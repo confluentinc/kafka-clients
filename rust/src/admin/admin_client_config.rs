@@ -475,7 +475,7 @@ impl AdminClientConfig {
             false,
             log_warnings,
             "AdminClientConfig",
-            |originals| originals,
+            Ok,
             // Java's `postProcessParsedConfig`.
             |config| {
                 CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;

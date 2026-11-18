@@ -5,3 +5,5 @@
 # `cargo xtask lint-custom check-ffi-translation --no-baseline`.
 missing kafka_consumer_MockConsumer_schedule_poll_task
 unmapped kafka_consumer_MockConsumer_schedule_poll_task
+# M18 share consumer is Rust-only; C FFI for share types comes in the share-consumer FFI milestone (PLAN §1).
+prefix:kafka_consumer_AcknowledgeType

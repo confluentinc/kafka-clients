@@ -64,6 +64,7 @@ use crate::common::security::*;
 use crate::common::serialization::*;
 use crate::common::topic_collection::*;
 use crate::common::*;
+use crate::consumer::acknowledgement_commit_callback::*;
 use crate::consumer::close_options::*;
 use crate::consumer::consumer_partition_assignor::*;
 use crate::consumer::offset_commit_callback::*;
@@ -742,6 +743,7 @@ fn producer_types_are_send_and_sync() {
 
 #[test]
 fn consumer_types_are_send_and_sync() {
+    assert!(is_send!(AcknowledgeType) && is_sync!(AcknowledgeType), "AcknowledgeType");
     assert!(is_send!(Assignment) && is_sync!(Assignment), "Assignment");
     assert!(is_send!(CloseOptions) && is_sync!(CloseOptions), "CloseOptions");
     assert!(

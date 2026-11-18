@@ -55,15 +55,17 @@ use log::warn;
 use crate::common::Error;
 use crate::common::config::abstract_config::{AbstractConfig, ConfigMap, ValuesReader, string_originals};
 use crate::common::config::config_def::{
-    CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, LambdaValidator, NonEmptyString, ParsedValue,
-    Range, Type, ValidList, ValidString, as_string, config_error,
+    CaseInsensitiveValidString, ConfigDef, DefaultValue, Importance, NonEmptyString, ParsedValue, Range, Type,
+    ValidList, ValidString,
 };
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::errors::InvalidConfigurationError;
 use crate::common::requests::JoinGroupRequest;
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::utils::Utils;
-use crate::consumer::internals::{AutoOffsetResetStrategy, auto_offset_reset_strategy};
+use crate::consumer::internals::{
+    AutoOffsetResetStrategy, auto_offset_reset_strategy, share_acknowledgement_mode, share_acquire_mode,
+};
 use crate::{ClientDnsLookup, CommonClientConfigs};
 
 /// Process-wide counter for deriving a default `client.id`.
@@ -382,16 +384,16 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             Importance::Low,
         )
         // Java validates the two share keys with `ShareAcknowledgementMode.Validator`
-        // and `ShareAcquireMode.Validator`, translated below. The share consumer
-        // is out of scope (`consumer-threading.md` §20), so a valid non-blank
-        // value is then rejected under either group protocol by
+        // and `ShareAcquireMode.Validator`. A `ConsumerConfig` rejects a valid
+        // non-blank value under either group protocol in
         // `checkUnsupportedConfigsPostProcess`, which skips a blank value: the
-        // validators are what reject a blank one, as in Java.
+        // validators are what reject a blank one, as in Java. A
+        // `ShareConsumerConfig` skips that check and accepts them.
         .define_with_validator(
             ConsumerConfig::SHARE_ACKNOWLEDGEMENT_MODE_CONFIG,
             Type::String,
             "implicit",
-            share_acknowledgement_mode_validator(),
+            share_acknowledgement_mode::Validator,
             Importance::Medium,
         )
         // Java's `DEFAULT_SHARE_ACQUIRE_MODE` is `ShareAcquireMode.BATCH_OPTIMIZED.name()`,
@@ -400,60 +402,11 @@ static CONFIG: LazyLock<ConfigDef> = LazyLock::new(|| {
             ConsumerConfig::SHARE_ACQUIRE_MODE_CONFIG,
             Type::String,
             "BATCH_OPTIMIZED",
-            share_acquire_mode_validator(),
+            share_acquire_mode::Validator,
             Importance::Medium,
         )
     // Java ends the chain with `config.providers`; it is left undefined until config providers are translated.
 });
-
-/// Java's `ShareAcknowledgementMode.Validator`: the value must be one of
-/// `implicit` or `explicit`, matched exactly (`ShareAcknowledgementMode.fromString`
-/// checks it against `Utils.enumOptions`, the constants' lower-case
-/// `toString()`).
-fn share_acknowledgement_mode_validator() -> LambdaValidator {
-    LambdaValidator::with(
-        |name, value| {
-            let acknowledgement_mode = as_string(value)?;
-            if acknowledgement_mode.is_some_and(|mode| ["implicit", "explicit"].contains(&mode)) {
-                return Ok(());
-            }
-            Err(config_error(
-                name,
-                value,
-                format!(
-                    "Invalid value `{}` for configuration {name}. The value must either be 'implicit' or 'explicit'.",
-                    acknowledgement_mode.unwrap_or("null")
-                ),
-            ))
-        },
-        || "[implicit, explicit]".to_owned(),
-    )
-}
-
-/// Java's `ShareAcquireMode.Validator`: the value must name one of the
-/// `ShareAcquireMode` constants, case-insensitively (`ShareAcquireMode.of`
-/// upper-cases it before `valueOf`).
-fn share_acquire_mode_validator() -> LambdaValidator {
-    LambdaValidator::with(
-        |name, value| {
-            let acquire_mode = as_string(value)?;
-            if acquire_mode
-                .is_some_and(|mode| ["BATCH_OPTIMIZED", "RECORD_LIMIT"].contains(&mode.to_uppercase().as_str()))
-            {
-                return Ok(());
-            }
-            Err(config_error(
-                name,
-                value,
-                format!(
-                    "Invalid value `{}` for configuration {name}. The value must either be 'batch_optimized' or 'record_limit'.",
-                    acquire_mode.unwrap_or("null")
-                ),
-            ))
-        },
-        || "[batch_optimized, record_limit]".to_owned(),
-    )
-}
 
 /// The consumer configuration keys
 // Documentation for the underlying keys can be found in the Kafka
@@ -1048,15 +1001,40 @@ impl ConsumerConfig {
     /// (a copy) nothing is logged: not the parse's duplicate-values warning,
     /// not the post-processing's lines.
     fn build(originals: ConfigMap, resolved_client_id: Option<&str>) -> Result<Self, Error> {
+        Self::build_with_hooks(
+            originals,
+            resolved_client_id,
+            "ConsumerConfig",
+            Ok,
+            Self::check_unsupported_configs_post_process,
+        )
+    }
+
+    /// [`Self::build`] with the two hooks a subclass overrides in Java:
+    /// `pre_process` is `preProcessParsedConfig` (which `ConsumerConfig`
+    /// inherits from `AbstractConfig`, returning the originals unchanged),
+    /// and `check_unsupported_configs_post_process` is the protected
+    /// `checkUnsupportedConfigsPostProcess` that `postProcessParsedConfig`
+    /// calls. `ShareConsumerConfig` overrides both; `class_name` is the
+    /// subclass's simple name.
+    pub(crate) fn build_with_hooks(
+        originals: ConfigMap,
+        resolved_client_id: Option<&str>,
+        class_name: &str,
+        pre_process: fn(ConfigMap) -> Result<ConfigMap, Error>,
+        check_unsupported_configs_post_process: fn(&AbstractConfig) -> Result<(), Error>,
+    ) -> Result<Self, Error> {
         let log_warnings = resolved_client_id.is_none();
         let config = AbstractConfig::with_hooks_and_log_warnings(
             &CONFIG,
             originals,
             false,
             log_warnings,
-            "ConsumerConfig",
-            |originals| originals,
-            |config| Self::post_process_parsed_config(config, resolved_client_id),
+            class_name,
+            pre_process,
+            |config| {
+                Self::post_process_parsed_config(config, resolved_client_id, check_unsupported_configs_post_process)
+            },
         )?;
         Self::from_abstract(config)
     }
@@ -1066,9 +1044,12 @@ impl ConsumerConfig {
     /// `client.id` takes, in place of a new one; it marks a copy for one more
     /// client ([`Self::copy_for_client`]), whose reads are the same but which
     /// logs none of the warnings: its original logged them once.
+    /// `check_unsupported_configs_post_process` is the (overridable)
+    /// `checkUnsupportedConfigsPostProcess` it calls.
     fn post_process_parsed_config(
         config: &AbstractConfig,
         resolved_client_id: Option<&str>,
+        check_unsupported_configs_post_process: fn(&AbstractConfig) -> Result<(), Error>,
     ) -> Result<ConfigMap, Error> {
         let log_warnings = resolved_client_id.is_none();
         CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
@@ -1078,7 +1059,7 @@ impl ConsumerConfig {
             CommonClientConfigs::post_process_reconnect_backoff_configs(config, config.parsed_values(), log_warnings);
         Self::maybe_override_client_id_with_configs(config, &mut refined_configs, resolved_client_id)?;
         Self::maybe_override_enable_auto_commit(config, &mut refined_configs)?;
-        Self::check_unsupported_configs_post_process(config)?;
+        check_unsupported_configs_post_process(config)?;
         Self::warn_if_connections_max_idle_ms_lower_than_max_poll_interval_ms(config, log_warnings)?;
         Ok(refined_configs)
     }

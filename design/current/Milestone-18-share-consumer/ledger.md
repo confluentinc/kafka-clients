@@ -50,9 +50,9 @@ ledger assigns them to P1. Together they are 564 Java lines.
 
 | Java file | Lines | Phase | PR | Rust target | Visibility | Status |
 |---|---|---|---|---|---|---|
-| `consumer/AcknowledgeType.java` | 75 | P2 | A | `consumer/acknowledge_type.rs` | pub (`@InterfaceAudience.Public`) | todo |
-| `consumer/AcknowledgementCommitCallback.java` | 59 | P2 | A | `consumer/acknowledgement_commit_callback.rs` | pub | todo |
-| `consumer/ShareConsumerConfig.java` | 80 | P2 | A | `consumer/share_consumer_config.rs` | **crate** — the Java class is package-private (`class ShareConsumerConfig extends ConsumerConfig`, no `public`) and is not in the 4.4 audience list. PLAN §1.2 groups it with "public value types"; that is wrong. | todo |
+| `consumer/AcknowledgeType.java` | 75 | P2 | A | `consumer/acknowledge_type.rs` | pub (`@InterfaceAudience.Public`) | done |
+| `consumer/AcknowledgementCommitCallback.java` | 59 | P2 | A | `consumer/acknowledgement_commit_callback.rs` | pub | done |
+| `consumer/ShareConsumerConfig.java` | 80 | P2 | A | `consumer/share_consumer_config.rs` | **crate** — the Java class is package-private (`class ShareConsumerConfig extends ConsumerConfig`, no `public`) and is not in the 4.4 audience list. PLAN §1.2 groups it with "public value types"; that is wrong. | done |
 | `consumer/ShareConsumer.java` | 137 | P8 | C | `consumer/share_consumer.rs` (one file per class, CLAUDE.md §2; note the `Consumer` trait precedent lives in `consumer/mod.rs`) | pub | todo |
 | `consumer/KafkaShareConsumer.java` | 857 | P8 | C | `consumer/kafka_share_consumer.rs` | pub | todo |
 | `consumer/MockShareConsumer.java` | 192 | P8 | C | `consumer/mock_share_consumer.rs` | pub (it is `@InterfaceAudience.Public` and in the main jar, so no test-jar exception is needed, unlike `MockAdminClient`) | todo |
@@ -63,12 +63,12 @@ ledger assigns them to P1. Together they are 564 Java lines.
 
 | Java file | Lines | Phase | PR | Rust target | Status |
 |---|---|---|---|---|---|
-| `internals/ShareAcknowledgementMode.java` | 116 | P2 | A | `consumer/internals/share_acknowledgement_mode.rs` | partial: its nested `Validator` is already translated as `share_acknowledgement_mode_validator()` in `consumer/consumer_config.rs`; P2 should move it to the type's file or have `consumer_config.rs` call the type |
-| `internals/ShareAcquireMode.java` | 93 | P2 | A | `consumer/internals/share_acquire_mode.rs` | partial: `Validator` as `share_acquire_mode_validator()` in `consumer_config.rs` (same note) |
-| `internals/Acknowledgements.java` | 331 | P2 | A | `consumer/internals/acknowledgements.rs` | todo |
-| `internals/AcknowledgementBatch.java` | 108 | P2 | A | `consumer/internals/acknowledgement_batch.rs` | todo |
-| `internals/NodeAcknowledgements.java` | 40 | P2 | A | `consumer/internals/node_acknowledgements.rs` | todo |
-| `internals/AcknowledgementCommitCallbackHandler.java` | 59 | P2 | A | `consumer/internals/acknowledgement_commit_callback_handler.rs` | todo |
+| `internals/ShareAcknowledgementMode.java` | 116 | P2 | A | `consumer/internals/share_acknowledgement_mode.rs` | crate | done: the nested `Validator` moved to the type's file; `consumer_config.rs` validates with it |
+| `internals/ShareAcquireMode.java` | 93 | P2 | A | `consumer/internals/share_acquire_mode.rs` | crate | done: the nested `Validator` moved to the type's file; `consumer_config.rs` validates with it |
+| `internals/Acknowledgements.java` | 331 | P2 | A | `consumer/internals/acknowledgements.rs` | done |
+| `internals/AcknowledgementBatch.java` | 108 | P2 | A | `consumer/internals/acknowledgement_batch.rs` | done |
+| `internals/NodeAcknowledgements.java` | 40 | P2 | A | `consumer/internals/node_acknowledgements.rs` | done |
+| `internals/AcknowledgementCommitCallbackHandler.java` | 59 | P2 | A | `consumer/internals/acknowledgement_commit_callback_handler.rs` | done |
 | `internals/ShareSessionHandler.java` | 371 | P3a | B | `consumer/internals/share_session_handler.rs` | todo |
 | `internals/ShareInFlightBatch.java` | 210 | P3a | B | `consumer/internals/share_in_flight_batch.rs` | todo (shape gated by D5) |
 | `internals/ShareInFlightBatchException.java` | 42 | P3a | B | `consumer/internals/share_in_flight_batch_error.rs` | todo — see gap G9 |
@@ -161,11 +161,11 @@ test file uses `@RepeatedTest`, `@Disabled` or `@Flaky`.
 
 | Java test file | Lines | `@Test` | `@ParameterizedTest` (source) | Phase | PR | Rust location | Status |
 |---|---|---|---|---|---|---|---|
-| `consumer/ShareConsumerConfigTest.java` | 52 | 1 | 0 | P2 | A | `consumer/share_consumer_config.rs` tests | todo |
-| `consumer/internals/ShareAcknowledgementModeTest.java` | 67 | 3 | 0 | P2 | A | `share_acknowledgement_mode.rs` | todo |
-| `consumer/internals/ShareAcquireModeTest.java` | 57 | 3 | 0 | P2 | A | `share_acquire_mode.rs` | todo |
-| `consumer/internals/AcknowledgementsTest.java` | 529 | 20 | 0 | P2 | A | `acknowledgements.rs` | todo |
-| `consumer/internals/AcknowledgementCommitCallbackHandlerTest.java` | 175 | 4 | 0 | P2 | A | `acknowledgement_commit_callback_handler.rs` | todo |
+| `consumer/ShareConsumerConfigTest.java` | 52 | 1 | 0 | P2 | A | `consumer/share_consumer_config.rs` tests | done |
+| `consumer/internals/ShareAcknowledgementModeTest.java` | 67 | 3 | 0 | P2 | A | `share_acknowledgement_mode.rs` | done |
+| `consumer/internals/ShareAcquireModeTest.java` | 57 | 3 | 0 | P2 | A | `share_acquire_mode.rs` | done |
+| `consumer/internals/AcknowledgementsTest.java` | 529 | 20 | 0 | P2 | A | `acknowledgements.rs` | done |
+| `consumer/internals/AcknowledgementCommitCallbackHandlerTest.java` | 175 | 4 | 0 | P2 | A | `acknowledgement_commit_callback_handler.rs` | done |
 | `consumer/internals/ShareSessionHandlerTest.java` | 667 | 2 | 9 (8 × `@MethodSource("shareFetchConfigProvider")`, 1 × `@EnumSource` INVALID_SHARE_SESSION_EPOCH / SHARE_SESSION_NOT_FOUND / SHARE_SESSION_LIMIT_REACHED) | P3a | B | `share_session_handler.rs` | todo |
 | `consumer/internals/ShareCompletedFetchTest.java` | 1,080 | 22 | 0 | P3a | B | `share_completed_fetch.rs` | todo |
 | `consumer/internals/ShareFetchBufferTest.java` | 331 | 8 | 0 | P3b | B | `share_fetch_buffer.rs` | todo |
@@ -271,3 +271,5 @@ share code gets a row. A phase cannot close with an unowned row.
 | Item | Where in the code | Owning phase | Reason |
 |---|---|---|---|
 | `ShareFetchRequest` `Builder::build_version` compares the acquire mode against a local `SHARE_ACQUIRE_MODE_BATCH_OPTIMIZED_ID` (`0`, Java `ShareAcquireMode.BATCH_OPTIMIZED.id()`) instead of `ShareAcquireMode` | `rust/src/common/requests/share_fetch_request.rs` (`SHARE_ACQUIRE_MODE_BATCH_OPTIMIZED_ID`) | P3a | `ShareAcquireMode` is translated in P2, in parallel with P1; P3a is the first phase that depends on both. Replace the constant with the P2 type's id and delete it. Behaviour is identical meanwhile. |
+| `expect(dead_code)` / `expect(unused_imports)` on the P2 crate-private modules and re-exports (`Acknowledgements`, `AcknowledgementBatch`, `NodeAcknowledgements`, `AcknowledgementCommitCallbackHandler`, `ShareAcknowledgementMode`, `ShareAcquireMode`, `ShareConsumerConfig`) | `rust/src/consumer/internals/mod.rs`, `rust/src/consumer/mod.rs` | the first phase that calls each from production: P3a (`Acknowledgements`, `AcknowledgementBatch`), P5a (`NodeAcknowledgements`, `ShareAcquireMode`), P7 (`AcknowledgementCommitCallbackHandler`, `ShareAcknowledgementMode`, `ShareConsumerConfig`); remove the attribute there (`expect` fails once the item is used) | P2 translates value types ahead of their callers; nothing is stubbed |
+| C FFI for `AcknowledgeType` | `rust/xtask/ffi-baseline.txt` (`prefix:kafka_consumer_AcknowledgeType`) | the share-consumer FFI milestone (after M18) | M18 is Rust-only; the C bindings for share types come in that milestone (PLAN §1) |
