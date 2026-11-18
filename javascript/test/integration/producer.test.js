@@ -2465,13 +2465,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   180000,
 );
 
-// Java runs a partition's callbacks in order on its one I/O thread. A JS
-// callback may return a Promise, which the core waits for before completing
-// that record's future; it does not wait for it before entering the next
-// record's callback (Python's and .NET's async callbacks run one at a time).
-// This pins both.
+// Java runs a partition's callbacks in order, one after another, on its one
+// I/O thread. A JS callback may return a Promise, which the core waits for
+// before completing that record's future, and the next record's callback
+// waits for it before it starts, as Python's and .NET's async callbacks run
+// one at a time. This pins both against real deliveries.
 (SKIP ? test.skip : test)(
-  "callbacks returning Promises that settle after random delays are entered in offset order, and each record's future waits for its own callback",
+  "callbacks returning Promises that settle after random delays run one at a time, in offset order, and each record's future waits for its own callback",
   async () => {
     const topic = await newTopic('promise-callbacks');
     const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
@@ -2483,6 +2483,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       };
       /** @type {bigint[]} */
       const entered = [];
+      /** @type {string[]} */
+      const events = [];
       let running = 0;
       let maxRunning = 0;
       /** @type {number[]} */
@@ -2496,10 +2498,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from(`v${i}`) }),
             callback: async ({ metadata }) => {
               entered.push(metadata.offset);
+              events.push(`start ${metadata.offset}`);
               running++;
               maxRunning = Math.max(maxRunning, running);
               await sleep(Math.floor(random() * 4));
               running--;
+              events.push(`end ${metadata.offset}`);
               if (futures[index].isDone()) doneBeforeItsCallbackEnded.push(index);
             },
           }),
@@ -2512,7 +2516,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         [],
         'callbacks entered in offset order',
       );
-      assert.ok(maxRunning > 1, 'the next callback is entered while the previous Promise is pending');
+      assert.equal(maxRunning, 1, "a callback starts only once the previous one's Promise settled");
+      // Each callback starts after the one before it ended, in offset order.
+      assert.deepEqual(
+        events,
+        entered.flatMap((offset) => [`start ${offset}`, `end ${offset}`]),
+      );
       assert.deepEqual(doneBeforeItsCallbackEnded, [], "no future completes before its own callback's Promise settled");
     } finally {
       await producer.close();
@@ -2588,11 +2597,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 );
 
 // Awaiting a later record's future inside a callback is an anti-pattern the
-// docs name. Its bounded form must recover: the wait answers (the later
-// record's value, or TimeoutError once 500 ms passed), the callback ends, and
-// the later record completes once, with its own callback.
+// docs name: the later record's callback waits for its turn behind this one,
+// and its future for that callback, as Java's get(timeout) on the I/O thread
+// times out on a record whose callback that thread runs next. Its bounded
+// form must recover: the wait rejects with the root TimeoutError once 500 ms
+// passed, the callback ends, and the later record completes once, with its
+// own callback, which runs after it.
 (SKIP ? test.skip : test)(
-  "a callback's bounded wait on a later record's future answers within its timeout, and that record still completes once",
+  "a callback's bounded wait on a later record's future rejects with TimeoutError, and that record completes once, after it",
   async () => {
     const topic = await newTopic('bounded-wait');
     const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'linger.ms': 50 } });
@@ -2604,6 +2616,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       let laterCallbacks = 0;
       let waited = -1;
       let firstCallbackEnded = false;
+      let laterRanBeforeFirstEnded = false;
       const first = await producer.send({
         record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('first') }),
         callback: async () => {
@@ -2620,18 +2633,21 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       });
       later = await producer.send({
         record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('later') }),
-        callback: () => void laterCallbacks++,
+        callback: () => {
+          laterCallbacks++;
+          if (!firstCallbackEnded) laterRanBeforeFirstEnded = true;
+        },
       });
       await first.get({ timeout: 30000 });
       const laterMetadata = await later.get({ timeout: 30000 });
       assert.equal(firstCallbackEnded, true);
-      assert.ok(waited >= 0 && waited < 500 + 1000, `waited ${waited} ms`);
-      assert.ok(
-        waitOutcome instanceof RootTimeoutError || waitOutcome === laterMetadata,
-        `the bounded wait answered ${String(waitOutcome)}`,
-      );
+      assert.ok(waitOutcome instanceof RootTimeoutError, `the bounded wait answered ${String(waitOutcome)}`);
+      assert.equal(waitOutcome.constructor, RootTimeoutError);
+      // The full timeout, a timer's early firing aside.
+      assert.ok(waited >= 490 && waited < 500 + 1000, `waited ${waited} ms`);
       assert.equal(laterMetadata.offset, 1n);
       assert.equal(laterCallbacks, 1);
+      assert.equal(laterRanBeforeFirstEnded, false, "the later record's callback waited for its turn");
     } finally {
       await producer.close();
     }
