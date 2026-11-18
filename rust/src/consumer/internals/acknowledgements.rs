@@ -716,8 +716,9 @@ mod tests {
         assert!(acks.acknowledge_error().is_none());
     }
 
+    // Java's `testCompleteException`; Rust code does not use "exception" (CLAUDE.md §2).
     #[test]
-    fn test_complete_exception() {
+    fn test_complete_error() {
         let mut acks = Acknowledgements::empty();
         acks.add(0, RENEW);
         assert!(!acks.is_completed());

@@ -184,8 +184,9 @@ mod tests {
     // `on_complete` has run the callback by the time it returns, so they are
     // asserted once.
 
+    // Java's `testNoException`; Rust code does not use "exception" (CLAUDE.md §2).
     #[tokio::test]
-    async fn test_no_exception() {
+    async fn test_no_error() {
         let mut fixture = setup();
         let acknowledgements_map = HashMap::from([(fixture.tip0.clone(), accept_reject())]);
 
