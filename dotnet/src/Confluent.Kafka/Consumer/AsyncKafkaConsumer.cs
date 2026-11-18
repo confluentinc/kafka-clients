@@ -62,7 +62,9 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// </exception>
     /// <exception cref="IllegalArgumentException">
     /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
-    /// implement <see cref="IDeserializerWithHeaders{T}"/>, or a public <c>Close()</c> but is not
+    /// implement <see cref="IDeserializerWithHeaders{T}"/>, a public
+    /// <c>Deserialize(string, Headers, ReadOnlyMemory&lt;byte&gt;)</c> but not
+    /// <see cref="IDeserializerWithReadOnlyMemory{T}"/>, or a public <c>Close()</c> but is not
     /// <see cref="IDisposable"/>: the consumer would never call that method.
     /// </exception>
     /// <exception cref="ConfigException">

@@ -68,7 +68,9 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// </exception>
     /// <exception cref="IllegalArgumentException">
     /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
-    /// implement <see cref="IDeserializerWithHeaders{T}"/>: the consumer would never call that method.
+    /// implement <see cref="IDeserializerWithHeaders{T}"/>, or a public
+    /// <c>Deserialize(string, Headers, ReadOnlyMemory&lt;byte&gt;)</c> but not
+    /// <see cref="IDeserializerWithReadOnlyMemory{T}"/>: the consumer would never call that method.
     /// </exception>
     public AsyncMockConsumer(
         IDeserializer<TKey> keyDeserializer,

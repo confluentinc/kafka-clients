@@ -47,6 +47,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     private readonly IDeserializer<TValue> _valueDeserializer;
     private readonly IDeserializerWithHeaders<TKey>? _keyWithHeaders;
     private readonly IDeserializerWithHeaders<TValue>? _valueWithHeaders;
+    private readonly IDeserializerWithReadOnlyMemory<TKey>? _keyWithMemory;
+    private readonly IDeserializerWithReadOnlyMemory<TValue>? _valueWithMemory;
 
     /// <summary>
     /// Creates a broker-free mock consumer whose <see cref="Poll"/> decodes the records queued by
@@ -65,7 +67,9 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// </exception>
     /// <exception cref="IllegalArgumentException">
     /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
-    /// implement <see cref="IDeserializerWithHeaders{T}"/>: the consumer would never call that method.
+    /// implement <see cref="IDeserializerWithHeaders{T}"/>, or a public
+    /// <c>Deserialize(string, Headers, ReadOnlyMemory&lt;byte&gt;)</c> but not
+    /// <see cref="IDeserializerWithReadOnlyMemory{T}"/>: the consumer would never call that method.
     /// </exception>
     public MockConsumer(
         IDeserializer<TKey> keyDeserializer,
@@ -78,12 +82,16 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
         SerdeGuard.Check(_valueDeserializer, DefaultMethodGuard.Consumer, disposes: false);
         _keyWithHeaders = _keyDeserializer as IDeserializerWithHeaders<TKey>;
         _valueWithHeaders = _valueDeserializer as IDeserializerWithHeaders<TValue>;
+        _keyWithMemory = _keyDeserializer as IDeserializerWithReadOnlyMemory<TKey>;
+        _valueWithMemory = _valueDeserializer as IDeserializerWithReadOnlyMemory<TValue>;
         _native = NativeConsumer.CreateMock(autoOffsetReset, withPump: false);
     }
 
     /// <inheritdoc/>
     public ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout) =>
-        _native.PollTyped(timeout, _keyDeserializer, _keyWithHeaders, _valueDeserializer, _valueWithHeaders);
+        _native.PollTyped(
+            timeout, _keyDeserializer, _keyWithHeaders, _keyWithMemory, _valueDeserializer, _valueWithHeaders,
+            _valueWithMemory);
 
     /// <inheritdoc/>
     public void Subscribe(IReadOnlyCollection<string> topics) => _native.Subscribe(topics);

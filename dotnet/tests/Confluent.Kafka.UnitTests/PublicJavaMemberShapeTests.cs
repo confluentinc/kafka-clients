@@ -107,7 +107,7 @@ public class PublicJavaMemberShapeTests
             ("Short", typeof(ISerde<short?>)),
             ("Float", typeof(ISerde<float?>)),
             ("Double", typeof(ISerde<double?>)),
-            ("ByteBuffer", typeof(ISerde<ReadOnlyMemory<byte>?>)),
+            ("ReadOnlyMemory", typeof(ISerde<ReadOnlyMemory<byte>?>)),
             ("UUID", typeof(ISerde<Guid?>)),
             ("Boolean", typeof(ISerde<bool?>)),
             ("Void", typeof(ISerde<object?>)),
@@ -122,7 +122,7 @@ public class PublicJavaMemberShapeTests
         Assert.Equal(
             new[]
             {
-                "Boolean", "ByteArray", "ByteBuffer", "Double", "Float", "Integer", "Long", "SerdeFrom", "SerdeFrom",
+                "Boolean", "ByteArray", "Double", "Float", "Integer", "Long", "ReadOnlyMemory", "SerdeFrom", "SerdeFrom",
                 "Short", "String", "UUID", "Void",
             },
             typeof(Serdes).GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)

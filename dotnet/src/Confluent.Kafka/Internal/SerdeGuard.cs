@@ -21,7 +21,7 @@ namespace Confluent.Kafka.Internal;
 
 /// <summary>
 /// Refuses, when a client is built, a serializer or deserializer with a public method the client would never call: a
-/// headers form without the interface that makes the client call it, or a <c>Close()</c> without
+/// headers form or a memory form without the interface that makes the client call it, or a <c>Close()</c> without
 /// <see cref="IDisposable"/>.
 /// </summary>
 internal static class SerdeGuard
@@ -47,6 +47,17 @@ internal static class SerdeGuard
             string type = DefaultMethodGuard.TypeText(typeof(T));
             throw DefaultMethodGuard.NeverCalled(
                 deserializer, "Deserialize(string, Headers, ReadOnlySpan<byte>)", "IDeserializerWithHeaders<" + type + ">", client);
+        }
+
+        if (deserializer is not IDeserializerWithReadOnlyMemory<T>
+            && DefaultMethodGuard.Declares(deserializer, "Deserialize", typeof(string), typeof(Headers), typeof(ReadOnlyMemory<byte>)))
+        {
+            string type = DefaultMethodGuard.TypeText(typeof(T));
+            throw DefaultMethodGuard.NeverCalled(
+                deserializer,
+                "Deserialize(string, Headers, ReadOnlyMemory<byte>)",
+                "IDeserializerWithReadOnlyMemory<" + type + ">",
+                client);
         }
 
         CheckClose(deserializer, client, disposes);

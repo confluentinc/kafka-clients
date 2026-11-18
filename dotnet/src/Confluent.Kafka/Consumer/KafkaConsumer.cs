@@ -36,6 +36,8 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     private readonly IDeserializer<TValue> _valueDeserializer;
     private readonly IDeserializerWithHeaders<TKey>? _keyWithHeaders;
     private readonly IDeserializerWithHeaders<TValue>? _valueWithHeaders;
+    private readonly IDeserializerWithReadOnlyMemory<TKey>? _keyWithMemory;
+    private readonly IDeserializerWithReadOnlyMemory<TValue>? _valueWithMemory;
 
     /// <summary>
     /// Creates a real KIP-848 consumer from a configuration map and the two deserializers
@@ -60,7 +62,9 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// </exception>
     /// <exception cref="IllegalArgumentException">
     /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
-    /// implement <see cref="IDeserializerWithHeaders{T}"/>, or a public <c>Close()</c> but is not
+    /// implement <see cref="IDeserializerWithHeaders{T}"/>, a public
+    /// <c>Deserialize(string, Headers, ReadOnlyMemory&lt;byte&gt;)</c> but not
+    /// <see cref="IDeserializerWithReadOnlyMemory{T}"/>, or a public <c>Close()</c> but is not
     /// <see cref="IDisposable"/>: the consumer would never call that method.
     /// </exception>
     /// <exception cref="ConfigException">
@@ -103,13 +107,17 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
         SerdeGuard.Check(_valueDeserializer, DefaultMethodGuard.Consumer, disposes: true);
         _keyWithHeaders = _keyDeserializer as IDeserializerWithHeaders<TKey>;
         _valueWithHeaders = _valueDeserializer as IDeserializerWithHeaders<TValue>;
+        _keyWithMemory = _keyDeserializer as IDeserializerWithReadOnlyMemory<TKey>;
+        _valueWithMemory = _valueDeserializer as IDeserializerWithReadOnlyMemory<TValue>;
         _native = NativeConsumer.Create(
             configs, withPump: false, serdes: new SerdeDisposal(keyDeserializer, valueDeserializer));
     }
 
     /// <inheritdoc/>
     public ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout) =>
-        _native.PollTyped(timeout, _keyDeserializer, _keyWithHeaders, _valueDeserializer, _valueWithHeaders);
+        _native.PollTyped(
+            timeout, _keyDeserializer, _keyWithHeaders, _keyWithMemory, _valueDeserializer, _valueWithHeaders,
+            _valueWithMemory);
 
     /// <inheritdoc/>
     public void Subscribe(IReadOnlyCollection<string> topics) => _native.Subscribe(topics);

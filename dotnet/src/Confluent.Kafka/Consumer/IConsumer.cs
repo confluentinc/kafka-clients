@@ -55,7 +55,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <summary>
     /// Polls for records (Java <c>poll(Duration)</c>). An empty poll returns an empty
     /// <see cref="ConsumerRecords{TKey, TValue}"/>, not <see langword="null"/>. The records own copies of their
-    /// bytes.
+    /// bytes, except a key or value that a deserializer returned as a memory over the batch's own bytes, as
+    /// <see cref="ConsumerRecord{TKey, TValue}"/> describes.
     /// </summary>
     /// <param name="timeout">The maximum time to wait (must be non-negative).</param>
     /// <returns>The records polled, as an owned <see cref="ConsumerRecords{TKey, TValue}"/>.</returns>

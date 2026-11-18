@@ -27,8 +27,8 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The eight clients that take a serializer or deserializer refuse, when they are built, one with a public method they
-/// would never call: a headers form without the interface that makes them call it, or, on the four that dispose their
-/// serdes, a <c>Close()</c> without <see cref="IDisposable"/>. Nothing is disposed on that refusal. A serde that
+/// would never call: a headers form, or a deserializer's memory form, without the interface that makes them call it,
+/// or, on the four that dispose their serdes, a <c>Close()</c> without <see cref="IDisposable"/>. Nothing is disposed on that refusal. A serde that
 /// implements the interface, or <see cref="IDisposable"/>, is taken.
 /// </summary>
 public sealed class SerdeGuardTests
@@ -40,6 +40,10 @@ public sealed class SerdeGuardTests
 
     private const string StrayDeserializerMessage = Prefix + "StrayDeserializer declares Deserialize(string, Headers, "
         + "ReadOnlySpan<byte>) but does not implement IDeserializerWithHeaders<string>, so the consumer would never call it.";
+
+    private const string StrayMemoryDeserializerMessage = Prefix + "StrayMemoryDeserializer declares "
+        + "Deserialize(string, Headers, ReadOnlyMemory<byte>) but does not implement "
+        + "IDeserializerWithReadOnlyMemory<string>, so the consumer would never call it.";
 
     private const string ClosingSerializerMessage = Prefix + "ClosingSerializer declares Close() but does not implement "
         + "IDisposable, so the producer would never call it.";
@@ -88,6 +92,28 @@ public sealed class SerdeGuardTests
         Assert.Equal(StrayDeserializerMessage, e.Message);
         Assert.Equal(0, other.Disposals);
     }
+
+    [Theory]
+    [MemberData(nameof(Consumers))]
+    public void AConsumer_RefusesADeserializerWithAMemoryFormItWouldNeverCall_DisposingNothing(string consumer, bool asKey)
+    {
+        DisposableDeserializer other = new DisposableDeserializer();
+
+        IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
+            () => Consumer(
+                consumer, asKey ? new StrayMemoryDeserializer() : other, asKey ? other : new StrayMemoryDeserializer()));
+
+        Assert.Equal(StrayMemoryDeserializerMessage, e.Message);
+        Assert.Equal(0, other.Disposals);
+    }
+
+    [Theory]
+    [MemberData(nameof(Consumers))]
+    public async Task AConsumer_TakesADeserializerWithTheMemoryInterface(string consumer, bool asKey) =>
+        await DisposeBounded(Consumer(
+            consumer,
+            asKey ? new MemoryDeserializer() : new HeadersDeserializer(),
+            asKey ? new HeadersDeserializer() : new MemoryDeserializer()));
 
     [Theory]
     [MemberData(nameof(RealProducers))]
@@ -300,6 +326,22 @@ public sealed class SerdeGuardTests
         public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
 
         public string? Deserialize(string topic, Headers headers, ReadOnlySpan<byte> data) => null;
+    }
+
+    /// <summary>A deserializer with a public memory form but not the interface that makes a consumer call it.</summary>
+    private sealed class StrayMemoryDeserializer : IDeserializer<string>
+    {
+        public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
+
+        public string? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data) => null;
+    }
+
+    /// <summary>A deserializer that implements the memory interface.</summary>
+    private sealed class MemoryDeserializer : IDeserializerWithReadOnlyMemory<string>
+    {
+        public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
+
+        public string? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data) => null;
     }
 
     /// <summary>A deserializer with a public close that is also IDisposable, counting its disposals.</summary>

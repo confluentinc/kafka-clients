@@ -103,6 +103,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private bool _deserializersHandedOver;
     private bool _recordBytesReleasable;
 
+    // The mock's batches left to the garbage collector, whose keys and values are in _recordBytes: under its lock.
+    private int _recordsRetained;
+    private Action? _releaseRetainedRecords;
+
     // Closing: a teardown that will close (a Dispose, or a close the core accepted). ClosePending: an explicit Close
     // begun while a call it does not wait for is in flight (its own thread's, or one made inside a callback), which
     // the core may still refuse; a close from inside a callback is a no-op only while Closing.
@@ -494,13 +498,16 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // The records are deserialized after the poll's use has ended, so a deserializer may dispose the consumer. A
     // record that fails to deserialize ends the batch: the records before it are returned, and every partition is
     // sought back to its first record not returned, the seeks taking one use of their own, so the failing record comes
-    // next.
+    // next. A deserializer's memory form, given when it has one, is called with a memory over the batch, which is
+    // then released as ReleaseRecords says.
     internal ConsumerRecords<TKey, TValue> PollTyped<TKey, TValue>(
         TimeSpan timeout,
         IDeserializer<TKey> keyDeserializer,
         IDeserializerWithHeaders<TKey>? keyWithHeaders,
+        IDeserializerWithReadOnlyMemory<TKey>? keyWithMemory,
         IDeserializer<TValue> valueDeserializer,
-        IDeserializerWithHeaders<TValue>? valueWithHeaders)
+        IDeserializerWithHeaders<TValue>? valueWithHeaders,
+        IDeserializerWithReadOnlyMemory<TValue>? valueWithMemory)
     {
         long timeoutMs = TimerTimeoutMs(timeout);
         RefuseInsideACallback();
@@ -516,14 +523,23 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         ConsumerRecords<TKey, TValue> copied;
         RecordDeserializationException? error;
         IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind;
+        SafeConsumerRecordsHandle? batch = null;
         try
         {
             copied = ConsumerRecordsMarshal.CopyOut(
-                records, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, out error, out rewind);
+                records, keyDeserializer, keyWithHeaders, keyWithMemory, valueDeserializer, valueWithHeaders,
+                valueWithMemory, ref batch, out error, out rewind);
         }
         finally
         {
-            DestroyRecords(records);
+            if (batch is null)
+            {
+                DestroyRecords(records);
+            }
+            else
+            {
+                ReleaseRecords(batch);
+            }
         }
 
         if (error is null)
@@ -1861,8 +1877,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     // The mock shares a record's key and value bytes until the records holding them are destroyed, so each one
-    // is copied into an unmanaged kafka_Bytes_t block that lives until the consumer's destroy has returned and no
-    // poll holds a records handle any more.
+    // is copied into an unmanaged kafka_Bytes_t block that lives until the consumer's destroy has returned, no
+    // poll holds a records handle any more and every batch left to the garbage collector is released.
     private IntPtr KeepRecordBytes(byte[]? data)
     {
         if (data is null)
@@ -1919,7 +1935,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         lock (_recordBytes)
         {
             _recordBytesReleasable = true;
-            if (_recordsHeld == 0)
+            if (_recordsHeld == 0 && _recordsRetained == 0)
             {
                 FreeRecordBytes();
             }
@@ -1963,31 +1979,79 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void DestroyRecords(IntPtr records)
     {
-        bool disposeTheDeserializers = false;
         try
         {
             ConsumerRecordsMarshal.Destroy(records);
         }
         finally
         {
-            lock (_recordBytes)
-            {
-                _recordsHeld--;
-                if (_recordsHeld == 0)
-                {
-                    if (_recordBytesReleasable)
-                    {
-                        FreeRecordBytes();
-                    }
+            EndRecordsHold();
+        }
+    }
 
-                    disposeTheDeserializers = _deserializersHandedOver;
-                    _deserializersHandedOver = false;
-                }
+    // A batch whose bytes a deserializer was given is never destroyed here, also when one of its records failed to
+    // deserialize: what the deserializers returned may be memory over it, so it is left to the garbage collector,
+    // which releases it once no such memory is reachable. The poll's hold ends here either way.
+    private void ReleaseRecords(SafeConsumerRecordsHandle batch)
+    {
+        try
+        {
+            if (!batch.HandedOut)
+            {
+                batch.Dispose();
             }
-
-            if (disposeTheDeserializers)
+            else if (IsMock)
             {
-                _serdes?.DisposeOnce();
+                lock (_recordBytes)
+                {
+                    _recordsRetained++;
+                }
+
+                batch.Retain(_releaseRetainedRecords ??= ReleaseRetainedRecords);
+            }
+            else
+            {
+                batch.Retain(null);
+            }
+        }
+        finally
+        {
+            EndRecordsHold();
+        }
+    }
+
+    private void EndRecordsHold()
+    {
+        bool disposeTheDeserializers = false;
+        lock (_recordBytes)
+        {
+            _recordsHeld--;
+            if (_recordsHeld == 0)
+            {
+                if (_recordBytesReleasable && _recordsRetained == 0)
+                {
+                    FreeRecordBytes();
+                }
+
+                disposeTheDeserializers = _deserializersHandedOver;
+                _deserializersHandedOver = false;
+            }
+        }
+
+        if (disposeTheDeserializers)
+        {
+            _serdes?.DisposeOnce();
+        }
+    }
+
+    private void ReleaseRetainedRecords()
+    {
+        lock (_recordBytes)
+        {
+            _recordsRetained--;
+            if (_recordBytesReleasable && _recordsHeld == 0 && _recordsRetained == 0)
+            {
+                FreeRecordBytes();
             }
         }
     }

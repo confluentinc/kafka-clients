@@ -30,6 +30,14 @@ namespace Confluent.Kafka.Consumer;
 /// the record stays valid after the poll's native batch is freed.
 /// </para>
 /// <para>
+/// A deserializer with the memory form, <see cref="Confluent.Kafka.Common.Serialization.IDeserializerWithReadOnlyMemory{T}"/>,
+/// may return a memory over the batch's own bytes, as the one of <c>Serdes.ReadOnlyMemory()</c> does on a synchronous
+/// consumer. The batch then stays in memory while such a key or value is reachable, with or without its record, after
+/// later polls and after the consumer is disposed, and the garbage collector frees it. A span taken from such a
+/// memory is valid only while the memory is reachable: code that keeps only the span, or a pointer into it, holds a
+/// pin for that time, <c>using MemoryHandle pin = memory.Pin();</c>.
+/// </para>
+/// <para>
 /// An absent key, or an absent value (a tombstone), is <c>default(TKey)</c> / <c>default(TValue)</c>, and the
 /// deserializer is not called; an empty one is deserialized from an empty span. That default is
 /// <see langword="null"/> for a reference type and for a nullable value type, such as the <c>long?</c> of
