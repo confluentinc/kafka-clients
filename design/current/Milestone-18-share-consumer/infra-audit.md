@@ -59,13 +59,19 @@ Rust shape (`abstract_membership_manager.rs`):
 - Fields `metadata: Arc<ConsumerMetadata>` (Java: `Metadata`) and `MembershipInner::metrics_manager:
   Option<Arc<ConsumerRebalanceMetricsManager>>` (Java: abstract `RebalanceMetricsManager`). The
   metadata is only used through `metadata_arc()` (`find_resolvable_assignment_and_trigger_metadata_update`).
-- The Java base methods listed above are **not** in the abstract struct. They are in
-  `consumer_membership_manager.rs`: `ConsumerMembershipManager::transition_to_fenced`,
-  `::transition_to_stale`, `::reconcile` (+ `drive_pending_reconcile` / `continue_after_revoke` /
-  `continue_after_assign`), `::leave_group`, `::leave_group_on_close`,
-  `::transition_to_sending_leave_group`, `::drive_pending_release`. These are built around the §31
-  ack-driven callback state machine (stored `oneshot::Receiver`s), which is consumer-specific in
-  practice but is Java's *base* `whenComplete` chain.
+- Split of the Java base methods listed above, as the Rust code stands today:
+  - **Already in `abstract_membership_manager.rs`:** `transition_to_fatal` (the state part),
+    `maybe_rejoin_stale_member`, `transition_to_sending_leave_group` (the state part),
+    `on_heartbeat_failure`, `maybe_abort_reconciliation`, `clear_assignment`,
+    `on_subscription_updated`, `on_consumer_poll`.
+  - **Consumer-side only, in `consumer_membership_manager.rs`:**
+    `ConsumerMembershipManager::transition_to_fenced`, `::transition_to_stale`, the release tail
+    (`::drive_pending_release`, plus the callback tails of the `::transition_to_fatal` and
+    `::transition_to_sending_leave_group` wrappers), the reconcile chain (`::reconcile` +
+    `drive_pending_reconcile` / `continue_after_revoke` / `continue_after_assign`), and
+    `::leave_group` / `::leave_group_on_close`. These are built around the §31 ack-driven callback
+    state machine (stored `oneshot::Receiver`s), which is consumer-specific in practice but is
+    Java's *base* `whenComplete` chain. P4 moves only this second group.
 - `enqueue_rebalance_callback*` take `ConsumerRebalanceListenerMethodName` (consumer-only; fine to
   leave consumer-side, Java has it in `ConsumerMembershipManager` too).
 
@@ -130,9 +136,15 @@ fetch (`poll(&delegate, now)`). All consumer-specific steps are guarded by `Opti
 thread with them `None` is valid.
 
 Share needs (additive): a share-membership drive equivalent to `ShareMembershipManager#poll`
-(`maybeReconcile(true)`) between share heartbeat and share consume, a share-consume poll, and
-`poll_on_close` for share consume in the close path (Java's `ShareConsumeRequestManager#pollOnClose`
-carries the on-close acknowledgements). The thread is constructed in
+(`maybeReconcile(true)`) between share heartbeat and share consume, and a share-consume poll.
+No share-consume `poll_on_close` is needed: `ShareConsumeRequestManager` does not override
+`pollOnClose`, so the thread's close round gets `RequestManager#pollOnClose`'s default `EMPTY` from it.
+The close-path acknowledgements travel in `ShareAcknowledgeOnCloseEvent` →
+`ApplicationEventProcessor#process(ShareAcknowledgeOnCloseEvent)` →
+`ShareConsumeRequestManager#acknowledgeOnClose` (sets `closing` and `closeFuture`), and are sent by the
+ordinary `ShareConsumeRequestManager#poll`, which completes `closeFuture` once nothing is in flight.
+`ShareConsumerImpl#sendAcknowledgementsAndLeaveGroup` waits for that with `addAndGet` before
+`applicationEventHandler.close()` starts the close round. The thread is constructed in
 `async_kafka_consumer.rs:AsyncKafkaConsumer` setup (Java constructs it inside `ApplicationEventHandler`);
 `ShareConsumerImpl` mirrors that wiring. §10 of `consumer-threading.md` (never race the poll) applies
 unchanged.
