@@ -68,7 +68,6 @@ use crate::common::protocol::Errors;
 use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::GroupMembershipOperation;
-use crate::consumer::internals::events::BackgroundEventHandler;
 use crate::consumer::internals::metrics::RebalanceMetricsManager;
 
 use super::MemberState;
@@ -624,7 +623,6 @@ pub(crate) struct AbstractMembershipManager {
     /// consumer passes its `ConsumerMetadata`'s inner `Metadata` and the share
     /// consumer its `ShareConsumerMetadata`'s.
     pub(crate) metadata: Arc<Metadata>,
-    pub(crate) background_event_handler: Arc<BackgroundEventHandler>,
     /// Java: `CloseOptions.GroupMembershipOperation leaveGroupOperation`, set
     /// by `leaveGroupOnClose(...)`. Read by the subclass's `leaveGroupEpoch()`
     /// and `isLeavingGroup()`.
@@ -710,7 +708,6 @@ impl AbstractMembershipManager {
         group_id: impl Into<String>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         metadata: Arc<Metadata>,
-        background_event_handler: Arc<BackgroundEventHandler>,
         auto_commit_enabled: bool,
         metrics_manager: Option<Arc<dyn RebalanceMetricsManager>>,
         time: Arc<dyn Time>,
@@ -742,7 +739,6 @@ impl AbstractMembershipManager {
             inner: Arc::new(Mutex::new(inner)),
             subscriptions,
             metadata,
-            background_event_handler,
             leave_group_operation: Mutex::new(GroupMembershipOperation::Default),
             pending_reconcile: Mutex::new(None),
             pending_reconcile_flag: std::sync::atomic::AtomicBool::new(false),
@@ -3103,7 +3099,6 @@ mod tests {
     use crate::consumer::internals::ConsumerMetadata;
     use async_trait::async_trait;
     use std::collections::HashSet;
-    use tokio::sync::mpsc;
 
     /// Test-only no-op rebalance listener so the §31 short-circuit
     /// (added in COMMENTS.1.md fix #1) lets the handshake proceed.
@@ -3118,12 +3113,7 @@ mod tests {
         }
     }
 
-    fn setup() -> (
-        Arc<Mutex<SubscriptionState>>,
-        Arc<Metadata>,
-        Arc<BackgroundEventHandler>,
-        mpsc::UnboundedReceiver<crate::consumer::internals::events::BackgroundEventEnvelope>,
-    ) {
+    fn setup() -> (Arc<Mutex<SubscriptionState>>, Arc<Metadata>) {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         // Register a no-op listener so the §31 short-circuit allows
         // the handshake to enqueue an event in these tests.
@@ -3137,23 +3127,14 @@ mod tests {
         };
         let metadata =
             ConsumerMetadata::with_config(&config, subs.clone(), ClusterResourceListeners::new()).metadata_arc();
-        let (tx, rx) = mpsc::unbounded_channel();
-        let beh = Arc::new(BackgroundEventHandler::new(tx));
-        (subs, metadata, beh, rx)
+        (subs, metadata)
     }
 
     #[test]
     fn new_starts_unsubscribed_with_random_member_id() {
-        let (subs, metadata, beh, _rx) = setup();
-        let mgr = AbstractMembershipManager::new(
-            "g",
-            subs,
-            metadata,
-            beh,
-            true,
-            None,
-            Arc::new(crate::common::utils::SystemTime),
-        );
+        let (subs, metadata) = setup();
+        let mgr =
+            AbstractMembershipManager::new("g", subs, metadata, true, None, Arc::new(crate::common::utils::SystemTime));
         let inner = mgr.inner.lock().unwrap();
         assert_eq!(inner.state, MemberState::Unsubscribed);
         assert_eq!(inner.member_epoch, 0);
@@ -3163,16 +3144,9 @@ mod tests {
 
     #[test]
     fn invalid_transition_returns_error() {
-        let (subs, metadata, beh, _rx) = setup();
-        let mgr = AbstractMembershipManager::new(
-            "g",
-            subs,
-            metadata,
-            beh,
-            true,
-            None,
-            Arc::new(crate::common::utils::SystemTime),
-        );
+        let (subs, metadata) = setup();
+        let mgr =
+            AbstractMembershipManager::new("g", subs, metadata, true, None, Arc::new(crate::common::utils::SystemTime));
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → STABLE is invalid.
         let err = inner.transition_to(MemberState::Stable).unwrap_err();
@@ -3181,16 +3155,9 @@ mod tests {
 
     #[test]
     fn valid_transition_succeeds() {
-        let (subs, metadata, beh, _rx) = setup();
-        let mgr = AbstractMembershipManager::new(
-            "g",
-            subs,
-            metadata,
-            beh,
-            true,
-            None,
-            Arc::new(crate::common::utils::SystemTime),
-        );
+        let (subs, metadata) = setup();
+        let mgr =
+            AbstractMembershipManager::new("g", subs, metadata, true, None, Arc::new(crate::common::utils::SystemTime));
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → PREPARE_LEAVING valid.
         inner.transition_to(MemberState::PrepareLeaving).unwrap();

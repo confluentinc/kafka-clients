@@ -85,6 +85,11 @@ pub(crate) struct ConsumerMembershipManager {
     /// wiring up the full commit pipeline; Phase 10 wires it through
     /// the supplier.
     pub(crate) commit_request_manager: Option<Arc<CommitRequestManager>>,
+    /// Java: `private final BackgroundEventHandler backgroundEventHandler`:
+    /// carries the rebalance-listener callback and `PartitionsAssigned`
+    /// events to the application thread. The base class has none (the share
+    /// manager applies its assignment in the background).
+    pub(crate) background_event_handler: Arc<BackgroundEventHandler>,
 }
 
 impl ConsumerMembershipManager {
@@ -114,7 +119,6 @@ impl ConsumerMembershipManager {
             group_id,
             subscriptions,
             metadata.metadata_arc(),
-            background_event_handler,
             // The auto-commit-before-rebalance needs the commit manager; the
             // base's reconcile gate reads this flag, so a manager built
             // without one (unit tests) reconciles as if auto-commit were off.
@@ -129,6 +133,7 @@ impl ConsumerMembershipManager {
             rebalance_timeout_ms,
             server_assignor,
             commit_request_manager,
+            background_event_handler,
         }
     }
 
@@ -476,7 +481,7 @@ impl ConsumerMembershipManager {
             ack: ack_tx,
             ack_through_application_events,
         };
-        self.abstract_mm.background_event_handler.add(event, current_time_ms)?;
+        self.background_event_handler.add(event, current_time_ms)?;
         Ok(Some(ack_rx))
     }
 
@@ -506,7 +511,7 @@ impl ConsumerMembershipManager {
     ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         let event = BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack: ack_tx };
-        self.abstract_mm.background_event_handler.add(event, current_time_ms)?;
+        self.background_event_handler.add(event, current_time_ms)?;
         log::debug!(
             "The event to update the new assignment and trigger onPartitionsAssigned callback if \
              needed has been enqueued successfully to be sent to the app thread."
