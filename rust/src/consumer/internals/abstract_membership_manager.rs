@@ -403,13 +403,6 @@ pub(crate) trait MembershipManagerHooks: Send + Sync + 'static {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#leaveGroupEpoch")]
     fn leave_group_epoch(&self) -> i32;
 
-    /// Signals that the assignment has been lost so that group-type actions
-    /// can run: called by the fence, fatal and stale transitions with the
-    /// partitions to release. Returns the ack of the resulting callback, or
-    /// `None` when there is nothing to wait for (Java's completed future).
-    ///
-    /// Java: `protected CompletableFuture<Void> signalPartitionsLost(Set<TopicPartition>)`,
-    /// whose base body returns `CompletableFuture.completedFuture(null)`.
     /// Signals that the member is leaving the group so that group-type actions
     /// can run (the consumer releases its assignment through
     /// `onPartitionsRevoked` / `onPartitionsLost`). Returns the ack the leave
@@ -477,6 +470,13 @@ pub(crate) trait MembershipManagerHooks: Send + Sync + 'static {
         current_time_ms: i64,
     ) -> Result<Option<SignalAck>, Error>;
 
+    /// Signals that the assignment has been lost so that group-type actions
+    /// can run: called by the fence, fatal and stale transitions with the
+    /// partitions to release. Returns the ack of the resulting callback, or
+    /// `None` when there is nothing to wait for (Java's completed future).
+    ///
+    /// Java: `protected CompletableFuture<Void> signalPartitionsLost(Set<TopicPartition>)`,
+    /// whose base body returns `CompletableFuture.completedFuture(null)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.AbstractMembershipManager#signalPartitionsLost")]
     fn signal_partitions_lost(
         &self,
