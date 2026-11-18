@@ -54,7 +54,8 @@ LIBRDKAFKA_PYTHON ?= $(LIBRDKAFKA_VENV)/bin/python
 # extension against the Rust library of $(PROFILE), which `build` builds first.
 export CONFLUENT_KAFKA_LIB_DIR = $(RUST_PROJECT_ROOT)/target/$(PROFILE)
 
-.PHONY: venv venv-librdkafka rust-lib init build test test-unit check verify verify-macos typecheck \
+.PHONY: venv venv-librdkafka rust-lib init build test test-except-grpc-arm test-unit check verify \
+	verify-except-grpc-arm verify-macos typecheck \
 	check-static docs test-soak test-verifiable-clients test-integration test-integration-ssl \
 	test-integration-sasl-ssl test-integration-native test-performance \
 	consumer-perf-test producer-perf-test transactional-producer-perf-test grpc-image grpc-image-async grpc-native clean
@@ -91,18 +92,27 @@ build: venv rust-lib
 # KRaft broker; they skip without Docker): what the Java tests drive through a
 # MockClient the binding cannot inject. They are not the gRPC multilanguage arm
 # of `test-integration` below.
-test: build
+test: test-except-grpc-arm
+	$(MAKE) test-integration
+
+# Everything `test` runs except the gRPC multilanguage arm (`test-integration`).
+test-except-grpc-arm: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	$(call selected_run,--section python.unit --default test/unit -- python -m pytest {} -v)
 	$(call selected_run,--section python.integration --default test/integration -- python -m pytest {} -v)
 	$(MAKE) test-soak
 	$(MAKE) test-verifiable-clients
-	$(MAKE) test-integration
 
-# The Python gate CI runs on Linux ("verify-python (Linux amd64) — plaintext"):
-# the tests, then the latency smoke run. The checks that are not tests are
-# `check`, which CI runs in "check-python (Linux amd64)".
+# The Python gate: the tests, then the latency smoke run. The checks that are
+# not tests are `check`, which CI runs in "check-python (Linux amd64)".
 verify: test
+	$(MAKE) test-performance
+
+# `verify` without the gRPC multilanguage arm: the CI job "verify-python (Linux
+# amd64) — plaintext". CI runs the arm in "verify-python (Linux amd64) —
+# plaintext gRPC arm" (`test-integration`), as it runs the ssl / sasl_ssl arms
+# in jobs of their own.
+verify-except-grpc-arm: test-except-grpc-arm
 	$(MAKE) test-performance
 
 # The macOS gate: the unit tests, then the gRPC multilanguage arm with the gRPC
@@ -196,7 +206,7 @@ test-integration: rust-lib
 		printf '  rust/target/$(PROFILE)/libconfluent_kafka.so\n'; \
 		printf 'into a Linux container and link it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
-		printf 'This container arm runs only in CI'"'"'s Linux verify-python job.\n'; \
+		printf 'This container arm runs only in CI'"'"'s Linux verify-python gRPC arm jobs.\n'; \
 		printf 'Run it natively on this host with: %smake -C python test-integration-native\n' \
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \
