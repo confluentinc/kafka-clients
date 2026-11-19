@@ -9,6 +9,10 @@ tools/java-perf-test/bin/
 *.png
 *.svg
 *.json
+# The Node.js client's committed Java index (`cargo xtask java-api`).
+!/javascript/java-index.json
+# The Java vectors the Node.js client's unit tests read (javascript/tools/java-vectors/).
+!/javascript/test/java_vectors.json
 *.jsonl
 # The test selections of `make select-tests` are committed with the branch;
 # the pre-commit hook's own selection is local to a checkout.
@@ -47,3 +51,18 @@ tools/java-perf-test/bin/
 !/rust/tools/verifiable-clients/src/bin/
 !/rust/tools/verifiable-clients/src/bin/*.rs
 
+
+# The Node.js client's build outputs (the addon, the compiled library); its
+# package.json, lockfile and tsconfig.json are tracked despite the `*.json`
+# rule above.
+/javascript/build/
+/javascript/native/build/
+/javascript/dist/
+/javascript/node_modules/
+!/javascript/package.json
+!/javascript/package-lock.json
+!/javascript/tsconfig.json
+# The platform packages' manifests (javascript/npm/README.md), published as committed.
+!/javascript/npm/*/package.json
+# The interface check's baseline (javascript/scripts/api_report.js).
+!/javascript/api/*.json
