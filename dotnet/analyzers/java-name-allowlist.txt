@@ -413,6 +413,19 @@ overload M:Confluent.Kafka.Common.Serialization.AsyncUUIDSerializer.Serialize(Sy
 overload M:Confluent.Kafka.Common.Serialization.AsyncVoidDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
 overload M:Confluent.Kafka.Common.Serialization.AsyncVoidSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Object,System.Threading.CancellationToken)
 
+# Configure on the asynchronous serde interfaces (M23/P8, ledgers 571, 572) is Java's configure(Map, boolean) with a
+# ValueTask result and a required CancellationToken, as Serialize and Deserialize above: a serde may wait in it.
+overload M:Confluent.Kafka.Common.Serialization.IAsyncDeserializerWithConfigure`1.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.Serialization.IAsyncSerializerWithConfigure`1.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
+missing T:Confluent.Kafka.Common.Serialization.AsyncStringDeserializer org.apache.kafka.common.serialization.StringDeserializer#configure(Map,boolean)
+missing T:Confluent.Kafka.Common.Serialization.AsyncStringSerializer org.apache.kafka.common.serialization.StringSerializer#configure(Map,boolean)
+missing T:Confluent.Kafka.Common.Serialization.AsyncUUIDDeserializer org.apache.kafka.common.serialization.UUIDDeserializer#configure(Map,boolean)
+missing T:Confluent.Kafka.Common.Serialization.AsyncUUIDSerializer org.apache.kafka.common.serialization.UUIDSerializer#configure(Map,boolean)
+overload M:Confluent.Kafka.Common.Serialization.AsyncStringDeserializer.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.Serialization.AsyncStringSerializer.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.Serialization.AsyncUUIDDeserializer.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.Serialization.AsyncUUIDSerializer.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
+
 # Java's close() on Serde and WrapperSerde is Dispose (dotnet/CLAUDE.md §3 rule 7): ISerde<T> is IDisposable, and its
 # Dispose closes the two halves as Java's close() does (row 461). The clients keep Close() beside Dispose, with another
 # contract, so their close() stays required.

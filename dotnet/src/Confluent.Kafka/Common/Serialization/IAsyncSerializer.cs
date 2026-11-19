@@ -26,7 +26,7 @@ namespace Confluent.Kafka.Common.Serialization;
 /// Java's <c>Serializer&lt;T&gt;</c> that an asynchronous producer takes, for a serializer that waits, as one that
 /// reads a schema registry does. It has one method, Java's <c>serialize(String, Headers, T)</c>, so the headers are
 /// always passed. Java's <c>configure</c> is
-/// <see cref="AsyncSerializerExtensions.Configure{T}(IAsyncSerializer{T}, IReadOnlyDictionary{string, object}, bool)"/>,
+/// <see cref="AsyncSerializerExtensions.Configure{T}(IAsyncSerializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// which a serializer replaces by implementing <see cref="IAsyncSerializerWithConfigure{T}"/>. Java's <c>close</c> is
 /// <see cref="IAsyncDisposable"/>, or else <see cref="IDisposable"/>: a producer disposes a serializer it was given
 /// through the first of the two it implements, and a mock producer does not.
@@ -74,14 +74,14 @@ public interface IAsyncSerializer<T>
 
 /// <summary>
 /// An asynchronous serializer that is set up from configs: it replaces Java's default
-/// <c>Serializer.configure(Map, boolean)</c>, which does nothing. <c>Configure</c> does not wait, as on
-/// <see cref="ISerializerWithConfigure{T}"/>.
+/// <c>Serializer.configure(Map, boolean)</c>, which does nothing. <c>Configure</c> may wait, as one that reads a schema
+/// registry does, where the <c>Configure</c> of <see cref="ISerializerWithConfigure{T}"/> returns when it is done.
 /// </summary>
 /// <remarks>
 /// No producer calls it: as Java configures only a serializer it builds from config, a serializer given to a producer
 /// is set up by whoever builds it. A <c>Configure</c> written on a class that implements only
 /// <see cref="IAsyncSerializer{T}"/> is not called by
-/// <see cref="AsyncSerializerExtensions.Configure{T}(IAsyncSerializer{T}, IReadOnlyDictionary{string, object}, bool)"/>,
+/// <see cref="AsyncSerializerExtensions.Configure{T}(IAsyncSerializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// and no check at construction reports it.
 /// </remarks>
 /// <typeparam name="T">The type encoded.</typeparam>
@@ -90,7 +90,9 @@ public interface IAsyncSerializerWithConfigure<T> : IAsyncSerializer<T>
     /// <summary>Configures this class.</summary>
     /// <param name="configs">Configs in key/value pairs.</param>
     /// <param name="isKey">Whether the serializer is used for the key or the value.</param>
-    void Configure(IReadOnlyDictionary<string, object?> configs, bool isKey);
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>A task that completes when the serializer is configured.</returns>
+    ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -101,24 +103,31 @@ public static class AsyncSerializerExtensions
 {
     /// <summary>
     /// Configures <paramref name="serializer"/>, Java's <c>Serializer.configure(Map, boolean)</c>:
-    /// <see cref="IAsyncSerializerWithConfigure{T}.Configure(IReadOnlyDictionary{string, object}, bool)"/> when
-    /// <paramref name="serializer"/> implements it, and otherwise nothing, as Java's default.
+    /// <see cref="IAsyncSerializerWithConfigure{T}.Configure(IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>
+    /// when <paramref name="serializer"/> implements it, and otherwise nothing, as Java's default.
     /// </summary>
     /// <typeparam name="T">The type encoded.</typeparam>
     /// <param name="serializer">The serializer.</param>
     /// <param name="configs">Configs in key/value pairs.</param>
     /// <param name="isKey">Whether the serializer is used for the key or the value.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>
+    /// The task of the serializer's <c>Configure</c>, or a completed one when it does not implement the interface.
+    /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="serializer"/> is null.</exception>
-    public static void Configure<T>(this IAsyncSerializer<T> serializer, IReadOnlyDictionary<string, object?> configs, bool isKey)
+    public static ValueTask Configure<T>(
+        this IAsyncSerializer<T> serializer,
+        IReadOnlyDictionary<string, object?> configs,
+        bool isKey,
+        CancellationToken cancellationToken = default)
     {
         if (serializer is null)
         {
             throw new ArgumentNullException(nameof(serializer));
         }
 
-        if (serializer is IAsyncSerializerWithConfigure<T> configurable)
-        {
-            configurable.Configure(configs, isKey);
-        }
+        return serializer is IAsyncSerializerWithConfigure<T> configurable
+            ? configurable.Configure(configs, isKey, cancellationToken)
+            : default;
     }
 }

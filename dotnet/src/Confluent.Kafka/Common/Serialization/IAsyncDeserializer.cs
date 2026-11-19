@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Common.Serialization;
 /// Java's <c>Deserializer&lt;T&gt;</c> that an asynchronous consumer takes, for a deserializer that waits, as one that
 /// reads a schema registry does. It has one method, Java's <c>deserialize(String, Headers, ByteBuffer)</c>, so the
 /// headers are always passed. Java's <c>configure</c> is
-/// <see cref="AsyncDeserializerExtensions.Configure{T}(IAsyncDeserializer{T}, IReadOnlyDictionary{string, object}, bool)"/>,
+/// <see cref="AsyncDeserializerExtensions.Configure{T}(IAsyncDeserializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// which a deserializer replaces by implementing <see cref="IAsyncDeserializerWithConfigure{T}"/>. Java's <c>close</c>
 /// is <see cref="IAsyncDisposable"/>, or else <see cref="IDisposable"/>: a consumer disposes a deserializer it was
 /// given through the first of the two it implements, and a mock consumer does not.
@@ -81,14 +81,14 @@ public interface IAsyncDeserializerWithRetention<T> : IAsyncDeserializer<T>
 
 /// <summary>
 /// An asynchronous deserializer that is set up from configs: it replaces Java's default
-/// <c>Deserializer.configure(Map, boolean)</c>, which does nothing. <c>Configure</c> does not wait, as on
-/// <see cref="IDeserializerWithConfigure{T}"/>.
+/// <c>Deserializer.configure(Map, boolean)</c>, which does nothing. <c>Configure</c> may wait, as one that reads a schema
+/// registry does, where the <c>Configure</c> of <see cref="IDeserializerWithConfigure{T}"/> returns when it is done.
 /// </summary>
 /// <remarks>
 /// No consumer calls it: as Java configures only a deserializer it builds from config, a deserializer given to a
 /// consumer is set up by whoever builds it. A <c>Configure</c> written on a class that implements only
 /// <see cref="IAsyncDeserializer{T}"/> is not called by
-/// <see cref="AsyncDeserializerExtensions.Configure{T}(IAsyncDeserializer{T}, IReadOnlyDictionary{string, object}, bool)"/>,
+/// <see cref="AsyncDeserializerExtensions.Configure{T}(IAsyncDeserializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// and no check at construction reports it.
 /// </remarks>
 /// <typeparam name="T">The type the bytes are decoded to.</typeparam>
@@ -97,7 +97,9 @@ public interface IAsyncDeserializerWithConfigure<T> : IAsyncDeserializer<T>
     /// <summary>Configures this class.</summary>
     /// <param name="configs">Configs in key/value pairs.</param>
     /// <param name="isKey">Whether the deserializer is used for the key or the value.</param>
-    void Configure(IReadOnlyDictionary<string, object?> configs, bool isKey);
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>A task that completes when the deserializer is configured.</returns>
+    ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -108,24 +110,31 @@ public static class AsyncDeserializerExtensions
 {
     /// <summary>
     /// Configures <paramref name="deserializer"/>, Java's <c>Deserializer.configure(Map, boolean)</c>:
-    /// <see cref="IAsyncDeserializerWithConfigure{T}.Configure(IReadOnlyDictionary{string, object}, bool)"/> when
-    /// <paramref name="deserializer"/> implements it, and otherwise nothing, as Java's default.
+    /// <see cref="IAsyncDeserializerWithConfigure{T}.Configure(IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>
+    /// when <paramref name="deserializer"/> implements it, and otherwise nothing, as Java's default.
     /// </summary>
     /// <typeparam name="T">The type the bytes are decoded to.</typeparam>
     /// <param name="deserializer">The deserializer.</param>
     /// <param name="configs">Configs in key/value pairs.</param>
     /// <param name="isKey">Whether the deserializer is used for the key or the value.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>
+    /// The task of the deserializer's <c>Configure</c>, or a completed one when it does not implement the interface.
+    /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="deserializer"/> is null.</exception>
-    public static void Configure<T>(this IAsyncDeserializer<T> deserializer, IReadOnlyDictionary<string, object?> configs, bool isKey)
+    public static ValueTask Configure<T>(
+        this IAsyncDeserializer<T> deserializer,
+        IReadOnlyDictionary<string, object?> configs,
+        bool isKey,
+        CancellationToken cancellationToken = default)
     {
         if (deserializer is null)
         {
             throw new ArgumentNullException(nameof(deserializer));
         }
 
-        if (deserializer is IAsyncDeserializerWithConfigure<T> configurable)
-        {
-            configurable.Configure(configs, isKey);
-        }
+        return deserializer is IAsyncDeserializerWithConfigure<T> configurable
+            ? configurable.Configure(configs, isKey, cancellationToken)
+            : default;
     }
 }

@@ -33,8 +33,18 @@ public sealed class AsyncStringSerializer : IAsyncSerializerWithConfigure<string
 
     ISerializer<string> IAsyncBuiltInSerializer<string>.Inner => _inner;
 
-    /// <inheritdoc cref="StringSerializer.Configure(IReadOnlyDictionary{string, object}, bool)"/>
-    public void Configure(IReadOnlyDictionary<string, object?> configs, bool isKey) => _inner.Configure(configs, isKey);
+    /// <summary>
+    /// Configures this class as <see cref="StringSerializer.Configure(IReadOnlyDictionary{string, object}, bool)"/> does, by
+    /// calling it. It never waits: the <see cref="ValueTask"/> it returns is already completed, the token is not
+    /// read, and what that method throws is thrown by the call itself.
+    /// </summary>
+    /// <inheritdoc cref="IAsyncSerializerWithConfigure{T}.Configure(IReadOnlyDictionary{string, object}, bool, CancellationToken)" path="/param"/>
+    /// <returns>A completed task.</returns>
+    public ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken)
+    {
+        _inner.Configure(configs, isKey);
+        return default;
+    }
 
     /// <inheritdoc/>
     public ValueTask<ReadOnlyMemory<byte>?> Serialize(

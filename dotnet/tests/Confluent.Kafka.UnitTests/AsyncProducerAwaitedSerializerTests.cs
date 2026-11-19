@@ -596,7 +596,10 @@ public sealed class AsyncProducerAwaitedSerializerTests
     private static AsyncUUIDSerializer UnsupportedEncoding()
     {
         AsyncUUIDSerializer serializer = new AsyncUUIDSerializer();
-        serializer.Configure(new Dictionary<string, object?> { ["value.serializer.encoding"] = "no-such-encoding" }, isKey: false);
+        Assert.True(
+            serializer
+                .Configure(new Dictionary<string, object?> { ["value.serializer.encoding"] = "no-such-encoding" }, isKey: false)
+                .IsCompletedSuccessfully);
         return serializer;
     }
 

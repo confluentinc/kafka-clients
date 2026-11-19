@@ -165,7 +165,7 @@ public sealed class AsyncSerializationTests
     }
 
     [Fact]
-    public void TheStringAndUuidClasses_AreConfiguredAsTheirSyncClasses()
+    public async Task TheStringAndUuidClasses_AreConfiguredAsTheirSyncClasses()
     {
         Dictionary<string, object?> configs = new Dictionary<string, object?>
         {
@@ -177,25 +177,25 @@ public sealed class AsyncSerializationTests
         StringSerializer serializer = new StringSerializer();
         serializer.Configure(configs, true);
         AsyncStringSerializer asyncSerializer = new AsyncStringSerializer();
-        asyncSerializer.Configure(configs, true);
+        await asyncSerializer.Configure(configs, true);
         byte[] utf16 = serializer.Serialize(Topic, "my string")!.Value.ToArray();
         Assert.NotEqual(s_myString, utf16);
         Assert.Equal(utf16, Completed(asyncSerializer.Serialize(Topic, headers, "my string", CancellationToken.None))!.Value.ToArray());
 
         AsyncStringDeserializer asyncDeserializer = new AsyncStringDeserializer();
-        asyncDeserializer.Configure(configs, true);
+        await asyncDeserializer.Configure(configs, true, CancellationToken.None);
         Assert.Equal("my string", Completed(asyncDeserializer.Deserialize(Topic, headers, utf16, CancellationToken.None)));
 
         Guid uuid = Guid.Parse("01234567-89ab-cdef-0123-456789abcdef");
         UUIDSerializer uuidSerializer = new UUIDSerializer();
         uuidSerializer.Configure(configs, true);
         AsyncUUIDSerializer asyncUuidSerializer = new AsyncUUIDSerializer();
-        asyncUuidSerializer.Configure(configs, true);
+        await asyncUuidSerializer.Configure(configs, true);
         byte[] uuidUtf16 = uuidSerializer.Serialize(Topic, uuid)!.Value.ToArray();
         Assert.Equal(uuidUtf16, Completed(asyncUuidSerializer.Serialize(Topic, headers, uuid, CancellationToken.None))!.Value.ToArray());
 
         AsyncUUIDDeserializer asyncUuidDeserializer = new AsyncUUIDDeserializer();
-        asyncUuidDeserializer.Configure(configs, true);
+        await asyncUuidDeserializer.Configure(configs, true, CancellationToken.None);
         Assert.Equal(uuid, Completed(asyncUuidDeserializer.Deserialize(Topic, headers, uuidUtf16, CancellationToken.None)));
     }
 
@@ -211,9 +211,9 @@ public sealed class AsyncSerializationTests
         SerializationException[] errors =
         {
             Assert.Throws<SerializationException>(() => new StringSerializer().Configure(configs, true)),
-            Assert.Throws<SerializationException>(() => new AsyncStringSerializer().Configure(configs, true)),
+            Assert.Throws<SerializationException>(() => Completed(new AsyncStringSerializer().Configure(configs, true))),
             Assert.Throws<SerializationException>(() => new StringDeserializer().Configure(configs, true)),
-            Assert.Throws<SerializationException>(() => new AsyncStringDeserializer().Configure(configs, true)),
+            Assert.Throws<SerializationException>(() => Completed(new AsyncStringDeserializer().Configure(configs, true))),
         };
 
         foreach (SerializationException e in errors)
@@ -301,7 +301,7 @@ public sealed class AsyncSerializationTests
     {
         Dictionary<string, object?> configs = new Dictionary<string, object?> { ["key.serializer.encoding"] = "UTF-16" };
         AsyncStringSerializer asyncSerializer = new AsyncStringSerializer();
-        asyncSerializer.Configure(configs, true);
+        Completed(asyncSerializer.Configure(configs, true));
 
         ISerializer<string> inner = ((IAsyncBuiltInSerializer<string>)asyncSerializer).Inner;
         IDeserializer<int?> innerDeserializer = ((IAsyncBuiltInDeserializer<int?>)new AsyncIntegerDeserializer()).Inner;
@@ -343,23 +343,58 @@ public sealed class AsyncSerializationTests
     }
 
     [Fact]
-    public void Configure_OnAnAsyncSerializerOrDeserializer_CallsTheConfigureInterface_AndOtherwiseNothing()
+    public async Task Configure_OnAnAsyncSerializerOrDeserializer_CallsTheConfigureInterface_AndOtherwiseNothing()
     {
         Dictionary<string, object?> configs = new Dictionary<string, object?> { ["k"] = "v" };
         ConfiguredSerde configured = new ConfiguredSerde();
         StrayConfigureSerde stray = new StrayConfigureSerde();
+        using CancellationTokenSource source = new CancellationTokenSource();
 
-        ((IAsyncSerializer<string>)configured).Configure(configs, true);
-        ((IAsyncDeserializer<string>)configured).Configure(configs, false);
-        ((IAsyncSerializer<string>)stray).Configure(configs, true);
-        ((IAsyncDeserializer<string>)stray).Configure(configs, true);
+        await ((IAsyncSerializer<string>)configured).Configure(configs, true, source.Token);
+        await ((IAsyncDeserializer<string>)configured).Configure(configs, false);
+        Completed(((IAsyncSerializer<string>)stray).Configure(configs, true));
+        Completed(((IAsyncDeserializer<string>)stray).Configure(configs, true));
 
         Assert.Equal(2, configured.Seen.Count);
         Assert.Same(configs, configured.Seen[0].Configs);
         Assert.True(configured.Seen[0].IsKey);
+        Assert.Equal(source.Token, configured.Seen[0].Token);
         Assert.Same(configs, configured.Seen[1].Configs);
         Assert.False(configured.Seen[1].IsKey);
+        Assert.Equal(CancellationToken.None, configured.Seen[1].Token);
         Assert.Equal(0, stray.Calls);
+    }
+
+    [Fact]
+    public async Task Configure_OnAnAsyncSerializerOrDeserializer_HandsBackTheTaskOfTheConfigureInterface()
+    {
+        Dictionary<string, object?> configs = new Dictionary<string, object?>();
+        ConfiguredSerde configured = new ConfiguredSerde
+        {
+            Pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+
+        ValueTask serializer = ((IAsyncSerializer<string>)configured).Configure(configs, true);
+        ValueTask deserializer = ((IAsyncDeserializer<string>)configured).Configure(configs, false);
+        Assert.False(serializer.IsCompleted);
+        Assert.False(deserializer.IsCompleted);
+
+        configured.Pending.SetException(new InvalidOperationException("the registry is away"));
+
+        Assert.Equal("the registry is away", (await Assert.ThrowsAsync<InvalidOperationException>(() => serializer.AsTask())).Message);
+        Assert.Equal("the registry is away", (await Assert.ThrowsAsync<InvalidOperationException>(() => deserializer.AsTask())).Message);
+    }
+
+    [Fact]
+    public void Configure_OnTheBuiltInAsyncClasses_IsCompletedWhenItReturns_AndDoesNotReadTheToken()
+    {
+        Dictionary<string, object?> configs = new Dictionary<string, object?>();
+        CancellationToken cancelled = new CancellationToken(canceled: true);
+
+        Completed(new AsyncStringSerializer().Configure(configs, true, cancelled));
+        Completed(new AsyncStringDeserializer().Configure(configs, true, cancelled));
+        Completed(new AsyncUUIDSerializer().Configure(configs, false, cancelled));
+        Completed(new AsyncUUIDDeserializer().Configure(configs, false, cancelled));
     }
 
     [Fact]
@@ -368,9 +403,9 @@ public sealed class AsyncSerializationTests
         Dictionary<string, object?> configs = new Dictionary<string, object?>();
 
         ArgumentNullException serializer = Assert.Throws<ArgumentNullException>(
-            () => ((IAsyncSerializer<string>)null!).Configure(configs, true));
+            () => Completed(((IAsyncSerializer<string>)null!).Configure(configs, true)));
         ArgumentNullException deserializer = Assert.Throws<ArgumentNullException>(
-            () => ((IAsyncDeserializer<string>)null!).Configure(configs, true));
+            () => Completed(((IAsyncDeserializer<string>)null!).Configure(configs, true)));
 
         Assert.Equal("serializer", serializer.ParamName);
         Assert.Equal("deserializer", deserializer.ParamName);
@@ -437,6 +472,8 @@ public sealed class AsyncSerializationTests
         return task.Result;
     }
 
+    private static void Completed(ValueTask task) => Assert.True(task.IsCompletedSuccessfully);
+
     private static bool Implements(Type type, string suffix) =>
         type.GetInterfaces().Any(contract => contract.Name.Contains(suffix));
 
@@ -449,10 +486,17 @@ public sealed class AsyncSerializationTests
     /// <summary>An asynchronous serializer and deserializer with the configure interfaces, recording each call.</summary>
     private sealed class ConfiguredSerde : IAsyncSerializerWithConfigure<string>, IAsyncDeserializerWithConfigure<string>
     {
-        internal List<(IReadOnlyDictionary<string, object?> Configs, bool IsKey)> Seen { get; } =
-            new List<(IReadOnlyDictionary<string, object?> Configs, bool IsKey)>();
+        internal List<(IReadOnlyDictionary<string, object?> Configs, bool IsKey, CancellationToken Token)> Seen { get; } =
+            new List<(IReadOnlyDictionary<string, object?> Configs, bool IsKey, CancellationToken Token)>();
 
-        public void Configure(IReadOnlyDictionary<string, object?> configs, bool isKey) => Seen.Add((configs, isKey));
+        /// <summary>When set, what each Configure hands back, still pending.</summary>
+        internal TaskCompletionSource<bool>? Pending { get; set; }
+
+        public ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken)
+        {
+            Seen.Add((configs, isKey, cancellationToken));
+            return Pending is null ? default : new ValueTask(Pending.Task);
+        }
 
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
             string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
