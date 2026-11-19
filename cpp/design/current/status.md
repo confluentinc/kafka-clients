@@ -121,7 +121,7 @@ headers against this file's rules; built with `-DCONFLUENT_KAFKA_CPP_LINT=ON`, o
 
 ## Packaging: a compiled library (2026-11-18)
 
-Upgradable Linux packages: a fix to the C++ layer or to the core reaches programs by a package
+Upgradable libraries: a fix to the C++ layer or to the core reaches programs by a package
 upgrade. The binding becomes a compiled library, shared and static, over the shared C core, and
 both cores' static libraries ship too (CLAUDE.md §3.2, §12.3, §12.4, §13.1, §13.4, rewritten for
 it). The core's soname is opt-in for packaging builds (`CONFLUENT_KAFKA_C_ABI_SONAME=1`,
@@ -165,22 +165,10 @@ it). The core's soname is opt-in for packaging builds (`CONFLUENT_KAFKA_C_ABI_SO
    patch sources as well as headers and check why a case fails: a removed overload is a removed
    symbol under the soname `0.1`; an inserted enumerator keeps the values (the ABI) and changes
    the order (the API inventory).
-7. `packaging/debian/`: one source package, `libconfluent-kafka0`, `libconfluent-kafka-dev`,
-   `libconfluent-kafka-cpp0.1`, `libconfluent-kafka-cpp-dev`, built per distro release in its
-   container; the upgrade checked by running a program built against the old package. Done:
-   `make package-deb DISTRO=ubuntu:24.04 [DEB_REVISION=n]` at the root. The core is staged in
-   `debian/core` (the binary targets' `dh_prep` clears `debian/tmp`) and copied in at install;
-   the C++ packages carry the binding's version (`dh_gencontrol -v`); `shlibs` with `-V` instead
-   of a symbols file, as the C exports change with the experimental FFI; line tables for the
-   core's `-dbgsym`. `install-c` removes the LLVM bitcode rustc embeds in the static library
-   (196 of 261 MB; `-dev` 52 → 9.7 MB). On Ubuntu 24.04: runtime 5.5 MB, C++ runtime 31 KB, core
-   floor glibc 2.38; lintian reports no error or warning (`initial-upload-closes-no-bugs`
-   suppressed, it is for the Debian archive; a readelf parse note on the 81 205-section static
-   library is lintian's own). Checked in a fresh container: a program built with `find_package`
-   against revision 1, after `apt install` of a revision 2 whose `to_string(Node)` changed,
-   prints the new text from its shared build and the old from its static one, neither rebuilt.
-   Not done: the crates' licenses in `debian/copyright` (they are linked into the core),
-   vendoring the crates for the Debian archive, CI jobs.
+7. Debian packages (`packaging/debian/`, `make package-deb`). Built and checked (an upgrade of the
+   shared library reached a program without a rebuild), then removed on 2026-11-19: this
+   repository does not build distribution packages. `install-c` (step 5) stays, for packagers;
+   it also strips the LLVM bitcode rustc embeds in the static library (196 of 261 MB).
 
 ## Next
 

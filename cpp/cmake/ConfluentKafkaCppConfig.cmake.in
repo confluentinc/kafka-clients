@@ -5,8 +5,7 @@
 # core's own targets, ConfluentKafka::core and ConfluentKafka::core_static
 # (cpp/CLAUDE.md §13.1).
 #
-# The core is a separate package (libconfluent-kafka-dev), installed in the same
-# prefix; ConfluentKafkaCpp_CORE_LIB_DIR points at another directory holding it.
+# The core is installed separately (`cargo xtask install-c`), in the same prefix; ConfluentKafkaCpp_CORE_LIB_DIR points at another directory holding it.
 
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
@@ -29,7 +28,7 @@ if(NOT TARGET ConfluentKafka::core)
     if(NOT ConfluentKafkaCpp_CORE_SHARED OR NOT ConfluentKafkaCpp_CORE_STATIC)
         set(ConfluentKafkaCpp_FOUND FALSE)
         set(ConfluentKafkaCpp_NOT_FOUND_MESSAGE
-            "the core libconfluent_kafka (shared and static) is not in ${_ck_core_hints}: install libconfluent-kafka-dev, or set ConfluentKafkaCpp_CORE_LIB_DIR")
+            "the core libconfluent_kafka (shared and static) is not in ${_ck_core_hints}: install the core in that prefix, or set ConfluentKafkaCpp_CORE_LIB_DIR")
         return()
     endif()
     add_library(ConfluentKafka::core SHARED IMPORTED)

@@ -60,21 +60,13 @@ components: `runtime` (the shared library and its soname link) and `development`
 else). `test/package` is a program built against the installed tree, run by the `package_config`
 test.
 
-## Linux packages
+## Installing the core
 
-`make package-deb DISTRO=ubuntu:24.04` at the repository root builds, in a container of that
-release, the Debian packages of `packaging/debian` into `build/deb/<distro>/<revision>/`:
-
-| Package | Contents |
-|---|---|
-| `libconfluent-kafka0` | `libconfluent_kafka.so.0`, the C core (soname from `rust/build.rs` `C_ABI_MAJOR`) |
-| `libconfluent-kafka-dev` | the C headers, `libconfluent_kafka.so`, `libconfluent_kafka.a`, `confluent-kafka.pc` |
-| `libconfluent-kafka-cpp0.1` | `libconfluent_kafka_cpp.so.0.1` |
-| `libconfluent-kafka-cpp-dev` | the C++ headers, `libconfluent_kafka_cpp.so`, `.a`, the CMake package, `confluent-kafka-cpp.pc` |
-
-A program linked against the shared libraries takes a fix of either by a package upgrade; one
-linked against the static ones keeps what it was built with. The core is staged by
-`cargo xtask install-c`, which any other packaging can use too.
+`cargo xtask install-c --destdir <dir> --prefix <prefix> --libdir <libdir>` (from `rust/`) installs
+the C core as `find_package(ConfluentKafkaCpp)` and `confluent-kafka-cpp.pc` expect it:
+`libconfluent_kafka.so.0` (soname from `rust/build.rs` `C_ABI_MAJOR`) with its links, the static
+library, both C headers and `confluent-kafka.pc`. This repository builds no distribution
+packages; a packager starts from it.
 
 The Makefile variables `CLANG_FORMAT`, `CLANG_TIDY` and `CLANG_TIDY_EXTRA_ARGS` select the LLVM
 binaries; `CLANG_TIDY_EXTRA_ARGS` takes, for example, `--extra-arg=-isystem<gcc include dir>` when a

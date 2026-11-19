@@ -526,9 +526,9 @@ Interfaces Java declares:
    rewritten by `make lint-baseline`, only shrinking), `decisions.txt` (§4.6) and
    `scope-excluded.txt` (what these rules cut out of §1.4's scope).
 4. `check-generated` covers the error emitter's output and every generated header. Released
-   as Linux packages (`packaging/debian/`: the core's runtime and `-dev` packages, the C++
-   library's, each `-dev` carrying the static library) and through a vcpkg overlay port under
-   `cpp/vcpkg/` that builds the library from source, versioned separately from the core, starting
+   through a vcpkg overlay port under `cpp/vcpkg/` that builds the library from source; this
+   repository builds no Linux packages, and `cargo xtask install-c` stages the core for those
+   who do, versioned separately from the core, starting
    at a preview version; no Conan recipe.
 5. Every file carries the Apache 2.0 header, copyright Confluent Inc.; code translated from
    OpenJDK keeps GPL with Classpath Exception. No TODO or FIXME: a Java path not implemented
