@@ -39,7 +39,9 @@ name: build-test-release
 #      verify-python (pytest test/unit) and verify-dotnet (dotnet test, net8.0 +
 #      net10.0), each followed by the gRPC multilanguage arm with the gRPC
 #      server running as a native host process (MULTILANG_BACKEND_MODE=native),
-#      which tests the macOS build of each binding. dependencies-macos.sh brings
+#      which tests the macOS build of each binding; a second .NET job runs the
+#      Native AOT check and the .NET arms against a Native AOT build of the
+#      server. dependencies-macos.sh brings
 #      up Docker via Colima for the broker. The native .NET server is the
 #      net10.0 build; Grpc.Tools has no macOS arm64 protoc and runs its
 #      macosx_x64 one under Rosetta 2, which is unaffected by the linux_arm64
@@ -389,10 +391,14 @@ blocks:
     # MACOS_ENSURE_ROSETTA, because building the native .NET server runs
     # Grpc.Tools' macosx_x64 protoc under Rosetta 2. It also packs the NuGet
     # package with this machine's native library and installs it into a fresh
-    # project (make package-check-dotnet), which needs no Docker. It also runs
-    # the Native AOT check (make -C dotnet test-aot-dotnet) and the .NET arms
-    # again against a Native AOT build of the server (make -C dotnet
-    # test-integration-native-aot).
+    # project (make package-check-dotnet), which needs no Docker.
+    # "verify-dotnet (macOS arm64) — Native AOT" runs the Native AOT check
+    # (make -C dotnet test-aot-dotnet), then the .NET arms against a Native AOT
+    # build of the server and binding (make -C dotnet
+    # test-integration-native-aot), with MACOS_ENSURE_ROSETTA for the server's
+    # build. It is a job of its own because verify-dotnet has no room for a
+    # second pass of the arms: on 2026-11-19 it took 25 of its 30 minutes, 14 of
+    # them for the 724 arms.
     #
     # The binding jobs use PLAINTEXT only. The SSL and SASL_SSL variants of
     # their arm run on Linux. The TLS and SASL code paths are in the Rust
@@ -400,9 +406,11 @@ blocks:
     # and rust/tests/integration/sasl_ssl_consumer_test.rs in the verify-rust job.
     #
     # The block's 45 minutes is the verify-rust job's limit; each binding job
-    # sets 30 minutes of its own (a job's limit may not exceed its block's).
-    # verify-dotnet took 10 minutes on 2026-10-01, before the package check,
-    # which takes about a minute, and the two AOT steps.
+    # sets 30 minutes of its own (a job's limit may not exceed its block's),
+    # and the Native AOT job 45, as the Linux gRPC-arm jobs do: it builds the
+    # library, AotSmoke and the AOT server before its arms. verify-dotnet took
+    # 10 minutes on 2026-10-01, before the package check, which takes about a
+    # minute.
     dependencies: []
     execution_time_limit:
       minutes: 45
@@ -484,10 +492,6 @@ blocks:
             # package can be packed and installed. Set on make's command line for the reason given
             # below.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make -C dotnet package-check-dotnet
-            # The Native AOT check: publishes a net8.0 and a net10.0 Native AOT executable with the
-            # whole library rooted, so a trim or AOT warning fails the job, then runs them. It needs
-            # no Docker. Set on make's command line for the reason given below.
-            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make -C dotnet test-aot-dotnet
             - command -v colima >/dev/null 2>&1 || brew install colima
             - colima status &>/dev/null || colima start --cpu 6 --memory 12 --disk 50
             - 'docker_wait=90; until docker info >/dev/null 2>&1; do if [ "$docker_wait" -le 0 ]; then echo "ERROR: Docker failed to start within 90 seconds"; colima status || true; exit 1; fi; sleep 3; docker_wait=$((docker_wait - 3)); done'
@@ -498,8 +502,23 @@ blocks:
             # commands (it did after the Colima bring-up), so the .NET 10 environment is set again
             # on the make's own command line.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make -C dotnet test-integration-native
-            # The same arms against a Native AOT build of the gRPC server and binding, which links with
-            # Xcode's clang.
+        - name: "verify-dotnet (macOS arm64) — Native AOT"
+          execution_time_limit:
+            minutes: 45
+          env_vars:
+            # Installs Rosetta 2 if it is missing, for Grpc.Tools' macosx_x64 protoc, which the build
+            # of the Native AOT server runs.
+            - name: MACOS_ENSURE_ROSETTA
+              value: "true"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            # The .NET 10 environment is set on each make's own command line, for the reason given in
+            # verify-dotnet. The Native AOT check: publishes a net8.0 and a net10.0 Native AOT
+            # executable with the whole library rooted, so a trim or AOT warning fails the job, then
+            # runs them.
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make -C dotnet test-aot-dotnet
+            # The .NET arms against a Native AOT build of the gRPC server and binding, linked with
+            # Xcode's clang, over the Colima broker the prologue starts.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make -C dotnet test-integration-native-aot
 
   - name: "Verify language bindings (Windows amd64)"
