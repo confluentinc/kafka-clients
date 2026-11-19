@@ -609,8 +609,9 @@ def jaas_field(jaas_config, name):
     ``username="k"``, ``username = "k"``, ``username='k'`` and bare
     ``username=k``. Returns ``None`` only when the field is genuinely absent.
 
-    This finds a field the way the Rust parser (``SaslConfigs::parse_jaas_option``)
-    does, so the client and this validator agree on whether a field is present:
+    This is a presence check, not a parser: the client itself parses the whole
+    value with Java's ``JaasConfig`` grammar and refuses a malformed entry when
+    it is built. The check finds a field the way that grammar reads an option:
     the key is recognized only at an **option start** (beginning of string or
     after whitespace), quoted regions are skipped wholesale **honoring backslash
     escapes**, the value may be double-quoted, single-quoted, or bare, and a
@@ -623,14 +624,15 @@ def jaas_field(jaas_config, name):
     missing-username config pass the fast-fail.
 
     The returned value is the raw inner content between the quotes: escapes are
-    honored for boundary detection but not expanded. That differs from the Rust
-    parser, which decodes them as Java does, and does not matter here, since
-    this validator only checks that a field is present and never forwards it.
+    honored for boundary detection but not expanded. That differs from the
+    client's parser, which decodes them as Java does, and does not matter here,
+    since this validator only checks that a field is present and never
+    forwards it.
 
     A hand-rolled scanner (rather than a regex) is required precisely because a
-    regex cannot skip escaped quotes / balanced quoting the way the Rust lexer
-    does; the two must agree so the hard failure in
-    :func:`check_admin_credentials` is reliable.
+    regex cannot skip escaped quotes / balanced quoting the way the client's
+    tokenizer does; the two must agree on which fields are present so the hard
+    failure in :func:`check_admin_credentials` is reliable.
     """
     s = jaas_config
     n = len(s)

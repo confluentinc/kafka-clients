@@ -22,19 +22,21 @@
 // with the @js-temporal/polyfill, and with the built-in Temporal where Node has
 // one (Node 26).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Temporal: Polyfill } = require('@js-temporal/polyfill');
 
 const { durationToMillis, UNBOUNDED_MILLIS } = require('../../../dist/internal/duration');
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');
 
+/** @type {Array<[string, typeof Polyfill]>} */
 const TEMPORALS = [['the polyfill', Polyfill]];
-if (globalThis.Temporal !== undefined) TEMPORALS.push(['the built-in Temporal', globalThis.Temporal]);
+// The built-in Temporal where Node has one; the library types have none.
+const global = /** @type {typeof globalThis & {Temporal?: typeof Polyfill}} */ (globalThis);
+if (global.Temporal !== undefined) TEMPORALS.push(['the built-in Temporal', global.Temporal]);
 
 const NOT_A_DURATION = 'timeout must be a number of milliseconds or a Temporal.Duration';
 
-test('a number is milliseconds, rounded down as Java\'s toMillis()', () => {
+test("a number is milliseconds, rounded down as Java's toMillis()", () => {
   assert.equal(durationToMillis(0, 'timeout'), 0);
   assert.ok(Object.is(durationToMillis(-0, 'timeout'), 0));
   assert.equal(durationToMillis(1500, 'timeout'), 1500);
@@ -92,7 +94,10 @@ test('null, undefined and any other type are TypeErrors', () => {
     message: "timeout must not be undefined. Leave the key out, or pass null for Java's null",
   });
   // Another Temporal type is not a Duration.
-  assert.throws(() => durationToMillis(Polyfill.Instant.fromEpochMilliseconds(0), 'timeout'), { name: 'TypeError', message: NOT_A_DURATION });
+  assert.throws(() => durationToMillis(Polyfill.Instant.fromEpochMilliseconds(0), 'timeout'), {
+    name: 'TypeError',
+    message: NOT_A_DURATION,
+  });
   // The parameter's name is the one given.
   assert.throws(() => durationToMillis('x', 'maxWait'), {
     name: 'TypeError',
@@ -117,12 +122,16 @@ for (const [label, Temporal] of TEMPORALS) {
 
   test(`a Temporal.Duration (${label}) with years, months or weeks is a RangeError`, () => {
     for (const fields of [{ years: 1 }, { months: 1 }, { weeks: 1 }, { weeks: -1 }]) {
-      assert.throws(() => durationToMillis(Temporal.Duration.from(fields), 'timeout'), (e) => {
-        assert.equal(e.constructor, RangeError);
-        assert.ok(!(e instanceof IllegalArgumentError));
-        assert.equal(e.message, 'timeout must not hold years, months or weeks, which have no fixed length');
-        return true;
-      });
+      assert.throws(
+        () => durationToMillis(Temporal.Duration.from(fields), 'timeout'),
+        (e) => {
+          assert.ok(e instanceof Error);
+          assert.equal(e.constructor, RangeError);
+          assert.ok(!(e instanceof IllegalArgumentError));
+          assert.equal(e.message, 'timeout must not hold years, months or weeks, which have no fixed length');
+          return true;
+        },
+      );
     }
   });
 
@@ -137,12 +146,13 @@ for (const [label, Temporal] of TEMPORALS) {
 
 test('a Temporal.Duration is recognised by its toStringTag alone', () => {
   // Another realm's, or another polyfill's, Duration: what the helper reads.
+  /** @param {number} millis */
   const foreign = (millis) => ({
     [Symbol.toStringTag]: 'Temporal.Duration',
     years: 0,
     months: 0,
     weeks: 0,
-    total: ({ unit }) => (unit === 'millisecond' ? millis : NaN),
+    total: (/** @type {{unit: string}} */ { unit }) => (unit === 'millisecond' ? millis : NaN),
   });
   assert.equal(durationToMillis(foreign(42.9), 'timeout'), 42);
   assert.throws(() => durationToMillis(foreign(2 ** 64), 'timeout'), {

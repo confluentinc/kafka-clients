@@ -23,14 +23,16 @@
 //! - `testSendWhileTopicGetRecreated`
 //! - `testSendWithTopicReassignmentIsMidWay`
 //!
-//! All four are native-only: they drive admin topic deletion / recreation /
-//! reassignment around the producer (and `testSendWhileTopicGetRecreated` runs
-//! a concurrent send loop counting callbacks), which is harness-side control
-//! the multilanguage gRPC backends add nothing to — their `Send` RPC blocks
-//! until delivery, so the concurrent send-with-callback loop cannot be
-//! expressed through them.
+//! Under `multilanguage-tests` each runs on every backend through
+//! [`multilanguage_test!`]: the admin client that deletes, recreates and
+//! reassigns the topic stays native (harness infrastructure, as Java's
+//! `cluster.admin()`), and the producer under test comes from the backend's
+//! factory. Without the feature they run on the native backend.
 //!
 //! Deviations shared by all tests:
+//! - Java's producer has a `StringSerializer` key serializer; every record here
+//!   has a null key, which it never sees, so byte-array serializers (what every
+//!   backend's factory builds) change nothing.
 //! - Broker ids are 1-based in this harness (`kafka_cluster.rs`), so Java's
 //!   broker `0` is `1` here and Java's broker `1` is `2`.
 //! - Java's `verifyTopicDeletion` inspects broker internals (replica manager,
@@ -45,10 +47,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use confluent_kafka::admin::Admin;
@@ -61,13 +60,11 @@ use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicCollection;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::Uuid;
-use confluent_kafka::common::serialization::ByteArraySerializer;
-use confluent_kafka::common::serialization::StringSerializer;
-use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
-use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::common::backend_factory::ProducerBackendFactory;
+use crate::common::callback_log::KIND_DELIVERY;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils;
@@ -84,8 +81,6 @@ const DEFAULT_MAX_WAIT: Duration = Duration::from_millis(15_000);
 
 /// The broker ids of this cluster (1-based, see the module docs).
 const BROKER_IDS: [i32; 2] = [1, 2];
-
-type TestProducer = KafkaProducer<String, Vec<u8>>;
 
 /// `@ClusterTestDefaults` of `ProducerSendWhileDeletionTest`:
 /// two brokers with `num.partitions=2`, `default.replication.factor=2`,
@@ -115,33 +110,49 @@ fn create_admin(ctx: &TestContext) -> Box<dyn Admin> {
     AdminClient::create(AdminClientConfig::new(&props).expect("valid admin config")).expect("admin client")
 }
 
-/// `ProducerSendWhileDeletionTest#createProducer` through
-/// `ClusterInstance.producer`: string key serializer, byte-array value
-/// serializer, everything else at the producer defaults.
-fn create_producer(bootstrap_servers: &str) -> TestProducer {
-    let props = HashMap::from([
+/// The config of `ProducerSendWhileDeletionTest#createProducer` through
+/// `ClusterInstance.producer`, everything else at the producer defaults. The
+/// serializers are the factory's (see the module docs).
+fn producer_config(bootstrap_servers: &str) -> HashMap<String, String> {
+    HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
         ("max.block.ms".to_string(), "5000".to_string()),
         ("request.timeout.ms".to_string(), "10000".to_string()),
         ("delivery.timeout.ms".to_string(), (10_000 + DEFAULT_LINGER_MS).to_string()),
-    ]);
-    KafkaProducer::new(
-        ProducerConfig::new(&props).expect("valid producer config"),
-        StringSerializer::new(),
-        ByteArraySerializer::default(),
-    )
-    .expect("producer")
+    ])
+}
+
+/// The PLAINTEXT bootstrap address the factory's backend can reach: a gRPC
+/// backend in a container needs the broker's container listener.
+fn bootstrap_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
+    if factory.needs_container_bootstrap() {
+        ctx.container_bootstrap_servers().to_string()
+    } else {
+        ctx.bootstrap_servers().to_string()
+    }
+}
+
+/// `ProducerSendWhileDeletionTest#createProducer` on `factory`'s backend.
+async fn create_producer<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> F::Producer {
+    factory
+        .create(producer_config(&bootstrap_for(factory, ctx)))
+        .await
+        .expect("producer")
 }
 
 /// `new ProducerRecord<>(topic, null, value)`.
-fn record(topic: &str, value: &str) -> ProducerRecord<String, Vec<u8>> {
+fn record(topic: &str, value: &str) -> ProducerRecord<Vec<u8>, Vec<u8>> {
     ProducerRecord::with_key(topic.to_string(), None, Some(value.as_bytes().to_vec()))
 }
 
 /// `producer.send(record).get()`.
-async fn send_and_get(producer: &TestProducer, topic: &str, value: &str) -> confluent_kafka::producer::RecordMetadata {
-    // UFCS: `KafkaProducer` has an inherent `send` shadowing the trait method.
-    <TestProducer as Producer<String, Vec<u8>>>::send(producer, record(topic, value))
+async fn send_and_get<P: Producer<Vec<u8>, Vec<u8>>>(
+    producer: &P,
+    topic: &str,
+    value: &str,
+) -> confluent_kafka::producer::RecordMetadata {
+    producer
+        .send(record(topic, value))
         .await
         .unwrap_or_else(|e| panic!("send of {value} to {topic} failed: {e:?}"))
         .get()
@@ -359,12 +370,10 @@ async fn assert_leader(admin: &dyn Admin, topic: &str, partition: i32, expected_
 /// the producer recovers when
 /// its topic is deleted mid-way through producing and then auto-created by the
 /// producer's own metadata request.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_send_with_topic_deletion_mid_way() {
-    let mut ctx = TestContext::new(deletion_cluster_config()).await;
+async fn send_with_topic_deletion_mid_way_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("topic");
-    let admin = create_admin(&ctx);
-    let producer = create_producer(ctx.bootstrap_servers());
+    let admin = create_admin(ctx);
+    let producer = create_producer(factory, ctx).await;
 
     // Create topic with leader as 0 (here 1) for the 2 partitions.
     create_topic_with_assignment(admin.as_ref(), &topic, BTreeMap::from([(0, vec![1, 2]), (1, vec![1, 2])])).await;
@@ -388,7 +397,7 @@ async fn test_send_with_topic_deletion_mid_way() {
     let final_resp = send_and_get(&producer, &topic, "value").await;
     assert_eq!(topic, final_resp.topic());
 
-    Producer::close(&producer).await.expect("close producer");
+    producer.close().await.expect("close producer");
     admin.close().await;
 }
 
@@ -396,12 +405,10 @@ async fn test_send_with_topic_deletion_mid_way() {
 /// after the topic is deleted
 /// and recreated with a new topic id, the producer produces to the new topic,
 /// starting at offset 0.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_send_with_recreated_topic() {
-    let mut ctx = TestContext::new(deletion_cluster_config()).await;
+async fn send_with_recreated_topic_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("topic");
-    let admin = create_admin(&ctx);
-    let producer = create_producer(ctx.bootstrap_servers());
+    let admin = create_admin(ctx);
+    let producer = create_producer(factory, ctx).await;
 
     cluster_create_topic(admin.as_ref(), &topic, 1, 1).await;
     let topic_id = known_topic_metadata(admin.as_ref(), &topic).await.topic_id();
@@ -427,7 +434,7 @@ async fn test_send_with_recreated_topic() {
     assert_eq!(topic, record_metadata.topic());
     assert_eq!(0, record_metadata.offset());
 
-    Producer::close(&producer).await.expect("close producer");
+    producer.close().await.expect("close producer");
     admin.close().await;
 }
 
@@ -437,22 +444,31 @@ async fn test_send_with_recreated_topic() {
 /// and flushes; every record's callback fires exactly once (success or error).
 ///
 /// Java runs both halves with `CompletableFuture.*Async` and joins them; here
-/// each is a spawned task that is awaited. The Java recreation loop has no
-/// bound besides the JUnit timeout; the joins here are bounded by
-/// [`RECREATE_TEST_TIMEOUT`] so a stuck loop fails instead of hanging the suite.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_send_while_topic_get_recreated() {
+/// the recreation loop is a spawned task and the producer half runs on the test
+/// task, both awaited. The Java recreation loop has no bound besides the JUnit
+/// timeout; the joins here are bounded by [`RECREATE_TEST_TIMEOUT`] so a stuck
+/// loop fails instead of hanging the suite.
+///
+/// The callbacks are counted from the backend's own callback log
+/// ([`ProducerBackendFactory::create_with_callback_log`]): on a gRPC backend
+/// that is the binding's real delivery callback, logged by its server, not the
+/// harness closure the RPC result runs.
+///
+/// Deviation for the gRPC backends: their `Send` RPC returns only after the
+/// record's outcome (each bounded by `max.block.ms` or `delivery.timeout.ms`),
+/// so the ten sends run one after the other, where Java's loop hands all ten
+/// over at once; their overlap with the recreation loop differs from Java's.
+/// Both assertions are kept.
+async fn send_while_topic_get_recreated_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     const MAX_NUM_TOPIC_RECREATION_ATTEMPTS: usize = 5;
-    const RECREATE_TEST_TIMEOUT: Duration = Duration::from_secs(180);
 
-    let mut ctx = TestContext::new(deletion_cluster_config()).await;
     let topic = ctx.topic("topic");
     let bootstrap = ctx.bootstrap_servers().to_string();
 
     let recreate_topic_future = {
         let topic = topic.clone();
         let admin_props = HashMap::from([
-            ("bootstrap.servers".to_string(), bootstrap.clone()),
+            ("bootstrap.servers".to_string(), bootstrap),
             ("client.id".to_string(), "producer-send-while-deletion-admin".to_string()),
         ]);
         tokio::spawn(async move {
@@ -490,56 +506,52 @@ async fn test_send_while_topic_get_recreated() {
         })
     };
 
-    let num_acks = Arc::new(AtomicUsize::new(0));
-    let producer_future = {
-        let topic = topic.clone();
-        let num_acks = Arc::clone(&num_acks);
-        tokio::spawn(async move {
-            let producer = create_producer(&bootstrap);
-            for i in 1..=NUM_RECORDS {
-                let num_acks = Arc::clone(&num_acks);
-                // Java ignores the returned future; a send that fails before
-                // reaching the accumulator still fires the callback
-                // (`KafkaProducer.doSend`'s ApiException branch), so it is
-                // counted there, not here.
-                let _ = <TestProducer as Producer<String, Vec<u8>>>::send_with_callback(
-                    &producer,
-                    record(&topic, &format!("value{i}")),
-                    Some(Box::new(
-                        move |_metadata: Option<&confluent_kafka::producer::RecordMetadata>, _error: Option<&Error>| {
-                            num_acks.fetch_add(1, Ordering::SeqCst);
-                        },
-                    )),
-                )
+    let (producer, log) = factory
+        .create_with_callback_log(producer_config(&bootstrap_for(factory, ctx)))
+        .await
+        .expect("producer");
+    let producer_future = async {
+        for i in 1..=NUM_RECORDS {
+            // Java ignores the returned future; a send that fails before
+            // reaching the accumulator still fires the callback
+            // (`KafkaProducer.doSend`'s ApiException branch), so it is
+            // counted there, not here.
+            let _ = log
+                .send_with_logging_callback(&producer, record(&topic, &format!("value{i}")))
                 .await;
-            }
-            Producer::flush(&producer).await.expect("flush");
-            Producer::close(&producer).await.expect("close producer");
-        })
+        }
+        producer.flush().await.expect("flush");
+        // `flush()` returns once every record's callback has run (a callback
+        // runs before its record's future completes), so the log holds them
+        // all, so one read after `flush()` is enough, with no polling. It is
+        // read before `close()`.
+        let entries = log.entries().await.expect("read the producer callback log");
+        producer.close().await.expect("close producer");
+        entries.iter().filter(|e| e.kind == KIND_DELIVERY).count()
     };
 
+    let num_acks = tokio::time::timeout(RECREATE_TEST_TIMEOUT, producer_future)
+        .await
+        .expect("producer half timed out");
     let topic_ids = tokio::time::timeout(RECREATE_TEST_TIMEOUT, recreate_topic_future)
         .await
         .expect("topic recreation loop timed out")
         .expect("topic recreation task panicked");
-    tokio::time::timeout(RECREATE_TEST_TIMEOUT, producer_future)
-        .await
-        .expect("producer task timed out")
-        .expect("producer task panicked");
     assert_eq!(MAX_NUM_TOPIC_RECREATION_ATTEMPTS, topic_ids.len());
-    assert_eq!(NUM_RECORDS, num_acks.load(Ordering::SeqCst));
+    assert_eq!(NUM_RECORDS, num_acks);
 }
+
+/// Bounds each half of [`send_while_topic_get_recreated_inner`].
+const RECREATE_TEST_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Translated from `ProducerSendWhileDeletionTest#testSendWithTopicReassignmentIsMidWay`:
 /// the producer keeps producing
 /// after the partition's only replica (and so its leader) moves to another
 /// broker, and the topic id is unchanged.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_send_with_topic_reassignment_is_mid_way() {
-    let mut ctx = TestContext::new(deletion_cluster_config()).await;
+async fn send_with_topic_reassignment_is_mid_way_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("topic");
-    let admin = create_admin(&ctx);
-    let producer = create_producer(ctx.bootstrap_servers());
+    let admin = create_admin(ctx);
+    let producer = create_producer(factory, ctx).await;
 
     // Create topic with leader as 0 (here 1) for the 1 partition.
     create_topic_with_assignment(admin.as_ref(), &topic, BTreeMap::from([(0, vec![1])])).await;
@@ -565,6 +577,61 @@ async fn test_send_with_topic_reassignment_is_mid_way() {
     let record_metadata = send_and_get(&producer, &topic, "value").await;
     assert_eq!(topic, record_metadata.topic());
 
-    Producer::close(&producer).await.expect("close producer");
+    producer.close().await.expect("close producer");
     admin.close().await;
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_with_topic_deletion_mid_way,
+    send_with_topic_deletion_mid_way_inner,
+    deletion_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_with_recreated_topic,
+    send_with_recreated_topic_inner,
+    deletion_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_while_topic_get_recreated,
+    send_while_topic_get_recreated_inner,
+    deletion_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_with_topic_reassignment_is_mid_way,
+    send_with_topic_reassignment_is_mid_way_inner,
+    deletion_cluster_config()
+);
+
+#[cfg(not(feature = "multilanguage-tests"))]
+mod rust_only_fallback {
+    use super::*;
+    use crate::common::backend_factory::RustNativeFactory;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_with_topic_deletion_mid_way() {
+        let mut ctx = TestContext::new(deletion_cluster_config()).await;
+        send_with_topic_deletion_mid_way_inner(&mut ctx, &RustNativeFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_with_recreated_topic() {
+        let mut ctx = TestContext::new(deletion_cluster_config()).await;
+        send_with_recreated_topic_inner(&mut ctx, &RustNativeFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_while_topic_get_recreated() {
+        let mut ctx = TestContext::new(deletion_cluster_config()).await;
+        send_while_topic_get_recreated_inner(&mut ctx, &RustNativeFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_with_topic_reassignment_is_mid_way() {
+        let mut ctx = TestContext::new(deletion_cluster_config()).await;
+        send_with_topic_reassignment_is_mid_way_inner(&mut ctx, &RustNativeFactory).await;
+    }
 }

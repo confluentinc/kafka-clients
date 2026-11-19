@@ -47,9 +47,9 @@ const PREFIX = 'org.apache.kafka.';
  * The error classes javascript/CLAUDE.md "Errors" describes, which the Java
  * members rules do not map member by member: what they keep on every class
  * instead of Java's members (`getMessage()` and `getCause()` as `message` and
- * `cause`; the payload getters are not generated), and Java's `public static
- * final` instances (`INSTANCE`), which check-java-members asks of the Java
- * class.
+ * `cause`), besides Java's `public static final` instances (`INSTANCE`) and
+ * the methods translating the payload (the getters, a static factory, a
+ * `toString()` override), which check-java-members maps to the Java class.
  * No other public member: the FFI id is private, and an error is classified
  * with `instanceof`, so there is no `code`, `retriable` or `apiError`.
  */
@@ -88,7 +88,26 @@ const CONSTANTS_ONLY = new Set([
 const DATA_CLASSES = new Set([
   'org.apache.kafka.clients.producer.ProducerRecord',
   'org.apache.kafka.clients.producer.RecordMetadata',
+  'org.apache.kafka.common.TopicPartition',
+  'org.apache.kafka.common.Node',
+  'org.apache.kafka.clients.consumer.OffsetAndMetadata',
 ]);
+
+/**
+ * The Java types the client does not translate, which a signature that cannot
+ * be dropped takes or returns as a placeholder typed `unknown` (root
+ * CLAUDE.md, JavaScript Binding Conventions, Scope: `export type Partitioner =
+ * unknown`): their members are not asked for.
+ */
+const PLACEHOLDERS = new Set(['Partitioner', 'MetricValueProvider', 'MetricConfig', 'Measurable']);
+
+/**
+ * The Java types that are not `@InterfaceAudience.Public`, which a public
+ * signature types `unknown` (root CLAUDE.md, JavaScript Binding Conventions,
+ * Scope: "A type that Java doesn't make public, such as `Time`, is
+ * `unknown`").
+ */
+const NOT_PUBLIC_TYPES = new Set(['Time']);
 
 /**
  * The Java functional interfaces translated as a function type
@@ -340,7 +359,11 @@ function signaturesOf(ts, node) {
   const same = members.filter((o) =>
     ts.isConstructorDeclaration(node)
       ? ts.isConstructorDeclaration(o)
-      : (ts.isMethodDeclaration(o) || ts.isMethodSignature(o)) && o.name && node.name && o.name.getText() === node.name.getText() && (ts.getCombinedModifierFlags(o) & ts.ModifierFlags.Static) === (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static),
+      : (ts.isMethodDeclaration(o) || ts.isMethodSignature(o)) &&
+        o.name &&
+        node.name &&
+        o.name.getText() === node.name.getText() &&
+        (ts.getCombinedModifierFlags(o) & ts.ModifierFlags.Static) === (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static),
   );
   const overloads = same.filter((o) => o.body === undefined);
   return overloads.length > 0 ? overloads : same.length > 0 ? same : [node];
@@ -407,10 +430,7 @@ function javaMember(index, cls, m, { anyStatic = false } = {}) {
     for (const c of chain) {
       const found = c.overloads.filter(
         (o) =>
-          o.name === name &&
-          o.name !== c.path[c.path.length - 1] &&
-          (arity === undefined || o.params.length === arity) &&
-          fits(o.static),
+          o.name === name && o.name !== c.path[c.path.length - 1] && (arity === undefined || o.params.length === arity) && fits(o.static),
       );
       if (found.length > 0) return { kind: 'methods', name, owner: c, overloads: found };
     }
@@ -430,6 +450,17 @@ function javaMember(index, cls, m, { anyStatic = false } = {}) {
   if (m.kind === 'method') {
     const found = methods(m.name);
     if (found) return found;
+    // A Java public mutable field is a setter only, `set<Field>` (plan §5
+    // item 2; Python's `set_<field>`: `MockProducer.sendException` ->
+    // `setSendException`).
+    const setterOf = /^set([A-Z]\w*)$/.exec(m.name);
+    if (setterOf !== null && !m.isStatic) {
+      const name = setterOf[1][0].toLowerCase() + setterOf[1].slice(1);
+      for (const c of chain) {
+        const f = c.fields.find((x) => x.name === name && x.visibility === 'public' && !x.final && !x.static);
+        if (f) return { kind: 'field', name, owner: c, field: f, setter: true };
+      }
+    }
     return cls.kind === 'enum' && m.name === 'toString' && fits(false) ? ENUM_TO_STRING : null;
   }
   if (m.isStatic) return field(m.name) || methods(m.name, 0);
@@ -525,9 +556,7 @@ function exportedItems(ctx) {
         bySymbol.set(target, { rel, dir, sf, name: exported.name, node, kind, tags, declaredHere });
       }
     }
-    return [...bySymbol.values()].sort((a, b) =>
-      a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : a.node.getStart() - b.node.getStart(),
-    );
+    return [...bySymbol.values()].sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : a.node.getStart() - b.node.getStart()));
   });
 }
 
@@ -614,6 +643,8 @@ module.exports = {
   PREFIX,
   ERROR_ALLOWANCE,
   DATA_CLASSES,
+  PLACEHOLDERS,
+  NOT_PUBLIC_TYPES,
   ENUM_IMPLICIT,
   JavaIndex,
   javaIndexOf,

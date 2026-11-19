@@ -16,8 +16,16 @@
 
 pub mod auth;
 pub(crate) mod authenticator;
+mod jaas_config;
+// `pub(crate)` for the client tests that share its test vectors.
+pub(crate) mod jaas_context;
+mod jaas_utils;
 pub mod scram;
 // TLS, behind the `rustls` feature.
 #[cfg(feature = "rustls")]
 pub(crate) mod ssl;
 pub mod token;
+
+pub(crate) use jaas_config::JaasConfig;
+pub(crate) use jaas_context::JaasContext;
+pub(crate) use jaas_utils::JaasUtils;

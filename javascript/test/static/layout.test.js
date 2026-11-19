@@ -19,7 +19,6 @@
 // import path per Java package, and no install-time build. It reads the TypeScript
 // sources (src/**/*.ts) and package.json only: no build needed.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -31,8 +30,15 @@ const ROOT = path.join(__dirname, '..', '..');
 const LIB = path.join(ROOT, 'src');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
-/** Every path under `dir`, relative to it, recursively; directories end with `/`. */
+/**
+ * Every path under `dir`, relative to it, recursively; directories end with `/`.
+ *
+ * @param {string} dir
+ * @param {string} [base]
+ * @returns {Array<string>}
+ */
 function walk(dir, base = dir) {
+  /** @type {Array<string>} */
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
@@ -46,7 +52,11 @@ function walk(dir, base = dir) {
 const libPaths = walk(LIB);
 const libDirs = ['', ...libPaths.filter((p) => p.endsWith('/'))];
 const libFiles = libPaths.filter((p) => !p.endsWith('/'));
-/** Whether `rel` (relative to src/) is private: under src/internal/, the package's own helpers. */
+/**
+ * Whether `rel` (relative to src/) is private: under src/internal/, the package's own helpers.
+ *
+ * @param {string} rel
+ */
 const isPrivate = (rel) => rel.split('/')[0] === 'internal';
 
 test('src/ holds only .ts sources, snake_case, private ones under src/internal/', () => {
@@ -77,13 +87,18 @@ const moduleDirs = libDirs.filter((d) => d !== '' && !isPrivate(d)).map((d) => d
  * emitted), exactly once. A namespace re-export (`export * as x from './x'`)
  * fails: each package is reached by its own import path only (root
  * conventions, Layout and modules).
+ *
+ * @param {string} dir
+ * @returns {Array<{kind: string, names: Array<string>, path: string}>}
  */
 function parseIndex(dir) {
+  /** @type {string} */
   const code = stripComments(fs.readFileSync(path.join(LIB, dir, 'index.ts'), 'utf8'));
   const statements = code
     .split(';')
     .map((s) => s.trim())
     .filter((s) => s !== '');
+  /** @type {Array<{kind: string, names: Array<string>, path: string}>} */
   const reexports = [];
   let markers = 0;
   for (const statement of statements) {
@@ -96,7 +111,10 @@ function parseIndex(dir) {
     }
     const named = /^export\s+(type\s+)?\{([\w\s,]+)\}\s*from\s*'(\.\/[\w/]+)'$/.exec(statement);
     if (named !== null) {
-      const names = named[2].split(',').map((n) => n.trim()).filter(Boolean);
+      const names = named[2]
+        .split(',')
+        .map((n) => n.trim())
+        .filter(Boolean);
       reexports.push({ kind: named[1] === undefined ? 'value' : 'type', names, path: named[3] });
       continue;
     }
@@ -111,9 +129,12 @@ function parseIndex(dir) {
  * Checks `src/<dir>index.ts`: each re-export names a public .ts of the folder
  * itself (never a child folder, never a file of another folder), and no name
  * twice.
+ *
+ * @param {string} dir
  */
 function checkIndex(dir) {
   const reexports = parseIndex(dir);
+  /** @type {Array<string>} */
   const bound = [];
   for (const r of reexports) {
     assert.match(r.path, /^\.\/[a-z][a-z0-9_]*$/, `src/${dir}index.ts re-exports ${r.path}, not a file of its own folder`);
@@ -133,9 +154,24 @@ test('the root index.ts exports only the Java built-in errors and Duration', () 
   const reexports = parseIndex('');
   assert.ok(reexports.length > 0, 'src/index.ts exports nothing');
   for (const r of reexports) {
-    assert.match(r.path, /_error$|^\.\/duration$/, `src/index.ts re-exports ${r.path}: the root exports only Java built-in errors and Duration`);
-    if (r.path === './duration') assert.deepEqual(r, { kind: 'type', names: ['Duration'], path: './duration' }, 'the root exports the type Duration only');
-    else assert.deepEqual(r.names, [r.path.slice(2).replace(/_([a-z])/g, (_m, c) => c.toUpperCase()).replace(/^[a-z]/, (c) => c.toUpperCase())], `src/index.ts re-exports ${r.path} under its class name only`);
+    assert.match(
+      r.path,
+      /_error$|^\.\/duration$/,
+      `src/index.ts re-exports ${r.path}: the root exports only Java built-in errors and Duration`,
+    );
+    if (r.path === './duration')
+      assert.deepEqual(r, { kind: 'type', names: ['Duration'], path: './duration' }, 'the root exports the type Duration only');
+    else
+      assert.deepEqual(
+        r.names,
+        [
+          r.path
+            .slice(2)
+            .replace(/_([a-z])/g, (_m, c) => c.toUpperCase())
+            .replace(/^[a-z]/, (c) => c.toUpperCase()),
+        ],
+        `src/index.ts re-exports ${r.path} under its class name only`,
+      );
   }
 });
 
@@ -146,12 +182,12 @@ test('a module folder index.ts re-exports public files of its own folder, and no
   }
 });
 
-test('the build outputs are not committed: dist/, build/ and native/build/ are git-ignored and untracked', (t) => {
-  const git = (args) => spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
-  if (git(['rev-parse', '--is-inside-work-tree']).status !== 0) {
-    t.skip('not a git checkout');
-    return;
-  }
+/** @param {Array<string>} args */
+const git = (args) => spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
+const NOT_GIT = git(['rev-parse', '--is-inside-work-tree']).status !== 0;
+if (NOT_GIT) console.log('skipping the build-output check: not a git checkout');
+
+(NOT_GIT ? test.skip : test)('the build outputs are not committed: dist/, build/ and native/build/ are git-ignored and untracked', () => {
   const tracked = git(['ls-files', '--', 'dist', 'build', 'native/build']);
   assert.equal(tracked.status, 0, tracked.stderr);
   assert.equal(tracked.stdout, '', 'dist/, build/ or native/build/ has tracked files');
@@ -191,6 +227,7 @@ test('the generated modules carry the license and the GENERATED, DO NOT EDIT hea
 
 test('package.json exports every module folder, with its compiled types, and nothing else', () => {
   // dist/ is src/ compiled (tsconfig.json: rootDir src, outDir dist).
+  /** @type {Record<string, {types: string, default: string}>} */
   const expected = {};
   for (const dir of libDirs) {
     if (isPrivate(dir)) continue;
@@ -206,6 +243,7 @@ test('package.json typesVersions maps every module subpath to its index.d.ts', (
   // `exports` is read only by TypeScript's node16, nodenext and bundler
   // resolution; typesVersions gives the subpaths their types under node10, the
   // default for `"module": "commonjs"`.
+  /** @type {Record<string, Array<string>>} */
   const expected = {};
   for (const dir of moduleDirs) expected[dir] = [`dist/${dir}/index.d.ts`];
   assert.deepEqual(pkg.typesVersions, { '*': expected });
@@ -252,7 +290,22 @@ test('package.json files hold the compiled library, not the build inputs, the te
   for (const entry of pkg.files) {
     const top = entry.replace(/^\.\//, '').split('/')[0];
     assert.ok(
-      !['binding.gyp', 'addon.exports.map', 'native', 'scripts', 'test', 'tools', 'build', 'examples', 'src', 'tsconfig.json', 'npm', 'api', 'verifiable_clients', 'grpc-server'].includes(top),
+      ![
+        'binding.gyp',
+        'addon.exports.map',
+        'native',
+        'scripts',
+        'test',
+        'tools',
+        'build',
+        'examples',
+        'src',
+        'tsconfig.json',
+        'npm',
+        'api',
+        'verifiable_clients',
+        'grpc-server',
+      ].includes(top),
       `files includes ${entry}`,
     );
     assert.ok(!/grpc/i.test(entry), `files includes ${entry}`);
@@ -262,10 +315,17 @@ test('package.json files hold the compiled library, not the build inputs, the te
   // (check-npm.py path-folders: <path>/package.json pointing into dist/), for
   // TypeScript setups that do not read `exports`.
   const tops = [...new Set(moduleDirs.map((d) => `${d.split('/')[0]}/`))].sort();
-  assert.deepEqual(pkg.files.filter((f) => tops.includes(f)).sort(), tops, 'files names the folders behind the import paths');
+  assert.deepEqual(
+    pkg.files.filter((/** @type {string} */ f) => tops.includes(f)).sort(),
+    tops,
+    'files names the folders behind the import paths',
+  );
   // Apache Kafka's credit line, which the package carries as Kafka's NOTICE asks.
   assert.ok(pkg.files.includes('NOTICE'));
-  assert.match(fs.readFileSync(path.join(ROOT, 'NOTICE'), 'utf8'), /This product includes software developed at\nThe Apache Software Foundation \(https:\/\/www\.apache\.org\/\)\./);
+  assert.match(
+    fs.readFileSync(path.join(ROOT, 'NOTICE'), 'utf8'),
+    /This product includes software developed at\nThe Apache Software Foundation \(https:\/\/www\.apache\.org\/\)\./,
+  );
 });
 
 test('only native/util.h includes the bindings header', () => {
@@ -283,6 +343,9 @@ test('only native/util.h includes the bindings header', () => {
  * ignored), relative to the package root: an installed or built tree
  * (node_modules/, native/build/) is not a source.
  * Outside a git checkout, every file under them but node_modules/ and build/.
+ *
+ * @param {Array<string>} dirs
+ * @returns {Array<string>}
  */
 function sourceFiles(dirs) {
   const listed = spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', ...dirs], {
@@ -292,6 +355,7 @@ function sourceFiles(dirs) {
   if (listed.status === 0) {
     return [...new Set(listed.stdout.split('\0').filter(Boolean))].filter((f) => fs.existsSync(path.join(ROOT, f))).sort();
   }
+  /** @param {string} rel */
   const skipped = (rel) => rel.split('/').some((s) => s === 'node_modules' || s === 'build');
   return dirs.flatMap((d) => walk(path.join(ROOT, d)).map((f) => `${d}/${f}`)).filter((f) => !f.endsWith('/') && !skipped(f));
 }
@@ -303,7 +367,10 @@ test('every source file carries the Apache 2.0 header of Confluent Inc.', () => 
     'tsconfig.json',
     'Dockerfile.grpc',
   ].filter((f) => /\.(js|ts|c|h)$|(^|\/)binding\.gyp$|(^|\/)addon\.exports\.map$|^Makefile$|^tsconfig\.json$|^Dockerfile\.grpc$/.test(f));
-  assert.ok(files.includes('native/binding.gyp') && files.includes('native/addon.exports.map'), 'native/ has no binding.gyp or addon.exports.map');
+  assert.ok(
+    files.includes('native/binding.gyp') && files.includes('native/addon.exports.map'),
+    'native/ has no binding.gyp or addon.exports.map',
+  );
   for (const expected of ['grpc-server/grpc_server.js', 'grpc-server/grpc_translate.js', 'verifiable_clients/verifiable_producer.js']) {
     assert.ok(files.includes(expected), `${expected} is not among the files checked`);
   }
@@ -326,6 +393,7 @@ test('a relative CONFLUENT_KAFKA_LIB_DIR or CONFLUENT_KAFKA_INCLUDE_DIR is relat
     const m = new RegExp(`"${variable}": "<!\\(node -p \\\\"(.*)\\\\"\\)"`).exec(gyp);
     assert.ok(m, `native/binding.gyp has no ${variable} command`);
     const expression = m[1].replace(/\\"/g, '"');
+    /** @param {string | undefined} value */
     const run = (value) => {
       const childEnv = { ...process.env };
       delete childEnv[env];
@@ -359,29 +427,41 @@ test('npm/ holds one folder per platform package of the preview, each published 
     'linux-x64-gnu': { os: ['linux'], cpu: ['x64'], libc: ['glibc'] },
     'darwin-arm64': { os: ['darwin'], cpu: ['arm64'] },
   };
-  const folders = fs.readdirSync(npmDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  const folders = fs
+    .readdirSync(npmDir, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name);
   assert.deepEqual(folders.sort(), Object.keys(selectors).sort());
   for (const [platform, selector] of Object.entries(selectors)) {
     const listed = sourceFiles([`npm/${platform}`]).map((f) => f.slice(`npm/${platform}/`.length));
     assert.deepEqual(listed.sort(), ['README.md', 'package.json'], `npm/${platform}`);
     const manifest = JSON.parse(fs.readFileSync(path.join(npmDir, platform, 'package.json'), 'utf8'));
-    assert.deepEqual(manifest, {
-      name: `@confluentinc/kafka-javascript-${platform}`,
-      version: pkg.version,
-      description: `The ${platform} native binary of @confluentinc/kafka-javascript`,
-      license: pkg.license,
-      repository: { ...pkg.repository, directory: `javascript/npm/${platform}` },
-      ...selector,
-      main: 'confluent-kafka-javascript.node',
-      // The root conventions' dist/ and NOTICE, which every package's files
-      // name (a platform package has no dist/: the entry matches nothing).
-      files: ['dist/', 'NOTICE', 'confluent-kafka-javascript.node', 'THIRD_PARTY_LICENSES.txt'],
-      engines: pkg.engines,
-    }, `npm/${platform}/package.json`);
+    assert.deepEqual(
+      manifest,
+      {
+        name: `@confluentinc/kafka-javascript-${platform}`,
+        version: pkg.version,
+        description: `The ${platform} native binary of @confluentinc/kafka-javascript`,
+        license: pkg.license,
+        repository: { ...pkg.repository, directory: `javascript/npm/${platform}` },
+        ...selector,
+        main: 'confluent-kafka-javascript.node',
+        // The main package's module type, which publint asks every package for.
+        type: pkg.type,
+        // The root conventions' dist/ and NOTICE, which every package's files
+        // name (a platform package has no dist/: the entry matches nothing).
+        files: ['dist/', 'NOTICE', 'confluent-kafka-javascript.node', 'THIRD_PARTY_LICENSES.txt'],
+        engines: pkg.engines,
+      },
+      `npm/${platform}/package.json`,
+    );
   }
   // The cargo-about configuration and template of THIRD_PARTY_LICENSES.txt.
   for (const name of ['about.toml', 'about.hbs', 'README.md']) {
     assert.ok(fs.existsSync(path.join(npmDir, name)), `npm/${name} is missing`);
   }
-  assert.match(fs.readFileSync(path.join(npmDir, 'about.hbs'), 'utf8'), /^Third-party licences of the native addon of @confluentinc\/kafka-javascript$/m);
+  assert.match(
+    fs.readFileSync(path.join(npmDir, 'about.hbs'), 'utf8'),
+    /^Third-party licences of the native addon of @confluentinc\/kafka-javascript$/m,
+  );
 });

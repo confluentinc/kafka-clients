@@ -17,7 +17,6 @@
 // The mapping lists of lint-mapping.json, invented and javaTargets
 // (scripts/lint/rules/invented_names.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');
@@ -53,7 +52,7 @@ test('needed entries that resolve pass, an invented options type named ...Args t
   assert.equal(r.status, 0, r.text);
   // The exported items, the public members of the exported classes, interfaces
   // and object types, and the 6 entries.
-  assert.ok(r.out.includes('✅ check-invented-names: 49 item(s) checked'), r.text);
+  assert.ok(r.out.includes('✅ check-invented-names: 50 item(s) checked'), r.text);
 });
 
 test('each finding kind, with its exact text', () => {
@@ -109,8 +108,11 @@ test('each finding kind, with its exact text', () => {
   assert.ok(r.err.includes('❌ check-invented-names: 14 finding(s).'), r.text);
 });
 
-test('without lint-mapping.json both lists are empty: an invented export is then check-java-name\'s finding, not this rule\'s', () => {
-  const r = lint(fixture({ 'lint-mapping.json': undefined, 'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace('  extraJs(): void {}\n', '') }), [RULE]);
+test("without lint-mapping.json both lists are empty: an invented export is then check-java-name's finding, not this rule's", () => {
+  const r = lint(
+    fixture({ 'lint-mapping.json': undefined, 'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace('  extraJs(): void {}\n', '') }),
+    [RULE],
+  );
   assert.equal(r.status, 0, r.text);
 });
 
@@ -120,6 +122,8 @@ test('cannot run without the Java index', () => {
 });
 
 test('nothing exported fails: 0 items checked', () => {
-  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [RULE]);
+  const r = lint(project({ 'tsconfig.json': TSCONFIG, 'java-index.json': javaIndex(classes), 'src/a.ts': 'const a = 1;\nvoid a;\n' }), [
+    RULE,
+  ]);
   assert.ok(r.err.includes('❌ check-invented-names: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });

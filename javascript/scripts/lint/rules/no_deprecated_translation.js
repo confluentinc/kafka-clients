@@ -43,7 +43,8 @@ module.exports = {
       if (java.cls.deprecated) {
         findings.push({
           kind: 'deprecated-class',
-          subject: `${item.rel}:${item.name}`, at: atNode(ctx, item.node),
+          subject: `${item.rel}:${item.name}`,
+          at: atNode(ctx, item.node),
           message: `translates ${shortName(java.cls)}, deprecated in Kafka ${refs}`,
         });
       }
@@ -58,7 +59,8 @@ module.exports = {
       if ((deprecated || jm.owner.deprecated) && !ownDeprecated) {
         findings.push({
           kind: 'deprecated-member',
-          subject: `${item.name}.${m.name}`, at: atNode(ctx, m.node),
+          subject: `${item.name}.${m.name}`,
+          at: atNode(ctx, m.node),
           message: `translates ${shortName(jm.owner)}#${jm.name}, deprecated in Kafka ${refs}`,
         });
       }

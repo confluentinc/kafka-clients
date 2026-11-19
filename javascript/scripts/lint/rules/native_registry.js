@@ -44,7 +44,42 @@ const SETUP = new Set(['setFactories']);
  * is a finding, so the list cannot grow stale.
  */
 const TEST_ONLY = new Map([
-  ['probe', { test: 'test/unit/internal/native.test.js', reason: 'a test-only registration: the load check test/unit/internal/native.test.js calls' }],
+  [
+    'probe',
+    {
+      test: 'test/unit/internal/native.test.js',
+      reason: 'a test-only registration: the load check test/unit/internal/native.test.js calls',
+    },
+  ],
+  [
+    'headerStats',
+    {
+      test: 'test/unit/common/header/headers.test.js',
+      reason:
+        "a test-only registration: the counts of native/headers.c, which prove option 1's copies and views and the handles' lifetimes",
+    },
+  ],
+  [
+    'producerStats',
+    {
+      test: 'test/memory/native_counts.test.js',
+      reason: "a test-only registration: the counts of native/producer.c, which prove every producer handle's lifetime",
+    },
+  ],
+  [
+    'errorStats',
+    {
+      test: 'test/memory/native_counts.test.js',
+      reason: 'a test-only registration: the counts of native/error.c, which prove every owned error is freed or given once',
+    },
+  ],
+  [
+    'recordSpy',
+    {
+      test: 'test/memory/record_read_back.test.js',
+      reason: "a test-only registration: the record a send built, read back, which proves the key and value are the caller's memory",
+    },
+  ],
 ]);
 
 /** The module specifiers `sf` imports or requires, with their lines. */
@@ -109,7 +144,12 @@ module.exports = {
         if (!new RegExp(`\\.${name}\\s*\\(`).test(text)) why = `${test} does not call it`;
       }
       if (why !== null) {
-        findings.push({ kind: 'unused-allowance', subject: name, unusedEntry: name, message: `is allowed unused as ${reason}, but ${why}: delete the entry` });
+        findings.push({
+          kind: 'unused-allowance',
+          subject: name,
+          unusedEntry: name,
+          message: `is allowed unused as ${reason}, but ${why}: delete the entry`,
+        });
       }
     }
     for (const r of registered) {

@@ -274,7 +274,13 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         }
         text.push_str("}\n");
         let stem = crate::error_hierarchy::snake(name);
-        out.push(JsModule { dir: (*dir).to_string(), stem, name: name.to_string(), content: text });
+        out.push(JsModule {
+            dir: (*dir).to_string(),
+            stem,
+            name: name.to_string(),
+            content: text,
+            notes: Vec::new(),
+        });
     }
     Ok(out)
 }

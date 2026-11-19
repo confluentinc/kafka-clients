@@ -20,7 +20,64 @@
 
 const PREFIX = 'org.apache.kafka.';
 
-/** An overload: `name` with parameter types `params`, public unless told. */
+/**
+ * An overload of the index.
+ *
+ * @typedef {object} JavaMethod
+ * @property {string} name
+ * @property {string[]} params
+ * @property {string[]} param_names
+ * @property {string[]} param_types
+ * @property {string | null} return_type
+ * @property {string} visibility
+ * @property {boolean} static
+ * @property {boolean} default
+ * @property {boolean} deprecated
+ * @property {string | null} javadoc
+ */
+
+/**
+ * A field of the index.
+ *
+ * @typedef {object} JavaField
+ * @property {string} name
+ * @property {string} type
+ * @property {string} visibility
+ * @property {boolean} static
+ * @property {boolean} final
+ * @property {boolean} deprecated
+ * @property {string | null} javadoc
+ */
+
+/**
+ * A class of the index.
+ *
+ * @typedef {object} JavaClass
+ * @property {string} fqn
+ * @property {string} package
+ * @property {string[]} path
+ * @property {string} kind
+ * @property {string} visibility
+ * @property {boolean} abstract
+ * @property {boolean} functional_interface
+ * @property {string[]} supertypes
+ * @property {boolean} public_audience
+ * @property {boolean} unsupported_package
+ * @property {boolean} deprecated
+ * @property {string | null} javadoc
+ * @property {JavaMethod[]} overloads
+ * @property {JavaField[]} fields
+ * @property {string[]} enum_constants
+ */
+
+/**
+ * An overload: `name` with parameter types `params`, public unless told.
+ *
+ * @param {string} name
+ * @param {string[]} [params]
+ * @param {Partial<JavaMethod>} [extra]
+ * @returns {JavaMethod}
+ */
 function method(name, params = [], extra = {}) {
   return {
     name,
@@ -40,7 +97,13 @@ function method(name, params = [], extra = {}) {
   };
 }
 
-/** A field, public static final unless told. */
+/**
+ * A field, public static final unless told.
+ *
+ * @param {string} name
+ * @param {Partial<JavaField>} [extra]
+ * @returns {JavaField}
+ */
 function field(name, extra = {}) {
   return {
     name,
@@ -54,7 +117,13 @@ function field(name, extra = {}) {
   };
 }
 
-/** A class of `<package>.<Name>` (a nested one as `Outer$Inner`), public and Public unless told. */
+/**
+ * A class of `<package>.<Name>` (a nested one as `Outer$Inner`), public and Public unless told.
+ *
+ * @param {string} name
+ * @param {Partial<JavaClass>} [extra]
+ * @returns {JavaClass}
+ */
 function javaClass(name, extra = {}) {
   const [pkg, cls] = [name.slice(0, name.lastIndexOf('.')), name.slice(name.lastIndexOf('.') + 1)];
   return {
@@ -77,7 +146,12 @@ function javaClass(name, extra = {}) {
   };
 }
 
-/** The index file's text for `classes`. */
+/**
+ * The index file's text for `classes`.
+ *
+ * @param {JavaClass[]} classes
+ * @returns {string}
+ */
 function javaIndex(classes) {
   return JSON.stringify({ schema: 2, audience_ref: '4.4.0-rc3', deprecation_refs: ['4.3.1', '4.4.0-rc3'], classes });
 }
@@ -173,6 +247,8 @@ const LIB = {
   equals(o: unknown): boolean;
   equals(options: unknown): boolean { void options; return false; }
   hashCode(): number { return 0; }
+  /** Java's public mutable field \`mode\`, as its setter. */
+  setMode(mode: string): void { void mode; }
   /** A JavaScript addition, on the list of invented names. */
   extraJs(): void {}
   private _native(): void {}
@@ -205,12 +281,18 @@ const LIB = {
   constructor(message: string) { super(message); }
 }
 `,
-  'src/internal/error_registry.ts': "export const ERRORS = [\n  ['../common/errors/foo_error', 'FooError', 'org.apache.kafka.common.errors.FooException'],\n];\n",
+  'src/internal/error_registry.ts':
+    "export const ERRORS = [\n  ['../common/errors/foo_error', 'FooError', 'org.apache.kafka.common.errors.FooException'],\n];\n",
   // The mapping lists (scripts/lint/java_ts.js mappingLists): Rec.extraJs and Mode.toJSON are invented.
   'lint-mapping.json': mapping({ invented: INVENTED }),
 };
 
-/** The text of a lint-mapping.json holding `lists` (`invented`, `javaTargets`: key to text). */
+/**
+ * The text of a lint-mapping.json holding `lists` (`invented`, `javaTargets`: key to text).
+ *
+ * @param {{ invented?: Record<string, string>, javaTargets?: Record<string, string> }} lists
+ * @returns {string}
+ */
 function mapping(lists) {
   return `${JSON.stringify({ invented: {}, javaTargets: {}, ...lists }, null, 2)}\n`;
 }

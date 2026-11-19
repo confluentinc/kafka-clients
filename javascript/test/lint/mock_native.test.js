@@ -16,7 +16,6 @@
 
 // check-mock-native (scripts/lint/rules/mock_native.js).
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');
@@ -31,8 +30,13 @@ const native: Native = loaded;
 export = native;
 `;
 
-const fixture = (files) =>
-  project({ 'tsconfig.json': TSCONFIG, 'src/internal/native.ts': NATIVE_TS, 'src/producer/index.ts': "export { MockProducer } from './mock_producer';\n", ...files });
+const fixture = (/** @type {Record<string, string | undefined>} */ files) =>
+  project({
+    'tsconfig.json': TSCONFIG,
+    'src/internal/native.ts': NATIVE_TS,
+    'src/producer/index.ts': "export { MockProducer } from './mock_producer';\n",
+    ...files,
+  });
 
 test('a mock whose constructor, directly or through a helper, or whose field reaches the addon passes', () => {
   for (const body of [
@@ -53,7 +57,9 @@ test('a mock whose constructor, directly or through a helper, or whose field rea
 });
 
 test('a mock translated in TypeScript, holding no native handle, is a finding', () => {
-  const r = lint(fixture({ 'src/producer/mock_producer.ts': 'export class MockProducer {\n  readonly #history: unknown[] = [];\n}\n' }), [RULE]);
+  const r = lint(fixture({ 'src/producer/mock_producer.ts': 'export class MockProducer {\n  readonly #history: unknown[] = [];\n}\n' }), [
+    RULE,
+  ]);
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
     "src/producer/mock_producer.ts:MockProducer: holds no native handle: a mock wraps the FFI's mock, its constructor or a field reaching native.<fn>",

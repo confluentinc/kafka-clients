@@ -19,7 +19,6 @@
 // names, `null` as given and `undefined` refused, the bare value of a
 // one-parameter form, and the message naming every form.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { JavaForms } = require('../../../dist/internal/args');
@@ -40,7 +39,12 @@ const RECORD_FORMS =
   '(topic, partition, timestamp, key, value), (topic, partition, key, value, headers), ' +
   '(topic, partition, key, value), (topic, key, value), (topic, value)';
 
-/** An IllegalArgumentError with exactly `message`, Java's built-in (not a KafkaError). */
+/**
+ * An IllegalArgumentError with exactly `message`, Java's built-in (not a KafkaError).
+ *
+ * @param {string} message
+ * @returns {(e: unknown) => true}
+ */
 function illegal(message) {
   return (e) => {
     assert.ok(e instanceof IllegalArgumentError);
@@ -75,11 +79,13 @@ test("null is Java's null, which is given; a parameter given as undefined is a T
   assert.equal(RECORD.match({ topic: null, value: null }, 1), 5);
   assert.equal(RECORD.match({ topic: 't', partition: null, key: null, value: 'v' }, 1), 3);
   // undefined is not "left out" (leave the key out): a TypeError naming the parameter.
-  for (const [forms, args, name] of [
+  /** @type {Array<[JavaForms, object, string]>} */
+  const cases = [
     [CLOSE, { timeout: undefined }, 'timeout'],
     [RECORD, { topic: 't', partition: undefined, value: 'v' }, 'partition'],
     [RECORD, { topic: undefined, value: 'v' }, 'topic'],
-  ]) {
+  ];
+  for (const [forms, args, name] of cases) {
     assert.throws(() => forms.match(args, 1), {
       name: 'TypeError',
       message: `${name} must not be undefined. Leave the key out, or pass null for Java's null`,
@@ -109,7 +115,10 @@ test('a name no form has is rejected the same way, listed after the others, befo
   );
   // An unknown name is present whatever its value.
   assert.throws(() => CLOSE.match({ timeoutMs: undefined }, 1), illegal('close() takes one of (), (timeout); got (timeoutMs)'));
-  assert.throws(() => RECORD.match({ topic: 't', value: undefined, extra: null }, 1), illegal(`${RECORD_FORMS}; got (topic, value, extra)`));
+  assert.throws(
+    () => RECORD.match({ topic: 't', value: undefined, extra: null }, 1),
+    illegal(`${RECORD_FORMS}; got (topic, value, extra)`),
+  );
 });
 
 test('only own enumerable keys are names, and value() reads only those', () => {
@@ -125,13 +134,13 @@ test('only own enumerable keys are names, and value() reads only those', () => {
   assert.equal(RECORD.value(plain, 'partition'), undefined);
   assert.equal(CLOSE.match({ [Symbol('timeout')]: 5 }, 1), 0);
   // A polluted Object.prototype is no parameter either.
-  Object.prototype.partition = 0;
+  /** @type {Record<string, unknown>} */ (Object.prototype).partition = 0;
   try {
     const args = { topic: 't', value: 'v' };
     assert.equal(RECORD.match(args, 1), 5);
     assert.equal(RECORD.value(args, 'partition'), undefined);
   } finally {
-    delete Object.prototype.partition;
+    delete (/** @type {Record<string, unknown>} */ (Object.prototype).partition);
   }
   // An object that is not a plain one is no options object: without a
   // one-parameter form, the form error.
@@ -157,9 +166,9 @@ test('a one-parameter form takes the bare value: anything but a plain object', (
 });
 
 test('one-parameter forms of different names take a bare value told apart by its type, with bareTypes', () => {
-  const isError = (v) => v instanceof Error;
+  const isError = (/** @type {unknown} */ v) => v instanceof Error;
   const ERROR = new JavaForms('E', [['message', 'cause'], ['message'], ['cause'], []], {
-    bareTypes: { message: (v) => v === null || typeof v === 'string', cause: isError },
+    bareTypes: { message: (/** @type {unknown} */ v) => v === null || typeof v === 'string', cause: isError },
   });
   const cause = new Error('c');
   assert.equal(ERROR.match('m', 1), 1);
@@ -223,7 +232,7 @@ test('without a one-parameter form, an argument that is not a plain object is th
 
 test('a lone one-parameter form with a test takes only the values it accepts', () => {
   const SEND = new JavaForms('send', [['record'], ['record', 'callback']], {
-    bareTypes: { record: (v) => v === null || v instanceof Map },
+    bareTypes: { record: (/** @type {unknown} */ v) => v === null || v instanceof Map },
   });
   assert.equal(SEND.match(new Map(), 1), 0);
   assert.equal(SEND.match(null, 1), 0);
@@ -252,7 +261,10 @@ test('more than one argument is refused with the form error, never dropped', () 
     () => SEND.match({}, 2),
     illegal('send() takes one of (record), (record, callback); got 2 arguments, not one object of named parameters'),
   );
-  assert.throws(() => CLOSE.match(5, 3), illegal('close() takes one of (), (timeout); got 3 arguments, not one object of named parameters'));
+  assert.throws(
+    () => CLOSE.match(5, 3),
+    illegal('close() takes one of (), (timeout); got 3 arguments, not one object of named parameters'),
+  );
 });
 
 test("callShapes lists an error constructor's forms as JavaScript calls them", () => {
@@ -260,12 +272,15 @@ test("callShapes lists an error constructor's forms as JavaScript calls them", (
   const E = new JavaForms('E', [['message', 'cause'], ['message'], ['cause'], []], {
     order: ['message', 'cause'],
     callShapes: true,
-    bareTypes: { message: (v) => typeof v === 'string', cause: (v) => v instanceof Error },
+    bareTypes: { message: (/** @type {unknown} */ v) => typeof v === 'string', cause: (/** @type {unknown} */ v) => v instanceof Error },
   });
   assert.throws(() => E.match('m', 2), illegal('E() takes one of (), (message), (cause), ({ message, cause }); got 2 arguments'));
   assert.throws(() => E.match({ reason: 1 }, 1), illegal('E() takes one of (), (message), (cause), ({ message, cause }); got (reason)'));
   // Ties keep Java's order.
-  const F = new JavaForms('F', [['cause'], ['message']], { callShapes: true, bareTypes: { message: (v) => typeof v === 'string', cause: (v) => v instanceof Error } });
+  const F = new JavaForms('F', [['cause'], ['message']], {
+    callShapes: true,
+    bareTypes: { message: (/** @type {unknown} */ v) => typeof v === 'string', cause: (/** @type {unknown} */ v) => v instanceof Error },
+  });
   assert.throws(() => F.match(5, 1), illegal('F() takes one of (cause), (message); got a number'));
 });
 
@@ -304,5 +319,7 @@ test('the message order may be given, and must hold every name', () => {
     () => subscribe.match({ callback: null, pattern: 'p', topics: [] }, 1),
     illegal('subscribe() takes one of (topics), (topics, callback), (pattern, callback), (pattern); got (topics, pattern, callback)'),
   );
-  assert.throws(() => new JavaForms('m', [['a', 'b']], { order: ['a'] }), { message: "JavaForms(m): the order a is not the forms' names a, b" });
+  assert.throws(() => new JavaForms('m', [['a', 'b']], { order: ['a'] }), {
+    message: "JavaForms(m): the order a is not the forms' names a, b",
+  });
 });

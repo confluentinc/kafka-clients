@@ -19,7 +19,6 @@
 // whatever ESLint's working directory, a run of part of the client fails
 // while a rule cannot run, and an edit is always seen.
 
-const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -42,7 +41,8 @@ function layout() {
   const parent = project({ 'stray.js': `// ${TODO_MARK} outside the client\n` });
   const root = path.join(parent, 'client');
   fs.mkdirSync(root);
-  for (const rel of ['src', 'native', 'tsconfig.json', 'CLAUDE.md', 'eslint-baseline.txt', 'lint-baseline.txt', 'lint-mapping.json']) copy(ROOT, root, rel);
+  for (const rel of ['src', 'native', 'tsconfig.json', 'CLAUDE.md', 'eslint-baseline.txt', 'lint-baseline.txt', 'lint-mapping.json'])
+    copy(ROOT, root, rel);
   fs.mkdirSync(path.join(root, 'test', 'unit'), { recursive: true });
   copy(ROOT, root, 'test/unit/internal/native.test.js');
   copy(ROOT, root, 'java-index.json');
@@ -57,19 +57,35 @@ function layout() {
   return { parent: fs.realpathSync(parent), root: fs.realpathSync(root) };
 }
 
-/** `eslint <args>` from `cwd`: `{status, messages}`, each message `<file relative to root>:<line> <rule> <text>`. */
+/**
+ * `eslint <args>` from `cwd`: `{status, messages}`, each message `<file relative to root>:<line> <rule> <text>`.
+ *
+ * @param {string} cwd
+ * @param {string} root
+ * @param {string[]} args
+ * @returns {{ status: number | null, messages: string[] }}
+ */
 function eslint(cwd, root, args) {
   const r = spawnSync(process.execPath, [BIN, '-f', 'json', ...args], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   assert.ok(r.stdout.startsWith('['), r.stderr);
   // ESLint reports real paths (a temporary directory's /var is /private/var).
   const real = fs.realpathSync(root);
-  const messages = JSON.parse(r.stdout).flatMap((f) =>
+  // ESLint's json formatter: one entry per file, with its messages.
+  const report = /** @type {{ filePath: string, messages: { line: number, ruleId: string | null, message: string }[] }[]} */ (
+    JSON.parse(r.stdout)
+  );
+  const messages = report.flatMap((f) =>
     f.messages.map((m) => `${path.relative(real, f.filePath).split(path.sep).join('/')}:${m.line} ${m.ruleId} ${m.message}`),
   );
   return { status: r.status, messages: messages.sort() };
 }
 
-/** Adds a member no Java class has to RecordMetadata (a kafka/java-members finding); returns its line. */
+/**
+ * Adds a member no Java class has to RecordMetadata (a kafka/java-members finding); returns its line.
+ *
+ * @param {string} root
+ * @returns {number}
+ */
 function addMember(root) {
   const file = path.join(root, 'src', 'producer', 'record_metadata.ts');
   const text = fs.readFileSync(file, 'utf8');
@@ -100,7 +116,10 @@ test('a run of part of the client fails while a rule cannot run, or the baseline
   for (const target of ['src', 'src/producer', 'src/producer/record_metadata.ts']) {
     const r = eslint(root, root, [target]);
     assert.equal(r.status, 1, target);
-    assert.ok(r.messages.some((m) => / kafka\/java-name check-java-name: cannot run, no Java index at java-index\.json/.test(m)), target);
+    assert.ok(
+      r.messages.some((m) => / kafka\/java-name check-java-name: cannot run, no Java index at java-index\.json/.test(m)),
+      target,
+    );
   }
   copy(ROOT, root, 'java-index.json');
   fs.appendFileSync(path.join(root, 'eslint-baseline.txt'), 'missing clients.producer.KafkaProducer#gone\n');
@@ -136,7 +155,9 @@ test('a nested ESLint configuration is a finding, even though ESLint uses it bel
   assert.ok(!r.messages.some((m) => m.includes('kafka/java-members')), r.messages.join('\n'));
   assert.ok(
     r.messages.some((m) =>
-      m.endsWith('kafka/config src/producer/eslint.config.cjs: is an ESLint configuration besides eslint.config.cjs: the files below it would lose the kafka/ rules'),
+      m.endsWith(
+        'kafka/config src/producer/eslint.config.cjs: is an ESLint configuration besides eslint.config.cjs: the files below it would lose the kafka/ rules',
+      ),
     ),
     r.messages.join('\n'),
   );
@@ -149,10 +170,13 @@ test('a one-file run of a file carrying a file-wide disable fails: the finding i
   fs.writeFileSync(file, text.replace('export class RecordMetadata', '/* eslint-disable */\nexport class RecordMetadata'));
   const r = eslint(root, root, ['src/producer/record_metadata.ts']);
   assert.equal(r.status, 1);
-  assert.ok(r.messages.some((m) => m.startsWith('src/producer/record_metadata.ts:1 kafka/directives ')), r.messages.join('\n'));
+  assert.ok(
+    r.messages.some((m) => m.startsWith('src/producer/record_metadata.ts:1 kafka/directives ')),
+    r.messages.join('\n'),
+  );
 });
 
-test('the formatter of make lint-rules prints a project finding once, with its file count; the exit code is ESLint\'s', () => {
+test("the formatter of make lint-rules prints a project finding once, with its file count; the exit code is ESLint's", () => {
   const { root } = layout();
   fs.rmSync(path.join(root, 'java-index.json'));
   // A finding of a rule that needs no Java index: an underscore member.
@@ -165,9 +189,15 @@ test('the formatter of make lint-rules prints a project finding once, with its f
   assert.equal(r.status, 1, r.stderr);
   const once = r.stdout.split('\n').filter((l) => l.includes('check-java-name: cannot run'));
   assert.equal(once.length, 1, r.stdout);
-  assert.match(once[0], /^ {2}error {2}check-java-name: cannot run, no Java index at java-index\.json .* kafka\/java-name {2}\(on \d+ files\)$/);
+  assert.match(
+    once[0],
+    /^ {2}error {2}check-java-name: cannot run, no Java index at java-index\.json .* kafka\/java-name {2}\(on \d+ files\)$/,
+  );
   // An ordinary finding stays under its file.
-  assert.match(r.stdout, /\nsrc\/producer\/stray\.ts\n {2}\d+:\d+ {2}error {2}src\/producer\/stray\.ts:Stray\._x: .* {2}kafka\/internal-members\n/);
+  assert.match(
+    r.stdout,
+    /\nsrc\/producer\/stray\.ts\n {2}\d+:\d+ {2}error {2}src\/producer\/stray\.ts:Stray\._x: .* {2}kafka\/internal-members\n/,
+  );
   assert.match(r.stdout, /\n✖ \d+ problems \(\d+ errors, 0 warnings\)\n/);
 });
 
@@ -182,6 +212,9 @@ test('an inline configuration, even JSON-escaped and switching kafka/directives 
     fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('export class RecordMetadata', `${comment}\nexport class RecordMetadata`));
     const r = eslint(root, root, ['.']);
     assert.equal(r.status, 1, comment);
-    assert.ok(r.messages.some((m) => / kafka\/directives src\/producer\/record_metadata\.ts:\d+: an inline configuration \(eslint\)/.test(m)), comment);
+    assert.ok(
+      r.messages.some((m) => / kafka\/directives src\/producer\/record_metadata\.ts:\d+: an inline configuration \(eslint\)/.test(m)),
+      comment,
+    );
   }
 });

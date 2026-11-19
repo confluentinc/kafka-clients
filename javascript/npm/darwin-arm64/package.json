@@ -15,6 +15,7 @@
     "arm64"
   ],
   "main": "confluent-kafka-javascript.node",
+  "type": "commonjs",
   "files": [
     "dist/",
     "NOTICE",
