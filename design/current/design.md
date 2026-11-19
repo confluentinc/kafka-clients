@@ -766,9 +766,9 @@ PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL
   truststore configuration. Without a truststore Mozilla's root certificates
   are trusted (the default `webpki-roots` cargo feature); with the
   `platform-verifier` feature the platform verifier decides instead
-  (`rustls-platform-verifier`). The C library and the Python wheel are built
-  with `platform-verifier` and without `webpki-roots` (`rust/Makefile`
-  `build-cdylib`), so no bundle is compiled into them.
+  (`rustls-platform-verifier`). The C library, the Python wheel and the .NET
+  package are built with `platform-verifier` and without `webpki-roots`
+  (`rust/Makefile` `build-cdylib`), so no bundle is compiled into them.
 - `SslTransportLayer`: async TLS transport through tokio-rustls.
 - `SslChannelBuilder`: the TLS channel factory.
 - TLS 1.2 and 1.3 are supported.

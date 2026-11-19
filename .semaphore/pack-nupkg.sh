@@ -28,8 +28,8 @@
 #       must be those of HEAD. Writes Confluent.Kafka.<version>.nupkg into <out-dir>, which must
 #       not exist or be empty, and prints its SHA-256.
 #   .semaphore/pack-nupkg.sh --dev <out-dir>
-#       Packs this machine's own release build (rust/target/release, from
-#       `cargo build --features ffi --release`) as the one RID of this machine, without the
+#       Packs this machine's own build of the package's library (rust/target/release-cdylib,
+#       from `make -C rust build-cdylib`) as the one RID of this machine, without the
 #       platform floor checks: a package to test the packaging, never one to release. On macOS
 #       its copy gets the @rpath install name a release build has.
 #
@@ -96,9 +96,9 @@ if [ "${1:-}" = "--dev" ]; then
     dev="--dev"
     rids=$(host_rid)
     lib=$(library_of "$rids")
-    [ -f "rust/target/release/$lib" ] || die "rust/target/release/$lib does not exist; run \`make -C rust build\` first"
+    [ -f "rust/target/release-cdylib/$lib" ] || die "rust/target/release-cdylib/$lib does not exist; run \`make -C rust build-cdylib\` first"
     mkdir -p "$stage/$rids"
-    cp "rust/target/release/$lib" "$stage/$rids/"
+    cp "rust/target/release-cdylib/$lib" "$stage/$rids/"
     if [ "${rids%%-*}" = osx ]; then
         # The install name .semaphore/build-ffi-library.sh gives a release build, instead of the
         # absolute path of this machine's target directory. Changing it can invalidate the

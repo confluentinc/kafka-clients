@@ -51,17 +51,20 @@ build-integration-tests:
 build-all-features:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features --release
 
-# The library the C binding and the Python wheel link: the C API with every
-# codec, TLS and SCRAM, the platform verifier as the default trust store and
-# no `webpki-roots`, so the Mozilla bundle is not compiled in. It has its own
-# cargo profile, `release-cdylib` (the release optimizations), so it lands in
-# target/release-cdylib/ and no release build with another feature set
-# replaces it. c/ and python/ build against it with RUST_PROFILE /
-# PROFILE=release-cdylib (the root's `build`, the benchmarks),
-# .semaphore/build-ffi-library.sh the wheel's library and python/soak/build.sh
-# the soak client's. Their tests link the debug all-features library
-# (`devel-build-all-features`), where `platform-verifier` is on too and wins
-# over `webpki-roots`, so they test the same trust store.
+# The library the C binding, the Python wheel and the .NET package link: the C
+# API with every codec, TLS and SCRAM, the platform verifier as the default
+# trust store and no `webpki-roots`, so the Mozilla bundle is not compiled in. It has its own cargo
+# profile, `release-cdylib` (the release optimizations), so it lands in
+# target/release-cdylib/ and no release build with another feature set replaces
+# it. c/, python/ and dotnet/ build against it with RUST_PROFILE /
+# PROFILE=release-cdylib (the root's `build`, the benchmarks, dotnet's pack),
+# .semaphore/build-ffi-library.sh the wheel's library and, through
+# build-dotnet-native.sh, the Linux and macOS .NET package's,
+# .semaphore/build-dotnet-native.ps1 the Windows ones (it reads the
+# CDYLIB_FEATURES line below), and python/soak/build.sh the soak client's. Their
+# tests link the debug all-features library (`devel-build-all-features`), where
+# `platform-verifier` is on too and wins over `webpki-roots`, so they test the
+# same trust store.
 CDYLIB_FEATURES = ffi,gzip,snappy,lz4,zstd,aws-lc-rs,rustls,platform-verifier
 build-cdylib:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --profile release-cdylib --no-default-features --features $(CDYLIB_FEATURES)

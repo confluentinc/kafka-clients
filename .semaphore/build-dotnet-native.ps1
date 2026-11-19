@@ -28,10 +28,13 @@
 #   .\.semaphore\build-dotnet-native.ps1 -Platform x64|x86 -OutDir <dir> [-RustProfile release|debug]
 # Writes <dir>\<rid>\confluent_kafka.dll and <dir>\<rid>\confluent_kafka_bindings.h, the header of
 # that library's C ABI. <dir> must not exist or be empty. The library also stays in
-# rust\target\<triple>\<release|debug>, where the library project reads it with -p:CargoTargetTriple
-# (and -p:CargoProfileDir=debug for the debug one).
+# rust\target\<triple>\<release-cdylib|debug>, where the library project reads it with
+# -p:CargoTargetTriple (and -p:CargoProfileDir=debug for the debug one).
 #
-# -RustProfile release (the default) is the package's library: `--features ffi --release`.
+# -RustProfile release (the default) is the package's library, as the Linux and macOS packages and
+# the Python wheels carry it: rust/Makefile's build-cdylib, the cargo profile release-cdylib with
+# its CDYLIB_FEATURES, read from rust/Makefile: the platform's certificate verifier as the default
+# trust store, and no webpki-roots.
 # -RustProfile debug is the library the Linux and macOS binding tests link: the debug
 # all-features build of rust/Makefile's devel-build-all-features, for verify-dotnet-windows.ps1.
 
@@ -100,6 +103,13 @@ if ($toolchainFile -notmatch '(?m)^channel\s*=\s*"([^"]+)"') {
     throw 'No channel in rust/rust-toolchain.toml'
 }
 $channel = $Matches[1]
+$cdylibMakefile = Get-Content (Join-Path $repo 'rust\Makefile') -Raw
+if ($cdylibMakefile -notmatch '(?m)^CDYLIB_FEATURES\s*=\s*(\S+)\s*$') {
+    throw 'No CDYLIB_FEATURES in rust/Makefile'
+}
+$cdylibFeatures = $Matches[1]
+# The cargo profile directory of the library.
+$profileDir = if ($RustProfile -eq 'release') { 'release-cdylib' } else { 'debug' }
 # Windows can still hold a file rustup has just extracted (os error 32, as when a scanner reads
 # it), and rustup then rolls the install back; the install is retried.
 Invoke-Retry { Invoke-Native rustup @('toolchain', 'install', $channel, '--profile', 'minimal', '--component', 'clippy', '--component', 'rustfmt', '--target', $triple) }
@@ -116,7 +126,7 @@ try {
     # fails the build; the build is retried, and Cargo keeps what it already built. A real build error
     # also runs three times before the job fails.
     $buildArgs = if ($RustProfile -eq 'release') {
-        @('--features', 'ffi', '--release')
+        @('--profile', 'release-cdylib', '--no-default-features', '--features', $cdylibFeatures)
     } else {
         # rust/Makefile's devel-build-all-features without its integration test binary, which no
         # Windows job runs; the test profile's output directory is debug.
@@ -126,7 +136,7 @@ try {
 } finally {
     Pop-Location
 }
-$library = Join-Path $repo "rust\target\$triple\$RustProfile\confluent_kafka.dll"
+$library = Join-Path $repo "rust\target\$triple\$profileDir\confluent_kafka.dll"
 if (-not (Test-Path $header)) {
     throw "the build wrote no $header"
 }

@@ -25,8 +25,8 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
   feature `webpki-roots` keeps trusting the Mozilla root bundle there, as
   before; with both on, `platform-verifier` wins. Like `webpki-roots` it
   enables `rustls`, so `default-features = false` with `platform-verifier`
-  builds TLS without the bundle. The C library and the Python wheel are built
-  that way.
+  builds TLS without the bundle. The C library, the Python wheel and the .NET
+  package are built that way.
 
 ### C FFI
 

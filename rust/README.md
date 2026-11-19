@@ -197,8 +197,8 @@ confluent-kafka = { version = "1.0.0", default-features = false, features = ["lz
 
 With `platform-verifier` instead of `webpki-roots` the Mozilla bundle is not
 compiled in, and a CA installed in the operating system is trusted, as the
-Java client trusts the JDK's default trust store; the C library and the Python
-wheel are built that way. On Linux a host without a CA bundle (a `scratch` or
+Java client trusts the JDK's default trust store; the C library, the Python
+wheel and the .NET package are built that way. On Linux a host without a CA bundle (a `scratch` or
 distroless image) must then set one of the truststore keys or `SSL_CERT_FILE`.
 
 ## Examples

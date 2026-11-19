@@ -30,8 +30,8 @@
 //!   by the platform verifier (`rustls-platform-verifier`) instead: the OS
 //!   verifier on macOS and Windows, the OS root store on Linux (`SSL_CERT_FILE`
 //!   / `SSL_CERT_DIR` override it), as Java trusts the JDK's default trust
-//!   store. The C library and the Python wheel are built that way, without
-//!   the bundle.
+//!   store. The C library, the Python wheel and the .NET package are built
+//!   that way, without the bundle.
 //! - Hostname verification is controlled by `endpoint_identification_algorithm`:
 //!   when empty, a custom `ServerCertVerifier` validates the cert chain but skips
 //!   hostname matching.
