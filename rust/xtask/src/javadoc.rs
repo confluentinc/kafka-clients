@@ -263,6 +263,12 @@ pub struct Translator<'a> {
     /// Whether `@throws` becomes `# Panics` rather than `# Errors`: the Rust
     /// item keeps Java's throw as a panic (CLAUDE.md §12.5).
     pub panics: bool,
+    /// Whether `<a href="u">t</a>` becomes the Markdown link `[t](u)` and a
+    /// nested list is indented under its parent item, for documentation read
+    /// as Markdown on the web (the Node.js client's config docs, which TypeDoc
+    /// renders). Off, the rustdoc keeps an anchor's text only and every list
+    /// item at the left margin.
+    pub markdown: bool,
 }
 
 /// A Javadoc translated by [`Translator::translate`].
@@ -383,6 +389,8 @@ impl Translator<'_> {
         let mut cur = String::new();
         let mut open = Open::Para;
         let mut lists: Vec<(bool, usize)> = Vec::new();
+        // The `href` of each open `<a>`, `None` for an anchor without one.
+        let mut links: Vec<Option<String>> = Vec::new();
         // The rows of the `<table>` being read, and whether a cell is open.
         let mut table: Option<Vec<Vec<String>>> = None;
         let mut in_cell = false;
@@ -463,12 +471,29 @@ impl Translator<'_> {
                         "li" | "dt" | "dd" => {
                             flush(&mut cur, &mut open, &mut out);
                             if !closing {
+                                // With `markdown`, a nested list is indented under its
+                                // parent item's text.
+                                let depth = if self.markdown {
+                                    lists.len().saturating_sub(1)
+                                } else {
+                                    0
+                                };
+                                let outer: String = lists[..depth]
+                                    .iter()
+                                    .map(|(ordered, n)| {
+                                        if *ordered {
+                                            " ".repeat(format!("{n}. ").len())
+                                        } else {
+                                            "  ".into()
+                                        }
+                                    })
+                                    .collect();
                                 let marker = match lists.last_mut() {
                                     Some((true, n)) => {
                                         *n += 1;
-                                        format!("{n}. ")
+                                        format!("{outer}{n}. ")
                                     },
-                                    _ => "- ".to_string(),
+                                    _ => format!("{outer}- "),
                                 };
                                 open = Open::Item(marker);
                             }
@@ -487,6 +512,20 @@ impl Translator<'_> {
                             let after = &body[close..];
                             i += end + close + after.find('>').map_or(after.len(), |g| g + 1);
                             continue;
+                        },
+                        // With `markdown`, `<a href="u">t</a>` as the Markdown link
+                        // `[t](u)`; an anchor without `href` keeps its text only.
+                        "a" if self.markdown && !closing => {
+                            let href = attribute(&rest[..end], "href");
+                            if href.is_some() {
+                                cur.push('[');
+                            }
+                            links.push(href);
+                        },
+                        "a" if self.markdown => {
+                            if let Some(Some(href)) = links.pop() {
+                                cur.push_str(&format!("]({href})"));
+                            }
                         },
                         "b" | "strong" => cur.push_str("**"),
                         "i" | "em" => cur.push('*'),
@@ -708,6 +747,20 @@ fn html_tag(s: &str) -> Option<(String, bool, usize)> {
         .collect::<String>()
         .to_ascii_lowercase();
     Some((name, closing, end + 1))
+}
+
+/// The value of attribute `name` in HTML start tag `tag` (`<a href="u">`).
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let at = lower.find(&format!("{name}="))? + name.len() + 1;
+    let rest = &tag[at..];
+    let quote = rest.chars().next()?;
+    let value = if quote == '"' || quote == '\'' {
+        &rest[1..rest[1..].find(quote)? + 1]
+    } else {
+        rest.split(|c: char| c.is_whitespace() || c == '>').next()?
+    };
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// The HTML entity at the start of `s`, decoded, and its length.
@@ -1050,7 +1103,7 @@ mod tests {
     use super::*;
 
     fn rustdoc(doc: &str) -> String {
-        Translator { index: None, panics: false }.to_rustdoc(doc)
+        Translator { index: None, panics: false, markdown: false }.to_rustdoc(doc)
     }
 
     #[test]
@@ -1084,6 +1137,23 @@ mod tests {
         assert_eq!(rustdoc("<ol><li>first<li>second</ol>"), "1. first\n2. second");
         // An `<li>` outside any list (`ProducerRecord`'s class doc) is a bullet.
         assert_eq!(rustdoc("Cases:\n<li>one</li>\n<li>two</li>"), "Cases:\n\n- one\n- two");
+    }
+
+    #[test]
+    fn test_markdown_keeps_links_and_indents_nested_lists() {
+        let markdown = |doc: &str| Translator { index: None, panics: false, markdown: true }.to_rustdoc(doc);
+        let nested = "<ul><li>a<ol><li>x</li><li>y</li></ol></li><li>b</li></ul>";
+        let links = "See <a href=\"https://kafka.apache.org/x\">the docs</a> and <a name=\"n\">here</a>.";
+        // A nested list is indented under its parent item; a link keeps its target.
+        assert_eq!(markdown(nested), "- a\n  1. x\n  2. y\n- b");
+        assert_eq!(markdown(links), "See [the docs](https://kafka.apache.org/x) and here.");
+        assert_eq!(
+            markdown("Body.\n@see <a href=\"https://kafka.apache.org\">Kafka</a>"),
+            "Body.\n\n# See also\n\n- [Kafka](https://kafka.apache.org)"
+        );
+        // The rustdoc keeps an anchor's text only and every item at the margin.
+        assert_eq!(rustdoc(nested), "- a\n1. x\n2. y\n- b");
+        assert_eq!(rustdoc(links), "See the docs and here.");
     }
 
     #[test]
@@ -1184,8 +1254,8 @@ mod tests {
             rustdoc("Waits.\n@throws org.apache.kafka.common.errors.TimeoutException if it times out\n@exception InterruptException on interrupt"),
             "Waits.\n\n# Errors\n\n- `TimeoutError` if it times out\n- `InterruptError` on interrupt"
         );
-        let panics =
-            Translator { index: None, panics: true }.to_rustdoc("Gets.\n@throws IllegalStateException if closed");
+        let panics = Translator { index: None, panics: true, markdown: false }
+            .to_rustdoc("Gets.\n@throws IllegalStateException if closed");
         assert_eq!(panics, "Gets.\n\n# Panics\n\n- `IllegalStateError` if closed");
     }
 
@@ -1199,7 +1269,7 @@ mod tests {
             &mut classes,
         );
         let index = JavaIndex { classes };
-        let t = Translator { index: Some(&index), panics: false };
+        let t = Translator { index: Some(&index), panics: false, markdown: false };
         assert_eq!(
             t.to_rustdoc("Seeks.\n@throws OffsetOutOfRangeException if out of range\n@throws IllegalArgumentException if bad"),
             "Seeks.\n\n# Errors\n\n- `ConsumerOffsetOutOfRangeError` if out of range\n- `LocalIllegalArgumentError` if bad"
@@ -1294,12 +1364,15 @@ mod tests {
     #[test]
     fn test_translate_splits_the_tags() {
         let doc = "Sends.\n@param maxBlockMs how long\n@return the {@code null} value\n@throws java.util.concurrent.TimeoutException late";
-        let t = Translator { index: None, panics: false }.translate(doc);
+        let t = Translator { index: None, panics: false, markdown: false }.translate(doc);
         assert_eq!(t.params, [("max_block_ms".to_string(), "how long".to_string())]);
         assert_eq!(t.returns.as_deref(), Some("the `None` value"));
         assert_eq!(t.throws[0].java, "TimeoutException");
         assert_eq!(t.throws[0].rust, "TimeoutError");
-        assert_eq!(t.rustdoc, Translator { index: None, panics: false }.to_rustdoc(doc));
+        assert_eq!(
+            t.rustdoc,
+            Translator { index: None, panics: false, markdown: false }.to_rustdoc(doc)
+        );
     }
 
     #[test]
@@ -1312,7 +1385,7 @@ mod tests {
             &mut classes,
         );
         let index = JavaIndex { classes };
-        let t = Translator { index: Some(&index), panics: false };
+        let t = Translator { index: Some(&index), panics: false, markdown: false };
         assert_eq!(t.error_names("TimeoutException"), ["TimeoutError"]);
         assert_eq!(
             t.error_names("org.apache.kafka.common.errors.TimeoutException"),
