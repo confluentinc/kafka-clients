@@ -6,8 +6,23 @@ Before GA the public API is not stable, and an interface may change even in a mi
 
 ## [Unreleased]
 
+### Security
+
+- Without `ssl.truststore.location` or `ssl.truststore.certificates`, the
+  broker certificate is verified by the operating system's certificate
+  verifier (its root certificates on Linux, where `SSL_CERT_FILE` /
+  `SSL_CERT_DIR` override them), as the Java client uses the JDK's default
+  trust store (the core's `platform-verifier` feature); the wheel no longer
+  ships Mozilla's root bundle. On Linux a host without a CA bundle must set
+  one of the truststore keys or `SSL_CERT_FILE`.
+
 ### Changed
 
+- On x86_64 the native library needs an x86-64-v3 CPU (AVX2, BMI2, FMA:
+  Intel Haswell, AMD Excavator or later), which the wheel's platform tag
+  cannot state. Importing `confluent_kafka` on an older CPU now raises an
+  `ImportError` naming the missing features, instead of the process dying
+  on an illegal instruction.
 - A `None` for an argument Java requires reaches the Rust core, which answers
   with Java's error and message: a `NullPointerException` is Python's
   `TypeError`, with the core's message and its "null" spelled "None"
