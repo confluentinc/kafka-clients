@@ -1,0 +1,19 @@
+{
+  "base": "origin/master",
+  "changed_files": [
+    "M .gitignore",
+    "M .semaphore/create-release-tag.yml",
+    "M .semaphore/semaphore.yml",
+    "M dotnet/.config/dotnet-tools.json",
+    "M dotnet/CLAUDE.md",
+    "M dotnet/Makefile",
+    "A dotnet/doc/docfx.json",
+    "A dotnet/doc/index.md",
+    "A dotnet/doc/toc.yml"
+  ],
+  "created": 1795070923,
+  "head": "ae291fea545955a3829dd0459865b75475e1694b",
+  "merge_base": "9b7311eb947760664a9c6319f0401f137381025c",
+  "tree": "8c3715f6e56ba434ab12ab0c0c2276b5c99df4ba",
+  "version": 2
+}

@@ -17,8 +17,10 @@ tools/java-perf-test/bin/
 !design/current/img/*.svg
 # The Confluent.Kafka NuGet package's icon (dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj).
 !/dotnet/icon.png
-# The .NET local tools (ReportGenerator, for dotnet/Makefile's coverage-dotnet).
+# The .NET local tools (ReportGenerator for dotnet/Makefile's coverage-dotnet, DocFX for docs-dotnet).
 !/dotnet/.config/dotnet-tools.json
+# The DocFX configuration of the .NET API reference (dotnet/Makefile's docs-dotnet).
+!/dotnet/doc/docfx.json
 *.md.lock
 *.pyc
 bin
