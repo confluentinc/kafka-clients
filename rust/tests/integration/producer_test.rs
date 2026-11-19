@@ -16,13 +16,16 @@
 //!
 //! Translated from:
 //! - `org.apache.kafka.clients.producer.ProducerCompressionTest`: `testCompression`
-//!   (native only)
+//! - `org.apache.kafka.clients.producer.KafkaProducerTest`: `testTopicRefreshInMetadata`
+//!   and `testTopicNotExistingInMetadata` (as
+//!   `test_partitions_for_unknown_topic_times_out_with_the_broker_error`; the cause
+//!   native only)
 //! - `org.apache.kafka.clients.producer.ProducerFailureHandlingTest`: among
 //!   others `testTooLargeRecordWithAckZero`,
 //!   `testPartitionTooLargeForReplicationWithAckAll`,
 //!   `testResponseTooLargeForReplicationWithAckAll`,
 //!   `testCannotSendToInternalTopic`,
-//!   `testNotEnoughReplicasAfterBrokerShutdown` (native only, dedicated cluster)
+//!   `testNotEnoughReplicasAfterBrokerShutdown` (dedicated cluster)
 //! - `kafka.api.BaseProducerSendTest` / `kafka.api.PlaintextProducerSendTest`
 //!   (`core/src/test/scala/integration/kafka/api/`): `testSendOffset`,
 //!   `testSendToPartition`, `testSendBeforeAndAfterPartitionExpansion`,
@@ -34,8 +37,8 @@
 //!   `testWrongSerializer` (native only),
 //!   `testSendCompressedMessageWithCreateTime` (native only),
 //!   `testSendNonCompressedMessageWithCreateTime` (native only),
-//!   `testSendCompressedMessageWithLogAppendTime` (native only),
-//!   `testSendNonCompressedMessageWithLogAppendTime` (native only),
+//!   `testSendCompressedMessageWithLogAppendTime`,
+//!   `testSendNonCompressedMessageWithLogAppendTime`,
 //!   `testSendWithInvalidBeforeAndAfterTimestamp`,
 //!   `testValidBeforeAndAfterTimestampsAtThreshold`,
 //!   `testValidBeforeAndAfterTimestampsWithinThreshold` (each of the last three
@@ -43,18 +46,21 @@
 //!   `testNonBlockingProducer` (buffer-exhaustion half native only),
 //!   `testSendRecordBatchWithMaxRequestSizeAndHigher`,
 //!   `testPartitionsForTimeoutErrorWhenTopicDoesNotExist`,
-//!   `testSendToPartitionWithFollowerShutdownShouldNotTimeout` (native only,
-//!   dedicated cluster). The exact
+//!   `testSendToPartitionWithFollowerShutdownShouldNotTimeout` (dedicated
+//!   cluster). The exact
 //!   `waitOnMetadata` messages that `testSendTimeoutErrorMessageWhenTopicDoesNotExist`
 //!   and `testSendTimeoutErrorWhenPartitionDoesNotExist` pin are asserted by
 //!   `test_produce_to_non_existent_topic` / `test_produce_invalid_partition`.
 //! - `kafka.api.SslProducerSendTest` (the `BaseProducerSendTest` bodies over
-//!   the SSL listener, native only): `testSendOffset` (`test_ssl_send_offset`),
-//!   `testClose` (`test_ssl_close`), `testFlush` (`test_ssl_flush`).
+//!   the SSL listener): `testSendOffset` (`test_ssl_send_offset`),
+//!   `testClose` (`test_ssl_close`), `testFlush` (`test_ssl_flush`),
+//!   `testSendToPartition` (`test_ssl_send_to_partition`),
+//!   `testSendBeforeAndAfterPartitionExpansion`
+//!   (`test_ssl_send_before_and_after_partition_expansion`).
 //!
 //! When the `multilanguage-tests` feature is enabled, each test is
-//! instantiated three times via [`multilanguage_test!`] — once per
-//! backend (rust / python / c). Test bodies are generic over
+//! instantiated once per backend via [`multilanguage_test!`] (rust, python,
+//! python_async, c, dotnet, dotnet_async, js). Test bodies are generic over
 //! [`ProducerBackendFactory`] so the same scenario exercises the native
 //! Rust producer, the Python binding, and the C binding through their
 //! gRPC server containers.
@@ -293,13 +299,24 @@ enum SendTestSecurity {
 
 impl SendTestSecurity {
     /// Points `props` at this protocol's listener. For SSL: the SSL bootstrap
-    /// servers, the cluster CA as truststore (Scala's generated
-    /// `trustStoreFile`), and no hostname verification because the tests reach
-    /// the broker via `127.0.0.1` (as in `ssl_sasl_test`).
-    ///
-    fn apply(self, ctx: &TestContext, mut props: HashMap<String, String>) -> HashMap<String, String> {
+    /// servers (the container-network SSL listener when
+    /// `needs_container_bootstrap`, as for the PLAINTEXT [`bootstrap_for`]), the
+    /// cluster CA as truststore (Scala's generated `trustStoreFile`), and no
+    /// hostname verification because the tests reach the broker via
+    /// `127.0.0.1` (as in `ssl_sasl_test`).
+    fn apply(
+        self,
+        ctx: &TestContext,
+        needs_container_bootstrap: bool,
+        mut props: HashMap<String, String>,
+    ) -> HashMap<String, String> {
         if self == SendTestSecurity::Ssl {
-            props.insert("bootstrap.servers".to_string(), ctx.ssl_bootstrap_servers().to_string());
+            let bootstrap = if needs_container_bootstrap {
+                ctx.container_ssl_bootstrap_servers()
+            } else {
+                ctx.ssl_bootstrap_servers()
+            };
+            props.insert("bootstrap.servers".to_string(), bootstrap.to_string());
             props.insert("security.protocol".to_string(), "SSL".to_string());
             props.insert("ssl.truststore.certificates".to_string(), ctx.ca_cert_pem().to_string());
             props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
@@ -308,22 +325,20 @@ impl SendTestSecurity {
     }
 
     /// The producer-under-test config for `factory`: [`send_test_producer_config`]
-    /// on this protocol's listener.
-    ///
-    /// SSL runs on the native backend only: the multilanguage gRPC servers
-    /// reach the broker over the container-internal PLAINTEXT listener, and
-    /// Java has no binding-specific variant of `SslProducerSendTest`.
+    /// on this protocol's listener, the one `factory`'s backend can reach. The
+    /// security keys travel through the config map to a gRPC backend's client,
+    /// so no cert files need mounting.
     fn producer_config<F: ProducerBackendFactory>(
         self,
         factory: &F,
         ctx: &TestContext,
         opts: &SendTestProducerOpts,
     ) -> HashMap<String, String> {
-        assert!(
-            self == SendTestSecurity::Plaintext || !factory.needs_container_bootstrap(),
-            "SSL send tests run on the native backend only"
-        );
-        self.apply(ctx, send_test_producer_config(&bootstrap_for(factory, ctx), opts))
+        self.apply(
+            ctx,
+            factory.needs_container_bootstrap(),
+            send_test_producer_config(&bootstrap_for(factory, ctx), opts),
+        )
     }
 }
 
@@ -343,7 +358,7 @@ fn send_test_admin_with_security(ctx: &TestContext, security: SendTestSecurity) 
         ("request.timeout.ms".to_string(), "30000".to_string()),
         ("default.api.timeout.ms".to_string(), "30000".to_string()),
     ]);
-    let props = security.apply(ctx, props);
+    let props = security.apply(ctx, false, props);
     let config = AdminClientConfig::new(&props).expect("valid admin config");
     AdminClient::create(config).expect("admin client")
 }
@@ -481,7 +496,7 @@ struct SendOffsetCallbackState {
 
 /// `check_serialized_sizes` gates the size assertions (and the null-value
 /// check derived from them) to backends that report real serialized sizes; see
-/// [`send_offset_inner`] for the binding gap.
+/// [`send_offset_with_security`] for which those are.
 fn send_offset_callback(
     state: Arc<Mutex<SendOffsetCallbackState>>,
     topic: String,
@@ -561,14 +576,18 @@ async fn send_offset_with_security<F: ProducerBackendFactory>(
         .expect("Failed to create producer");
     let partition = 0;
     let state = Arc::new(Mutex::new(SendOffsetCallbackState::default()));
-    // Binding gap: both gRPC servers hardcode the serialized sizes in the
-    // returned metadata to -1 (`bindings/python/grpc_translate.py`
-    // `_record_metadata_to_proto`, `bindings/c/grpc_server/server.cc` ~704), and
-    // the Python servers turn an absent value into `b""`
-    // (`_proto_to_producer_record`), so record1 is not a null-value send there.
-    // The size and null-value checks therefore run only on the native backend.
-    // Everything else runs on every backend.
-    let check_serialized_sizes = factory.name() == "rust";
+    // The size and null-value checks run on the native backend and on the JS
+    // gRPC server, which reports the client's real serialized sizes
+    // (`javascript/grpc-server/grpc_translate.js` `recordMetadataToProto`) and
+    // sends an absent proto value as a null value, a tombstone
+    // (`protoToProducerRecord`), so record1 really is a null-value send there.
+    //
+    // On the Python, C and .NET gRPC servers the checks stay off: this gate was
+    // written when those servers reported the sizes as -1 and Python's turned an
+    // absent value into `b""`. Widen it to each of them once a run of its arm
+    // shows it reports the client's sizes and sends a null value. Everything
+    // else runs on every backend.
+    let check_serialized_sizes = matches!(factory.name(), "rust" | "js");
     let callback = || {
         Some(send_offset_callback(
             state.clone(),
@@ -646,15 +665,22 @@ async fn send_offset_with_security<F: ProducerBackendFactory>(
 /// respected, and the consumed records keep the partition, ordering, null key,
 /// value, and explicit timestamp.
 async fn send_to_partition_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    send_to_partition_with_security(ctx, factory, SendTestSecurity::Plaintext).await;
+}
+
+/// [`send_to_partition_inner`] with the suite's `securityProtocol` (PLAINTEXT
+/// or, for `SslProducerSendTest`, SSL).
+async fn send_to_partition_with_security<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    security: SendTestSecurity,
+) {
     let topic = ctx.topic("topic");
     let producer = factory
-        .create(send_test_producer_config(
-            &bootstrap_for(factory, ctx),
-            &SendTestProducerOpts::default(),
-        ))
+        .create(security.producer_config(factory, ctx, &SendTestProducerOpts::default()))
         .await
         .expect("Failed to create producer");
-    let admin = send_test_admin(ctx);
+    let admin = send_test_admin_with_security(ctx, security);
     create_topic_with_admin(admin.as_ref(), &topic, 2, 2).await;
     let partition = 1;
 
@@ -688,6 +714,8 @@ async fn send_to_partition_inner<F: ProducerBackendFactory>(ctx: &mut TestContex
         assert_eq!(partition, metadata.partition());
     }
 
+    // The verification consumer is always PLAINTEXT, as `BaseProducerSendTest#setUp`
+    // builds it, whatever the producer's protocol.
     let mut consumer = send_test_consumer(ctx);
     consumer
         .assign(vec![TopicPartition::new(topic.clone(), partition)])
@@ -744,17 +772,28 @@ async fn send_before_and_after_partition_expansion_inner<F: ProducerBackendFacto
     ctx: &mut TestContext,
     factory: &F,
 ) {
+    send_before_and_after_partition_expansion_with_security(ctx, factory, SendTestSecurity::Plaintext).await;
+}
+
+/// [`send_before_and_after_partition_expansion_inner`] with the suite's
+/// `securityProtocol` (PLAINTEXT or, for `SslProducerSendTest`, SSL).
+async fn send_before_and_after_partition_expansion_with_security<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    security: SendTestSecurity,
+) {
     let topic = ctx.topic("topic");
     let producer = factory
-        .create(send_test_producer_config(
-            &bootstrap_for(factory, ctx),
+        .create(security.producer_config(
+            factory,
+            ctx,
             &SendTestProducerOpts { max_block_ms: 5 * 1000, ..SendTestProducerOpts::default() },
         ))
         .await
         .expect("Failed to create producer");
 
     // create topic
-    let admin = send_test_admin(ctx);
+    let admin = send_test_admin_with_security(ctx, security);
     create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
 
     let partition0 = 0;
@@ -857,12 +896,16 @@ fn compression_error_message(compression: &str) -> String {
 
 /// Translated from `ProducerCompressionTest#testCompression`: compressed
 /// messages should be able to be sent and consumed correctly, for every
-/// `CompressionType`.
+/// `CompressionType`. The read-back is the native verification consumer, which
+/// decompresses every codec's batches.
 ///
-/// Native only, also under `multilanguage-tests`: the body sends 6000 records
-/// per codec with `linger.ms=200` and only then waits on the futures. The gRPC
-/// `Send` RPC blocks until delivery, so every record would wait out the full
-/// linger on its own (~20 minutes per codec) instead of sharing batches.
+/// Deviation for the gRPC backends: the body sends 6000 records per codec with
+/// `linger.ms=200` and only then waits on the futures, but their `Send` RPC
+/// returns only after the record is acked, so every record would wait out the
+/// full linger on its own (~20 minutes per codec) instead of sharing batches.
+/// They run with `linger.ms=0`: each record is its own batch, still compressed
+/// with the codec, sent one at a time, so the in-order offsets hold. Java's
+/// shared batches are kept on the native backend only.
 async fn compression_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     // `CompressionType.values()`, in declaration order.
     for compression in ["none", "gzip", "snappy", "lz4", "zstd"] {
@@ -880,12 +923,14 @@ async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestConte
     let admin = send_test_admin(ctx);
     test_utils::create_topic(admin.as_ref(), &compression_topic, 1, 1).await;
 
-    // `cluster.producer(producerProps)`: bootstrap plus the three overrides.
+    // `cluster.producer(producerProps)`: bootstrap plus the three overrides
+    // (`linger.ms` 0 on the gRPC backends, see `compression_inner`).
+    let linger_ms = if factory.name() == "rust" { "200" } else { "0" };
     let producer_props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap_for(factory, ctx)),
         ("compression.type".to_string(), compression.to_string()),
         ("batch.size".to_string(), "66000".to_string()),
-        ("linger.ms".to_string(), "200".to_string()),
+        ("linger.ms".to_string(), linger_ms.to_string()),
     ]);
     let mut consumer = send_test_consumer(ctx);
     let producer = factory.create(producer_props).await.expect("Failed to create producer");
@@ -942,11 +987,18 @@ async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestConte
             .unwrap_or_else(|e| panic!("{compression}: send {offset} failed: {e:?}"));
         assert_eq!(offset as i64, metadata.offset(), "{compression}");
     }
+    // Binding gap: the Python gRPC servers drop a ProducerRecord's headers
+    // (`python/grpc_translate.py` `_proto_to_producer_record` reads no
+    // `headers`), so on the two Python arms the third flavour is sent without
+    // its header and the header checks are skipped there; every other check
+    // runs. Remove this gate when that translation forwards the headers, as the
+    // C, .NET and JS servers do.
+    let headers_reach_the_client = !factory.name().starts_with("python");
     verify_compression_consumer_records(
         consumer.as_mut(),
         &messages,
         now,
-        &header_arr,
+        headers_reach_the_client.then_some(&header_arr[..]),
         partition,
         &compression_topic,
         compression,
@@ -967,11 +1019,15 @@ async fn process_compression_test<F: ProducerBackendFactory>(ctx: &mut TestConte
 /// `ProducerCompressionTest#verifyConsumerRecords`, with
 /// `ProducerCompressionTest#flagLoop`
 /// folded into the record index: record `i` is message `i / 3`, flavour `i % 3`.
+///
+/// `header_arr` is `None` for a backend whose sends drop the record headers
+/// (see [`process_compression_test`]): the third flavour's header checks are
+/// then skipped.
 async fn verify_compression_consumer_records(
     consumer: &mut dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>,
     messages: &[String],
     now: i64,
-    header_arr: &[RecordHeader],
+    header_arr: Option<&[RecordHeader]>,
     partition: i32,
     topic: &str,
     compression: &str,
@@ -1004,8 +1060,10 @@ async fn verify_compression_consumer_records(
                 // verify message with key and header
                 assert_eq!(Some(message_value.len().to_string()), key, "{error_message}");
                 assert_eq!(*message_value, value, "{error_message}");
-                assert_eq!(1, record.headers.len(), "{error_message}");
-                assert_eq!(header_arr[0], record.headers[0], "{error_message}");
+                if let Some(header_arr) = header_arr {
+                    assert_eq!(1, record.headers.len(), "{error_message}");
+                    assert_eq!(header_arr[0], record.headers[0], "{error_message}");
+                }
             },
         }
         assert_eq!(now, record.timestamp, "{error_message}");
@@ -1063,13 +1121,16 @@ async fn produce_record_too_large_inner<F: ProducerBackendFactory>(ctx: &mut Tes
 /// record is sent on its own, so none of the futures is complete until
 /// `flush()` forces the accumulated batches out, after which all are.
 ///
-/// Deviation for the gRPC backends (python / c): their `Send` RPC blocks until
-/// the record is delivered, so with `linger.ms=Int.MaxValue` the first send
-/// would never return, and every returned future is already complete — the
-/// "no request is complete" half cannot be observed through them. They run with
-/// `linger.ms=0` and a single round, checking only that `flush()` succeeds and
-/// every future is complete afterwards. The native backend runs Java's exact
-/// shape: 50 rounds of `numRecords` sends, not-done before `flush()`, done after.
+/// Deviation for every gRPC backend (python, c, dotnet and js): their `Send`
+/// RPC blocks until the record's outcome, so with `linger.ms=Int.MaxValue` the
+/// first send would never return, and every returned future is already
+/// complete — the "no request is complete" half cannot be observed through
+/// them. They run with `linger.ms=0` and a single round, checking only that
+/// `flush()` succeeds; the "All requests are complete." check is vacuous there,
+/// since every future was complete before `flush()`. No gRPC arm, the JS one
+/// included, can be made stronger while `Send` blocks. The native backend runs
+/// Java's exact shape: 50 rounds of `numRecords` sends, not-done before
+/// `flush()`, done after.
 async fn flush_sends_pending_records_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     flush_with_security(ctx, factory, SendTestSecurity::Plaintext).await;
 }
@@ -1125,8 +1186,11 @@ async fn flush_with_security<F: ProducerBackendFactory>(
 /// non-blocking send has been acked, and the last one carries offset
 /// `numRecords` (records with the same key go to the same partition).
 ///
-/// On the gRPC backends `Send` blocks until delivery, so `response0` is already
-/// complete before `close()`; the assertions still hold and are kept.
+/// On the gRPC backends (the JS one included) `Send` blocks until delivery, so
+/// `response0` is already complete before `close()`: "The last message should
+/// be acked before producer is shutdown" is vacuous there, and only the offset
+/// check says anything. No gRPC arm can do better while `Send` blocks; the
+/// assertions are kept as they hold.
 async fn close_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     close_with_security(ctx, factory, SendTestSecurity::Plaintext).await;
 }
@@ -1616,6 +1680,16 @@ async fn send_after_closed_inner<F: ProducerBackendFactory>(ctx: &mut TestContex
     // gRPC backends return Ok(KafkaFuture) where the future resolves to
     // an IllegalState error (the gRPC server's lookup of the closed
     // producer_id fails). Accept both shapes.
+    //
+    // Vacuous on the gRPC arms, the JS one included: each server forgets a
+    // producer on Close (`javascript/grpc-server/grpc_server.js` `#close`), so
+    // this Send gets the server's own `unknown producer_id N`
+    // (LOCAL_ILLEGAL_STATE) and never reaches the client's `send()`. That is
+    // why the message is not asserted here. The JS client's closed error,
+    // "Cannot perform operation after producer has been closed", is asserted
+    // by its unit test (`javascript/test/unit/producer/kafka_producer.test.js`,
+    // "after close every call goes to the core"). Making this arm reach the
+    // client needs the servers to keep closed producers, a server change.
     let send_result = producer.send(record).await;
     let err = match send_result {
         Err(e) => e,
@@ -1646,6 +1720,14 @@ async fn batch_size_zero_inner<F: ProducerBackendFactory>(ctx: &mut TestContext,
     // gRPC `Send` RPC blocks until the record is delivered, so under Java's
     // `linger.ms=MAX` the first send would wait forever for a second record;
     // non-native backends use `linger.ms=0` (same as `flush_with_security`).
+    //
+    // Weaker than Java on every gRPC arm, the JS one included: with
+    // `linger.ms=0` each record goes out at once whatever `batch.size` is, so
+    // these arms prove only that a `batch.size=0` producer delivers in order,
+    // not that `batch.size=0` is what makes the records sendable. No gRPC arm
+    // can do better while its `Send` RPC returns only after the record's
+    // outcome: nothing is ever pending between two calls. The faithful JS
+    // translation needs a client-side test with lingering records.
     let linger_ms = if factory.name() == "rust" { INT_MAX_VALUE } else { 0 };
     let producer = factory
         .create(send_test_producer_config(
@@ -1788,12 +1870,18 @@ async fn send_and_verify_timestamp<F: ProducerBackendFactory>(
     timestamp_type: TimestampType,
 ) {
     let topic = ctx.topic("topic");
+    // Deviation for the gRPC backends: their `Send` RPC returns only after the
+    // record's outcome, so under Java's `linger.ms=Int.MaxValue` the first send
+    // would never return. They run with `linger.ms=0`, which loses Java's
+    // `close(20 s)` draining a lingering batch; every other assertion is kept.
+    // The native backend keeps Java's shape.
+    let linger_ms = if factory.name() == "rust" { INT_MAX_VALUE } else { 0 };
     let producer = factory
         .create(send_test_producer_config(
             &bootstrap_for(factory, ctx),
             &SendTestProducerOpts {
                 compression_type,
-                linger_ms: INT_MAX_VALUE,
+                linger_ms,
                 delivery_timeout_ms: INT_MAX_VALUE,
                 ..SendTestProducerOpts::default()
             },
@@ -2177,11 +2265,20 @@ async fn non_blocking_verify_send_success(future: &KafkaFuture<RecordMetadata>, 
 /// (`PlaintextProducerSendTest.scala:258-313`): requests are failed immediately
 /// without blocking if metadata is not available or the buffer is full.
 ///
-/// The buffer-exhaustion half runs on the native backend only: it needs the
-/// first record to sit in a lingering batch (`linger.ms=15000`) while the
-/// second send finds the buffer full, but the gRPC `Send` RPC blocks until
-/// delivery, so the first batch has already been sent — and its buffer freed —
-/// by the time the second send is issued.
+/// The buffer-exhaustion half needs the first record to sit in a lingering
+/// batch (`linger.ms=15000`) while the second send finds the buffer full. The
+/// gRPC `Send` RPC blocks until delivery, so on a gRPC arm the first send is
+/// left in flight instead: a send that has not answered within a second is
+/// queued (one failing on missing metadata answers at once), the second send
+/// is issued while it is pending, and it must answer well before the linger
+/// ends, which is the gRPC form of "verify future was completed immediately"
+/// (the harness hands back a future that is already complete,
+/// `MultilanguageProducer::send_with_callback`, so `is_done` shows nothing
+/// there). That runs on the native backend and on the JS gRPC server, which
+/// leaves the record to the client until the future settles
+/// (`javascript/grpc-server/grpc_server.js` `send`); the other gRPC servers
+/// keep returning after the first half until a run of their arm shows the
+/// same.
 ///
 /// Deviation: Java's topic `topic` is auto-created by the producer's first
 /// metadata request; here it is created with the admin client beforehand. The
@@ -2213,8 +2310,10 @@ async fn non_blocking_producer_inner<F: ProducerBackendFactory>(ctx: &mut TestCo
     non_blocking_verify_send_success(&future, &topic).await;
     producer.close().await.expect("close should succeed");
 
-    if factory.name() != "rust" {
-        return;
+    match factory.name() {
+        "rust" => {},
+        "js" => return non_blocking_producer_buffer_exhausted_over_grpc(factory, &bootstrap, &topic).await,
+        _ => return,
     }
 
     // Verify that send fails immediately without blocking when there is no space left in the buffer
@@ -2250,6 +2349,80 @@ async fn non_blocking_producer_inner<F: ProducerBackendFactory>(ctx: &mut TestCo
     producer2.close().await.expect("close should succeed");
 }
 
+/// The buffer-exhaustion half of [`non_blocking_producer_inner`] on a gRPC
+/// backend, whose `Send` RPC answers only once the record's future settles:
+/// the first send stays in flight while the second finds the buffer full.
+async fn non_blocking_producer_buffer_exhausted_over_grpc<F: ProducerBackendFactory>(
+    factory: &F,
+    bootstrap: &str,
+    topic: &str,
+) {
+    /// How long a send must stay unanswered to count as queued: a send that
+    /// finds no metadata (`max.block.ms=0`) answers at once.
+    const QUEUED_AFTER: Duration = Duration::from_secs(1);
+    /// The bound on the send that finds the buffer full, far below the
+    /// first batch's 15 s linger, after which the buffer would be free again.
+    const IMMEDIATE: Duration = Duration::from_secs(5);
+
+    let producer2 = factory
+        .create(send_test_producer_config(
+            bootstrap,
+            &SendTestProducerOpts {
+                max_block_ms: 0,
+                linger_ms: 15000,
+                batch_size: 1100,
+                buffer_size: 1500,
+                ..SendTestProducerOpts::default()
+            },
+        ))
+        .await
+        .expect("Failed to create producer");
+    // wait until metadata is available and one record is queued
+    let deadline = Instant::now() + Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS);
+    let mut queued = loop {
+        let mut first = Box::pin(non_blocking_send(&producer2, topic));
+        tokio::select! {
+            biased;
+            future = &mut first => {
+                let result = future.get().await;
+                assert!(
+                    matches!(result, Err(Error::Timeout(_))),
+                    "a send that answers at once must fail on missing metadata, got: {result:?}"
+                );
+                assert!(Instant::now() < deadline, "no send was queued within {}ms", test_utils::DEFAULT_MAX_WAIT_MS);
+                tokio::time::sleep(Duration::from_millis(test_utils::DEFAULT_PAUSE_MS)).await;
+            },
+            () = tokio::time::sleep(QUEUED_AFTER) => break first,
+        }
+    };
+    // should fail send since buffer is full (verifyBufferExhausted)
+    let started = Instant::now();
+    let (future, future2) = tokio::join!(
+        async {
+            let future = non_blocking_send(&producer2, topic).await;
+            assert!(
+                started.elapsed() < IMMEDIATE,
+                "verify future was completed immediately: {:?}",
+                started.elapsed()
+            );
+            future
+        },
+        &mut queued,
+    );
+    let err = future.get().await.expect_err("send with a full buffer should fail");
+    match &err {
+        Error::ProducerBufferExhausted(e) => assert!(
+            e.message().starts_with("Failed to allocate ") && e.message().contains("Total memory: 1500 bytes."),
+            "unexpected BufferExhausted message: {}",
+            e.message()
+        ),
+        _ => panic!("Expected BufferExhausted, got: {err:?}"),
+    }
+    // previous batch should be completed and sent now
+    non_blocking_verify_send_success(&future2, topic).await;
+    producer2.close().await.expect("close should succeed");
+}
+
 /// Translated from `PlaintextProducerSendTest.testSendRecordBatchWithMaxRequestSizeAndHigher`
 /// (`PlaintextProducerSendTest.scala:316-336`): a record whose batch is exactly
 /// the broker's default `max.message.bytes` is accepted, and one byte more is
@@ -2257,8 +2430,10 @@ async fn non_blocking_producer_inner<F: ProducerBackendFactory>(ctx: &mut TestCo
 /// the estimated batch then exceeds by one byte).
 ///
 /// `serializedValueSize` and the error message are checked on the native
-/// backend only: the gRPC servers report serialized sizes as -1 and surface
-/// only the error code.
+/// backend and on the JS gRPC server, which reports the client's serialized
+/// sizes (`javascript/grpc-server/grpc_translate.js` `recordMetadataToProto`)
+/// and forwards the core's message unchanged (`kafkaErrorToProto`). The other
+/// gRPC servers keep the gate until a run of their arm shows the same.
 async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBackendFactory>(
     ctx: &mut TestContext,
     factory: &F,
@@ -2291,7 +2466,8 @@ async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBac
         .get_with_timeout(UNBOUNDED_GET_TIMEOUT)
         .await
         .expect("a record of exactly the maximum size should be accepted");
-    if factory.name() == "rust" {
+    let reports_sizes_and_messages = matches!(factory.name(), "rust" | "js");
+    if reports_sizes_and_messages {
         assert_eq!(value_size, metadata.serialized_value_size());
     }
 
@@ -2305,7 +2481,7 @@ async fn send_record_batch_with_max_request_size_and_higher_inner<F: ProducerBac
         .expect_err("a record one byte over the maximum size should be rejected");
     match &err {
         Error::RecordTooLarge(e) => {
-            if factory.name() == "rust" {
+            if reports_sizes_and_messages {
                 assert_eq!(
                     "The message is 1048577 bytes when serialized which is larger than 1048576, which is the value \
                      of the max.request.size configuration.",
@@ -2401,6 +2577,60 @@ async fn partitions_for_timeout_error_when_topic_does_not_exist_inner<F: Produce
         factory.name()
     );
     assert_eq!(err.message(), format!("Topic {topic} not present in metadata after 500 ms."));
+
+    producer.close().await.expect("close");
+}
+
+/// Translated from `KafkaProducerTest.testTopicRefreshInMetadata` and
+/// `KafkaProducerTest.testTopicNotExistingInMetadata`: while the broker
+/// answers `UNKNOWN_TOPIC_OR_PARTITION` for the topic, `partitionsFor` times out
+/// after `max.block.ms` with a `TimeoutException` whose cause is the broker's
+/// `UnknownTopicOrPartitionException` (`KafkaProducer#waitOnMetadata`:
+/// `new TimeoutException(errorMessage, metadata.getError(topic).exception())`).
+///
+/// Java scripts the error with a `MockClient`; here a broker with
+/// `auto.create.topics.enable=false` (`no_auto_create_cluster_config`) answers it
+/// for a topic that is never created. Java's two tests differ only in how the
+/// `MockClient` replays the error and in `max.block.ms` (3000, 2000); one body
+/// with 2000 covers both. Java asserts the classes; the message is asserted too.
+///
+/// The cause is asserted on the native backend only: the gRPC proto's
+/// `KafkaError` carries a code and a message, not a cause
+/// (`javascript/grpc-server/grpc_translate.js` `kafkaErrorToProto` sends only
+/// `{ code, message }`), so a gRPC arm cannot see the timeout's cause. The JS
+/// client keeps the cause chain (`javascript/native/error.c` reads
+/// `kafka_common_Error_source`); a proto field for the cause would let its arm
+/// assert it. The class and the message are asserted on every backend.
+async fn partitions_for_unknown_topic_times_out_with_the_broker_error_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let config = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_for(factory, ctx)),
+        ("max.block.ms".to_string(), "2000".to_string()),
+        // test under normal producer for simplicity
+        ("enable.idempotence".to_string(), "false".to_string()),
+    ]);
+    let producer = factory.create(config).await.expect("Failed to create producer");
+
+    let topic = ctx.topic("topic");
+    let err = producer
+        .partitions_for(&topic)
+        .await
+        .expect_err("partitions_for on a topic the broker reports unknown should fail");
+    assert!(
+        matches!(err, Error::Timeout(_)),
+        "{} backend: expected Timeout, got: {err:?}",
+        factory.name()
+    );
+    assert_eq!(err.message(), format!("Topic {topic} not present in metadata after 2000 ms."));
+    if factory.name() == "rust" {
+        assert!(
+            matches!(err.source(), Some(Error::UnknownTopicOrPartition(_))),
+            "expected the UnknownTopicOrPartition cause, got {:?}",
+            err.source()
+        );
+    }
 
     producer.close().await.expect("close");
 }
@@ -2533,49 +2763,109 @@ crate::multilanguage_test!(test_close_flushes_pending, close_flushes_pending_inn
 crate::multilanguage_test!(test_close, close_inner, producer_send_cluster_config());
 
 // `kafka.api.SslProducerSendTest` (`SslProducerSendTest.scala:24-27`): the
-// `BaseProducerSendTest` bodies over the SSL listener. Native backend only under
-// both feature sets — see `SendTestSecurity::producer_config`.
+// `BaseProducerSendTest` bodies over the SSL listener, on every backend under
+// `multilanguage-tests` (a gRPC backend reaches the SSL listener its mode can
+// reach, see `SendTestSecurity::apply`) and on the native one without it. The
+// other Base bodies have no SSL arm here: the lingering-record ones
+// (CreateTime, the close(0) pair), whose faithful JS translations are
+// client-side tests, and the follower shutdown, which keeps its own blocker
+// (its dedicated cluster).
+
+/// `SslProducerSendTest.testSendOffset`, the `BaseProducerSendTest.testSendOffset` body over SSL.
+async fn ssl_send_offset_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    send_offset_with_security(ctx, factory, SendTestSecurity::Ssl).await;
+}
+
+/// `SslProducerSendTest.testClose`, the `BaseProducerSendTest.testClose` body over SSL.
+async fn ssl_close_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    close_with_security(ctx, factory, SendTestSecurity::Ssl).await;
+}
+
+/// `SslProducerSendTest.testFlush`, the `BaseProducerSendTest.testFlush` body over SSL.
+async fn ssl_flush_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    flush_with_security(ctx, factory, SendTestSecurity::Ssl).await;
+}
+
+/// `SslProducerSendTest.testSendToPartition`, the `BaseProducerSendTest.testSendToPartition` body over SSL.
+async fn ssl_send_to_partition_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    send_to_partition_with_security(ctx, factory, SendTestSecurity::Ssl).await;
+}
+
+/// `SslProducerSendTest.testSendBeforeAndAfterPartitionExpansion`, the
+/// `BaseProducerSendTest.testSendBeforeAndAfterPartitionExpansion` body over SSL.
+async fn ssl_send_before_and_after_partition_expansion_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    send_before_and_after_partition_expansion_with_security(ctx, factory, SendTestSecurity::Ssl).await;
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(test_ssl_send_offset, ssl_send_offset_inner, producer_send_cluster_config());
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(test_ssl_close, ssl_close_inner, producer_send_cluster_config());
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(test_ssl_flush, ssl_flush_inner, producer_send_cluster_config());
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_ssl_send_to_partition,
+    ssl_send_to_partition_inner,
+    producer_send_cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_ssl_send_before_and_after_partition_expansion,
+    ssl_send_before_and_after_partition_expansion_inner,
+    producer_send_cluster_config()
+);
 
 /// `SslProducerSendTest.testSendOffset` (`BaseProducerSendTest.scala:127-194`).
+#[cfg(not(feature = "multilanguage-tests"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_ssl_send_offset() {
     let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    send_offset_with_security(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-        SendTestSecurity::Ssl,
-    )
-    .await;
+    ssl_send_offset_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
 }
 
 /// `SslProducerSendTest.testClose` (`BaseProducerSendTest.scala:296-325`).
+#[cfg(not(feature = "multilanguage-tests"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_ssl_close() {
     let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    close_with_security(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-        SendTestSecurity::Ssl,
-    )
-    .await;
+    ssl_close_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
 }
 
 /// `SslProducerSendTest.testFlush` (`BaseProducerSendTest.scala:483-501`).
+#[cfg(not(feature = "multilanguage-tests"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_ssl_flush() {
     let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    flush_with_security(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-        SendTestSecurity::Ssl,
-    )
-    .await;
+    ssl_flush_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
+}
+
+/// `SslProducerSendTest.testSendToPartition` (`kafka.api.BaseProducerSendTest#testSendToPartition`).
+#[cfg(not(feature = "multilanguage-tests"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ssl_send_to_partition() {
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    ssl_send_to_partition_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
+}
+
+/// `SslProducerSendTest.testSendBeforeAndAfterPartitionExpansion`
+/// (`kafka.api.BaseProducerSendTest#testSendBeforeAndAfterPartitionExpansion`).
+#[cfg(not(feature = "multilanguage-tests"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ssl_send_before_and_after_partition_expansion() {
+    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
+    ssl_send_before_and_after_partition_expansion_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory)
+        .await;
 }
 
 // ---------------------------------------------------------------------------
-// Broker fault injection (native only under both feature sets: the scenarios
-// stop brokers of a dedicated cluster, and the bindings add nothing to what the
-// native producer proves here).
+// Broker fault injection: the scenarios stop brokers of a dedicated cluster.
+// Under `multilanguage-tests` they run on every backend (each arm on its own
+// dedicated cluster, which a container backend joins by its network); without
+// the feature, on the native backend.
 // ---------------------------------------------------------------------------
 
 /// [`producer_failure_handling_cluster_config`]'s broker properties on a
@@ -2598,15 +2888,6 @@ fn producer_failure_handling_dedicated_cluster_config() -> ClusterConfig {
 /// metadata, whereas here the creation is awaited together with the partition
 /// leader (`create_topic_with_admin_config`), so the first send cannot race
 /// the leader election.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_not_enough_replicas_after_broker_shutdown() {
-    let mut ctx = TestContext::new(producer_failure_handling_dedicated_cluster_config()).await;
-    not_enough_replicas_after_broker_shutdown_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
-    ctx.cleanup().await;
-}
-
-/// Body of [`test_not_enough_replicas_after_broker_shutdown`], generic so that
-/// `send` resolves to `Producer::send`.
 async fn not_enough_replicas_after_broker_shutdown_inner<F: ProducerBackendFactory>(
     ctx: &mut TestContext,
     factory: &F,
@@ -2623,7 +2904,7 @@ async fn not_enough_replicas_after_broker_shutdown_inner<F: ProducerBackendFacto
     let record = || ProducerRecord::with_key(topic_name.clone(), Some(b("key")), Some(b("value")));
 
     let producer = factory
-        .create(failure_producer_config(ctx.bootstrap_servers(), -1))
+        .create(failure_producer_config(&bootstrap_for(factory, ctx), -1))
         .await
         .expect("Failed to create producer");
     // this should work with all brokers up and running
@@ -2657,7 +2938,13 @@ async fn not_enough_replicas_after_broker_shutdown_inner<F: ProducerBackendFacto
     // restart the server
     ctx.cluster().start_broker(one_broker).await;
     producer.close().await.expect("close should succeed");
+    ctx.cleanup().await;
 }
+
+/// How many records a gRPC arm of
+/// [`send_to_partition_with_follower_shutdown_should_not_timeout_inner`] has
+/// acked when it starts stopping the follower.
+const FOLLOWER_SHUTDOWN_AFTER_ACKS: usize = 10;
 
 /// [`producer_send_cluster_config`]'s broker shape on a dedicated `Type.KRAFT`
 /// cluster (two brokers plus one isolated controller, as Scala's KRaft
@@ -2678,19 +2965,20 @@ fn producer_send_dedicated_cluster_config() -> ClusterConfig {
 /// Java's `createTopicWithAdmin(.., numPartitions = 1, replicationFactor = 3,
 /// replicaAssignment = Map(0 -> List(0, 1)))` creates the topic from the
 /// assignment alone; [`NewTopic::with_replicas_assignments`] is the same request.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_send_to_partition_with_follower_shutdown_should_not_timeout() {
-    let mut ctx = TestContext::new(producer_send_dedicated_cluster_config()).await;
-    send_to_partition_with_follower_shutdown_should_not_timeout_inner(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-    )
-    .await;
-    ctx.cleanup().await;
-}
-
-/// Body of [`test_send_to_partition_with_follower_shutdown_should_not_timeout`],
-/// generic so that `send` resolves to `Producer::send`.
+///
+/// Deviation for the gRPC backends: their `Send` RPC returns only after the
+/// record is acked, so sending the 100 records and only then stopping the
+/// follower, as Java does, would leave nothing in flight while it stops. They
+/// instead stop the follower concurrently with the sends, once
+/// [`FOLLOWER_SHUTDOWN_AFTER_ACKS`] records are acked: the remaining sends are
+/// issued one at a time while the follower shuts down, so some of them are
+/// produced to a leader whose follower is going away, which is the case Java's
+/// test exists for. How many overlap the shutdown depends on timing; no gRPC
+/// arm can put all 100 in flight at once while `Send` blocks. Every assertion
+/// of Java's is kept, on every backend: as `Send` returns only once the record
+/// is acked, the gRPC arms bound each `Send` by Java's 30 s, so a produce held
+/// past 30 s fails there, as in Java (with `request.timeout.ms` 20 000, one
+/// timeout followed by a quick retry still fits, in Java as here).
 async fn send_to_partition_with_follower_shutdown_should_not_timeout_inner<F: ProducerBackendFactory>(
     ctx: &mut TestContext,
     factory: &F,
@@ -2698,7 +2986,7 @@ async fn send_to_partition_with_follower_shutdown_should_not_timeout_inner<F: Pr
     let topic = ctx.topic("topic");
     let producer = factory
         .create(send_test_producer_config(
-            ctx.bootstrap_servers(),
+            &bootstrap_for(factory, ctx),
             &SendTestProducerOpts::default(),
         ))
         .await
@@ -2721,21 +3009,52 @@ async fn send_to_partition_with_follower_shutdown_should_not_timeout_inner<F: Pr
     let partition = 0;
 
     let now = current_time_ms();
-    let mut futures = Vec::with_capacity(NUM_RECORDS);
-    for i in 1..=NUM_RECORDS {
-        let record = ProducerRecord::with_partition_timestamp_key(
+    let record = |i: usize| {
+        ProducerRecord::with_partition_timestamp_key(
             topic.clone(),
             Some(partition),
             Some(now),
             None,
             Some(b(&format!("value{i}"))),
         )
-        .expect("valid record");
-        futures.push(producer.send(record).await.expect("send should succeed"));
-    }
+        .expect("valid record")
+    };
+    let mut futures = Vec::with_capacity(NUM_RECORDS);
+    if factory.name() == "rust" {
+        for i in 1..=NUM_RECORDS {
+            futures.push(producer.send(record(i)).await.expect("send should succeed"));
+        }
 
-    // Shutdown the follower
-    ctx.cluster().shutdown_broker(follower).await;
+        // Shutdown the follower
+        ctx.cluster().shutdown_broker(follower).await;
+    } else {
+        // See the doc comment: the follower stops while the sends go on.
+        let (acked_tx, acked_rx) = tokio::sync::oneshot::channel::<()>();
+        let sends = async {
+            let mut acked_tx = Some(acked_tx);
+            for i in 1..=NUM_RECORDS {
+                // Java's `get(30, SECONDS)` bound, kept here: the RPC returns
+                // only once the record is acked, so the later
+                // `get_with_timeout` finds every future already complete.
+                let sent = tokio::time::timeout(Duration::from_secs(30), producer.send(record(i)))
+                    .await
+                    .expect("produce to a leader with a shutting-down follower should not time out");
+                futures.push(sent.expect("send should succeed"));
+                if i == FOLLOWER_SHUTDOWN_AFTER_ACKS
+                    && let Some(tx) = acked_tx.take()
+                {
+                    let _ = tx.send(());
+                }
+            }
+        };
+        let cluster = ctx.cluster();
+        let shutdown = async {
+            acked_rx.await.expect("the send loop signals before it ends");
+            // Shutdown the follower
+            cluster.shutdown_broker(follower).await;
+        };
+        tokio::join!(sends, shutdown);
+    }
 
     // make sure all of them end up in the same partition with increasing offset values
     for (offset, future) in futures.iter().enumerate() {
@@ -2768,6 +3087,41 @@ async fn send_to_partition_with_follower_shutdown_should_not_timeout_inner<F: Pr
     producer.close().await.expect("close should succeed");
     consumer.close().await.expect("consumer close should succeed");
     admin.close_with_timeout(Duration::from_secs(5)).await;
+    ctx.cleanup().await;
+}
+
+// `ProducerFailureHandlingTest#testNotEnoughReplicasAfterBrokerShutdown`.
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_not_enough_replicas_after_broker_shutdown,
+    not_enough_replicas_after_broker_shutdown_inner,
+    producer_failure_handling_dedicated_cluster_config()
+);
+/// `ProducerFailureHandlingTest#testNotEnoughReplicasAfterBrokerShutdown`.
+#[cfg(not(feature = "multilanguage-tests"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_not_enough_replicas_after_broker_shutdown() {
+    let mut ctx = TestContext::new(producer_failure_handling_dedicated_cluster_config()).await;
+    not_enough_replicas_after_broker_shutdown_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
+}
+
+// `BaseProducerSendTest.testSendToPartitionWithFollowerShutdownShouldNotTimeout`.
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_send_to_partition_with_follower_shutdown_should_not_timeout,
+    send_to_partition_with_follower_shutdown_should_not_timeout_inner,
+    producer_send_dedicated_cluster_config()
+);
+/// `BaseProducerSendTest.testSendToPartitionWithFollowerShutdownShouldNotTimeout`.
+#[cfg(not(feature = "multilanguage-tests"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_to_partition_with_follower_shutdown_should_not_timeout() {
+    let mut ctx = TestContext::new(producer_send_dedicated_cluster_config()).await;
+    send_to_partition_with_follower_shutdown_should_not_timeout_inner(
+        &mut ctx,
+        &crate::common::backend_factory::RustNativeFactory,
+    )
+    .await;
 }
 
 // New tests translated from Java/Scala sources (see COVERAGE-ASSESSMENT.md).
@@ -2824,15 +3178,13 @@ crate::multilanguage_test!(
     batch_size_zero_no_partition_no_record_key_inner,
     producer_send_cluster_config()
 );
-// The four `sendAndVerifyTimestamp` tests are native-only, also under
-// `multilanguage-tests`. They keep Java's producer shape (`linger.ms` and
-// `delivery.timeout.ms` = Int.MaxValue, default `batch.size`), which relies on
-// `send()` returning an unresolved future so `close(20s)` can drain the
-// lingering batch. The gRPC `Send` RPC is synchronous per record: it blocks
-// until delivery (`bindings/c/grpc_server/server.cc` calls
-// `kafka_producer_FutureRecordMetadata_get`; `bindings/python/grpc_server.py`
-// calls `future.result(timeout=120)`). So the first record's partial batch
-// never ships and `close` is never reached on the python / c backends.
+// The two CreateTime `sendAndVerifyTimestamp` tests are native-only, also
+// under `multilanguage-tests`: their faithful JS translation, Java's lingering
+// batch drained by `close(20 s)`, is a client-side test, and the gRPC `Send` RPC
+// returns only after the record's outcome. The two LogAppendTime tests run on
+// every backend, the gRPC ones with `linger.ms=0` (see
+// `send_and_verify_timestamp`), because only this harness can create a
+// `message.timestamp.type=LogAppendTime` topic for them.
 #[cfg(feature = "multilanguage-tests")]
 #[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
 #[tokio::test(flavor = "multi_thread")]
@@ -2849,24 +3201,17 @@ async fn test_send_non_compressed_message_with_create_time__rust() {
         .await;
 }
 #[cfg(feature = "multilanguage-tests")]
-#[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_send_compressed_message_with_log_append_time__rust() {
-    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    send_compressed_message_with_log_append_time_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory)
-        .await;
-}
+crate::multilanguage_test!(
+    test_send_compressed_message_with_log_append_time,
+    send_compressed_message_with_log_append_time_inner,
+    producer_send_cluster_config()
+);
 #[cfg(feature = "multilanguage-tests")]
-#[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_send_non_compressed_message_with_log_append_time__rust() {
-    let mut ctx = TestContext::new(producer_send_cluster_config()).await;
-    send_non_compressed_message_with_log_append_time_inner(
-        &mut ctx,
-        &crate::common::backend_factory::RustNativeFactory,
-    )
-    .await;
-}
+crate::multilanguage_test!(
+    test_send_non_compressed_message_with_log_append_time,
+    send_non_compressed_message_with_log_append_time_inner,
+    producer_send_cluster_config()
+);
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
     test_send_with_invalid_before_and_after_timestamp,
@@ -2905,15 +3250,16 @@ crate::multilanguage_test!(
     partitions_for_timeout_error_when_topic_does_not_exist_inner,
     no_auto_create_cluster_config()
 );
-// `testCompression` is native-only, also under `multilanguage-tests` — see
-// `compression_inner` for why the gRPC backends cannot run it.
 #[cfg(feature = "multilanguage-tests")]
-#[expect(non_snake_case)] // `__rust` suffix matches `multilanguage_test!` naming.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_compression__rust() {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
-    compression_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory).await;
-}
+crate::multilanguage_test!(
+    test_partitions_for_unknown_topic_times_out_with_the_broker_error,
+    partitions_for_unknown_topic_times_out_with_the_broker_error_inner,
+    no_auto_create_cluster_config()
+);
+// `testCompression` runs on every backend; see `compression_inner` for the
+// gRPC backends' `linger.ms`.
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(test_compression, compression_inner);
 
 // ---------------------------------------------------------------------------
 // Rust-native-only tests — the Producer trait surface they exercise
@@ -3643,6 +3989,14 @@ mod rust_only_fallback {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_partitions_for_timeout_error_when_topic_does_not_exist() {
         partitions_for_timeout_error_when_topic_does_not_exist_inner(
+            &mut no_auto_create_ctx().await,
+            &RustNativeFactory,
+        )
+        .await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_partitions_for_unknown_topic_times_out_with_the_broker_error() {
+        partitions_for_unknown_topic_times_out_with_the_broker_error_inner(
             &mut no_auto_create_ctx().await,
             &RustNativeFactory,
         )
