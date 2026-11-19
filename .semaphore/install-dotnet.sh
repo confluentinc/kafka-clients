@@ -6,8 +6,9 @@ set -euo pipefail
 # (M10/P1, Decision 1) and the "verify-dotnet (macOS arm64)" and "verify-dotnet (macOS
 # arm64) — Native AOT" jobs in "Verify Rust and language bindings (macOS arm64)". The
 # Linux "verify-dotnet (Linux amd64) —
-# plaintext gRPC arm", "— ssl" and "— sasl_ssl (plain)" jobs do NOT run this
-# script: they run only the gRPC multilanguage arm, whose .NET server runs
+# plaintext gRPC arm", "— plaintext Native AOT gRPC arm", "— ssl" and "— sasl_ssl
+# (plain)" jobs do NOT run this script: they run only the gRPC multilanguage arm,
+# whose .NET server runs
 # inside the gRPC Docker images, so they need no host .NET. This lives OUTSIDE the shared
 # dependency-install scripts -- `.semaphore/dependencies.sh` on Linux,
 # `.semaphore/dependencies-macos.sh` on macOS -- and outside either block's

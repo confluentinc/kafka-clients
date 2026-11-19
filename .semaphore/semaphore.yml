@@ -30,7 +30,8 @@ name: build-test-release
 #      and verify-c, verify-python and verify-dotnet, each over PLAINTEXT, SSL
 #      and SASL_SSL, including the gRPC multilanguage arm (__grpc_c /
 #      __grpc_python / __grpc_dotnet); the PLAINTEXT arm of each binding runs
-#      in a job of its own. The .NET gRPC images are built for
+#      in a job of its own, and the .NET one again against Native AOT builds of
+#      the .NET gRPC images. The .NET gRPC images are built for
 #      linux/amd64: Grpc.Tools' linux_arm64 protoc SIGSEGVs during C# codegen
 #      inside an arm64 Linux container, so they need an amd64 Linux agent
 #      (which this block uses anyway).
@@ -258,17 +259,22 @@ blocks:
     #     — only the gRPC container arm over the PLAINTEXT CONTAINER listener,
     #     in a job of its own so its duration and failures are attributable
     #     apart from the binding's tests.
+    #   - PLAINTEXT Native AOT gRPC arm, for .NET only:
+    #     `make -C dotnet test-integration-aot` — the same arm against Native
+    #     AOT builds of the two .NET gRPC images, whose server and binding are
+    #     one native executable, in an image with no .NET runtime.
     #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
     #     (CTLSONLY :9100) or SASL_SSL (CSASLTLS :9101) CONTAINER listener. The
     #     unit tests and perf are protocol-independent, so running them once in
-    #     the PLAINTEXT job is enough. The three .NET gRPC arm
-    #     jobs install no host .NET: the gRPC images build inside the .NET SDK
-    #     image, and the harness is Rust.
+    #     the PLAINTEXT job is enough. The four .NET gRPC arm
+    #     jobs install no host .NET: the gRPC images, the Native AOT ones
+    #     included, build inside a .NET SDK image, and the harness is Rust.
     #
     # The block's 45 minutes is the Rust jobs' limit; each binding job sets its
     # own (a job's limit may not exceed its block's, see the note at the top of
     # this file): 30, or 45 for the Python and .NET gRPC-arm jobs (plaintext
-    # gRPC arm, ssl, sasl_ssl), which take about 27 minutes. verify-dotnet's
+    # gRPC arm, ssl, sasl_ssl, and .NET's plaintext Native AOT gRPC arm), which
+    # take about 27 minutes. verify-dotnet's
     # plaintext job was 26 minutes on 2026-09-30 and 20 on 2026-10-01, against
     # about 11 for verify-c and verify-python, and reached 30 minutes in
     # November 2026, while it still ran the .NET gRPC arm; that arm now runs in
@@ -365,6 +371,13 @@ blocks:
             minutes: 45
           commands:
             - make -C dotnet test-integration
+        - name: "verify-dotnet (Linux amd64) — plaintext Native AOT gRPC arm"
+          execution_time_limit:
+            minutes: 45
+          commands:
+            # The plaintext gRPC arm again, against Native AOT builds of the two .NET gRPC images
+            # (Dockerfile.grpc.aot, Dockerfile.grpc.async.aot), tagged <MULTILANG_IMAGE_TAG>-aot.
+            - make -C dotnet test-integration-aot
         - name: "verify-dotnet (Linux amd64) — ssl"
           execution_time_limit:
             minutes: 45
