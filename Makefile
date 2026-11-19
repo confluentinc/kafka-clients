@@ -11,7 +11,17 @@
 # languages run as recipe lines, one after the other, so their builds of the
 # shared Rust library never overlap.
 
-.PHONY: build build-all devel-build build-grpc-images submodules init init-hooks \
+# The tag of the five gRPC images of the multilanguage harness
+# (confluent-kafka-rust/{python,python-async,c,dotnet,dotnet-async}-grpc-server).
+# python/Makefile, c/Makefile and dotnet/Makefile build them under it and
+# rust/tests/common/backend_pool.rs runs them under it (the variable reaches
+# cargo through the environment). Set it per worktree, e.g.
+# `MULTILANG_IMAGE_TAG=mlconv-1234 make build-grpc-images`, so concurrent
+# sessions on one host do not overwrite each other's images.
+MULTILANG_IMAGE_TAG ?= dev
+export MULTILANG_IMAGE_TAG
+
+.PHONY: build build-all devel-build build-grpc-images clean-grpc-images submodules init init-hooks \
 	test test-integration-perf verify verify-commit verify-commit-checks bump-version \
 	select-tests pre-push-test-selection clean-test-selection clean
 
@@ -45,6 +55,28 @@ build-grpc-images:
 
 submodules:
 	git submodule update --init --recursive
+
+# Removes the five gRPC images that carry the current MULTILANG_IMAGE_TAG,
+# e.g. a worktree's own tag once its work is done. The shared default `dev`
+# images are left alone unless CLEAN_DEV_IMAGES=1, since other sessions on the
+# host may be using them. The tag is checked and used with surrounding
+# whitespace stripped, so "dev " is still dev, and anything that is not a
+# Docker tag is refused.
+CLEAN_IMAGE_TAG = $(strip $(MULTILANG_IMAGE_TAG))
+clean-grpc-images:
+	@case "$(CLEAN_IMAGE_TAG)" in \
+		""|-*|.*|*[!A-Za-z0-9_.-]*) \
+			echo "Refusing: '$(MULTILANG_IMAGE_TAG)' is not a Docker tag."; exit 1;; \
+	esac
+	@if [ "$(CLEAN_IMAGE_TAG)" = "dev" ] && [ "$(CLEAN_DEV_IMAGES)" != "1" ]; then \
+		echo "Refusing to remove the shared :dev gRPC images; set MULTILANG_IMAGE_TAG, or CLEAN_DEV_IMAGES=1."; \
+		exit 1; \
+	fi
+	-docker rmi confluent-kafka-rust/python-grpc-server:$(CLEAN_IMAGE_TAG) \
+		confluent-kafka-rust/python-async-grpc-server:$(CLEAN_IMAGE_TAG) \
+		confluent-kafka-rust/c-grpc-server:$(CLEAN_IMAGE_TAG) \
+		confluent-kafka-rust/dotnet-grpc-server:$(CLEAN_IMAGE_TAG) \
+		confluent-kafka-rust/dotnet-async-grpc-server:$(CLEAN_IMAGE_TAG)
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests), creates the

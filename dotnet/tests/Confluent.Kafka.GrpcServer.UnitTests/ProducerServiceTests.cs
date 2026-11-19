@@ -79,7 +79,7 @@ public sealed class ProducerServiceTests
 
         Proto.SendResponse response = await SendOnAnotherThread(server, producerId).WaitAsync(TimeSpan.FromSeconds(10));
 
-        Assert.Equal(7, response.Error.Code);
+        Assert.Equal(-5, response.Error.Code);
         Assert.Equal("dotnet server: producer future timed out after 120s", response.Error.Message);
     }
 

@@ -1,0 +1,144 @@
+# A rebalance listener on a gRPC arm, as a sequence.
+#
+# Source of truth for design/current/img/multilanguage-tests-callbacks.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: the listener is the server's own, built with its
+# binding. It runs inside the binding's poll, writes the callback log and runs
+# the steps the test scripted beforehand (here a commit back into the same
+# consumer). The server never calls the test; the test reads the log
+# afterwards with an ordinary call. Colours as in the other multilanguage-tests
+# diagrams: orange is gRPC, grey a call inside one process.
+
+vars: {
+  d2-config: {
+    pad: 24
+  }
+}
+
+classes: {
+  part: {
+    style: {
+      fill: "#eef2f6"
+      stroke: "#9aa7b4"
+      border-radius: 8
+      font-color: "#16202a"
+      font-size: 15
+    }
+  }
+  server: {
+    style: {
+      fill: "#fbeade"
+      stroke: "#b3470e"
+      stroke-width: 2
+      border-radius: 8
+      font-color: "#7a2f08"
+      font-size: 15
+    }
+  }
+  core: {
+    style: {
+      fill: "#dcf0ec"
+      stroke: "#0d7368"
+      stroke-width: 2
+      border-radius: 8
+      font-color: "#0b4f47"
+      font-size: 15
+    }
+  }
+  note: {
+    style: {
+      fill: "#ffffff"
+      stroke: "#9aa7b4"
+      stroke-dash: 3
+      border-radius: 6
+      font-color: "#586675"
+      font-size: 14
+    }
+  }
+  grpc: {
+    style: {
+      stroke: "#b3470e"
+      stroke-width: 2
+      font-color: "#b3470e"
+      font-size: 14
+    }
+  }
+  call: {
+    style: {
+      stroke: "#586675"
+      stroke-width: 2
+      font-color: "#586675"
+      font-size: 14
+    }
+  }
+  kafka: {
+    style: {
+      stroke: "#0d7368"
+      stroke-width: 2
+      stroke-dash: 4
+      font-color: "#0d7368"
+      font-size: 14
+    }
+  }
+}
+
+shape: sequence_diagram
+
+test: "Rust test\nstand-in client" {class: part}
+server: "test server\nowns the listener" {class: server}
+binding: "binding + Rust core\nfires the callback" {class: core}
+
+setup: "script the listener, subscribe" {
+  style: {
+    fill: "#e6ecf2"
+    stroke: "#9aa7b4"
+    stroke-dash: 3
+    font-color: "#3d4a57"
+    font-size: 14
+    bold: true
+  }
+
+  test -> server: "SetListenerAction(on revoked: commit)" {class: grpc}
+  test -> server: "Subscribe(topics, with_listener)" {class: grpc}
+  server -> binding: "subscribe(topics, the server's listener)" {class: call}
+}
+
+rebalance: "a later poll revokes partitions" {
+  style: {
+    fill: "#e6ecf2"
+    stroke: "#9aa7b4"
+    stroke-dash: 3
+    font-color: "#3d4a57"
+    font-size: 14
+    bold: true
+  }
+
+  # Activation spans: the server's Poll handler, the listener running inside
+  # it, and the binding's poll.
+  server.poll.style: {fill: "#fbeade"; stroke: "#b3470e"}
+  server.poll.listener.style: {fill: "#f6d3bb"; stroke: "#b3470e"}
+  binding.poll.style: {fill: "#dcf0ec"; stroke: "#0d7368"}
+
+  test -> server.poll: "Poll(…)" {class: grpc}
+  server.poll -> binding.poll: "poll()" {class: call}
+  binding.poll -> server.poll.listener: "on_partitions_revoked(…), inside poll" {class: call}
+  server.log: "writes a callback-log entry,\nruns the scripted step" {class: note}
+  server.poll.listener -> binding.poll: "commit()" {class: call}
+  binding.poll -> server.poll: "poll returns" {class: call}
+  server.poll -> test: "PollResponse" {class: grpc}
+}
+
+check: "read what happened" {
+  style: {
+    fill: "#e6ecf2"
+    stroke: "#9aa7b4"
+    stroke-dash: 3
+    font-color: "#3d4a57"
+    font-size: 14
+    bold: true
+  }
+
+  test -> server: "GetCallbackLog()" {class: grpc}
+  server -> test: "[revoked …, assigned …]" {class: grpc}
+}
