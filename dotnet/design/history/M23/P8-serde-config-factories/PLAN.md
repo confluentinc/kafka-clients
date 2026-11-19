@@ -150,11 +150,11 @@ The ten points of the first decision, in their final shape:
    `ISerializerWithConfigure<T>` / `IAsyncSerializerWithConfigure<T>` / `IDeserializerWithConfigure<T>` /
    `IAsyncDeserializerWithConfigure<T>`: the key with `true`, then the value with `false`, once each. On the
    asynchronous clients it is awaited, with `Create`'s token. A serde given as an argument is never configured.
-   `configs` is a copy of the user's configuration (row 561).
+   `configs` is the serde's own copy of the user's configuration as `Create` found it when it was called (row 561).
 5. **A failure while the serdes are built** (the function returns null or throws, `Configure` throws, the client
    refuses the instance) is a `KafkaException` "Failed to construct kafka producer" / "Failed to construct kafka
-   consumer" with the cause as `InnerException`, as Java's constructor wraps what its `try` throws. What Java's
-   constructor would hold by then is disposed (row 562).
+   consumer" with the cause as `InnerException`, as Java's constructor wraps what its `try` throws. A serde
+   built here is disposed, and a given one where Java's constructor holds it by then and closes it (row 562).
 6. **Order.** The binding's configuration checks and the core's configuration validation come first, as bare
    `ConfigException`s, before any function runs.
 7. **Disposal.** A serde the client built is disposed at close exactly as a given one (`SerdeDisposal`), and
@@ -200,13 +200,13 @@ The binding's order, for all four `Create(configs, key, value)`:
 
 | # | Check | Result |
 |---|---|---|
-| 1 | `configs` is null | `ArgumentNullException("configs")` |
+| 1 | `configs` is null; otherwise it is copied, once, and every later step reads that copy (row 561) | `ArgumentNullException("configs")` |
 | 2 | for a null argument, its key is missing or null: the key's, then the value's | bare `ConfigException`, Java's message (Java step 1) |
 | 3 | per serde, the key's then the value's: a given one is checked by `SerdeGuard.Check`; a configured one must be a function of the client's interface | bare `IllegalArgumentException` (the guard, as before this phase); bare `ConfigException` (rows 565, 567) |
 | 3a | asynchronous clients only: the token is already cancelled | `OperationCanceledException` (row 576) |
 | 4 | `ClientConfigs.Prepare`: the other keys' types, a null key | bare `ConfigException` (Java step 2) |
 | 5 | the core's config constructor: values, ranges | bare `ConfigException` (Java step 2) |
-| 6 | for a null key argument: the key function, the null check, `SerdeGuard.Check`, `Configure(copy of configs, true)`; then the same for a null value argument with `false` | "Failed to construct kafka …" with the cause inside (Java step 3) |
+| 6 | for a null key argument: the key function, the null check, `SerdeGuard.Check`, `Configure(its own copy of that copy, true)`; then the same for a null value argument with `false` | "Failed to construct kafka …" with the cause inside (Java step 3) |
 | 6a | asynchronous clients only: the token is read before each function, by each `Configure` it is passed to, and once more before step 7 | `OperationCanceledException`, bare (row 576) |
 | 7 | the core's client constructor | "Failed to construct kafka …"; `group.protocol=classic` bare (row 564) |
 
@@ -217,14 +217,16 @@ yet when one fails: nothing native has to be torn down (row 568).
 On an asynchronous client, steps 1 to 5 throw from the call to `Create` itself, before it returns a task; from
 step 6 on a failure fails the returned `Task` (row 581).
 
-What is disposed on a failure (row 562), key then value; on an asynchronous client each disposal is awaited:
+What is disposed on a failure (row 562). Two serdes are disposed key then value, except for a value failure in
+step 6, where the instance that failed is disposed first and the key after it. On an asynchronous client each
+disposal is awaited:
 
 | Failure | Disposed |
 |---|---|
 | steps 1–5 | nothing: nothing was built, and a given serde stays its owner's |
 | step 6, the key: the function throws or returns null | nothing; a given value stays its owner's, as Java's constructor holds neither yet |
 | step 6, the key: the guard refuses the instance or its `Configure` throws | that instance |
-| step 6, the value | the instance that failed, if any, and the key, built or given, as Java's constructor holds the key by then and closes it |
+| step 6, the value | the instance that failed, if any, then the key: a built key on all four clients, since nothing else holds it (Java's consumer does not close it); a given key on the producers only, whose Java constructor has assigned `keySerializerPlugin` by then and closes it. On the consumers a given key stays its owner's, as Java's `new Deserializers<>(…)` builds both and the consumer holds neither yet |
 | step 7, wrapped | both serdes, given or built, as before this phase (ledger 447) |
 | step 7, bare (`group.protocol=classic`) | the built ones; a given one stays its owner's (row 564) |
 | a cancellation (asynchronous clients) | the built ones; a given one stays its owner's (row 576) |
@@ -267,7 +269,9 @@ All the logic is in internal helpers with a synchronous and an awaited entry; ea
 wrapper over them.
 
 - `src/Confluent.Kafka/Internal/ConfiguredSerdes.cs` (new). `ConfiguredSerdes<TKeySerde, TValueSerde>` holds the
-  pair of one client. Its constructor makes checks 1 to 3. `Build()` and `BuildAwaited(token)` are step 6 and
+  pair of one client. Its constructor copies `configs` once, after the null check, and makes checks 1 to 3 on
+  the copy; `Configs` is that copy, which each public `Create` hands to `NativeProducer` / `NativeConsumer`, and
+  each `Configure` gets its own copy of it (row 561). `Build()` and `BuildAwaited(token)` are step 6 and
   return the pair's `SerdeDisposal`; `DisposeBuilt()` and `DisposeBuiltAwaited()` dispose only what was built, for
   a bare failure or a cancellation; `Key` and `Value` give the serdes the client stores. The non-generic
   `ConfiguredSerdes` has four factories (`Serializers`, `AsyncSerializers`, `Deserializers`,
@@ -284,7 +288,9 @@ wrapper over them.
   client (`OfAsyncSerdes`) are disposed only through `IAsyncDisposable`, by `DisposeOnceAsync()` (awaited) or
   `DisposeOnce()` (a synchronous `Dispose()` of the client, which waits on the calling thread, as before).
 - `Internal/SerdeGuard.cs`: the check of an asynchronous serde's close (row 575).
-- `Internal/ClientConfigs.cs`: the comment on the skipped keys.
+- `Internal/ClientConfigs.cs`: the comment on the skipped keys; `Prepare` takes the entries as an
+  `IReadOnlyCollection<KeyValuePair<string, object?>>`, which a dictionary and `ConfiguredSerdes.Configs` both
+  are, so a null key the caller's own dictionary type allows is still refused at check 4.
 - The four client classes: the two `Create` overloads, a private constructor, no public one.
 - `Common/Serialization/IAsyncSerializer.cs`, `IAsyncDeserializer.cs` and the four built-in asynchronous serdes
   that have a `Configure`: the `ValueTask` shape. `ISerializer.cs`, `IDeserializer.cs`, `IProducer.cs`,
@@ -333,6 +339,9 @@ Unit tests (`tests/Confluent.Kafka.UnitTests`), asserting the exact messages:
   `async consumer`) unless a name says otherwise:
   - `Create(configs)` calls each function once and configures each serde once, the key (`true`) before the value
     (`false`), with the configuration's entries;
+  - the configuration is read once, at the call: a key function that changes the caller's dictionary (a value
+    the client would refuse, a changed entry, a new one, a removed one, another value function) changes neither
+    the client that is built, nor the value function that is called, nor what either `Configure` receives;
   - with both serdes given: they are used, no function is called, nothing is configured, and no serde key is
     needed;
   - with only the key null, and with only the value null: the null one is built and the given one is taken as it
@@ -344,13 +353,19 @@ Unit tests (`tests/Confluent.Kafka.UnitTests`), asserting the exact messages:
     kind's interface): the exact bare `ConfigException`, and no function runs;
   - a bad configuration value is the core's bare `ConfigException`, and no function runs;
   - the key function fails: Java's wrapped failure, and a given value is left alone;
-  - the value function fails: Java's wrapped failure, and the key is disposed, built or given;
-  - `Configure` throws: Java's wrapped failure, that serde and the key before it are disposed;
+  - the value function fails: Java's wrapped failure; a built key is disposed on every client, a given one only
+    on a producer
+    (`Create_WhenTheValueFunctionFails_IsJavasWrappedFailure_DisposesABuiltKey_AndAGivenOneOnlyOnAProducer`);
+  - `Configure` throws: Java's wrapped failure; that serde is disposed, then a built key before it; when it is the
+    value's, a given key only on a producer
+    (`Create_WhenTheValuesConfigureThrows_DisposesTheValue_AndAGivenKeyOnlyOnAProducer`);
   - a built serde the client refuses: Java's wrapped failure around the refusal;
   - a serde with no `Configure` and no dispose is built without either being called;
   - the core fails to build the client: the built serdes are disposed, key then value;
   - the asynchronous `Create`: it throws its checks from the call and reports the rest through its task; it
-    returns while a `Configure` is pending and completes only once both are configured; it passes its token to
+    returns while a `Configure` is pending and completes only once both are configured; the caller changes its
+    dictionary, and the key serde the map it was given, while the key's `Configure` is pending, and the value
+    serde's `Configure` still receives the entries of the call, in a map of its own; it passes its token to
     `Configure`; a token already cancelled, a cancellation while the key is configured, while the value is
     configured, and once both are configured, each with what is disposed and what is left; a `Configure`
     cancelled by another token is Java's wrapped failure; the built serdes are disposed by the blocking
@@ -444,8 +459,8 @@ The other rows are this plan's own choices and deviations, for the owner to acce
 | 558 | Owner 2026-11-19 | Order | the binding's configuration checks and the core's validation come first, bare, before the functions run | Agreed |
 | 559 | Owner 2026-11-19 | Disposal and guard | a built serde is disposed at close as a given one, and `SerdeGuard.Check` applies to it | Agreed |
 | 560 | Owner 2026-11-19 | Unchanged | the five own-role keys never reach the core; the mocks do not change. Amended by rows 570 and 573: the three-argument form is `Create(configs, key, value)` and builds a null argument from the configuration | Agreed |
-| 561 | Actor 130 | The `configs` given to `Configure` | a fresh copy of the user's configuration for each call, serde keys included, as Java's `originals()` copies; it does not carry the `client.id` the core resolves, which Java adds (`config.originals(singletonMap(CLIENT_ID_CONFIG, clientId))`). Why: no FFI function returns the resolved id. Goes when: the C ABI returns the client id of a producer and a consumer | Proposed |
-| 562 | Actor 130 | Disposal on a failed `Create` | the table of "Java's order, and the binding's": a built instance the guard refuses or whose `Configure` throws is disposed; a value failure also disposes the key, built or given; a wrapped failure of the core disposes both, given or built; a bare one and a cancellation dispose only the built ones. Java closes less in one case: a serializer whose `configure` throws is not yet assigned and is not closed. Why: the user holds no reference to a built serde, so nobody else can dispose it | Proposed |
+| 561 | Actor 130 | The `configs` `Create` reads, and the one given to `Configure` | `Create` copies the user's configuration once, synchronously, right after the null check and before anything reads it, as Java's `appendSerializerToConfig` / `appendDeserializerToConfig` does (`new HashMap<>(configs)`); the missing-key check, the kind check, `ClientConfigs.Prepare`, the core and each `Configure` read that one copy, on all four clients. So a change to the caller's dictionary after the call (by the caller while an asynchronous `Create` is pending, or by a function) reaches none of them, and no later read can race it (Critic 130, finding 1: before the fix the value serde's map was copied from the caller's dictionary after the key's `Configure`). Each `Configure` gets its own copy of that copy, serde keys included, as Java's `originals()` copies, so one serde cannot change what the other sees; it does not carry the `client.id` the core resolves, which Java adds (`config.originals(singletonMap(CLIENT_ID_CONFIG, clientId))`). Why: no FFI function returns the resolved id. Goes when: the C ABI returns the client id of a producer and a consumer | Proposed |
+| 562 | Actor 130 | Disposal on a failed `Create` | the table of "Java's order, and the binding's": a built instance the guard refuses or whose `Configure` throws is disposed; a value failure then disposes the key: a built one on all four clients; a given one on the producers only, as Java's `KafkaProducer` has assigned `keySerializerPlugin` by then and its `close(Duration.ofMillis(0), true)` closes it, and not on the consumers, as Java's `new Deserializers<>(config, keyDeserializer, valueDeserializer, metrics)` builds both and the consumer's field is still null when the value fails (Critic 130, finding 2); a wrapped failure of the core disposes both, given or built; a bare one and a cancellation dispose only the built ones. Java closes less in two cases: a serde whose `configure` throws is not yet assigned and is not closed, and a key deserializer Java's consumer built is not closed when the value deserializer fails. Why: the user holds no reference to a built serde, so nobody else can dispose it | Proposed |
 | 563 | Actor 130 | `SerdeGuard.Check` on a built serde | its `IllegalArgumentException` is the `InnerException` of "Failed to construct kafka …", where a given serde's is thrown bare. Why: the instance exists only inside Java's `try` | Proposed |
 | 564 | Actor 130 | A bare failure of the core's client constructor | the consumer's `group.protocol=classic` refusal (`UnsupportedOperationException`) comes after the functions ran; it stays bare and the built deserializers are disposed, where ledger 447 leaves given ones alone on a bare error. Why: the binding repeats no core check to refuse it earlier. Goes when: the core's config constructor refuses it | Proposed |
 | 565 | Actor 130 | A value of the wrong kind | a bare `ConfigException` with the binding's own text "Expected value to be a System.Func<…>, but it was a …". Java has no such case: a class name it cannot load is a bare `ConfigException` "Class … could not be found.", and a class of another interface is a wrapped `KafkaException` "… is not an instance of …" | Proposed |
@@ -547,7 +562,11 @@ that is `IDisposable`, an asynchronous client one that is `IAsyncDisposable`, an
 `IAsyncDisposable` ("<Type> implements IDisposable but does not implement IAsyncDisposable, so the producer would
 never dispose it."). They are also disposed when the core fails to build the client with Java's wrapped "Failed
 to construct kafka producer" / "… consumer", not, for a given one, for an error it returns bare, such as a
-configuration value it cannot parse, which Java raises before its constructor's `try` (ledger 447). A serde the
+configuration value it cannot parse, which Java raises before its constructor's `try` (ledger 447). When the value
+serde cannot be built from the configuration (its function throws or returns null, the client refuses the
+instance, or its `Configure` throws), a producer also disposes a key serializer it was given, as Java's
+constructor holds it by then and closes it; a consumer leaves a given key deserializer to its owner, as Java's
+consumer holds neither deserializer yet (ledger 562). A serde the
 client built is disposed on every failure of `Create` after its function returned it, the bare
 `group.protocol=classic` refusal and a cancellation included, since the user holds no reference to it (ledgers
 562, 564, 576)." P7 has no draft for this sentence: its ledger 548
@@ -661,6 +680,54 @@ method (`AsyncSerializerExtensions.Configure`, `AsyncDeserializerExtensions.Conf
 asynchronous `Create` awaits it on a serde it builds (§4 **Serializers**). An asynchronous serde is closed only
 through `IAsyncDisposable` (ledger 575)."
 
+### R13 — `dotnet/CLAUDE.md:607-609`, the §3 sketch of the synchronous `KafkaConsumer`
+
+Stale: `public KafkaConsumer(IReadOnlyDictionary<string, object?> configs, IDeserializer<TKey> keyDeserializer,
+IDeserializer<TValue> valueDeserializer);  // 3-param (decision A); typed values, §4 Config`.
+
+Replacement:
+
+```csharp
+public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue> {   // Java `KafkaConsumer` (KIP-848), synchronous
+    // Java KafkaConsumer(Map) and KafkaConsumer(Map, Deserializer<K>, Deserializer<V>); no public constructor.
+    public static KafkaConsumer<TKey, TValue> Create(IReadOnlyDictionary<string, object?> configs);
+    public static KafkaConsumer<TKey, TValue> Create(IReadOnlyDictionary<string, object?> configs,
+        IDeserializer<TKey>? keyDeserializer, IDeserializer<TValue>? valueDeserializer);   // typed values, §4 Config
+}
+```
+
+### R14 — `dotnet/CLAUDE.md:960`, §4 status table, row **Exceptions**: "the client constructors throw it"
+
+Stale: "**`ConfigException : KafkaException`** (Java's `common.config` class, −10) is generated too: the client
+constructors throw it for a configuration value the binding refuses, and it is the type of the core's −10 (§4
+**Config**)."
+
+Replacement: "**`ConfigException : KafkaException`** (Java's `common.config` class, −10) is generated too: the
+real clients' `Create` throws it for a configuration value the binding refuses, a serde key's value included (a
+missing or `null` one when no serde is given, or one that is not a function of the client's serde interface), and
+it is the type of the core's −10 (§4 **Config**)."
+
+### Rule-file mentions of a client constructor that were checked and stay
+
+Searched once more after Critic 130's review (finding 3), for "constructor", "ctor", "new Kafka…" and "public
+Kafka…(" in `dotnet/CLAUDE.md`, `dotnet/.claude/rules/*`, the root `CLAUDE.md` and `.claude/rules/*`. Every stale sentence has
+a draft above: `dotnet/CLAUDE.md:330-334` and `:532-537` (R8), `:607-609` (R13), `:780` (R9), `:837-841` (R7),
+`:897-902` (R10), `:958` (R1 to R4), `:959` (R5, R6) and `:960` (R14). These mention a constructor and are not
+stale:
+
+- `dotnet/CLAUDE.md:770`, "Their Java methods and the three client classes' constructors are not translated":
+  the constructors of the config classes (`ProducerConfig(Map)`, `ConsumerConfig(Map)`, `AdminClientConfig(Map)`),
+  which stay untranslated.
+- `dotnet/CLAUDE.md:1703-1704`, "A client constructor's rejection … `TranslateAdmin.ConstructorError`": the gRPC
+  admin translation, which this phase does not touch.
+- `dotnet/.claude/rules/ffi-marshalling.md:102`, `:105` and `:484`: the core's config constructor and the native
+  `KafkaProducer_new`, which `Create` still calls.
+- `dotnet/.claude/rules/bindings.md`: no mention. The root `CLAUDE.md` (`:316`, `:353`, `:436`, `:469-470`,
+  `:520`) and `.claude/rules/consumer-threading.md:586`: the Python binding's constructors, the core's config
+  constructor and Java's own; none is about a .NET client constructor.
+- `dotnet/README.md:264` (not a rule file): the breaking-change note, which quotes the old
+  `new KafkaProducer<K, V>(config, key, value)` form on purpose.
+
 ### R12 — `dotnet/README.md` (not a rule file; edited in S2 and S5)
 
 The serialization section now says that a client is built by `Create`, shows the configuration route for a
@@ -673,7 +740,10 @@ synchronous and an asynchronous client, and says that an asynchronous serde is d
 2. Row 581: should the asynchronous `Create` report its upfront checks (a null `configs`, a missing key, a wrong
    kind of value, a bad configuration value) through its `Task` instead of throwing them from the call? The
    implementation throws from the call; the logic is in internal helpers, so the other shape is a change to the
-   four thin wrappers and their tests.
+   four thin wrappers and their tests. Critic 130 (its question 1) adds that the .NET Task-based Asynchronous
+   Pattern guidance has a method throw from the call only for usage errors: a token already cancelled (check 3a,
+   an `OperationCanceledException` from the call today) would then be a cancelled `Task`, and a configuration the
+   binding or the core refuses (checks 4 and 5), which may come from a file at run time, a faulted one.
 3. Row 575: a public `Dispose()` on a serde that is `IAsyncDisposable` was refused before S2 (as never called) and
    is accepted now, since such a class commonly implements both patterns. Is that the intended reading of "closed
    only through `IAsyncDisposable`"?
@@ -686,3 +756,18 @@ synchronous and an asynchronous client, and says that an asynchronous serde is d
    failed once on net10.0 during the S6 gates (9,627 passed, 1 failed) and passed on net8.0, in six reruns of its
    class and in two reruns of the whole net10.0 suite (9,628 / 51 / 0 each). It is a thread-timing test of
    `AsyncMockConsumer`, which this phase does not touch.
+8. Row 562 (Critic 130, finding 2 and its question 2): when the value deserializer cannot be built, the consumers
+   now leave a given key deserializer to its owner, as Java's consumer does, while the producers dispose a given
+   key serializer, as Java's producer does. The other choice is one behaviour on all four clients (the producer's),
+   recorded as a deviation on the consumers. A key the binding built is disposed on all four, which on the
+   consumers is more than Java does.
+9. Rows 562 and 575 (Critic 130, question 3): an asynchronous serde a configuration function built that is
+   `IDisposable` without being `IAsyncDisposable` is refused, as a given one is, with Java's wrapped failure. It is
+   then never disposed: the client held the only reference, and an asynchronous client disposes only through
+   `IAsyncDisposable`. Is that intended, or should a refused built serde be disposed through `IDisposable`?
+10. Critic 130, question 4: Java's `public static ConsumerConfig.appendDeserializerToConfig` stays a `missing`
+    entry of `dotnet/analyzers/java-name-baseline.txt` (line 234), and Java's
+    `ConsumerConfigTest.testAppendDeserializerToConfig*` and `ProducerConfigTest.testAppendSerializerToConfig*`
+    stay untranslated, although `Create` now does what both methods do (`ProducerConfig.appendSerializerToConfig`
+    is package-private in Java, so it has no baseline entry). The halves of those tests that expect a
+    `ConfigException` are covered through `Create`. Keep the method out, or expose it on `ConsumerConfig`?
