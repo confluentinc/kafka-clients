@@ -176,15 +176,15 @@ public sealed class BytesMemoryManagerTests : IDisposable
     public void ARetainedBatch_ReportsItsBytesAsMemoryPressure_UntilTheRelease_WhichRunsItsCallback()
     {
         SafeConsumerRecordsHandle batch = NewBatch();
-        batch.AddBytes(100);
-        batch.AddBytes(23);
+        batch.AddRecord(100);
+        batch.AddRecord(23);
         int released = 0;
 
         Assert.Equal(0, batch.Pressure);
 
         batch.Retain(() => released++);
 
-        Assert.Equal(123, batch.Pressure);
+        Assert.Equal(123 + (2 * SafeConsumerRecordsHandle.RecordOverhead), batch.Pressure);
         Assert.Equal(0, released);
 
         batch.Dispose();
@@ -197,7 +197,7 @@ public sealed class BytesMemoryManagerTests : IDisposable
     public void ARetainedBatchsMemoryPressure_StaysWhileAPinDefersTheRelease()
     {
         SafeConsumerRecordsHandle batch = NewBatch();
-        batch.AddBytes(s_data.Length);
+        batch.AddRecord(s_data.Length);
         ReadOnlyMemory<byte> memory = batch.HandOut(_block, s_data.Length);
         int released = 0;
         batch.Retain(() => released++);
@@ -205,7 +205,7 @@ public sealed class BytesMemoryManagerTests : IDisposable
 
         batch.Dispose();
 
-        Assert.Equal(s_data.Length, batch.Pressure);
+        Assert.Equal(s_data.Length + SafeConsumerRecordsHandle.RecordOverhead, batch.Pressure);
         Assert.Equal(0, released);
 
         pin.Dispose();
@@ -218,13 +218,11 @@ public sealed class BytesMemoryManagerTests : IDisposable
     public void ADisposedBatch_ThatWasNotRetained_ReportsNoMemoryPressure()
     {
         SafeConsumerRecordsHandle batch = NewBatch();
-        batch.AddBytes(123);
-        int released = 0;
+        batch.AddRecord(123);
 
-        batch.Dispose(() => released++);
+        batch.Dispose();
 
         Assert.Equal(0, batch.Pressure);
-        Assert.Equal(1, released);
     }
 
     [Fact]

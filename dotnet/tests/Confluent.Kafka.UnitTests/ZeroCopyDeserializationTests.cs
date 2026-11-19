@@ -153,7 +153,10 @@ public sealed class ZeroCopyDeserializationTests
         Assert.True(MemoryMarshal.TryGetMemoryManager(records[2].Key()!.Value, out BytesMemoryManager? third));
         Assert.Same(first!.Batch, second!.Batch);
         Assert.Same(first.Batch, third!.Batch);
-        Assert.Equal("key-0".Length + "value-0".Length + "second".Length + "k2".Length, first.Batch.Pressure);
+        Assert.Equal(
+            (3 * SafeConsumerRecordsHandle.RecordOverhead) + "key-0".Length + "value-0".Length + "second".Length
+                + "k2".Length,
+            first.Batch.Pressure);
     }
 
     [Fact]

@@ -1419,12 +1419,6 @@ internal sealed partial class NativeConsumer
                     error = awaited.Error;
                     rewind = awaited.Rewind;
                 }
-                else if (key.InnerWithMemory is null && value.InnerWithMemory is null)
-                {
-                    copied = ConsumerRecordsMarshal.CopyOut(
-                        records, key.Inner, key.InnerWithHeaders, value.Inner, value.InnerWithHeaders, out error,
-                        out rewind);
-                }
                 else
                 {
                     copied = ConsumerRecordsMarshal.CopyOut(

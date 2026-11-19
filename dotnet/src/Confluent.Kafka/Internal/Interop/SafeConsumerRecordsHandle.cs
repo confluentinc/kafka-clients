@@ -17,17 +17,22 @@ using System;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// The owned <c>kafka_consumer_ConsumerRecords_t</c> of a polled batch whose keys and values are handed out as memory
-/// through <see cref="BytesMemoryManager"/>. Each such memory references the handle and each pin adds a reference to
-/// it, so the batch is destroyed only once no memory over it is reachable and no pin is open. It holds no reference to
-/// the consumer, whose disposal the batch outlives.
+/// The owned <c>kafka_consumer_ConsumerRecords_t</c> of a polled batch with records, released by the garbage collector
+/// only. The records copied out of it and every memory over it handed out through <see cref="BytesMemoryManager"/>
+/// reference the handle, and each pin adds a reference to it, so the batch is destroyed only once none of them is
+/// reachable and no pin is open. It holds no reference to the consumer, whose disposal the batch outlives: its destroy
+/// only frees the batch.
 /// </summary>
 internal sealed class SafeConsumerRecordsHandle : SafeHandleZeroIsInvalid
 {
+    // The native memory of one record beside its key and value bytes, reported as memory pressure: the core's
+    // ConsumerRecordInner (152 bytes, measured on x86-64 with gdb on the debug library), the kafka_Bytes_t views of
+    // its key and value (2 x 16 bytes), and the topic's CString, rounded up to 192.
+    internal const long RecordOverhead = 192;
+
     private long _bytes;
     private long _pressure;
     private bool _handedOut;
-    private bool _lent;
     private Action? _released;
 
     internal SafeConsumerRecordsHandle(IntPtr records)
@@ -38,12 +43,10 @@ internal sealed class SafeConsumerRecordsHandle : SafeHandleZeroIsInvalid
     // Whether a deserializer was given a memory over the batch, which it may have kept.
     internal bool HandedOut => _handedOut;
 
-    // Whether a deserializer was lent a memory over the batch, a pin of which may outlive its call.
-    internal bool Lent => _lent;
-
     internal long Pressure => _pressure;
 
-    internal void AddBytes(long length) => _bytes += length;
+    // One record of the batch, with the length of its key and value bytes.
+    internal void AddRecord(long keyAndValueLength) => _bytes += RecordOverhead + keyAndValueLength;
 
     // An empty key or value has no bytes to keep valid, so it references no batch.
     internal ReadOnlyMemory<byte> HandOut(IntPtr data, int length)
@@ -66,19 +69,11 @@ internal sealed class SafeConsumerRecordsHandle : SafeHandleZeroIsInvalid
             return null;
         }
 
-        _lent = true;
         return new BytesMemoryManager(this, data, length);
     }
 
-    // Disposes the batch, whose release an open pin defers, and runs `released` at the release.
-    internal void Dispose(Action released)
-    {
-        _released = released;
-        Dispose();
-    }
-
-    // Leaves the batch to the garbage collector, which cannot see the native bytes it keeps: they are reported as
-    // memory pressure until the release, which then runs `released`.
+    // Leaves the batch to the garbage collector, which cannot see the native memory it keeps: it is reported as memory
+    // pressure until the release, which then runs `released`. Nothing disposes a batch once a record wraps it.
     internal void Retain(Action? released)
     {
         _released = released;

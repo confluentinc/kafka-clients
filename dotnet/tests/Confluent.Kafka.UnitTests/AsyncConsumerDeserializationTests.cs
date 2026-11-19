@@ -523,13 +523,16 @@ public sealed class AsyncConsumerDeserializationTests
         Assert.True(MemoryMarshal.TryGetMemoryManager(records[2].Key()!.Value, out BytesMemoryManager? third));
         Assert.Same(first!.Batch, second!.Batch);
         Assert.Same(first.Batch, third!.Batch);
-        Assert.Equal("key-0".Length + "value-0".Length + "second".Length + "k2".Length, first.Batch.Pressure);
+        Assert.Equal(
+            (3 * SafeConsumerRecordsHandle.RecordOverhead) + "key-0".Length + "value-0".Length + "second".Length
+                + "k2".Length,
+            first.Batch.Pressure);
     }
 
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task ACallScopedBatch_ReportsNoMemoryPressure_AndIsReleasedOnceItsLastPinIs(bool awaits)
+    public async Task ACallScopedBatch_ReportsItsRecordsAsMemoryPressure_AndOutlivesItsPins(bool awaits)
     {
         KeepingDeserializer values = new KeepingDeserializer(awaits);
         AsyncMockConsumer<string, string> consumer =
@@ -542,7 +545,7 @@ public sealed class AsyncConsumerDeserializationTests
 
         Assert.True(MemoryMarshal.TryGetMemoryManager(Assert.Single(values.Kept), out BytesMemoryManager? manager));
         SafeConsumerRecordsHandle batch = manager!.Batch;
-        Assert.Equal(0, batch.Pressure);
+        Assert.Equal(SafeConsumerRecordsHandle.RecordOverhead + "key".Length + "kept".Length, batch.Pressure);
         Assert.Equal(2, values.Pins.Count);
         values.Pins[0].Dispose();
         Assert.False(batch.IsClosed);
@@ -550,7 +553,8 @@ public sealed class AsyncConsumerDeserializationTests
 
         values.Pins[1].Dispose();
 
-        Assert.True(batch.IsClosed);
+        // Only the garbage collector releases a batch, so it outlives the pins.
+        Assert.False(batch.IsClosed);
     }
 
     public enum Failure

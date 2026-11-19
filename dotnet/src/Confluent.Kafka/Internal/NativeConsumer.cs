@@ -585,8 +585,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // The records are deserialized after the poll's use has ended, so a deserializer may dispose the consumer. A
     // record that fails to deserialize ends the batch: the records before it are returned, and every partition is
     // sought back to its first record not returned, the seeks taking one use of their own, so the failing record comes
-    // next. A deserializer's memory form, given when it has one, is called with a memory over the batch, which is
-    // then released as ReleaseRecords says.
+    // next. A deserializer's memory form, given when it has one, is called with a memory over the batch. A batch with
+    // records is then released as ReleaseRecords says, one without records destroyed here.
     internal ConsumerRecords<TKey, TValue> PollTyped<TKey, TValue>(
         TimeSpan timeout,
         IDeserializer<TKey> keyDeserializer,
@@ -2086,9 +2086,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    // A batch whose bytes a deserializer was given is never destroyed here, also when one of its records failed to
-    // deserialize: what the deserializers returned may be memory over it, so it is left to the garbage collector,
-    // which releases it once no such memory is reachable. The poll's hold ends here either way.
+    // A batch with records is never destroyed here, also when one of its records failed to deserialize: the records
+    // returned and what the deserializers returned may read it, so it is left to the garbage collector, which
+    // releases it once none of them is reachable. The poll's hold ends here either way.
     private void ReleaseRecords(SafeConsumerRecordsHandle batch)
     {
         try
@@ -2125,14 +2125,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
+    // Every batch with records is left to the garbage collector, never disposed: the records copied out of it, and
+    // any memory over it a deserializer kept, may still read it. A mock batch counts as retained until its release,
+    // which frees the mock's record bytes once no poll holds records and no other batch is retained.
     private void ReleaseBatch(SafeConsumerRecordsHandle batch)
     {
-        if (!batch.HandedOut && !(IsMock && batch.Lent))
-        {
-            batch.Dispose();
-            return;
-        }
-
         Action? released = null;
         if (IsMock)
         {
@@ -2144,15 +2141,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             released = _releaseRetainedRecords ??= ReleaseRetainedRecords;
         }
 
-        if (batch.HandedOut)
-        {
-            batch.Retain(released);
-        }
-        else
-        {
-            // A pin taken on a lent memory defers the release past this poll, and the mock's record bytes with it.
-            batch.Dispose(released!);
-        }
+        batch.Retain(released);
     }
 
     private void EndRecordsHold()

@@ -32,7 +32,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <summary>
 /// <see cref="ConsumerRecordsMarshal"/>'s next offsets over native batches built in a fixed partition order: a batch
 /// with next offsets and no records, and the next offsets of a batch cut short by a failing deserializer. Also when
-/// a copy-out creates the handle that keeps the native batch alive: only for a deserializer's memory form.
+/// a copy-out creates the handle that keeps the native batch alive: for every batch with records, whatever the
+/// deserializers' forms.
 /// </summary>
 public sealed class ConsumerRecordsMarshalNextOffsetsTests
 {
@@ -167,7 +168,7 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
     }
 
     [Fact]
-    public void ACopyOutWithNoMemoryForm_CreatesNoBatchHandle_AndLeavesTheNativeBatchToItsCaller()
+    public void ACopyOutWithNoMemoryForm_CreatesTheBatchHandle_WithNothingHandedOut()
     {
         using NativeBatch batch = new NativeBatch();
         batch.Partition(s_a0, (0, 3, "a"), (1, 3, "b"));
@@ -176,8 +177,22 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
         ConsumerRecords<string, string> records = batch.CopyOut(
             new FailingDeserializer("bad"), out SafeConsumerRecordsHandle? handle);
 
-        Assert.Null(handle);
+        Assert.NotNull(handle);
+        Assert.False(handle!.HandedOut);
         Assert.Equal(new[] { "a", "b", "c" }, records.Select(r => r.Value()).ToArray());
+    }
+
+    [Fact]
+    public void ACopyOutOfABatchWithNoRecords_CreatesNoBatchHandle_AndLeavesTheNativeBatchToItsCaller()
+    {
+        using NativeBatch batch = new NativeBatch();
+        batch.NextOffset(s_a0, 42, CoreEpoch, CoreMetadata);
+
+        ConsumerRecords<string, string> records = batch.CopyOut(
+            new FailingDeserializer("bad"), out SafeConsumerRecordsHandle? handle);
+
+        Assert.Null(handle);
+        Assert.Equal(0, records.Count());
     }
 
     [Fact]
@@ -215,6 +230,7 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
         private readonly List<Utf8Marshal.PinnedUtf8String> _strings = new List<Utf8Marshal.PinnedUtf8String>();
         private readonly List<IntPtr> _bytes = new List<IntPtr>();
         private readonly List<IntPtr> _records = new List<IntPtr>();
+        private readonly List<SafeConsumerRecordsHandle> _handles = new List<SafeConsumerRecordsHandle>();
         private readonly List<IntPtr> _lists = new List<IntPtr>();
         private readonly List<IntPtr> _topicPartitions = new List<IntPtr>();
         private readonly List<IntPtr> _offsets = new List<IntPtr>();
@@ -248,29 +264,20 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
         internal ConsumerRecords<string, string> CopyOut(
             IDeserializer<string> valueDeserializer,
             out RecordDeserializationException? error,
-            out IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind)
-        {
-            IntPtr records = Call((ref IntPtr outErr) =>
-                Native.ConsumerRecordsWithNextOffsets(_recordsMap, _nextOffsetsMap, ref outErr));
-            try
-            {
-                return ConsumerRecordsMarshal.CopyOut(
-                    records,
-                    Serdes.String().Deserializer(),
-                    null,
-                    valueDeserializer,
-                    null,
-                    out error,
-                    out rewind);
-            }
-            finally
-            {
-                ConsumerRecordsMarshal.Destroy(records);
-            }
-        }
+            out IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind) =>
+            CopyOut(valueDeserializer, out _, out error, out rewind);
 
         internal ConsumerRecords<string, string> CopyOut(
-            IDeserializer<string> valueDeserializer, out SafeConsumerRecordsHandle? handle)
+            IDeserializer<string> valueDeserializer, out SafeConsumerRecordsHandle? handle) =>
+            CopyOut(valueDeserializer, out handle, out _, out _);
+
+        // The batch handle, when the copy-out creates one, is disposed with this batch, before the key and value
+        // bytes its records borrow are freed.
+        private ConsumerRecords<string, string> CopyOut(
+            IDeserializer<string> valueDeserializer,
+            out SafeConsumerRecordsHandle? handle,
+            out RecordDeserializationException? error,
+            out IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind)
         {
             IntPtr records = Call((ref IntPtr outErr) =>
                 Native.ConsumerRecordsWithNextOffsets(_recordsMap, _nextOffsetsMap, ref outErr));
@@ -286,8 +293,8 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
                     null,
                     valueDeserializer as IDeserializerWithReadOnlyMemory<string>,
                     ref handle,
-                    out _,
-                    out _);
+                    out error,
+                    out rewind);
             }
             finally
             {
@@ -295,11 +302,20 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
                 {
                     ConsumerRecordsMarshal.Destroy(records);
                 }
+                else
+                {
+                    _handles.Add(handle);
+                }
             }
         }
 
         public void Dispose()
         {
+            foreach (SafeConsumerRecordsHandle handle in _handles)
+            {
+                handle.Dispose();
+            }
+
             foreach (IntPtr record in _records)
             {
                 Free(NativeMethods.ConsumerRecordDestroy, record);

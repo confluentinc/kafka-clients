@@ -42,25 +42,10 @@ internal static class ConsumerRecordsMarshal
     // record not returned: the failing one, and the first record of every later partition in the batch. A
     // partition in rewind has as next offset its last returned record's offset + 1 with that record's leader epoch,
     // or none when no record of it was returned; every other partition keeps the batch's. A deserializer's headers
-    // form, given when it has one, is called with the headers the record then carries.
-    internal static ConsumerRecords<TKey, TValue> CopyOut<TKey, TValue>(
-        IntPtr records,
-        IDeserializer<TKey> keyDeserializer,
-        IDeserializerWithHeaders<TKey>? keyWithHeaders,
-        IDeserializer<TValue> valueDeserializer,
-        IDeserializerWithHeaders<TValue>? valueWithHeaders,
-        out RecordDeserializationException? error,
-        out IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind)
-    {
-        SafeConsumerRecordsHandle? batch = null;
-        return CopyOut(
-            records, keyDeserializer, keyWithHeaders, null, valueDeserializer, valueWithHeaders, null, ref batch,
-            out error, out rewind);
-    }
-
-    // A deserializer's memory form, given when it has one, is called instead of its other forms, with a memory over
-    // the batch. The batch then becomes `batch`, which owns `records` from that point, also when this method throws;
-    // a batch with no records, or read with no memory form, leaves `batch` as given and `records` to the caller.
+    // form, given when it has one, is called with the headers the record then carries, and its memory form, given
+    // when it has one, instead of its other forms, with a memory over the batch. A batch with records becomes
+    // `batch`, which owns `records` from that point, also when this method throws, and is released by the garbage
+    // collector only; a batch with no records leaves `batch` null and `records` to the caller.
     internal static ConsumerRecords<TKey, TValue> CopyOut<TKey, TValue>(
         IntPtr records,
         IDeserializer<TKey> keyDeserializer,
@@ -94,10 +79,8 @@ internal static class ConsumerRecordsMarshal
                     nextOffsets);
         }
 
-        if (keyWithMemory is not null || valueWithMemory is not null)
-        {
-            batch = new SafeConsumerRecordsHandle(records);
-        }
+        SafeConsumerRecordsHandle owner = new SafeConsumerRecordsHandle(records);
+        batch = owner;
 
         List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> byPartition;
         IntPtr partitions = NativeMethods.ConsumerRecordsPartitions(records, ref outErr);
@@ -126,7 +109,7 @@ internal static class ConsumerRecordsMarshal
                         IntPtr record = Get(partitionRecords, i);
                         error = reader.Copy(
                             record, topic, partitionId, keyDeserializer, keyWithHeaders, keyWithMemory,
-                            valueDeserializer, valueWithHeaders, valueWithMemory, batch, list);
+                            valueDeserializer, valueWithHeaders, valueWithMemory, owner, list);
                         if (error is not null)
                         {
                             rewind = Rewind(records, partitions, p, error);
@@ -217,7 +200,7 @@ internal static class ConsumerRecordsMarshal
                         IntPtr record = Get(partitionRecords, i);
                         RecordFields fields = reader.Fields(record);
                         Headers headers = CopyHeaders(record);
-                        batch.AddBytes((long)Length(fields.Key) + Length(fields.Value));
+                        batch.AddRecord((long)Length(fields.Key) + Length(fields.Value));
 
                         TKey? deserializedKey = default;
                         TValue? deserializedValue = default;
@@ -534,7 +517,7 @@ internal static class ConsumerRecordsMarshal
         IDeserializer<T> deserializer,
         IDeserializerWithHeaders<T>? withHeaders,
         IDeserializerWithReadOnlyMemory<T>? withMemory,
-        SafeConsumerRecordsHandle? batch,
+        SafeConsumerRecordsHandle batch,
         string topic,
         Headers headers,
         IntPtr bytes)
@@ -543,7 +526,7 @@ internal static class ConsumerRecordsMarshal
         int length = Math.Max(view->Length, 0);
         if (withMemory is not null)
         {
-            return withMemory.Deserialize(topic, headers, batch!.HandOut(view->Data, length));
+            return withMemory.Deserialize(topic, headers, batch.HandOut(view->Data, length));
         }
 
         ReadOnlySpan<byte> data = new ReadOnlySpan<byte>((void*)view->Data, length);
@@ -708,7 +691,7 @@ internal static class ConsumerRecordsMarshal
             IDeserializer<TValue> valueDeserializer,
             IDeserializerWithHeaders<TValue>? valueWithHeaders,
             IDeserializerWithReadOnlyMemory<TValue>? valueWithMemory,
-            SafeConsumerRecordsHandle? batch,
+            SafeConsumerRecordsHandle batch,
             List<ConsumerRecord<TKey, TValue>> records)
         {
             IntPtr outErr = IntPtr.Zero;
@@ -722,7 +705,7 @@ internal static class ConsumerRecordsMarshal
             IntPtr value = NativeMethods.ConsumerRecordValue(record, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             Headers headers = CopyHeaders(record);
-            batch?.AddBytes((long)Length(key) + Length(value));
+            batch.AddRecord((long)Length(key) + Length(value));
 
             TKey? deserializedKey = default;
             if (key != IntPtr.Zero)
