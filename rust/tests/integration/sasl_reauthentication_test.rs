@@ -24,17 +24,22 @@
 //! broker closes a connection whose session has expired when it next receives
 //! anything but a re-authentication, so a client that does not re-authenticate
 //! loses the requests it has in flight once per session lifetime.
+//!
+//! Under `multilanguage-tests` the SASL_SSL test runs on every backend through
+//! [`multilanguage_test!`](crate::multilanguage_test), the producer under test
+//! coming from the backend's factory (a gRPC backend in a container through the
+//! broker's container SASL_SSL listener). The SASL_PLAINTEXT test stays on the
+//! native backend: the container listeners have no SASL_PLAINTEXT twin.
 
 use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::serialization::StringSerializer;
-use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
-use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::common::backend_factory::ProducerBackendFactory;
+use crate::common::backend_factory::RustNativeFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::cluster_config::kip848_3_broker;
 use crate::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
@@ -73,7 +78,11 @@ fn sasl_plain_props(bootstrap: &str, security_protocol: &str) -> HashMap<String,
 /// rather than being resent. Before the client re-authenticated, a send
 /// shortly after the first session expired failed with "Disconnected from
 /// node".
-async fn produce_across_session_lifetimes(ctx: &mut TestContext, mut props: HashMap<String, String>) {
+async fn produce_across_session_lifetimes<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    mut props: HashMap<String, String>,
+) {
     let topic = ctx.topic("sasl_reauthentication_topic");
     props.extend([
         ("client.id".to_string(), "sasl-reauthentication-producer".to_string()),
@@ -81,28 +90,23 @@ async fn produce_across_session_lifetimes(ctx: &mut TestContext, mut props: Hash
         ("enable.idempotence".to_string(), "false".to_string()),
         ("retries".to_string(), "0".to_string()),
     ]);
-    let producer = KafkaProducer::<String, String>::new(
-        ProducerConfig::new(&props).expect("valid producer config"),
-        StringSerializer::new(),
-        StringSerializer::new(),
-    )
-    .expect("producer constructs");
+    let producer = factory.create(props).await.expect("producer constructs");
 
     // The first send creates the topic.
     let deadline = Instant::now() + Duration::from_millis(7 * SESSION_LIFETIME_MS / 2);
     let mut sent = 0;
     while Instant::now() < deadline {
         producer
-            .send(ProducerRecord::new(topic.clone(), Some(format!("value-{sent}"))))
+            .send(ProducerRecord::new(topic.clone(), Some(format!("value-{sent}").into_bytes())))
             .await
-            .unwrap_or_else(|e| panic!("record {sent} must be accepted: {e:?}"))
+            .unwrap_or_else(|e| panic!("{} backend: record {sent} must be accepted: {e:?}", factory.name()))
             .get_with_timeout(Duration::from_secs(30))
             .await
-            .unwrap_or_else(|e| panic!("record {sent} must be acknowledged: {e:?}"));
+            .unwrap_or_else(|e| panic!("{} backend: record {sent} must be acknowledged: {e:?}", factory.name()));
         sent += 1;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(sent > 20, "only {sent} records sent");
+    assert!(sent > 20, "{} backend: only {sent} records sent", factory.name());
 
     producer.close().await.expect("close");
 }
@@ -113,7 +117,7 @@ async fn produce_across_session_lifetimes(ctx: &mut TestContext, mut props: Hash
 async fn test_sasl_plain_producer_reauthenticates_before_its_session_expires() {
     let mut ctx = TestContext::new(cluster_config()).await;
     let props = sasl_plain_props(ctx.sasl_plaintext_bootstrap_servers(), "SASL_PLAINTEXT");
-    produce_across_session_lifetimes(&mut ctx, props).await;
+    produce_across_session_lifetimes(&mut ctx, &RustNativeFactory, props).await;
     ctx.cleanup().await;
 }
 
@@ -121,16 +125,36 @@ async fn test_sasl_plain_producer_reauthenticates_before_its_session_expires() {
 /// over SASL_SSL: the re-authentication's handshake and token, and the
 /// responses that arrive during it, go through TLS, which can hold several
 /// decrypted frames at once.
+async fn sasl_ssl_producer_reauthenticates_before_its_session_expires_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let mut props = if factory.needs_container_bootstrap() {
+        // The container listener is advertised by the broker's container
+        // name, which the broker certificate covers.
+        sasl_plain_props(ctx.cluster().container_sasl_ssl_bootstrap_servers(), "SASL_SSL")
+    } else {
+        let mut props = sasl_plain_props(ctx.sasl_ssl_bootstrap_servers(), "SASL_SSL");
+        // Tests connect via 127.0.0.1; disable hostname verification, as the
+        // other SASL_SSL suites do.
+        props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
+        props
+    };
+    props.insert("ssl.truststore.certificates".to_string(), ctx.ca_cert_pem().to_string());
+    produce_across_session_lifetimes(ctx, factory, props).await;
+    ctx.cleanup().await;
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_sasl_ssl_producer_reauthenticates_before_its_session_expires,
+    sasl_ssl_producer_reauthenticates_before_its_session_expires_inner,
+    cluster_config()
+);
+
+#[cfg(not(feature = "multilanguage-tests"))]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_sasl_ssl_producer_reauthenticates_before_its_session_expires() {
     let mut ctx = TestContext::new(cluster_config()).await;
-    let mut props = sasl_plain_props(ctx.sasl_ssl_bootstrap_servers(), "SASL_SSL");
-    props.extend([
-        ("ssl.truststore.certificates".to_string(), ctx.ca_cert_pem().to_string()),
-        // Tests connect via 127.0.0.1; disable hostname verification, as the
-        // other SASL_SSL suites do.
-        ("ssl.endpoint.identification.algorithm".to_string(), String::new()),
-    ]);
-    produce_across_session_lifetimes(&mut ctx, props).await;
-    ctx.cleanup().await;
+    sasl_ssl_producer_reauthenticates_before_its_session_expires_inner(&mut ctx, &RustNativeFactory).await;
 }
