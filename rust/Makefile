@@ -36,6 +36,7 @@ CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc -
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
+	test-integration-grpc-js test-integration-grpc-js-native chaos-javascript \
 	test-integration-perf test-integration-perf-macos producer-perf-test verify verify-macos \
 	format-check check-generated lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
@@ -191,7 +192,8 @@ test-all-features-sasl-ssl:
 #
 # The `multilanguage_test!` / `multilanguage_consumer_test!` macros expand each
 # case into one test per backend, named `<case>__rust`, `<case>__grpc_python`,
-# `<case>__grpc_python_async` and `<case>__grpc_c`. So a backend is selectable
+# `<case>__grpc_python_async`, `<case>__grpc_c` and (producer only)
+# `<case>__grpc_js`. So a backend is selectable
 # with a plain libtest name filter -- no cargo feature or env var needed.
 #
 # The shared `__grpc_` infix is what lets `test-all-features` exclude every
@@ -244,6 +246,77 @@ test-integration-grpc-dotnet:
 test-integration-grpc-dotnet-native:
 	MULTILANG_BACKEND_MODE=native \
 		$(CARGO_TEST_GRPC_DOTNET) --all-features --test integration -- __grpc_dotnet
+
+# ── The JavaScript-backend arms ───────────────────────────────────────────
+#
+# The same pair for the Node.js binding: the container arm, run by javascript/'s
+# `test-integration-grpc` after it builds the javascript gRPC image, and the
+# native arm, run by the root `test-integration-javascript-native` after the root
+# `build-grpc-native-javascript` builds the addon and checks the gRPC packages
+# `npm ci` installs in javascript/node_modules, where the server loads them.
+#
+# The binding is producer-only, so only `multilanguage_test!` has a `__grpc_js`
+# arm (the consumer and admin macros do not), and
+# javascript/grpc-server/grpc_server.js registers ProducerService alone.
+#
+# THREE TESTS ARE SKIPPED FOR JAVASCRIPT ONLY. They are defined once, in
+# JS_GRPC_SKIPS, and used only by the two targets below, which only ever run
+# __grpc_js, so no other backend loses coverage.
+#
+# The producer transaction tests. The JS producer has no transaction surface
+# (initTransactions / beginTransaction / sendOffsetsToTransaction /
+# commitTransaction / abortTransaction), so grpc-server/grpc_server.js leaves
+# the five transaction RPCs out and they answer gRPC UNIMPLEMENTED.
+# test_consume_transform_produce_with_offsets also needs ConsumerService.
+# REMOVE these three when the JS producer implements transactions (and, for the
+# third, a JS consumer with a ConsumerService in grpc-server/grpc_server.js).
+#
+# With all three gone, remove JS_GRPC_SKIPS (the definition below and its uses in
+# test-integration-grpc-js and test-integration-grpc-js-native).
+#
+# Plain `cargo test`, with the other arms' features: the test selection has no
+# section for the JavaScript arm, so the arm runs whole whatever TEST_SELECTION
+# names.
+JS_GRPC_SKIPS = --skip test_transactional_records_are_visible_only_after_commit \
+	--skip test_aborted_transaction_records_are_discarded \
+	--skip test_consume_transform_produce_with_offsets
+
+test-integration-grpc-js:
+	cargo test --all-features --test integration -- __grpc_js \
+		$(JS_GRPC_SKIPS)
+
+test-integration-grpc-js-native:
+	MULTILANG_BACKEND_MODE=native \
+		cargo test --all-features --test integration -- __grpc_js \
+		$(JS_GRPC_SKIPS)
+
+# ── Chaos runs of the JavaScript producer ─────────────────────────────────
+#
+# `cargo xtask chaos` (tests/chaos/README.md) with the Node.js producer
+# (`producer:javascript`, served by javascript/grpc-server/grpc_server.js) and
+# the Rust consumer, on the harness's dedicated three-broker cluster, each run
+# ending in the conservation verdict. Two runs:
+#
+#   - leader movement without broker restarts: a preferred-leader change and a
+#     partition reassignment every cycle, at replication factor 2 so the
+#     reassignment moves data onto the third broker (Java's producer retries
+#     the NOT_LEADER_OR_FOLLOWER errors it meets with a metadata refresh);
+#   - an unclean broker roll (SIGKILL) under the workload's idempotent producer
+#     (acks=all, enable.idempotence=true): every acknowledged record is read
+#     back once, in order, per partition.
+#
+# The JavaScript backend runs in its container (the root
+# `chaos-javascript`, after `build-grpc-images-javascript`) or as a host
+# process (the root `chaos-javascript-native`, MULTILANG_BACKEND_MODE=native,
+# after `build-grpc-native-javascript`). A long run, so neither is part of
+# `verify` or of a pull request's CI; .semaphore/chaos-javascript.yml runs the
+# container form as a scheduled task (service.yml).
+CHAOS_JAVASCRIPT_WORKLOADS = --workload producer:javascript --workload consumer:rust --reports
+
+chaos-javascript:
+	cargo xtask chaos $(CHAOS_JAVASCRIPT_WORKLOADS) --no-broker-roll --change-leader \
+		--reassign-partitions --replication-factor 2 --cycles 3
+	cargo xtask chaos $(CHAOS_JAVASCRIPT_WORKLOADS) --unclean --cycles 3
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138
@@ -342,15 +415,17 @@ audit:
 # PYTHON_VERSION is required whenever VERSION's PEP 440 form is below the
 # current Python version (python/pyproject.toml). DOTNET_VERSION (semver, e.g.
 # 4.4.0-beta.1) sets the .NET package's version (dotnet/Directory.Build.props),
-# which stays as it is without it and only moves up too; to change only that
-# one, give VERSION and PYTHON_VERSION their current values. The recipe reads them
+# which stays as it is without it and only moves up too; JAVASCRIPT_VERSION
+# (semver, 4.0.0 or higher, e.g. 4.4.0-beta.2) likewise sets the Node.js
+# package's version (javascript/package.json and package-lock.json). To change
+# only one of those, give VERSION and PYTHON_VERSION their current values. The recipe reads them
 # from its environment ("$$VERSION"), never through $(VERSION), so make pastes no
 # value into the shell. make still expands $(...) in a value given on its
 # command line, so a caller passing values it did not write (the Semaphore
 # Task) checks them and passes them in the environment instead.
 bump-version:
-	@test -n "$$VERSION" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440] [DOTNET_VERSION=SEMVER]" >&2; exit 2; }
-	cargo xtask bump-version "$$VERSION" $${PYTHON_VERSION:+--python-version "$$PYTHON_VERSION"} $${DOTNET_VERSION:+--dotnet-version "$$DOTNET_VERSION"}
+	@test -n "$$VERSION" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440] [DOTNET_VERSION=SEMVER] [JAVASCRIPT_VERSION=SEMVER]" >&2; exit 2; }
+	cargo xtask bump-version "$$VERSION" $${PYTHON_VERSION:+--python-version "$$PYTHON_VERSION"} $${DOTNET_VERSION:+--dotnet-version "$$DOTNET_VERSION"} $${JAVASCRIPT_VERSION:+--javascript-version "$$JAVASCRIPT_VERSION"}
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
 # component for the toolchain pinned in rust-toolchain.toml, and, if the
