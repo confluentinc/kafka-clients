@@ -94,5 +94,10 @@ target_link_libraries(kafka_grpc_server PRIVATE
     ${PROTOBUF_PC_LIBRARIES}
     pthread dl m
 )
+# The platform certificate verifier of the static Rust lib calls the Security
+# and CoreFoundation frameworks on macOS.
+if(APPLE)
+    target_link_libraries(kafka_grpc_server PRIVATE "-framework Security" "-framework CoreFoundation")
+endif()
 target_compile_options(kafka_grpc_server PRIVATE ${GRPCPP_CFLAGS_OTHER} ${PROTOBUF_PC_CFLAGS_OTHER})
 target_link_directories(kafka_grpc_server PRIVATE ${GRPCPP_LIBRARY_DIRS} ${PROTOBUF_PC_LIBRARY_DIRS})

@@ -10,6 +10,7 @@ the multilanguage tests.
 - **Library:** `libconfluent_kafka.a` (default) or the shared library, under
   `../rust/target/<RUST_PROFILE>/`: the CMake cache variable `RUST_PROFILE` is
   `debug` by default, and only that directory is searched.
+  The library as it ships is `release-cdylib` (`make -C ../rust build-cdylib`).
 - **Naming:** symbols keep the Java namespace, without `clients`:
   `org.apache.kafka.clients.producer.KafkaProducer` →
   `kafka_producer_KafkaProducer_t`. Fallible functions return their value and
@@ -68,6 +69,8 @@ it first; by hand:
 ```bash
 make -C ../rust devel-build-all-features   # debug, what the tests link
 make -C ../rust build-all-features         # release, with -DRUST_PROFILE=release
+make -C ../rust build-cdylib               # as it ships, with -DRUST_PROFILE=release-cdylib:
+                                           # features ffi + platform-verifier, no webpki-roots
 ```
 
 CMake looks for it under `RUST_PROJECT_ROOT`, which defaults to `../rust`;

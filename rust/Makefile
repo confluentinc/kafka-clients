@@ -11,6 +11,7 @@ ARCH := $(shell uname -m)
 
 ifeq ($(ARCH),x86_64)
   # x86-64-v3 (Haswell+, ~2013): faster than baseline, portable across v3 hosts.
+  # Not for the library the packages ship (build-cdylib), which any x86_64 CPU runs.
   RUSTFLAGS_NATIVE = -C target-cpu=x86-64-v3
 else
   # Other arches (e.g. aarch64): default target-cpu is already the portable baseline.
@@ -35,7 +36,7 @@ CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc -
 MULTILANG_IMAGE_TAG ?= dev
 export MULTILANG_IMAGE_TAG
 
-.PHONY: build build-integration-tests build-all-features \
+.PHONY: build build-integration-tests build-all-features build-cdylib \
 	devel-build devel-build-integration-tests devel-build-all-features build-tests-all-features \
 	test test-all-features test-all-features-ssl test-all-features-sasl-ssl \
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
@@ -50,6 +51,27 @@ build-integration-tests:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi,integration-tests --release
 build-all-features:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features --release
+
+# The library the C binding, the Python wheel and the .NET package link: the C
+# API with every codec, TLS and SCRAM, the platform verifier as the default
+# trust store and no `webpki-roots`, so the Mozilla bundle is not compiled in. It has its own cargo
+# profile, `release-cdylib` (the release optimizations), so it lands in
+# target/release-cdylib/ and no release build with another feature set replaces
+# it. c/, python/ and dotnet/ build against it with RUST_PROFILE /
+# PROFILE=release-cdylib (the root's `build`, the benchmarks, dotnet's pack),
+# .semaphore/build-ffi-library.sh the wheel's library and, through
+# build-dotnet-native.sh, the Linux and macOS .NET package's,
+# .semaphore/build-dotnet-native.ps1 the Windows ones (it reads the
+# CDYLIB_FEATURES line below), and python/soak/build.sh the soak client's. Their
+# tests link the debug all-features library (`devel-build-all-features`), where
+# `platform-verifier` is on too and wins over `webpki-roots`, so they test the
+# same trust store. It is built without RUSTFLAGS_NATIVE, for the target's
+# baseline CPU, so the packages run on any x86_64 CPU, as librdkafka's do: the
+# code that gains most from AVX2 (aws-lc's assembly, memchr) chooses it at run
+# time from the CPU it finds.
+CDYLIB_FEATURES = ffi,gzip,snappy,lz4,zstd,aws-lc-rs,rustls,platform-verifier
+build-cdylib:
+	cargo build --profile release-cdylib --no-default-features --features $(CDYLIB_FEATURES)
 
 devel-build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi
