@@ -146,6 +146,11 @@ message SendResponse {
     RecordMetadata metadata = 1;
     KafkaError error = 2;
   }
+  // True when `error` was raised by the send call itself (Java's `send`
+  // throwing: Python's `send()` raising, C's send returning NULL with
+  // `out_err`), false when the record's future failed with it. The harness
+  // returns the first as `Err` from `send` and the second as a failed future.
+  bool raised_by_send = 3;
 }
 
 message RecordMetadata {
@@ -305,11 +310,34 @@ message CallbackLogPartition {
 //   "lost"      | the lost partitions       | empty                          | listener failure
 //   "commit"    | the committed partitions  | committed offset per partition | commit failure
 //   "delivery"  | the delivered-to partition| {"<topic>-<partition>": offset}| delivery failure
+//   "listener_action" | the callback's partitions | see below            | the action's failure
 // ```
 //
 // `offsets` keys are always `"<topic>-<partition>"` (e.g. `"my-topic-0"`).
+//
+// A "listener_action" entry records one step of the script a logging
+// rebalance listener ran from inside one of its methods, as configured by
+// consumer_service.proto's SetListenerAction. The steps of an invocation are
+// appended in order right after that invocation's "assigned" / "revoked" /
+// "lost" entry; `method` names the invocation and `step` the step kind. The
+// result goes in:
+//
+// ```text
+//   step                 | result_partitions        | offsets
+//   ---------------------+--------------------------+-------------------------------------
+//   ASSIGNMENT           | assignment() as returned | empty
+//   BEGINNING_OFFSETS    | empty                    | beginningOffsets(partitions) as returned
+//   POSITION             | empty                    | {"<tp>": position(tp)}
+//   COMMIT_SYNC_POSITION | empty                    | {"<tp>": the committed offset}
+//   SEEK, PAUSE, SLEEP   | empty                    | empty
+//   FAIL                 | empty                    | empty; `error` is the step's message
+// ```
+//
+// On failure `error` / `error_code` describe the failing call and the result
+// fields stay empty.
 message CallbackLogEntry {
-  // One of "assigned", "revoked", "lost", "commit", "delivery".
+  // One of "assigned", "revoked", "lost", "commit", "delivery",
+  // "listener_action".
   string kind = 1;
   repeated CallbackLogPartition partitions = 2;
   // `"<topic>-<partition>"` -> offset. Empty for the rebalance kinds.
@@ -317,6 +345,24 @@ message CallbackLogEntry {
   // The callback's error message; empty string when the callback was
   // invoked with no error.
   string error = 4;
+  // "listener_action" only: the listener method the step ran in, "assigned",
+  // "revoked" or "lost". Empty for every other kind.
+  string method = 5;
+  // "listener_action" only: the partition set the ASSIGNMENT step read.
+  // Empty for every other kind and step.
+  repeated CallbackLogPartition result_partitions = 6;
+  // The class of the error `error` describes, as KafkaError.code: the FFI
+  // error code (kafka_common_Error_e), so the reader rebuilds the error's class
+  // without parsing text. 0 (NONE) when the callback saw no error.
+  int32 error_code = 7;
+  // "listener_action" only: the step's kind, consumer_service.proto's
+  // ListenerStepKind name without its prefix ("POSITION", "FAIL", ...).
+  string step = 8;
+  // The error the callback saw, as a reply carries one (code, message and
+  // payload), so the reader rebuilds it through the same conversion; absent
+  // when the callback saw no error. `error` / `error_code` repeat its message
+  // and code.
+  KafkaError error_detail = 9;
 }
 
 message CallbackLogResponse {
@@ -356,6 +402,35 @@ message KafkaError {
   repeated string unauthorized_topics = 6; // TOPIC_AUTHORIZATION_FAILED
   repeated string invalid_topics = 7;      // INVALID_TOPIC_ERROR
   optional string group_id = 8;            // GROUP_AUTHORIZATION_FAILED
+  // CONSUMER_NO_OFFSET_FOR_PARTITION: the error's partitions().
+  repeated CallbackLogPartition partitions = 9;
+  // CONSUMER_OFFSET_OUT_OF_RANGE: the error's offsetOutOfRangePartitions().
+  repeated PartitionOffset offset_out_of_range_partitions = 10;
+  // UNKNOWN_SERVER_ERROR (-1) is the code of two classes: Java's bare
+  // `KafkaException` and its `ApiException` subclass `UnknownServerException`.
+  // True for the bare `KafkaException` (Python: not an `ApiError`; C:
+  // `kafka_common_Error_is_api_error` is 0), false otherwise.
+  bool bare_kafka_error = 11;
+  // The error's cause, Java's `getCause()`, one level deep: the Python
+  // servers read it from `__cause__`, the C server from
+  // `kafka_common_Error_source`. Absent when the error has none.
+  optional KafkaErrorCause cause = 12;
+}
+
+// The class and message of a KafkaError's cause. The cause's own cause and
+// payload are not carried.
+message KafkaErrorCause {
+  // As KafkaError.code.
+  int32 code = 1;
+  string message = 2;
+  // As KafkaError.bare_kafka_error.
+  bool bare_kafka_error = 3;
+}
+
+// A (topic, partition) and an offset inside a KafkaError payload.
+message PartitionOffset {
+  CallbackLogPartition partition = 1;
+  int64 offset = 2;
 }
 
 // ---------------------------------------------------------------------------

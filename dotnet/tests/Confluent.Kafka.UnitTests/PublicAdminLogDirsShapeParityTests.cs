@@ -39,9 +39,15 @@ public sealed class PublicAdminLogDirsShapeParityTests
     [Fact]
     public void IAdmin_TheThreeNewRpcsAreSynchronous_WithTheJavaParameterShape()
     {
-        MethodInfo describeLogDirs = typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeLogDirs))!;
-        MethodInfo alter = typeof(IAdmin).GetMethod(nameof(IAdmin.AlterReplicaLogDirs))!;
-        MethodInfo describeReplicas = typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeReplicaLogDirs))!;
+        MethodInfo describeLogDirs = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.DescribeLogDirs),
+            new[] { typeof(IReadOnlyCollection<int>), typeof(DescribeLogDirsOptions) })!;
+        MethodInfo alter = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.AlterReplicaLogDirs),
+            new[] { typeof(IReadOnlyDictionary<TopicPartitionReplica, string>), typeof(AlterReplicaLogDirsOptions) })!;
+        MethodInfo describeReplicas = typeof(IAdmin).GetMethod(
+            nameof(IAdmin.DescribeReplicaLogDirs),
+            new[] { typeof(IReadOnlyCollection<TopicPartitionReplica>), typeof(DescribeReplicaLogDirsOptions) })!;
 
         Assert.Equal(typeof(DescribeLogDirsResult), describeLogDirs.ReturnType);
         Assert.Equal(typeof(AlterReplicaLogDirsResult), alter.ReturnType);
@@ -72,8 +78,11 @@ public sealed class PublicAdminLogDirsShapeParityTests
             ParameterInfo[] parameters = rpc.GetParameters();
             Assert.False(parameters[0].IsOptional, $"{rpc.Name}'s input must be required");
             Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(parameters[0]));
-            Assert.True(parameters[1].IsOptional, $"{rpc.Name}'s options must be optional");
-            Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(parameters[1]));
+            Assert.False(parameters[1].IsOptional, $"{rpc.Name}'s options must be required");
+            Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(parameters[1]));
+            MethodInfo? shortForm = typeof(IAdmin).GetMethod(rpc.Name, new[] { parameters[0].ParameterType });
+            Assert.NotNull(shortForm);
+            Assert.Equal(rpc.ReturnType, shortForm!.ReturnType);
         }
 
         Assert.Empty(

@@ -153,7 +153,7 @@ public sealed class PublicAdminConfigsTests
         ConfigResource subscription = new ConfigResource(ConfigResourceType.CLIENT_METRICS, "sub-1");
 
         Assert.Empty(await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.CLIENT_METRICS }).All().Get(), s_deadline));
+            () => admin.ListConfigResources(new[] { ConfigResourceType.CLIENT_METRICS }, new ListConfigResourcesOptions()).All().Get(), s_deadline));
 
         await TestTimeout.Run(
             () => admin.IncrementalAlterConfigs(
@@ -168,7 +168,7 @@ public sealed class PublicAdminConfigsTests
             s_deadline);
 
         IReadOnlyCollection<ConfigResource> filtered = await TestTimeout.Run(
-            () => admin.ListConfigResources(new[] { ConfigResourceType.CLIENT_METRICS }).All().Get(), s_deadline);
+            () => admin.ListConfigResources(new[] { ConfigResourceType.CLIENT_METRICS }, new ListConfigResourcesOptions()).All().Get(), s_deadline);
         Assert.Equal(subscription, Assert.Single(filtered));
 
         Config config = await TestTimeout.Run(
@@ -301,17 +301,17 @@ public sealed class PublicAdminConfigsTests
         Assert.Throws<ArgumentNullException>(() => admin.DescribeConfigs(null!));
         Assert.Throws<ArgumentNullException>(() => admin.IncrementalAlterConfigs(null!));
 
-        ArgumentException nullResource = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullResource = Assert.Throws<ArgumentNullException>(
             () => admin.DescribeConfigs(new ConfigResource[] { null! }));
         Assert.Equal("resources", nullResource.ParamName);
 
         ConfigResource resource = new ConfigResource(ConfigResourceType.TOPIC, Topic);
-        ArgumentException nullOps = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullOps = Assert.Throws<ArgumentNullException>(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> { [resource] = null! }));
         Assert.Equal("configs", nullOps.ParamName);
 
-        ArgumentException nullOp = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullOp = Assert.Throws<ArgumentNullException>(
             () => admin.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>>
                 {

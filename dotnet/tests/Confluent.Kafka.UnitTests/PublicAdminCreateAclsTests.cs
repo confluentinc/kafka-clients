@@ -159,11 +159,11 @@ public sealed class PublicAdminCreateAclsTests
             "acls",
             Assert.Throws<ArgumentNullException>(() => admin.CreateAcls(null!)).ParamName);
 
-        ArgumentException nullElement = Assert.Throws<ArgumentException>(
+        ArgumentNullException nullElement = Assert.Throws<ArgumentNullException>(
             () => admin.CreateAcls(new AclBinding?[] { Binding("ok"), null }!));
         Assert.Equal("acls", nullElement.ParamName);
         Assert.StartsWith(
-            "The ACL bindings must not contain a null element.", nullElement.Message, StringComparison.Ordinal);
+            "acls must not contain null", nullElement.Message, StringComparison.Ordinal);
 
         Assert.Null(Record.Exception(
             () => admin.CreateAcls(

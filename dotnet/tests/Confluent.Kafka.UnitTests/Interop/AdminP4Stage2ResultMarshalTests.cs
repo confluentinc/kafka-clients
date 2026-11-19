@@ -73,7 +73,7 @@ public sealed class AdminP4Stage2ResultMarshalTests
                 [latest] = OffsetSpec.Latest(),
                 [timestamp] = OffsetSpec.ForTimestamp(1),
             },
-            null);
+            new ListOffsetsOptions());
 
         Assert.Equal(new[] { latest, timestamp }, listed.Futures.Keys);
         ListOffsetsResult.ListOffsetsResultInfo info = listed.Futures[latest].Get(s_deadline);
@@ -98,10 +98,10 @@ public sealed class AdminP4Stage2ResultMarshalTests
                 {
                     [partition] = new NewPartitionReassignment(new[] { 0, 2 }),
                 },
-                options: null)).All().Get(),
+                options: new AlterPartitionReassignmentsOptions())).All().Get(),
             s_deadline);
 
-        var listed = admin.ListPartitionReassignments(new[] { partition }, options: null);
+        var listed = admin.ListPartitionReassignments(new[] { partition }, options: new ListPartitionReassignmentsOptions());
         IReadOnlyDictionary<TopicPartition, PartitionReassignment> reassignments =
             new KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(listed.Reassignments)
                 .Get(s_deadline);
@@ -123,7 +123,7 @@ public sealed class AdminP4Stage2ResultMarshalTests
     {
         TestTimeout.Run(
             () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(
-                new[] { new NewTopic(name, partitions, replicationFactor) }, null)).All().Get(),
+                new[] { new NewTopic(name, partitions, replicationFactor) }, new CreateTopicsOptions())).All().Get(),
             s_deadline)
             .GetAwaiter()
             .GetResult();

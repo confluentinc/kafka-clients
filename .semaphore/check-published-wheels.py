@@ -18,13 +18,15 @@
 # Checks that an index lists every uploaded wheel, not yanked, with the
 # checksum of the uploaded bytes, serves exactly those bytes for download, and
 # lists no other file for the version. Used by the "Release (Python):
-# post-publish checksum" blocks of semaphore.yml. Standard library only.
+# post-publish checksum" blocks of publish-testpypi.yml and publish-pypi.yml. Standard
+# library only.
 #
 # Usage: check-published-wheels.py <index> <package> <version> <uploaded.sha256>
 #   <index> is https://test.pypi.org or https://pypi.org, and
 #   <uploaded.sha256> holds `<sha256>  <wheel>` for each uploaded wheel.
 
 import hashlib
+import http.client
 import json
 import re
 import sys
@@ -37,7 +39,8 @@ def fetch(url, headers=None):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}), timeout=120) as response:
                 return response.read()
-        except OSError as error:
+        except (OSError, http.client.HTTPException) as error:
+            # http.client.IncompleteRead, a body cut short, is not an OSError.
             if attempt == 3:
                 raise
             print(f"{url}: {error}; retrying in 10s")

@@ -44,14 +44,14 @@ public sealed class AdminConstructedNullTopicTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DeleteRecords(
+        ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() => admin.DeleteRecords(
             new Dictionary<TopicPartition, RecordsToDelete> { [NullTopic(constructed)] = RecordsToDelete.BeforeOffset(1) },
-            null));
+            new DeleteRecordsOptions()));
 
         AssertRejected(
             rejected,
             "recordsToDelete",
-            "The records-to-delete map must not contain a topic partition with a null topic.");
+            "recordsToDelete must not contain a TopicPartition with a null topic");
     }
 
     [Theory]
@@ -62,12 +62,12 @@ public sealed class AdminConstructedNullTopicTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.AlterPartitionReassignments(
+        ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() => admin.AlterPartitionReassignments(
             new Dictionary<TopicPartition, NewPartitionReassignment?> { [NullTopic(constructed)] = null },
-            null));
+            new AlterPartitionReassignmentsOptions()));
 
         AssertRejected(
-            rejected, "reassignments", "The reassignments map must not contain a topic partition with a null topic.");
+            rejected, "reassignments", "reassignments must not contain a TopicPartition with a null topic");
     }
 
     [Theory]
@@ -78,12 +78,12 @@ public sealed class AdminConstructedNullTopicTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.AlterConsumerGroupOffsets(
+        ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() => admin.AlterConsumerGroupOffsets(
             "g",
             new Dictionary<TopicPartition, OffsetAndMetadata> { [NullTopic(constructed)] = new OffsetAndMetadata(1) },
-            null));
+            new AlterConsumerGroupOffsetsOptions()));
 
-        AssertRejected(rejected, "offsets", "The offsets map must not contain a topic partition with a null topic.");
+        AssertRejected(rejected, "offsets", "offsets must not contain a TopicPartition with a null topic");
     }
 
     [Theory]
@@ -94,13 +94,13 @@ public sealed class AdminConstructedNullTopicTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DeleteConsumerGroupOffsets(
+        ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() => admin.DeleteConsumerGroupOffsets(
             "g",
             new[] { NullTopic(constructed) },
-            null));
+            new DeleteConsumerGroupOffsetsOptions()));
 
         AssertRejected(
-            rejected, "partitions", "The partitions collection must not contain a topic partition with a null topic.");
+            rejected, "partitions", "partitions must not contain a TopicPartition with a null topic");
     }
 
     [Theory]
@@ -111,8 +111,8 @@ public sealed class AdminConstructedNullTopicTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         SafeAdminResultHandle alteredHandle = admin.AlterConsumerGroupOffsets(
-            "g", new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("t", 0)] = new OffsetAndMetadata(1) }, null);
-        SafeAdminResultHandle deletedHandle = admin.DeleteConsumerGroupOffsets("g", new[] { new TopicPartition("t", 0) }, null);
+            "g", new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("t", 0)] = new OffsetAndMetadata(1) }, new AlterConsumerGroupOffsetsOptions());
+        SafeAdminResultHandle deletedHandle = admin.DeleteConsumerGroupOffsets("g", new[] { new TopicPartition("t", 0) }, new DeleteConsumerGroupOffsetsOptions());
 
         // Alter: Java's future fails, for a partition that was not attempted.
         const string NotAttempted = "Alter offset for partition \"null-0\" was not attempted";
@@ -144,12 +144,12 @@ public sealed class AdminConstructedNullTopicTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => AsyncAbortTransactionResult.OfClient(admin.AbortTransaction(
+        ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() => AsyncAbortTransactionResult.OfClient(admin.AbortTransaction(
             new AbortTransactionSpec(NullTopic(constructed), 1L, 1, 1),
-            null)));
+            new AbortTransactionOptions())));
 
         AssertRejected(
-            rejected, "spec", "The abort transaction spec must not carry a topic partition with a null topic.");
+            rejected, "spec", "spec must not have a TopicPartition with a null topic");
     }
 
     [Theory]
@@ -160,14 +160,14 @@ public sealed class AdminConstructedNullTopicTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.ListOffsets(
+        ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() => admin.ListOffsets(
             new Dictionary<TopicPartition, OffsetSpec> { [NullTopic(constructed)] = OffsetSpec.Latest() },
-            null));
+            new ListOffsetsOptions()));
 
         AssertRejected(
             rejected,
             "topicPartitionOffsets",
-            "The offsets map must not contain a topic partition with a null topic.");
+            "topicPartitionOffsets must not contain a TopicPartition with a null topic");
     }
 
     [Theory]
@@ -178,15 +178,15 @@ public sealed class AdminConstructedNullTopicTests
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.ListConsumerGroupOffsets(
+        ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() => admin.ListConsumerGroupOffsets(
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
                 ["g1"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { NullTopic(constructed) }),
             },
-            null));
+            new ListConsumerGroupOffsetsOptions()));
 
         AssertRejected(
-            rejected, "groupSpecs", "The spec for group id 'g1' must not select a topic partition with a null topic.");
+            rejected, "groupSpecs", "groupSpecs must not contain a TopicPartition with a null topic");
     }
 
     [Theory]
@@ -194,21 +194,21 @@ public sealed class AdminConstructedNullTopicTests
     [InlineData(true)]
     public void DistinctPartitions_ElectLeaders_ListReassignments_DescribeProducers_RejectANullTopic(bool constructed)
     {
-        const string Message = "The partitions must not contain a topic partition with a null topic.";
+        const string Message = "partitions must not contain a TopicPartition with a null topic";
         NativeAdminClient admin = NativeAdminClient.CreateMock(1);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition[] partitions = { NullTopic(constructed) };
 
         AssertRejected(
-            Assert.Throws<ArgumentException>(() => admin.ElectLeaders(ElectionType.PREFERRED, partitions, null)),
+            Assert.Throws<ArgumentNullException>(() => admin.ElectLeaders(ElectionType.PREFERRED, partitions, new ElectLeadersOptions())),
             "partitions",
             Message);
         AssertRejected(
-            Assert.Throws<ArgumentException>(() => admin.ListPartitionReassignments(partitions, null)),
+            Assert.Throws<ArgumentNullException>(() => admin.ListPartitionReassignments(partitions, new ListPartitionReassignmentsOptions())),
             "partitions",
             Message);
         AssertRejected(
-            Assert.Throws<ArgumentException>(() => AsyncDescribeProducersResult.OfClient(admin.DescribeProducers(partitions, null))),
+            Assert.Throws<ArgumentNullException>(() => AsyncDescribeProducersResult.OfClient(admin.DescribeProducers(partitions, new DescribeProducersOptions()))),
             "partitions",
             Message);
     }
@@ -218,7 +218,7 @@ public sealed class AdminConstructedNullTopicTests
 
     private static void AssertRejected(ArgumentException rejected, string paramName, string message)
     {
-        Assert.IsType<ArgumentException>(rejected);
+        Assert.IsType<ArgumentNullException>(rejected);
         Assert.Equal(paramName, rejected.ParamName);
         Assert.StartsWith(message, rejected.Message, StringComparison.Ordinal);
     }

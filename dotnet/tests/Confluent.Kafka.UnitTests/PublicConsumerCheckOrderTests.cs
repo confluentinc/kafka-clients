@@ -385,7 +385,7 @@ public sealed class PublicConsumerCheckOrderTests
             ["PartitionsFor(null)"] = (c => c.PartitionsFor(null!), c => c.PartitionsFor(null!)),
             ["PartitionsFor(null, timeout)"] = (c => c.PartitionsFor(null!, TimeSpan.Zero), c => c.PartitionsFor(null!, TimeSpan.Zero)),
             ["ListTopics(timeout)"] = (c => c.ListTopics(s_negative), c => c.ListTopics(s_negative)),
-            ["CommitAsync(null)"] = (c => c.CommitAsync(s_nullOffsets), c => c.CommitAsync(s_nullOffsets)),
+            ["CommitAsync(null)"] = (c => c.CommitAsync(s_nullOffsets, null), c => c.CommitAsync(s_nullOffsets, (IOffsetCommitCallback?)null)),
             ["CommitAsync(null, callback)"] = (c => c.CommitAsync(null!, s_callback), c => c.CommitAsync(null!, s_callback)),
             ["CommitAsync(null callback)"] = (
                 c => c.CommitAsync((IOffsetCommitCallback)null!), c => c.CommitAsync((IOffsetCommitCallback)null!)),
@@ -721,7 +721,7 @@ public sealed class PublicConsumerCheckOrderTests
             ["EndOffsets(null, timeout)"] = (c => c.EndOffsets(null!, s_second), c => c.EndOffsets(null!, s_second)),
             ["PartitionsFor(null)"] = (c => c.PartitionsFor(null!), c => c.PartitionsFor(null!)),
             ["PartitionsFor(null, timeout)"] = (c => c.PartitionsFor(null!, s_second), c => c.PartitionsFor(null!, s_second)),
-            ["CommitAsync(null)"] = (c => c.CommitAsync(s_nullOffsets), c => c.CommitAsync(s_nullOffsets)),
+            ["CommitAsync(null)"] = (c => c.CommitAsync(s_nullOffsets, null), c => c.CommitAsync(s_nullOffsets, (IOffsetCommitCallback?)null)),
             ["CommitAsync(null, callback)"] = (c => c.CommitAsync(null!, s_callback), c => c.CommitAsync(null!, s_callback)),
             ["CommitAsync(null callback)"] = (
                     c => c.CommitAsync((IOffsetCommitCallback)null!), c => c.CommitAsync((IOffsetCommitCallback)null!)),
@@ -802,7 +802,7 @@ public sealed class PublicConsumerCheckOrderTests
             ["Seek(partition, negative offset)"] = (c => c.Seek(s_tp0, -1L), c => c.Seek(s_tp0, -1L)),
             ["CurrentLag(negative partition)"] = (c => c.CurrentLag(s_negativePartition), c => c.CurrentLag(s_negativePartition)),
             ["Commit(negative partition)"] = (c => c.Commit(NegativeOffsets()), c => c.Commit(NegativeOffsets())),
-            ["CommitAsync(negative partition)"] = (c => c.CommitAsync(NegativeOffsets()), c => c.CommitAsync(NegativeOffsets())),
+            ["CommitAsync(negative partition)"] = (c => c.CommitAsync(NegativeOffsets(), null), c => c.CommitAsync(NegativeOffsets(), (IOffsetCommitCallback?)null)),
             ["Position(negative partition)"] = (c => c.Position(s_negativePartition), c => c.Position(s_negativePartition)),
         };
 

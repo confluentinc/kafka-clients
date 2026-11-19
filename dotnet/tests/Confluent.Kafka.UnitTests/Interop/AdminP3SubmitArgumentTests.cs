@@ -35,7 +35,6 @@ public sealed class AdminP3SubmitArgumentTests
     [Fact]
     public void DescribeCluster_NoSetterRan_TheCOptionsCarryTheCoresDefaults()
     {
-        Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack((DescribeClusterOptions?)null));
         Assert.Equal((-1, (sbyte)0, (sbyte)0), ReadBack(new DescribeClusterOptions()));
         Assert.Empty(new DescribeClusterOptions().Setters.InOrder);
     }
@@ -81,7 +80,6 @@ public sealed class AdminP3SubmitArgumentTests
     [Fact]
     public void ListConfigResources_NoSetterRan_TheCOptionsCarryTheCoresDefault()
     {
-        Assert.Equal(-1, ReadBack((ListConfigResourcesOptions?)null));
         Assert.Equal(-1, ReadBack(new ListConfigResourcesOptions()));
         Assert.Equal(-1, ReadBack(new ListConfigResourcesOptions().TimeoutMs(null)));
     }
@@ -123,7 +121,7 @@ public sealed class AdminP3SubmitArgumentTests
     }
 
     private static (int TimeoutMs, sbyte IncludeAuthorizedOperations, sbyte IncludeFencedBrokers) ReadBack(
-        DescribeClusterOptions? options)
+        DescribeClusterOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeClusterOptions(options);
         try
@@ -143,7 +141,7 @@ public sealed class AdminP3SubmitArgumentTests
         }
     }
 
-    private static int ReadBack(ListConfigResourcesOptions? options)
+    private static int ReadBack(ListConfigResourcesOptions options)
     {
         IntPtr native = NativeAdminClient.NewListConfigResourcesOptions(options);
         try

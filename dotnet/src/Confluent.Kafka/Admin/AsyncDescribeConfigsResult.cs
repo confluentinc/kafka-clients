@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAsyncAdmin.DescribeConfigs"/> — Java's
+/// The result of <see cref="IAsyncAdmin.DescribeConfigs(IReadOnlyCollection{ConfigResource}, DescribeConfigsOptions)"/> — Java's
 /// <c>org.apache.kafka.clients.admin.DescribeConfigsResult</c>: one future per resource.
 /// </summary>
 /// <remarks>

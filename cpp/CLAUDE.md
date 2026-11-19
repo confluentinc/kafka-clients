@@ -452,7 +452,7 @@ Interfaces Java declares:
    constructor, a copied client, a null where the type has none); serde test vectors against
    Java's.
 3. GoogleTest comes from the system (`find_package(GTest CONFIG)`) or is fetched at a pinned
-   release. Integration: `make verify` through `verify-cpp`; `test-integration-cpp` with `-ssl`
+   release. Integration: the root `make verify` runs `make -C cpp verify`; `test-integration-cpp` with `-ssl`
    and `-sasl-ssl`; a `cpp/grpc_server` backend for the multilanguage conformance suite;
    `producer-perf-test-cpp` and `consumer-perf-test-cpp` compared against the C and Python
    numbers.
@@ -506,7 +506,7 @@ Interfaces Java declares:
    the core's own targets, plus a pkg-config file. The core is the one cargo builds under
    `rust/target/<profile>/`, located through `RUST_PROJECT_ROOT` (default `../rust`) or
    `CONFLUENT_KAFKA_LIB_DIR` / `CONFLUENT_KAFKA_INCLUDE_DIR`; the C header is needed to build the
-   library, never to use it. From the repository root: `make build-cpp`, `make test-cpp`.
+   library, never to use it. `make -C cpp build` and `make -C cpp test` build the core first.
    Toolchain floor: GCC 11, Clang 16, MSVC 2019 16.10. No C++17 mode.
 2. `clang-format` with `cpp/.clang-format` (`BasedOnStyle: Google`, `IndentWidth: 4`,
    `ColumnLimit: 120`; layout only, names stay Java's); `clang-tidy` with `cpp/.clang-tidy`,

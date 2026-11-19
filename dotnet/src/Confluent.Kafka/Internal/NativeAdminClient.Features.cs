@@ -98,8 +98,7 @@ internal sealed partial class NativeAdminClient
                 AdminStrings.Validate(entry.Key, nameof(featureUpdates));
                 if (entry.Value is null)
                 {
-                    throw new ArgumentException(
-                        "The feature updates must not contain a null update.", nameof(featureUpdates));
+                    throw new ArgumentNullException(nameof(featureUpdates), "featureUpdates must not contain null");
                 }
 
                 // A C map holds each name once, so a repeat the caller's comparer allows is refused here.

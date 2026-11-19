@@ -47,16 +47,20 @@ public sealed class PublicAdminP7ShapeParityTests
     [InlineData(nameof(IAdmin.DescribeDelegationToken), typeof(DescribeDelegationTokenResult))]
     [InlineData(nameof(IAdmin.DescribeFeatures), typeof(DescribeFeaturesResult))]
     [InlineData(nameof(IAdmin.UpdateFeatures), typeof(UpdateFeaturesResult))]
-    public void EachRpc_IsSynchronous_AndEndsInAnOptionalOptions(string name, Type resultType)
+    public void EachRpc_IsSynchronous_WithAFormEndingInItsOptionsAndOneWithout(string name, Type resultType)
     {
-        MethodInfo rpc = typeof(IAdmin).GetMethod(name)!;
+        MethodInfo rpc = LongForm(name);
 
         Assert.Equal(resultType, rpc.ReturnType);
 
         ParameterInfo[] parameters = rpc.GetParameters();
         ParameterInfo options = parameters[parameters.Length - 1];
-        Assert.EndsWith("Options", options.ParameterType.Name, StringComparison.Ordinal);
-        Assert.True(options.IsOptional, $"{name}'s options must be optional");
+        Assert.False(options.IsOptional, $"{name}'s options must be required");
+
+        MethodInfo? shortForm = typeof(IAdmin).GetMethod(
+            name, parameters.Take(parameters.Length - 1).Select(parameter => parameter.ParameterType).ToArray());
+        Assert.NotNull(shortForm);
+        Assert.Equal(resultType, shortForm!.ReturnType);
     }
 
     [Fact]
@@ -85,12 +89,12 @@ public sealed class PublicAdminP7ShapeParityTests
             Assert.Empty(Required(optionsOnly));
         }
 
-        // describeUserScramCredentials' users are optional and nullable: absent means every user, which Java spells as a
-        // zero-argument overload.
-        ParameterInfo users = typeof(IAdmin)
-            .GetMethod(nameof(IAdmin.DescribeUserScramCredentials))!.GetParameters()[0];
+        // DescribeUserScramCredentials' users are nullable: null means every user, as the zero-argument overload does.
+        ParameterInfo users = LongForm(nameof(IAdmin.DescribeUserScramCredentials)).GetParameters()[0];
         Assert.Equal(typeof(IReadOnlyCollection<string>), users.ParameterType);
-        Assert.True(users.IsOptional);
+        Assert.False(users.IsOptional);
+        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(users));
+        Assert.NotNull(typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeUserScramCredentials), Type.EmptyTypes));
     }
 
     [Fact]
@@ -294,9 +298,19 @@ public sealed class PublicAdminP7ShapeParityTests
             || typeof(IAsyncDisposable).IsAssignableFrom(typeof(DescribeUserScramCredentialsResult)));
 
     private static IEnumerable<Type> Required(string name) =>
-        typeof(IAdmin).GetMethod(name)!.GetParameters()
-            .Where(parameter => !parameter.IsOptional)
+        LongForm(name).GetParameters()
+            .Where(parameter => !parameter.ParameterType.Name.EndsWith("Options", StringComparison.Ordinal))
             .Select(parameter => parameter.ParameterType);
+
+    private static MethodInfo LongForm(string name) =>
+        typeof(IAdmin).GetMethods().Single(method => method.Name == name && EndsInOptions(method));
+
+    private static bool EndsInOptions(MethodInfo method)
+    {
+        ParameterInfo[] parameters = method.GetParameters();
+        return parameters.Length > 0
+            && parameters[parameters.Length - 1].ParameterType.Name.EndsWith("Options", StringComparison.Ordinal);
+    }
 
     private static IEnumerable<string> PublicMembers(Type resultType) =>
         resultType

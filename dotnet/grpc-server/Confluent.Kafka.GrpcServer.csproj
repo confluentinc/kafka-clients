@@ -42,10 +42,13 @@
     <IsPackable>false</IsPackable>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <!--
-      CA1031: the servicer catches System.Exception broadly on purpose — it is
-      a faithful port of grpc_server.py's `except Exception` that funnels every
-      failure into a proto KafkaError (Translate.ToProto). This is the harness
-      contract, not a defect, so the rule is relaxed for this project only.
+      CA1031: the servicers catch System.Exception on purpose, as the Python
+      servers do. CreateProducer, Send and the admin handlers funnel every
+      failure into a proto KafkaError (Translate.ToProto); the other consumer
+      and producer handlers reply only with a binding error
+      (Translate.IsBindingError) and let any other exception fail the call.
+      This is the harness contract, not a defect, so the rule is relaxed for
+      this project only.
     -->
     <NoWarn>$(NoWarn);CA1031</NoWarn>
   </PropertyGroup>

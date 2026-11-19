@@ -107,7 +107,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
                             seen["Assignment"] = Record.Exception(() => consumer.Assignment());
                             seen["Position"] = Record.Exception(() => { _ = consumer.Position(s_tp0); });
                             seen["Close"] = Record.Exception(() => Block(() => CloseCatching(consumer)));
-                            seen["Handle"] = Record.Exception(() => consumer.Handle().Dispose());
+                            seen["Handle"] = Record.Exception(() => CoreConsumerHandles.Of(consumer).Dispose());
                             seen["Wakeup"] = Record.Exception(consumer.Wakeup);
                         });
                         returned = other.Join(s_bound);
@@ -163,7 +163,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
                     seen["Metrics"] = Record.Exception(() => consumer.Metrics());
                     seen["Position"] = Record.Exception(() => { _ = consumer.Position(s_tp0); });
                     close = CloseCatching(consumer);
-                    seen["Handle"] = Record.Exception(() => consumer.Handle().Dispose());
+                    seen["Handle"] = Record.Exception(() => CoreConsumerHandles.Of(consumer).Dispose());
                     seen["Wakeup"] = Record.Exception(consumer.Wakeup);
                 });
                 pending = !rebalance.IsCompleted;

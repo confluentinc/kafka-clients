@@ -37,11 +37,13 @@
 //! against `4.4.0b1`), `--python-version` is required.
 //!
 //! `--dotnet-version <semver>` sets the version of the `Confluent.Kafka` NuGet
-//! package, the one `<Version>` of [`DOTNET_PROPS`], in the semver form only.
-//! It is a third line, on the Apache Kafka version like Python's
-//! (`rfc/versioning.md`), and it moves only when given: the crate's version is
-//! on another line, so it is never the default. A .NET version lower, in
-//! semver order, than the current one is refused.
+//! package, the one `<Version>` of [`DOTNET_PROPS`], in the semver form only,
+//! where an `-alpha.N`, `-beta.N` or `-rc.N` may be followed by `.dev.M`, a dev
+//! build ([`DotnetVersion`]). It is a third line, on the Apache Kafka version
+//! like Python's (`rfc/versioning.md`), and it moves only when given: the
+//! crate's version is on another line, so it is never the default. A .NET
+//! version lower, in NuGet's (SemVer 2.0) order, than the current one is
+//! refused.
 //!
 //! What is released together:
 //!
@@ -79,7 +81,8 @@ const USAGE: &str =
      crate's in PEP 440 form. Python versions are their own line and only move up: a version below\n\
      a package's current one is refused, so pass --python-version while the crate's is lower.\n\
      --dotnet-version sets the .NET package's version (dotnet/Directory.Build.props), in the semver\n\
-     form; without it that version is left as it is. It only moves up too.";
+     form, where -alpha.N, -beta.N and -rc.N may be followed by .dev.M (4.4.0-alpha.0.dev.1); without\n\
+     it that version is left as it is. It only moves up too.";
 
 /// A pre-release stage, in semver precedence order (its labels compare as
 /// ASCII text).
@@ -362,21 +365,62 @@ fn ensure_not_lowered(file: &str, current: &str, python: &str, target: &Pep440) 
     Ok(())
 }
 
-/// The .NET version given with `--dotnet-version`: the semver form only, as
-/// NuGet writes it, so `4.4.0-beta.1` and not `4.4.0b1`.
-fn parse_dotnet_version(text: &str) -> anyhow::Result<PackageVersion> {
-    match PackageVersion::parse(text) {
-        Some(version) if version.to_string() == text => Ok(version),
-        _ => anyhow::bail!(
+/// A version of the `Confluent.Kafka` NuGet package: a [`PackageVersion`] in
+/// its semver form, where an `-alpha.N`, `-beta.N` or `-rc.N` may be followed
+/// by `.dev.M`, a dev build of it. NuGet puts a dev build after the version it
+/// extends and before the next one (`4.4.0-alpha.1` < `4.4.0-alpha.1.dev.1` <
+/// `4.4.0-alpha.2`), so the dev builds that lead up to `4.4.0-alpha.1` are
+/// `4.4.0-alpha.0.dev.M`. The derived order, `version` then `dev`, is NuGet's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DotnetVersion {
+    version: PackageVersion,
+    /// The `M` of `.dev.M`.
+    dev: Option<u64>,
+}
+
+impl DotnetVersion {
+    /// Parses the form NuGet writes, so `4.4.0-beta.1` and not `4.4.0b1`.
+    fn parse(text: &str) -> Option<Self> {
+        let (head, dev) = match text.rsplit_once(".dev.") {
+            Some((head, dev)) => (head, Some(number(dev)?)),
+            None => (text, None),
+        };
+        let version = PackageVersion::parse(head).filter(|version| version.to_string() == head)?;
+        // `.dev.M` extends an alpha, beta or rc, never a release or a `-dev.N`.
+        let extends_pre_release = matches!(version.pre_release, Some((stage, _)) if stage != Stage::Dev);
+        if dev.is_some() && !extends_pre_release {
+            return None;
+        }
+        Some(Self { version, dev })
+    }
+}
+
+/// The form NuGet writes, for [`DOTNET_PROPS`].
+impl fmt::Display for DotnetVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.version)?;
+        match self.dev {
+            Some(m) => write!(f, ".dev.{m}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The .NET version given with `--dotnet-version`, in the form
+/// [`DotnetVersion`] parses.
+fn parse_dotnet_version(text: &str) -> anyhow::Result<DotnetVersion> {
+    match DotnetVersion::parse(text) {
+        Some(version) => Ok(version),
+        None => anyhow::bail!(
             "`{text}` is not a .NET package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N or -rc.N, such as \
-             4.4.0-beta.1"
+             4.4.0-beta.1; an -alpha.N, -beta.N or -rc.N may be followed by .dev.M, such as 4.4.0-alpha.0.dev.1"
         ),
     }
 }
 
 /// Refuses to write `new` over the .NET version `current`, when it is lower in
-/// semver order: the .NET package only moves up.
-fn ensure_dotnet_not_lowered(current: &str, new: PackageVersion) -> anyhow::Result<()> {
+/// NuGet's order: the .NET package only moves up.
+fn ensure_dotnet_not_lowered(current: &str, new: DotnetVersion) -> anyhow::Result<()> {
     let current_version = parse_dotnet_version(current)
         .with_context(|| format!("{DOTNET_PROPS} has `{current}`, not a version this command writes"))?;
     if new < current_version {
@@ -672,6 +716,10 @@ mod tests {
         PackageVersion::parse(text).unwrap_or_else(|| panic!("{text} should parse"))
     }
 
+    fn dotnet(text: &str) -> DotnetVersion {
+        DotnetVersion::parse(text).unwrap_or_else(|| panic!("{text} should parse"))
+    }
+
     #[test]
     fn semver_and_pep440_forms_read_as_the_same_version() {
         for (semver, pep440) in [
@@ -965,6 +1013,9 @@ version = \"9.9.9\"
             "4.4.0-dev.3",
             "4.4.0-rc.0",
             "10.0.100",
+            "4.4.0-alpha.0.dev.1",
+            "4.4.0-beta.0.dev.12",
+            "4.4.0-rc.1.dev.0",
         ] {
             assert_eq!(parse_dotnet_version(text).unwrap().to_string(), text);
         }
@@ -978,21 +1029,58 @@ version = \"9.9.9\"
             "4.4.0+abc",
             "4.4.0-pre.1",
             "",
+            // `.dev.M` extends only an alpha, beta or rc, in the semver form.
+            "4.4.0.dev.1",
+            "4.4.0-dev.1.dev.1",
+            "4.4.0-alpha.0.dev.01",
+            "4.4.0-alpha.0.dev",
+            "4.4.0-alpha.0.dev.1.dev.2",
+            "4.4.0-alpha.dev.1",
+            "4.4.0a0.dev.1",
+            "4.4.0a1.dev1",
         ] {
             let error = parse_dotnet_version(text).unwrap_err();
             assert_eq!(
                 error.to_string(),
                 format!(
                     "`{text}` is not a .NET package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N or -rc.N, such \
-                     as 4.4.0-beta.1"
+                     as 4.4.0-beta.1; an -alpha.N, -beta.N or -rc.N may be followed by .dev.M, such as \
+                     4.4.0-alpha.0.dev.1"
                 )
             );
         }
     }
 
+    /// NuGet's order (SemVer 2.0 precedence), each version below the next: a
+    /// dev build comes after the version it extends and before the next one.
+    #[test]
+    fn dotnet_versions_compare_in_nuget_order() {
+        let ordered = [
+            "4.3.0",
+            "4.4.0-alpha.0.dev.1",
+            "4.4.0-alpha.0.dev.2",
+            "4.4.0-alpha.0.dev.10",
+            "4.4.0-alpha.1",
+            "4.4.0-alpha.1.dev.1",
+            "4.4.0-alpha.2",
+            "4.4.0-beta.0.dev.1",
+            "4.4.0-beta.1",
+            "4.4.0-beta.1.dev.1",
+            "4.4.0-dev.1",
+            "4.4.0-dev.2",
+            "4.4.0-rc.0.dev.1",
+            "4.4.0-rc.1",
+            "4.4.0",
+            "4.4.1-alpha.0.dev.1",
+        ];
+        for pair in ordered.windows(2) {
+            assert!(dotnet(pair[0]) < dotnet(pair[1]), "{} < {}", pair[0], pair[1]);
+        }
+    }
+
     #[test]
     fn a_lower_dotnet_version_is_refused() {
-        let check = |current: &str, new: &str| ensure_dotnet_not_lowered(current, v(new));
+        let check = |current: &str, new: &str| ensure_dotnet_not_lowered(current, dotnet(new));
         let error = check("4.4.0-beta.1", "4.4.0-alpha.2").unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -1001,11 +1089,27 @@ version = \"9.9.9\"
         );
         assert!(check("4.4.0", "4.4.0-rc.9").is_err());
         assert!(check("4.4.1", "4.4.0").is_err());
+        // A dev build is above the version it extends, so the dev builds that
+        // lead up to 4.4.0-alpha.1 are 4.4.0-alpha.0.dev.M, below it.
+        let error = check("4.4.0-alpha.1", "4.4.0-alpha.0.dev.2").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dotnet/Directory.Build.props is at 4.4.0-alpha.1: the .NET version 4.4.0-alpha.0.dev.2 would lower it. \
+             .NET versions only move up; pass --dotnet-version with a version not below 4.4.0-alpha.1"
+        );
+        assert!(check("4.4.0-alpha.1.dev.1", "4.4.0-alpha.1").is_err());
         // Semver order, as NuGet compares: dev is above beta.
         check("4.4.0-beta.1", "4.4.0-dev.1").unwrap();
         check("4.4.0-beta.1", "4.4.0-beta.1").unwrap();
         check("4.4.0-rc.1", "4.4.0").unwrap();
         check("4.4.0", "4.5.0-alpha.0").unwrap();
+        // Each step of a release: dev builds, then the pre-release they lead up to.
+        check("4.4.0-alpha.0.dev.1", "4.4.0-alpha.0.dev.2").unwrap();
+        check("4.4.0-alpha.0.dev.1", "4.4.0-alpha.1").unwrap();
+        check("4.4.0-alpha.1", "4.4.0-alpha.1.dev.1").unwrap();
+        check("4.4.0-alpha.1", "4.4.0-beta.0.dev.1").unwrap();
+        check("4.4.0-beta.0.dev.1", "4.4.0-beta.1").unwrap();
+        check("4.4.0-dev.1", "4.4.0").unwrap();
         let error = check("4.4.0b1", "4.4.0").unwrap_err();
         assert_eq!(
             error.to_string(),

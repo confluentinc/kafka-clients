@@ -38,13 +38,17 @@ LINT_PROBE = $(LINT_BUILD_DIR)/probe/probe.cpp
 BASELINE ?=
 STRICT ?= OFF
 
-# Every target expects the Rust library already built under
-# $(RUST_PROJECT_ROOT)/target: the repository root's Makefile orders that
-# (`build-cpp` depends on the Rust build); run standalone, build it first.
-.PHONY: build devel-build test test-unit test-static format format-check lint lint-plugin lint-custom lint-tests \
-	lint-baseline abi-check verify clean
+# Every target that needs the core builds it first (rust-lib): the release
+# all-features library, which CMake prefers over the debug one.
+.PHONY: rust-lib build devel-build test test-unit test-static format format-check lint lint-plugin lint-custom \
+	lint-tests lint-baseline abi-check verify clean
 
-build:
+# The Rust library and its headers, built by rust/Makefile; a cargo no-op once
+# they are current.
+rust-lib:
+	$(MAKE) -C $(RUST_PROJECT_ROOT) build-all-features
+
+build: rust-lib
 	cmake -S . -B $(BUILD_DIR) -G $(CMAKE_GENERATOR) \
 		-DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) \
 		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
@@ -59,7 +63,7 @@ test-unit: build
 
 # The unit tests linked against ConfluentKafka::cpp_static and the core's static
 # library, in a build tree of their own.
-test-static:
+test-static: rust-lib
 	cmake -S . -B $(STATIC_BUILD_DIR) -G $(CMAKE_GENERATOR) \
 		-DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCONFLUENT_KAFKA_CPP_TEST_LINK=static
 	cmake --build $(STATIC_BUILD_DIR)
@@ -75,7 +79,7 @@ lint: build lint-custom
 	$(CLANG_TIDY) -p $(BUILD_DIR) --quiet $(CLANG_TIDY_EXTRA_ARGS) $(TIDY_SOURCES)
 
 # Builds the plugin, ck_java_model and the linter's tests.
-lint-plugin:
+lint-plugin: rust-lib
 	cmake -S tools/lint -B $(LINT_BUILD_DIR) -G $(CMAKE_GENERATOR) \
 		-DCK_LINT_FFI_INCLUDE_DIR=$(FFI_INCLUDE)
 	cmake --build $(LINT_BUILD_DIR)

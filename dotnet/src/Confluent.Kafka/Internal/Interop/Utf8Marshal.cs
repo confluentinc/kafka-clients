@@ -71,7 +71,7 @@ internal static class Utf8Marshal
             return string.Empty;
         }
 
-#if NETSTANDARD2_0
+#if NETSTANDARD2_0 || NETFRAMEWORK
         fixed (byte* ptr = data)
         {
             return Encoding.UTF8.GetString(ptr, data.Length);

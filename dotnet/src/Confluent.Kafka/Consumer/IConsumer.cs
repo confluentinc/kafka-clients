@@ -34,9 +34,8 @@ namespace Confluent.Kafka.Consumer;
 /// <para>
 /// The consumer has one owner at a time, as Java's does. A call from another thread while a call is in progress
 /// throws <see cref="ConcurrentModificationException"/> ("KafkaConsumer is not safe for multi-threaded access.");
-/// <see cref="MockConsumer{TKey, TValue}"/> makes it wait instead. <see cref="IConsumerCommon.Wakeup"/> and
-/// <see cref="IConsumerCommon.Handle"/> may be called from any thread, and a <see cref="IDisposable.Dispose"/> from
-/// another thread wakes the call in progress, waits for it, and closes the consumer.
+/// <see cref="MockConsumer{TKey, TValue}"/> makes it wait instead. <see cref="IConsumerCommon.Wakeup"/> may
+/// be called from any thread, and a <see cref="IDisposable.Dispose"/> from another thread wakes the call in progress, waits for it, and closes the consumer.
 /// </para>
 /// <para>
 /// Rebalance listeners run on the calling thread, only inside <c>Poll</c>, <c>Unsubscribe</c> and <c>Close</c>;
@@ -387,8 +386,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// commits nothing.
     /// </summary>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a commit failure.</exception>
     void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets);
@@ -399,8 +397,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
     /// <param name="timeout">The maximum time to block.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="timeout"/> is negative ("Invalid negative timeout &lt;ms&gt;").
     /// </exception>
@@ -452,14 +449,13 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </remarks>
     /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
     /// <param name="callback">The callback that receives the commit's outcome, or <see langword="null"/> for none.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/>, a key's topic or a value is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
     /// <exception cref="KafkaException">The core could not start the commit.</exception>
     void CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null);
+        IOffsetCommitCallback? callback);
 
     /// <summary>
     /// Seeks <paramref name="partition"/> to <paramref name="offset"/> (Java <c>seek(TopicPartition, long)</c>);
@@ -557,8 +553,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </summary>
     /// <param name="timestampsToSearch">The per-partition timestamps to search for.</param>
     /// <returns>The first offset at or after each timestamp, per partition, <see langword="null"/> where there is none.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> or a key's topic is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an offsets-for-times failure.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -575,8 +570,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <param name="timestampsToSearch">The per-partition timestamps to search for.</param>
     /// <param name="timeout">The maximum time to block.</param>
     /// <returns>The first offset at or after each timestamp, per partition, <see langword="null"/> where there is none.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> or a key's topic is null.</exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">

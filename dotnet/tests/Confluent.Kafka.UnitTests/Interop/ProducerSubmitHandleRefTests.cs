@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 
 using Confluent.Kafka.Internal;
 
@@ -45,6 +46,9 @@ public sealed class ProducerSubmitHandleRefTests
     // The budget sits well above the GC noise and well below a rooted context per rejected submit.
     private const long GrowthBudgetBytes = 2_000_000;
 
+    // Best of N: a rooted context raises every attempt, while GC noise on a loaded runner rarely raises them all.
+    private const int MeasurementAttempts = 3;
+
     [Fact]
     public void SubmitVoidOperation_WhenAddRefThrows_DoesNotRootTheCompletionContext()
     {
@@ -59,6 +63,25 @@ public sealed class ProducerSubmitHandleRefTests
             AssertRejected(producer);
         }
 
+        var growths = new List<long>(MeasurementAttempts);
+        for (int attempt = 0; attempt < MeasurementAttempts; attempt++)
+        {
+            long growth = MeasureGrowth(producer);
+            if (growth < GrowthBudgetBytes)
+            {
+                return;
+            }
+
+            growths.Add(growth);
+        }
+
+        Assert.Fail(
+            $"Rejected submits rooted their completion contexts: managed memory grew {string.Join(", ", growths)} "
+            + $"bytes in {MeasurementAttempts} attempts of {Iterations} iterations (budget {GrowthBudgetBytes}).");
+    }
+
+    private static long MeasureGrowth(NativeProducer producer)
+    {
         long baseline = GC.GetTotalMemory(forceFullCollection: true);
 
         for (int i = 0; i < Iterations; i++)
@@ -66,11 +89,7 @@ public sealed class ProducerSubmitHandleRefTests
             AssertRejected(producer);
         }
 
-        long growth = GC.GetTotalMemory(forceFullCollection: true) - baseline;
-        Assert.True(
-            growth < GrowthBudgetBytes,
-            $"Rejected submits rooted their completion contexts: managed memory grew {growth} bytes "
-            + $"across {Iterations} iterations (budget {GrowthBudgetBytes}).");
+        return GC.GetTotalMemory(forceFullCollection: true) - baseline;
     }
 
     private static void AssertRejected(NativeProducer producer)

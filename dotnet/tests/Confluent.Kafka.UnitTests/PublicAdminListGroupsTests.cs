@@ -123,7 +123,6 @@ public sealed class PublicAdminListGroupsTests
         foreach (AsyncListGroupsResult result in new[]
         {
             admin.ListGroups(),
-            admin.ListGroups(null),
             admin.ListGroups(new ListGroupsOptions()),
         })
         {

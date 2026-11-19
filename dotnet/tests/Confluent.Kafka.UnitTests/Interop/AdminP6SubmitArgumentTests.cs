@@ -154,13 +154,10 @@ public sealed class AdminP6SubmitArgumentTests
     [Fact]
     public void AclOptions_NoSetterRan_TheCOptionsCarryTheDefaultTimeout()
     {
-        Assert.Equal(-1, CreateAclsTimeoutMs(null));
         Assert.Equal(-1, CreateAclsTimeoutMs(new CreateAclsOptions()));
         Assert.Empty(new CreateAclsOptions().Setters.InOrder);
-        Assert.Equal(-1, DescribeAclsTimeoutMs(null));
         Assert.Equal(-1, DescribeAclsTimeoutMs(new DescribeAclsOptions()));
         Assert.Empty(new DescribeAclsOptions().Setters.InOrder);
-        Assert.Equal(-1, DeleteAclsTimeoutMs(null));
         Assert.Equal(-1, DeleteAclsTimeoutMs(new DeleteAclsOptions()));
         Assert.Empty(new DeleteAclsOptions().Setters.InOrder);
     }
@@ -384,12 +381,9 @@ public sealed class AdminP6SubmitArgumentTests
     [Fact]
     public void QuotaOptions_NoSetterRan_TheCOptionsCarryTheDefaults()
     {
-        Assert.Equal(-1, DescribeClientQuotasTimeoutMs(null));
         Assert.Equal(-1, DescribeClientQuotasTimeoutMs(new DescribeClientQuotasOptions()));
         Assert.Empty(new DescribeClientQuotasOptions().Setters.InOrder);
-        Assert.Equal(-1, AlterClientQuotasTimeoutMs(null));
         Assert.Equal(-1, AlterClientQuotasTimeoutMs(new AlterClientQuotasOptions()));
-        Assert.Equal(0, AlterClientQuotasValidateOnly(null));
         Assert.Equal(0, AlterClientQuotasValidateOnly(new AlterClientQuotasOptions()));
         Assert.Empty(new AlterClientQuotasOptions().Setters.InOrder);
     }
@@ -517,7 +511,7 @@ public sealed class AdminP6SubmitArgumentTests
         Assert.Equal(0, Marshal.ReadByte(value));
     }
 
-    private static int CreateAclsTimeoutMs(CreateAclsOptions? options)
+    private static int CreateAclsTimeoutMs(CreateAclsOptions options)
     {
         IntPtr native = NativeAdminClient.NewCreateAclsOptions(options);
         try
@@ -530,7 +524,7 @@ public sealed class AdminP6SubmitArgumentTests
         }
     }
 
-    private static int DescribeAclsTimeoutMs(DescribeAclsOptions? options)
+    private static int DescribeAclsTimeoutMs(DescribeAclsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeAclsOptions(options);
         try
@@ -543,7 +537,7 @@ public sealed class AdminP6SubmitArgumentTests
         }
     }
 
-    private static int DeleteAclsTimeoutMs(DeleteAclsOptions? options)
+    private static int DeleteAclsTimeoutMs(DeleteAclsOptions options)
     {
         IntPtr native = NativeAdminClient.NewDeleteAclsOptions(options);
         try
@@ -716,7 +710,7 @@ public sealed class AdminP6SubmitArgumentTests
         }
     }
 
-    private static int DescribeClientQuotasTimeoutMs(DescribeClientQuotasOptions? options)
+    private static int DescribeClientQuotasTimeoutMs(DescribeClientQuotasOptions options)
     {
         IntPtr native = NativeAdminClient.NewDescribeClientQuotasOptions(options);
         try
@@ -729,7 +723,7 @@ public sealed class AdminP6SubmitArgumentTests
         }
     }
 
-    private static int AlterClientQuotasTimeoutMs(AlterClientQuotasOptions? options)
+    private static int AlterClientQuotasTimeoutMs(AlterClientQuotasOptions options)
     {
         IntPtr native = NativeAdminClient.NewAlterClientQuotasOptions(options);
         try
@@ -742,7 +736,7 @@ public sealed class AdminP6SubmitArgumentTests
         }
     }
 
-    private static sbyte AlterClientQuotasValidateOnly(AlterClientQuotasOptions? options)
+    private static sbyte AlterClientQuotasValidateOnly(AlterClientQuotasOptions options)
     {
         IntPtr native = NativeAdminClient.NewAlterClientQuotasOptions(options);
         try

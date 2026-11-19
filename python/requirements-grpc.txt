@@ -1,6 +1,6 @@
 # Runtime dependencies of the Python gRPC test servers (grpc_server.py,
 # grpc_server_async.py). Used by Dockerfile.grpc{,.async} and by
-# `make build-grpc-native-python`, so container and native runs use the same
+# `make -C python grpc-native`, so container and native runs use the same
 # versions.
 #
 # Keep grpcio on the same series as grpcio-tools (requirements-grpc-tools.txt):

@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Consumer;
 /// On <see cref="IConsumer{TKey, TValue}"/> it runs on the caller's thread, inside the consumer call that delivers
 /// it (<c>Poll</c>, <c>Commit</c>, <c>CommitAsync</c>, <c>Close</c>, …); on <see cref="IAsyncConsumer{TKey, TValue}"/>,
 /// on the consumer's <c>confluent-kafka-consumer-pump</c> thread. A call back into the consumer from inside it goes
-/// through the consumer's own <see cref="ConsumerHandle"/>, as from a rebalance listener
+/// through the consumer's own handle, as from a rebalance listener
 /// (<see cref="IConsumerRebalanceListener"/>).
 /// </para>
 /// <para>

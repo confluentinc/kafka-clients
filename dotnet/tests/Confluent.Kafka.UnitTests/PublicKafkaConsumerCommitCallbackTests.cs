@@ -21,6 +21,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Internal;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -66,7 +67,7 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
         KafkaConsumer<byte[], byte[]> consumer = NewConsumer();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0 });
-        using ConsumerHandle handle = consumer.Handle();
+        using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
         List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? Offsets, Exception? Exception)> seen =
             new List<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>?, Exception?)>();
         Exception? failure = null;
@@ -75,7 +76,7 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
         {
             try
             {
-                handle.CommitAsync(Empty(), new DelegateCallback((o, e) => seen.Add((o, e))));
+                handle.CommitAsync(OffsetsSnapshot.Of(Empty()), new DelegateCallback((o, e) => seen.Add((o, e))));
             }
             catch (Exception e)
             {

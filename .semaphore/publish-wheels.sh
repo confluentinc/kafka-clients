@@ -16,7 +16,7 @@
 #
 #
 # Packages the tested wheels of a Python release tag build and publishes them
-# to one index, for the "Release (Python): packaging" block of semaphore.yml
+# to one index, for the "Release (Python): packaging" block of release.yml
 # and the "Release (Python): publish to ..." blocks of publish-testpypi.yml
 # and publish-pypi.yml, the tag build's manual promotions. Every version goes
 # to Test PyPI first, then to PyPI, after its wheels have passed the
@@ -79,7 +79,7 @@ refuse() {
 simple_index() {
     local body status
     body=$(mktemp) || return 1
-    status=$(curl -sS --retry 3 --retry-delay 5 -o "${body}" -w '%{http_code}' \
+    status=$(curl -sS --retry 3 --retry-delay 5 --retry-all-errors -o "${body}" -w '%{http_code}' \
         -H 'Accept: application/vnd.pypi.simple.v1+json' "${PYPI_INDEX}/simple/${PYPI_PACKAGE}/") || { rm -f "${body}"; return 1; }
     case "${status}" in
         200)

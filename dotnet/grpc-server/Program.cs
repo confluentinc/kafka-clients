@@ -52,7 +52,10 @@ internal static class Program
             options.Listen(address, port, listenOptions => listenOptions.Protocols = HttpProtocols.Http2);
         });
 
-        builder.Services.AddGrpc();
+        // In the consumer handlers and the producer handlers other than CreateProducer and Send, an exception that is
+        // not a binding error fails the call; the detailed error carries its type and message to the harness, as
+        // Python's server sends "Exception calling application: ...".
+        builder.Services.AddGrpc(options => options.EnableDetailedErrors = true);
 
         // Singletons: each servicer owns the id map or workload registry that every RPC shares, and
         // ASP.NET Core would otherwise create a servicer per request.

@@ -32,8 +32,8 @@
 #       Checks the package: its file name, the exact list of its entries and how they are stored,
 #       its nuspec, its assemblies, and each native library as `native` does.
 #
-# --dev is for a package built from a developer's or a CI job's own native (make
-# package-check-dotnet): the platform floors are not checked, since that native was not built for
+# --dev is for a package built from a developer's or a CI job's own native (make -C
+# dotnet package-check-dotnet): the platform floors are not checked, since that native was not built for
 # them. A release package is never checked with --dev.
 #
 # The checks read the files as NuGet and the dynamic loaders do, and refuse what those would read
@@ -52,9 +52,13 @@ import zipfile
 PACKAGE_ID = "Confluent.Kafka"
 PROPS = "dotnet/Directory.Build.props"
 
-# The release versions: X.Y.Z, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N. The
-# dotnet/v<version> tag pattern of semaphore.yml is this pattern after its prefix.
-VERSION_PATTERN = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|dev|rc)\.(0|[1-9][0-9]*))?"
+# The release versions: X.Y.Z, optionally followed by -alpha.N, -beta.N, -dev.N or -rc.N, an
+# -alpha.N, -beta.N or -rc.N then optionally by .dev.M, a dev build. NuGet puts a dev build after
+# the version it extends (4.4.0-alpha.1 < 4.4.0-alpha.1.dev.1 < 4.4.0-alpha.2), so the dev builds
+# that lead up to 4.4.0-alpha.1 are 4.4.0-alpha.0.dev.M. The dotnet/v<version> tag pattern of
+# release.yml is this pattern after its prefix.
+VERSION_PATTERN = (r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+                   r"(-((alpha|beta|rc)\.(0|[1-9][0-9]*)(\.dev\.(0|[1-9][0-9]*))?|dev\.(0|[1-9][0-9]*)))?")
 # The package id is shared with confluent-kafka-dotnet, whose versions are 2.x: this client's
 # versions start at 4, the Apache Kafka line, so that none can be taken for one of those.
 MIN_MAJOR = 4
@@ -63,7 +67,10 @@ MIN_MAJOR = 4
 # as the nuspec's dependency groups name them, with the dependencies of each, and as the
 # assembly's TargetFrameworkAttribute names them.
 TARGET_FRAMEWORKS = {
-    "netstandard2.0": (".NETStandard2.0", {"System.Memory": "4.5.5", "Microsoft.Bcl.AsyncInterfaces": "8.0.0"},
+    "net462": (".NETFramework4.6.2", {"System.Memory": "4.5.5", "Microsoft.Bcl.AsyncInterfaces": "8.0.0",
+                                      "System.ValueTuple": "4.5.0"},
+               ".NETFramework,Version=v4.6.2"),
+    "netstandard2.0":(".NETStandard2.0", {"System.Memory": "4.5.5", "Microsoft.Bcl.AsyncInterfaces": "8.0.0"},
                        ".NETStandard,Version=v2.0"),
     "net8.0": ("net8.0", {}, ".NETCoreApp,Version=v8.0"),
     "net10.0": ("net10.0", {}, ".NETCoreApp,Version=v10.0"),
@@ -79,6 +86,11 @@ NATIVE_FILES = {
     "win-x64": "confluent_kafka.dll",
     "win-x86": "confluent_kafka.dll",
 }
+
+# The .NET Framework build targets (dotnet/src/Confluent.Kafka/Packaging/): buildTransitive/ copies
+# both Windows natives into a project's output under runtimes/<rid>/native, for the library to load
+# the one of its process, and build/, which packages.config imports, imports it.
+FRAMEWORK_TARGETS = (f"buildTransitive/net462/{PACKAGE_ID}.targets", f"build/net462/{PACKAGE_ID}.targets")
 
 GLIBC_FLOOR = (2, 28)
 MACOS_FLOOR = (11, 0, 0)
@@ -114,7 +126,7 @@ def fail(message):
 def release_version_problem(version):
     """Why `version` is not a release version of the package, or None."""
     if not re.fullmatch(VERSION_PATTERN, version):
-        return f"'{version}' is not X.Y.Z or X.Y.Z-(alpha|beta|dev|rc).N"
+        return f"'{version}' is not X.Y.Z, X.Y.Z-(alpha|beta|dev|rc).N or X.Y.Z-(alpha|beta|rc).N.dev.M"
     if int(version.split(".")[0]) < MIN_MAJOR:
         return (f"'{version}' is below {MIN_MAJOR}.0.0; the versions of {PACKAGE_ID} below {MIN_MAJOR} are "
                 "confluent-kafka-dotnet's")
@@ -532,6 +544,7 @@ def check_package(path, version, rids, commit, dev):
             if rid not in NATIVE_FILES:
                 fail(f"--rids names {rid}, which is not one of {', '.join(NATIVE_FILES)}")
             expected.add(f"runtimes/{rid}/native/{NATIVE_FILES[rid]}")
+        expected |= set(FRAMEWORK_TARGETS)
         core_properties = [n for n in names if re.fullmatch(r"package/services/metadata/core-properties/[^/]+\.psmdcp", n)]
         if len(core_properties) != 1:
             problems.append(f"the package has {len(core_properties)} core-properties entries, not 1")
@@ -576,6 +589,31 @@ def check_package(path, version, rids, commit, dev):
                 problems.append(f"lib/{folder}/{PACKAGE_ID}.xml is not the XML documentation of {PACKAGE_ID}")
         for rid in rids:
             problems += check_native(rid, NATIVE_FILES[rid], archive.read(f"runtimes/{rid}/native/{NATIVE_FILES[rid]}"), dev)
+        problems += check_framework_targets(archive)
+    return problems
+
+
+def check_framework_targets(archive):
+    transitive, build = FRAMEWORK_TARGETS
+    try:
+        copying = ElementTree.fromstring(archive.read(transitive))
+        importing = ElementTree.fromstring(archive.read(build))
+    except ElementTree.ParseError as error:
+        return [f"a .NET Framework targets file is not MSBuild XML: {error}"]
+    problems = []
+    copied = {item.get("Include"): item for item in copying.iter("Content")}
+    for rid in ("win-x64", "win-x86"):
+        source = f"$(MSBuildThisFileDirectory)..\\..\\runtimes\\{rid}\\native\\{NATIVE_FILES[rid]}"
+        item = copied.get(source)
+        if item is None or item.get("Link") != f"runtimes\\{rid}\\native\\{NATIVE_FILES[rid]}" \
+                or item.get("CopyToOutputDirectory") != "PreserveNewest" or item.get("Pack") != "false":
+            problems.append(f"{transitive} does not copy runtimes/{rid}/native/{NATIVE_FILES[rid]} "
+                            f"to runtimes\\{rid}\\native in a project's output")
+    if len(copied) != 2:
+        problems.append(f"{transitive} copies {len(copied)} files, not the 2 Windows natives")
+    imports = [element.get("Project") for element in importing.iter("Import")]
+    if imports != ["$(MSBuildThisFileDirectory)..\\..\\" + transitive.replace("/", "\\")]:
+        problems.append(f"{build} does not import {transitive} only")
     return problems
 
 

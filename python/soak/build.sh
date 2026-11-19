@@ -27,7 +27,7 @@
 # Ordering is mandatory. `pip install -e python` compiles the C
 # extension against rust/target/include/confluent_kafka_bindings.h and links
 # libconfluent_kafka from CONFLUENT_KAFKA_LIB_DIR, so cargo must run first.
-# This mirrors the repo's `make build-python` / python/Makefile.
+# This mirrors python/Makefile's `build`.
 
 set -euo pipefail
 
@@ -126,8 +126,8 @@ if [[ -n "$GIT_REF" ]]; then
     # Submodules are deliberately NOT initialised: `kafka` is a multi-GB Java
     # source reference and `unity` only backs the C unit tests. Neither is a
     # prerequisite of `cargo build --features ffi` (build.rs generates from the
-    # in-repo rust/generator/messages/ specs), which is why the repo's own
-    # `build-rust` target does not depend on them either.
+    # in-repo rust/generator/messages/ specs), which is why rust/Makefile's
+    # `build` target does not depend on them either.
 else
     ROOT="$(cd "$SRC_DIR" && pwd)"
     if [[ ! -f "$ROOT/rust/Cargo.toml" ]]; then

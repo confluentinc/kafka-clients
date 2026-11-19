@@ -12,7 +12,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
-    <!-- .NET Framework, which runs only on Windows, runs the package's .NET Standard 2.0 assembly. -->
+    <!-- .NET Framework, which runs only on Windows, runs the package's net462 assembly. -->
     <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('Windows'))">net462;net8.0;net10.0</TargetFrameworks>
     <!-- The C# of the program, which .NET Framework's default language version predates. -->
     <LangVersion>latest</LangVersion>

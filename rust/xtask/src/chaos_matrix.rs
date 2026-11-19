@@ -1234,15 +1234,24 @@ pub(crate) fn stop_group(child: &mut Child, pgid: u32, grace: Duration) -> anyho
         std::thread::sleep(Duration::from_millis(500));
     }
     if group_running(child, pgid)? {
-        signal_group(pgid, "KILL");
-        let _ = child.wait();
-        // Orphaned group members are reaped by init, not by us.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline && group_alive(pgid) {
-            std::thread::sleep(Duration::from_millis(200));
-        }
+        kill_group(child, pgid);
     }
     Ok(())
+}
+
+/// SIGKILL process group `pgid`, led by `child`, and wait up to 10 s for it
+/// to be gone. The signal is sent again while a member is left: a process
+/// forked while the group is being killed can miss it (seen on macOS under
+/// load) and would keep the group alive.
+pub(crate) fn kill_group(child: &mut Child, pgid: u32) {
+    signal_group(pgid, "KILL");
+    let _ = child.wait();
+    // Orphaned group members are reaped by init, not by us.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while group_alive(pgid) && Instant::now() < deadline {
+        signal_group(pgid, "KILL");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub(crate) fn signal_group(pid: u32, signal: &str) {
@@ -2466,12 +2475,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
                 out.display()
             )
         );
-        signal_group(pgid, "KILL");
-        run.wait().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while group_alive(pgid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        kill_group(&mut run, pgid);
         refuse_if_previous_run_alive(&out).unwrap();
         // A pid file without a run (between runs) blocks nothing either.
         write_pid_file(&out, None).unwrap();
@@ -2651,11 +2655,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 70 filtered out
         let pgid = child.id();
         child.wait().unwrap();
         assert!(group_running(&mut child, pgid).unwrap(), "the group outlives its leader");
-        signal_group(pgid, "KILL");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while group_alive(pgid) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        kill_group(&mut child, pgid);
         assert!(!group_running(&mut child, pgid).unwrap());
     }
 

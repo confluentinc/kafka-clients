@@ -220,8 +220,7 @@ internal sealed partial class NativeAdminClient
         {
             if (alteration is null)
             {
-                throw new ArgumentException(
-                    "The client quota alterations must not contain a null element.", parameterName);
+                throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
             }
 
             foreach (KeyValuePair<string, string?> part in alteration.Entity().Entries())

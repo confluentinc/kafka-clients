@@ -61,7 +61,7 @@ public sealed class PublicConsumerOwnerCheckTests
                     seen["Metrics"] = Record.Exception(() => consumer.Metrics());
                     seen["EnforceRebalance"] = Record.Exception(() => consumer.EnforceRebalance());
                     seen["Close"] = Record.Exception(() => consumer.Close());
-                    seen["Handle"] = Record.Exception(() => consumer.Handle().Dispose());
+                    seen["Handle"] = Record.Exception(() => CoreConsumerHandles.Of(consumer).Dispose());
                     seen["Wakeup"] = Record.Exception(consumer.Wakeup);
                 })));
 
@@ -106,7 +106,7 @@ public sealed class PublicConsumerOwnerCheckTests
                         seen["Metrics"] = Record.Exception(() => consumer.Metrics());
                         seen["EnforceRebalance"] = Record.Exception(() => consumer.EnforceRebalance());
                         close = CloseCatching(consumer);
-                        seen["Handle"] = Record.Exception(() => consumer.Handle().Dispose());
+                        seen["Handle"] = Record.Exception(() => CoreConsumerHandles.Of(consumer).Dispose());
                         seen["Wakeup"] = Record.Exception(consumer.Wakeup);
                     }))),
                 s_deadline);

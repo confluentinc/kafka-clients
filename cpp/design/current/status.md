@@ -6,8 +6,8 @@ Updated 2026-11-18.
 
 - Scaffold on branch `esabellico/cpp_bindings_scaffold`: CMake project (`ConfluentKafka::cpp`
   INTERFACE target, install and package config, version check against `version.hpp`), Makefile
-  (build, test, format, format-check, lint, clean), root `make build-cpp` / `make test-cpp`
-  (standalone; not yet part of `build-all`, `test` or `verify`).
+  (build, test, format, format-check, lint, clean), run as `make -C cpp <target>`, each building
+  the core first (standalone; not yet part of the root `build-all`, `test` or `verify`).
 - `src/detail/ffi.hpp` (moved from `include/` by the packaging step 2): the single include of the
   C header, `UniqueHandle`, `ErrorHandle`, `ErrorSlot`.
 - Tests: GoogleTest harness (`confluent_kafka_cpp_unit_test`), `ffi_handle_test`, the header probe

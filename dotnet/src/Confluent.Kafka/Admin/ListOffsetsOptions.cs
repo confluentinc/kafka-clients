@@ -18,7 +18,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.ListOffsets"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.ListOffsets(System.Collections.Generic.IReadOnlyDictionary{TopicPartition, OffsetSpec}, ListOffsetsOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.ListOffsetsOptions</c>.
 /// </summary>
 /// <remarks>

@@ -1,0 +1,22 @@
+<Project>
+
+  <!--
+    .NET Framework: an AnyCPU process is 64-bit or 32-bit, so both native libraries are copied, under
+    runtimes\win-x64\native and runtimes\win-x86\native, and Confluent.Kafka loads the one of the process
+    (Internal/Interop/NativeMethods.NetFramework.cs). The one NuGet copies beside the application for a
+    RuntimeIdentifier is loaded instead when it is of the process.
+  -->
+  <ItemGroup>
+    <Content Include="$(MSBuildThisFileDirectory)..\..\runtimes\win-x64\native\confluent_kafka.dll"
+             Condition="Exists('$(MSBuildThisFileDirectory)..\..\runtimes\win-x64\native\confluent_kafka.dll')"
+             Link="runtimes\win-x64\native\confluent_kafka.dll"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest"
+             Visible="false" Pack="false" />
+    <Content Include="$(MSBuildThisFileDirectory)..\..\runtimes\win-x86\native\confluent_kafka.dll"
+             Condition="Exists('$(MSBuildThisFileDirectory)..\..\runtimes\win-x86\native\confluent_kafka.dll')"
+             Link="runtimes\win-x86\native\confluent_kafka.dll"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest"
+             Visible="false" Pack="false" />
+  </ItemGroup>
+
+</Project>

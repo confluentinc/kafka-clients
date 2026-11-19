@@ -21,7 +21,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// The result of <see cref="IAdmin.DescribeTopics(TopicCollection, DescribeTopicsOptions?)"/> —
+/// The result of <see cref="IAdmin.DescribeTopics(TopicCollection, DescribeTopicsOptions)"/> —
 /// Java's <c>org.apache.kafka.clients.admin.DescribeTopicsResult</c>: one future per topic, keyed
 /// by whichever identifier the request used.
 /// </summary>

@@ -28,6 +28,8 @@ namespace Confluent.Kafka.Internal;
 /// </summary>
 internal static class ClientConfigs
 {
+    private const string HiddenPassword = "[hidden]";
+
     // The client's own serializer keys stay with the binding, neither checked nor sent: it always takes serde instances.
     private static readonly HashSet<string> s_producerSerdeKeys = new(StringComparer.Ordinal)
     {
@@ -138,7 +140,9 @@ internal static class ClientConfigs
 
         if (message is not null)
         {
-            throw new ConfigException(key, value, message);
+            // A recorded deviation: a Password key's value is shown as Java's Password.toString() shows it, never in
+            // full, where Java prints the value's toString().
+            throw new ConfigException(key, type == ConfigType.Password ? HiddenPassword : value, message);
         }
     }
 

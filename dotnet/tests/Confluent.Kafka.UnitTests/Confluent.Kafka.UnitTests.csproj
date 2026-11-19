@@ -6,8 +6,8 @@
     a TFM-sentinel smoke test that proves the harness runs and InternalsVisibleTo
     compiles.
 
-    Test TFMs are net462;net8.0;net10.0. net462 satisfies the net462 (via ns2.0) TFM
-    smoke leg (PLAN §5.7): it must BUILD on the floor here (Microsoft.NETFramework.-
+    Test TFMs are net462;net8.0;net10.0. net462 is the TFM smoke leg of the library's
+    net462 assembly (PLAN §5.7): it must BUILD on the floor here (Microsoft.NETFramework.-
     ReferenceAssemblies restores the reference assemblies cross-platform), but its
     RUN is Windows/CI-only. net8.0 runs are CI-only too (only the .NET 10 runtime is
     installed locally), so use `dotnet test -f net10.0` locally.
@@ -36,11 +36,39 @@
        (macOS/Linux) — a build-only package (no runtime asset). Its RUN stays
        Windows/CI-only (PLAN §5.7). -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net462'">
+    <!-- RuntimeInformation (TfmSentinelTests) is built into .NET Framework from 4.7.1 on. -->
+    <PackageReference Include="System.Runtime.InteropServices.RuntimeInformation" Version="4.3.0" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
   </ItemGroup>
+
+  <!--
+    net462: a binding redirect to each strong-named assembly in the output folder, at the version
+    the folder holds. The .NET Framework test host runs the tests with this project's .dll.config
+    followed by its own configuration, which redirects the assemblies it ships with to its own
+    versions (System.Memory to 4.0.5.0, where this folder holds 4.0.1.2), so loading them fails.
+    The build writes a redirect only for an assembly referenced at two versions, and none is, so
+    it writes no .dll.config. For a name redirected twice the first redirect wins, so these win
+    over the test host's. Skipped in design-time builds (dotnet format, IDEs), which load the project
+    without building its references, so the copied assemblies may not exist yet.
+  -->
+  <Target Name="RedirectToCopiedAssemblies" AfterTargets="ResolveAssemblyReferences" BeforeTargets="GenerateBindingRedirects"
+          Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework' and '$(DesignTimeBuild)' != 'true'">
+    <ItemGroup>
+      <_CopiedManagedAssembly Include="@(ReferenceCopyLocalPaths)"
+                              Condition="'%(Extension)' == '.dll' and '%(ReferenceCopyLocalPaths.AssetType)' != 'native' and '%(ReferenceCopyLocalPaths.Culture)' == ''" />
+    </ItemGroup>
+    <GetAssemblyIdentity AssemblyFiles="@(_CopiedManagedAssembly)">
+      <Output TaskParameter="Assemblies" ItemName="_CopiedAssemblyIdentity" />
+    </GetAssemblyIdentity>
+    <ItemGroup>
+      <SuggestedBindingRedirects Include="%(_CopiedAssemblyIdentity.Name), Culture=neutral, PublicKeyToken=%(_CopiedAssemblyIdentity.PublicKeyToken)"
+                                 MaxVersion="%(_CopiedAssemblyIdentity.Version)"
+                                 Condition="'%(_CopiedAssemblyIdentity.PublicKeyToken)' != ''" />
+    </ItemGroup>
+  </Target>
 
   <!-- -p:ConfluentKafkaPackageVersion=<version> tests the Confluent.Kafka package of that version,
        restored from a feed that holds it, instead of the project: the release pipeline runs these

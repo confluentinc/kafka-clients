@@ -290,8 +290,7 @@ internal sealed partial class NativeAdminClient
         {
             if (alteration is null)
             {
-                throw new ArgumentException(
-                    "The SCRAM credential alterations must not contain a null element.", nameof(alterations));
+                throw new ArgumentNullException(nameof(alterations), "alterations must not contain null");
             }
 
             AdminStrings.Validate(alteration.User(), nameof(alterations));
@@ -304,23 +303,7 @@ internal sealed partial class NativeAdminClient
     private static KafkaFutureImpl<T> StartResultFuture<T>(
         SafeAdminResultHandle result, ResultFuture accessor, Func<IntPtr, T> convert)
     {
-        IntPtr future;
-        bool added = false;
-        try
-        {
-            result.DangerousAddRef(ref added);
-            IntPtr outErr = IntPtr.Zero;
-            future = accessor(result.DangerousGetHandle(), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-        }
-        finally
-        {
-            if (added)
-            {
-                result.DangerousRelease();
-            }
-        }
-
+        IntPtr future = CallAccessor(result, accessor);
         return NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Owned(future), convert);
     }
 }

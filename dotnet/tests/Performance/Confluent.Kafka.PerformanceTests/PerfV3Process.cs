@@ -40,7 +40,7 @@ internal static class PerfV3Process
     {
         string perfV3Dll = ResolvePerfV3Dll();
         Assert.True(File.Exists(perfV3Dll),
-            $"PerfV3 exe not found at '{perfV3Dll}'. Build it first (make test-integration-perf-dotnet builds it), " +
+            $"PerfV3 exe not found at '{perfV3Dll}'. Build it first (make -C dotnet test-integration-perf-dotnet builds it), " +
             "or set PERFV3_DLL to its path.");
 
         // Set by the SDK under dotnet test; else the dotnet on PATH.
