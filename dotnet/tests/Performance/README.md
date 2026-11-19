@@ -49,16 +49,22 @@ settings apply to no arm. The tests and batches are in `tools/perf-cloud/`.
   (`buffer_memory_allocation_strategy`); the report shows it per client.
 - **Serializers and deserializers (PerfV3).** Both producer arms send `byte[]` keys and values through the
   built-in byte-array serializers. The async arm passes their `Async` classes, which the producer calls inside
-  `Send` without awaiting, so both arms serialize the same way. Both consumer arms decode each key and value to
-  its length without copying it (`ByteCountDeserializer`). The sync consumer gives it a span over the batch. The
-  async consumer takes it as an `IAsyncDeserializer<T>` that is not a built-in, so the async arm measures the
-  awaited path: the consumer awaits the call for each key and value and lends it a memory valid for that call,
-  which costs one 40-byte memory manager per key and per value that has bytes.
+  `Send` without awaiting, so both arms serialize the same way. Both consumer arms read each key and value as a
+  `ReadOnlyMemory<byte>` over the fetched batch, without copying it, and count its length: the sync arm through
+  the built-in `ReadOnlyMemoryDeserializer`, the async arm through `AsyncReadOnlyMemoryDeserializer`, which the
+  consumer calls without awaiting, so both arms deserialize the same way. Each polled batch stays alive until the
+  garbage collector releases it, and each key and value that has bytes costs one memory manager. No arm measures
+  the awaited path of an `IAsyncDeserializer<T>` that is not a built-in.
 - The transactional workload forces idempotence and `acks=all`.
 - **The consumer** takes the client defaults for every setting the test leaves out: the driver passes
   `USE_DEFAULTS=True`. Run outside the driver, without `USE_DEFAULTS`, the harnesses tune the fetch settings
   (4 MiB) and read in batches of `CONSUMER_BATCH_SIZE` records (2500 by default; PerfV3 as `max.poll.records`).
   `MAX_POLL_RECORDS` overrides it, and PerfV2 also reads `POLL_SINGLE` (one record per `Consume` call).
+- **`DO_VERIFY`** (default `True`) also applies to the consumer: both harnesses read every byte of each polled
+  key and value, counting the bits set, and check that the record's partition is not negative. PerfV3 reads the
+  bytes in place in the fetched batch, PerfV2 in the `byte[]` copies its client hands out. The summary and
+  `results.json` (`verify`) report the records read, the bits set and the failures, over every record polled,
+  the warmup's included; a negative partition fails the run. `DO_VERIFY=False` reads only the lengths.
 
 ## Run them by hand
 
