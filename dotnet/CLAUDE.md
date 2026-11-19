@@ -1605,6 +1605,7 @@ Never build .NET before Rust — the native won't exist.
 | Build the binding | `dotnet build` (copies the native to output) |
 | Unit tests (**no broker**) | `dotnet test` (`MockProducer` / `MockConsumer`) |
 | Unit-test coverage | `make coverage-dotnet` (repository root; report in `dotnet/artifacts/coverage/report`) |
+| API reference | `make -C dotnet docs-dotnet` (DocFX over the built `net10.0` assembly and its XML documentation file; site in `dotnet/artifacts/docs/_site`) |
 | Rust tests | `cargo test` |
 | Format / lint (Rust) | `cargo xtask format` / `cargo xtask lint` |
 | Format (C#) | `dotnet format` |
@@ -1652,6 +1653,9 @@ process, with no perf stage. The arms skip no test. The gRPC server's own unit t
 gate, outside CI: `make -C dotnet test-grpc-server-dotnet`. A separate Linux job,
 `coverage-dotnet (Linux amd64)`, runs `make coverage-dotnet` and keeps the unit tests' coverage
 report as the workflow artifact `coverage/dotnet.tar.gz`; it reports only and fails on no coverage level.
+Another, `docs-dotnet (Linux amd64)`, runs `make -C dotnet docs-dotnet` and keeps the API reference as the
+workflow artifact `docs/dotnet.tar.gz`; a DocFX warning fails it. DocFX reads the assembly, not the project,
+because from the project it leaves out the members of C# 14 extension blocks (`Admin.Create`, the Java enum methods).
 
 ### 7.6 The gRPC test server (`grpc-server/`)
 

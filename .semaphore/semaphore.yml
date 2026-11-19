@@ -57,8 +57,9 @@ name: build-test-release
 #   5. ".NET additional checks (Linux amd64)" -- the .NET checks that are not
 #      the test suite, one job each: dotnet format over the solution and the
 #      soak projects and the examples' build and format check (check-dotnet),
-#      and the .NET unit tests' code coverage (coverage-dotnet), which runs
-#      every unit test on every build, a pull request's included.
+#      the .NET unit tests' code coverage (coverage-dotnet), which runs
+#      every unit test on every build, a pull request's included, and the
+#      .NET API reference (docs-dotnet).
 #   On a release tag, the "Release" promotion then starts release.yml, which
 #   holds the "Release (Rust):", "Release (Python):" and "Release (.NET):"
 #   blocks (see the comments there).
@@ -641,6 +642,12 @@ blocks:
     # (about 3 MB; extract it and open report/index.html). One archive, because
     # the report is several hundred pages that link to each other. It reports
     # only: no coverage level fails it.
+    #
+    # docs-dotnet builds the .NET API reference with DocFX
+    # (`make -C dotnet docs-dotnet`) from the net10.0 assembly and its XML
+    # documentation file, and keeps the site as the workflow artifact
+    # docs/dotnet.tar.gz (extract it and open _site/index.html). A DocFX warning
+    # fails it.
     dependencies: []
     execution_time_limit:
       minutes: 30
@@ -674,6 +681,16 @@ blocks:
             - make -C dotnet coverage-dotnet
             - tar -czf coverage-dotnet.tar.gz -C dotnet/artifacts/coverage report
             - retry artifact push workflow --force --expire-in 2w coverage-dotnet.tar.gz --destination coverage/dotnet.tar.gz
+        - name: "docs-dotnet (Linux amd64)"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - export DOTNET_ROOT="$HOME/.dotnet"
+            - export PATH="$HOME/.dotnet:$PATH"
+            - export DOTNET_MULTILEVEL_LOOKUP=0
+            - (cd dotnet && retry dotnet tool restore)
+            - make -C dotnet docs-dotnet
+            - tar -czf docs-dotnet.tar.gz -C dotnet/artifacts/docs _site
+            - retry artifact push workflow --force --expire-in 2w docs-dotnet.tar.gz --destination docs/dotnet.tar.gz
 
 promotions:
   - name: Start translation plan
