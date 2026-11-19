@@ -1,0 +1,27 @@
+{
+  "about": "The rule linter's mapping lists (scripts/lint/java_ts.js mappingLists). invented: the list of invented names for the exported items and public members, each with the reason it has no Java counterpart (root CLAUDE.md, JavaScript Binding Conventions, Scope and Layout and modules). javaTargets: the Java class or member of an item the naming convention does not find. An export is keyed src/<module>.ts:<Name>, a member <Class>.<member>, one named by a well-known symbol <Class>.[Symbol.<name>].",
+  "invented": {
+    "src/duration.ts:Duration": "the type of every parameter taking a Java Duration: a number of milliseconds or a Temporal.Duration, which the root exports",
+    "src/producer/producer_configs.ts:ProducerConfigs": "the type of the configuration map the constructor takes, Java's Map and Properties as one, its known keys generated from Java's ProducerConfig",
+    "src/producer/kafka_producer.ts:CloseArgs": "the options object of Java's close(Duration), the timed form of the close() overload set",
+    "src/producer/producer_record.ts:Data": "the JavaScript types a key or value takes",
+    "KafkaProducer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the producer",
+    "Headers.[Symbol.iterator]": "[Symbol.iterator] where Java has Iterable, JavaScript's iteration protocol",
+    "SslClientAuth.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "SecurityProtocol.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "Headers.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "Header.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "ProducerRecord.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
+    "RecordMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string"
+  },
+  "javaTargets": {
+    "Header.constructor": "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader",
+    "Header.toString": "org.apache.kafka.common.header.internals.RecordHeader#toString",
+    "Headers.constructor": "org.apache.kafka.common.header.internals.RecordHeaders#RecordHeaders",
+    "Headers.toString": "org.apache.kafka.common.header.internals.RecordHeaders#toString",
+    "Header.equals": "org.apache.kafka.common.header.internals.RecordHeader#equals",
+    "Header.hashCode": "org.apache.kafka.common.header.internals.RecordHeader#hashCode",
+    "Headers.equals": "org.apache.kafka.common.header.internals.RecordHeaders#equals",
+    "Headers.hashCode": "org.apache.kafka.common.header.internals.RecordHeaders#hashCode"
+  }
+}
