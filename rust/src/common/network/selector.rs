@@ -4432,6 +4432,48 @@ mod tests {
         selector.poll(0).await.unwrap();
     }
 
+    /// A completed send stays in `completed_sends` until the next poll's `clear()`, but
+    /// `NetworkClient` completes an `acks=0` produce in the poll that wrote it, and the batch
+    /// then returns its buffer to the `BufferPool`. By then the send must hold no view of the
+    /// records, or `MemoryRecordsBuilder::take_buffer` cannot reclaim the allocation and the
+    /// pool replaces it with a fresh one for every batch.
+    #[tokio::test]
+    async fn test_completed_send_releases_its_buffers() {
+        use std::time::Duration;
+
+        let server = SinkServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+
+        let mut batch_buffer = bytes::BytesMut::with_capacity(4096);
+        batch_buffer.extend_from_slice(&[7u8; 1024]);
+        let batch_buffer = batch_buffer.freeze();
+        let mut send = NetworkSend::new("0", Box::new(ByteBufferSend::size_prefixed(batch_buffer.slice(..))));
+        send.set_fire_and_forget(true);
+        selector.send(send).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while selector.completed_sends().is_empty() {
+                selector.poll(200).await.unwrap();
+            }
+        })
+        .await
+        .expect("the send was never written within 5s");
+
+        assert_eq!(
+            1,
+            selector.completed_sends().len(),
+            "the written send is still held until the next poll"
+        );
+        let reclaimed = batch_buffer
+            .try_into_mut()
+            .expect("the completed send must not keep a view of the buffer it wrote");
+        assert_eq!(4096, reclaimed.capacity(), "the same allocation is reclaimed");
+
+        selector.close_channel("0").await;
+        selector.poll(0).await.unwrap();
+    }
+
     // ---- Phase 30: per-channel wakers (selectedKeys() on tokio) --------------
 
     /// Phase 30 (dirty site #1) — send-after-arm wake. A channel parked on
