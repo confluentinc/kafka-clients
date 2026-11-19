@@ -11,6 +11,7 @@ ARCH := $(shell uname -m)
 
 ifeq ($(ARCH),x86_64)
   # x86-64-v3 (Haswell+, ~2013): faster than baseline, portable across v3 hosts.
+  # Not for the library the packages ship (build-cdylib), which any x86_64 CPU runs.
   RUSTFLAGS_NATIVE = -C target-cpu=x86-64-v3
 else
   # Other arches (e.g. aarch64): default target-cpu is already the portable baseline.
@@ -64,10 +65,13 @@ build-all-features:
 # CDYLIB_FEATURES line below), and python/soak/build.sh the soak client's. Their
 # tests link the debug all-features library (`devel-build-all-features`), where
 # `platform-verifier` is on too and wins over `webpki-roots`, so they test the
-# same trust store.
+# same trust store. It is built without RUSTFLAGS_NATIVE, for the target's
+# baseline CPU, so the packages run on any x86_64 CPU, as librdkafka's do: the
+# code that gains most from AVX2 (aws-lc's assembly, memchr) chooses it at run
+# time from the CPU it finds.
 CDYLIB_FEATURES = ffi,gzip,snappy,lz4,zstd,aws-lc-rs,rustls,platform-verifier
 build-cdylib:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --profile release-cdylib --no-default-features --features $(CDYLIB_FEATURES)
+	cargo build --profile release-cdylib --no-default-features --features $(CDYLIB_FEATURES)
 
 devel-build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi

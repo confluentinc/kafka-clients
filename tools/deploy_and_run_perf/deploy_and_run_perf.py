@@ -109,18 +109,21 @@ echo "== apt: base packages =="
 sudo apt update && sudo apt install -y wget curl git unzip zip build-essential cmake pkg-config \
   tmux gnupg ca-certificates
 
-# The bindings' library, tuned for this host: `make -C rust build-cdylib` (the
-# feature set the C library and the Python wheel ship) in a tree that has it,
-# else, for an older tree, `cargo build --features ffi --release`. Sets
-# CDYLIB_DIR to the directory holding libconfluent_kafka and CDYLIB_PROFILE to
-# its cargo profile.
+# The bindings' library as the packages ship it: `make -C rust build-cdylib`
+# (the feature set of the C library, the Python wheel and the .NET package) in
+# a tree that has it, else, for an older tree, `cargo build --features ffi
+# --release`. Like everything this bootstrap compiles, it is built for the
+# baseline CPU, as users install the clients and as the librdkafka baselines
+# (the Confluent apt package, the PyPI wheel) are built: RUSTFLAGS_NATIVE is
+# emptied for a tree whose recipe still passes it. Sets CDYLIB_DIR to the
+# directory holding libconfluent_kafka and CDYLIB_PROFILE to its cargo profile.
 build_cdylib() {
   if grep -q '^build-cdylib:' "$REPO/rust/Makefile"; then
-    make -C "$REPO/rust" build-cdylib RUSTFLAGS_NATIVE="-C target-cpu=native"
+    make -C "$REPO/rust" build-cdylib RUSTFLAGS_NATIVE=
     CDYLIB_PROFILE=release-cdylib
     CDYLIB_DIR="$REPO/rust/target/release-cdylib"
   else
-    ( cd "$REPO/rust" && RUSTFLAGS="-C target-cpu=native" cargo build --features ffi --release )
+    ( cd "$REPO/rust" && cargo build --features ffi --release )
     CDYLIB_PROFILE=release
     CDYLIB_DIR="$REPO/rust/target/release"
   fi
@@ -220,7 +223,7 @@ if [ "$TEST" = "rust-consumer" ]; then
   export PATH="$HOME/.cargo/bin:$PATH"
   echo "== Building consumer-perf (release) in $REPO/rust =="
   cd "$REPO/rust"
-  RUSTFLAGS="-C target-cpu=native" cargo build --release -p consumer-perf
+  cargo build --release -p consumer-perf
   install_kafka_cli
   echo "== Bootstrap complete (rust-consumer) =="
   exit 0
@@ -230,7 +233,7 @@ if [ "$TEST" = "librdkafka-consumer" ]; then
   install_librdkafka
   echo "== Compiling librdkafka_e2e (consumer e2e benchmark) =="
   mkdir -p "$REPO/rust/consumer-perf/compare/build"
-  cc -O2 -march=native -o "$REPO/rust/consumer-perf/compare/build/librdkafka_e2e" \
+  cc -O2 -o "$REPO/rust/consumer-perf/compare/build/librdkafka_e2e" \
     "$REPO/rust/consumer-perf/compare/librdkafka_e2e.c" \
     $(pkg-config --cflags --libs rdkafka) -lm -lpthread
   install_kafka_cli
@@ -257,7 +260,7 @@ if [[ "$TEST" == python-* ]]; then
   set +u; . "$REPO/venv/bin/activate"; set -u
   pip install --upgrade pip setuptools wheel
   ( cd "$REPO/python" && \
-    CONFLUENT_KAFKA_LIB_DIR="$CDYLIB_DIR" CFLAGS="-O2 -march=native" pip install -e . )
+    CONFLUENT_KAFKA_LIB_DIR="$CDYLIB_DIR" CFLAGS="-O2" pip install -e . )
   # pytest: consumer_performance_test.py imports it at module level.
   pip install psutil pytest
   echo "== Creating the librdkafka venv (confluent-kafka, CLIENT_VERSION=2) =="
@@ -285,7 +288,7 @@ cd "$REPO"
 # RUST_PROFILE for c/CMakeLists.txt since it selects the library by profile,
 # RUST_LIB_DIR for the trees before it; each ignores the other.
 cmake -S c -B c/build -DRUST_PROJECT_ROOT="$REPO/rust" -DRUST_PROFILE="$CDYLIB_PROFILE" \
-  -DRUST_LIB_DIR="$CDYLIB_DIR" -DCMAKE_C_FLAGS="-O2 -march=native"
+  -DRUST_LIB_DIR="$CDYLIB_DIR" -DCMAKE_C_FLAGS="-O2"
 cmake --build c/build --target producer_perf_test
 echo "== Bootstrap complete =="
 """

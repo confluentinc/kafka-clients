@@ -18,11 +18,6 @@ Before GA the public API is not stable, and an interface may change even in a mi
 
 ### Changed
 
-- On x86_64 the native library needs an x86-64-v3 CPU (AVX2, BMI2, FMA:
-  Intel Haswell, AMD Excavator or later), which the wheel's platform tag
-  cannot state. Importing `confluent_kafka` on an older CPU now raises an
-  `ImportError` naming the missing features, instead of the process dying
-  on an illegal instruction.
 - A `None` for an argument Java requires reaches the Rust core, which answers
   with Java's error and message: a `NullPointerException` is Python's
   `TypeError`, with the core's message and its "null" spelled "None"
