@@ -33,6 +33,7 @@
 //! `kafka_producer_ProducerConfig_get_string` answers, and each keeps its own
 //! record of the keys it used.
 
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::collections::HashMap;
 use std::ffi::c_char;
 use std::sync::Arc;
@@ -113,13 +114,14 @@ impl ProducerConfigInner {
 /// [`kafka_producer_ProducerConfig_set_partitioner`] call runs on it.
 pub(crate) unsafe fn producer_config_ref<'a>(
     config: *const kafka_producer_ProducerConfig_t,
+    param: &'static str,
 ) -> &'a ProducerConfigInner {
     // SAFETY: Per this function's `# Safety`, `config` is a live handle kept alive for `'a`, i.e.
     // the `Box::into_raw` of a `ProducerConfigInner` in `kafka_producer_ProducerConfig_new`, the
     // only constructor, and no `kafka_producer_ProducerConfig_set_partitioner` call, the only
     // writer (the lent strings and the used keys mutate behind their `Mutex`es), runs on it for
     // `'a`, so the shared reference is sound.
-    unsafe { &*(config as *const ProducerConfigInner) }
+    unsafe { require_ref::<_, ProducerConfigInner>(config, param) }
 }
 
 /// Constructs a new ProducerConfig with the given configuration map.
@@ -154,7 +156,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_new(
     init_default_logger();
     // SAFETY: Per this function's `# Safety`, `props` is a live map of C strings, as `map_strings`
     // requires; its entries are copied into owned `String`s.
-    let props: HashMap<String, String> = unsafe { map_strings(props) }.into_iter().collect();
+    let props: HashMap<String, String> = unsafe { map_strings(props, "props") }.into_iter().collect();
     let config = match ProducerConfig::new(&props) {
         Ok(config) => config,
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
@@ -193,7 +195,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_set_partitioner(
     // `ProducerConfigInner` in `kafka_producer_ProducerConfig_new`, that no other call uses at the
     // same time, so the exclusive reference, used only within this call, aliases nothing; no view
     // into the handle is ever handed out.
-    let inner = unsafe { &mut *(self_ as *mut ProducerConfigInner) };
+    let inner = unsafe { require_mut::<_, ProducerConfigInner>(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitioner` is a live handle, as `take_partitioner`
     // requires; an owned one is freed by that call and not used again by the caller, as the rustdoc
     // states.
@@ -205,7 +207,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_set_partitioner(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 /// - `out_value` - receives the value, when there is one
 ///
 /// # Returns
@@ -222,7 +224,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_set_partitioner(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_value` valid for a write; `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -233,7 +235,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_short(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { producer_config_ref(self_) };
+    let inner = unsafe { producer_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_short(key)) }
@@ -244,7 +246,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_short(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 /// - `out_value` - receives the value, when there is one
 ///
 /// # Returns
@@ -261,7 +263,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_short(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_value` valid for a write; `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -272,7 +274,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_int(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { producer_config_ref(self_) };
+    let inner = unsafe { producer_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_int(key)) }
@@ -283,7 +285,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_int(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 /// - `out_value` - receives the value, when there is one
 ///
 /// # Returns
@@ -300,7 +302,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_int(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_value` valid for a write; `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -311,7 +313,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_long(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { producer_config_ref(self_) };
+    let inner = unsafe { producer_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_long(key)) }
@@ -322,7 +324,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_long(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 /// - `out_value` - receives the value, when there is one
 ///
 /// # Returns
@@ -339,7 +341,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_long(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_value` valid for a write; `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -350,7 +352,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_double(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { producer_config_ref(self_) };
+    let inner = unsafe { producer_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe { config_getters::get_scalar(key, out_value, out_err, |key| inner.config.get_double(key)) }
@@ -361,7 +363,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_double(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 /// - `out_value` - receives the value, when there is one
 ///
 /// # Returns
@@ -378,7 +380,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_double(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_value` valid for a write; `out_err` a valid slot pointing at null.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -389,7 +391,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_boolean(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { producer_config_ref(self_) };
+    let inner = unsafe { producer_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key`, `out_value` and `out_err` are as
     // `get_scalar` requires.
     unsafe {
@@ -404,7 +406,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_boolean(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 ///
 /// # Returns
 ///
@@ -422,7 +424,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_boolean(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_err` a valid slot pointing at null. The string is borrowed from the
 /// handle, valid until it is destroyed.
 #[ffi_guard]
@@ -433,7 +435,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_string(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *const c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { producer_config_ref(self_) };
+    let inner = unsafe { producer_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key` and `out_err` are as `get_string` requires.
     unsafe { config_getters::get_string(&inner.strings, key, out_err, |key| inner.config.get_string(key)) }
 }
@@ -443,7 +445,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_string(
 ///
 /// # Parameters
 ///
-/// - `key` - the configuration name
+/// - `key` - the configuration name; `NULL` names none (`Unknown configuration 'null'`)
 ///
 /// # Returns
 ///
@@ -459,7 +461,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_string(
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle; `key` a valid NUL-terminated string;
+/// `self_` must be a live handle; `key` `NULL` or a valid NUL-terminated string;
 /// `out_err` a valid slot pointing at null. The list of `char *` is owned by the
 /// caller, freed with `kafka_List_destroy`.
 #[ffi_guard]
@@ -470,7 +472,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_get_list(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { producer_config_ref(self_) };
+    let inner = unsafe { producer_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key` and `out_err` are as `get_list` requires.
     unsafe { config_getters::get_list(key, out_err, |key| inner.config.get_list(key)) }
 }
@@ -494,7 +496,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_unused(
     self_: *const kafka_producer_ProducerConfig_t,
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    sorted_string_list(unsafe { producer_config_ref(self_) }.config.unused())
+    sorted_string_list(unsafe { producer_config_ref(self_, "self_") }.config.unused())
 }
 
 /// `ignore(String key)`: marks the configuration `key` used without reading it.
@@ -513,7 +515,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_ignore(
     key: *const c_char,
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    let inner = unsafe { producer_config_ref(self_) };
+    let inner = unsafe { producer_config_ref(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `key` is as `ignore` requires.
     unsafe { config_getters::ignore(key, |key| inner.config.ignore(key)) }
 }
@@ -527,7 +529,7 @@ pub unsafe extern "C" fn kafka_producer_ProducerConfig_ignore(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_ProducerConfig_log_unused(self_: *const kafka_producer_ProducerConfig_t) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this call.
-    unsafe { producer_config_ref(self_) }.config.log_unused();
+    unsafe { producer_config_ref(self_, "self_") }.config.log_unused();
 }
 
 /// Gets the set of all producer configuration names.
@@ -598,7 +600,7 @@ mod tests {
         // SAFETY: Test code: `list` is an owned list of C strings just returned, read once and
         // destroyed once.
         unsafe {
-            let strings = list_strings(list);
+            let strings = list_strings(list, "value");
             kafka_List_destroy(list);
             strings
         }
@@ -742,7 +744,7 @@ mod tests {
             kafka_producer_ProducerConfig_log_unused(config);
 
             // A configuration copied for a client starts with nothing used.
-            let built = producer_config_ref(config).build().expect("copied");
+            let built = producer_config_ref(config, "config").build().expect("copied");
             assert_eq!(built.unused().len(), 3);
 
             kafka_producer_ProducerConfig_destroy(config);
@@ -788,11 +790,11 @@ mod tests {
                 out,
                 kafka_producer_RoundRobinPartitioner__as_Partitioner(partitioner),
             );
-            let config = producer_config_ref(out).build().unwrap();
+            let config = producer_config_ref(out, "out").build().unwrap();
             assert_eq!(config.linger_ms, 5);
             assert!(config.partitioner.is_some());
             // A second build from the same handle works too.
-            assert!(producer_config_ref(out).build().is_ok());
+            assert!(producer_config_ref(out, "out").build().is_ok());
             kafka_producer_ProducerConfig_destroy(out);
             kafka_producer_RoundRobinPartitioner_destroy(partitioner);
             kafka_producer_ProducerConfig_destroy(std::ptr::null_mut());

@@ -17,6 +17,7 @@
 //! (CLAUDE.md §4). Rust's fluent setter takes `self` by value and returns
 //! it; C mutates the handle in place.
 
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::ffi::c_char;
 
 use crate::admin::ListConsumerGroupOffsetsSpec;
@@ -43,13 +44,14 @@ pub(crate) struct ListConsumerGroupOffsetsSpecInner {
 /// alive for `'a`, during which no setter runs on it.
 pub(crate) unsafe fn list_consumer_group_offsets_spec_ref<'a>(
     spec: *const kafka_admin_ListConsumerGroupOffsetsSpec_t,
+    param: &'static str,
 ) -> &'a ListConsumerGroupOffsetsSpec {
     // SAFETY: Per this function's `# Safety`, `spec` is a valid list-consumer-group-offsets-spec
     // handle kept alive for `'a`, during which no setter runs on it. Every
     // `kafka_admin_ListConsumerGroupOffsetsSpec_t` comes from
     // `box_list_consumer_group_offsets_spec`, which boxes a `ListConsumerGroupOffsetsSpecInner`, so
     // the shared reference is to a live value that nothing mutates while it is used.
-    &unsafe { &*(spec as *const ListConsumerGroupOffsetsSpecInner) }.spec
+    &unsafe { require_ref::<_, ListConsumerGroupOffsetsSpecInner>(spec, param) }.spec
 }
 
 /// Hands `spec` to C as an owned handle, freed with
@@ -97,13 +99,14 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_set_topic_part
     // SAFETY: Per this function's `# Safety`, `topic_partitions` is null or a valid list of
     // topic-partition handles, and the closure runs only when it is non-null, as
     // `list_topic_partitions` requires.
-    let topic_partitions = (!topic_partitions.is_null()).then(|| unsafe { list_topic_partitions(topic_partitions) });
+    let topic_partitions =
+        (!topic_partitions.is_null()).then(|| unsafe { list_topic_partitions(topic_partitions, "topic_partitions") });
     // SAFETY: Per this function's `# Safety`, `self_` is a valid spec handle that no other call
     // uses at the same time, so no other reference to it is live while `inner` is used. Every
     // `kafka_admin_ListConsumerGroupOffsetsSpec_t` comes from
     // `box_list_consumer_group_offsets_spec`, which boxes a `ListConsumerGroupOffsetsSpecInner`, so
     // the exclusive reference is to a live value.
-    let inner = unsafe { &mut *(self_ as *mut ListConsumerGroupOffsetsSpecInner) };
+    let inner = unsafe { require_mut::<_, ListConsumerGroupOffsetsSpecInner>(self_, "self_") };
     inner.spec = inner.spec.clone().set_topic_partitions(topic_partitions);
 }
 
@@ -129,7 +132,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_topic_partitio
     // call; no setter runs on it meanwhile, since the setter's `# Safety` excludes any other call
     // using the handle at the same time. That is what `list_consumer_group_offsets_spec_ref`
     // requires.
-    unsafe { list_consumer_group_offsets_spec_ref(self_) }
+    unsafe { list_consumer_group_offsets_spec_ref(self_, "self_") }
         .topic_partitions()
         .map_or(std::ptr::null_mut(), |tps| topic_partition_list(tps.iter().cloned()))
 }
@@ -149,7 +152,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsSpec_to_string(
     // call; no setter runs on it meanwhile, since the setter's `# Safety` excludes any other call
     // using the handle at the same time. That is what `list_consumer_group_offsets_spec_ref`
     // requires.
-    into_c_string(&unsafe { list_consumer_group_offsets_spec_ref(self_) }.to_string())
+    into_c_string(&unsafe { list_consumer_group_offsets_spec_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned spec handle; `NULL` is a no-op.
@@ -203,11 +206,11 @@ mod tests {
             kafka_common_TopicPartition_destroy(tp_handle);
 
             let expected = ListConsumerGroupOffsetsSpec::new().set_topic_partitions(Some(vec![tp.clone()]));
-            assert_eq!(*list_consumer_group_offsets_spec_ref(spec), expected);
+            assert_eq!(*list_consumer_group_offsets_spec_ref(spec, "spec"), expected);
             let out = kafka_admin_ListConsumerGroupOffsetsSpec_topic_partitions(spec);
             assert_eq!(kafka_List_size(out), 1);
             assert_eq!(
-                *topic_partition_ref(kafka_List_get(out, 0) as *const kafka_common_TopicPartition_t),
+                *topic_partition_ref(kafka_List_get(out, 0) as *const kafka_common_TopicPartition_t, "value"),
                 tp
             );
             kafka_List_destroy(out);

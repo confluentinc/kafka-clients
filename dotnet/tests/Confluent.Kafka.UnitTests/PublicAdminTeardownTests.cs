@@ -1,0 +1,271 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+
+using Confluent.Kafka.Admin;
+
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
+using Xunit;
+
+namespace Confluent.Kafka.UnitTests;
+
+/// <summary>
+/// Admin construction and teardown as a user drives it: close before destroy, idempotent
+/// disposal, and a clear <see cref="IllegalStateException"/> afterwards. Every wait is
+/// bounded by <see cref="TestTimeout"/>, so a teardown that hangs fails the run instead
+/// of blocking it.
+/// </summary>
+public sealed class PublicAdminTeardownTests
+{
+    private const string ClosedAdminMessage = "Cannot accept new calls when AdminClient is closing.";
+
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
+    private static readonly IReadOnlyDictionary<string, object?> s_unreachable =
+        new Dictionary<string, object?>(StringComparer.Ordinal) { ["bootstrap.servers"] = "127.0.0.1:1" };
+
+    [Fact]
+    public void Dispose_IsIdempotent()
+    {
+        MockAdminClient admin = MockAdminClient.Create().Build();
+
+        TestTimeout.Run(admin.Dispose, s_deadline);
+        TestTimeout.Run(admin.Dispose, s_deadline);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_IsIdempotent_AndMixesWithDispose()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+
+        await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
+        await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
+
+        // A blocking Dispose after an async one must not double-close either.
+        TestTimeout.Run(admin.Dispose, s_deadline);
+    }
+
+    [Fact]
+    public async Task Close_WithATimeout_ThenDispose_IsSafe()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+
+        await TestTimeout.Run(() => admin.Close(TimeSpan.FromSeconds(5)), s_deadline);
+
+        // Close already won the teardown; Dispose must be a no-op, not a second close and destroy.
+        TestTimeout.Run(admin.Dispose, s_deadline);
+    }
+
+    [Fact]
+    public async Task Close_WithZeroTimeout_IsValid()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+
+        await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), s_deadline);
+    }
+
+    [Fact]
+    public async Task Close_WithANegativeTimeout_ThrowsJavasMessage_BeforeTheClosedCheck()
+    {
+        IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+        IllegalArgumentException failure = Assert.Throws<IllegalArgumentException>(
+            () => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); });
+        Assert.Equal("The timeout cannot be negative.", failure.Message);
+
+        await TestTimeout.Run(() => admin.Close(TimeSpan.Zero), s_deadline);
+        Assert.Equal(
+            "The timeout cannot be negative.",
+            Assert.Throws<IllegalArgumentException>(() => { _ = admin.Close(TimeSpan.FromMilliseconds(-1)); }).Message);
+    }
+
+    [Fact]
+    public async Task AMockClose_ReadsNoTimeout_AndLeavesTheMockOpenUntilItIsDisposed()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+
+        await TestTimeout.Run(() => admin.Close(TimeSpan.FromMilliseconds(-1)), s_deadline);
+        await TestTimeout.Run(() => admin.Close(), s_deadline);
+        using (CancellationTokenSource cancelled = new CancellationTokenSource())
+        {
+            cancelled.Cancel();
+            await TestTimeout.Run(() => admin.Close(cancelled.Token), s_deadline);
+        }
+
+        await TestTimeout.DisposeAsync(admin);
+        Assert.Equal(
+            ClosedAdminMessage,
+            Assert.Throws<IllegalStateException>(() => admin.ListTopics()).Message);
+    }
+
+    [Fact]
+    public void TheSyncCloseWithoutATimeout_ClosesTheClient()
+    {
+        IAdmin admin = IAdmin.Create(s_unreachable);
+
+        TestTimeout.Run(admin.Close, s_deadline);
+        TestTimeout.Run(admin.Close, s_deadline);
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
+        TestTimeout.Run(admin.Dispose, s_deadline);
+    }
+
+    [Fact]
+    public async Task TheAsyncCloseWithoutATimeout_ClosesTheClient()
+    {
+        IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
+
+        await TestTimeout.Run(() => admin.Close(), s_deadline);
+        await TestTimeout.Run(() => admin.Close(CancellationToken.None), s_deadline);
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
+        await TestTimeout.DisposeAsync(admin);
+    }
+
+    [Fact]
+    public async Task AnAlreadyCancelledToken_ThrowsBeforeTheCloseBegins()
+    {
+        IAsyncAdmin admin = IAsyncAdmin.Create(s_unreachable);
+        using CancellationTokenSource cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => { _ = admin.Close(cancelled.Token); });
+        Assert.Throws<OperationCanceledException>(() => { _ = admin.Close(TimeSpan.Zero, cancelled.Token); });
+
+        await TestTimeout.Run(() => admin.Close(), s_deadline);
+        Assert.Throws<IllegalStateException>(() => admin.ListTopics());
+    }
+
+    [Fact]
+    public void SaslPlaintextWithoutAMechanism_FailsWithTheCoresConfigError()
+    {
+        ConfigException failure = Assert.Throws<ConfigException>(() => IAdmin.Create(
+            new Dictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["bootstrap.servers"] = "127.0.0.1:1",
+                ["security.protocol"] = "SASL_PLAINTEXT",
+            }));
+
+        Assert.Equal(-10, failure.Code);
+        Assert.Equal(
+            "Invalid value GSSAPI for configuration sasl.mechanism: only PLAIN is supported by this client",
+            failure.Message);
+    }
+
+    [Fact]
+    public void CallAfterDispose_ThrowsIllegalState()
+    {
+        MockAdminClient admin = MockAdminClient.Create().Build();
+        TestTimeout.Run(admin.Dispose, s_deadline);
+
+        Assert.Throws<IllegalStateException>(
+            () => admin.CreateTopics(new[] { new NewTopic("after-dispose", 1, 1) }));
+    }
+
+    [Fact]
+    public void X9_CallAfterDispose_ThrowsTheClosedAdminClientsIllegalState()
+    {
+        MockAdminClient mock = MockAdminClient.Create().Build();
+        TestTimeout.Run(mock.Dispose, s_deadline);
+        Assert.Equal(
+            ClosedAdminMessage,
+            Assert.Throws<IllegalStateException>(() => mock.ListTopics()).Message);
+
+        IAdmin real = IAdmin.Create(
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
+        TestTimeout.Run(real.Dispose, s_deadline);
+        Assert.Equal(
+            ClosedAdminMessage,
+            Assert.Throws<IllegalStateException>(() => real.ListTopics()).Message);
+    }
+
+    [Fact]
+    public async Task CloseAfterDispose_IsANoOp()
+    {
+        AsyncMockAdminClient admin = AsyncMockAdminClient.Create().Build();
+        TestTimeout.Run(admin.Dispose, s_deadline);
+
+        // Java's close() is idempotent; a second close must not throw.
+        await TestTimeout.Run(() => admin.Close(TimeSpan.FromSeconds(1)), s_deadline);
+
+        IAsyncAdmin real = IAsyncAdmin.Create(s_unreachable);
+        await TestTimeout.DisposeAsync(real);
+        await TestTimeout.Run(() => real.Close(TimeSpan.FromSeconds(1)), s_deadline);
+        await TestTimeout.Run(() => real.Close(), s_deadline);
+    }
+
+    [Fact]
+    public void ManyClients_CreateAndDisposeCleanly()
+    {
+        TestTimeout.Run(
+            () =>
+            {
+                for (int i = 0; i < 25; i++)
+                {
+                    AsyncMockAdminClient.Create().Build().Dispose();
+                    MockAdminClient.Create().NumBrokers(1 + (i % 3)).Build().Dispose();
+                }
+
+                for (int i = 0; i < 5; i++)
+                {
+                    IAdmin.Create(s_unreachable).Dispose();
+                    IAsyncAdmin.Create(s_unreachable).DisposeAsync().AsTask().GetAwaiter().GetResult();
+                }
+            },
+            s_deadline);
+    }
+
+    [Fact]
+    public async Task RealClient_ConstructsAndTearsDownWithoutABroker()
+    {
+        IAsyncAdmin admin = IAsyncAdmin.Create(
+            new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" });
+
+        await TestTimeout.Run(async () => await admin.DisposeAsync(), s_deadline);
+    }
+
+    [Fact]
+    public void RealClient_RejectsANullConfigValueItsValidatorRefuses()
+    {
+        ConfigException failure = Assert.Throws<ConfigException>(
+            () => IAdmin.Create(new Dictionary<string, object?> { ["bootstrap.servers"] = null }));
+
+        Assert.Equal("Configuration 'bootstrap.servers' values must not be null.", failure.Message);
+        Assert.Equal(-10, failure.Code);
+    }
+
+    [Fact]
+    public void RealClient_LeavesANullConfigValueWithNoValidatorUnset()
+    {
+        var config = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "localhost:9092",
+            ["sasl.login.connect.timeout.ms"] = null,
+        };
+
+        IAdmin admin = IAdmin.Create(config);
+
+        TestTimeout.Run(admin.Dispose, s_deadline);
+
+        config["sasl.login.connect.timeout.ms"] = "";
+        ConfigException failure = Assert.Throws<ConfigException>(() => IAdmin.Create(config));
+        Assert.Equal(
+            "Invalid value  for configuration sasl.login.connect.timeout.ms: Not a number of type INT",
+            failure.Message);
+        Assert.Equal(-10, failure.Code);
+    }
+}

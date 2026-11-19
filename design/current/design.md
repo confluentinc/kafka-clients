@@ -1013,9 +1013,10 @@ its own.
 
 ### Test commands
 
-`make verify` (repository root) runs
-`build format-check lint test check-bindings`. `build` and `test` cover the
-Rust, C and Python sides. For Rust only, use `make verify-rust`.
+`make verify` (repository root) runs `build`, the Rust checks
+(format-check, check-generated, lint), `test`, and the Python checks
+(`make -C python check`). `build` and `test` cover the Rust, C and Python
+sides. For Rust only, use `make -C rust verify`.
 
 The xtask subcommands are `format`, `format-check`, `check-generated`,
 `generate-error-codes`, `java-deprecated`, `lint`, `lint-custom`
@@ -1066,7 +1067,8 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
 
 - **Error slot.** A fallible function returns its value (or `void`) and takes
   a trailing `kafka_common_Error_t **out_err`: not NULL, `*out_err` NULL on
-  entry (GLib's `GError` rule, unchecked like every precondition). On failure
+  entry (GLib's `GError` rule; a NULL `out_err` leaves the error nowhere to
+  go, so the process aborts when there is one). On failure
   it stores an owned error there and returns its type's failure value (NULL,
   a NULL `kafka_Bytes_t`, 0 for `int8_t`, -1 for the other integers); the
   caller tests `*out_err`, never the value, since NULL and -1 can be answers.
@@ -1140,31 +1142,45 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
 - **Panics never cross the boundary.** Every export carries `#[ffi_guard]`
   (proc-macro crate `rust/ffi-macros`), which wraps the body in
   `catch_unwind`; `ffi::tests::test_every_exported_function_is_guarded` fails on
-  an unguarded export. A fallible function stores the panic in `*out_err` as a
-  `LOCAL_ILLEGAL_STATE` error whose message begins "Rust panic caught at the FFI
-  boundary in <function>" and returns its failure value, as on any other
-  failure (`fallback` is a compile error there); any other
-  function returns its return type's failure value (NULL, 0 or -1, NaN,
-  `UNKNOWN_SERVER_ERROR`, a NULL `kafka_Bytes_t`), or, where that value is a
-  valid answer in the Java domain, the explicit `fallback` its documentation
-  names (`ffi::tests::test_explicit_fallbacks` pins each one); a `void` function
-  only logs. A `_cb` function delivers a panic exactly once through its
-  completion, whether it happened on the calling thread or on the task running
-  the operation; the three completions without an error parameter
+  an unguarded export. Two kinds of panic reach it:
+  - A **type precondition** (CLAUDE.md §4): a NULL mandatory pointer — a handle,
+    a string, a list or map, an element, a function pointer — is checked by the
+    `ffi::precondition` helpers (`require_ref`, `require_str`, `require_fn`, …),
+    which panic with a typed `PreconditionPanic` carrying Java's error and
+    message: `LOCAL_NULL_POINTER` (Java's `NullPointerException`, "<parameter>
+    must not be null") unless Java checks the argument with an error of its own
+    (`assign(null)`'s `IllegalArgumentException`, "Topic partitions collection
+    to assign to cannot be null"). The guard reports that error as it is, never
+    wrapped. `cargo xtask lint-custom check-ffi-null-checks` fails on a pointer
+    parameter dereferenced without one of the helpers.
+  - Any **other** panic is a library bug, reported as a `LOCAL_ILLEGAL_STATE`
+    error whose message begins "Rust panic caught at the FFI boundary in
+    <function>".
+
+  A fallible function stores either in `*out_err` and returns its failure value,
+  as on any other failure. A `_cb` function delivers either exactly once
+  through its completion, whether it happened on the calling thread or on the
+  task running the operation; the three completions without an error parameter
   (`Admin_close_cb`, `Admin_close_with_timeout_cb`,
-  `Callback_on_completion_cb`) fire with `opaque` alone. A task
-  owning a callback runs its body under `catch_task_panic`, so a panic inside
-  it still completes the callback once, and is spawned through
-  `spawn_callback_task`, which aborts the process if Tokio itself panics while
-  spawning it: unwinding there would let the guard fire a callback the task may
-  already have queued. The full contract opens the C header
-  (`rust/cbindgen.toml` `header`) and the `src/ffi/mod.rs` module docs. A
-  panic is a library bug: the handle it hit should be destroyed, and its
-  `_destroy` still frees it and runs its pending callbacks once each.
+  `Callback_on_completion_cb`) fire with `opaque` alone. A function of
+  `confluent_kafka.h` with no error channel (neither fallible nor a `_cb`) has
+  nowhere to report it, so it **aborts** the process after logging the error
+  (`ffi_guard_abort`): a NULL mandatory argument is a bug in the C program,
+  and returning a made-up value would hide it. Its `_err` twin in
+  `confluent_kafka_bindings.h` reports it instead. A task owning a callback
+  runs its body under `catch_task_panic`, so a panic inside it still completes
+  the callback once, and is spawned through `spawn_callback_task`, which aborts
+  the process if Tokio itself panics while spawning it: unwinding there would
+  let the guard fire a callback the task may already have queued. The full
+  contract opens the C header (`rust/cbindgen.toml` `header`) and the
+  `src/ffi/mod.rs` module docs. After a bug panic the handle it hit should be
+  destroyed, and its `_destroy` still frees it and runs its pending callbacks
+  once each. `_destroy(NULL)` stays a no-op.
 - **Two headers: `confluent_kafka.h` for C, `confluent_kafka_bindings.h` for
-  language bindings.** A failure value that is also a valid answer is
-  acceptable to a C programmer, but a binding must raise whenever Rust
-  panicked, without turning every Java precondition throw into a `Result`. So
+  language bindings.** Aborting on a panic is acceptable to a C programmer,
+  for whom it marks a bug, but a binding must raise whenever Rust panicked
+  (a `None` its user passed included), without turning every Java
+  precondition throw into a `Result`. So
   `#[ffi_guard]` also emits a twin `f_err` for every export `f` that is neither
   fallible nor a `_cb`, and `rust/build.rs` writes the second header from the
   same cbindgen IR, declaring each such function only as its twin.
@@ -1174,11 +1190,12 @@ by-design gaps, all closure parameters whose C shape the lint cannot derive):
   |---|---|
   | fallible, `T f(args, kafka_common_Error_t **out_err)` | `f` itself, no twin |
   | a `_cb` function | `f` itself, no twin: the completion is the channel for every outcome, a caught panic included |
-  | any other `T f(args)`, `void` included | only `T f_err(args, kafka_common_Error_t **out_err)`: on a caught panic it stores the error in `*out_err` and returns `f`'s panic value (NULL for an error factory, whose value is itself an error), otherwise what `f` returns |
+  | any other `T f(args)`, `void` included | only `T f_err(args, kafka_common_Error_t **out_err)`: on a caught panic it stores the error in `*out_err` and returns the failure value of its return type where `f` aborts (NULL, 0, -1, a NULL `kafka_Bytes_t`), otherwise what `f` returns |
 
   A twin has `f`'s documentation and preconditions, and `out_err` the contract
-  above; a caught panic is `LOCAL_ILLEGAL_STATE`, its message naming the twin,
-  and `fallback` does not apply. A program includes one header, never both.
+  above; a precondition panic is its own error (`LOCAL_NULL_POINTER` or Java's),
+  any other caught panic `LOCAL_ILLEGAL_STATE`, its message naming the twin. A
+  program includes one header, never both.
   Function-pointer typedefs are the same in both, since the caller implements
   them. `ffi::tests::test_bindings_header_declares_the_twin_of_every_export`
   and `test_fallible_declarations_end_in_out_err` pin both headers against the
@@ -1389,12 +1406,15 @@ multilanguage tests, and `soak/` holds the long-running soak client.
 
 ### Multilanguage test harness
 
-`rust/multilanguage-test-server/` (a Rust gRPC server with `admin`, `consumer`
-and `producer` services), `c/grpc_server/` (the C backend) and the Python
-servers above let the same producer, consumer and admin scenarios run against
-three targets: the native Rust client, the Python binding and the C binding.
-The harness is enabled by the `multilanguage-tests` feature, which implies
-`integration-tests`, and driven by `cargo xtask test-multilanguage`.
+The same producer, consumer and admin scenarios run on six arms: the native
+Rust client and, through gRPC, the Python binding (sync and asyncio), the C
+binding and the .NET binding (sync and async). Each binding has a small test
+server in its own Docker image (`python/grpc_server.py`,
+`python/grpc_server_async.py`, `c/grpc_server/`, `dotnet/grpc-server/`).
+`rust/multilanguage-test-server/` holds the gRPC protocol they share. The
+`multilanguage-tests` feature, which implies `integration-tests`, generates the
+five gRPC arms. See [multilanguage-tests.md](multilanguage-tests.md) for how the
+harness works.
 
 ### Benchmark harness
 

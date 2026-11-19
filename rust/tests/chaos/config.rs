@@ -425,29 +425,21 @@ impl ChaosConfig {
         }
 
         // `--security-protocol`: which broker listener every client uses. A
-        // gRPC (python / c) backend whose server runs in a sibling container
-        // reaches the broker through its container-network listeners, which
-        // exist for PLAINTEXT, SSL and SASL_SSL but not SASL_PLAINTEXT. A
-        // natively launched server uses the host listeners like the Rust
-        // client, so every protocol is available to it.
+        // gRPC backend whose server runs in a sibling container reaches the
+        // broker through the container-network twin of that listener, which
+        // every protocol has; a natively launched server uses the host
+        // listeners like the Rust client.
         let security_protocol = {
             let raw = env_str(var, "CHAOS_SECURITY_PROTOCOL", "plaintext");
-            let protocol = SecurityProtocol::parse(&raw).ok_or_else(|| {
+            SecurityProtocol::parse(&raw).ok_or_else(|| {
                 format!("CHAOS_SECURITY_PROTOCOL must be plaintext, ssl, sasl_plaintext or sasl_ssl, got '{raw}'")
-            })?;
-            if let Some(spec) = workloads.iter().find(|w| w.backend.is_grpc())
-                && grpc_backends_use_containers(lookup)?
-                && protocol == SecurityProtocol::SaslPlaintext
-            {
-                return Err(format!(
-                    "--security-protocol sasl_plaintext is not supported for '{}' with \
-                     MULTILANG_BACKEND_MODE=container: the gRPC server's container reaches the brokers through \
-                     their container-network listeners, which exist for plaintext, ssl and sasl_ssl only",
-                    spec.label()
-                ));
-            }
-            protocol
+            })?
         };
+        // A gRPC workload's backend mode is checked up front, as
+        // `backend_pool` panics on a value it does not know.
+        if workloads.iter().any(|w| w.backend.is_grpc()) {
+            grpc_backends_use_containers(lookup)?;
+        }
 
         // Faults, librdkafka-style: broker rolling is implicit (default-on)
         // unless `--no-broker-roll`. Other faults are layered on via valued
@@ -1089,7 +1081,8 @@ fn check_controller_quorum(
 /// topic, a consumer one; `adds_consumer` (`--rebalance-add-cycle`) adds one
 /// more consumer of the first consumer's backend mid-run. Consumer churn adds
 /// only Rust consumers. The asyncio server (`python-async`) and the C server
-/// have no fixed pool.
+/// have no fixed pool. Neither do the .NET servers (`dotnet`, `dotnet-async`),
+/// so their streams are not counted either.
 fn check_python_server_streams(workloads: &[WorkloadSpec], num_topics: u16, adds_consumer: bool) -> Result<(), String> {
     let python = |w: &&WorkloadSpec| w.backend == Backend::Python;
     let producers = workloads.iter().filter(python).filter(|w| w.role == Role::Producer).count();
@@ -1196,8 +1189,9 @@ fn parse_workloads(s: &str) -> Result<Vec<WorkloadSpec>, String> {
             "consumer" => Role::Consumer,
             _ => return Err(format!("workload role must be producer or consumer, got '{role}'")),
         };
-        let backend = Backend::parse(backend)
-            .ok_or_else(|| format!("workload backend must be rust, python, python-async or c, got '{backend}'"))?;
+        let backend = Backend::parse(backend).ok_or_else(|| {
+            format!("workload backend must be rust, python, python-async, c, dotnet or dotnet-async, got '{backend}'")
+        })?;
         let n = counters.entry((role, backend)).or_insert(0);
         *n += 1;
         specs.push(WorkloadSpec { role, backend, instance: *n });
@@ -1305,13 +1299,13 @@ mod tests {
     }
 
     /// A gRPC-backed workload takes the run's security protocol like a Rust
-    /// one. Only SASL_PLAINTEXT with a containerised server is rejected: the
-    /// brokers' container-network listeners cover PLAINTEXT, SSL and SASL_SSL.
+    /// one, in either backend mode: the brokers' container-network listeners
+    /// cover all four protocols, as the host ones do.
     #[test]
     fn grpc_workloads_accept_every_protocol_their_listeners_cover() {
         let workloads = ("CHAOS_WORKLOADS", "producer:python,consumer:c");
         for mode in ["container", "native"] {
-            for protocol in ["plaintext", "ssl", "sasl_ssl"] {
+            for protocol in ["plaintext", "ssl", "sasl_plaintext", "sasl_ssl"] {
                 let cfg = parse(&[
                     workloads,
                     ("CHAOS_SECURITY_PROTOCOL", protocol),
@@ -1321,25 +1315,6 @@ mod tests {
                 assert_eq!(cfg.security_protocol, SecurityProtocol::parse(protocol).unwrap());
             }
         }
-
-        let native = parse(&[
-            workloads,
-            ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
-            ("MULTILANG_BACKEND_MODE", "native"),
-        ])
-        .expect("a host-process server uses the host SASL_PLAINTEXT listener");
-        assert_eq!(native.security_protocol, SecurityProtocol::SaslPlaintext);
-
-        assert_eq!(
-            parse_err(&[
-                workloads,
-                ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
-                ("MULTILANG_BACKEND_MODE", "container"),
-            ]),
-            "--security-protocol sasl_plaintext is not supported for 'producer-python-1' with \
-             MULTILANG_BACKEND_MODE=container: the gRPC server's container reaches the brokers through their \
-             container-network listeners, which exist for plaintext, ssl and sasl_ssl only"
-        );
 
         // Rust-only runs never consult the backend mode.
         parse(&[
@@ -1351,6 +1326,41 @@ mod tests {
             parse_err(&[workloads, ("MULTILANG_BACKEND_MODE", "docker")]),
             "MULTILANG_BACKEND_MODE must be container or native, got 'docker'"
         );
+    }
+
+    /// The .NET backends parse like the other gRPC ones, and an unknown
+    /// backend is rejected with the full list.
+    #[test]
+    fn dotnet_workloads_parse_and_unknown_backends_are_rejected() {
+        let cfg = parse(&[("CHAOS_WORKLOADS", "producer:dotnet,consumer:dotnet-async,consumer:dotnet")])
+            .expect("dotnet workloads parse");
+        let labels: Vec<String> = cfg.workloads.iter().map(WorkloadSpec::label).collect();
+        assert_eq!(labels, ["producer-dotnet-1", "consumer-dotnet-async-1", "consumer-dotnet-1"]);
+        assert!(cfg.workloads.iter().all(|w| w.backend.is_grpc()));
+        assert_eq!(cfg.added_consumer_backend(), Backend::DotnetAsync);
+
+        assert_eq!(
+            parse_err(&[("CHAOS_WORKLOADS", "producer:rust,consumer:java")]),
+            "workload backend must be rust, python, python-async, c, dotnet or dotnet-async, got 'java'"
+        );
+    }
+
+    /// A .NET workload takes SASL_PLAINTEXT like the other gRPC ones, in
+    /// either backend mode: a containerised server uses the brokers'
+    /// container-network SASL_PLAINTEXT listener, a native one the host one.
+    #[test]
+    fn dotnet_workloads_accept_sasl_plaintext_in_both_modes() {
+        for workloads in ["producer:rust,consumer:dotnet-async", "producer:dotnet,consumer:rust"] {
+            for mode in ["container", "native"] {
+                let cfg = parse(&[
+                    ("CHAOS_WORKLOADS", workloads),
+                    ("CHAOS_SECURITY_PROTOCOL", "sasl_plaintext"),
+                    ("MULTILANG_BACKEND_MODE", mode),
+                ])
+                .unwrap_or_else(|e| panic!("{workloads} in {mode} mode should be accepted: {e}"));
+                assert_eq!(cfg.security_protocol, SecurityProtocol::SaslPlaintext);
+            }
+        }
     }
 
     #[test]

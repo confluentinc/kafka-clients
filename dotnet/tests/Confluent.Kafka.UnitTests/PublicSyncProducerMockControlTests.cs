@@ -1,0 +1,198 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Diagnostics;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Producer;
+using Xunit;
+
+namespace Confluent.Kafka.UnitTests;
+
+/// <summary>
+/// The sync mock's control helpers, Java's MockProducer completeNext, errorNext, history and clear; Get blocks, so
+/// a pending send is resolved from a second thread.
+/// </summary>
+public sealed class PublicSyncProducerMockControlTests
+{
+    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
+
+    private const string Topic = "sync-mock-control-topic";
+
+    [Fact]
+    public async Task CompleteNext_ResolvesPendingSend()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        Task<RecordMetadata> sendTask = Task.Run(
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get());
+
+        DriveUntilResolved(producer.CompleteNext);
+
+        RecordMetadata metadata = null!;
+        await TestTimeout.Run(async () => metadata = await sendTask, s_deadline);
+        Assert.Equal(Topic, metadata.Topic());
+        Assert.Equal(0, metadata.Partition());
+        Assert.Equal(0L, metadata.Offset());
+    }
+
+    [Fact]
+    public void CompleteNext_NoPending_ReturnsFalse()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        // No pending send: false, as Java's MockProducer.completeNext() returns.
+        Assert.False(producer.CompleteNext());
+    }
+
+    [Fact]
+    public async Task ErrorNext_FaultsPendingSend()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        Task<RecordMetadata> sendTask = Task.Run(
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get());
+
+        DriveUntilResolved(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("sync-mock-error")));
+
+        CorruptRecordException failure = await FutureAssert.ThrowsAsync<CorruptRecordException>(
+            () => TestTimeout.Run(() => sendTask, s_deadline));
+        Assert.Equal(2, failure.Code);
+        Assert.Contains("sync-mock-error", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ErrorNext_NoPending_ReturnsFalse()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        Assert.False(producer.ErrorNext(new Common.Errors.CorruptRecordException("nope")));
+    }
+
+    [Fact]
+    public void HistoryCount_IncrementsPerSend()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        Assert.Equal(0, producer.HistoryCount());
+
+        for (int i = 0; i < 3; i++)
+        {
+            int captured = i;
+            TestTimeout.Run(
+                () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes($"v-{captured}"), partition: 0, key: null)).Get(),
+                s_deadline);
+        }
+
+        // The history counts every sent record, completed or not.
+        Assert.Equal(3, producer.HistoryCount());
+    }
+
+    [Fact]
+    public void Clear_ResetsHistory()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        TestTimeout.Run(
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get(),
+            s_deadline);
+        Assert.Equal(1, producer.HistoryCount());
+
+        producer.Clear();
+        Assert.Equal(0, producer.HistoryCount());
+    }
+
+    [Fact]
+    public void Helpers_AfterDispose_ThrowIllegalState()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        TestTimeout.Dispose(producer);
+
+        Assert.Throws<IllegalStateException>(() => producer.CompleteNext());
+        Assert.Throws<IllegalStateException>(() => producer.ErrorNext(new Common.Errors.CorruptRecordException("x")));
+        Assert.Throws<IllegalStateException>(() => producer.HistoryCount());
+        Assert.Throws<IllegalStateException>(() => producer.Clear());
+        Assert.Throws<IllegalStateException>(() => producer.Flushed());
+        Assert.True(producer.Closed());
+    }
+
+    [Fact]
+    public void Flushed_WithAutoComplete_IsTrue_WithOrWithoutBufferedRecords()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        Assert.True(producer.Flushed());
+        TestTimeout.Run(
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null)).Get(),
+            s_deadline);
+        Assert.True(producer.Flushed());
+    }
+
+    [Fact]
+    public void Flushed_WithoutAutoComplete_IsFalseWhileASendWaits_AndTrueAfterFlush()
+    {
+        MockProducer<byte[], byte[]> producer =
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        Common.KafkaFuture<RecordMetadata> pending =
+            producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null));
+        Assert.False(producer.Flushed());
+
+        TestTimeout.Run(() => producer.Flush(), s_deadline);
+        Assert.True(producer.Flushed());
+        Assert.True(pending.IsDone());
+    }
+
+    [Fact]
+    public void Closed_IsFalseUntilTheProducerCloses()
+    {
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        Assert.False(producer.Closed());
+        TestTimeout.Run(() => producer.Close(), s_deadline);
+        Assert.True(producer.Closed());
+    }
+
+    // Retries drive until it resolves the worker's pending send or the deadline passes: an early call returns
+    // false until the worker's send has landed.
+    private static void DriveUntilResolved(Func<bool> drive)
+    {
+        Stopwatch sw = Stopwatch.StartNew();
+        while (!drive())
+        {
+            if (sw.Elapsed > s_deadline)
+            {
+                throw new System.TimeoutException(
+                    "No pending send registered to drive within the deadline — treated as a hang.");
+            }
+
+            Thread.Sleep(2);
+        }
+    }
+}

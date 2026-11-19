@@ -35,6 +35,7 @@
 //! [`kafka_string_destroy`]; a borrowed `&str` is a `const char *` valid as
 //! long as its owner.
 
+use crate::ffi::precondition::{require_element, require_list, require_map, require_mut, require_ref};
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::ptr;
@@ -364,58 +365,42 @@ pub(crate) unsafe fn destroy_boxed<T>(element: *mut c_void) {
 ///
 /// `list` must be a valid handle from [`box_list`] / `kafka_List_new`, alive
 /// and not mutated for `'a`.
-pub(crate) unsafe fn list_ref<'a>(list: *const kafka_List_t) -> &'a ListInner {
+pub(crate) unsafe fn list_ref<'a>(list: *const kafka_List_t, param: &'static str) -> &'a ListInner {
     // SAFETY: per this function's `# Safety`, `list` came from `box_list` (which
     // `kafka_List_new` uses too), whose `Box::into_raw` of a `ListInner` is the
     // allocation behind every list handle, and it stays alive and unmutated for `'a`.
-    unsafe { &*(list as *const ListInner) }
+    unsafe { require_ref::<_, ListInner>(list, param) }
 }
 
-/// The elements of a list handle; null reads as empty.
-///
-/// # Safety
-///
-/// `list` must be null or a valid list handle, alive and not mutated for
-/// `'a`.
-pub(crate) unsafe fn list_elements<'a>(list: *const kafka_List_t) -> &'a [*mut c_void] {
-    if list.is_null() {
-        &[]
-    } else {
-        // SAFETY: `list` is non-null (checked above) and, per this function's
-        // `# Safety`, a valid list handle alive and unmutated for `'a`, as `list_ref`
-        // requires.
-        unsafe { list_ref(list) }.elements()
-    }
-}
-
-/// Reads a list of `const char *` into `String`s; null reads as empty.
+/// Reads the mandatory list `list` of `const char *` into `String`s; panics
+/// with `precondition::null` when the list or an element is `NULL`.
 ///
 /// # Safety
 ///
 /// `list` must be null or a valid list whose elements are NUL-terminated
 /// strings.
-pub(crate) unsafe fn list_strings(list: *const kafka_List_t) -> Vec<String> {
+pub(crate) unsafe fn list_strings(list: *const kafka_List_t, param: &'static str) -> Vec<String> {
     // SAFETY: per this function's `# Safety`, `list` is null or a valid list, kept alive
     // by the caller for this call, which is as long as the borrow of its elements lasts.
-    unsafe { list_elements(list) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: per this function's `# Safety`, every element is a NUL-terminated
         // string, which `c_str_to_string` copies into an owned `String`.
-        .map(|&element| unsafe { c_str_to_string(element as *const c_char) })
+        .map(|&element| unsafe { c_str_to_string(require_element(element, param) as *const c_char) })
         .collect()
 }
 
-/// Reads a list of `const char *` into a set, the shape of a Java
-/// `Set<String>` parameter; null reads as empty.
+/// Reads the mandatory list `list` of `const char *` into a set, the shape
+/// of a Java `Set<String>` parameter; panics as [`list_strings`] does.
 ///
 /// # Safety
 ///
 /// `list` must be null or a valid list whose elements are NUL-terminated
 /// strings.
-pub(crate) unsafe fn list_string_set(list: *const kafka_List_t) -> HashSet<String> {
+pub(crate) unsafe fn list_string_set(list: *const kafka_List_t, param: &'static str) -> HashSet<String> {
     // SAFETY: per this function's `# Safety`, `list` is null or a valid list of
     // NUL-terminated strings, which is what `list_strings` requires.
-    unsafe { list_strings(list) }.into_iter().collect()
+    unsafe { list_strings(list, param) }.into_iter().collect()
 }
 
 /// Hands a Java `Set<String>` to C as an owned, sorted list of `char *`, so
@@ -469,7 +454,7 @@ pub unsafe extern "C" fn kafka_List_add(self_: *mut kafka_List_t, element: *mut 
     // SAFETY: per this function's `# Safety`, `self_` is a valid list handle, so it points
     // at the `ListInner` `box_list` allocated, and no other call uses it meanwhile, so the
     // `&mut`, which lives only for this call, is unique.
-    unsafe { &mut *(self_ as *mut ListInner) }.elements.push(element);
+    unsafe { require_mut::<_, ListInner>(self_, "self_") }.elements.push(element);
 }
 
 /// Returns the number of elements.
@@ -483,7 +468,7 @@ pub unsafe extern "C" fn kafka_List_size(self_: *const kafka_List_t) -> i32 {
     // SAFETY: per this function's `# Safety`, `self_` is a valid list handle. The borrow
     // lasts for this call only, and the one mutator, `kafka_List_add`, requires that no
     // other call uses the list meanwhile, so nothing writes to it during the borrow.
-    i32::try_from(unsafe { list_ref(self_) }.elements.len()).unwrap_or(i32::MAX)
+    i32::try_from(unsafe { list_ref(self_, "self_") }.elements.len()).unwrap_or(i32::MAX)
 }
 
 /// Returns the element at `index`, or `NULL` when `index` is out of range.
@@ -504,7 +489,7 @@ pub unsafe extern "C" fn kafka_List_get(self_: *const kafka_List_t, index: i32) 
     // SAFETY: per this function's `# Safety`, `self_` is a valid list handle. The borrow
     // lasts for this call only, and the one mutator, `kafka_List_add`, requires that no
     // other call uses the list meanwhile, so nothing writes to it during the borrow.
-    let inner = unsafe { list_ref(self_) };
+    let inner = unsafe { list_ref(self_, "self_") };
     usize::try_from(index)
         .ok()
         .and_then(|i| inner.elements.get(i))
@@ -661,22 +646,23 @@ where
     )
 }
 
-/// Reads a map of `const char *` keys and values into owned pairs, in entry
-/// order; null reads as empty.
+/// Reads the mandatory map `map` of `const char *` keys and values into
+/// owned pairs, in entry order; panics with `precondition::null` when the map
+/// or a key is `NULL`, and reads a `NULL` value as empty.
 ///
 /// # Safety
 ///
 /// `map` must be null or a valid map whose keys and values are
 /// NUL-terminated strings.
-pub(crate) unsafe fn map_strings(map: *const kafka_Map_t) -> Vec<(String, String)> {
+pub(crate) unsafe fn map_strings(map: *const kafka_Map_t, param: &'static str) -> Vec<(String, String)> {
     // SAFETY: per this function's `# Safety`, `map` is null or a valid map, kept alive by
     // the caller for this call, which is as long as the borrow of its entries lasts.
-    unsafe { map_entries(map) }
+    unsafe { require_map(map, param) }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: per this function's `# Safety`, every key and value is a
             // NUL-terminated string, which `c_str_to_string` copies into a `String`.
-            (unsafe { c_str_to_string(k as *const c_char) }, unsafe {
+            (unsafe { c_str_to_string(require_element(k, param) as *const c_char) }, unsafe {
                 c_str_to_string(v as *const c_char)
             })
         })
@@ -703,26 +689,11 @@ pub(crate) unsafe fn string_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
 ///
 /// `map` must be a valid handle from [`box_map`] / `kafka_Map_new`, alive and
 /// not mutated for `'a`.
-pub(crate) unsafe fn map_ref<'a>(map: *const kafka_Map_t) -> &'a MapInner {
+pub(crate) unsafe fn map_ref<'a>(map: *const kafka_Map_t, param: &'static str) -> &'a MapInner {
     // SAFETY: per this function's `# Safety`, `map` came from `box_map` (which
     // `kafka_Map_new` uses too), whose `Box::into_raw` of a `MapInner` is the allocation
     // behind every map handle, and it stays alive and unmutated for `'a`.
-    unsafe { &*(map as *const MapInner) }
-}
-
-/// The entries of a map handle; null reads as empty.
-///
-/// # Safety
-///
-/// `map` must be null or a valid map handle, alive and not mutated for `'a`.
-pub(crate) unsafe fn map_entries<'a>(map: *const kafka_Map_t) -> &'a [(*mut c_void, *mut c_void)] {
-    if map.is_null() {
-        &[]
-    } else {
-        // SAFETY: `map` is non-null (checked above) and, per this function's `# Safety`, a
-        // valid map handle alive and unmutated for `'a`, as `map_ref` requires.
-        unsafe { map_ref(map) }.entries()
-    }
+    unsafe { require_ref::<_, MapInner>(map, param) }
 }
 
 /// Returns a new empty map.
@@ -773,7 +744,7 @@ pub unsafe extern "C" fn kafka_Map_put(self_: *mut kafka_Map_t, key: *mut c_void
     // SAFETY: per this function's `# Safety`, `self_` is a valid map handle, so it points
     // at the `MapInner` `box_map` allocated, and no other call uses it meanwhile, so the
     // `&mut`, which lives only for this call, is unique.
-    let inner = unsafe { &mut *(self_ as *mut MapInner) };
+    let inner = unsafe { require_mut::<_, MapInner>(self_, "self_") };
     // SAFETY: per this function's `# Safety`, `key` is null or of the type the map's
     // `key_eq` compares, when it has one.
     match unsafe { inner.position(key) } {
@@ -805,7 +776,7 @@ pub unsafe extern "C" fn kafka_Map_size(self_: *const kafka_Map_t) -> i32 {
     // SAFETY: per this function's `# Safety`, `self_` is a valid map handle. The borrow
     // lasts for this call only, and the one mutator, `kafka_Map_put`, requires that no
     // other call uses the map meanwhile, so nothing writes to it during the borrow.
-    i32::try_from(unsafe { map_ref(self_) }.entries.len()).unwrap_or(i32::MAX)
+    i32::try_from(unsafe { map_ref(self_, "self_") }.entries.len()).unwrap_or(i32::MAX)
 }
 
 /// Returns the key of the entry at `index`, or `NULL` when `index` is out of range.
@@ -823,7 +794,7 @@ pub unsafe extern "C" fn kafka_Map_key(self_: *const kafka_Map_t, index: i32) ->
     // SAFETY: per this function's `# Safety`, `self_` is a valid map handle. The borrow
     // lasts for this call only, and the one mutator, `kafka_Map_put`, requires that no
     // other call uses the map meanwhile, so nothing writes to it during the borrow.
-    let inner = unsafe { map_ref(self_) };
+    let inner = unsafe { map_ref(self_, "self_") };
     usize::try_from(index)
         .ok()
         .and_then(|i| inner.entries.get(i))
@@ -845,7 +816,7 @@ pub unsafe extern "C" fn kafka_Map_value(self_: *const kafka_Map_t, index: i32) 
     // SAFETY: per this function's `# Safety`, `self_` is a valid map handle. The borrow
     // lasts for this call only, and the one mutator, `kafka_Map_put`, requires that no
     // other call uses the map meanwhile, so nothing writes to it during the borrow.
-    let inner = unsafe { map_ref(self_) };
+    let inner = unsafe { map_ref(self_, "self_") };
     usize::try_from(index)
         .ok()
         .and_then(|i| inner.entries.get(i))
@@ -872,7 +843,7 @@ pub unsafe extern "C" fn kafka_Map_get(self_: *const kafka_Map_t, key: *mut c_vo
     // SAFETY: per this function's `# Safety`, `self_` is a valid map handle. The borrow
     // lasts for this call only, and the one mutator, `kafka_Map_put`, requires that no
     // other call uses the map meanwhile, so nothing writes to it during the borrow.
-    let inner = unsafe { map_ref(self_) };
+    let inner = unsafe { map_ref(self_, "self_") };
     // SAFETY: per this function's `# Safety`, `key` is null or of the type the map's
     // `key_eq` compares, when it has one.
     unsafe { inner.position(key) }.map_or(ptr::null_mut(), |i| inner.entries[i].1)
@@ -985,11 +956,11 @@ pub(crate) fn box_iterator(
 ///
 /// `self_` must be a valid iterator handle, alive for `'a` and used by no
 /// other call meanwhile.
-unsafe fn iterator_mut<'a>(self_: *mut kafka_Iterator_t) -> &'a mut IteratorInner {
+unsafe fn iterator_mut<'a>(self_: *mut kafka_Iterator_t, param: &'static str) -> &'a mut IteratorInner {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid iterator handle, the
     // `Box::into_raw` of `box_iterator`, alive for `'a` and used by no other call, so the `&mut`
     // is unique.
-    unsafe { &mut *(self_ as *mut IteratorInner) }
+    unsafe { require_mut::<_, IteratorInner>(self_, param) }
 }
 
 /// Returns `1` if the iteration has more elements, else `0`.
@@ -1006,7 +977,7 @@ unsafe fn iterator_mut<'a>(self_: *mut kafka_Iterator_t) -> &'a mut IteratorInne
 pub unsafe extern "C" fn kafka_Iterator_has_next(self_: *mut kafka_Iterator_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid iterator handle used by no other
     // call, as `iterator_mut` requires; the borrow ends with this call.
-    i8::from(unsafe { iterator_mut(self_) }.has_next())
+    i8::from(unsafe { iterator_mut(self_, "self_") }.has_next())
 }
 
 /// Returns the next element in the iteration.
@@ -1032,7 +1003,7 @@ pub unsafe extern "C" fn kafka_Iterator_has_next(self_: *mut kafka_Iterator_t) -
 pub unsafe extern "C" fn kafka_Iterator_next(self_: *mut kafka_Iterator_t) -> *mut c_void {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid iterator handle used by no other
     // call, as `iterator_mut` requires; the borrow ends with this call.
-    match unsafe { iterator_mut(self_) }.next() {
+    match unsafe { iterator_mut(self_, "self_") }.next() {
         Some(element) => element,
         // Java's `NoSuchElementException`: a precondition the caller checks with
         // `kafka_Iterator_has_next` (CLAUDE.md §12.5).
@@ -1122,10 +1093,10 @@ pub(crate) unsafe fn destroy_map_entry_element(element: *mut c_void) {
 /// # Safety
 ///
 /// `self_` must be a valid entry handle, alive for `'a`.
-unsafe fn map_entry_ref<'a>(self_: *const kafka_Map_Entry_t) -> &'a MapEntryInner {
+unsafe fn map_entry_ref<'a>(self_: *const kafka_Map_Entry_t, param: &'static str) -> &'a MapEntryInner {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid entry handle alive for `'a`, the
     // `Box::into_raw` of `box_map_entry`; nothing mutates an entry, so the shared borrow is sound.
-    unsafe { &*(self_ as *const MapEntryInner) }
+    unsafe { require_ref::<_, MapEntryInner>(self_, param) }
 }
 
 /// Returns the key corresponding to this entry.
@@ -1142,7 +1113,7 @@ unsafe fn map_entry_ref<'a>(self_: *const kafka_Map_Entry_t) -> &'a MapEntryInne
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_Entry_key(self_: *const kafka_Map_Entry_t) -> *const c_void {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid entry handle, alive for this call.
-    unsafe { map_entry_ref(self_) }.key
+    unsafe { map_entry_ref(self_, "self_") }.key
 }
 
 /// Returns the value corresponding to this entry.
@@ -1159,7 +1130,25 @@ pub unsafe extern "C" fn kafka_Map_Entry_key(self_: *const kafka_Map_Entry_t) ->
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_Map_Entry_value(self_: *const kafka_Map_Entry_t) -> *const c_void {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid entry handle, alive for this call.
-    unsafe { map_entry_ref(self_) }.value
+    unsafe { map_entry_ref(self_, "self_") }.value
+}
+
+/// Asserts that `iterator` is past its end: `kafka_Iterator_next` would panic
+/// with Java's `NoSuchElementException` message, which its `_err` twin stores.
+///
+/// # Safety
+///
+/// `iterator` must be a valid iterator handle, used by no other call meanwhile.
+#[cfg(test)]
+pub(crate) unsafe fn assert_past_the_end(iterator: *mut kafka_Iterator_t) {
+    let mut err = ptr::null_mut();
+    // SAFETY: Per this function's `# Safety`; `err` is a live local pointing at null.
+    let element = unsafe { kafka_Iterator_next_err(iterator, &mut err) };
+    assert!(element.is_null(), "past the end the twin returns NULL");
+    // SAFETY: `err` is the handle the twin stored, consumed once.
+    let error = unsafe { crate::ffi::common::take_error(err) }.expect("past the end is an error");
+    assert!(error.is_local_illegal_state_error(), "{error:?}");
+    assert!(error.message().ends_with("the iteration has no more elements"), "{error:?}");
 }
 
 #[cfg(test)]
@@ -1265,7 +1254,7 @@ mod tests {
             assert_eq!(kafka_List_get(list, 1), b.as_ptr() as *mut c_void);
             assert!(kafka_List_get(list, 2).is_null());
             assert!(kafka_List_get(list, -1).is_null());
-            assert_eq!(list_strings(list), vec!["a".to_string(), "b".to_string()]);
+            assert_eq!(list_strings(list, "value"), vec!["a".to_string(), "b".to_string()]);
             // Destroying the list leaves `a` and `b` untouched: they are still
             // valid CStrings dropped at the end of the test.
             kafka_List_destroy(list);
@@ -1278,7 +1267,7 @@ mod tests {
         let list = box_string_list(["x", "y", "z"]);
         // SAFETY: Test code: `list` is the fresh `box_string_list` handle, destroyed once at
         // the end; `second` is one of its owned strings, read before that destroy. Null is
-        // accepted by `kafka_List_destroy`, `list_strings` and `list_elements`.
+        // accepted by `kafka_List_destroy`, `list_strings` and `require_list`.
         unsafe {
             assert_eq!(kafka_List_size(list), 3);
             let second = kafka_List_get(list, 1) as *const c_char;
@@ -1287,8 +1276,20 @@ mod tests {
             // sanitizers rather than by an assertion: there is nothing to observe).
             kafka_List_destroy(list);
             kafka_List_destroy(ptr::null_mut());
-            assert!(list_strings(ptr::null()).is_empty());
-            assert!(list_elements(ptr::null()).is_empty());
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    list_strings(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    require_list(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
         }
     }
 
@@ -1319,7 +1320,7 @@ mod tests {
         // SAFETY: Test code: `map` is the fresh `kafka_Map_new` handle, used by this thread
         // only and destroyed once at the end; it compares keys by identity, so any key
         // pointer is accepted, and its entries are live CStrings that outlive it. Null is
-        // accepted by `kafka_Map_destroy` and `map_entries`.
+        // accepted by `kafka_Map_destroy` and `require_map`.
         unsafe {
             kafka_Map_put(map, k1.as_ptr() as *mut c_void, v1.as_ptr() as *mut c_void);
             kafka_Map_put(map, k2.as_ptr() as *mut c_void, v2.as_ptr() as *mut c_void);
@@ -1333,10 +1334,16 @@ mod tests {
             assert!(kafka_Map_key(map, 2).is_null());
             assert!(kafka_Map_value(map, -1).is_null());
             assert!(kafka_Map_get(map, v1.as_ptr() as *mut c_void).is_null());
-            assert_eq!(map_entries(map).len(), 2);
+            assert_eq!(require_map(map, "map").len(), 2);
             kafka_Map_destroy(map);
             kafka_Map_destroy(ptr::null_mut());
-            assert!(map_entries(ptr::null()).is_empty());
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    require_map(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
         }
     }
 
@@ -1428,7 +1435,7 @@ mod tests {
                 assert_eq!(DROPS.load(Ordering::SeqCst), expected as usize - 1, "the previous one is freed");
             }
             assert_eq!(kafka_Iterator_has_next(iterator), 0);
-            assert!(kafka_Iterator_next(iterator).is_null(), "a panic past the end returns NULL");
+            assert_past_the_end(iterator);
             kafka_Iterator_destroy(iterator);
         }
         assert_eq!(DROPS.load(Ordering::SeqCst), 3, "destroy frees the last element");

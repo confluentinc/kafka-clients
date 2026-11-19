@@ -111,6 +111,43 @@ user-supplied trait (`ConsumerRebalanceListener`, `OffsetCommitCallback`,
   - A `BaseConsumer`-style sync API (cf. `rdkafka` crate). Revisit only if a
     concrete user need surfaces.
 
+### 1.1 Amendment — a sync consumer facade is now shipped in the .NET binding (M5/P8a)
+
+The "async-only, no sync facade" stance above governs the **Rust public API**,
+which **remains async-only**. It is *un-deferred in the .NET binding only*: the
+.NET binding now ships a **synchronous** consumer facade (`IConsumer` /
+`KafkaConsumer` / `MockConsumer`) alongside its async one
+(`IAsyncConsumer` / `AsyncKafkaConsumer` / `AsyncMockConsumer`).
+
+  - **Why (binding layer):** Java's `org.apache.kafka.clients.consumer.Consumer`
+    is **synchronous** — a blocking `poll` / `commitSync`. A binding's job is to
+    restore the Java *shape* (`dotnet/.claude/rules/bindings.md` §1.2), so the most Java-faithful
+    surface is synchronous; .NET users expect a blocking `Poll`. The async
+    surface stays too (both are siblings over one native consumer).
+  - **How it is implemented — the distinction that matters:** the .NET sync
+    facade calls the blocking C ABI forms (`kafka_consumer_Consumer_poll` /
+    `_subscribe_*` / …, each with a trailing `kafka_common_Error_t **out_err`),
+    and the core's `block_on`
+    runs **inside the Rust core's own multi-thread tokio runtime** — the caller's
+    thread parks, deadlock-free. This is **distinct from, and not, the forbidden
+    *managed* sync-over-async façade** (a binding-side `block_on` / `Task.Run` /
+    `.GetAwaiter().GetResult()` wrapping the *async binding API*). §1's original
+    objections do **not** apply here: (a) the deadlock concern was about calling
+    `block_on` on the *caller's* current-thread runtime — here the parking is on
+    the *core's* runtime, not the caller's; (b) the "forces every user trait sync"
+    concern does not apply — the deserializer runs in managed code above the ABI,
+    and listener and commit-callback methods cross it as C function pointers that
+    report through `kafka_consumer_Consumer__set_callback_result` (BH:3668-3693,
+    BH:3778-3792 at `3f8a5bc6`), so the async consumer also takes `Task`-returning
+    ones (ledgers 35 and 47). This generalizes the shipped `EnforceRebalance`
+    sync op to the full core loop; since M19/P1 `Seek` and `CurrentLag` are
+    blocking members on `IConsumer` and `Task`s on `IAsyncConsumer` (decision 22,
+    ledger 103).
+  - **Scope:** this amendment governs the **binding layer only**. It does not
+    reintroduce a sync facade into the Rust core, and it does not change §1's
+    guidance for the Rust `AsyncKafkaConsumer` API. A sync facade in *other*
+    bindings is each binding's own decision.
+
 ## 2. Consumer dispatch surface: `Consumer` + `DynConsumer`, concrete `KafkaConsumer`
 
 The Rust equivalent of Java's `Consumer<K, V>` interface is a trait whose

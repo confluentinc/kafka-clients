@@ -92,9 +92,6 @@ from ._base import (
     FLUSH_IN_CALLBACK_MESSAGE,
     LONG_MAX_VALUE,
     _ProducerState,
-    check_group_metadata,
-    check_offsets,
-    check_record,
     close_timeout_ms,
     closed_while_sending,
     free_error,
@@ -265,7 +262,7 @@ class _AsyncRecord(AsyncRecordFuture, _FutureState[RecordMetadata]):
         raise not_copyable("AsyncKafkaFuture", "it is the record the producer's send completes")
 
     def __init__(self, producer: AsyncProducer[Any, Any], callback: Callback | AsyncCallback | None,
-                 topic: str, partition: int | None, loop: asyncio.AbstractEventLoop) -> None:
+                 topic: str | None, partition: int | None, loop: asyncio.AbstractEventLoop) -> None:
         # The future (AsyncKafkaFuture's slots; _native is the class attribute).
         self._inner = None
         self._loop = loop
@@ -752,8 +749,6 @@ class AsyncProducer(Generic[K, V], _ProducerState):
             group_metadata: ConsumerGroupMetadata) -> None:
         """See :meth:`Producer.send_offsets_to_transaction`."""
         self._check_not_closed()
-        check_group_metadata(group_metadata)
-        check_offsets(offsets)
         native = group_metadata_handle(group_metadata)
         spec = offsets_to_spec(offsets)
         await self._run_async(_lib.Producer_send_offsets_to_transaction_cb, spec, native)
@@ -824,7 +819,6 @@ class AsyncProducer(Generic[K, V], _ProducerState):
         if callback is MISSING:
             callback = None  # Java's send(record) passes null
         self._check_not_closed()
-        check_record(record)
         if callback is not None:
             check_callback(callback)
         # Before the serializers, so a call from another loop has no effect.
@@ -955,8 +949,6 @@ class AsyncProducer(Generic[K, V], _ProducerState):
     async def partitions_for(self, *, topic: str) -> list[PartitionInfo]:
         """See :meth:`Producer.partitions_for`."""
         self._check_not_closed()
-        if topic is None:
-            raise TypeError("topic must not be None")
         partitions, error = await self._await_payload(_lib.Producer_partitions_for_cb, topic)
         raise_if_error(error)
         return [to_partition_info(t) for t in partitions]

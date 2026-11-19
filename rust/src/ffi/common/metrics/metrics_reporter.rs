@@ -35,7 +35,8 @@ use crate::ffi::common::metrics::kafka_metric::{
     KafkaMetricInner, kafka_common_metrics_KafkaMetric_t, kafka_metric_ref,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, kafka_List_destroy, kafka_List_t, list_elements};
+use crate::ffi::precondition::{require_element, require_list};
+use crate::ffi::util::{box_list, kafka_List_destroy, kafka_List_t};
 
 /// Opaque handle to a [`MetricsReporter`] implementation.
 #[repr(C)]
@@ -156,12 +157,14 @@ impl MetricsReporter for CMetricsReporter {
 /// `reporter` must be a valid metrics-reporter handle, alive for `'a`.
 pub(crate) unsafe fn metrics_reporter_ref<'a>(
     reporter: *const kafka_common_metrics_MetricsReporter_t,
+    param: &'static str,
 ) -> &'a dyn MetricsReporter {
     // SAFETY: Per this function's `# Safety`, `reporter` is a valid metrics-reporter handle alive
     // for `'a`, as `Interface::from_ptr` requires: every `kafka_common_metrics_MetricsReporter_t`
     // is an `Interface<dyn MetricsReporter>`, owned or a view; the reference returned lives for the
     // same `'a`.
-    unsafe { Interface::<dyn MetricsReporter>::from_ptr(reporter as *const Interface<dyn MetricsReporter>) }.get()
+    unsafe { Interface::<dyn MetricsReporter>::from_ptr(reporter as *const Interface<dyn MetricsReporter>, param) }
+        .get()
 }
 
 /// Takes the implementation a `*mut` parameter received (see
@@ -228,7 +231,7 @@ pub extern "C" fn kafka_common_metrics_MetricsReporter_new(
 ///
 /// # Safety
 ///
-/// `self_` must be a valid metrics-reporter handle and `metrics` null or a
+/// `self_` must be a valid metrics-reporter handle and `metrics` a
 /// valid list of metric handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -236,19 +239,26 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_init(
     self_: *const kafka_common_metrics_MetricsReporter_t,
     metrics: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `metrics` is null or a valid list, which the caller
-    // keeps alive and does not mutate for this call, as `list_elements` requires; the slice is used
+    // SAFETY: Per this function's `# Safety`, `metrics` is a valid list, which the caller
+    // keeps alive and does not mutate for this call, as `require_list` requires; the slice is used
     // only within this call.
-    let metrics: Vec<Arc<KafkaMetric>> = unsafe { list_elements(metrics) }
+    let metrics: Vec<Arc<KafkaMetric>> = unsafe { require_list(metrics, "metrics") }
         .iter()
-        // SAFETY: Per this function's `# Safety`, each element of `metrics` is a valid metric
-        // handle, as `kafka_metric_ref` requires; the `Arc` is cloned, so the borrow lasts for this
-        // call only.
-        .map(|&element| Arc::clone(unsafe { kafka_metric_ref(element as *const kafka_common_metrics_KafkaMetric_t) }))
+        .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, each element of `metrics` is a valid metric
+            // handle, as `kafka_metric_ref` requires; the `Arc` is cloned, so the borrow lasts for this
+            // call only.
+            Arc::clone(unsafe {
+                kafka_metric_ref(
+                    require_element(element, "metrics") as *const kafka_common_metrics_KafkaMetric_t,
+                    "metrics",
+                )
+            })
+        })
         .collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metrics-reporter handle, as
     // `metrics_reporter_ref` requires; the reference is used only within this call.
-    unsafe { metrics_reporter_ref(self_) }.init(&metrics);
+    unsafe { metrics_reporter_ref(self_, "self_") }.init(&metrics);
 }
 
 /// `metricChange(KafkaMetric metric)`.
@@ -270,7 +280,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_metric_change(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metrics-reporter handle, as
     // `metrics_reporter_ref` requires, and `metric` a valid metric handle, as `kafka_metric_ref`
     // requires; both references are used only within this call.
-    unsafe { metrics_reporter_ref(self_) }.metric_change(unsafe { kafka_metric_ref(metric) });
+    unsafe { metrics_reporter_ref(self_, "self_") }.metric_change(unsafe { kafka_metric_ref(metric, "metric") });
 }
 
 /// `metricRemoval(KafkaMetric metric)`.
@@ -292,7 +302,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_metric_removal(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metrics-reporter handle, as
     // `metrics_reporter_ref` requires, and `metric` a valid metric handle, as `kafka_metric_ref`
     // requires; both references are used only within this call.
-    unsafe { metrics_reporter_ref(self_) }.metric_removal(unsafe { kafka_metric_ref(metric) });
+    unsafe { metrics_reporter_ref(self_, "self_") }.metric_removal(unsafe { kafka_metric_ref(metric, "metric") });
 }
 
 /// `close()`.
@@ -307,7 +317,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricsReporter_close(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metrics-reporter handle, as
     // `metrics_reporter_ref` requires; the reference is used only within this call.
-    unsafe { metrics_reporter_ref(self_) }.close();
+    unsafe { metrics_reporter_ref(self_, "self_") }.close();
 }
 
 /// Frees an owned handle; null is a no-op.
@@ -426,7 +436,6 @@ mod tests {
             // No-ops: nothing to observe, nothing crashes.
             let list = box_list(vec![metric as *mut c_void], None);
             kafka_common_metrics_MetricsReporter_init(silent, list);
-            kafka_common_metrics_MetricsReporter_init(silent, ptr::null());
             kafka_common_metrics_MetricsReporter_metric_change(silent, metric);
             kafka_common_metrics_MetricsReporter_metric_removal(silent, metric);
             kafka_common_metrics_MetricsReporter_close(silent);

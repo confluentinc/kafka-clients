@@ -76,8 +76,9 @@ build_and_stage() {
     dest="$1"
     lib="$2"
     rm -f rust/target/include/confluent_kafka.h rust/target/include/confluent_kafka_bindings.h
-    # The wheel ships the library `make -C rust build-cdylib` builds, the one
-    # the binding's tests run against, with its target CPU (x86-64-v3 on
+    # The wheel ships the library `make -C rust build-cdylib` builds (the
+    # binding's tests run the debug all-features build, with the same
+    # platform-verifier trust store), with its target CPU (x86-64-v3 on
     # x86_64). The wheel's tag cannot state a CPU level, so the extension
     # checks it at import and raises ImportError on an older CPU (python/setup.py,
     # CONFLUENT_KAFKA_TARGET_CPU). `cargo fetch --locked` fails if Cargo.lock is

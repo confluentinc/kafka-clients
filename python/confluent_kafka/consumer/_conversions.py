@@ -56,9 +56,13 @@ __all__ = [
 # Python value types -> FFI argument tuples.
 # --------------------------------------------------------------------------
 def tp_to_spec(
-    partitions: Iterable[TopicPartition],
-) -> list[tuple[str, int]]:
-    """``Iterable[TopicPartition]`` -> the FFI's ``(topic, partition)`` list."""
+    partitions: Iterable[TopicPartition] | None,
+) -> list[tuple[str, int]] | None:
+    """``Iterable[TopicPartition]`` -> the FFI's ``(topic, partition)`` list;
+    ``None`` stays ``None``, Java's null collection, which the FFI receives as
+    ``NULL`` and answers with Java's error."""
+    if partitions is None:
+        return None
     return [(tp.topic(), tp.partition()) for tp in partitions]
 
 
@@ -86,10 +90,13 @@ def offsets_to_spec(
 
 
 def timestamps_to_spec(
-    timestamps_to_search: Mapping[TopicPartition, int],
-) -> list[tuple[str, int, int]]:
+    timestamps_to_search: Mapping[TopicPartition, int] | None,
+) -> list[tuple[str, int, int]] | None:
     """``dict[TopicPartition, int]`` -> the FFI's ``(topic, partition,
-    timestamp)`` list for ``offsets_for_times``."""
+    timestamp)`` list for ``offsets_for_times``; ``None`` stays ``None``, Java's
+    null map, which the FFI receives as ``NULL``."""
+    if timestamps_to_search is None:
+        return None
     return [
         (tp.topic(), tp.partition(), ts)
         for tp, ts in timestamps_to_search.items()

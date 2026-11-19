@@ -350,7 +350,7 @@ def test_partitions_for_with_null_topic() -> None:
                        value_serializer=bytes_serializer()) as producer:
         with pytest.raises(TypeError) as err:
             producer.partitions_for(topic=None)  # type: ignore[arg-type]
-        assert str(err.value) == "topic must not be None"
+        assert str(err.value) == "topic cannot be None"
 
 
 def test_init_transaction_timeout() -> None:
@@ -369,7 +369,7 @@ def test_init_transaction_timeout() -> None:
 
 
 def test_null_group_metadata_in_send_offsets() -> None:
-    _verify_invalid_group_metadata(None, "Consumer group metadata could not be None")
+    _verify_invalid_group_metadata(None, "Consumer group metadata could not be null")
 
 
 def _verify_invalid_group_metadata(group_metadata: ConsumerGroupMetadata | None,

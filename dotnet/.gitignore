@@ -1,0 +1,22 @@
+# Build output
+bin/
+obj/
+
+# Rider / Visual Studio user-specific files
+*.user
+*.suo
+.vs/
+.idea/
+
+# macOS
+.DS_Store
+
+# Test / coverage artifacts
+[Tt]est[Rr]esults/
+*.trx
+*.coverage
+*.coveragexml
+coverage/
+
+# Packages and their staged natives, from `make -C dotnet pack-dotnet` (.semaphore/pack-nupkg.sh)
+artifacts/

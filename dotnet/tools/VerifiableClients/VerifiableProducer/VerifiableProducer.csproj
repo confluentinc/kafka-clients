@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The verifiable-producer tool: its Main runs VerifiableProducer.Main of the VerifiableClients
+    library. Published self-contained for the ducker-ak nodes (README); invariant globalization, so
+    the nodes need no ICU.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.Tools</RootNamespace>
+    <AssemblyName>VerifiableProducer</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../VerifiableClients/VerifiableClients.csproj" />
+  </ItemGroup>
+
+</Project>

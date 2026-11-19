@@ -18,7 +18,7 @@
 //! Each such Java class gets an opaque `kafka_common_<Class>_t`. A handle is
 //! either a **view** borrowed from a `kafka_common_Error_t` through
 //! `kafka_common_Error_<snake(class)>` (null when the error is not that
-//! class), valid until the error is destroyed and never passed to
+//! class or is null), valid until the error is destroyed and never passed to
 //! `_destroy`, or an **owned** value built by the class's own constructors
 //! and freed with `kafka_common_<Class>_destroy`. Both point at the same
 //! [`Payload<T>`], so the getters do not care which they were given.
@@ -50,6 +50,7 @@ pub(crate) mod resource_not_found_error;
 pub(crate) mod throttling_quota_exceeded_error;
 pub(crate) mod topic_authorization_error;
 
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::any::Any;
 use std::ffi::{CString, c_char};
 use std::fmt;
@@ -117,14 +118,14 @@ impl<T: PayloadClass> Payload<T> {
     /// for `'a`: an owned handle not destroyed, or a view whose error is not
     /// destroyed. No reference obtained through [`Payload::from_ptr_mut`] on
     /// it may be live during `'a`.
-    pub(crate) unsafe fn from_ptr<'a, P>(handle: *const P) -> &'a Self {
+    pub(crate) unsafe fn from_ptr<'a, P>(handle: *const P, param: &'static str) -> &'a Self {
         // SAFETY: Per this function's `# Safety`, `handle` is a view or owned handle of this
         // payload class, so it points at a live `Payload<T>`: a view at the one an
         // `ErrorInner`'s payload slot holds (`ErrorInner::payload_view`), an owned handle at
         // the `Box::into_raw` of `Payload::boxed`. It stays alive for `'a`, and nothing
         // mutates it then: no `from_ptr_mut` reference is live, and its lazy slots are
         // `OnceLock`s.
-        unsafe { &*(handle as *const Self) }
+        unsafe { require_ref::<_, Self>(handle, param) }
     }
 
     /// The payload behind an owned handle of opaque type `P`, mutably.
@@ -134,12 +135,12 @@ impl<T: PayloadClass> Payload<T> {
     /// `handle` must be an owned handle not yet destroyed, never a view
     /// borrowed from a `kafka_common_Error_t`, and no reference obtained
     /// through [`Payload::from_ptr`] on it may be live.
-    pub(crate) unsafe fn from_ptr_mut<'a, P>(handle: *mut P) -> &'a mut Self {
+    pub(crate) unsafe fn from_ptr_mut<'a, P>(handle: *mut P, param: &'static str) -> &'a mut Self {
         // SAFETY: Per this function's `# Safety`, `handle` is an owned handle not yet
         // destroyed, i.e. the `Box::into_raw` of `Payload::boxed`, which the C caller owns
         // and never a view inside an `ErrorInner`, and no `from_ptr` reference on it is live,
         // so the `&mut` is the only reference for `'a`.
-        unsafe { &mut *(handle as *mut Self) }
+        unsafe { require_mut::<_, Self>(handle, param) }
     }
 
     /// Replaces the value in place, as a Rust `with_*` builder step does on
@@ -219,4 +220,57 @@ pub(crate) unsafe fn take_source(source: *mut kafka_common_Error_t) -> Error {
     // yet destroyed, as `take_error` requires; the caller hands it over, so consuming it here
     // is its final use.
     unsafe { take_error(source) }.unwrap_or_else(|| Error::kafka_message(""))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ptr;
+
+    #[test]
+    fn every_view_reads_a_null_error_as_another_class() {
+        // SAFETY: Test code: every view accepts `NULL` for `error`, per its `# Safety`.
+        unsafe {
+            assert!(
+                super::consumer_commit_failed_error::kafka_common_Error_consumer_commit_failed(ptr::null()).is_null()
+            );
+            assert!(
+                super::consumer_log_truncation_error::kafka_common_Error_consumer_log_truncation(ptr::null()).is_null()
+            );
+            assert!(
+                super::consumer_no_offset_for_partition_error::kafka_common_Error_consumer_no_offset_for_partition(
+                    ptr::null()
+                )
+                .is_null()
+            );
+            assert!(
+                super::consumer_offset_out_of_range_error::kafka_common_Error_consumer_offset_out_of_range(ptr::null())
+                    .is_null()
+            );
+            assert!(
+                super::consumer_retriable_commit_failed_error::kafka_common_Error_consumer_retriable_commit_failed(
+                    ptr::null()
+                )
+                .is_null()
+            );
+            assert!(super::duplicate_resource_error::kafka_common_Error_duplicate_resource(ptr::null()).is_null());
+            assert!(
+                super::group_authorization_error::kafka_common_Error_group_authorization_error(ptr::null()).is_null()
+            );
+            assert!(super::invalid_topic_error::kafka_common_Error_invalid_topic(ptr::null()).is_null());
+            assert!(super::local_callback_error::kafka_common_Error_local_callback_error(ptr::null()).is_null());
+            assert!(super::quota_violation_error::kafka_common_Error_quota_violation(ptr::null()).is_null());
+            assert!(
+                super::record_deserialization_error::kafka_common_Error_record_deserialization(ptr::null()).is_null()
+            );
+            assert!(super::record_too_large_error::kafka_common_Error_record_too_large_error(ptr::null()).is_null());
+            assert!(super::resource_not_found_error::kafka_common_Error_resource_not_found(ptr::null()).is_null());
+            assert!(
+                super::throttling_quota_exceeded_error::kafka_common_Error_throttling_quota_exceeded_error(ptr::null())
+                    .is_null()
+            );
+            assert!(
+                super::topic_authorization_error::kafka_common_Error_topic_authorization_error(ptr::null()).is_null()
+            );
+        }
+    }
 }

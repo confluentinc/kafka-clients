@@ -1,0 +1,135 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
+
+namespace Confluent.Kafka.Consumer;
+
+/// <summary>
+/// The consumer members that do not block in Java, shared by <see cref="IConsumer{TKey, TValue}"/> and
+/// <see cref="IAsyncConsumer{TKey, TValue}"/>, so both flavors carry them with the same signatures.
+/// </summary>
+/// <remarks>
+/// The state reads are methods, as in Java: each crosses into the core, can throw, and returns a
+/// new copy. A Java <c>Set</c> is returned as an <see cref="IReadOnlyCollection{T}"/>, since
+/// <c>IReadOnlySet</c> is not on netstandard2.0.
+/// </remarks>
+public interface IConsumerCommon
+{
+    /// <summary>
+    /// Interrupts a blocked operation of this consumer (Java <c>wakeup()</c>): the operation in progress, or the
+    /// next one Java's <c>wakeup()</c> interrupts, throws a <see cref="WakeupException"/>, once.
+    /// It may be called from any thread, and does nothing once the consumer is closed.
+    /// </summary>
+    void Wakeup();
+
+    /// <summary>
+    /// Returns the current consumer group metadata (Java <c>groupMetadata()</c>).
+    /// </summary>
+    /// <returns>A snapshot of the group membership.</returns>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
+    /// </exception>
+    /// <exception cref="InvalidGroupIdException">
+    /// A <see cref="KafkaConsumer{TKey, TValue}"/> or <see cref="AsyncKafkaConsumer{TKey, TValue}"/> has no
+    /// <c>group.id</c>, with Java's message, after the closed and concurrency checks.
+    /// </exception>
+    ConsumerGroupMetadata GroupMetadata();
+
+    /// <summary>
+    /// Returns the current partition assignment (Java <c>assignment()</c>), as a new copy.
+    /// </summary>
+    /// <returns>The assigned topic-partitions (a copy; empty when nothing is assigned).</returns>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
+    /// </exception>
+    IReadOnlyCollection<TopicPartition> Assignment();
+
+    /// <summary>
+    /// Returns the current topic subscription (Java <c>subscription()</c>), as a new copy.
+    /// </summary>
+    /// <returns>The subscribed topics (a copy; empty when not subscribed).</returns>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
+    /// </exception>
+    IReadOnlyCollection<string> Subscription();
+
+    /// <summary>
+    /// Returns the currently paused partitions (Java <c>paused()</c>), as a new copy.
+    /// </summary>
+    /// <returns>The paused topic-partitions (a copy; empty when none are paused).</returns>
+    /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ConcurrentModificationException">
+    /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
+    /// </exception>
+    IReadOnlyCollection<TopicPartition> Paused();
+
+    /// <summary>
+    /// Triggers a rebalance (Java <c>enforceRebalance()</c>).
+    /// </summary>
+    /// <remarks>
+    /// Under the KIP-848 group protocol it only logs and returns, as Java's <c>AsyncKafkaConsumer</c> does. As in
+    /// Java, it makes no closed check, so on a closed consumer it returns, and no owner check, so another thread's
+    /// call does not refuse it; the core still refuses it while another operation is in flight. The
+    /// <see cref="KafkaException"/> below cannot occur under that protocol.
+    /// </remarks>
+    /// <exception cref="ConcurrentModificationException">
+    /// The core refused it while another operation was in flight (the core's own check).
+    /// </exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a rebalance failure (not reachable under the current KIP-848
+    /// no-op).
+    /// </exception>
+    void EnforceRebalance();
+
+    /// <summary>
+    /// Triggers a rebalance, giving a <paramref name="reason"/> (Java <c>enforceRebalance(String reason)</c>).
+    /// </summary>
+    /// <remarks>
+    /// It behaves as <see cref="EnforceRebalance()"/>: under the KIP-848 group protocol it only logs and returns.
+    /// </remarks>
+    /// <param name="reason">A human-readable reason, or <see langword="null"/>.</param>
+    /// <exception cref="ConcurrentModificationException">
+    /// The core refused it while another operation was in flight (the core's own check).
+    /// </exception>
+    /// <exception cref="KafkaException">
+    /// The core reported a rebalance failure (not reachable under the current KIP-848
+    /// no-op).
+    /// </exception>
+    void EnforceRebalance(string? reason);
+
+    /// <summary>
+    /// Returns a snapshot of the consumer's metrics (Java <c>Map&lt;MetricName, ? extends Metric&gt;
+    /// metrics()</c>), keyed by <see cref="MetricName"/>.
+    /// </summary>
+    /// <remarks>
+    /// Each <see cref="IMetric.MetricValue()"/> was measured once, by this call; the entries do not measure again. Keys
+    /// compare by name, group and tags, not description, so per-partition metrics that share a name are distinct
+    /// keys. As Java's <c>KafkaConsumer.metrics()</c> takes no <c>acquire()</c>, another thread's call does not
+    /// refuse it on <see cref="KafkaConsumer{TKey, TValue}"/> and <see cref="AsyncKafkaConsumer{TKey, TValue}"/>; the
+    /// mocks wait for it, as Java's synchronized <c>MockConsumer.metrics()</c> does.
+    /// </remarks>
+    /// <returns>An owned, immutable snapshot (empty when no metrics are registered — e.g. a mock).</returns>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed: the native handle is gone, where Java's consumer still answers.
+    /// </exception>
+    IReadOnlyDictionary<MetricName, IMetric> Metrics();
+}

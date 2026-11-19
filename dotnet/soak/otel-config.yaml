@@ -1,0 +1,75 @@
+# OpenTelemetry Collector config for the Rust client soak.
+#
+# The soak client pushes OTLP/gRPC metrics to this collector on 127.0.0.1:4317;
+# the collector remote-writes them to an Amazon Managed Prometheus (AMP)
+# workspace over SigV4, assuming a cross-account writer role. This mirrors the
+# reference librdkafka Python soak's otel-config.yaml
+# (confluent-kafka-python/tests/soak/otel-config.yaml), adapted for the Rust
+# soak's Heracles AMP target.
+#
+# Fill in the three FILL_IN_* values before use (bootstrap.sh refuses to
+# continue while any remain); bootstrap.sh then copies this to
+# /etc/otelcol-contrib/config.yaml and restarts the service:
+#
+#   region     the AMP workspace region, e.g. us-west-2
+#   role arn   the cross-account AMP-writer role the EC2 instance role assumes,
+#              e.g. arn:aws:iam::<amp-account>:role/njc-rust-soak-tests-amp-writer
+#   endpoint   the workspace remote-write URL,
+#              https://aps-workspaces.<region>.amazonaws.com/workspaces/<ws-id>/api/v1/remote_write
+#
+# Account-specific values (the writer-role ARN, the AMP workspace id) are
+# intentionally NOT committed here — this repo is public. The live values live on
+# the box (/etc/otelcol-contrib/config.yaml) and in the private handoff notes.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+
+processors:
+  batch:
+    send_batch_max_size: 100
+    send_batch_size: 10
+    timeout: 10s
+
+extensions:
+  # Signs remote-write requests with SigV4, assuming the cross-account AMP-writer
+  # role. The EC2 instance role must be allowed to sts:AssumeRole this ARN, and
+  # the ARN's trust policy must allow the instance role — both halves must agree.
+  sigv4auth:
+    region: FILL_IN_REGION_HERE
+    service: aps
+    assume_role:
+      arn: FILL_IN_ROLE_ARN_HERE
+
+exporters:
+  # The durable store: remote-write to Heracles AMP over SigV4. This is what the
+  # shared Grafana (datasource heracles_amp) queries.
+  prometheusremotewrite:
+    endpoint: FILL_IN_REMOTE_WRITE_ENDPOINT_HERE
+    auth:
+      authenticator: sigv4auth
+  # Local diagnostic scrape endpoint — current values only, nothing scrapes it.
+  # Manual health check: it should carry the soak's series, e.g.
+  #   curl -s localhost:9464/metrics | grep -c '^kafka_client_soak_rust_dotnet'
+  prometheus:
+    endpoint: 127.0.0.1:9464
+
+service:
+  extensions: [sigv4auth]
+  telemetry:
+    # "warn" for the steady-state multi-week run. Bring-up is over: this is how
+    # the export-failure / cross-account-auth issues were diagnosed and how a
+    # real production incident (a K2 broker roll) was triaged since. Flip back
+    # to "debug" on this line (restart the collector service to pick it up) if
+    # a new pipeline issue needs that level of detail again.
+    logs:
+      level: "warn"
+    # The collector's own telemetry defaults to 127.0.0.1:8888. Manual check
+    # that remote-write is healthy (must stay 0):
+    #   curl -s localhost:8888/metrics | grep '^otelcol_exporter_send_failed_metric_points'
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheusremotewrite, prometheus]

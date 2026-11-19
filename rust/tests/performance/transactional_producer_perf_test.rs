@@ -93,13 +93,31 @@
 //!
 //! Rate limiting (`LIMIT_RPS`): each producer paces to its exact share
 //! `LIMIT_RPS / NUM_TRANSACTIONAL_PRODUCERS` (a float, so the shares sum to
-//! `LIMIT_RPS`) — see `pace`.
+//! `LIMIT_RPS`), only at a transaction boundary: immediately before
+//! `begin_transaction`, and once more after the last commit of a counted run —
+//! see `pace`.
+//!
+//! Counted runs (`NUM_MESSAGES` > 0, which `LIMIT_RPS` > 0 sets) also stop once
+//! the measured interval reaches `TEST_DURATION_SECONDS` + 10 s, checked at a
+//! transaction boundary like the target. A run the time cap stops prints a
+//! `capped:` line, writes `results.json` with what it measured and does not fail
+//! for the shortfall (the driver's report flags a client that held less than 95%
+//! of the target rate).
 //!
 //! Run failures (the test fails, after `results.json` is written): a worker
-//! failure (`begin_transaction` / EOS poll error, task panic), a send rejected
-//! inside a transaction (that transaction is aborted, never committed), or the
-//! EOS idle safety net. A failed `commit_transaction` is aborted and counted as
-//! an aborted transaction, and the worker continues; it is not a run failure.
+//! failure (`begin_transaction` / EOS poll error, a transaction that can be
+//! neither committed nor aborted, task panic), a send rejected inside a
+//! transaction (that transaction is aborted, never committed), a transaction
+//! aborted because `commit_transaction` (or, in EOS mode,
+//! `send_offsets_to_transaction`) failed, or the EOS idle safety net. Aborted
+//! transactions are counted as aborted and the worker continues; the aborts
+//! forced by an error (a rejected send, a failed commit or
+//! `send_offsets_to_transaction`) are also counted apart from the ABORT_RATE
+//! ones, as `error_aborted_transactions` in `results.json`. A commit,
+//! abort or `send_offsets_to_transaction` that times out (or fails with another
+//! retriable error) is retried, not followed by another call: the client
+//! rejects an abort after a commit timeout, for example (see `retry_txn_call`
+//! and `commit_or_abort`).
 //!
 //! KIP-848: ALL consumers in this project's transactional perf
 //! harnesses run on the KIP-848 consumer group protocol. Here the EOS consumer
@@ -144,6 +162,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use confluent_kafka::common::Error;
 use confluent_kafka::common::Metric;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
@@ -174,11 +193,26 @@ const MAX_LATENCY_MS: usize = 10_000;
 /// captures post-measurement (cooldown) windows. Mirrors the sibling tests.
 const POST_TEST_AWAIT_SECONDS: u64 = 10;
 
+/// A counted run (`NUM_MESSAGES` > 0) also stops, at a transaction boundary,
+/// once the measured interval reaches `TEST_DURATION_SECONDS` plus this slack,
+/// so a client that cannot hold the target rate ends with its real numbers
+/// instead of running unbounded.
+const COUNTED_RUN_CAP_SLACK: Duration = Duration::from_secs(10);
+
 /// EOS count mode (`NUM_MESSAGES > 0`): when no producer has polled a record for
 /// this long while the shared processed counter is still below `NUM_MESSAGES`,
 /// the workers stop and the run fails — the source cannot satisfy the target, and waiting longer
 /// would hang the run.
 const EOS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Attempts of a transactional call (commit, abort, send offsets) that keeps
+/// timing out, or failing with another retriable error, before the worker gives
+/// up. After a timeout the call may still be completing, so the client accepts
+/// only the same call again and rejects any other ("... timed out and must be
+/// retried"; an abort after a commit timeout, for example): the only
+/// alternative to retrying is to stop the producer. Each attempt waits up to
+/// `max.block.ms` (60 s by default). Same as the Java harness.
+const MAX_TXN_CALL_ATTEMPTS: u32 = 3;
 
 /// Linux `USER_HZ` — clock ticks per second used to convert `/proc/self/stat`
 /// utime/stime into CPU seconds. Effectively always 100 on Linux.
@@ -247,23 +281,14 @@ struct PerfTestConfig {
 impl PerfTestConfig {
     fn from_env() -> Self {
         // `batch.size`: default 1 MiB (1024 KiB); env value is in KiB.
-        let batch_size = match env_opt("BATCH_SIZE") {
-            Some(kib) => kib.parse::<i64>().unwrap_or(1024) * 1024,
-            None => 1024 * 1024,
-        };
+        let batch_size = env_parse::<i64>("BATCH_SIZE", 1024) * 1024;
         // `max.request.size`: default batch×64, capped at 8 MiB; env value is
         // in KiB.
-        let max_request_size = {
-            let requested = match env_opt("MAX_REQUEST_SIZE") {
-                Some(kib) => kib.parse::<i64>().unwrap_or(0) * 1024,
-                None => batch_size * 64,
-            };
-            requested.min(8 * 1024 * 1024)
-        };
+        let max_request_size = env_parse_opt::<i64>("MAX_REQUEST_SIZE")
+            .map_or(batch_size * 64, |kib| kib * 1024)
+            .min(8 * 1024 * 1024);
         // `buffer.memory`: only set when present; env value is in MiB.
-        let buffer_memory = env_opt("BUFFER_MEMORY")
-            .and_then(|mib| mib.parse::<i64>().ok())
-            .map(|mib| mib * 1024 * 1024);
+        let buffer_memory = env_parse_opt::<i64>("BUFFER_MEMORY").map(|mib| mib * 1024 * 1024);
 
         // Full defaults match the sibling transactional producer performance
         // tests (600 s, unlimited rate). The in-suite integration run overrides
@@ -314,7 +339,7 @@ impl PerfTestConfig {
             consumer_group_id,
             kafka_bin: env_opt("KAFKA_BIN"),
             seed_throughput: env_parse("SEED_THROUGHPUT", -1),
-            seed_count: env_opt("SEED_COUNT").and_then(|v| v.parse().ok()),
+            seed_count: env_parse_opt("SEED_COUNT"),
         }
     }
 
@@ -460,8 +485,21 @@ fn env_opt(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+/// A numeric variable, `None` when unset or empty. A value that does not parse
+/// fails the run, naming the variable, rather than running with the default
+/// (`LIMIT_RPS=10k` would otherwise run unlimited).
+fn env_parse_opt<T: std::str::FromStr>(key: &str) -> Option<T>
+where
+    T::Err: std::fmt::Display,
+{
+    env_opt(key).map(|v| v.parse().unwrap_or_else(|e| panic!("invalid {key}={v:?}: {e}")))
+}
+
+fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T
+where
+    T::Err: std::fmt::Display,
+{
+    env_parse_opt(key).unwrap_or(default)
 }
 
 fn now_ms() -> u128 {
@@ -912,21 +950,59 @@ fn percentile_from_counts(counts: &[u64], p: f64) -> u64 {
     (counts.len() - 1) as u64
 }
 
-/// Summary stats over a cumulative histogram: `(count, sum_ms, min_ms, max_ms)`.
-fn hist_summary(hist: &[AtomicU64]) -> (u64, u64, u64, u64) {
-    let (mut count, mut sum, mut min, mut max) = (0u64, 0u64, 0u64, 0u64);
-    for (ms, b) in hist.iter().enumerate() {
-        let n = b.load(Ordering::Relaxed);
-        if n > 0 {
-            if count == 0 {
-                min = ms as u64;
-            }
-            count += n;
-            sum += ms as u64 * n;
-            max = ms as u64;
+/// One measured-interval latency series for the run summary (per-record,
+/// commit or abort): a 1 ms histogram for the percentiles (bucket
+/// `floor(latency / 1 ms)`, clamped to the overflow bucket) plus the exact
+/// count / sum / min / max for the average and the extremes, which bucket
+/// indices would floor by up to 1 ms. Only the measured interval's transactions
+/// record into it (the warmup records nothing), so both halves cover the same
+/// samples.
+struct LatencySeries {
+    hist: Vec<AtomicU64>,
+    count: AtomicU64,
+    sum_us: AtomicU64,
+    min_us: AtomicU64,
+    max_us: AtomicU64,
+}
+
+impl LatencySeries {
+    fn new() -> Self {
+        Self {
+            hist: (0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect(),
+            count: AtomicU64::new(0),
+            sum_us: AtomicU64::new(0),
+            min_us: AtomicU64::new(u64::MAX),
+            max_us: AtomicU64::new(0),
         }
     }
-    (count, sum, min, max)
+
+    fn record(&self, latency_us: u64) {
+        let ms = (latency_us / 1000) as usize;
+        self.hist[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.sum_us.fetch_add(latency_us, Ordering::Relaxed);
+        self.min_us.fetch_min(latency_us, Ordering::Relaxed);
+        self.max_us.fetch_max(latency_us, Ordering::Relaxed);
+    }
+
+    /// Percentile (0.0..=1.0) in whole ms from the histogram.
+    fn percentile_ms(&self, p: f64) -> u64 {
+        percentile_from_hist(&self.hist, p)
+    }
+
+    /// Exact `(min, avg, max)` in ms; all 0 when nothing was recorded.
+    fn exact_ms(&self) -> (f64, f64, f64) {
+        let count = self.count.load(Ordering::Relaxed);
+        if count == 0 {
+            return (0.0, 0.0, 0.0);
+        }
+        let us_to_ms = |us: u64| us as f64 / 1000.0;
+        (
+            us_to_ms(self.min_us.load(Ordering::Relaxed)),
+            us_to_ms(self.sum_us.load(Ordering::Relaxed)) / count as f64,
+            us_to_ms(self.max_us.load(Ordering::Relaxed)),
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -935,10 +1011,10 @@ fn hist_summary(hist: &[AtomicU64]) -> (u64, u64, u64, u64) {
 
 struct SharedState {
     metrics: Arc<Metrics>,
-    // Cumulative summary histograms (per-record + per-transaction commit/abort).
-    latency_hist: Arc<Vec<AtomicU64>>,
-    commit_latency_hist: Arc<Vec<AtomicU64>>,
-    abort_latency_hist: Arc<Vec<AtomicU64>>,
+    // Cumulative summary series (per-record + per-transaction commit/abort).
+    latency: LatencySeries,
+    commit_latency: LatencySeries,
+    abort_latency: LatencySeries,
     // Global counters aggregated across all producer tasks.
     committed_records: Arc<AtomicU64>,
     verified: Arc<AtomicU64>,
@@ -946,11 +1022,18 @@ struct SharedState {
     aborted_transactions: Arc<AtomicU64>,
     aborted_records: Arc<AtomicU64>,
     // Set by a producer task that stops early because `begin_transaction` (or,
-    // in EOS mode, the consumer poll) failed; fails the run.
+    // in EOS mode, the consumer poll) failed, or because a transaction could be
+    // neither committed nor aborted (see `commit_or_abort`); fails the run.
     worker_failed: Arc<AtomicBool>,
     // Set when a `send()` inside a transaction was rejected synchronously; that
     // transaction is aborted (never committed) and the run fails.
     send_rejected: Arc<AtomicBool>,
+    // Transactions aborted because of an error rather than by ABORT_RATE: a
+    // rejected send, a failed `commit_transaction` or, in EOS mode, a failed
+    // `send_offsets_to_transaction` (`error_aborted_transactions` in
+    // results.json). Also counted in `aborted_transactions`; the worker
+    // continues, and any fails the run.
+    error_aborted_transactions: Arc<AtomicU64>,
     // EOS count mode: set when a worker gave up because NO producer had polled a
     // record for `EOS_IDLE_TIMEOUT` with the shared counter still below
     // `NUM_MESSAGES`; fails the run.
@@ -964,16 +1047,28 @@ struct SharedState {
     // global `NUM_MESSAGES` bound). Bumped by each polled batch's size once its
     // transaction is finished (committed, aborted or failed).
     eos_processed: Arc<AtomicU64>,
+    // Produce mode: records sent (attempted) across ALL producers, added by each
+    // producer when it stops; the `capped:` line's count and a capped run's
+    // exact-count target.
+    records_sent: Arc<AtomicU64>,
+    // Set when a counted run's worker stopped at the time cap
+    // (`TEST_DURATION_SECONDS` + `COUNTED_RUN_CAP_SLACK`) before the target; the
+    // run is reported, not failed, for the shortfall.
+    capped: Arc<AtomicBool>,
 }
 
-/// Exact-rate pacing shared by both loops: with `rate` records/s (0 = unlimited)
-/// and `checkpoint = max(floor(rate / 10), 1)`, every `checkpoint` records sleep
-/// until `start + records_sent / rate`. The deadline is derived from the
-/// cumulative count (not advanced by a fixed 100 ms per checkpoint), so rates
-/// that are not a multiple of 10 — including fractional per-producer shares —
-/// are honoured exactly.
-async fn pace(rate: f64, checkpoint: u64, records_sent: u64, start: Instant) {
-    if rate > 0.0 && records_sent.is_multiple_of(checkpoint) {
+/// Exact-rate pacing shared by both loops, called only at a transaction
+/// boundary: immediately before `begin_transaction`, and after the last commit
+/// of a counted run for the wait the next `begin_transaction` would have taken.
+/// With `rate` records/s (0 = unlimited), sleep until `start + records_sent /
+/// rate`, where `records_sent` counts this producer's records so far. Never
+/// between `begin_transaction` and the commit/abort: that time is counted in the
+/// commit latency and in the latency of the records already sent, so a client
+/// that sends faster would sleep longer there and look slower. The deadline is
+/// derived from the cumulative count, so rates that are not a multiple of 10 —
+/// including fractional per-producer shares — are honoured exactly.
+async fn pace(rate: f64, records_sent: u64, start: Instant) {
+    if rate > 0.0 {
         let deadline = Duration::from_secs_f64(records_sent as f64 / rate);
         let elapsed = start.elapsed();
         if elapsed < deadline {
@@ -982,10 +1077,70 @@ async fn pace(rate: f64, checkpoint: u64, records_sent: u64, start: Instant) {
     }
 }
 
-/// The pacing checkpoint for `rate`: `max(floor(rate / 10), 1)` records (~100 ms
-/// worth of records at that rate).
-fn rate_checkpoint(rate: f64) -> u64 {
-    ((rate / 10.0).floor() as u64).max(1)
+/// How `commit_or_abort` ended the open transaction.
+enum CommitOutcome {
+    /// Committed: every record in the transaction is durable.
+    Committed,
+    /// The commit failed, and the abort that followed succeeded: the producer
+    /// can begin the next transaction.
+    Aborted,
+    /// The producer cannot go on: the commit kept failing with a retriable
+    /// error, or the abort after a failed commit failed (after a fatal error,
+    /// such as a fenced producer, the client rejects it).
+    Failed,
+}
+
+/// Runs a transactional call (`commit_transaction`, `abort_transaction`,
+/// `send_offsets_to_transaction`), retrying it while it fails with a retriable
+/// error (a timeout, for example), up to `MAX_TXN_CALL_ATTEMPTS` attempts.
+/// Returns the last result.
+async fn retry_txn_call<F, Fut>(op: &str, mut call: F) -> Result<(), Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<(), Error>>,
+{
+    let mut attempt = 1;
+    loop {
+        match call().await {
+            Err(e) if e.is_retriable_error() && attempt < MAX_TXN_CALL_ATTEMPTS => {
+                eprintln!("{op} error (attempt {attempt} of {MAX_TXN_CALL_ATTEMPTS}, retrying): {e:?}");
+                attempt += 1;
+            },
+            result => return result,
+        }
+    }
+}
+
+/// Aborts the open transaction, retrying a timed-out abort (see
+/// `retry_txn_call`).
+async fn abort_transaction(producer: &KafkaProducer<Vec<u8>, Vec<u8>>) -> Result<(), Error> {
+    retry_txn_call("abort_transaction", move || producer.abort_transaction()).await
+}
+
+/// Commits the open transaction, answering each error the way the client
+/// requires. A commit that times out (or fails with another retriable error) is
+/// retried, not aborted: the client rejects an abort after a commit timeout.
+/// Any other error is answered with `abort_transaction`, which the client
+/// accepts after an abortable error and rejects after a fatal one.
+async fn commit_or_abort(producer: &KafkaProducer<Vec<u8>, Vec<u8>>) -> CommitOutcome {
+    let e = match retry_txn_call("commit_transaction", move || producer.commit_transaction()).await {
+        Ok(()) => return CommitOutcome::Committed,
+        Err(e) => e,
+    };
+    if e.is_retriable_error() {
+        // Still failing after the last attempt; the commit may yet complete, so
+        // the transaction cannot be aborted either.
+        eprintln!("commit_transaction error (giving up, the producer stops): {e:?}");
+        return CommitOutcome::Failed;
+    }
+    eprintln!("commit_transaction error (the transaction will be aborted): {e:?}");
+    match abort_transaction(producer).await {
+        Ok(()) => CommitOutcome::Aborted,
+        Err(ae) => {
+            eprintln!("abort_transaction error (the producer stops): {ae:?}");
+            CommitOutcome::Failed
+        },
+    }
 }
 
 /// One producer task's produce-mode loop (`TXN_MODE=produce`).
@@ -1012,21 +1167,32 @@ async fn run_producer(
     let msg_count = messages.len();
     let mut txn_index: u64 = 0;
     let mut records_sent: u64 = 0;
-    // Rate limiting: this producer's exact share `rate` of LIMIT_RPS (see `pace`).
-    let checkpoint = rate_checkpoint(rate);
+    let count_cap = test_duration + COUNTED_RUN_CAP_SLACK;
 
     loop {
         // A counted run is bounded by `num_messages` (records attempted by this
-        // producer); a time-based run (num_messages == 0) is bounded by the
-        // duration. Both are checked only at a transaction boundary so a
-        // transaction is never split.
+        // producer), or by the time cap if that comes first; a time-based run
+        // (num_messages == 0) is bounded by the duration. All are checked only
+        // at a transaction boundary so a transaction is never split.
         if num_messages > 0 {
             if records_sent >= num_messages {
+                // The wait owed for the last transaction's records, which the
+                // next `begin_transaction` would have taken: without it a fast
+                // client ends a counted run early and overstates throughput.
+                pace(rate, records_sent, test_start).await;
+                break;
+            }
+            if test_start.elapsed() >= count_cap {
+                shared.capped.store(true, Ordering::Relaxed);
                 break;
             }
         } else if test_start.elapsed() >= test_duration {
             break;
         }
+
+        // Rate limit: this producer's exact share `rate` of LIMIT_RPS, paced
+        // here, before the transaction opens (see `pace`).
+        pace(rate, records_sent, test_start).await;
 
         // --- begin ---
         let begin_time = Instant::now();
@@ -1059,9 +1225,6 @@ async fn run_producer(
                 },
             }
             records_sent += 1;
-
-            // Rate limit per record, relative to the common measured-interval start.
-            pace(rate, checkpoint, records_sent, test_start).await;
         }
 
         // --- commit or abort ---
@@ -1071,7 +1234,8 @@ async fn run_producer(
             // aborted and record no latency or completion (no abort latency
             // either — that series is deterministic-abort only). Fails the run.
             shared.send_rejected.store(true, Ordering::Relaxed);
-            if let Err(e) = producer.abort_transaction().await {
+            shared.error_aborted_transactions.fetch_add(1, Ordering::Relaxed);
+            if let Err(e) = abort_transaction(&producer).await {
                 eprintln!("abort_transaction error: {e:?}");
             }
             shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
@@ -1079,7 +1243,7 @@ async fn run_producer(
         } else if should_abort(txn_index, abort_rate) {
             // Aborted transactions STILL produced their N records above; on abort
             // those records count toward neither throughput nor latency.
-            if let Err(e) = producer.abort_transaction().await {
+            if let Err(e) = abort_transaction(&producer).await {
                 eprintln!("abort_transaction error: {e:?}");
             }
             // Per-transaction abort latency = begin -> abort completes (symmetric
@@ -1087,15 +1251,14 @@ async fn run_producer(
             let abort_completion = Instant::now();
             let abort_latency_us = abort_completion.duration_since(begin_time).as_micros() as u64;
             shared.metrics.record_abort(abort_latency_us);
-            let ams = (abort_latency_us / 1000) as usize;
-            shared.abort_latency_hist[ams.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+            shared.abort_latency.record(abort_latency_us);
             shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
             // The transaction attempted N records, matching the C/Java harnesses
             // (`aborted_records += n` / `abortedRecords.addAndGet(n)`).
             shared.aborted_records.fetch_add(records_per_transaction, Ordering::Relaxed);
         } else {
-            match producer.commit_transaction().await {
-                Ok(()) => {
+            match commit_or_abort(&producer).await {
+                CommitOutcome::Committed => {
                     // On return every record in the transaction is durable.
                     let commit_completion = Instant::now();
                     shared.committed_transactions.fetch_add(1, Ordering::Relaxed);
@@ -1103,15 +1266,13 @@ async fn run_producer(
                     // Per-transaction commit latency = begin -> commit completes.
                     let commit_latency_us = commit_completion.duration_since(begin_time).as_micros() as u64;
                     shared.metrics.record_commit(commit_latency_us);
-                    let cms = (commit_latency_us / 1000) as usize;
-                    shared.commit_latency_hist[cms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+                    shared.commit_latency.record(commit_latency_us);
 
                     // Per-record latency = each record's produce() -> commit completes.
                     for (ts, produce_call) in produce_ts.iter().zip(produce_calls) {
                         let latency_us = commit_completion.duration_since(*ts).as_micros() as u64;
                         shared.metrics.record_success(latency_us, message_size);
-                        let ms = (latency_us / 1000) as usize;
-                        shared.latency_hist[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+                        shared.latency.record(latency_us);
 
                         // Verification: the commit already flushed, so the future
                         // is resolved; await is immediate.
@@ -1128,23 +1289,25 @@ async fn run_producer(
                         shared.committed_records.fetch_add(1, Ordering::Relaxed);
                     }
                 },
-                Err(e) => {
-                    // A failed commit does not stop the worker: abort the
-                    // transaction (so the next `begin_transaction` can proceed),
-                    // count it as aborted with its N attempted records, matching
-                    // the C/Java harnesses, and continue.
-                    eprintln!("commit_transaction error: {e:?}");
-                    if let Err(ae) = producer.abort_transaction().await {
-                        eprintln!("abort_transaction error: {ae:?}");
-                    }
+                CommitOutcome::Aborted => {
+                    // The failed commit was aborted, so the next
+                    // `begin_transaction` can proceed: count it as aborted with
+                    // its N attempted records, matching the C/Java harnesses,
+                    // and continue. Fails the run.
+                    shared.error_aborted_transactions.fetch_add(1, Ordering::Relaxed);
                     shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
                     shared.aborted_records.fetch_add(records_per_transaction, Ordering::Relaxed);
+                },
+                CommitOutcome::Failed => {
+                    shared.worker_failed.store(true, Ordering::Relaxed);
+                    break;
                 },
             }
         }
 
         txn_index += 1;
     }
+    shared.records_sent.fetch_add(records_sent, Ordering::Relaxed);
 
     // Compression cross-check: print this producer's own compression-rate-avg
     // (org.apache.kafka.clients.producer.internals.SenderMetricsRegistry) for
@@ -1193,8 +1356,7 @@ async fn run_eos_producer(
 ) {
     let mut txn_index: u64 = 0;
     let mut records_sent: u64 = 0;
-    // Rate limiting: this producer's exact share `rate` of LIMIT_RPS (see `pace`).
-    let checkpoint = rate_checkpoint(rate);
+    let count_cap = test_duration + COUNTED_RUN_CAP_SLACK;
     // Consecutive empty polls, to warn (once) that the source is starving the
     // pipeline: the EOS ceiling is min(source-rate, txn-rate),
     // so an under-fed source shows up here rather than as a deadlock.
@@ -1206,9 +1368,16 @@ async fn run_eos_producer(
         // count mode the bound is GLOBAL: the total source records processed by
         // all producers (`eos_processed`), not a per-producer share — one worker
         // may consume a whole poll batch past its share, which would leave
-        // another unable to ever reach its own.
+        // another unable to ever reach its own. The time cap, if it comes first,
+        // stops a counted run the same way.
         if num_messages > 0 {
             if shared.eos_processed.load(Ordering::Relaxed) >= num_messages {
+                // This producer's owed wait, as in `run_producer`.
+                pace(rate, records_sent, test_start).await;
+                break;
+            }
+            if test_start.elapsed() >= count_cap {
+                shared.capped.store(true, Ordering::Relaxed);
                 break;
             }
         } else if test_start.elapsed() >= test_duration {
@@ -1265,6 +1434,10 @@ async fn run_eos_producer(
             .eos_last_records_ms
             .fetch_max(test_start.elapsed().as_millis() as u64, Ordering::Relaxed);
 
+        // Rate limit: this producer's exact share `rate` of LIMIT_RPS, paced
+        // here, before the transaction opens (see `pace`).
+        pace(rate, records_sent, test_start).await;
+
         // --- begin ---
         let begin_time = Instant::now();
         if let Err(e) = producer.begin_transaction() {
@@ -1286,6 +1459,8 @@ async fn run_eos_producer(
         // Set when any send in this transaction is rejected synchronously; the
         // transaction is then aborted (no offsets sent, no commit).
         let mut txn_rejected = false;
+        // Set when the transaction could be neither committed nor aborted.
+        let mut producer_failed = false;
         for record in &records {
             let key = record.key().map(|k| k.as_slice());
             let value = record.value().map(|v| v.as_slice());
@@ -1308,9 +1483,6 @@ async fn run_eos_producer(
 
             records_sent += 1;
             batch_records += 1;
-
-            // Rate limit per record, relative to the common measured-interval start.
-            pace(rate, checkpoint, records_sent, test_start).await;
         }
 
         // --- send the consumed offsets to the transaction (offset + 1 per
@@ -1336,16 +1508,25 @@ async fn run_eos_producer(
             // latency or completion (no abort latency either — that series is
             // deterministic-abort only). Fails the run.
             shared.send_rejected.store(true, Ordering::Relaxed);
-            if let Err(e) = producer.abort_transaction().await {
+            shared.error_aborted_transactions.fetch_add(1, Ordering::Relaxed);
+            if let Err(e) = abort_transaction(&producer).await {
                 eprintln!("abort_transaction error: {e:?}");
             }
             shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
             shared.aborted_records.fetch_add(batch_records, Ordering::Relaxed);
-        } else if let Err(e) = producer.send_offsets_to_transaction(offset_map, group_metadata.as_ref()).await {
+        } else if let Err(e) = retry_txn_call("send_offsets_to_transaction", || {
+            producer.send_offsets_to_transaction(offset_map.clone(), group_metadata.as_ref())
+        })
+        .await
+        {
+            // Aborted and counted as aborted; fails the run. (Still timing out
+            // after the retries, the abort is rejected and the next
+            // `begin_transaction` fails the worker.)
             eprintln!("send_offsets_to_transaction error: {e:?}");
-            if let Err(ae) = producer.abort_transaction().await {
+            if let Err(ae) = abort_transaction(&producer).await {
                 eprintln!("abort_transaction error: {ae:?}");
             }
+            shared.error_aborted_transactions.fetch_add(1, Ordering::Relaxed);
             shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
             shared.aborted_records.fetch_add(batch_records, Ordering::Relaxed);
         } else if should_abort(txn_index, abort_rate) {
@@ -1354,7 +1535,7 @@ async fn run_eos_producer(
             // count toward neither throughput nor latency, the consumed offsets
             // are NOT committed, and (per the module doc) the consumer is NOT
             // sought back — those records are simply not reprocessed here.
-            if let Err(e) = producer.abort_transaction().await {
+            if let Err(e) = abort_transaction(&producer).await {
                 eprintln!("abort_transaction error: {e:?}");
             }
             // Per-transaction abort latency = begin -> abort completes (symmetric
@@ -1362,13 +1543,12 @@ async fn run_eos_producer(
             let abort_completion = Instant::now();
             let abort_latency_us = abort_completion.duration_since(begin_time).as_micros() as u64;
             shared.metrics.record_abort(abort_latency_us);
-            let ams = (abort_latency_us / 1000) as usize;
-            shared.abort_latency_hist[ams.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+            shared.abort_latency.record(abort_latency_us);
             shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
             shared.aborted_records.fetch_add(batch_records, Ordering::Relaxed);
         } else {
-            match producer.commit_transaction().await {
-                Ok(()) => {
+            match commit_or_abort(&producer).await {
+                CommitOutcome::Committed => {
                     // On return every record in the transaction is durable and the
                     // consumed offsets are committed atomically with the output.
                     let commit_completion = Instant::now();
@@ -1377,15 +1557,13 @@ async fn run_eos_producer(
                     // Per-transaction commit latency = begin -> commit completes.
                     let commit_latency_us = commit_completion.duration_since(begin_time).as_micros() as u64;
                     shared.metrics.record_commit(commit_latency_us);
-                    let cms = (commit_latency_us / 1000) as usize;
-                    shared.commit_latency_hist[cms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+                    shared.commit_latency.record(commit_latency_us);
 
                     // Per-record latency = each record's produce() -> commit completes.
                     for (ts, produce_call) in produce_ts.iter().zip(produce_calls) {
                         let latency_us = commit_completion.duration_since(*ts).as_micros() as u64;
                         shared.metrics.record_success(latency_us, message_size);
-                        let ms = (latency_us / 1000) as usize;
-                        shared.latency_hist[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+                        shared.latency.record(latency_us);
 
                         match produce_call.get_with_timeout(Duration::from_secs(60)).await {
                             Ok(md) => {
@@ -1400,15 +1578,17 @@ async fn run_eos_producer(
                         shared.committed_records.fetch_add(1, Ordering::Relaxed);
                     }
                 },
-                Err(e) => {
-                    // A failed commit does not stop the worker: abort, count it
-                    // as aborted with its attempted records, and continue.
-                    eprintln!("commit_transaction error: {e:?}");
-                    if let Err(ae) = producer.abort_transaction().await {
-                        eprintln!("abort_transaction error: {ae:?}");
-                    }
+                CommitOutcome::Aborted => {
+                    // The failed commit was aborted: count it as aborted with its
+                    // attempted records and continue. Fails the run.
+                    shared.error_aborted_transactions.fetch_add(1, Ordering::Relaxed);
                     shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
                     shared.aborted_records.fetch_add(batch_records, Ordering::Relaxed);
+                },
+                CommitOutcome::Failed => {
+                    // Stops this worker, after the footer's bookkeeping.
+                    shared.worker_failed.store(true, Ordering::Relaxed);
+                    producer_failed = true;
                 },
             }
         }
@@ -1417,6 +1597,9 @@ async fn run_eos_producer(
         // failed); count its records toward the global bound ---
         shared.eos_processed.fetch_add(batch_records, Ordering::Relaxed);
         txn_index += 1;
+        if producer_failed {
+            break;
+        }
     }
 
     // Compression cross-check (parity with produce mode / base harness). Must
@@ -1764,11 +1947,6 @@ async fn transactional_producer_perf_test() {
     let metrics = Arc::new(Metrics::new());
     let cumulative = Arc::new(CumulativeStats::new());
     let should_stop = Arc::new(AtomicBool::new(false));
-    let latency_hist: Arc<Vec<AtomicU64>> = Arc::new((0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect());
-    let commit_latency_hist: Arc<Vec<AtomicU64>> =
-        Arc::new((0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect());
-    let abort_latency_hist: Arc<Vec<AtomicU64>> =
-        Arc::new((0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect());
 
     // === METRICS COLLECTOR ===
     // Spawned BEFORE warmup so the rollover JSONL also captures warmup windows
@@ -1841,20 +2019,25 @@ async fn transactional_producer_perf_test() {
             let (key, value) = &messages[i % msg_count];
             let record: ProducerRecord<&[u8], &[u8]> =
                 ProducerRecord::with_key(topic.clone(), key.as_deref(), Some(value.as_slice()));
-            if let Ok(produce_call) = warmup_producer.send(record, None).await {
-                warmup_producer
-                    .commit_transaction()
-                    .await
-                    .expect("warmup commit_transaction failed");
-                let md = produce_call
-                    .get_with_timeout(Duration::from_secs(30))
-                    .await
-                    .expect("warmup send failed");
-                assert!(
-                    !config.do_verify || verify_record_metadata(&md, &topic),
-                    "warmup failed due to message verification error"
-                );
-            }
+            // A rejected send fails the warmup here: skipping it would leave the
+            // transaction open, and the next `begin_transaction` would fail with
+            // a misleading message.
+            let produce_call = warmup_producer
+                .send(record, None)
+                .await
+                .unwrap_or_else(|e| panic!("warmup send failed: {e:?}"));
+            assert!(
+                matches!(commit_or_abort(warmup_producer).await, CommitOutcome::Committed),
+                "warmup commit_transaction failed (see above)"
+            );
+            let md = produce_call
+                .get_with_timeout(Duration::from_secs(30))
+                .await
+                .expect("warmup send failed");
+            assert!(
+                !config.do_verify || verify_record_metadata(&md, &topic),
+                "warmup failed due to message verification error"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
             i += 1;
         }
@@ -1954,9 +2137,9 @@ async fn transactional_producer_perf_test() {
 
     let shared = Arc::new(SharedState {
         metrics: Arc::clone(&metrics),
-        latency_hist: Arc::clone(&latency_hist),
-        commit_latency_hist: Arc::clone(&commit_latency_hist),
-        abort_latency_hist: Arc::clone(&abort_latency_hist),
+        latency: LatencySeries::new(),
+        commit_latency: LatencySeries::new(),
+        abort_latency: LatencySeries::new(),
         committed_records: Arc::new(AtomicU64::new(0)),
         verified: Arc::new(AtomicU64::new(0)),
         committed_transactions: Arc::new(AtomicU64::new(0)),
@@ -1964,9 +2147,12 @@ async fn transactional_producer_perf_test() {
         aborted_records: Arc::new(AtomicU64::new(0)),
         worker_failed: Arc::new(AtomicBool::new(false)),
         send_rejected: Arc::new(AtomicBool::new(false)),
+        error_aborted_transactions: Arc::new(AtomicU64::new(0)),
         source_exhausted: Arc::new(AtomicBool::new(false)),
         eos_processed: Arc::new(AtomicU64::new(0)),
         eos_last_records_ms: Arc::new(AtomicU64::new(0)),
+        records_sent: Arc::new(AtomicU64::new(0)),
+        capped: Arc::new(AtomicBool::new(false)),
     });
 
     // Bound each EOS consumer poll so a run with no source data cannot block
@@ -2035,6 +2221,21 @@ async fn transactional_producer_perf_test() {
     // The last commit has completed; mark the end of the measured interval.
     meas_end.store(now_ms() as u64, Ordering::Relaxed);
     let measured_secs = test_start.elapsed().as_secs_f64();
+    // Records sent: produce mode's attempted records, EOS mode's processed
+    // source records (the unit of each mode's NUM_MESSAGES bound).
+    let records_sent = if eos_mode {
+        shared.eos_processed.load(Ordering::Relaxed)
+    } else {
+        shared.records_sent.load(Ordering::Relaxed)
+    };
+    let capped = shared.capped.load(Ordering::Relaxed);
+    if capped {
+        println!(
+            "capped: sent {records_sent} of {} records in {measured_secs:.2} s (TEST_DURATION_SECONDS + {} s)",
+            config.num_messages,
+            COUNTED_RUN_CAP_SLACK.as_secs()
+        );
+    }
 
     // === COOLDOWN ===
     println!("Waiting for final metrics collection...");
@@ -2048,6 +2249,7 @@ async fn transactional_producer_perf_test() {
     let committed_transactions = shared.committed_transactions.load(Ordering::Relaxed);
     let aborted_transactions = shared.aborted_transactions.load(Ordering::Relaxed);
     let aborted_records = shared.aborted_records.load(Ordering::Relaxed);
+    let error_aborted_transactions = shared.error_aborted_transactions.load(Ordering::Relaxed);
     let total_bytes = committed_records * message_size;
     let samples = cumulative.sample_count.load(Ordering::Relaxed);
     let avg_cpu = if samples > 0 {
@@ -2077,44 +2279,30 @@ async fn transactional_producer_perf_test() {
         0.0
     };
 
-    // Per-record latency summary from the cumulative histogram (ms resolution).
-    let (lat_count, lat_sum_ms, min_latency_ms, max_latency_ms) = hist_summary(&latency_hist);
-    let avg_latency_ms = if lat_count > 0 {
-        lat_sum_ms as f64 / lat_count as f64
-    } else {
-        0.0
-    };
-    let p50_ms = percentile_from_hist(&latency_hist, 0.50);
-    let p90_ms = percentile_from_hist(&latency_hist, 0.90);
-    let p95_ms = percentile_from_hist(&latency_hist, 0.95);
-    let p99_ms = percentile_from_hist(&latency_hist, 0.99);
-    let p999_ms = percentile_from_hist(&latency_hist, 0.999);
+    // Per-record latency summary: exact min/avg/max, percentiles from the 1 ms
+    // histogram.
+    let (min_latency_ms, avg_latency_ms, max_latency_ms) = shared.latency.exact_ms();
+    let p50_ms = shared.latency.percentile_ms(0.50);
+    let p90_ms = shared.latency.percentile_ms(0.90);
+    let p95_ms = shared.latency.percentile_ms(0.95);
+    let p99_ms = shared.latency.percentile_ms(0.99);
+    let p999_ms = shared.latency.percentile_ms(0.999);
 
-    // Per-transaction commit-latency summary from the cumulative histogram.
-    let (commit_count, commit_sum_ms, commit_min_ms, commit_max_ms) = hist_summary(&commit_latency_hist);
-    let commit_avg_ms = if commit_count > 0 {
-        commit_sum_ms as f64 / commit_count as f64
-    } else {
-        0.0
-    };
-    let commit_p50_ms = percentile_from_hist(&commit_latency_hist, 0.50);
-    let commit_p90_ms = percentile_from_hist(&commit_latency_hist, 0.90);
-    let commit_p95_ms = percentile_from_hist(&commit_latency_hist, 0.95);
-    let commit_p99_ms = percentile_from_hist(&commit_latency_hist, 0.99);
-    let commit_p999_ms = percentile_from_hist(&commit_latency_hist, 0.999);
+    // Per-transaction commit-latency summary, likewise.
+    let (commit_min_ms, commit_avg_ms, commit_max_ms) = shared.commit_latency.exact_ms();
+    let commit_p50_ms = shared.commit_latency.percentile_ms(0.50);
+    let commit_p90_ms = shared.commit_latency.percentile_ms(0.90);
+    let commit_p95_ms = shared.commit_latency.percentile_ms(0.95);
+    let commit_p99_ms = shared.commit_latency.percentile_ms(0.99);
+    let commit_p999_ms = shared.commit_latency.percentile_ms(0.999);
 
     // Per-transaction abort-latency summary (deterministic-abort path only).
-    let (abort_count, abort_sum_ms, abort_min_ms, abort_max_ms) = hist_summary(&abort_latency_hist);
-    let abort_avg_ms = if abort_count > 0 {
-        abort_sum_ms as f64 / abort_count as f64
-    } else {
-        0.0
-    };
-    let abort_p50_ms = percentile_from_hist(&abort_latency_hist, 0.50);
-    let abort_p90_ms = percentile_from_hist(&abort_latency_hist, 0.90);
-    let abort_p95_ms = percentile_from_hist(&abort_latency_hist, 0.95);
-    let abort_p99_ms = percentile_from_hist(&abort_latency_hist, 0.99);
-    let abort_p999_ms = percentile_from_hist(&abort_latency_hist, 0.999);
+    let (abort_min_ms, abort_avg_ms, abort_max_ms) = shared.abort_latency.exact_ms();
+    let abort_p50_ms = shared.abort_latency.percentile_ms(0.50);
+    let abort_p90_ms = shared.abort_latency.percentile_ms(0.90);
+    let abort_p95_ms = shared.abort_latency.percentile_ms(0.95);
+    let abort_p99_ms = shared.abort_latency.percentile_ms(0.99);
+    let abort_p999_ms = shared.abort_latency.percentile_ms(0.999);
 
     println!();
     println!("Duration: {:.2} ms", measured_secs * 1000.0);
@@ -2135,12 +2323,13 @@ async fn transactional_producer_perf_test() {
     println!("Committed transactions: {committed_transactions}");
     println!("Aborted transactions: {aborted_transactions}");
     println!("Aborted records: {aborted_records}");
+    println!("Error-driven aborted transactions: {error_aborted_transactions}");
     println!("Committed records: {committed_records}");
     println!("Average rate msg/s: {msg_rate:.2} msg/s");
     println!("Average rate MiB/s: {mib_rate:.2} MiB/s");
     println!("Transactions/s: {txn_rate:.2}");
     println!("Average per-record latency: {avg_latency_ms:.2} ms");
-    println!("Max per-record latency: {max_latency_ms} ms");
+    println!("Max per-record latency: {max_latency_ms:.2} ms");
     println!("p99 per-record latency: {p99_ms} ms");
     println!("Average commit latency: {commit_avg_ms:.2} ms");
     println!("p99 commit latency: {commit_p99_ms} ms");
@@ -2164,16 +2353,17 @@ async fn transactional_producer_perf_test() {
             "  \"committed_transactions\": {committed_txns},\n",
             "  \"aborted_transactions\": {aborted_txns},\n",
             "  \"aborted_records\": {aborted_recs},\n",
+            "  \"error_aborted_transactions\": {error_aborted_txns},\n",
             "  \"transactions_per_s\": {txn_rate:.2},\n",
-            "  \"latency_ms\": {{\"min\": {min}, \"avg\": {avg:.2}, \"p50\": {p50}, ",
+            "  \"latency_ms\": {{\"min\": {min:.2}, \"avg\": {avg:.2}, \"p50\": {p50}, ",
             "\"p90\": {p90}, \"p95\": {p95}, \"p99\": {p99}, \"p999\": {p999}, ",
-            "\"max\": {max}}},\n",
-            "  \"commit_latency_ms\": {{\"min\": {cmin}, \"avg\": {cavg:.2}, \"p50\": {cp50}, ",
+            "\"max\": {max:.2}}},\n",
+            "  \"commit_latency_ms\": {{\"min\": {cmin:.2}, \"avg\": {cavg:.2}, \"p50\": {cp50}, ",
             "\"p90\": {cp90}, \"p95\": {cp95}, \"p99\": {cp99}, \"p999\": {cp999}, ",
-            "\"max\": {cmax}}},\n",
-            "  \"abort_latency_ms\": {{\"min\": {amin}, \"avg\": {aavg:.2}, \"p50\": {ap50}, ",
+            "\"max\": {cmax:.2}}},\n",
+            "  \"abort_latency_ms\": {{\"min\": {amin:.2}, \"avg\": {aavg:.2}, \"p50\": {ap50}, ",
             "\"p90\": {ap90}, \"p95\": {ap95}, \"p99\": {ap99}, \"p999\": {ap999}, ",
-            "\"max\": {amax}}},\n",
+            "\"max\": {amax:.2}}},\n",
             "  \"cpu_avg_pct\": {cpu:.2},\n",
             "  \"rss_avg_kib\": {rss:.2}\n",
             "}}\n"
@@ -2186,6 +2376,7 @@ async fn transactional_producer_perf_test() {
         committed_txns = committed_transactions,
         aborted_txns = aborted_transactions,
         aborted_recs = aborted_records,
+        error_aborted_txns = error_aborted_transactions,
         txn_rate = txn_rate,
         min = min_latency_ms,
         avg = avg_latency_ms,
@@ -2232,6 +2423,10 @@ async fn transactional_producer_perf_test() {
         !shared.send_rejected.load(Ordering::Relaxed),
         "one or more sends were rejected inside a transaction; those transactions were aborted (see above)"
     );
+    assert_eq!(
+        error_aborted_transactions, 0,
+        "{error_aborted_transactions} transaction(s) aborted on an error, not by ABORT_RATE (see above)"
+    );
     assert!(
         !shared.source_exhausted.load(Ordering::Relaxed),
         "EOS source exhausted before NUM_MESSAGES ({}) was reached (see above)",
@@ -2269,10 +2464,16 @@ async fn transactional_producer_perf_test() {
         // counted in `aborted_records`: deterministic abort, a rejected send, or a
         // failed commit), so the two together must account for the target
         // exactly. With ABORT_RATE == 0 and no failures this is `committed ==
-        // target`.
+        // target`. A run the time cap stopped is held to the records its
+        // producers sent (whole transactions too), not to the target: the
+        // shortfall is reported (the `capped:` line, results.json), not failed.
         if config.num_messages > 0 {
             let n = config.records_per_transaction;
-            let target: u64 = shares.iter().map(|share| share.div_ceil(n) * n).sum();
+            let target: u64 = if capped {
+                records_sent
+            } else {
+                shares.iter().map(|share| share.div_ceil(n) * n).sum()
+            };
             assert_eq!(
                 committed_records + aborted_records,
                 target,

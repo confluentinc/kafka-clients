@@ -16,7 +16,7 @@
 #
 #
 # Packages the tested wheels of a Python release tag build and publishes them
-# to one index, for the "Release (Python): packaging" block of semaphore.yml
+# to one index, for the "Release (Python): packaging" block of release.yml
 # and the "Release (Python): publish to ..." blocks of publish-testpypi.yml
 # and publish-pypi.yml, the tag build's manual promotions. Every version goes
 # to Test PyPI first, then to PyPI, after its wheels have passed the
@@ -79,7 +79,7 @@ refuse() {
 simple_index() {
     local body status
     body=$(mktemp) || return 1
-    status=$(curl -sS --retry 3 --retry-delay 5 -o "${body}" -w '%{http_code}' \
+    status=$(curl -sS --retry 3 --retry-delay 5 --retry-all-errors -o "${body}" -w '%{http_code}' \
         -H 'Accept: application/vnd.pypi.simple.v1+json' "${PYPI_INDEX}/simple/${PYPI_PACKAGE}/") || { rm -f "${body}"; return 1; }
     case "${status}" in
         200)
@@ -107,8 +107,8 @@ for file in page["files"]:
 # blocks' `run` conditions already limit them to Python release tags; the
 # check is repeated here, before the token is loaded, so that the publish does
 # not depend on those conditions alone. A build whose jobs were redirected to
-# another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see the global prologue of
-# semaphore.yml) did not test the tagged commit.
+# another branch (SEMAPHORE_GIT_BRANCH_CHECKOUT, see .semaphore/job-start.sh)
+# did not test the tagged commit.
 release_version() {
     local release_tag_pattern='^python/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)(0|[1-9][0-9]*))?(\.dev(0|[1-9][0-9]*))?$'
     if [ "${SEMAPHORE_GIT_REF_TYPE:-}" != "tag" ]; then

@@ -155,7 +155,7 @@ pub unsafe extern "C" fn kafka_common_Error_{name}(error: *const kafka_common_Er
     // valid error handle: an owned one from `box_error`, not yet destroyed, or a borrowed one
     // whose owner is still alive, so it points at a live `ErrorInner`, as `error_ref` requires.
     // The borrow lasts only for this call, while the caller keeps the handle alive.
-    i8::from(unsafe {{ error_ref(error) }}.error.{name}())
+    i8::from(unsafe {{ error_ref(error, "error") }}.error.{name}())
 }}
 "#,
             name = p.name

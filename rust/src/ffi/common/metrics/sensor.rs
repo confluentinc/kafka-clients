@@ -24,6 +24,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use crate::ffi::util::into_c_string;
 use std::ffi::{CString, c_char};
 use std::sync::Arc;
@@ -37,7 +38,7 @@ use crate::ffi::common::metrics::compound_stat::{kafka_common_metrics_CompoundSt
 use crate::ffi::common::metrics::measurable_stat::{kafka_common_metrics_MeasurableStat_t, take_measurable_stat};
 use crate::ffi::common::metrics::metric_config::{kafka_common_metrics_MetricConfig_t, metric_config_option};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, kafka_List_t, list_elements, owned_c_string};
+use crate::ffi::util::{kafka_List_t, owned_c_string};
 
 // ---------------------------------------------------------------------------
 // Sensor.RecordingLevel
@@ -57,6 +58,14 @@ pub enum kafka_common_metrics_Sensor_RecordingLevel_e {
     kafka_common_metrics_Sensor_RecordingLevel_INFO,
     kafka_common_metrics_Sensor_RecordingLevel_DEBUG,
     kafka_common_metrics_Sensor_RecordingLevel_TRACE,
+}
+
+/// The value an `_err` twin returning [`kafka_common_metrics_Sensor_RecordingLevel_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_metrics_Sensor_RecordingLevel_e {
+    fn fail() -> Self {
+        Self::kafka_common_metrics_Sensor_RecordingLevel_INFO
+    }
 }
 
 /// One instance per value; the singletons point into this array.
@@ -86,11 +95,14 @@ pub(crate) fn recording_level_singleton(level: RecordingLevel) -> *const kafka_c
 /// # Safety
 ///
 /// `level` must be a singleton returned by this module.
-pub(crate) unsafe fn recording_level_of(level: *const kafka_common_metrics_Sensor_RecordingLevel_t) -> RecordingLevel {
+pub(crate) unsafe fn recording_level_of(
+    level: *const kafka_common_metrics_Sensor_RecordingLevel_t,
+    param: &'static str,
+) -> RecordingLevel {
     // SAFETY: Per this function's `# Safety`, `level` is a singleton returned by this module, i.e.
     // a pointer to an element of the `static` `VARIANTS` array (`recording_level_singleton`), so it
     // points at a live, initialised `RecordingLevel`, which is `Copy` and read out here.
-    unsafe { *(level as *const RecordingLevel) }
+    *unsafe { require_ref::<_, RecordingLevel>(level, param) }
 }
 
 /// Returns `RecordingLevel.INFO`, a static singleton never freed.
@@ -119,21 +131,17 @@ pub extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_trace()
 
 /// Returns the enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_metrics_Sensor_RecordingLevel_INFO`, the first
-/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
-/// value, and is only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_metrics_Sensor_RecordingLevel_e::kafka_common_metrics_Sensor_RecordingLevel_INFO)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel__enum(
     self_: *const kafka_common_metrics_Sensor_RecordingLevel_t,
 ) -> kafka_common_metrics_Sensor_RecordingLevel_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out.
-    enum_of(unsafe { recording_level_of(self_) })
+    enum_of(unsafe { recording_level_of(self_, "self_") })
 }
 
 /// Returns the constant's name (Java's inherited `Enum.toString()`).
@@ -149,7 +157,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out and its name copied into an owned string.
-    into_c_string(&unsafe { recording_level_of(self_) }.to_string())
+    into_c_string(&unsafe { recording_level_of(self_, "self_") }.to_string())
 }
 
 /// Returns the permanent and immutable id of the level: `0` for `INFO`, `1` for `DEBUG`, `2` for
@@ -165,7 +173,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_id(
 ) -> i16 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out.
-    unsafe { recording_level_of(self_) }.id()
+    unsafe { recording_level_of(self_, "self_") }.id()
 }
 
 /// Returns an English description of the level.
@@ -182,7 +190,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out. The names returned are C string
     // literals, never freed, as the rustdoc states.
-    match unsafe { recording_level_of(self_) } {
+    match unsafe { recording_level_of(self_, "self_") } {
         RecordingLevel::Info => c"INFO".as_ptr(),
         RecordingLevel::Debug => c"DEBUG".as_ptr(),
         RecordingLevel::Trace => c"TRACE".as_ptr(),
@@ -243,9 +251,9 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_for_name(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *const kafka_common_metrics_Sensor_RecordingLevel_t {
     // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    match RecordingLevel::for_name(&unsafe { c_str_to_string(name) }) {
+    match RecordingLevel::for_name(&unsafe { require_str(name, "name") }) {
         Ok(level) => recording_level_singleton(level),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -270,7 +278,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_RecordingLevel_should_recor
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `recording_level_of` requires; the value is copied out.
-    i8::from(unsafe { recording_level_of(self_) }.should_record(config_id))
+    i8::from(unsafe { recording_level_of(self_, "self_") }.should_record(config_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -302,12 +310,12 @@ pub(crate) fn box_sensor(sensor: Arc<Sensor>) -> *mut kafka_common_metrics_Senso
 /// # Safety
 ///
 /// `self_` must be a valid sensor handle, alive for `'a`.
-unsafe fn inner<'a>(self_: *const kafka_common_metrics_Sensor_t) -> &'a SensorInner {
+unsafe fn inner<'a>(self_: *const kafka_common_metrics_Sensor_t, param: &'static str) -> &'a SensorInner {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle alive for `'a`, i.e.
     // the `Box::into_raw` of a `SensorInner` in `box_sensor` (every sensor handle is owned: no view
     // of this type is handed out). No call mutates a `SensorInner`, and its `Sensor` is used only
     // through `&self`, so the shared reference is sound for `'a`.
-    unsafe { &*(self_ as *const SensorInner) }
+    unsafe { require_ref::<_, SensorInner>(self_, param) }
 }
 
 /// The sensor behind a handle.
@@ -315,28 +323,42 @@ unsafe fn inner<'a>(self_: *const kafka_common_metrics_Sensor_t) -> &'a SensorIn
 /// # Safety
 ///
 /// `sensor` must be a valid sensor handle, alive for `'a`.
-pub(crate) unsafe fn sensor_ref<'a>(sensor: *const kafka_common_metrics_Sensor_t) -> &'a Arc<Sensor> {
+pub(crate) unsafe fn sensor_ref<'a>(
+    sensor: *const kafka_common_metrics_Sensor_t,
+    param: &'static str,
+) -> &'a Arc<Sensor> {
     // SAFETY: Per this function's `# Safety`, `sensor` is a valid sensor handle alive for `'a`, as
     // `inner` requires; the reference returned borrows the handle's `Arc` for the same `'a`.
-    &unsafe { inner(sensor) }.sensor
+    &unsafe { inner(sensor, param) }.sensor
 }
 
 /// The sensors behind a list of `const kafka_common_metrics_Sensor_t *`
-/// elements; null reads as empty.
+/// elements; `NULL` reads as empty, as Java's `Sensor` reads a null `parents`
+/// array.
 ///
 /// # Safety
 ///
 /// `sensors` must be null or a valid list of sensor handles.
 pub(crate) unsafe fn list_sensors(sensors: *const kafka_List_t) -> Vec<Arc<Sensor>> {
+    if sensors.is_null() {
+        return Vec::new();
+    }
     // SAFETY: Per this function's `# Safety`, `sensors` is null or a valid list handle, alive and
-    // not mutated during this call, as `list_elements` requires; the slice is used only within this
+    // not mutated during this call, as `require_list` requires; the slice is used only within this
     // call, its sensors being cloned into owned `Arc`s before return.
-    unsafe { list_elements(sensors) }
+    unsafe { require_list(sensors, "sensors") }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `sensors` is a valid sensor
-        // handle, as `sensor_ref` requires; the reference lives only until `Arc::clone` copies the
-        // `Arc`.
-        .map(|&element| Arc::clone(unsafe { sensor_ref(element as *const kafka_common_metrics_Sensor_t) }))
+        .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `sensors` is a valid sensor
+            // handle, as `sensor_ref` requires; the reference lives only until `Arc::clone` copies the
+            // `Arc`.
+            Arc::clone(unsafe {
+                sensor_ref(
+                    require_element(element, "sensors") as *const kafka_common_metrics_Sensor_t,
+                    "sensors",
+                )
+            })
+        })
         .collect()
 }
 
@@ -355,7 +377,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `inner`
     // requires. The string returned is the handle's own `name_c`, so it lives as long as the
     // handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner(self_) }.name_c.as_ptr()
+    unsafe { inner(self_, "self_") }.name_c.as_ptr()
 }
 
 /// `shouldRecord()`.
@@ -372,7 +394,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_name(
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_should_record(self_: *const kafka_common_metrics_Sensor_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    i8::from(unsafe { sensor_ref(self_) }.should_record())
+    i8::from(unsafe { sensor_ref(self_, "self_") }.should_record())
 }
 
 /// Record an occurrence, this is just short-hand for
@@ -394,7 +416,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_record(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    match unsafe { sensor_ref(self_) }.record() {
+    match unsafe { sensor_ref(self_, "self_") }.record() {
         Ok(()) => {},
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -424,7 +446,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    match unsafe { sensor_ref(self_) }.record_with_value(value) {
+    match unsafe { sensor_ref(self_, "self_") }.record_with_value(value) {
         Ok(()) => {},
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -457,7 +479,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value_time_ms(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    match unsafe { sensor_ref(self_) }.record_with_value_time_ms(value, time_ms) {
+    match unsafe { sensor_ref(self_, "self_") }.record_with_value_time_ms(value, time_ms) {
         Ok(()) => {},
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -492,7 +514,11 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_record_with_value_time_ms_c
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    match unsafe { sensor_ref(self_) }.record_with_value_time_ms_check_quotas(value, time_ms, check_quotas != 0) {
+    match unsafe { sensor_ref(self_, "self_") }.record_with_value_time_ms_check_quotas(
+        value,
+        time_ms,
+        check_quotas != 0,
+    ) {
         Ok(()) => {},
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -516,7 +542,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_check_quotas(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    match unsafe { sensor_ref(self_) }.check_quotas() {
+    match unsafe { sensor_ref(self_, "self_") }.check_quotas() {
         Ok(()) => {},
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -546,7 +572,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_check_quotas_with_time_ms(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    match unsafe { sensor_ref(self_) }.check_quotas_with_time_ms(time_ms) {
+    match unsafe { sensor_ref(self_, "self_") }.check_quotas_with_time_ms(time_ms) {
         Ok(()) => {},
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(error) => unsafe { fail_with(out_err, error) },
@@ -596,14 +622,14 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_metric_name(
     // SAFETY: Per this function's `# Safety`, `metric_name` is a valid metric-name handle, as
     // `metric_name_ref` requires; the name is cloned, so nothing borrows the handle after this
     // call.
-    let metric_name = unsafe { metric_name_ref(metric_name) }.clone();
+    let metric_name = unsafe { metric_name_ref(metric_name, "metric_name") }.clone();
     // SAFETY: Per this function's `# Safety`, `stat` is a valid measurable-stat handle that the
     // caller does not use again when it was owned, as `take_measurable_stat` requires; an owned one
     // is consumed here and a view's implementation is shared through its `Arc`.
     let stat = unsafe { take_measurable_stat(stat) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    let added = unsafe { sensor_ref(self_) }.add_with_metric_name(metric_name, stat);
+    let added = unsafe { sensor_ref(self_, "self_") }.add_with_metric_name(metric_name, stat);
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer, as
     // `deliver_added` requires.
     unsafe { deliver_added(added, out_err) }
@@ -643,7 +669,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_metric_name_config
     // SAFETY: Per this function's `# Safety`, `metric_name` is a valid metric-name handle, as
     // `metric_name_ref` requires; the name is cloned, so nothing borrows the handle after this
     // call.
-    let metric_name = unsafe { metric_name_ref(metric_name) }.clone();
+    let metric_name = unsafe { metric_name_ref(metric_name, "metric_name") }.clone();
     // SAFETY: Per this function's `# Safety`, `stat` is a valid measurable-stat handle that the
     // caller does not use again when it was owned, as `take_measurable_stat` requires; an owned one
     // is consumed here and a view's implementation is shared through its `Arc`.
@@ -654,7 +680,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_metric_name_config
     let config = unsafe { metric_config_option(config) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    let added = unsafe { sensor_ref(self_) }.add_with_metric_name_config(metric_name, stat, config);
+    let added = unsafe { sensor_ref(self_, "self_") }.add_with_metric_name_config(metric_name, stat, config);
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer,
     // as `deliver_added` requires.
     unsafe { deliver_added(added, out_err) }
@@ -693,7 +719,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add(
     let stat = unsafe { take_compound_stat(stat) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    let added = unsafe { sensor_ref(self_) }.add(stat);
+    let added = unsafe { sensor_ref(self_, "self_") }.add(stat);
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer, as `deliver_added`
     // requires.
     unsafe { deliver_added(added, out_err) }
@@ -739,7 +765,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_config(
     let config = unsafe { metric_config_option(config) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    let added = unsafe { sensor_ref(self_) }.add_with_config(stat, config);
+    let added = unsafe { sensor_ref(self_, "self_") }.add_with_config(stat, config);
     // SAFETY: Per this function's `# Safety`, `out_err` is a valid pointer, as
     // `deliver_added` requires.
     unsafe { deliver_added(added, out_err) }
@@ -759,7 +785,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_add_with_config(
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_has_metrics(self_: *const kafka_common_metrics_Sensor_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    i8::from(unsafe { sensor_ref(self_) }.has_metrics())
+    i8::from(unsafe { sensor_ref(self_, "self_") }.has_metrics())
 }
 
 /// Returns `1` if the Sensor is eligible for removal due to inactivity, `0` otherwise.
@@ -772,7 +798,7 @@ pub unsafe extern "C" fn kafka_common_metrics_Sensor_has_metrics(self_: *const k
 pub unsafe extern "C" fn kafka_common_metrics_Sensor_has_expired(self_: *const kafka_common_metrics_Sensor_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid sensor handle, as `sensor_ref`
     // requires; the reference is used only within this call.
-    i8::from(unsafe { sensor_ref(self_) }.has_expired())
+    i8::from(unsafe { sensor_ref(self_, "self_") }.has_expired())
 }
 
 /// Frees a sensor handle; null is a no-op. The sensor stays registered.
@@ -825,7 +851,7 @@ mod tests {
             // never freed; the names read are static; `err` is a valid slot pointing at null
             // before each call, and `name` outlives the call reading it.
             unsafe {
-                assert_eq!(recording_level_of(singleton), level);
+                assert_eq!(recording_level_of(singleton, "singleton"), level);
                 assert_eq!(kafka_common_metrics_Sensor_RecordingLevel__enum(singleton) as usize, index);
                 assert_eq!(kafka_common_metrics_Sensor_RecordingLevel_id(singleton), level.id());
                 assert_eq!(
@@ -897,7 +923,7 @@ mod tests {
         // `kafka_common_metrics_MetricConfig_new` and is destroyed once; `err` is a valid slot
         // pointing at null before each call, and each error stored in it is destroyed once.
         unsafe {
-            let sensor = box_sensor(metrics_ref(registry).sensor("s").unwrap());
+            let sensor = box_sensor(metrics_ref(registry, "registry").sensor("s").unwrap());
             assert_eq!(CStr::from_ptr(kafka_common_metrics_Sensor_name(sensor)).to_str().unwrap(), "s");
             assert_eq!(kafka_common_metrics_Sensor_should_record(sensor), 1);
             assert_eq!(kafka_common_metrics_Sensor_has_metrics(sensor), 0);
@@ -906,7 +932,7 @@ mod tests {
 
             // A stat class's view is shared with the sensor: the class handle stays valid.
             let avg = kafka_common_metrics_stats_Avg_new();
-            let name = box_metric_name(metrics_ref(registry).metric_name("avg", "g"));
+            let name = box_metric_name(metrics_ref(registry, "registry").metric_name("avg", "g"));
             let mut err = ptr::null_mut();
             let added = kafka_common_metrics_Sensor_add_with_metric_name(
                 sensor,
@@ -932,7 +958,7 @@ mod tests {
             assert_eq!(added, 1);
             // A name another sensor registered is Java's IllegalArgumentException
             // from the registry.
-            let other = box_sensor(metrics_ref(registry).sensor("other").unwrap());
+            let other = box_sensor(metrics_ref(registry, "registry").sensor("other").unwrap());
             let added = kafka_common_metrics_Sensor_add_with_metric_name_config(
                 other,
                 name,
@@ -953,9 +979,9 @@ mod tests {
             assert!(err.is_null());
             kafka_common_metrics_Sensor_record_with_value_time_ms(sensor, 5.0, 10, &mut err);
             assert!(err.is_null());
-            let avg_config = metrics_ref(registry).config().clone();
-            let metric = metrics_ref(registry)
-                .metric(&metrics_ref(registry).metric_name("avg", "g"))
+            let avg_config = metrics_ref(registry, "registry").config().clone();
+            let metric = metrics_ref(registry, "registry")
+                .metric(&metrics_ref(registry, "registry").metric_name("avg", "g"))
                 .unwrap();
             assert_eq!(metric.measurable().unwrap().measure(&avg_config, 10), 3.0);
             kafka_common_metrics_stats_Avg_destroy(avg);
@@ -967,8 +993,8 @@ mod tests {
             assert!(err.is_null());
 
             // A compound stat registers both of its metrics.
-            let rate_name = box_metric_name(metrics_ref(registry).metric_name("rate", "g"));
-            let total_name = box_metric_name(metrics_ref(registry).metric_name("total", "g"));
+            let rate_name = box_metric_name(metrics_ref(registry, "registry").metric_name("rate", "g"));
+            let total_name = box_metric_name(metrics_ref(registry, "registry").metric_name("total", "g"));
             let meter = kafka_common_metrics_stats_Meter_new(rate_name, total_name);
             kafka_common_MetricName_destroy(rate_name);
             kafka_common_MetricName_destroy(total_name);
@@ -1001,12 +1027,12 @@ mod tests {
             kafka_common_metrics_Sensor_destroy(other);
             kafka_common_metrics_stats_Meter_destroy(meter);
             // The registry's built-in `count` metric plus avg, rate and total.
-            assert_eq!(metrics_ref(registry).metrics().len(), 4);
+            assert_eq!(metrics_ref(registry, "registry").metrics().len(), 4);
 
             // Destroying the handle leaves the sensor registered.
             kafka_common_metrics_Sensor_destroy(sensor);
             kafka_common_metrics_Sensor_destroy(ptr::null_mut());
-            assert!(metrics_ref(registry).get_sensor("s").is_some());
+            assert!(metrics_ref(registry, "registry").get_sensor("s").is_some());
             kafka_common_metrics_Metrics_destroy(registry);
         }
     }

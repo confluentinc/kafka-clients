@@ -23,6 +23,7 @@
 //! already in use, as in Java where `MetricConfig` is passed by reference
 //! but every registered config is read-only in practice.
 
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::collections::BTreeMap;
 use std::ptr;
 use std::sync::Arc;
@@ -128,14 +129,14 @@ pub(crate) fn box_metric_config(config: Arc<MetricConfig>) -> *mut kafka_common_
 /// # Safety
 ///
 /// `self_` must be a valid metric-config handle, alive for `'a`.
-unsafe fn inner<'a>(self_: *const kafka_common_metrics_MetricConfig_t) -> &'a MetricConfigInner {
+unsafe fn inner<'a>(self_: *const kafka_common_metrics_MetricConfig_t, param: &'static str) -> &'a MetricConfigInner {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-config handle alive for
     // `'a`, so it points at a live `MetricConfigInner`: an owned one, the `Box::into_raw` of
     // `box_metric_config`, or one an interface invoker borrows to C for the call
     // (`MetricConfigInner::as_ptr`), which outlives the call. Only `inner_mut` gives exclusive
     // access, and only to an owned handle no other call uses at the same time, so the shared
     // reference is sound for `'a`.
-    unsafe { &*(self_ as *const MetricConfigInner) }
+    unsafe { require_ref::<_, MetricConfigInner>(self_, param) }
 }
 
 /// What an owned handle points at, for a setter.
@@ -144,11 +145,14 @@ unsafe fn inner<'a>(self_: *const kafka_common_metrics_MetricConfig_t) -> &'a Me
 ///
 /// `self_` must be a valid owned metric-config handle, alive for `'a` and
 /// used by no other call during it.
-unsafe fn inner_mut<'a>(self_: *mut kafka_common_metrics_MetricConfig_t) -> &'a mut MetricConfigInner {
+unsafe fn inner_mut<'a>(
+    self_: *mut kafka_common_metrics_MetricConfig_t,
+    param: &'static str,
+) -> &'a mut MetricConfigInner {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle, the
     // `Box::into_raw` of `box_metric_config`, alive for `'a` and used by nothing else during it, so
     // the exclusive reference aliases nothing for `'a`.
-    unsafe { &mut *(self_ as *mut MetricConfigInner) }
+    unsafe { require_mut::<_, MetricConfigInner>(self_, param) }
 }
 
 /// The config behind a handle.
@@ -156,10 +160,13 @@ unsafe fn inner_mut<'a>(self_: *mut kafka_common_metrics_MetricConfig_t) -> &'a 
 /// # Safety
 ///
 /// `config` must be a valid metric-config handle, alive for `'a`.
-pub(crate) unsafe fn metric_config_ref<'a>(config: *const kafka_common_metrics_MetricConfig_t) -> &'a MetricConfig {
+pub(crate) unsafe fn metric_config_ref<'a>(
+    config: *const kafka_common_metrics_MetricConfig_t,
+    param: &'static str,
+) -> &'a MetricConfig {
     // SAFETY: Per this function's `# Safety`, `config` is a valid metric-config handle, as `inner`
     // requires; the reference returned lives for the same `'a`.
-    unsafe { inner(config) }.config()
+    unsafe { inner(config, param) }.config()
 }
 
 /// The config behind a handle as the `Arc` the Rust API takes.
@@ -170,7 +177,7 @@ pub(crate) unsafe fn metric_config_ref<'a>(config: *const kafka_common_metrics_M
 pub(crate) unsafe fn metric_config_arc(config: *const kafka_common_metrics_MetricConfig_t) -> Arc<MetricConfig> {
     // SAFETY: Per this function's `# Safety`, `config` is a valid metric-config handle, as `inner`
     // requires; the reference is used only within this call, since `arc` returns an owned `Arc`.
-    unsafe { inner(config) }.arc()
+    unsafe { inner(config, "config") }.arc()
 }
 
 /// The config behind a handle, or `None` for null (Java's null config, the
@@ -218,9 +225,11 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_quota(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-config handle, as
     // `metric_config_ref` requires; the returned pointer views the quota inside that config, which
     // lives until the handle is destroyed or a setter replaces its config, as documented above.
-    unsafe { metric_config_ref(self_) }.quota().map_or(ptr::null(), |quota| {
-        quota as *const Quota as *const kafka_common_metrics_Quota_t
-    })
+    unsafe { metric_config_ref(self_, "self_") }
+        .quota()
+        .map_or(ptr::null(), |quota| {
+            quota as *const Quota as *const kafka_common_metrics_Quota_t
+        })
 }
 
 /// Sets the quota.
@@ -241,11 +250,11 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_quota(
 ) {
     // SAFETY: Per this function's `# Safety`, `quota` is a valid quota handle, as `quota_of`
     // requires; the quota is cloned, so the borrow lasts for this call only.
-    let quota = unsafe { quota_of(quota) }.clone();
+    let quota = unsafe { quota_of(quota, "quota") }.clone();
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle that no
     // other call uses at the same time, as `inner_mut` requires; the exclusive reference is used
     // only within this call.
-    unsafe { inner_mut(self_) }.update(|config| config.set_quota(quota));
+    unsafe { inner_mut(self_, "self_") }.update(|config| config.set_quota(quota));
 }
 
 /// Returns the event window.
@@ -260,7 +269,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_event_window(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-config handle, as
     // `metric_config_ref` requires; the reference is used only within this call.
-    unsafe { metric_config_ref(self_) }.event_window()
+    unsafe { metric_config_ref(self_, "self_") }.event_window()
 }
 
 /// Sets the event window.
@@ -281,7 +290,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_event_window(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle that no
     // other call uses at the same time, as `inner_mut` requires; the exclusive reference is used
     // only within this call.
-    unsafe { inner_mut(self_) }.update(|config| config.set_event_window(window));
+    unsafe { inner_mut(self_, "self_") }.update(|config| config.set_event_window(window));
 }
 
 /// Returns the time window, in milliseconds.
@@ -296,7 +305,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_time_window_ms(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-config handle, as
     // `metric_config_ref` requires; the reference is used only within this call.
-    unsafe { metric_config_ref(self_) }.time_window_ms()
+    unsafe { metric_config_ref(self_, "self_") }.time_window_ms()
 }
 
 /// Sets the time window.
@@ -319,11 +328,11 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_time_window(
 ) {
     // SAFETY: Per this function's `# Safety`, `unit` is a time-unit singleton, as `time_unit_of`
     // (`time_unit::value_of`) requires; the value is copied out.
-    let unit = unsafe { time_unit_of(unit) };
+    let unit = unsafe { time_unit_of(unit, "unit") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle that no
     // other call uses at the same time, as `inner_mut` requires; the exclusive reference is used
     // only within this call.
-    unsafe { inner_mut(self_) }.update(|config| config.set_time_window(window, unit));
+    unsafe { inner_mut(self_, "self_") }.update(|config| config.set_time_window(window, unit));
 }
 
 /// Returns the tags, a map of `char *` to `char *` in key order.
@@ -340,33 +349,39 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_tags(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-config handle, as
     // `metric_config_ref` requires; the tags are copied into an owned map before return, so the
     // borrow lasts for this call only.
-    box_string_map(unsafe { metric_config_ref(self_) }.tags())
+    box_string_map(unsafe { metric_config_ref(self_, "self_") }.tags())
 }
 
 /// Sets the tags.
+///
+/// WARNING: `NULL` `tags` panics; Java stores `null`.
 ///
 /// # Parameters
 ///
 /// - `tags` - A map of `const char *` to `const char *`, copied.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `tags` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a valid owned metric-config handle that no other call uses at the same time,
-/// and `tags` `NULL` or a valid map of NUL-terminated strings.
+/// and `tags` a valid map of NUL-terminated strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_tags(
     self_: *mut kafka_common_metrics_MetricConfig_t,
     tags: *const kafka_Map_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `tags` is null or a valid map of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `tags` is a valid map of NUL-terminated
     // strings, as `map_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the map after this call.
-    let tags: BTreeMap<String, String> = unsafe { map_strings(tags) }.into_iter().collect();
+    let tags: BTreeMap<String, String> = unsafe { map_strings(tags, "tags") }.into_iter().collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle that no
     // other call uses at the same time, as `inner_mut` requires; the exclusive reference is used
     // only within this call.
-    unsafe { inner_mut(self_) }.update(|config| config.set_tags(tags));
+    unsafe { inner_mut(self_, "self_") }.update(|config| config.set_tags(tags));
 }
 
 /// Returns the number of samples.
@@ -381,7 +396,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_samples(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-config handle, as
     // `metric_config_ref` requires; the reference is used only within this call.
-    unsafe { metric_config_ref(self_) }.samples()
+    unsafe { metric_config_ref(self_, "self_") }.samples()
 }
 
 /// Sets the number of samples.
@@ -403,7 +418,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_samples(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle that no
     // other call uses at the same time, as `inner_mut` requires; the exclusive reference is used
     // only within this call.
-    unsafe { inner_mut(self_) }.update(|config| config.set_samples(samples));
+    unsafe { inner_mut(self_, "self_") }.update(|config| config.set_samples(samples));
 }
 
 /// Returns the recording level, a singleton.
@@ -419,7 +434,7 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_record_level(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric-config handle, as
     // `metric_config_ref` requires; the value is copied out and mapped to its static singleton, so
     // the borrow lasts for this call only.
-    recording_level_singleton(unsafe { metric_config_ref(self_) }.record_level())
+    recording_level_singleton(unsafe { metric_config_ref(self_, "self_") }.record_level())
 }
 
 /// Sets the recording level.
@@ -440,11 +455,11 @@ pub unsafe extern "C" fn kafka_common_metrics_MetricConfig_set_record_level(
 ) {
     // SAFETY: Per this function's `# Safety`, `recording_level` is a recording-level singleton, as
     // `recording_level_of` requires; the value is copied out.
-    let recording_level = unsafe { recording_level_of(recording_level) };
+    let recording_level = unsafe { recording_level_of(recording_level, "recording_level") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid owned metric-config handle that no
     // other call uses at the same time, as `inner_mut` requires; the exclusive reference is used
     // only within this call.
-    unsafe { inner_mut(self_) }.update(|config| config.set_record_level(recording_level));
+    unsafe { inner_mut(self_, "self_") }.update(|config| config.set_record_level(recording_level));
 }
 
 /// Frees an owned metric-config handle; null is a no-op. The handle Rust
@@ -520,7 +535,7 @@ mod tests {
             kafka_Map_destroy(tags);
 
             assert_eq!(
-                *quota_of(kafka_common_metrics_MetricConfig_quota(handle)),
+                *quota_of(kafka_common_metrics_MetricConfig_quota(handle), "value"),
                 Quota::upper_bound(5.0)
             );
             assert_eq!(kafka_common_metrics_MetricConfig_event_window(handle), 7);
@@ -534,14 +549,14 @@ mod tests {
                 kafka_common_metrics_Sensor_RecordingLevel_debug()
             );
             let tags = kafka_common_metrics_MetricConfig_tags(handle);
-            assert_eq!(map_strings(tags), [("k".to_string(), "v".to_string())]);
+            assert_eq!(map_strings(tags, "tags"), [("k".to_string(), "v".to_string())]);
             kafka_Map_destroy(tags);
 
             // The shared config is untouched; the handle has its own copy.
             assert!(shared.quota().is_none());
             assert_eq!(shared.samples(), MetricConfig::DEFAULT_NUM_SAMPLES);
             assert!(!Arc::ptr_eq(&metric_config_arc(handle), &shared));
-            assert_eq!(metric_config_ref(handle).record_level(), RecordingLevel::Debug);
+            assert_eq!(metric_config_ref(handle, "handle").record_level(), RecordingLevel::Debug);
             assert!(metric_config_option(ptr::null()).is_none());
             assert!(metric_config_option(handle).is_some());
             kafka_common_metrics_MetricConfig_destroy(handle);

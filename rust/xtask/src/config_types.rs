@@ -15,9 +15,10 @@
 //! The `ConfigDef` type of every producer, consumer and admin config key, read
 //! from the Java sources.
 //!
-//! The Python clients check a config value's Python type against
-//! its key's `ConfigDef` type before the core sees it (CLAUDE.md, Python Binding
-//! Conventions, Configuration). The key sets and types are those of Java's `ProducerConfig`,
+//! It is rendered twice, as the Python table (`_config_types.py`) and the .NET
+//! one (`ConfigTypes.g.cs`): both bindings check a config value's type against
+//! its key's `ConfigDef` type before the core sees it, and refuse a `null` the
+//! key's validator refuses. The key sets and types are those of Java's `ProducerConfig`,
 //! `ConsumerConfig` and `AdminClientConfig`: every `define(name, Type.X, …)` /
 //! `defineInternal(name, Type.X, …)` of the class, plus the ones
 //! `withClientSslSupport()` / `withClientSaslSupport()` add from `SslConfigs` /
@@ -36,12 +37,18 @@ type Res<T> = anyhow::Result<T>;
 
 const JAVA_ROOT: &str = "kafka/clients/src/main/java";
 const OUTPUT: &str = "python/confluent_kafka/_config_types.py";
+const OUTPUT_CS: &str = "dotnet/src/Confluent.Kafka/Internal/ConfigTypes.g.cs";
 const SSL_CONFIGS: &str = "org.apache.kafka.common.config.SslConfigs";
 const SASL_CONFIGS: &str = "org.apache.kafka.common.config.SaslConfigs";
 
 /// The `ConfigDef` types a key can have (Java's `ConfigDef.Type`).
 const TYPES: &[&str] = &[
     "BOOLEAN", "STRING", "INT", "SHORT", "LONG", "DOUBLE", "LIST", "CLASS", "PASSWORD",
+];
+
+/// The C# `ConfigType` enum's members: `TYPES`, in the order the enum declares them.
+const TYPES_CS: &[&str] = &[
+    "BOOLEAN", "STRING", "PASSWORD", "INT", "SHORT", "LONG", "DOUBLE", "LIST", "CLASS",
 ];
 
 /// One key of a `ConfigDef`: its type, the class whose source defines it and
@@ -435,9 +442,16 @@ fn java_hash_set_order(values: impl IntoIterator<Item = String>) -> Vec<String> 
 }
 
 /// The null rule of a key from its validator's source, read as Java's
-/// `ConfigDef` validators treat `null`. An unknown validator kind stops
+/// `ConfigDef` validators treat `null`. A custom validator's message is
+/// evaluated with `null` spelled `null_text`. An unknown validator kind stops
 /// generation.
-fn null_rule(reader: &mut Reader, consts: &mut config_consts::Reader, key: &str, def: &KeyDef) -> Res<NullRule> {
+fn null_rule(
+    reader: &mut Reader,
+    consts: &mut config_consts::Reader,
+    key: &str,
+    def: &KeyDef,
+    null_text: &str,
+) -> Res<NullRule> {
     let Some(src) = def.validator.as_deref() else {
         return Ok(NullRule::Allowed);
     };
@@ -549,8 +563,9 @@ fn null_rule(reader: &mut Reader, consts: &mut config_consts::Reader, key: &str,
         if !rejects_null {
             anyhow::bail!("config types: `{fqn}.{parser}` does not reject null");
         }
-        // The message as Python builds it, `null` spelled `None` (Types).
-        let message = consts.eval_src_with(&fqn, throw.trim(), &[(local, "None"), ("name", key)])?;
+        // The message as the binding builds it: `null` spelled `None` in
+        // Python (Types), `null` in C# as in Java.
+        let message = consts.eval_src_with(&fqn, throw.trim(), &[(local, null_text), ("name", key)])?;
         return Ok(NullRule::Named { kind: "custom Validator", message });
     }
     anyhow::bail!("config types: `{key}` in `{}` has an unknown validator `{src}`", def.class)
@@ -632,26 +647,151 @@ fn render(tables: &[(&str, Table)]) -> String {
     out
 }
 
-/// The generated file and its content.
-pub fn generated_output(repo_root: &Path) -> Res<(PathBuf, String)> {
+/// The three clients' tables, read from the Java sources, with the custom
+/// validators' messages evaluated with `null` spelled `null_text`.
+fn read_tables(repo_root: &Path, null_text: &str) -> Res<Vec<(&'static str, Table)>> {
     let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
     let mut consts = config_consts::Reader::new(repo_root);
     let mut tables = Vec::with_capacity(CLIENTS.len());
     for (name, fqn) in CLIENTS {
         let mut table = Table::new();
         for (key, def) in client_types(&mut reader, fqn)? {
-            let rule = null_rule(&mut reader, &mut consts, &key, &def)?;
+            let rule = null_rule(&mut reader, &mut consts, &key, &def, null_text)?;
             table.insert(key, (def.ty, rule));
         }
         tables.push((name, table));
     }
-    Ok((repo_root.join(OUTPUT), render(&tables)))
+    Ok(tables)
 }
 
-/// Every generated file: the key-type tables and the config classes'
-/// constants (`config_consts`).
+/// The generated Python file and its content.
+pub fn generated_output(repo_root: &Path) -> Res<(PathBuf, String)> {
+    Ok((repo_root.join(OUTPUT), render(&read_tables(repo_root, "None")?)))
+}
+
+/// `PRODUCER` -> `Producer`, `BOOLEAN` -> `Boolean`: the C# name of a Python
+/// table or of a `ConfigDef.Type`.
+fn cs_name(upper: &str) -> String {
+    let mut chars = upper.chars();
+    chars
+        .next()
+        .map(|first| first.to_string() + &chars.as_str().to_lowercase())
+        .unwrap_or_default()
+}
+
+/// A C# regular string literal.
+fn cs_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn render_cs(tables: &[(&str, Table)]) -> String {
+    let mut out = String::from(
+        "// Copyright 2025 Confluent Inc.\n\
+         //\n\
+         // Licensed under the Apache License, Version 2.0 (the \"License\");\n\
+         // you may not use this file except in compliance with the License.\n\
+         // You may obtain a copy of the License at\n\
+         //\n\
+         //     http://www.apache.org/licenses/LICENSE-2.0\n\
+         //\n\
+         // Unless required by applicable law or agreed to in writing, software\n\
+         // distributed under the License is distributed on an \"AS IS\" BASIS,\n\
+         // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n\
+         // See the License for the specific language governing permissions and\n\
+         // limitations under the License.\n\
+         \n\
+         // <auto-generated>\n\
+         // GENERATED by `cargo xtask generate-error-codes` from Java's ProducerConfig,\n\
+         // ConsumerConfig and AdminClientConfig -- DO NOT EDIT.\n\
+         // </auto-generated>\n\
+         \n\
+         #nullable enable\n\
+         \n\
+         using System;\n\
+         using System.Collections.Generic;\n\
+         \n\
+         namespace Confluent.Kafka.Internal;\n\
+         \n\
+         /// <summary>The <c>ConfigDef</c> type of a config key.</summary>\n\
+         internal enum ConfigType\n\
+         {\n",
+    );
+    for ty in TYPES_CS {
+        out.push_str(&format!("    {},\n", cs_name(ty)));
+    }
+    out.push_str(
+        "}\n\
+         \n\
+         /// <summary>The form of the <c>ConfigException</c> a key's validator throws for <c>null</c>: \
+         <c>Named</c> for <c>(name, null, message)</c>, <c>Plain</c> for <c>(message)</c>.</summary>\n\
+         internal enum ConfigNullForm\n\
+         {\n    \
+             Named,\n    \
+             Plain,\n\
+         }\n\
+         \n\
+         /// <summary>The producer, consumer and admin config keys: each key's type, and for each key \
+         whose validator refuses <c>null</c>, the error it throws.</summary>\n\
+         internal static class ConfigTypes\n\
+         {",
+    );
+    for (name, map) in tables {
+        out.push_str(&format!(
+            "\n    internal static readonly IReadOnlyDictionary<string, ConfigType> {} =\n        \
+             new Dictionary<string, ConfigType>(StringComparer.Ordinal)\n        {{\n",
+            cs_name(name)
+        ));
+        for (key, (ty, _)) in map {
+            out.push_str(&format!("            [{}] = ConfigType.{},\n", cs_str(key), cs_name(ty)));
+        }
+        out.push_str("        };\n");
+    }
+    for (name, map) in tables {
+        out.push_str(&format!(
+            "\n    internal static readonly IReadOnlyDictionary<string, (ConfigNullForm Form, string Message)> {}Null =\n        \
+             new Dictionary<string, (ConfigNullForm Form, string Message)>(StringComparer.Ordinal)\n        {{\n",
+            cs_name(name)
+        ));
+        for (key, (_, rule)) in map {
+            let (form, message) = match rule {
+                NullRule::Allowed => continue,
+                NullRule::Named { message, .. } => ("Named", message),
+                NullRule::Plain { message, .. } => ("Plain", message),
+            };
+            out.push_str(&format!(
+                "            [{}] = (ConfigNullForm.{form}, {}),\n",
+                cs_str(key),
+                cs_str(message)
+            ));
+        }
+        out.push_str("        };\n");
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// The generated C# file and its content.
+fn generated_cs_output(repo_root: &Path) -> Res<(PathBuf, String)> {
+    Ok((repo_root.join(OUTPUT_CS), render_cs(&read_tables(repo_root, "null")?)))
+}
+
+/// Every generated file: the key-type tables (Python and C#) and the config
+/// classes' constants (`config_consts`).
 fn all_outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
-    let mut out = vec![generated_output(repo_root)?];
+    let mut out = vec![generated_output(repo_root)?, generated_cs_output(repo_root)?];
     out.extend(crate::config_consts::outputs(repo_root)?);
     Ok(out)
 }
@@ -724,6 +864,129 @@ mod tests {
         let producer_null = content.split("\nPRODUCER_NULL:").nth(1).unwrap().split("\n}").next().unwrap();
         assert!(!producer_null.contains("\"transactional.id\""));
         assert!(!producer_null.contains("\"client.id\""));
+    }
+
+    /// The lines of one C# dictionary of the generated file: from its
+    /// declaration to its closing `};`.
+    fn cs_section<'a>(content: &'a str, name: &str) -> &'a str {
+        let decl = format!("> {name} =\n");
+        content
+            .split(decl.as_str())
+            .nth(1)
+            .unwrap()
+            .split("        };\n")
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_cs_custom_validators_spell_null_as_java() {
+        let (_, content) = generated_cs_output(&repo_root()).unwrap();
+        for line in [
+            "            [\"auto.offset.reset\"] = (ConfigNullForm.Named, \"Invalid value `null` for configuration auto.offset.reset. The value must be either 'earliest', 'latest', 'none' or of the format 'by_duration:<PnDTnHnMn.nS.>'.\"),",
+            "            [\"share.acknowledgement.mode\"] = (ConfigNullForm.Named, \"Invalid value `null` for configuration share.acknowledgement.mode. The value must either be 'implicit' or 'explicit'.\"),",
+            "            [\"share.acquire.mode\"] = (ConfigNullForm.Named, \"Invalid value `null` for configuration share.acquire.mode. The value must either be 'batch_optimized' or 'record_limit'.\"),",
+            "            [\"acks\"] = (ConfigNullForm.Named, \"String must be one of: all, -1, 0, 1\"),",
+            "            [\"bootstrap.servers\"] = (ConfigNullForm.Plain, \"Configuration 'bootstrap.servers' values must not be null.\"),",
+            "            [\"buffer.memory\"] = ConfigType.Long,",
+            "            [\"key.serializer\"] = ConfigType.Class,",
+            "            [\"ssl.keystore.password\"] = ConfigType.Password,",
+            "namespace Confluent.Kafka.Internal;",
+            "internal static class ConfigTypes",
+        ] {
+            assert!(content.contains(line), "missing {line}");
+        }
+        assert!(!content.contains("None"), "a Python spelling in the C# table");
+    }
+
+    /// Python's `test_generated_key_types_are_java_s`, over the C# table: each
+    /// fact inside its own client's dictionary.
+    #[test]
+    fn test_cs_generated_key_types_are_java_s() {
+        let (_, content) = generated_cs_output(&repo_root()).unwrap();
+        for (client, key, ty) in [
+            ("Producer", "acks", "String"),
+            ("Producer", "buffer.memory", "Long"),
+            ("Producer", "ssl.keystore.password", "Password"),
+            ("Consumer", "group.id", "String"),
+            ("Consumer", "key.deserializer", "Class"),
+            ("Consumer", "isolation.level", "String"),
+        ] {
+            let line = format!("            [\"{key}\"] = ConfigType.{ty},\n");
+            assert!(cs_section(&content, client).contains(&line), "{client}: missing {line}");
+        }
+        // The entries carry no end-of-line comments.
+        for line in content.lines().filter(|l| l.starts_with("            [")) {
+            assert!(!line.contains("//"), "comment in {line}");
+        }
+    }
+
+    #[test]
+    fn test_cs_table_matches_python_table() {
+        let root = repo_root();
+        let python = read_tables(&root, "None").unwrap();
+        let java = read_tables(&root, "null").unwrap();
+        let (_, content) = generated_cs_output(&root).unwrap();
+        let (mut keys, mut rules, mut custom) = (0, 0, 0);
+        for ((name, py), (_, cs), (want_keys, want_rules)) in python
+            .iter()
+            .zip(&java)
+            .zip([(120, 46), (120, 44), (95, 32)])
+            .map(|((a, b), c)| (a, b, c))
+        {
+            assert_eq!(py.keys().collect::<Vec<_>>(), cs.keys().collect::<Vec<_>>(), "{name}");
+            let section = cs_section(&content, &cs_name(name));
+            let null_section = cs_section(&content, &format!("{}Null", cs_name(name)));
+            assert_eq!(section.matches("] = ConfigType.").count(), want_keys, "{name} keys");
+            assert_eq!(null_section.matches("] = (ConfigNullForm.").count(), want_rules, "{name} rules");
+            assert_eq!(py.len(), want_keys, "{name} Python keys");
+            let mut py_rules = 0;
+            for (key, ((py_ty, py_rule), (cs_ty, cs_rule))) in py.iter().map(|(k, v)| (k, (v, &cs[k]))) {
+                assert_eq!(py_ty, cs_ty, "{key}");
+                assert!(
+                    section.contains(&format!("[\"{key}\"] = ConfigType.{},", cs_name(cs_ty))),
+                    "{key}"
+                );
+                match (py_rule, cs_rule) {
+                    (NullRule::Allowed, NullRule::Allowed) => continue,
+                    (NullRule::Named { kind: pk, message: pm }, NullRule::Named { kind: ck, message: cm })
+                    | (NullRule::Plain { kind: pk, message: pm }, NullRule::Plain { kind: ck, message: cm }) => {
+                        assert_eq!(pk, ck, "{key}");
+                        if *ck == "custom Validator" {
+                            custom += 1;
+                            assert_eq!(pm.replace("`None`", "`null`"), *cm, "{key}");
+                            assert_ne!(pm, cm, "{key}");
+                        } else {
+                            assert_eq!(pm, cm, "{key}");
+                        }
+                        assert!(null_section.contains(&format!("[\"{key}\"] = (ConfigNullForm.")), "{key}");
+                    },
+                    other => panic!("{key}: forms differ: {other:?}"),
+                }
+                py_rules += 1;
+            }
+            assert_eq!(py_rules, want_rules, "{name} Python rules");
+            keys += want_keys;
+            rules += want_rules;
+        }
+        assert_eq!((keys, rules, custom), (335, 122, 3));
+    }
+
+    #[test]
+    fn test_cs_output_is_generated_and_checked() {
+        let root = repo_root();
+        let outputs = all_outputs(&root).unwrap();
+        let cs = generated_cs_output(&root).unwrap();
+        assert_eq!(cs.0, root.join("dotnet/src/Confluent.Kafka/Internal/ConfigTypes.g.cs"));
+        assert!(outputs.contains(&cs), "all_outputs does not list the C# table");
+        assert!(outputs.contains(&generated_output(&root).unwrap()));
+        let mut java: Vec<_> = TYPES.to_vec();
+        let mut cs_types: Vec<_> = TYPES_CS.to_vec();
+        java.sort_unstable();
+        cs_types.sort_unstable();
+        assert_eq!(java, cs_types);
+        assert_eq!(cs_name("PASSWORD"), "Password");
+        assert_eq!(cs_str("a\"b\\c"), "\"a\\\"b\\\\c\"");
     }
 
     #[test]

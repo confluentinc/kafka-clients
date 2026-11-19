@@ -38,9 +38,9 @@ use crate::common::Cluster;
 use crate::ffi::common::cluster::{box_cluster, kafka_common_Cluster_destroy, kafka_common_Cluster_t};
 use crate::ffi::common::metrics::Interface;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{Required, require_fn, require_str};
 use crate::ffi::util::{
-    GenericValue, box_string_map, c_str_to_string, kafka_Bytes_t, kafka_Map_destroy, kafka_Map_t, map_strings,
-    owned_c_string,
+    GenericValue, box_string_map, kafka_Bytes_t, kafka_Map_destroy, kafka_Map_t, map_strings, owned_c_string,
 };
 use crate::producer::Partitioner;
 
@@ -66,15 +66,17 @@ pub type kafka_producer_Partitioner_configure_fn_t =
 /// byte[] valueBytes, Cluster cluster)` of a C implementation. `key` and
 /// `value` are the record's `void *`s (`NULL` for Java's `null`), the byte
 /// arrays their serialized form, and `cluster` a view borrowed for the call.
-pub type kafka_producer_Partitioner_partition_fn_t = unsafe extern "C" fn(
-    self_: *mut c_void,
-    topic: *const c_char,
-    key: *const c_void,
-    key_bytes: kafka_Bytes_t,
-    value: *const c_void,
-    value_bytes: kafka_Bytes_t,
-    cluster: *const kafka_common_Cluster_t,
-) -> i32;
+pub type kafka_producer_Partitioner_partition_fn_t = Option<
+    unsafe extern "C" fn(
+        self_: *mut c_void,
+        topic: *const c_char,
+        key: *const c_void,
+        key_bytes: kafka_Bytes_t,
+        value: *const c_void,
+        value_bytes: kafka_Bytes_t,
+        cluster: *const kafka_common_Cluster_t,
+    ) -> i32,
+>;
 
 /// `void close()` of a C implementation; nullable, the Java default being a
 /// no-op.
@@ -85,13 +87,16 @@ pub type kafka_producer_Partitioner_close_fn_t = Option<unsafe extern "C" fn(sel
 /// # Safety
 ///
 /// `partitioner` must be a live handle, kept alive for `'a`.
-pub(crate) unsafe fn partitioner_ref<'a>(partitioner: *const kafka_producer_Partitioner_t) -> &'a SharedPartitioner {
+pub(crate) unsafe fn partitioner_ref<'a>(
+    partitioner: *const kafka_producer_Partitioner_t,
+    param: &'static str,
+) -> &'a SharedPartitioner {
     // SAFETY: Per this function's `# Safety`, `partitioner` is a live handle kept alive for `'a`:
     // an owned one, the `Interface::owned` box of `kafka_producer_Partitioner_new`, or the view a
     // class handle caches (`kafka_producer_RoundRobinPartitioner__as_Partitioner`), as
     // `Interface::from_ptr` requires. The implementation returned is borrowed from the handle, so
     // it lives as long as the handle does.
-    unsafe { Interface::<SharedPartitioner>::from_ptr(partitioner as *const Interface<SharedPartitioner>) }.get()
+    unsafe { Interface::<SharedPartitioner>::from_ptr(partitioner as *const Interface<SharedPartitioner>, param) }.get()
 }
 
 /// Takes the implementation a `*mut` parameter received: an owned handle is
@@ -154,7 +159,7 @@ impl Partitioner<GenericValue, GenericValue> for SharedPartitionerAdapter {
 struct CPartitioner {
     self_: *mut c_void,
     configure: kafka_producer_Partitioner_configure_fn_t,
-    partition: kafka_producer_Partitioner_partition_fn_t,
+    partition: Required<kafka_producer_Partitioner_partition_fn_t>,
     close: kafka_producer_Partitioner_close_fn_t,
 }
 
@@ -270,6 +275,7 @@ pub extern "C" fn kafka_producer_Partitioner_new(
     partition: kafka_producer_Partitioner_partition_fn_t,
     close: kafka_producer_Partitioner_close_fn_t,
 ) -> *mut kafka_producer_Partitioner_t {
+    let partition = require_fn(partition, "partition");
     let imp: Arc<SharedPartitioner> = Arc::new(Mutex::new(CPartitioner { self_, configure, partition, close }));
     Interface::owned(imp) as *mut kafka_producer_Partitioner_t
 }
@@ -293,10 +299,10 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_configure(
     // SAFETY: Per this function's `# Safety`, `_configs` (the `configs` of the `# Safety`) is a
     // live map of C strings, as `map_strings` requires; its entries are copied into owned
     // `String`s.
-    let configs: HashMap<String, String> = unsafe { map_strings(_configs) }.into_iter().collect();
+    let configs: HashMap<String, String> = unsafe { map_strings(_configs, "_configs") }.into_iter().collect();
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `partitioner_ref`
     // requires; the reference is used only within this call.
-    unsafe { partitioner_ref(self_) }
+    unsafe { partitioner_ref(self_, "self_") }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .configure(&configs);
@@ -334,17 +340,17 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_partition(
     cluster: *const kafka_common_Cluster_t,
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    let topic = unsafe { c_str_to_string(topic) };
+    let topic = unsafe { require_str(topic, "topic") };
     let key = (!key.is_null()).then(|| GenericValue::new(key as *mut c_void));
     let value = (!value.is_null()).then(|| GenericValue::new(value as *mut c_void));
     // SAFETY: Per this function's `# Safety`, `cluster` is a live handle, as `cluster_ref`
     // requires; the reference is used only within this call.
-    let cluster = unsafe { crate::ffi::common::cluster::cluster_ref(cluster) };
+    let cluster = unsafe { crate::ffi::common::cluster::cluster_ref(cluster, "cluster") };
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `partitioner_ref`
     // requires; the reference is used only within this call.
-    unsafe { partitioner_ref(self_) }
+    unsafe { partitioner_ref(self_, "self_") }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .partition(
@@ -373,7 +379,7 @@ pub unsafe extern "C" fn kafka_producer_Partitioner_partition(
 pub unsafe extern "C" fn kafka_producer_Partitioner_close(self_: *const kafka_producer_Partitioner_t) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `partitioner_ref`
     // requires; the reference is used only within this call.
-    unsafe { partitioner_ref(self_) }
+    unsafe { partitioner_ref(self_, "self_") }
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .close();
@@ -402,7 +408,7 @@ mod tests {
     use super::*;
     use crate::common::{Node, PartitionInfo};
     use crate::ffi::common::cluster::kafka_common_Cluster_node_by_id;
-    use crate::ffi::util::{kafka_Map_get, kafka_Map_size};
+    use crate::ffi::util::{c_str_to_string, kafka_Map_get, kafka_Map_size};
 
     struct Recorder {
         configured: AtomicI32,
@@ -478,7 +484,7 @@ mod tests {
         let handle = kafka_producer_Partitioner_new(
             &recorder as *const Recorder as *mut c_void,
             Some(configure),
-            partition,
+            Some(partition),
             Some(close),
         );
         let configs = box_string_map([("bootstrap.servers", "localhost:9092")]);
@@ -525,7 +531,8 @@ mod tests {
             last_key_len: AtomicI32::new(-1),
             last_node: AtomicI32::new(0),
         };
-        let handle = kafka_producer_Partitioner_new(&recorder as *const Recorder as *mut c_void, None, partition, None);
+        let handle =
+            kafka_producer_Partitioner_new(&recorder as *const Recorder as *mut c_void, None, Some(partition), None);
         let configs = box_string_map([("bootstrap.servers", "localhost:9092")]);
         // SAFETY: Test code: `handle` comes from `kafka_producer_Partitioner_new` over the test's
         // `recorder`, and `configs` is destroyed once after its last use.

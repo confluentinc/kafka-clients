@@ -60,6 +60,7 @@ use crate::common::LocalCallbackError;
 use crate::common::LocalConcurrentModificationError;
 use crate::common::LocalIllegalArgumentError;
 use crate::common::LocalIllegalStateError;
+use crate::common::LocalNullPointerError;
 use crate::common::LocalTimeoutError;
 use crate::common::LocalUnsupportedOperationError;
 use crate::common::config::ConfigError;
@@ -172,7 +173,8 @@ pub(crate) trait ErrorHierarchy {
     /// exceptions, which are siblings of `KafkaException` rather than
     /// subclasses (`org.apache.kafka.common.KafkaException` extends `RuntimeException`): [`LocalIllegalArgumentError`],
     /// [`LocalIllegalStateError`], [`LocalConcurrentModificationError`],
-    /// [`LocalTimeoutError`], [`LocalUnsupportedOperationError`] — and
+    /// [`LocalTimeoutError`], [`LocalUnsupportedOperationError`],
+    /// [`LocalNullPointerError`] — and
     /// [`LocalCallbackError`], which has no Java class
     /// but stands in for a foreign callback's `Throwable`.
     ///
@@ -343,6 +345,11 @@ pub(crate) trait ErrorHierarchy {
 
     /// Whether this error's Java class is, or extends, `java.lang.UnsupportedOperationException`.
     fn is_local_unsupported_operation_error(&self) -> bool {
+        false
+    }
+
+    /// Whether this error's Java class is, or extends, `java.lang.NullPointerException`.
+    fn is_local_null_pointer_error(&self) -> bool {
         false
     }
 
@@ -1626,6 +1633,9 @@ impl<T: ErrorHierarchy + ?Sized> ErrorHierarchy for Box<T> {
     fn is_local_unsupported_operation_error(&self) -> bool {
         (**self).is_local_unsupported_operation_error()
     }
+    fn is_local_null_pointer_error(&self) -> bool {
+        (**self).is_local_null_pointer_error()
+    }
     fn is_local_callback_error(&self) -> bool {
         (**self).is_local_callback_error()
     }
@@ -2120,14 +2130,15 @@ impl<T: ErrorName + ?Sized> ErrorName for Box<T> {
 ///
 /// Every path in the expansion is `$crate`-qualified, as in
 /// [`kafka_error_type`], so an invoking file needs nothing in scope but the
-/// macro itself. The five JDK `Local*` classes each live in their own file per
+/// macro itself. The six JDK `Local*` classes each live in their own file per
 /// CLAUDE.md §2 and invoke this from there.
 ///
 /// # Constructors deliberately not modelled
 ///
-/// The five classes stand in for JDK types (`java.lang.IllegalStateException`,
+/// The six classes stand in for JDK types (`java.lang.IllegalStateException`,
 /// `java.lang.IllegalArgumentException`,
 /// `java.lang.UnsupportedOperationException`,
+/// `java.lang.NullPointerException`,
 /// `java.util.ConcurrentModificationException`,
 /// `java.util.concurrent.TimeoutException`), each of which really declares all
 /// four of `()`, `(String)`, `(Throwable)`, `(String, Throwable)`. Under
@@ -2284,7 +2295,8 @@ error_name_impl! {
 }
 
 // `IllegalArgumentException`, `IllegalStateException`,
-// `UnsupportedOperationException`, `ConcurrentModificationException` and
+// `UnsupportedOperationException`, `NullPointerException`,
+// `ConcurrentModificationException` and
 // `java.util.concurrent.TimeoutException` are `java.lang` / `java.util` exceptions sitting BESIDE `KafkaException`, not
 // below it. Every Kafka hierarchy predicate is false for them, so each overrides
 // only its own class's predicate — the statement that they are outside the
@@ -2314,7 +2326,12 @@ impl ErrorHierarchy for LocalUnsupportedOperationError {
         true
     }
 }
-// Beside `KafkaException` like the five above: a foreign callback's error is
+impl ErrorHierarchy for LocalNullPointerError {
+    fn is_local_null_pointer_error(&self) -> bool {
+        true
+    }
+}
+// Beside `KafkaException` like the six above: a foreign callback's error is
 // not a Kafka error, so the client wraps it as Java wraps a foreign `Throwable`.
 impl ErrorHierarchy for LocalCallbackError {
     fn is_local_callback_error(&self) -> bool {
@@ -2418,6 +2435,14 @@ pub enum Error {
     /// from [`UnsupportedVersion`](Self::UnsupportedVersion), the wire-level
     /// `ApiException` for a broker lacking an API version.
     LocalUnsupportedOperation(LocalUnsupportedOperationError),
+    /// Null pointer error — a mandatory argument was null.
+    ///
+    /// Java's `java.lang.NullPointerException`. Rust has no null, so only the C
+    /// boundary raises it, for a `NULL` mandatory pointer. Like
+    /// `LocalIllegalState` it is a plain `RuntimeException` — neither an
+    /// `ApiException` nor a `KafkaException` — so it is never retriable and
+    /// never fatal.
+    LocalNullPointer(LocalNullPointerError),
     /// An error raised by a callback written in another language.
     ///
     /// No Java class: it stands in for the foreign error, which cannot cross
@@ -3053,6 +3078,15 @@ impl Error {
         Self::LocalUnsupportedOperation(LocalUnsupportedOperationError::new(message))
     }
 
+    /// Creates a null pointer error, Java's `java.lang.NullPointerException`.
+    ///
+    /// # Arguments
+    ///
+    /// - `message` - the error message
+    pub fn local_null_pointer(message: impl Into<String>) -> Self {
+        Self::LocalNullPointer(LocalNullPointerError::new(message))
+    }
+
     /// Creates a timeout error, Java's `org.apache.kafka.common.errors.TimeoutException`.
     ///
     /// # Arguments
@@ -3338,8 +3372,9 @@ impl Error {
     /// [`LocalIllegalArgument`](Self::LocalIllegalArgument),
     /// [`LocalIllegalState`](Self::LocalIllegalState),
     /// [`LocalConcurrentModification`](Self::LocalConcurrentModification),
-    /// [`LocalTimeout`](Self::LocalTimeout) and
-    /// [`LocalUnsupportedOperation`](Self::LocalUnsupportedOperation), plus
+    /// [`LocalTimeout`](Self::LocalTimeout),
+    /// [`LocalUnsupportedOperation`](Self::LocalUnsupportedOperation) and
+    /// [`LocalNullPointer`](Self::LocalNullPointer), plus
     /// [`LocalCallback`](Self::LocalCallback), a foreign callback's error, which
     /// the client wraps as Java wraps a listener's foreign `Throwable`.
     ///
@@ -3676,6 +3711,20 @@ impl Error {
     /// misses the subclasses a later Java release may add.
     pub fn is_local_unsupported_operation_error(&self) -> bool {
         ErrorHierarchy::is_local_unsupported_operation_error(self)
+    }
+
+    /// Returns whether this error's Java class is, or extends,
+    /// `java.lang.NullPointerException`.
+    ///
+    /// Covers exactly [`Error::LocalNullPointer`](Self::LocalNullPointer), a plain
+    /// `RuntimeException` beside `KafkaException`: it answers `false` to
+    /// [`is_kafka_error`](Self::is_kafka_error), [`is_api_error`](Self::is_api_error) and
+    /// [`is_retriable_error`](Self::is_retriable_error).
+    ///
+    /// Prefer this to matching [`Error::LocalNullPointer`](Self::LocalNullPointer): a variant
+    /// match misses the subclasses a later Java release may add.
+    pub fn is_local_null_pointer_error(&self) -> bool {
+        ErrorHierarchy::is_local_null_pointer_error(self)
     }
 
     /// Returns whether this is an error raised by a callback written in another language
@@ -5287,6 +5336,26 @@ mod tests {
         assert_eq!(bare.to_string(), "LocalUnsupportedOperationError: ");
     }
 
+    /// `LocalNullPointer` is Java's `NullPointerException`, a plain
+    /// `RuntimeException` beside `KafkaException`, distinct from
+    /// `IllegalArgumentException` in both directions.
+    #[test]
+    fn null_pointer_parity_with_illegal_state() {
+        let npe = Error::local_null_pointer("topic must not be null");
+        let iae = Error::local_illegal_argument("topic must not be null");
+        assert_eq!(npe.message(), "topic must not be null");
+        assert_eq!(npe.to_string(), "LocalNullPointerError: topic must not be null");
+        assert!(npe.is_local_null_pointer_error());
+        assert!(!iae.is_local_null_pointer_error());
+        assert!(!npe.is_local_illegal_argument_error());
+        assert!(!npe.is_local_illegal_state_error());
+        assert!(!npe.is_retriable_error());
+        assert!(!crate::common::requests::RequestUtils::is_fatal_error(&npe));
+        assert!(!npe.is_api_error());
+        assert!(!npe.is_kafka_error());
+        assert!(npe.kafka_error().is_none());
+    }
+
     #[test]
     fn concurrent_modification_display() {
         let cme = Error::local_concurrent_modification("oops");
@@ -5535,6 +5604,15 @@ mod tests {
                     false, false, false,
                 ],
             ),
+            // `java.lang.NullPointerException`: a plain `RuntimeException`.
+            (
+                "LocalNullPointer",
+                Error::local_null_pointer("self_ must not be null"),
+                [
+                    false, false, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false, false,
+                ],
+            ),
             // A foreign callback's error: no Java class, outside the hierarchy
             // like the runtime exceptions above.
             (
@@ -5673,6 +5751,7 @@ mod tests {
             ("LocalIllegalStateError", Error::local_illegal_state("boom")),
             ("LocalConcurrentModificationError", Error::local_concurrent_modification("boom")),
             ("LocalUnsupportedOperationError", Error::local_unsupported_operation("boom")),
+            ("LocalNullPointerError", Error::local_null_pointer("boom")),
             ("TimeoutError", Error::timeout("boom")),
             ("RecordTooLargeError", Error::record_too_large("boom")),
             ("SerializationError", Error::serialization("boom")),
@@ -5859,6 +5938,7 @@ mod tests {
             Error::local_illegal_state("bad state"),
             Error::local_concurrent_modification("racy"),
             Error::local_unsupported_operation("not implemented"),
+            Error::local_null_pointer("self_ must not be null"),
             Error::new(Errors::NotLeaderOrFollower),
             Error::new(Errors::SaslAuthenticationFailed),
             Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::new(std::collections::HashMap::new())),

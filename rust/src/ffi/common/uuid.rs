@@ -24,7 +24,8 @@ use crate::common::Uuid;
 use crate::ffi::common::fail_with;
 use crate::ffi::common::kafka_common_Error_t;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, list_elements};
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
+use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`Uuid`].
 #[repr(C)]
@@ -43,11 +44,11 @@ pub(crate) fn box_uuid(uuid: Uuid) -> *mut kafka_common_Uuid_t {
 /// # Safety
 ///
 /// `uuid` must be a valid uuid handle.
-pub(crate) unsafe fn uuid_of(uuid: *const kafka_common_Uuid_t) -> Uuid {
+pub(crate) unsafe fn uuid_of(uuid: *const kafka_common_Uuid_t, param: &'static str) -> Uuid {
     // SAFETY: Per this function's `# Safety`, `uuid` is a valid uuid handle, i.e. the
     // `Box::into_raw` of a `Uuid` in `box_uuid`, the only function that makes one, not yet
     // destroyed, so it points at a live, initialised `Uuid`, which is `Copy` and read out here.
-    unsafe { *(uuid as *const Uuid) }
+    *unsafe { require_ref::<_, Uuid>(uuid, param) }
 }
 
 /// Hands `uuids` to C as an owned list of `kafka_common_Uuid_t *`.
@@ -56,20 +57,20 @@ pub(crate) fn uuid_list(uuids: impl IntoIterator<Item = Uuid>) -> *mut kafka_Lis
     box_list(elements, Some(destroy_boxed::<Uuid>))
 }
 
-/// Reads a list of `const kafka_common_Uuid_t *`; null reads as empty.
+/// Reads a list of `const kafka_common_Uuid_t *`; `NULL` panics.
 ///
 /// # Safety
 ///
 /// `list` must be null or a valid list whose elements are uuid handles.
-pub(crate) unsafe fn list_uuids(list: *const kafka_List_t) -> Vec<Uuid> {
+pub(crate) unsafe fn list_uuids(list: *const kafka_List_t, param: &'static str) -> Vec<Uuid> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
-    // `list_elements` requires; the slice is used only within this call, while nothing mutates the
+    // `require_list` requires; the slice is used only within this call, while nothing mutates the
     // list.
-    unsafe { list_elements(list) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, every element of `list` is a uuid handle, as
         // `uuid_of` requires; the `Uuid` is copied out.
-        .map(|&element| unsafe { uuid_of(element as *const kafka_common_Uuid_t) })
+        .map(|&element| unsafe { uuid_of(require_element(element, param) as *const kafka_common_Uuid_t, param) })
         .collect()
 }
 
@@ -133,9 +134,9 @@ pub unsafe extern "C" fn kafka_common_Uuid_from_string(
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_Uuid_t {
     // SAFETY: Per this function's `# Safety`, `s` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    match Uuid::from_string(&unsafe { c_str_to_string(s) }) {
+    match Uuid::from_string(&unsafe { require_str(s, "s") }) {
         Ok(uuid) => box_uuid(uuid),
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         Err(e) => unsafe { fail_with(out_err, e) },
@@ -152,7 +153,7 @@ pub unsafe extern "C" fn kafka_common_Uuid_from_string(
 pub unsafe extern "C" fn kafka_common_Uuid_most_significant_bits(self_: *const kafka_common_Uuid_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid uuid handle, as `uuid_of`
     // requires; the `Uuid` is copied out.
-    unsafe { uuid_of(self_) }.most_significant_bits() as i64
+    unsafe { uuid_of(self_, "self_") }.most_significant_bits() as i64
 }
 
 /// Returns the least significant bits of the UUID's 128 value.
@@ -165,7 +166,7 @@ pub unsafe extern "C" fn kafka_common_Uuid_most_significant_bits(self_: *const k
 pub unsafe extern "C" fn kafka_common_Uuid_least_significant_bits(self_: *const kafka_common_Uuid_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid uuid handle, as `uuid_of`
     // requires; the `Uuid` is copied out.
-    unsafe { uuid_of(self_) }.least_significant_bits() as i64
+    unsafe { uuid_of(self_, "self_") }.least_significant_bits() as i64
 }
 
 /// Returns a base64 string encoding of the UUID.
@@ -179,7 +180,7 @@ pub unsafe extern "C" fn kafka_common_Uuid_least_significant_bits(self_: *const 
 pub unsafe extern "C" fn kafka_common_Uuid_to_string(self_: *const kafka_common_Uuid_t) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid uuid handle, as `uuid_of`
     // requires; the `Uuid` is copied out. and its text copied into an owned string.
-    into_c_string(&unsafe { uuid_of(self_) }.to_string())
+    into_c_string(&unsafe { uuid_of(self_, "self_") }.to_string())
 }
 
 /// Frees an owned uuid handle. Null is a no-op.
@@ -218,7 +219,7 @@ mod tests {
         unsafe {
             assert_eq!(kafka_common_Uuid_most_significant_bits(uuid), -2);
             assert_eq!(kafka_common_Uuid_least_significant_bits(uuid), 3);
-            assert_eq!(uuid_of(uuid), Uuid::new(u64::MAX - 1, 3));
+            assert_eq!(uuid_of(uuid, "uuid"), Uuid::new(u64::MAX - 1, 3));
             kafka_common_Uuid_destroy(uuid);
             kafka_common_Uuid_destroy(ptr::null_mut());
         }
@@ -237,7 +238,7 @@ mod tests {
             let text = kafka_common_Uuid_to_string(original);
             let parsed = kafka_common_Uuid_from_string(text, &mut error);
             assert!(error.is_null());
-            assert_eq!(uuid_of(parsed), uuid_of(original));
+            assert_eq!(uuid_of(parsed, "parsed"), uuid_of(original, "original"));
             assert_eq!(CStr::from_ptr(text).to_bytes().len(), 22);
             kafka_string_destroy(text);
             kafka_common_Uuid_destroy(parsed);
@@ -279,7 +280,7 @@ mod tests {
         // destroyed once, after `list_uuids` reads it.
         unsafe {
             assert_eq!(kafka_List_size(list), 2);
-            assert_eq!(list_uuids(list), ids.to_vec());
+            assert_eq!(list_uuids(list, "value"), ids.to_vec());
             kafka_List_destroy(list);
         }
     }

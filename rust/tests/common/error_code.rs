@@ -201,6 +201,7 @@ pub const PRODUCER_BUFFER_EXHAUSTED: i32 = -28;
 pub const BOOTSTRAP_RESOLUTION: i32 = -29;
 pub const LOCAL_CALLBACK: i32 = -30;
 pub const LOCAL_UNSUPPORTED_OPERATION: i32 = -31;
+pub const LOCAL_NULL_POINTER: i32 = -32;
 
 /// Rebuild the error class that owns the protocol error `code`, carrying
 /// `message` -- the table of `Errors::error_with_message` (Java's

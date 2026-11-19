@@ -19,12 +19,17 @@
 //! `security.protocol=SASL_SSL` + `sasl.*` + `ssl.*` configuration, mirroring
 //! the producer wiring proven by master PR #10.
 //!
-//! Tests:
-//! 1. `test_sasl_ssl_consume_records` — subscribe → produce → poll returns the
-//!    produced records over a TLS-encrypted, PLAIN-authenticated connection
-//!    on port 9097 (admin/admin-secret).
-//! 2. `test_sasl_ssl_wrong_credentials` — wrong SASL password surfaces as an
-//!    error (it must not hang), mirroring `ssl_sasl_test::test_sasl_wrong_credentials`.
+//! Test: `test_sasl_ssl_wrong_credentials` — wrong SASL password surfaces as
+//! an error (it must not hang), mirroring `ssl_sasl_test::test_sasl_wrong_credentials`.
+//! No shared scenario makes a wrong-credentials check over SASL_SSL
+//! (`client_authentication_failure_test` uses the SASL_PLAINTEXT listener).
+//!
+//! The successful-consumption test that was here (subscribe, produce five
+//! records `key i` / `value i` to partition 0, poll them back) is covered by
+//! the shared scenarios the SASL_SSL CI jobs run over this listener, for
+//! example `plaintext_consumer_test::test_async_consumer_pause_state_not_preserved_by_rebalance`,
+//! which subscribes, produces the same five records and verifies each one in
+//! order.
 //!
 //! Gated identically to the other `plaintext_consumer_*` / `ssl_sasl_test`
 //! suites via `tests/integration/main.rs`'s `#![cfg(feature = "integration-tests")]`.
@@ -33,28 +38,16 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::Duration;
-use std::time::Instant;
 
 use confluent_kafka::common::Error;
-use confluent_kafka::common::TopicPartition;
-use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
-use confluent_kafka::consumer::ConsumerRecord;
 use confluent_kafka::consumer::KafkaConsumer;
-use confluent_kafka::producer::KafkaProducer;
-use confluent_kafka::producer::Producer;
-use confluent_kafka::producer::ProducerConfig;
-use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::cluster_config::ClusterConfig;
-use crate::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
+use crate::common::kafka_cluster::SASL_USERNAME;
 use crate::common::test_context::TestContext;
-
-/// Type alias for the bytes-typed `Consumer` trait object returned by
-/// `KafkaConsumer::new::<Vec<u8>, Vec<u8>>`.
-type BytesConsumer = dyn confluent_kafka::consumer::DynConsumer<Vec<u8>, Vec<u8>>;
 
 /// Local byte-array deserializer (the crate exports `ByteArraySerializer` but
 /// no symmetric `ByteArrayDeserializer`); identical in behavior.
@@ -119,117 +112,6 @@ fn make_sasl_ssl_consumer_config(
         ("ssl.endpoint.identification.algorithm".to_string(), String::new()),
     ]);
     ConsumerConfig::new(&props).expect("invalid SASL_SSL consumer config")
-}
-
-/// Build a SASL_SSL `ProducerConfig` (PLAIN, acks=all) against port 9097.
-fn make_sasl_ssl_producer_config(bootstrap: &str, ca_cert_pem: &str) -> ProducerConfig {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap.to_string()),
-        ("client.id".to_string(), "sasl-ssl-test-producer".to_string()),
-        ("acks".to_string(), "all".to_string()),
-        ("max.block.ms".to_string(), "30000".to_string()),
-        ("linger.ms".to_string(), "5".to_string()),
-        ("security.protocol".to_string(), "SASL_SSL".to_string()),
-        ("sasl.mechanism".to_string(), "PLAIN".to_string()),
-        ("sasl.jaas.config".to_string(), plain_jaas_config(SASL_USERNAME, SASL_PASSWORD)),
-        ("ssl.truststore.certificates".to_string(), ca_cert_pem.to_string()),
-        ("ssl.endpoint.identification.algorithm".to_string(), String::new()),
-    ]);
-    ProducerConfig::new(&props).expect("invalid SASL_SSL producer config")
-}
-
-/// Produce `num_records` byte records to `tp` over SASL_SSL, then flush.
-async fn produce_records_sasl_ssl(bootstrap: &str, ca_cert_pem: &str, tp: &TopicPartition, num_records: usize) {
-    let producer: KafkaProducer<Vec<u8>, Vec<u8>> = KafkaProducer::new(
-        make_sasl_ssl_producer_config(bootstrap, ca_cert_pem),
-        ByteArraySerializer::default(),
-        ByteArraySerializer::default(),
-    )
-    .expect("Failed to build SASL_SSL test producer");
-
-    let mut last_future = None;
-    for i in 0..num_records {
-        let record: ProducerRecord<Vec<u8>, Vec<u8>> = ProducerRecord::with_partition_key(
-            tp.topic().to_string(),
-            Some(tp.partition()),
-            Some(format!("key {i}").into_bytes()),
-            Some(format!("value {i}").into_bytes()),
-        )
-        .expect("ProducerRecord::with_partition_key should not fail for a non-negative partition");
-        // Call the `Producer` trait `send` (1-arg) via fully-qualified syntax
-        // so the inherent zero-copy
-        // `KafkaProducer::<Vec<u8>,Vec<u8>>::send(record, callback)` does not
-        // shadow it.
-        last_future = Some(
-            <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
-                .await
-                .expect("SASL_SSL producer send should succeed"),
-        );
-    }
-    producer.flush().await.expect("producer.flush should succeed");
-    if let Some(f) = last_future {
-        f.get_with_timeout(Duration::from_secs(30))
-            .await
-            .expect("last send should succeed");
-    }
-    producer.close().await.expect("producer close should succeed");
-}
-
-/// Poll until `num_records` records are collected (or the deadline elapses).
-async fn consume_records(consumer: &mut BytesConsumer, num_records: usize) -> Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut collected: Vec<ConsumerRecord<Vec<u8>, Vec<u8>>> = Vec::with_capacity(num_records);
-    while collected.len() < num_records && Instant::now() < deadline {
-        let records = consumer
-            .poll(Duration::from_millis(100))
-            .await
-            .expect("poll should succeed over SASL_SSL");
-        for r in records {
-            collected.push(r);
-        }
-    }
-    collected
-}
-
-/// Test: SASL_SSL consumer subscribe → produce → poll returns records.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_sasl_ssl_consume_records() {
-    let mut ctx = TestContext::new(cluster_config_sasl_ssl_kip848()).await;
-    let bootstrap = ctx.sasl_ssl_bootstrap_servers().to_string();
-    let ca_cert_pem = ctx.ca_cert_pem().to_string();
-    let topic = ctx.topic("sasl_ssl_topic");
-    let group_id = ctx.group_id("sasl_ssl_group");
-    let tp = TopicPartition::new(topic.clone(), 0);
-
-    const NUM_RECORDS: usize = 5;
-    produce_records_sasl_ssl(&bootstrap, &ca_cert_pem, &tp, NUM_RECORDS).await;
-
-    let mut consumer = KafkaConsumer::<Vec<u8>, Vec<u8>>::new(
-        make_sasl_ssl_consumer_config(&bootstrap, &group_id, &ca_cert_pem, SASL_USERNAME, SASL_PASSWORD),
-        ByteArrayDeserializer,
-        ByteArrayDeserializer,
-    )
-    .expect("KafkaConsumer::new should succeed for SASL_SSL");
-
-    consumer
-        .subscribe_with_topics(vec![topic.clone()])
-        .await
-        .expect("subscribe should succeed");
-
-    let records = consume_records(&mut consumer, NUM_RECORDS).await;
-    assert_eq!(
-        records.len(),
-        NUM_RECORDS,
-        "expected {NUM_RECORDS} records over SASL_SSL, got {}",
-        records.len()
-    );
-    for (i, record) in records.iter().enumerate() {
-        assert_eq!(record.topic(), topic.as_str());
-        assert_eq!(record.key().map(|k| k.as_slice()), Some(format!("key {i}").as_bytes()));
-        assert_eq!(record.value().map(|v| v.as_slice()), Some(format!("value {i}").as_bytes()));
-    }
-
-    consumer.close().await.expect("consumer close should succeed");
 }
 
 /// Test: SASL_SSL consumer with wrong credentials surfaces an error (not a hang).

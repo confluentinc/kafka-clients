@@ -26,9 +26,10 @@
 //! [`BackendMode`] selects how a backend runs, via `MULTILANG_BACKEND_MODE`:
 //!
 //! - **`container`** (default on Linux) — a Docker container attached to the
-//!   broker's network, exposing a fixed internal port (50051 python / 50052 c)
-//!   that testcontainers maps to a **random** host port. The server reaches the
-//!   broker through its CONTAINER-family listener.
+//!   broker's network, exposing a fixed internal port (50051 python / 50052 c /
+//!   50053 dotnet and dotnet_async — separate containers) that testcontainers
+//!   maps to a **random** host port. The server reaches the broker through its
+//!   CONTAINER-family listener.
 //! - **`native`** (default on all other platforms, e.g. macOS) — the same gRPC
 //!   server run as a child process on the host, bound to an ephemeral port on
 //!   `127.0.0.1` that it reports on startup. The server connects to the broker
@@ -108,6 +109,16 @@ pub enum BackendKind {
     /// Distinct image from [`BackendKind::Python`]; see `Dockerfile.grpc.async`.
     PythonAsync,
     C,
+    /// The .NET binding's synchronous backend (consumer M8/P1, producer M12/P1, admin
+    /// M15/P12). The image serves `ConsumerService`, `ProducerService` and
+    /// `AdminService` (see `dotnet/Dockerfile.grpc`).
+    Dotnet,
+    /// The .NET binding's asynchronous `AsyncKafkaConsumer` backend (M8/P2). Distinct
+    /// image from [`BackendKind::Dotnet`] (see `dotnet/Dockerfile.grpc.async`),
+    /// which bakes `CONSUMER_FLAVOR=async`. Serves `ConsumerService`, `ProducerService`
+    /// (since the producer M12/P1 work) and `AdminService` (since M15/P14, over the
+    /// binding's `IAsyncAdmin`).
+    DotnetAsync,
 }
 
 impl BackendKind {
@@ -116,6 +127,8 @@ impl BackendKind {
             BackendKind::Python => "confluent-kafka-rust/python-grpc-server",
             BackendKind::PythonAsync => "confluent-kafka-rust/python-async-grpc-server",
             BackendKind::C => "confluent-kafka-rust/c-grpc-server",
+            BackendKind::Dotnet => "confluent-kafka-rust/dotnet-grpc-server",
+            BackendKind::DotnetAsync => "confluent-kafka-rust/dotnet-async-grpc-server",
         }
     }
 
@@ -128,6 +141,10 @@ impl BackendKind {
             BackendKind::Python => 50051,
             BackendKind::PythonAsync => 50051,
             BackendKind::C => 50052,
+            BackendKind::Dotnet => 50053,
+            // Mirror Python: the async .NET server binds the same 50053 as the sync one —
+            // they run in separate containers, so the internal ports don't collide.
+            BackendKind::DotnetAsync => 50053,
         }
     }
 
@@ -136,6 +153,8 @@ impl BackendKind {
             BackendKind::Python => "python",
             BackendKind::PythonAsync => "python_async",
             BackendKind::C => "c",
+            BackendKind::Dotnet => "dotnet",
+            BackendKind::DotnetAsync => "dotnet_async",
         }
     }
 
@@ -146,6 +165,13 @@ impl BackendKind {
     /// (`MULTILANG_PYTHON` overrides it); the generated gRPC stubs live under
     /// `target/grpc-native/python` and are put on `PYTHONPATH`. C runs the
     /// server binary built by CMake (`MULTILANG_C_GRPC_SERVER` overrides it).
+    /// .NET runs the server assembly with the `dotnet` host resolved through
+    /// `PATH` (`MULTILANG_DOTNET` overrides it); the assembly is the net10.0
+    /// build under `target/grpc-native/dotnet`, with the native library beside
+    /// it (`MULTILANG_DOTNET_GRPC_SERVER` overrides it). Both .NET kinds run the
+    /// same assembly, and `CONSUMER_FLAVOR` is set explicitly to pick the sync
+    /// or async servicers, so a value inherited from the test process cannot
+    /// change the flavor.
     fn native_command(self) -> (Command, &'static str) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         match self {
@@ -158,8 +184,8 @@ impl BackendKind {
                     _ => "grpc_server_async.py",
                 };
                 let stubs = root.join("target/grpc-native/python");
-                require_native_artifact(self, &python, "build-grpc-native-python");
-                require_native_artifact(self, &stubs.join("admin_service_pb2.py"), "build-grpc-native-python");
+                require_native_artifact(self, &python, "-C python grpc-native");
+                require_native_artifact(self, &stubs.join("admin_service_pb2.py"), "-C python grpc-native");
 
                 let mut python_path = std::ffi::OsString::from(stubs);
                 if let Some(existing) = std::env::var_os("PYTHONPATH") {
@@ -168,14 +194,30 @@ impl BackendKind {
                 }
                 let mut command = Command::new(python);
                 command.arg(root.join("../python").join(script)).env("PYTHONPATH", python_path);
-                (command, "build-grpc-native-python")
+                (command, "-C python grpc-native")
             },
             BackendKind::C => {
                 let server = std::env::var_os("MULTILANG_C_GRPC_SERVER")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| root.join("target/grpc-native/c/kafka_grpc_server"));
-                require_native_artifact(self, &server, "build-grpc-native-c");
-                (Command::new(server), "build-grpc-native-c")
+                require_native_artifact(self, &server, "-C c grpc-native");
+                (Command::new(server), "-C c grpc-native")
+            },
+            BackendKind::Dotnet | BackendKind::DotnetAsync => {
+                let dotnet = std::env::var_os("MULTILANG_DOTNET")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("dotnet"));
+                let server = std::env::var_os("MULTILANG_DOTNET_GRPC_SERVER")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| root.join("target/grpc-native/dotnet/Confluent.Kafka.GrpcServer.dll"));
+                require_native_artifact(self, &server, "-C dotnet grpc-native");
+                let flavor = match self {
+                    BackendKind::DotnetAsync => "async",
+                    _ => "sync",
+                };
+                let mut command = Command::new(dotnet);
+                command.arg(server).env("CONSUMER_FLAVOR", flavor);
+                (command, "-C dotnet grpc-native")
             },
         }
     }
@@ -266,12 +308,15 @@ impl BackendHandle {
         self.connect(Some(Duration::from_secs(30))).await
     }
 
-    /// Like [`Self::channel`], but with no per-request timeout, for the
-    /// long-lived server-streaming calls of the chaos harness's
-    /// `ChaosWorkloadService`: a workload's stream stays open for the whole
-    /// run, and may go quiet for longer than 30 s while the brokers are down
-    /// (a server sends the response headers only with its first event).
-    pub async fn streaming_channel(&self) -> Channel {
+    /// Like [`Self::channel`], but with no per-request timeout, for calls that
+    /// may legitimately outlast 30 s:
+    /// - the long-lived server-streaming calls of the chaos harness's
+    ///   `ChaosWorkloadService`: a workload's stream stays open for the whole
+    ///   run, and may go quiet for longer than 30 s while the brokers are down
+    ///   (a server sends the response headers only with its first event);
+    /// - the producer's blocking RPCs (`MultilanguageProducer`), which set a
+    ///   deadline of their own, derived from the producer's config.
+    pub async fn untimed_channel(&self) -> Channel {
         self.connect(None).await
     }
 
@@ -404,11 +449,22 @@ pub async fn get_or_start(kind: BackendKind, broker_network: &str) -> Arc<Backen
     .clone()
 }
 
+/// The tag of the gRPC images, `MULTILANG_IMAGE_TAG`, `dev` when unset: the
+/// tag `make build-grpc-images` built them under (see the root Makefile), so
+/// each worktree can run its own images.
+fn image_tag() -> String {
+    std::env::var("MULTILANG_IMAGE_TAG")
+        .ok()
+        .filter(|tag| !tag.is_empty())
+        .unwrap_or_else(|| "dev".to_string())
+}
+
 async fn start_container(kind: BackendKind, broker_network: String) -> BackendHandle {
     let internal_port: u16 = kind.internal_port();
     let internal: ContainerPort = internal_port.tcp();
 
-    let image = GenericImage::new(kind.image_repository(), "dev")
+    let tag = image_tag();
+    let image = GenericImage::new(kind.image_repository(), tag.as_str())
         .with_exposed_port(internal)
         .with_wait_for(WaitFor::message_on_stderr("listening"))
         // Join the broker's user-defined bridge network so the gRPC
@@ -418,8 +474,8 @@ async fn start_container(kind: BackendKind, broker_network: String) -> BackendHa
 
     let container = image.start().await.unwrap_or_else(|e| {
         panic!(
-            "failed to start {} gRPC backend container (image {}:dev) on network {}: {e}\n\
-             Build it with `make build-grpc-images`.",
+            "failed to start {} gRPC backend container (image {}:{tag}) on network {}: {e}\n\
+             Build it with `MULTILANG_IMAGE_TAG={tag} make build-grpc-images`.",
             kind.label(),
             kind.image_repository(),
             broker_network,
@@ -673,6 +729,35 @@ pub fn take_and_remove_handles_on_network(broker_network: &str) -> usize {
         handle.terminate();
     }
     removed.len()
+}
+
+/// [`take_and_remove_handles_on_network`] for a caller that may not be on a
+/// runtime: de-pools every backend attached to `broker_network`, stops it, and
+/// leaks its handle instead of dropping it, so no `ContainerAsync::drop` runs.
+/// Returns how many were stopped.
+///
+/// Called by a dedicated cluster's teardown, which runs in
+/// [`super::test_context::TestContext`]'s `Drop`, possibly while unwinding out of
+/// `#[tokio::test]`'s `block_on`, where that `Drop` could find no runtime (the
+/// cluster's own containers are leaked the same way). The backend container is
+/// a child of the dedicated cluster's network, so without this the network
+/// cannot be removed and leaks. A later test on another network starts a fresh
+/// backend, as the entry is gone.
+pub fn stop_and_forget_handles_on_network(broker_network: &str) -> usize {
+    let removed: Vec<BackendCell> = {
+        let mut pool = BACKEND_POOL.lock().expect("backend pool lock poisoned");
+        let keys: Vec<(BackendKind, String)> =
+            pool.keys().filter(|(_, network)| network == broker_network).cloned().collect();
+        keys.into_iter().filter_map(|key| pool.remove(&key)).collect()
+    };
+    let count = removed.len();
+    for cell in removed {
+        if let Some(handle) = cell.get() {
+            handle.terminate();
+        }
+        std::mem::forget(cell);
+    }
+    count
 }
 
 /// Stop every backend in the pool (`docker rm -f` a container, kill a native

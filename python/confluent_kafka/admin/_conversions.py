@@ -55,6 +55,7 @@ from confluent_kafka.common.kafka_future import (
 )
 
 if TYPE_CHECKING:
+    from confluent_kafka.admin.abstract_options import AbstractOptions
     from confluent_kafka.admin._internals import (
         _CoordinatorKey,
         _DescribeUserScramCredentialsResponseData,
@@ -291,7 +292,11 @@ __all__ = [
     "any_topic_name",
     "element",
     "non_null",
+    "after_options",
+    "optional_list",
+    "setters",
     "options_or_new",
+    "options_or_null",
 ]
 
 _T = TypeVar("_T")
@@ -322,14 +327,22 @@ def element(value: _T | None, name: str) -> _T:
     return value
 
 
-def check_keys(mapping: Mapping[Any, Any], name: str) -> None:
+def check_keys(mapping: Mapping[Any, Any] | None, name: str) -> None:
     """Java's dereference of each key of ``mapping`` in the method's own loop,
     before it reads ``options`` (``nodeFor(resource)``, ``replica.brokerId()``,
     ``Collectors.toUnmodifiableMap``'s null-key check): ``element`` on each key.
     The values Java reads only on the admin thread are checked after ``options``,
-    in the ``*_args`` conversion."""
+    in the ``*_args`` conversion. A ``None`` mapping is left to the C API."""
+    if mapping is None:
+        return
     for key in mapping:
         element(key, name)
+
+
+def optional_list(values: Iterable[_T] | None) -> list[_T] | None:
+    """``values`` as a list, ``None`` (Java's ``null``, which the C API reports)
+    kept."""
+    return None if values is None else list(values)
 
 
 def present(values: Iterable[Any], name: str) -> list[Any]:
@@ -348,14 +361,11 @@ _O = TypeVar("_O")
 
 
 def options_or_new(options: _O | None, factory: Callable[[], _O], *, read: bool = True) -> _O:
-    """An RPC's ``options``: left out (``MISSING``), Java's short form, which passes
-    ``new XxxOptions()``; an explicit ``None`` is Java's ``null``, which
-    ``KafkaAdminClient`` dereferences (``options.timeoutMs()``):
-    ``TypeError("options must not be None")``. The caller runs it where Java reads
-    ``options``, after Java's own loop over the arguments; ``read`` is ``False`` when
-    Java's body returns before reading it (an empty input, every input failed
-    early): then a ``None`` is accepted and a new options object, which the core does
-    not read either, goes to the FFI."""
+    """A mock's ``options``: left out (``MISSING``), Java's short form, which passes
+    ``new XxxOptions()``; an explicit ``None`` is Java's ``null``, which the mock
+    dereferences: ``TypeError("options must not be None")``. ``read`` is ``False``
+    when Java's body returns before reading it: then a ``None`` gives a new options
+    object, which is not read either."""
     if options is MISSING:
         return factory()
     if options is None:
@@ -363,6 +373,46 @@ def options_or_new(options: _O | None, factory: Callable[[], _O], *, read: bool 
             return factory()
         raise TypeError("options must not be None")
     return options
+
+
+def options_or_null(options: _O | None, factory: Callable[[], _O], *, read: bool = True,
+                    before: tuple[object, ...] = ()) -> _O | None:
+    """An FFI-backed RPC's ``options``: left out (``MISSING``), Java's short form,
+    which passes ``new XxxOptions()``; an explicit ``None`` is Java's ``null``, which
+    crosses to the C API as NULL, so the C API reports Java's dereference
+    (``options.timeoutMs()``) as ``TypeError("options must not be None")``. ``read``
+    is ``False`` when Java's body returns before reading it (an empty input, every
+    input failed early): then a ``None`` gives a new options object, which the core
+    does not read either. ``before`` holds the arguments Java reads only after
+    ``options`` while the C entry point checks them first: a ``None`` among them with
+    a ``None`` options raises the options' ``TypeError`` here, in Java's order."""
+    if options is MISSING:
+        return factory()
+    if options is None:
+        if not read:
+            return factory()
+        if any(value is None for value in before):
+            raise TypeError("options must not be None")
+    return options
+
+
+def after_options(options: object, convert: Callable[..., _T], *args: Any) -> _T:
+    """``convert(*args)``, the checks Java makes only after it has read ``options``
+    (a ``None`` element read on a later path, an op's fields): with Java's ``null``
+    options, a failing check gives way to the options' ``TypeError("options must
+    not be None")``, as Java's dereference of ``options`` comes first."""
+    try:
+        return convert(*args)
+    except (TypeError, ValueError):  # ValueError: IllegalArgumentError
+        if options is None:
+            raise TypeError("options must not be None") from None
+        raise
+
+
+def setters(options: AbstractOptions | None) -> list[tuple[str, Any]] | None:
+    """The setters ``options`` ran, for the extension's options builder, or ``None``
+    for Java's ``null`` options, which the extension passes to the FFI as NULL."""
+    return None if options is None else options._setters_ran()
 
 
 def any_topic_name(names: Iterable[Any]) -> bool:
@@ -484,13 +534,15 @@ def topic_partition_from_tuple(raw: tuple[str, int]) -> TopicPartition:
 # ---- the RPCs, in Java declaration order ------------------------------------
 
 
-def create_topics_args(new_topics: Iterable[NewTopic]) -> tuple[Any, ...]:
+def create_topics_args(new_topics: Iterable[NewTopic] | None) -> tuple[Any, ...]:
     """``Admin_create_topics(h, spec, options)``'s arguments: each ``NewTopic`` as
     ``(name, num_partitions, replication_factor, configs, assignments)``, the
     counts ``-1`` for Java's empty ``Optional``, the configs and assignments
     ``None`` when not set (``NewTopic(name, replicasAssignments)`` when the
     assignments are set, else ``NewTopic(name, numPartitions,
     replicationFactor)``)."""
+    if new_topics is None:  # Java's null: the C API reports it
+        return (None,)
     spec = []
     for topic in new_topics:
         element(topic, "new_topics")  # newTopic.name()
@@ -734,30 +786,38 @@ DESCRIBE_TOPIC_NAME_COLLECTION = 1
 DESCRIBE_TOPIC_ID_COLLECTION = 2
 
 
-def describe_topic_names(topic_names: Iterable[str]) -> list[str]:
+def describe_topic_names(topic_names: Iterable[str] | None) -> list[str] | None:
     """``describeTopics(Collection<String> topicNames)``'s names as a list; a ``str``
     is refused (``reject_str``)."""
+    if topic_names is None:  # Java's null: the C API reports it
+        return None
     reject_str("topic_names", topic_names)
     return present(topic_names, "topic_names")  # see topic_collection_target
 
 
-def group_ids_list(group_ids: Iterable[str]) -> list[str]:
+def group_ids_list(group_ids: Iterable[str] | None) -> list[str] | None:
     """A ``Collection<String> groupIds`` as a list; a ``str`` is refused
     (``reject_str``)."""
+    if group_ids is None:  # Java's null: the C API reports it
+        return None
     reject_str("group_ids", group_ids)
     return present(group_ids, "group_ids")
 
 
-def transactional_ids_list(transactional_ids: Iterable[str]) -> list[str]:
+def transactional_ids_list(transactional_ids: Iterable[str] | None) -> list[str] | None:
     """A ``Collection<String> transactionalIds`` as a list; a ``str`` is refused
     (``reject_str``)."""
+    if transactional_ids is None:  # Java's null: the C API reports it
+        return None
     reject_str("transactional_ids", transactional_ids)
     return present(transactional_ids, "transactional_ids")
 
 
-def describe_topics_args(form: int, keys: list[Any]) -> tuple[Any, ...]:
+def describe_topics_args(form: int, keys: list[Any] | None) -> tuple[Any, ...]:
     """``Admin_describe_topics(h, form, names_or_ids, options)``'s arguments, the ids
     as Java's ``Uuid.toString()``."""
+    if keys is None:  # Java's null: the C API reports it
+        return (form, None)
     targets = [str(key) for key in keys] if form == DESCRIBE_TOPIC_ID_COLLECTION else keys
     return (form, targets)
 
@@ -892,9 +952,11 @@ def describe_acls_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoo
     return DescribeAclsResult._new(future=future, kind=kind)
 
 
-def create_acls_args(acls: Iterable[AclBinding]) -> tuple[Any, ...]:
+def create_acls_args(acls: Iterable[AclBinding] | None) -> tuple[Any, ...]:
     """``Admin_create_acls(h, acls, options)``'s plain arguments: each binding as
     ``_acl_binding_args``' seven-tuple."""
+    if acls is None:  # Java's null: the C API reports it
+        return (None,)
     return ([_acl_binding_args(element(acl, "acls")) for acl in acls],)
 
 
@@ -909,9 +971,11 @@ def create_acls_result(native: Any, kind: Kind, loop: asyncio.AbstractEventLoop 
     return CreateAclsResult._new(futures=futures, kind=kind)
 
 
-def delete_acls_args(filters: Iterable[AclBindingFilter]) -> tuple[Any, ...]:
+def delete_acls_args(filters: Iterable[AclBindingFilter] | None) -> tuple[Any, ...]:
     """``Admin_delete_acls(h, filters, options)``'s plain arguments: each filter as
     ``_acl_binding_filter_args``' seven-tuple."""
+    if filters is None:  # Java's null: the C API reports it
+        return (None,)
     return ([_acl_binding_filter_args(element(f, "filters")) for f in filters],)
 
 
@@ -995,12 +1059,14 @@ def describe_configs_result(native: Any, kind: Kind, loop: asyncio.AbstractEvent
     return DescribeConfigsResult._new(futures=futures, kind=kind)
 
 
-def incremental_alter_configs_args(configs: Mapping[ConfigResource, Iterable[AlterConfigOp]]
+def incremental_alter_configs_args(configs: Mapping[ConfigResource, Iterable[AlterConfigOp]] | None
                                    ) -> tuple[Any, ...]:
     """``Admin_incremental_alter_configs(h, rows, options)``'s arguments: one row per
     resource, ``(Type.id(), name, [(configEntry().name(), value() or None,
     opType().id())])``, a resource with no op included (Java sends it with an empty
     config list)."""
+    if configs is None:  # Java's null: the C API reports it
+        return (None,)
     spec = []
     for resource, ops in configs.items():
         element(resource, "configs")  # nodeFor(resource): resource.type()
@@ -1032,10 +1098,12 @@ def replica_from_tuple(raw: tuple[str, int, int]) -> TopicPartitionReplica:
     return TopicPartitionReplica(topic=topic, partition=partition, broker_id=broker_id)
 
 
-def alter_replica_log_dirs_args(replica_assignment: Mapping[TopicPartitionReplica, str]
+def alter_replica_log_dirs_args(replica_assignment: Mapping[TopicPartitionReplica, str] | None
                                 ) -> tuple[Any, ...]:
     """``Admin_alter_replica_log_dirs(h, rows, options)``'s arguments: each entry as
     ``(topic, partition, broker_id, log_dir)``."""
+    if replica_assignment is None:  # Java's null: the C API reports it
+        return (None,)
     return ([(element(replica, "replica_assignment").topic(), replica.partition(),
               replica.broker_id(), element(log_dir, "replica_assignment"))
              for replica, log_dir in replica_assignment.items()],)
@@ -1052,10 +1120,12 @@ def alter_replica_log_dirs_result(native: Any, kind: Kind,
     return AlterReplicaLogDirsResult._new(futures=futures, kind=kind)
 
 
-def describe_log_dirs_args(brokers: list[int]) -> tuple[Any, ...]:
+def describe_log_dirs_args(brokers: list[int] | None) -> tuple[Any, ...]:
     """``Admin_describe_log_dirs(h, brokers, options)``'s arguments; a ``None``
     broker is Java's unboxing ``new ConstantNodeIdProvider(brokerId)``:
     ``NullPointerException``."""
+    if brokers is None:  # Java's null: the C API reports it
+        return (None,)
     return ([element(broker, "brokers") for broker in brokers],)
 
 
@@ -1095,9 +1165,11 @@ def describe_log_dirs_result(native: Any, kind: Kind, loop: asyncio.AbstractEven
     return DescribeLogDirsResult._new(futures=futures, kind=kind)
 
 
-def describe_replica_log_dirs_args(replicas: list[TopicPartitionReplica]) -> tuple[Any, ...]:
+def describe_replica_log_dirs_args(replicas: list[TopicPartitionReplica] | None) -> tuple[Any, ...]:
     """``Admin_describe_replica_log_dirs(h, replicas, options)``'s arguments: each
     replica as ``(topic, partition, broker_id)``."""
+    if replicas is None:  # Java's null: the C API reports it
+        return (None,)
     return ([(element(replica, "replicas").topic(), replica.partition(), replica.broker_id())
              for replica in replicas],)
 
@@ -1130,10 +1202,12 @@ def describe_replica_log_dirs_result(native: Any, kind: Kind,
     return DescribeReplicaLogDirsResult._new(futures=futures, kind=kind)
 
 
-def create_partitions_args(new_partitions: Mapping[str, NewPartitions]) -> tuple[Any, ...]:
+def create_partitions_args(new_partitions: Mapping[str, NewPartitions] | None) -> tuple[Any, ...]:
     """``Admin_create_partitions(h, rows, options)``'s arguments: each entry as
     ``(topic, totalCount(), assignments() or None)`` (``None`` is Java's
     ``increaseTo(int)``, an empty list ``increaseTo(int, List.of())``)."""
+    if new_partitions is None:  # Java's null: the C API reports it
+        return (None,)
     rows = []
     for topic, partitions in new_partitions.items():
         total = element(partitions, "new_partitions").total_count()
@@ -1156,10 +1230,12 @@ def create_partitions_result(native: Any, kind: Kind, loop: asyncio.AbstractEven
                                        kind=kind)
 
 
-def delete_records_args(records_to_delete: Mapping[TopicPartition, RecordsToDelete]
+def delete_records_args(records_to_delete: Mapping[TopicPartition, RecordsToDelete] | None
                         ) -> tuple[Any, ...]:
     """``Admin_delete_records(h, rows, options)``'s arguments: each entry as
     ``(topic, partition, beforeOffset())``."""
+    if records_to_delete is None:  # Java's null: the C API reports it
+        return (None,)
     return ([(element(partition, "records_to_delete").topic(), partition.partition(),
               element(records, "records_to_delete").before_offset())
              for partition, records in records_to_delete.items()],)
@@ -1217,14 +1293,16 @@ def _to_delegation_token(raw: tuple[Any, ...]) -> DelegationToken:
     return DelegationToken(token_information=info, hmac=hmac)
 
 
-def create_delegation_token_options(options: CreateDelegationTokenOptions
-                                    ) -> list[tuple[str, Any]]:
+def create_delegation_token_options(options: CreateDelegationTokenOptions | None
+                                    ) -> list[tuple[str, Any]] | None:
     """The ``(setter, value)`` pairs of a ``CreateDelegationTokenOptions``: the
     renewers as ``(principal_type, name)`` pairs and the owner as one (``None`` for
     none), read back from the options' own getters. A ``None`` renewers, which the
     setter stores as Java's does, raises where Java iterates it
     (``KafkaAdminClient.createDelegationToken``: ``for (KafkaPrincipal principal :
     options.renewers())``)."""
+    if options is None:  # Java's null: the C API reports it
+        return None
     renewers = options.renewers()
     if renewers is None:
         raise TypeError("CreateDelegationTokenOptions.renewers must not be None")
@@ -1279,11 +1357,13 @@ def expire_delegation_token_result(native: Any, kind: Kind,
     return ExpireDelegationTokenResult._new(expiry_timestamp=future, kind=kind)
 
 
-def describe_delegation_token_options(options: DescribeDelegationTokenOptions
-                                      ) -> list[tuple[str, Any]]:
+def describe_delegation_token_options(options: DescribeDelegationTokenOptions | None
+                                      ) -> list[tuple[str, Any]] | None:
     """The ``(setter, value)`` pairs of a ``DescribeDelegationTokenOptions``: the
     owners as ``(principal_type, name)`` pairs, ``None`` for Java's ``null`` (every
     owner), read back from the options' own getter."""
+    if options is None:  # Java's null: the C API reports it
+        return None
     def owners() -> list[tuple[str, str]] | None:
         stored = options.owners()
         return None if stored is None else [_principal_args(p) for p in stored]
@@ -1378,14 +1458,15 @@ def describe_consumer_groups_result(native: Any, kind: Kind,
 def list_consumer_group_offsets_args(
         group_id: str | None,
         group_specs: Mapping[str, ListConsumerGroupOffsetsSpec] | None) -> tuple[Any, ...]:
-    """``Admin_list_consumer_group_offsets(h, group_id, group_specs, options)``'s
-    inputs: the group id of Java's ``(groupId, options)`` form, or each entry of its
-    ``(groupSpecs, options)`` form as ``(group_id, [(topic, partition), ...])``,
-    ``None`` partitions for Java's ``topicPartitions() == null`` (every partition of
-    the group)."""
+    """``Admin_list_consumer_group_offsets(h, specs_form, group_id, group_specs,
+    options)``'s inputs: whether the call is Java's ``(groupSpecs, options)`` form,
+    the group id of its ``(groupId, options)`` form, or each entry of the specs form
+    as ``(group_id, [(topic, partition), ...])``, ``None`` partitions for Java's
+    ``topicPartitions() == null`` (every partition of the group)."""
     if group_specs is MISSING:  # the (groupId, options) form
-        return (group_id, None)
-    assert group_specs is not None  # the caller's non_null
+        return (False, group_id, None)
+    if group_specs is None:  # Java's null: the C API reports it
+        return (True, None, None)
     rows = []
     for spec_group_id, spec in group_specs.items():
         if spec_group_id is None:  # a later-path null: CoordinatorStrategy's group id
@@ -1395,7 +1476,7 @@ def list_consumer_group_offsets_args(
         partitions = spec.topic_partitions()
         rows.append((spec_group_id, None if partitions is None
                      else [(tp.topic(), tp.partition()) for tp in partitions]))
-    return (None, rows)
+    return (True, None, rows)
 
 
 def _group_offsets(raw: Mapping[tuple[str, int], tuple[int, str, int | None] | None]
@@ -1481,10 +1562,12 @@ def outcomes(kind: Kind, loop: asyncio.AbstractEventLoop | None,
     return KafkaFuture._of_impl(impl)
 
 
-def delete_consumer_group_offsets_args(group_id: str, partitions: Iterable[TopicPartition]
+def delete_consumer_group_offsets_args(group_id: str, partitions: Iterable[TopicPartition] | None
                                        ) -> tuple[Any, ...]:
     """``Admin_delete_consumer_group_offsets(h, group_id, partitions, options)``'s
     inputs: each partition as ``(topic, partition)``."""
+    if partitions is None:  # Java's null: the C API reports it
+        return (group_id, None)
     return (group_id, [(element(tp, "partitions").topic(), tp.partition())
                        for tp in partitions])
 
@@ -1512,11 +1595,13 @@ def delete_consumer_group_offsets_result(partitions: Iterable[TopicPartition], n
     return DeleteConsumerGroupOffsetsResult._new(future=future, partitions=requested, kind=kind)
 
 
-def list_groups_options(options: Any) -> list[tuple[str, Any]]:
+def list_groups_options(options: Any) -> list[tuple[str, Any]] | None:
     """The ``(setter, value)`` pairs of a ``ListGroupsOptions``: the set filters as
     their stored sets (the copies Java's setters store), each ``GroupState`` /
     ``GroupType`` as its ``toString()`` name, which the extension parses back
     (``GroupState.parse``, ``GroupType.parse``)."""
+    if options is None:  # Java's null: the C API reports it
+        return None
     stored: dict[str, Callable[[], list[str]]] = {
         "in_group_states": lambda: [str(state) for state in options.group_states()],
         "with_types": lambda: [str(group_type) for group_type in options.types()],
@@ -1568,12 +1653,13 @@ def partitions_spec(partitions: Iterable[TopicPartition]) -> list[tuple[str, int
             for partition in partitions]
 
 
-def elect_leaders_args(election_type: ElectionType, partitions: Iterable[TopicPartition] | None
-                       ) -> tuple[Any, ...]:
+def elect_leaders_args(election_type: ElectionType | None,
+                       partitions: Iterable[TopicPartition] | None) -> tuple[Any, ...]:
     """``Admin_elect_leaders(h, election_type, partitions, options)``'s arguments:
-    ``ElectionType.value``; Java's ``null`` partitions (every partition) as
-    ``None``."""
-    return (election_type.value, None if partitions is None else partitions_spec(partitions))
+    ``ElectionType.value``, ``None`` for Java's ``null``, which the C API reports;
+    Java's ``null`` partitions (every partition) as ``None``."""
+    return (None if election_type is None else election_type.value,
+            None if partitions is None else partitions_spec(partitions))
 
 
 def _elections(rows: Mapping[tuple[str, int], Any]
@@ -1604,11 +1690,13 @@ def _reassignment_key(partition: TopicPartition | None) -> TopicPartition:
 
 
 def alter_partition_reassignments_args(
-        reassignments: Mapping[TopicPartition, NewPartitionReassignment | None]
+        reassignments: Mapping[TopicPartition, NewPartitionReassignment | None] | None
 ) -> tuple[Any, ...]:
     """``Admin_alter_partition_reassignments(h, rows, options)``'s arguments: each
     entry as ``(topic, partition, targetReplicas())``, ``None`` for Java's
     ``Optional.empty()`` (cancel the reassignment)."""
+    if reassignments is None:  # Java's null: the C API reports it
+        return (None,)
     return ([(_reassignment_key(partition).topic(), partition.partition(),
               None if reassignment is None else list(reassignment.target_replicas()))
              for partition, reassignment in reassignments.items()],)
@@ -1661,12 +1749,14 @@ def list_partition_reassignments_result(native: Any, kind: Kind,
 
 
 def remove_members_from_consumer_group_args(group_id: str,
-                                            options: RemoveMembersFromConsumerGroupOptions
+                                            options: RemoveMembersFromConsumerGroupOptions | None
                                             ) -> tuple[Any, ...]:
     """``Admin_remove_members_from_consumer_group(h, group_id, members, options)``'s
     inputs: the members' group instance ids (Java's ``MemberToRemove`` holds nothing
     else), ``None`` in ``removeAll`` mode (Java's ``new
     RemoveMembersFromConsumerGroupOptions()``)."""
+    if options is None:  # Java's null: the C API reports it
+        return (group_id, None)
     if options.remove_all():
         return (group_id, None)
     return (group_id, [member.group_instance_id() for member in options.members()])
@@ -1693,11 +1783,13 @@ def remove_members_from_consumer_group_result(
 
 
 def alter_consumer_group_offsets_args(group_id: str,
-                                      offsets: Mapping[TopicPartition, OffsetAndMetadata]
+                                      offsets: Mapping[TopicPartition, OffsetAndMetadata] | None
                                       ) -> tuple[Any, ...]:
     """``Admin_alter_consumer_group_offsets(h, group_id, offsets, options)``'s inputs:
     each entry as ``(topic, partition, offset, metadata, leader_epoch)``, ``-1`` for
     an absent leader epoch."""
+    if offsets is None:  # Java's null: the C API reports it
+        return (group_id, None)
     rows = []
     for tp, offset_and_metadata in offsets.items():
         element(tp, "offsets")
@@ -1750,13 +1842,15 @@ def offset_spec_value(spec: OffsetSpec) -> tuple[bool, int]:
     return False, -1  # ListOffsetsRequest.LATEST_TIMESTAMP
 
 
-def list_offsets_args(topic_partition_offsets: Mapping[TopicPartition, OffsetSpec]
+def list_offsets_args(topic_partition_offsets: Mapping[TopicPartition, OffsetSpec] | None
                       ) -> tuple[Any, ...]:
     """``Admin_list_offsets(h, rows, isolation_level, options)``'s first argument:
     each entry as ``(topic, partition, is_timestamp, value)``. The caller adds the
     options' ``isolationLevel().id()`` once it has read ``options``, after these
     rows, as Java builds its offset queries before ``new ListOffsetsHandler(…,
     options, …)``."""
+    if topic_partition_offsets is None:  # Java's null: the C API reports it
+        return (None,)
     spec = [(element(partition, "topic_partition_offsets").topic(), partition.partition(),
              *offset_spec_value(offset_spec))
             for partition, offset_spec in topic_partition_offsets.items()]
@@ -1843,10 +1937,12 @@ def describe_client_quotas_result(native: Any, kind: Kind,
     return DescribeClientQuotasResult._new(entities=future, kind=kind)
 
 
-def alter_client_quotas_args(entries: Iterable[ClientQuotaAlteration]) -> tuple[Any, ...]:
+def alter_client_quotas_args(entries: Iterable[ClientQuotaAlteration] | None) -> tuple[Any, ...]:
     """``Admin_alter_client_quotas(h, entries, options)``'s plain arguments: each
     alteration as ``(entity, ops)``, the entity's ``(type, name or None)`` pairs and
     the ops' ``(key, value or None)``, ``None`` removing the quota."""
+    if entries is None:  # Java's null: the C API reports it
+        return (None,)
     rows = []
     for entry in entries:
         # Java's AlterClientQuotasRequest.Builder dereferences, in this order, the
@@ -1955,9 +2051,11 @@ def _scram_alteration_row(alteration: UserScramCredentialAlteration) -> tuple[An
             upsertion.password(), upsertion.salt())
 
 
-def alter_user_scram_credentials_args(alterations: Iterable[UserScramCredentialAlteration]
+def alter_user_scram_credentials_args(alterations: Iterable[UserScramCredentialAlteration] | None
                                       ) -> tuple[Any, ...]:
     """``Admin_alter_user_scram_credentials(h, rows, options)``'s plain arguments."""
+    if alterations is None:  # Java's null: the C API reports it
+        return (None,)
     return ([_scram_alteration_row(element(a, "alterations")) for a in alterations],)
 
 
@@ -2005,9 +2103,11 @@ def describe_features_result(native: Any, kind: Kind, loop: asyncio.AbstractEven
     return DescribeFeaturesResult._new(future=future, kind=kind)
 
 
-def update_features_args(feature_updates: Mapping[str, FeatureUpdate]) -> tuple[Any, ...]:
+def update_features_args(feature_updates: Mapping[str, FeatureUpdate] | None) -> tuple[Any, ...]:
     """``Admin_update_features(h, rows, options)``'s plain arguments: each entry as
     ``(feature, max_version_level, upgrade_type code)``."""
+    if feature_updates is None:  # Java's null: the C API reports it
+        return (None,)
     rows = [(feature, element(update, "feature_updates").max_version_level(),
              update.upgrade_type().code())
             for feature, update in feature_updates.items()]
@@ -2028,10 +2128,12 @@ def update_features_result(native: Any, kind: Kind, loop: asyncio.AbstractEventL
     return UpdateFeaturesResult._new(futures=futures, kind=kind)
 
 
-def describe_producers_args(partitions: Iterable[TopicPartition]) -> tuple[Any, ...]:
+def describe_producers_args(partitions: Iterable[TopicPartition] | None) -> tuple[Any, ...]:
     """``Admin_describe_producers(h, partitions, options)``'s plain arguments: each
     distinct partition as ``(topic, partition)`` (Java's ``Collection`` becomes the
     handler's key set)."""
+    if partitions is None:  # Java's null: the C API reports it
+        return (None,)
     return ([(element(tp, "partitions").topic(), tp.partition())
              for tp in dict.fromkeys(partitions)],)
 
@@ -2074,9 +2176,11 @@ def _transactional_id_key(transactional_id: str) -> _CoordinatorKey:
     return _CoordinatorKey.by_transactional_id(transactional_id=transactional_id)
 
 
-def describe_transactions_args(transactional_ids: Iterable[str]) -> tuple[Any, ...]:
+def describe_transactions_args(transactional_ids: Iterable[str] | None) -> tuple[Any, ...]:
     """``Admin_describe_transactions(h, transactional_ids, options)``'s plain
     arguments; a ``str`` is refused (``reject_str``)."""
+    if transactional_ids is None:  # Java's null: the C API reports it
+        return (None,)
     reject_str("transactional_ids", transactional_ids)
     return (list(dict.fromkeys(transactional_ids)),)
 
@@ -2134,11 +2238,13 @@ def abort_transaction_result(native: Any, kind: Kind, loop: asyncio.AbstractEven
         futures={spec.topic_partition(): wrap(kind, loop, native.future("all"))}, kind=kind)
 
 
-def list_transactions_options(options: ListTransactionsOptions) -> list[tuple[str, Any]]:
+def list_transactions_options(options: ListTransactionsOptions | None) -> list[tuple[str, Any]] | None:
     """The ``(setter, value)`` pairs of a ``ListTransactionsOptions``: the filters as
     their stored sets (the copies Java's setters store), each ``TransactionState`` as
     its ``toString()`` name, which the extension parses back
     (``TransactionState.parse``)."""
+    if options is None:  # Java's null: the C API reports it
+        return None
     stored: dict[str, Callable[[], Any]] = {
         "filter_states": lambda: [str(state) for state in options.filtered_states()],
         "filter_producer_ids": lambda: list(options.filtered_producer_ids())}
@@ -2175,9 +2281,11 @@ def list_transactions_result(native: Any, kind: Kind, loop: asyncio.AbstractEven
     return ListTransactionsResult._new(future=future, kind=kind)
 
 
-def fence_producers_args(transactional_ids: Iterable[str]) -> tuple[Any, ...]:
+def fence_producers_args(transactional_ids: Iterable[str] | None) -> tuple[Any, ...]:
     """``Admin_fence_producers(h, transactional_ids, options)``'s plain arguments;
     a ``str`` is refused (``reject_str``)."""
+    if transactional_ids is None:  # Java's null: the C API reports it
+        return (None,)
     reject_str("transactional_ids", transactional_ids)
     return (list(dict.fromkeys(transactional_ids)),)
 
@@ -2219,10 +2327,12 @@ def fence_producers_result(native: Any, kind: Kind, loop: asyncio.AbstractEventL
     return FenceProducersResult._new(futures=futures, kind=kind)
 
 
-def list_config_resources_args(config_resource_types: Iterable[ConfigResource.Type]
+def list_config_resources_args(config_resource_types: Iterable[ConfigResource.Type] | None
                                ) -> tuple[Any, ...]:
     """``Admin_list_config_resources(h, type_ids, options)``'s arguments: each type's
     ``id()``; an empty set asks for every type."""
+    if config_resource_types is None:  # Java's null: the C API reports it
+        return (None,)
     return ([element(resource_type, "config_resource_types").id()
              for resource_type in config_resource_types],)
 

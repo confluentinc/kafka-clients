@@ -10,47 +10,37 @@ set(RUST_PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../rust" CACHE PATH "Path to 
 # Rust FFI header directory
 set(RUST_INCLUDE_DIR "${RUST_PROJECT_ROOT}/target/include")
 
+# The cargo profile directory to link from: target/${RUST_PROFILE}. Only that
+# directory is searched, so a library of another profile is never picked up.
+set(RUST_PROFILE "debug" CACHE STRING "Cargo profile directory of the Rust library: debug, release or release-cdylib")
+
 # Link type: "static" or "shared"
 set(LINK_TYPE "static" CACHE STRING "Link type: static or shared")
 
-# Directory of the Rust library: the repository root's Makefile passes
-# target/release-cdylib (the library `make -C rust build-cdylib` builds, as it
-# ships), c/Makefile's `devel-build` target/debug; a configure that does not
-# pass it keeps the cached one. When it is empty, the first of
-# target/release-cdylib, target/release and target/debug that holds the
-# library is used.
-set(RUST_LIB_DIR "" CACHE PATH "Directory of libconfluent_kafka")
-if(RUST_LIB_DIR)
-    set(RUST_LIB_PATHS "${RUST_LIB_DIR}")
-else()
-    set(RUST_LIB_PATHS
-        "${RUST_PROJECT_ROOT}/target/release-cdylib"
-        "${RUST_PROJECT_ROOT}/target/release"
-        "${RUST_PROJECT_ROOT}/target/debug")
-endif()
-# Searched again on every configure, so a changed RUST_LIB_DIR takes effect in
-# an existing build directory.
+# Searched again on every configure, so a change of RUST_PROFILE or LINK_TYPE
+# takes effect in an existing build directory.
 unset(CONFLUENT_KAFKA_RUST CACHE)
-
 if(LINK_TYPE STREQUAL "shared")
     find_library(CONFLUENT_KAFKA_RUST
         NAMES confluent_kafka
-        PATHS ${RUST_LIB_PATHS}
+        PATHS "${RUST_PROJECT_ROOT}/target/${RUST_PROFILE}"
         NO_DEFAULT_PATH
     )
 else()
     # For static linking, look for the .a file explicitly
     find_library(CONFLUENT_KAFKA_RUST
         NAMES libconfluent_kafka.a confluent_kafka
-        PATHS ${RUST_LIB_PATHS}
+        PATHS "${RUST_PROJECT_ROOT}/target/${RUST_PROFILE}"
         NO_DEFAULT_PATH
     )
 endif()
 
 if(NOT CONFLUENT_KAFKA_RUST)
     message(FATAL_ERROR
-        "Could not find libconfluent_kafka in ${RUST_LIB_PATHS}. "
-        "Run 'make -C rust build-cdylib' from the repository root first.")
+        "Could not find libconfluent_kafka in ${RUST_PROJECT_ROOT}/target/${RUST_PROFILE}. "
+        "Run 'make -C rust devel-build-all-features' (debug), 'make -C rust build-all-features' "
+        "(release) or 'make -C rust build-cdylib' (release-cdylib) from the repository root "
+        "first; c/Makefile's build does it.")
 endif()
 
 message(STATUS "Using Rust library: ${CONFLUENT_KAFKA_RUST}")
@@ -126,6 +116,11 @@ add_executable(test_kafka_future tests/test_kafka_future.c)
 target_include_directories(test_kafka_future PRIVATE ${RUST_INCLUDE_DIR})
 target_link_libraries(test_kafka_future unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
 
+# Forks a child per case and expects it to abort on a NULL mandatory argument.
+add_executable(test_abort_on_null tests/test_abort_on_null.c)
+target_include_directories(test_abort_on_null PRIVATE ${RUST_INCLUDE_DIR})
+target_link_libraries(test_abort_on_null unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+
 # Includes confluent_kafka_bindings.h alone, as a language binding does, so it
 # cannot use test_support.h (which includes confluent_kafka.h).
 add_executable(test_bindings_header tests/test_bindings_header.c)
@@ -143,6 +138,7 @@ add_test(NAME kafka_admin COMMAND test_kafka_admin)
 add_test(NAME serialization COMMAND test_serialization)
 add_test(NAME kafka_future COMMAND test_kafka_future)
 add_test(NAME bindings_header COMMAND test_bindings_header)
+add_test(NAME abort_on_null COMMAND test_abort_on_null)
 
 # ---------------------------------------------------------------------------
 # Producer performance test (opt-in; intentionally NOT registered with CTest).
@@ -150,10 +146,10 @@ add_test(NAME bindings_header COMMAND test_bindings_header)
 # Mirrors tests/integration/producer_perf_test.rs. Drives two backends selected
 # by the CLIENT_VERSION env var: the Rust client C bindings (v3, default) and
 # librdkafka (v2, reference baseline). It needs a reachable broker and runs
-# long, so it builds but is launched manually, not under `ctest`/`make test-c`.
+# long, so it builds but is launched manually, not under `ctest`/`make -C c test`.
 #
 # librdkafka is an optional dependency: if it is not found the target is
-# skipped so the default `build-c` still succeeds on hosts without it.
+# skipped so the default `make -C c build` still succeeds on hosts without it.
 # ---------------------------------------------------------------------------
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)

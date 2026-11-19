@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The binding's own Roslyn analyzers (diagnostic ids CKRDA*). Every other project under dotnet/
+    loads them through Directory.Build.props, and .editorconfig sets where each rule applies.
+    A compiler extension targets netstandard2.0. Microsoft.CodeAnalysis.CSharp is pinned to the
+    compiler of the first SDK 10 (5.0.0), so every SDK 10 loads the analyzers, and
+    Microsoft.CodeAnalysis.Analyzers to the version that compiler depends on.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>Confluent.Kafka.Analyzers</RootNamespace>
+    <AssemblyName>Confluent.Kafka.Analyzers</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsRoslynComponent>true</IsRoslynComponent>
+    <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
+    <!-- RS2008 asks for AnalyzerReleases.*.md release tracking, which only a shipped analyzer needs. -->
+    <NoWarn>$(NoWarn);RS2008</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="3.11.0" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

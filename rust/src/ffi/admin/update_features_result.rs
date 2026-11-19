@@ -41,12 +41,15 @@ pub(crate) fn box_update_features_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_UpdateFeaturesResult_t) -> &'a ResultHandle<UpdateFeaturesResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_UpdateFeaturesResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<UpdateFeaturesResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_UpdateFeaturesResult_t` is built by
     // `box_result::<UpdateFeaturesResult, _>` (in `box_update_features_result`), as `result_ref`
     // requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Returns a `kafka_Map_t` of owned `char *` feature names, sorted, to owned `kafka_common_KafkaFuture_t *` of `Void`
@@ -65,7 +68,7 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx
         .string_keyed_future_map(h.result.values().iter(), |ctx, f| ctx.void_future(f))
 }
@@ -89,7 +92,7 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

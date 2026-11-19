@@ -20,13 +20,15 @@
 //! handle, so every owner keeps a [`RecordHeaderInner`] boxed and never moves
 //! it after the view exists.
 
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_list, require_ref, require_str_or};
 use std::ffi::c_char;
 use std::sync::OnceLock;
 
 use crate::common::header::{Header, RecordHeader};
 use crate::ffi::common::header::{HeaderInner, kafka_common_header_Header_t};
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, kafka_Bytes_t, kafka_List_t, list_elements};
+use crate::ffi::util::{into_c_string, kafka_Bytes_t, kafka_List_t};
 
 /// Opaque handle to a [`RecordHeader`]. Public although Java keeps the
 /// class in `internals`: it is the type the `Headers` getters return, and the
@@ -129,33 +131,46 @@ pub(crate) fn box_record_header(header: RecordHeader) -> *mut kafka_common_heade
 /// `header` must be a valid record-header handle, alive for `'a`.
 pub(crate) unsafe fn record_header_ref<'a>(
     header: *const kafka_common_header_internals_RecordHeader_t,
+    param: &'static str,
 ) -> &'a RecordHeader {
     // SAFETY: Per this function's `# Safety`, `header` is a valid record-header handle alive for
     // `'a`, so it points at a live `RecordHeaderInner`: the `Box::into_raw` of `box_record_header`,
     // or an element of a `HeadersInner`'s `views` (alive until that headers handle's next mutation,
     // as the module docs of `ffi::common::header` state). No code mutates a `RecordHeaderInner`'s
     // `header`, so the shared reference is sound for `'a`.
-    unsafe { &*(header as *const RecordHeaderInner) }.header()
+    unsafe { require_ref::<_, RecordHeaderInner>(header, param) }.header()
 }
 
 /// Reads a list of `const kafka_common_header_internals_RecordHeader_t *`
-/// into owned headers, in order; null reads as empty.
+/// into owned headers, in order; `NULL` panics.
 ///
 /// # Safety
 ///
 /// `list` must be null or a valid list whose elements are record-header
 /// handles.
-pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t) -> Vec<RecordHeader> {
+pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t, param: &'static str) -> Vec<RecordHeader> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
-    // `list_elements` requires; the slice is used only within this call, which does not mutate the
+    // `require_list` requires; the slice is used only within this call, which does not mutate the
     // list.
-    unsafe { list_elements(list) }
+    unsafe { require_list(list, param) }
         .iter()
         .map(|&element| {
             // SAFETY: Per this function's `# Safety`, every element of `list` is a record-header
             // handle, as `record_header_ref` requires; the header is cloned, so the borrow lasts
             // for this call only.
-            unsafe { record_header_ref(element as *const kafka_common_header_internals_RecordHeader_t) }.clone()
+            unsafe {
+                record_header_ref(
+                    {
+                        // Java's `RecordHeaders(Header[])` checks each header.
+                        if element.is_null() {
+                            fail(Error::local_null_pointer("Header cannot be null."));
+                        }
+                        element
+                    } as *const kafka_common_header_internals_RecordHeader_t,
+                    param,
+                )
+            }
+            .clone()
         })
         .collect()
 }
@@ -166,6 +181,10 @@ pub(crate) unsafe fn list_record_headers(list: *const kafka_List_t) -> Vec<Recor
 ///
 /// - `key` - the header's key, copied
 /// - `value` - the header's value, copied; `value.data == NULL` is a `NULL` value
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Null header keys are not permitted") if `key` is `NULL`.
 ///
 /// # Safety
 ///
@@ -180,9 +199,9 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_new(
 ) -> *mut kafka_common_header_internals_RecordHeader_t {
     box_record_header(RecordHeader::new(
         // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(key) },
+        unsafe { require_str_or(key, "key", || Error::local_null_pointer("Null header keys are not permitted")) },
         // SAFETY: Per this function's `# Safety`, `value` is null or a valid buffer, so
         // `value.data` is null or valid for `value.len` bytes, as `kafka_Bytes_t::as_slice`
         // requires; the bytes are copied into an owned `Vec`, so nothing borrows them after this
@@ -206,7 +225,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid record-header handle, as
     // `record_header_ref` requires; the result is copied into an owned value before return, so the
     // borrow lasts for this call only.
-    into_c_string(&unsafe { record_header_ref(self_) }.to_string())
+    into_c_string(&unsafe { record_header_ref(self_, "self_") }.to_string())
 }
 
 /// Returns the handle as the `Header` interface it implements.
@@ -227,7 +246,7 @@ pub unsafe extern "C" fn kafka_common_header_internals_RecordHeader__as_Header(
     // a boxed one, or an element of a `HeadersInner`'s `views`, a vector never pushed to after it
     // is built. The view returned
     // points into the handle, so it lives as long as the handle, as the rustdoc states.
-    unsafe { &*(self_ as *const RecordHeaderInner) }.as_header_ptr()
+    unsafe { require_ref::<_, RecordHeaderInner>(self_, "self_") }.as_header_ptr()
 }
 
 /// Frees an owned record-header handle; null is a no-op. The borrowed
@@ -272,7 +291,7 @@ mod tests {
             let header =
                 kafka_common_header_internals_RecordHeader_new(key.as_ptr(), kafka_Bytes_t::from_slice(&bytes));
             assert_eq!(
-                record_header_ref(header),
+                record_header_ref(header, "header"),
                 &RecordHeader::new("h1".to_string(), Some(vec![9, 9]))
             );
             let s = kafka_common_header_internals_RecordHeader_to_string(header);
@@ -312,12 +331,33 @@ mod tests {
             let second = kafka_common_header_internals_RecordHeader_new(b.as_ptr(), kafka_Bytes_t::NULL);
             kafka_List_add(list, first as *mut c_void);
             kafka_List_add(list, second as *mut c_void);
-            let headers = list_record_headers(list);
+            let headers = list_record_headers(list, "value");
             assert_eq!(headers.iter().map(|h| h.key()).collect::<Vec<_>>(), ["a", "b"]);
-            assert!(list_record_headers(ptr::null()).is_empty());
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    list_record_headers(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
             kafka_List_destroy(list);
             kafka_common_header_internals_RecordHeader_destroy(first);
             kafka_common_header_internals_RecordHeader_destroy(second);
+        }
+    }
+
+    #[test]
+    fn a_null_key_is_javas_null_pointer_error() {
+        // SAFETY: Test code: the key is `NULL`, and `err` is a valid slot pointing at null;
+        // `stored` frees the error stored there.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            let header =
+                kafka_common_header_internals_RecordHeader_new_err(std::ptr::null(), kafka_Bytes_t::NULL, &mut err);
+            assert!(header.is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "Null header keys are not permitted");
         }
     }
 }

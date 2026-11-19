@@ -1,0 +1,199 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Confluent.Kafka library: the public API, a P/Invoke binding over the Rust
+    core's C ABI (Internal/Interop/), and the Confluent.Kafka NuGet package.
+
+    TFMs (CLAUDE.md §4 D1 / ffi-marshalling.md §0.1): net462 for .NET Framework 4.6.2
+    and later, netstandard2.0 for the other runtimes it covers (.NET 6 and 7 among
+    them), net8.0 and net10.0, as confluent-kafka-dotnet's package. The net462 and
+    netstandard2.0 legs build the same code but for the net462 leg's native-library preload
+    (Internal/Interop/NativeMethods.NetFramework.cs).
+  -->
+
+  <PropertyGroup>
+    <TargetFrameworks>net462;netstandard2.0;net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka</RootNamespace>
+    <AssemblyName>Confluent.Kafka</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Utf8Marshal pins and walks raw byte buffers (ffi §A3/§B3); `unsafe` is
+         confined to Internal/Interop/ per CLAUDE.md §2. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!--
+    The package. The id is confluent-kafka-dotnet's, with a new major version, which closes
+    CLAUDE.md §4's package-id gate. The version is <Version> in
+    dotnet/Directory.Build.props. The package carries the native library of each platform under
+    runtimes/<rid>/native/ (ffi-marshalling.md §0.2, "at publish"), from NativeAssetsDir below;
+    the release pipeline packs it (.semaphore/pack-nupkg.sh) and checks it
+    (.semaphore/check-nupkg.py), which fails on any entry it does not expect.
+  -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Confluent.Kafka</PackageId>
+    <Title>Confluent.Kafka</Title>
+    <Description>Confluent's .NET client for Apache Kafka, built on the Confluent Kafka Rust client. Its API follows the Apache Kafka Java client.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/confluentinc/kafka-clients</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageTags>Kafka;Confluent</PackageTags>
+    <!-- The nuspec's <repository> names this URL and the commit packed. The URL is fixed rather
+         than read from the clone's remote, which a checkout may name differently. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <RepositoryUrl>https://github.com/confluentinc/kafka-clients</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <!-- The SDK's own pack-time check that the assets of the four TFMs are compatible
+         with each other. -->
+    <EnablePackageValidation>true</EnablePackageValidation>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="README.md" Visible="false" />
+    <None Include="../../icon.png" Pack="true" PackagePath="icon.png" Visible="false" />
+  </ItemGroup>
+
+  <!--
+    The native libraries of a package: NativeAssetsDir holds one directory per RID, each holding
+    that RID's library (`linux-x64/libconfluent_kafka.so`, `osx-arm64/libconfluent_kafka.dylib`,
+    `win-x64/confluent_kafka.dll`, ...), and each file is packed at runtimes/<rid>/native/.
+    pack-nupkg.sh stages a directory holding exactly the RIDs to pack. A pack is refused without
+    NativeAssetsDir, with a relative one, or with one holding no library or anything else than
+    <rid>/<library>, so no package is
+    made without native libraries; a build that is not a pack is refused with it, since it would
+    leave out the developer native the build copies.
+  -->
+  <ItemGroup Condition="'$(NativeAssetsDir)' != ''">
+    <None Include="$(NativeAssetsDir)/**/*" Pack="true" PackagePath="runtimes/%(RecursiveDir)native/%(Filename)%(Extension)" Visible="false" />
+  </ItemGroup>
+
+  <!-- The .NET Framework build targets, which copy both Windows natives into a .NET Framework
+       project's output (Packaging/buildTransitive-net462.targets). build/ has them for packages.config. -->
+  <ItemGroup>
+    <None Remove="Packaging/**" />
+    <None Include="Packaging/buildTransitive-net462.targets" Pack="true" PackagePath="buildTransitive/net462/Confluent.Kafka.targets" />
+    <None Include="Packaging/build-net462.targets" Pack="true" PackagePath="build/net462/Confluent.Kafka.targets" />
+  </ItemGroup>
+
+  <Target Name="RequireNativeAssetsForPack" BeforeTargets="GenerateNuspec">
+    <ItemGroup>
+      <_NativeAssetFile Include="$(NativeAssetsDir)/**/*" Condition="'$(NativeAssetsDir)' != ''" />
+      <_NativeAssetLibrary Include="$(NativeAssetsDir)/*/libconfluent_kafka.so;$(NativeAssetsDir)/*/libconfluent_kafka.dylib;$(NativeAssetsDir)/*/confluent_kafka.dll" Condition="'$(NativeAssetsDir)' != ''" />
+    </ItemGroup>
+    <Error Condition="'$(NativeAssetsDir)' == ''"
+           Text="A Confluent.Kafka package needs its native libraries: pack with -p:NativeAssetsDir=&lt;dir&gt; holding &lt;rid&gt;/&lt;library&gt; (.semaphore/pack-nupkg.sh, or `make -C dotnet pack-dotnet`)." />
+    <Error Condition="'$(NativeAssetsDir)' != '' and !$([System.IO.Path]::IsPathRooted('$(NativeAssetsDir)'))"
+           Text="NativeAssetsDir '$(NativeAssetsDir)' must be an absolute path." />
+    <Error Condition="'$(NativeAssetsDir)' != '' and !Exists('$(NativeAssetsDir)')"
+           Text="NativeAssetsDir '$(NativeAssetsDir)' does not exist." />
+    <Error Condition="'$(NativeAssetsDir)' != '' and ('@(_NativeAssetLibrary)' == '' or '@(_NativeAssetFile->Count())' != '@(_NativeAssetLibrary->Count())')"
+           Text="NativeAssetsDir '$(NativeAssetsDir)' must hold &lt;rid&gt;/libconfluent_kafka.so, &lt;rid&gt;/libconfluent_kafka.dylib or &lt;rid&gt;/confluent_kafka.dll for each RID to pack, and nothing else." />
+  </Target>
+
+  <Target Name="RejectNativeAssetsOutsidePack" BeforeTargets="Build"
+          Condition="'$(NativeAssetsDir)' != '' and '$(_IsPacking)' != 'true'">
+    <Error Text="NativeAssetsDir is for `dotnet pack` only: a build with it leaves out the native library (.semaphore/pack-nupkg.sh)." />
+  </Target>
+
+  <!--
+    Native-copy (PLAN D1, un-defers M0/P0 D2 / ffi §0.2). The binding P/Invokes our
+    own Rust cdylib (the `cargo build` ffi step, CLAUDE.md §7.1 — Rust FIRST).
+    This is ffi §0.2's **pre-publish** half: no NuGet, no runtimes/{rid}/native/ —
+    an MSBuild Content item copies the native into $(OutDir) where default
+    [DllImport] probing resolves it. (At publish, §0.2 switches delivery to
+    same-package RID assets; the loading path is unchanged.) <Content> (not
+    <None>) is deliberate so it flows TRANSITIVELY to the referencing test project's
+    output, where the native-load probe finds it at runtime. Path/filename are
+    COMPUTED (never hardcoded, ffi §0.2): the per-OS filename Cargo emits and the
+    cargo profile dir from $(Configuration); the Rust workspace's target dir is
+    rust/target/ under the repo root, which is 3 dir levels up.
+  -->
+  <PropertyGroup>
+    <!-- Per-OS filename Cargo emits — the `lib` prefix / OS suffix must be
+         preserved so the loader (which maps the bare "confluent_kafka" DllName)
+         resolves it. -->
+    <NativeLibraryFileName Condition="$([MSBuild]::IsOSPlatform('OSX'))">libconfluent_kafka.dylib</NativeLibraryFileName>
+    <NativeLibraryFileName Condition="$([MSBuild]::IsOSPlatform('Linux'))">libconfluent_kafka.so</NativeLibraryFileName>
+    <NativeLibraryFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">confluent_kafka.dll</NativeLibraryFileName>
+
+    <!-- Cargo profile dir mirrors $(Configuration): Debug -> debug, Release -> release. -->
+    <CargoProfileDir>debug</CargoProfileDir>
+    <CargoProfileDir Condition="'$(Configuration)' == 'Release'">release</CargoProfileDir>
+
+    <!-- A cargo build for an explicit target triple, as the Windows CI jobs make, puts the
+         library under target/<triple>/; -p:CargoTargetTriple=<triple> reads it from there. -->
+    <CargoTargetSubdir>target</CargoTargetSubdir>
+    <CargoTargetSubdir Condition="'$(CargoTargetTriple)' != ''">target/$(CargoTargetTriple)</CargoTargetSubdir>
+
+    <!-- Repo root is 3 dir levels up from this project
+         (src/Confluent.Kafka -> src -> dotnet -> repo); the Rust workspace, and so
+         Cargo's target dir, is rust/ under it. -->
+    <NativeLibraryPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../rust/$(CargoTargetSubdir)/$(CargoProfileDir)/$(NativeLibraryFileName)'))</NativeLibraryPath>
+  </PropertyGroup>
+
+  <!-- Pack="false": the package carries the natives from NativeAssetsDir instead, and a <Content>
+       item would otherwise be packed under content/. A pack (NativeAssetsDir set) neither copies
+       nor requires the developer native. Always, not PreserveNewest: the copy keeps the source
+       mtime, so a newer native of the other Cargo profile would otherwise survive a build. -->
+  <ItemGroup Condition="'$(NativeAssetsDir)' == ''">
+    <Content Include="$(NativeLibraryPath)" Link="$(NativeLibraryFileName)" CopyToOutputDirectory="Always" Visible="false" Pack="false" />
+  </ItemGroup>
+
+  <!-- CKRDA0013 / CKRDA0014: the Java list and the name lists the analyzer checks this project against. -->
+  <ItemGroup>
+    <AdditionalFiles Include="../../analyzers/java-api.txt" />
+    <!-- -p:JavaNameBaseline=false leaves the baseline out, so every finding is reported: cargo xtask dotnet-java-name-baseline. -->
+    <AdditionalFiles Include="../../analyzers/java-name-baseline.txt" Condition="'$(JavaNameBaseline)' != 'false'" />
+    <AdditionalFiles Include="../../analyzers/java-name-allowlist.txt" />
+    <AdditionalFiles Include="../../analyzers/java-name-pairs.txt" />
+  </ItemGroup>
+
+  <!-- Fail early with a clear message if the native is missing (reinforces
+       CLAUDE.md §7.1 "never build .NET before Rust"); otherwise a bare
+       DllNotFoundException surfaces only at runtime. -->
+  <Target Name="EnsureNativeLibraryExists" BeforeTargets="Build" Condition="'$(NativeAssetsDir)' == ''">
+    <Error Condition="!Exists('$(NativeLibraryPath)')"
+           Text="Native library not found at '$(NativeLibraryPath)'. Run `cargo build --features ffi` in rust/ first (CLAUDE.md §7.1: the Rust core produces the native + header the binding consumes)." />
+  </Target>
+
+  <!-- System.Memory (ReadOnlyMemory<byte>/Span<byte>) and IAsyncDisposable /
+       ValueTask are built in on net8.0+ but need facade packages on the
+       net462 and netstandard2.0 legs. Microsoft.Bcl.AsyncInterfaces
+       supplies IAsyncDisposable (DisposeAsync — the primary close-first teardown,
+       no separate-op drain, CLAUDE.md §4 / ffi §B7) and transitively brings the
+       ValueTask async builder. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net462' or '$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
+  </ItemGroup>
+
+  <!-- .NET Framework has ValueTuple built in from 4.7 on; on 4.6.2 it is this package, which the
+       netstandard2.0 assets get from the .NET Standard facades.
+       The net462 reference assemblies let the net462 leg build on macOS and Linux too, as in the
+       unit-test project. Build-only: PrivateAssets keeps it out of the package's dependencies. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net462'">
+    <PackageReference Include="System.ValueTuple" Version="4.5.0" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- Grant the unit-test assembly access to internals (Internal/ scaffolding).
+       Both assemblies are strong-named (shared key, Directory.Build.props), so
+       the friend grant must carry the test assembly's full public key. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Confluent.Kafka.UnitTests" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
+    <InternalsVisibleTo Include="Confluent.Kafka.GrpcServer.UnitTests" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
+  </ItemGroup>
+
+  <!-- The gRPC test server and the soak client read an error's internal id (KafkaException.Code, the
+       type -> id lookup), as Python's server and soak client read _ffi_id. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Confluent.Kafka.GrpcServer" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
+    <InternalsVisibleTo Include="SoakClient" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
+    <InternalsVisibleTo Include="SoakClient.Tests" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
+  </ItemGroup>
+
+</Project>

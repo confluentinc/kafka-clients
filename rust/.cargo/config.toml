@@ -1,2 +1,12 @@
 [alias]
 xtask = "run --package xtask --"
+
+# The Windows library links the C runtime statically, so an application that loads it needs no
+# Visual C++ Redistributable. Every buffer the library allocates is freed by the library's own
+# `_destroy` functions, so its C runtime never frees memory of another one. A RUSTFLAGS variable,
+# even an empty one, replaces these flags.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -330,19 +330,19 @@ def test_list_consumer_group_offsets_passes_its_specs(monkeypatch: pytest.Monkey
     with _admin(FAST_DEFAULT) as admin:
         # Java's listConsumerGroupOffsets(groupId): its own entry point, default options.
         result = admin.list_consumer_group_offsets(group_id="g")
-        assert rec.args == ("g", None, [])
+        assert rec.args == (False, "g", None, [])
         _fails(result.partitions_to_offset_and_metadata(), KafkaTimeoutError,
                _timed_out("offsetFetch"))
         admin.list_consumer_group_offsets(
             group_id="g", options=ListConsumerGroupOffsetsOptions(timeout_ms=7,
                                                                   require_stable=True))
-        assert rec.args == ("g", None, [("timeout_ms", 7), ("require_stable", True)])
+        assert rec.args == (False, "g", None, [("timeout_ms", 7), ("require_stable", True)])
         result = admin.list_consumer_group_offsets(group_specs={
             "a": ListConsumerGroupOffsetsSpec(topic_partitions=[TP0, TP1]),
             "b": ListConsumerGroupOffsetsSpec()})
         assert rec.args is not None
-        group_id, rows, pairs = rec.args
-        assert group_id is None and pairs == []
+        specs_form, group_id, rows, pairs = rec.args
+        assert specs_form and group_id is None and pairs == []
         assert rows[1] == ("b", None)
         assert rows[0][0] == "a" and sorted(rows[0][1]) == [("t", 0), ("t", 1)]
         _fails(result.partitions_to_offset_and_metadata(group_id="a"), KafkaTimeoutError)
@@ -457,7 +457,7 @@ async def test_async_calls_pass_the_same_arguments(monkeypatch: pytest.MonkeyPat
         result = admin.list_consumer_group_offsets(
             group_specs={"a": ListConsumerGroupOffsetsSpec(topic_partitions=[TP0])},
             options=ListConsumerGroupOffsetsOptions(timeout_ms=SHORT))
-        assert rec.args == (None, [("a", [("t", 0)])], [("timeout_ms", SHORT)])
+        assert rec.args == (True, None, [("a", [("t", 0)])], [("timeout_ms", SHORT)])
         future = result.partitions_to_offset_and_metadata()
         assert isinstance(future, AsyncKafkaFuture)
         await _afails(future, KafkaTimeoutError, _timed_out("offsetFetch"))

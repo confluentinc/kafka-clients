@@ -15,6 +15,8 @@
 //! `kafka_common_resource_ResourcePattern_t`:
 //! `org.apache.kafka.common.resource.ResourcePattern` (CLAUDE.md §4).
 
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::common::resource::ResourcePattern;
@@ -30,7 +32,7 @@ use crate::ffi::common::resource::resource_type::{
     kafka_common_resource_ResourceType_t, singleton as resource_type_singleton, value_of as resource_type_of,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`ResourcePattern`].
 #[repr(C)]
@@ -62,13 +64,16 @@ impl ResourcePatternInner {
 /// # Safety
 ///
 /// `pattern` must be a valid resource-pattern handle, alive for `'a`.
-unsafe fn inner_ref<'a>(pattern: *const kafka_common_resource_ResourcePattern_t) -> &'a ResourcePatternInner {
+unsafe fn inner_ref<'a>(
+    pattern: *const kafka_common_resource_ResourcePattern_t,
+    param: &'static str,
+) -> &'a ResourcePatternInner {
     // SAFETY: Per this function's `# Safety`, `pattern` is a valid resource-pattern handle alive
     // for `'a`, so it points at a live `ResourcePatternInner`: the `Box::into_raw` of
     // `box_resource_pattern`, or one a parent handle embeds and hands out a view on, which lives as
     // long as that parent. Nothing mutates a `ResourcePatternInner` while a handle to it exists, so
     // the shared reference is sound for `'a`.
-    unsafe { &*(pattern as *const ResourcePatternInner) }
+    unsafe { require_ref::<_, ResourcePatternInner>(pattern, param) }
 }
 
 /// The pattern behind a handle.
@@ -78,10 +83,11 @@ unsafe fn inner_ref<'a>(pattern: *const kafka_common_resource_ResourcePattern_t)
 /// `pattern` must be a valid resource-pattern handle, alive for `'a`.
 pub(crate) unsafe fn resource_pattern_ref<'a>(
     pattern: *const kafka_common_resource_ResourcePattern_t,
+    param: &'static str,
 ) -> &'a ResourcePattern {
     // SAFETY: Per this function's `# Safety`, `pattern` is a valid resource-pattern handle, as
     // `inner_ref` requires; the reference returned lives for the same `'a`.
-    &unsafe { inner_ref(pattern) }.pattern
+    &unsafe { inner_ref(pattern, param) }.pattern
 }
 
 /// Hands `pattern` to C as an owned handle, freed with
@@ -105,6 +111,12 @@ pub(crate) fn box_resource_pattern(pattern: ResourcePattern) -> *mut kafka_commo
 ///   `pattern_type` is `ANY` or `MATCH`.
 /// - `kafka_common_Error_is_local_illegal_state_error` for a Rust panic caught at the FFI boundary.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("resourceType") if `resource_type` is `NULL`.
+/// - `LocalNullPointerError` ("name") if `name` is `NULL`.
+/// - `LocalNullPointerError` ("patternType") if `pattern_type` is `NULL`.
+///
 /// # Safety
 ///
 /// `resource_type` and `pattern_type` must be singletons of their enums, `name`
@@ -118,19 +130,28 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_new(
     pattern_type: *const kafka_common_resource_PatternType_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_common_resource_ResourcePattern_t {
+    if resource_type.is_null() {
+        fail(Error::local_null_pointer("resourceType"));
+    }
+    if name.is_null() {
+        fail(Error::local_null_pointer("name"));
+    }
+    if pattern_type.is_null() {
+        fail(Error::local_null_pointer("patternType"));
+    }
     let pattern = ResourcePattern::new(
         // SAFETY: Per this function's `# Safety`, `resource_type` is a singleton of its enum, i.e.
         // one returned by the `resource_type` module, as `resource_type_of`
         // (`resource_type::value_of`) requires; the value is copied out.
-        unsafe { resource_type_of(resource_type) },
+        unsafe { resource_type_of(resource_type, "resource_type") },
         // SAFETY: Per this function's `# Safety`, `name` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(name) },
+        unsafe { require_str(name, "name") },
         // SAFETY: Per this function's `# Safety`, `pattern_type` is a singleton of its enum, i.e.
         // one returned by the `pattern_type` module, as `pattern_type_of`
         // (`pattern_type::value_of`) requires; the value is copied out.
-        unsafe { pattern_type_of(pattern_type) },
+        unsafe { pattern_type_of(pattern_type, "pattern_type") },
     );
     match pattern {
         Ok(pattern) => box_resource_pattern(pattern),
@@ -157,7 +178,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_resource_type(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `resource_pattern_ref` requires; the value is copied out and mapped to its static singleton,
     // so the borrow lasts for this call only.
-    resource_type_singleton(unsafe { resource_pattern_ref(self_) }.resource_type())
+    resource_type_singleton(unsafe { resource_pattern_ref(self_, "self_") }.resource_type())
 }
 
 /// `name()`.
@@ -178,7 +199,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `inner_ref` requires; the string returned is the handle's own C string, so it lives as long
     // as the handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner_ref(self_) }.name_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.name_c.as_ptr()
 }
 
 /// `patternType()`.
@@ -199,7 +220,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_pattern_type(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `resource_pattern_ref` requires; the value is copied out and mapped to its static singleton,
     // so the borrow lasts for this call only.
-    pattern_type_singleton(unsafe { resource_pattern_ref(self_) }.pattern_type())
+    pattern_type_singleton(unsafe { resource_pattern_ref(self_, "self_") }.pattern_type())
 }
 
 /// `toFilter()`.
@@ -220,7 +241,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_to_filter(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `resource_pattern_ref` requires; the result is copied into an owned value before return, so
     // the borrow lasts for this call only.
-    box_resource_pattern_filter(unsafe { resource_pattern_ref(self_) }.to_filter())
+    box_resource_pattern_filter(unsafe { resource_pattern_ref(self_, "self_") }.to_filter())
 }
 
 /// `isUnknown()`.
@@ -239,7 +260,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_is_unknown(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `resource_pattern_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { resource_pattern_ref(self_) }.is_unknown())
+    i8::from(unsafe { resource_pattern_ref(self_, "self_") }.is_unknown())
 }
 
 /// Returns the text form of the pattern.
@@ -256,7 +277,7 @@ pub unsafe extern "C" fn kafka_common_resource_ResourcePattern_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource-pattern handle, as
     // `resource_pattern_ref` requires; the result is copied into an owned value before return, so
     // the borrow lasts for this call only.
-    into_c_string(&unsafe { resource_pattern_ref(self_) }.to_string())
+    into_c_string(&unsafe { resource_pattern_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned pattern handle. Null is a no-op; the pattern borrowed
@@ -318,7 +339,7 @@ mod tests {
             );
             assert!(err.is_null());
             let expected = ResourcePattern::new(ResourceType::Topic, "orders-", PatternType::Prefixed).unwrap();
-            assert_eq!(*resource_pattern_ref(pattern), expected);
+            assert_eq!(*resource_pattern_ref(pattern, "pattern"), expected);
             assert_eq!(
                 kafka_common_resource_ResourcePattern_resource_type(pattern),
                 kafka_common_resource_ResourceType_topic()
@@ -339,7 +360,7 @@ mod tests {
             kafka_string_destroy(s);
 
             let filter = kafka_common_resource_ResourcePattern_to_filter(pattern);
-            assert_eq!(*resource_pattern_filter_ref(filter), expected.to_filter());
+            assert_eq!(*resource_pattern_filter_ref(filter, "filter"), expected.to_filter());
             assert_eq!(kafka_common_resource_ResourcePatternFilter_matches(filter, pattern), 1);
             kafka_common_resource_ResourcePatternFilter_destroy(filter);
             kafka_common_resource_ResourcePattern_destroy(pattern);
@@ -382,6 +403,29 @@ mod tests {
             );
             kafka_common_Error_destroy(error);
             assert!(pattern.is_null(), "nothing is returned on failure");
+        }
+    }
+
+    #[test]
+    fn null_arguments_are_javas_null_pointer_errors() {
+        let topic = kafka_common_resource_ResourceType_topic();
+        let literal = kafka_common_resource_PatternType_literal();
+        // SAFETY: Test code: each call gets one `NULL` argument, the others singletons or a string
+        // literal, and a valid `err` slot pointing at null; `stored` frees the error stored there.
+        unsafe {
+            for (resource_type, name, pattern_type, text) in [
+                (std::ptr::null(), c"t".as_ptr(), literal, "resourceType"),
+                (topic, std::ptr::null(), literal, "name"),
+                (topic, c"t".as_ptr(), std::ptr::null(), "patternType"),
+            ] {
+                let mut err = std::ptr::null_mut();
+                assert!(
+                    kafka_common_resource_ResourcePattern_new(resource_type, name, pattern_type, &mut err).is_null()
+                );
+                let error = crate::ffi::precondition::stored(err);
+                assert!(error.is_local_null_pointer_error(), "{error:?}");
+                assert_eq!(error.message(), text);
+            }
         }
     }
 }

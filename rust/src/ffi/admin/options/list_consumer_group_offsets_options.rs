@@ -21,6 +21,7 @@
 
 use crate::admin::ListConsumerGroupOffsetsOptions;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{require_mut, require_ref};
 
 /// Opaque handle to a [`ListConsumerGroupOffsetsOptions`], owned by the caller and freed with
 /// [`kafka_admin_ListConsumerGroupOffsetsOptions_destroy`].
@@ -37,13 +38,14 @@ pub struct kafka_admin_ListConsumerGroupOffsetsOptions_t {
 /// setter runs on it.
 pub(crate) unsafe fn list_consumer_group_offsets_options_ref<'a>(
     options: *const kafka_admin_ListConsumerGroupOffsetsOptions_t,
+    param: &'static str,
 ) -> &'a ListConsumerGroupOffsetsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_ListConsumerGroupOffsetsOptions_t` is
     // the `Box::into_raw` of a `Box<ListConsumerGroupOffsetsOptions>` (`boxed`), so the shared
     // reference is to a live `ListConsumerGroupOffsetsOptions` that nothing mutates while it is
     // used.
-    unsafe { &*(options as *const ListConsumerGroupOffsetsOptions) }
+    unsafe { require_ref::<_, ListConsumerGroupOffsetsOptions>(options, param) }
 }
 
 /// Mutable access to the options behind a handle, for the in-place setters.
@@ -54,13 +56,14 @@ pub(crate) unsafe fn list_consumer_group_offsets_options_ref<'a>(
 /// reference is live meanwhile.
 unsafe fn options_mut<'a>(
     options: *mut kafka_admin_ListConsumerGroupOffsetsOptions_t,
+    param: &'static str,
 ) -> &'a mut ListConsumerGroupOffsetsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every
     // `kafka_admin_ListConsumerGroupOffsetsOptions_t` is the `Box::into_raw` of a
     // `Box<ListConsumerGroupOffsetsOptions>` (`boxed`), so the exclusive reference is to a live
     // `ListConsumerGroupOffsetsOptions`.
-    unsafe { &mut *(options as *mut ListConsumerGroupOffsetsOptions) }
+    unsafe { require_mut::<_, ListConsumerGroupOffsetsOptions>(options, param) }
 }
 
 fn boxed(options: ListConsumerGroupOffsetsOptions) -> *mut kafka_admin_ListConsumerGroupOffsetsOptions_t {
@@ -100,7 +103,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsOptions_set_timeout
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
@@ -122,7 +125,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsOptions_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `list_consumer_group_offsets_options_ref` requires.
-    unsafe { list_consumer_group_offsets_options_ref(self_) }
+    unsafe { list_consumer_group_offsets_options_ref(self_, "self_") }
         .timeout_ms()
         .unwrap_or(-1)
 }
@@ -146,7 +149,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsOptions_set_require
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_require_stable(require_stable != 0);
 }
 
@@ -167,7 +170,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsOptions_require_sta
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `list_consumer_group_offsets_options_ref` requires.
-    i8::from(unsafe { list_consumer_group_offsets_options_ref(self_) }.require_stable())
+    i8::from(unsafe { list_consumer_group_offsets_options_ref(self_, "self_") }.require_stable())
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

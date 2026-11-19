@@ -20,16 +20,14 @@
 //! `Cluster`, the admin descriptions) stores [`NodeInner`]s so the pointers
 //! it hands out stay valid for its own lifetime.
 
+use crate::ffi::precondition::{require_element, require_list, require_ref, require_str};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 use std::sync::LazyLock;
 
 use crate::common::Node;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{
-    box_list, c_str_to_option, c_str_to_string, destroy_boxed, into_c_string, kafka_List_t, list_elements,
-    owned_c_string,
-};
+use crate::ffi::util::{box_list, c_str_to_option, destroy_boxed, into_c_string, kafka_List_t, owned_c_string};
 
 /// Opaque handle to a [`Node`] (broker).
 #[repr(C)]
@@ -78,13 +76,13 @@ pub(crate) fn box_node(node: Node) -> *mut kafka_common_Node_t {
 /// # Safety
 ///
 /// `node` must be a valid node handle, alive for `'a`.
-pub(crate) unsafe fn node_ref<'a>(node: *const kafka_common_Node_t) -> &'a Node {
+pub(crate) unsafe fn node_ref<'a>(node: *const kafka_common_Node_t, param: &'static str) -> &'a Node {
     // SAFETY: Per this function's `# Safety`, `node` is a valid node handle alive for `'a`, so it
     // points at a live `NodeInner`: the `Box::into_raw` of `box_node`, the `static` `NO_NODE`,
     // which is never dropped, or one a holder (`PartitionInfo`, `Cluster`, `TopicPartitionInfo`,
     // the admin descriptions) stores and hands out through `NodeInner::as_ptr`, which lives as long
     // as that holder. No call mutates a `NodeInner`, so the shared reference is sound for `'a`.
-    unsafe { &*(node as *const NodeInner) }.node()
+    unsafe { require_ref::<_, NodeInner>(node, param) }.node()
 }
 
 /// A copy of the node behind a nullable handle: null is Java's `null`.
@@ -99,7 +97,7 @@ pub(crate) unsafe fn optional_node(node: *const kafka_common_Node_t) -> Option<N
         // SAFETY: `node` is non-null (checked above) and, per this function's `# Safety`, a valid
         // node handle, as `node_ref` requires; the node is cloned, so the borrow lasts for this
         // call only.
-        Some(unsafe { node_ref(node) }.clone())
+        Some(unsafe { node_ref(node, "node") }.clone())
     }
 }
 
@@ -114,31 +112,39 @@ pub(crate) fn node_list(nodes: &[Node]) -> *mut kafka_List_t {
     box_list(elements, Some(destroy_boxed::<NodeInner>))
 }
 
-/// Reads a list of `const kafka_common_Node_t *` into owned copies; null
-/// reads as empty.
+/// Reads a list of `const kafka_common_Node_t *` into owned copies; a
+/// null list or element panics.
 ///
 /// # Safety
 ///
 /// `list` must be null or a valid list whose elements are node handles.
-pub(crate) unsafe fn list_nodes(list: *const kafka_List_t) -> Vec<Node> {
+pub(crate) unsafe fn list_nodes(list: *const kafka_List_t, param: &'static str) -> Vec<Node> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list handle, as
-    // `list_elements` requires; the slice is used only within this call, while nothing mutates the
+    // `require_list` requires; the slice is used only within this call, while nothing mutates the
     // list.
-    unsafe { list_elements(list) }
+    unsafe { require_list(list, param) }
         .iter()
-        // SAFETY: Per this function's `# Safety`, every element of `list` is a node handle, as
-        // `node_ref` requires; the node is cloned, so the borrow lasts for this call only.
-        .map(|&element| unsafe { node_ref(element as *const kafka_common_Node_t) }.clone())
+        .map(|&element| {
+            // SAFETY: Per this function's `# Safety`, every element of `list` is a node handle, as
+            // `node_ref` requires; the node is cloned, so the borrow lasts for this call only.
+            unsafe { node_ref(require_element(element, param) as *const kafka_common_Node_t, param) }.clone()
+        })
         .collect()
 }
 
 /// Creates a node with no rack, not fenced.
+///
+/// WARNING: `NULL` `host` panics; Java stores `null`.
 ///
 /// # Parameters
 ///
 /// - `id` - the node id
 /// - `host` - the host name
 /// - `port` - the port
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `host` is `NULL`
 ///
 /// # Safety
 ///
@@ -148,12 +154,14 @@ pub(crate) unsafe fn list_nodes(list: *const kafka_List_t) -> Vec<Node> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Node_new(id: i32, host: *const c_char, port: i32) -> *mut kafka_common_Node_t {
     // SAFETY: Per this function's `# Safety`, `host` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    box_node(Node::new(id, unsafe { c_str_to_string(host) }, port))
+    box_node(Node::new(id, unsafe { require_str(host, "host") }, port))
 }
 
 /// Creates a node that is not fenced.
+///
+/// WARNING: `NULL` `host` panics; Java stores `null`.
 ///
 /// # Parameters
 ///
@@ -161,6 +169,10 @@ pub unsafe extern "C" fn kafka_common_Node_new(id: i32, host: *const c_char, por
 /// - `host` - the host name
 /// - `port` - the port
 /// - `rack` - the rack, or `NULL` for none
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `host` is `NULL`
 ///
 /// # Safety
 ///
@@ -175,14 +187,16 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack(
     rack: *const c_char,
 ) -> *mut kafka_common_Node_t {
     // SAFETY: Per this function's `# Safety`, `host` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires, and `rack` null or one, as `c_str_to_option` requires; both are
+    // `require_str` requires, and `rack` null or one, as `c_str_to_option` requires; both are
     // copied into owned values, so nothing borrows them after this call.
-    box_node(Node::with_rack(id, unsafe { c_str_to_string(host) }, port, unsafe {
+    box_node(Node::with_rack(id, unsafe { require_str(host, "host") }, port, unsafe {
         c_str_to_option(rack)
     }))
 }
 
 /// Creates a node.
+///
+/// WARNING: `NULL` `host` panics; Java stores `null`.
 ///
 /// # Parameters
 ///
@@ -191,6 +205,10 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack(
 /// - `port` - the port
 /// - `rack` - the rack, or `NULL` for none
 /// - `is_fenced` - 1 if the node is fenced, else 0
+///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `host` is `NULL`
 ///
 /// # Safety
 ///
@@ -208,9 +226,9 @@ pub unsafe extern "C" fn kafka_common_Node_with_rack_is_fenced(
     box_node(Node::with_rack_is_fenced(
         id,
         // SAFETY: Per this function's `# Safety`, `host` is a valid NUL-terminated string, as
-        // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it
+        // `require_str` requires; it is copied into an owned `String`, so nothing borrows it
         // after this call.
-        unsafe { c_str_to_string(host) },
+        unsafe { require_str(host, "host") },
         port,
         // SAFETY: Per this function's `# Safety`, `rack` is null or a valid NUL-terminated string,
         // as `c_str_to_option` requires; it is copied into an owned value, so nothing borrows it
@@ -243,7 +261,7 @@ pub extern "C" fn kafka_common_Node_no_node() -> *const kafka_common_Node_t {
 pub unsafe extern "C" fn kafka_common_Node_is_empty(self_: *const kafka_common_Node_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid node handle, as `node_ref`
     // requires; the reference is used only within this call.
-    i8::from(unsafe { node_ref(self_) }.is_empty())
+    i8::from(unsafe { node_ref(self_, "self_") }.is_empty())
 }
 
 /// Returns the node id of this node.
@@ -256,7 +274,7 @@ pub unsafe extern "C" fn kafka_common_Node_is_empty(self_: *const kafka_common_N
 pub unsafe extern "C" fn kafka_common_Node_id(self_: *const kafka_common_Node_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid node handle, as `node_ref`
     // requires; the reference is used only within this call.
-    unsafe { node_ref(self_) }.id()
+    unsafe { node_ref(self_, "self_") }.id()
 }
 
 /// Returns the string representation of the node id.
@@ -277,7 +295,7 @@ pub unsafe extern "C" fn kafka_common_Node_id_string(self_: *const kafka_common_
     // holder. No call mutates a `NodeInner`, so the shared reference is sound for this call. The
     // string returned is the inner's own `id_string_c`, so it lives as long as the handle; that is
     // the rustdoc's "borrowed from the handle".
-    unsafe { &*(self_ as *const NodeInner) }.id_string_c.as_ptr()
+    unsafe { require_ref::<_, NodeInner>(self_, "self_") }.id_string_c.as_ptr()
 }
 
 /// Returns the host name for this node
@@ -296,7 +314,7 @@ pub unsafe extern "C" fn kafka_common_Node_host(self_: *const kafka_common_Node_
     // holder. No call mutates a `NodeInner`, so the shared reference is sound for this call. The
     // string returned is the inner's own `host_c`, so it lives as long as the handle; that is the
     // rustdoc's "borrowed from the handle and valid until it is destroyed".
-    unsafe { &*(self_ as *const NodeInner) }.host_c.as_ptr()
+    unsafe { require_ref::<_, NodeInner>(self_, "self_") }.host_c.as_ptr()
 }
 
 /// Returns the port for this node.
@@ -309,7 +327,7 @@ pub unsafe extern "C" fn kafka_common_Node_host(self_: *const kafka_common_Node_
 pub unsafe extern "C" fn kafka_common_Node_port(self_: *const kafka_common_Node_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid node handle, as `node_ref`
     // requires; the reference is used only within this call.
-    unsafe { node_ref(self_) }.port()
+    unsafe { node_ref(self_, "self_") }.port()
 }
 
 /// Returns 1 if this node has a defined rack, else 0.
@@ -322,7 +340,7 @@ pub unsafe extern "C" fn kafka_common_Node_port(self_: *const kafka_common_Node_
 pub unsafe extern "C" fn kafka_common_Node_has_rack(self_: *const kafka_common_Node_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid node handle, as `node_ref`
     // requires; the reference is used only within this call.
-    i8::from(unsafe { node_ref(self_) }.has_rack())
+    i8::from(unsafe { node_ref(self_, "self_") }.has_rack())
 }
 
 /// The rack for this node
@@ -345,7 +363,7 @@ pub unsafe extern "C" fn kafka_common_Node_rack(self_: *const kafka_common_Node_
     // holder. No call mutates a `NodeInner`, so the shared reference is sound for this call. The
     // string returned is the inner's own `rack_c`, so it lives as long as the handle; that is the
     // rustdoc's "borrowed from the handle".
-    unsafe { &*(self_ as *const NodeInner) }
+    unsafe { require_ref::<_, NodeInner>(self_, "self_") }
         .rack_c
         .as_ref()
         .map_or(ptr::null(), |rack| rack.as_ptr())
@@ -364,7 +382,7 @@ pub unsafe extern "C" fn kafka_common_Node_rack(self_: *const kafka_common_Node_
 pub unsafe extern "C" fn kafka_common_Node_is_fenced(self_: *const kafka_common_Node_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid node handle, as `node_ref`
     // requires; the reference is used only within this call.
-    i8::from(unsafe { node_ref(self_) }.is_fenced())
+    i8::from(unsafe { node_ref(self_, "self_") }.is_fenced())
 }
 
 /// Returns `host:port (id: idString rack: rack isFenced: isFenced)`.
@@ -379,7 +397,7 @@ pub unsafe extern "C" fn kafka_common_Node_to_string(self_: *const kafka_common_
     // SAFETY: Per this function's `# Safety`, `self_` is a valid node handle, as `node_ref`
     // requires; the reference is used only within this call, and the text is copied into an owned
     // string.
-    into_c_string(&unsafe { node_ref(self_) }.to_string())
+    into_c_string(&unsafe { node_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned node handle. Null is a no-op; the `noNode()` singleton and
@@ -467,8 +485,14 @@ mod tests {
         // destroyed once, after `list_nodes` reads it.
         unsafe {
             assert_eq!(kafka_List_size(list), 2);
-            assert_eq!(list_nodes(list), nodes.to_vec());
-            assert!(list_nodes(ptr::null()).is_empty());
+            assert_eq!(list_nodes(list, "value"), nodes.to_vec());
+            assert_eq!(
+                crate::ffi::precondition::caught(|| {
+                    list_nodes(ptr::null(), "value");
+                })
+                .message(),
+                "value must not be null"
+            );
             kafka_List_destroy(list);
         }
     }

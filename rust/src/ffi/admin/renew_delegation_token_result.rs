@@ -59,11 +59,14 @@ pub(crate) fn box_renew_delegation_token_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_RenewDelegationTokenResult_t) -> &'a ResultHandle<Held> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_RenewDelegationTokenResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<Held> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_RenewDelegationTokenResult_t` is built by `box_result::<Held, _>`, as
     // `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Returns a future which yields expiry timestamp
@@ -86,7 +89,7 @@ pub unsafe extern "C" fn kafka_admin_RenewDelegationTokenResult_expiry_timestamp
 ) -> *const kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    unsafe { handle(self_) }.result.expiry_timestamp
+    unsafe { handle(self_, "self_") }.result.expiry_timestamp
 }
 
 /// Frees a result handle, and with it the future `expiry_timestamp` borrows

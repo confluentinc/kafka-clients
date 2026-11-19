@@ -56,6 +56,7 @@ use crate::ffi::common::{
     box_error, deliver_panic_opaque, kafka_common_Error_destroy, kafka_common_Error_t, run_inline,
 };
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{Required, require_fn};
 use crate::ffi::producer::record_metadata::{
     box_record_metadata, kafka_producer_RecordMetadata_destroy, kafka_producer_RecordMetadata_t,
 };
@@ -79,19 +80,21 @@ pub struct kafka_producer_Callback_t {
 /// which the producer logs and frees. Until the report the record's future
 /// does not complete, and `flush`, `commit_transaction` and
 /// `abort_transaction` wait for it.
-pub type kafka_producer_Callback_on_completion_fn_t = unsafe extern "C" fn(
-    self_: *mut c_void,
-    metadata: *const kafka_producer_RecordMetadata_t,
-    error: *const kafka_common_Error_t,
-    callback_id: i64,
-);
+pub type kafka_producer_Callback_on_completion_fn_t = Option<
+    unsafe extern "C" fn(
+        self_: *mut c_void,
+        metadata: *const kafka_producer_RecordMetadata_t,
+        error: *const kafka_common_Error_t,
+        callback_id: i64,
+    ),
+>;
 
 /// The registration a handle holds, moved into the Rust callback built from
 /// it when a function consumes the handle.
 #[derive(Clone, Copy)]
 pub(crate) struct CallbackRegistration {
     self_: SendPtr,
-    on_completion: kafka_producer_Callback_on_completion_fn_t,
+    on_completion: Required<kafka_producer_Callback_on_completion_fn_t>,
 }
 
 impl CallbackRegistration {
@@ -220,6 +223,7 @@ pub extern "C" fn kafka_producer_Callback_new(
     self_: *mut c_void,
     on_completion: kafka_producer_Callback_on_completion_fn_t,
 ) -> *mut kafka_producer_Callback_t {
+    let on_completion = require_fn(on_completion, "on_completion");
     Box::into_raw(Box::new(CallbackRegistration { self_: SendPtr(self_), on_completion }))
         as *mut kafka_producer_Callback_t
 }
@@ -270,7 +274,7 @@ pub unsafe extern "C" fn kafka_producer_Callback_on_completion(
 
 /// Completion of [`kafka_producer_Callback_on_completion_cb`]:
 /// `onCompletion` is void, so only `opaque` is passed.
-pub type kafka_producer_Callback_on_completion_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+pub type kafka_producer_Callback_on_completion_cb_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
 
 /// Non-blocking `kafka_producer_Callback_on_completion`.
 ///
@@ -310,6 +314,7 @@ pub unsafe extern "C" fn kafka_producer_Callback_on_completion_cb(
     cb: kafka_producer_Callback_on_completion_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle not used again, as
     // `take_callback` requires.
     let registration = unsafe { take_callback(self_) };
@@ -427,7 +432,7 @@ mod tests {
     fn invoker_runs_the_implementation_inline_and_waits_for_the_report() {
         let log = Log::default();
         // Each invocation consumes its handle, as `on_completion` takes `self: Box<Self>`.
-        let handle = || kafka_producer_Callback_new(&log as *const Log as *mut c_void, on_completion);
+        let handle = || kafka_producer_Callback_new(&log as *const Log as *mut c_void, Some(on_completion));
         let metadata = box_record_metadata(record_metadata(5));
         let error = box_error(Error::timeout("late"));
         // SAFETY: Test code: each handle comes from `kafka_producer_Callback_new` over the test's
@@ -443,7 +448,7 @@ mod tests {
         assert_eq!(
             // SAFETY: Test code: `error` is the live `box_error` handle above, destroyed only at
             // the end.
-            unsafe { error_ref(error) }.error.message(),
+            unsafe { error_ref(error, "error") }.error.message(),
             "late",
             "the invoker borrows its arguments"
         );
@@ -461,7 +466,7 @@ mod tests {
                 handle(),
                 metadata,
                 std::ptr::null(),
-                cb,
+                Some(cb),
                 &fired as *const _ as *mut c_void,
             );
         }
@@ -484,7 +489,7 @@ mod tests {
     #[test]
     fn a_panicking_on_completion_cb_fires_cb_once_inline() {
         let log = Log::default();
-        let handle = kafka_producer_Callback_new(&log as *const Log as *mut c_void, on_completion);
+        let handle = kafka_producer_Callback_new(&log as *const Log as *mut c_void, Some(on_completion));
         let probe = Probe::default();
         fail_point::arm();
         // SAFETY: Test code: `handle` is a live handle this test made, consumed by the call before
@@ -494,7 +499,7 @@ mod tests {
                 handle,
                 std::ptr::null(),
                 std::ptr::null(),
-                on_opaque,
+                Some(on_opaque),
                 probe.as_opaque(),
             );
         }
@@ -505,7 +510,7 @@ mod tests {
     #[test]
     fn a_queued_delivery_completes_its_future_only_once_reported() {
         let log = Log::default();
-        let handle = kafka_producer_Callback_new(&log as *const Log as *mut c_void, on_completion);
+        let handle = kafka_producer_Callback_new(&log as *const Log as *mut c_void, Some(on_completion));
         let queue = Arc::new(CallbackQueue::new());
         let results = Arc::new(CallbackResults::new());
         // SAFETY: Test code: `handle` is live and not used again; the closures hold copies of the
@@ -575,7 +580,7 @@ mod tests {
     fn a_delivery_allocates_its_sink_job_and_metadata_handle_only() {
         const RECORDS: usize = 8;
         let ids = Ids { next: Default::default(), ids: Default::default() };
-        let handle = kafka_producer_Callback_new(&ids as *const Ids as *mut c_void, store_id);
+        let handle = kafka_producer_Callback_new(&ids as *const Ids as *mut c_void, Some(store_id));
         // SAFETY: Test code: `handle` is live and not used again; `ids` outlives every invocation.
         let registration = unsafe { take_callback(handle) };
         let queue = Arc::new(CallbackQueue::new());

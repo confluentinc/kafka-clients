@@ -1,0 +1,294 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Globalization;
+using System.Security.Cryptography;
+
+
+namespace Confluent.Kafka.Common;
+
+/// <summary>
+/// A Kafka identifier, such as a topic id, Java's <c>Uuid</c>: 128 bits whose text form is the URL-safe,
+/// unpadded base64 of its 16 big-endian bytes, ordered as Java orders it, by the signed high half, then the
+/// signed low half.
+/// </summary>
+/// <remarks>It is not a <see cref="System.Guid"/>, whose text form and byte order differ from Kafka's.</remarks>
+public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
+{
+    private const int ByteCount = 16;
+
+    private const int MaxTextLength = 24;
+
+    private static readonly Func<Uuid> s_unsafeRandomUuid = UnsafeRandomUuid;
+    private readonly long _mostSignificantBits;
+    private readonly long _leastSignificantBits;
+
+    /// <summary>Initializes an id from its high and low 64 bits.</summary>
+    public Uuid(long mostSigBits, long leastSigBits)
+    {
+        _mostSignificantBits = mostSigBits;
+        _leastSignificantBits = leastSigBits;
+    }
+
+    /// <summary>The all-zero id, Java's <c>Uuid.ZERO_UUID</c>.</summary>
+    public static readonly Uuid ZERO_UUID = default;
+
+    /// <summary>The id <c>(0, 1)</c>, Java's <c>Uuid.ONE_UUID</c>.</summary>
+    public static readonly Uuid ONE_UUID = new Uuid(0L, 1L);
+
+    /// <summary>The id of the KRaft metadata topic, <see cref="ONE_UUID"/>: Java's <c>Uuid.METADATA_TOPIC_ID</c>.</summary>
+    public static readonly Uuid METADATA_TOPIC_ID = ONE_UUID;
+
+    // Declared after ZERO_UUID and ONE_UUID: static fields initialize in textual order.
+    private static readonly ReadOnlyCollection<Uuid> s_reserved =
+        new ReadOnlyCollection<Uuid>(new[] { ZERO_UUID, ONE_UUID });
+
+    /// <summary>
+    /// The ids <see cref="RandomUuid()"/> never returns, <see cref="ZERO_UUID"/> and <see cref="ONE_UUID"/>: Java's
+    /// <c>Uuid.RESERVED</c>.
+    /// </summary>
+    public static readonly IReadOnlyCollection<Uuid> RESERVED = s_reserved;
+
+    /// <summary>The high 64 bits.</summary>
+    /// <returns>The high 64 bits.</returns>
+    public long GetMostSignificantBits() => _mostSignificantBits;
+
+    /// <summary>The low 64 bits.</summary>
+    /// <returns>The low 64 bits.</returns>
+    public long GetLeastSignificantBits() => _leastSignificantBits;
+
+    /// <summary>Determines whether two ids are equal.</summary>
+    public static bool operator ==(Uuid left, Uuid right) => left.Equals(right);
+
+    /// <summary>Determines whether two ids differ.</summary>
+    public static bool operator !=(Uuid left, Uuid right) => !left.Equals(right);
+
+    /// <summary>
+    /// Creates an id from the URL-safe base64 text form <see cref="ToString"/> writes, padded or not: Java's
+    /// <c>Uuid.fromString</c>. Throws <see cref="ArgumentNullException"/> for <see langword="null"/>, and
+    /// <see cref="ArgumentException"/> for text longer than 24 characters, not valid URL-safe base64, or not
+    /// decoding to 16 bytes.
+    /// </summary>
+    public static Uuid FromString(string str)
+    {
+        if (str is null)
+        {
+            throw new ArgumentNullException(nameof(str));
+        }
+
+        if (str.Length > MaxTextLength)
+        {
+            throw new IllegalArgumentException(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Input string with prefix `{0}` is too long to be decoded as a base64 UUID",
+                    str.Substring(0, MaxTextLength)));
+        }
+
+        byte[] bytes;
+        try
+        {
+            bytes = DecodeUrlSafeBase64(str);
+        }
+        catch (FormatException exception)
+        {
+            throw new IllegalArgumentException(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Input string `{0}` is not a valid base64 UUID",
+                    str),
+                exception);
+        }
+
+        if (bytes.Length != ByteCount)
+        {
+            throw new IllegalArgumentException(
+                string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Input string `{0}` decoded as {1} bytes, which is not equal to the expected 16 bytes of a base64-encoded UUID",
+                    str,
+                    bytes.Length));
+        }
+
+        return new Uuid(ReadBigEndianInt64(bytes, 0), ReadBigEndianInt64(bytes, 8));
+    }
+
+    /// <inheritdoc/>
+    public override string ToString()
+    {
+        byte[] bytes = new byte[ByteCount];
+        WriteBigEndianInt64(bytes, 0, GetMostSignificantBits());
+        WriteBigEndianInt64(bytes, 8, GetLeastSignificantBits());
+
+        return Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+    }
+
+    /// <summary>
+    /// A random version-4 id that is not reserved and has no <c>'-'</c> in its text form: Java's
+    /// <c>Uuid.randomUuid()</c>.
+    /// </summary>
+    public static Uuid RandomUuid() => RandomUuid(s_unsafeRandomUuid);
+
+    /// <inheritdoc/>
+    public int CompareTo(Uuid other)
+    {
+        if (GetMostSignificantBits() > other.GetMostSignificantBits())
+        {
+            return 1;
+        }
+
+        if (GetMostSignificantBits() < other.GetMostSignificantBits())
+        {
+            return -1;
+        }
+
+        if (GetLeastSignificantBits() > other.GetLeastSignificantBits())
+        {
+            return 1;
+        }
+
+        if (GetLeastSignificantBits() < other.GetLeastSignificantBits())
+        {
+            return -1;
+        }
+
+        return 0;
+    }
+
+    /// <inheritdoc/>
+    public bool Equals(Uuid other) =>
+        GetMostSignificantBits() == other.GetMostSignificantBits() &&
+        GetLeastSignificantBits() == other.GetLeastSignificantBits();
+
+    /// <inheritdoc/>
+    public override bool Equals(object? obj) => obj is Uuid other && Equals(other);
+
+    /// <inheritdoc/>
+    public override int GetHashCode()
+    {
+        long value = GetMostSignificantBits() ^ GetLeastSignificantBits();
+        return (int)(value ^ (value >> 32));
+    }
+
+    /// <summary>Converts a list of ids to an array, Java's <c>Uuid.toArray(List)</c>.</summary>
+    /// <param name="list">The ids, or <see langword="null"/>.</param>
+    /// <returns>A new array of the ids in order, or <see langword="null"/> when <paramref name="list"/> is.</returns>
+    public static Uuid[]? ToArray(IReadOnlyList<Uuid>? list)
+    {
+        if (list is null)
+        {
+            return null;
+        }
+
+        Uuid[] array = new Uuid[list.Count];
+        for (int i = 0; i < array.Length; i++)
+        {
+            array[i] = list[i];
+        }
+
+        return array;
+    }
+
+    /// <summary>Converts an array of ids to a list, Java's <c>Uuid.toList(Uuid[])</c>.</summary>
+    /// <param name="array">The ids, or <see langword="null"/>.</param>
+    /// <returns>A new list of the ids in order, or <see langword="null"/> when <paramref name="array"/> is.</returns>
+    public static IReadOnlyList<Uuid>? ToList(Uuid[]? array) => array is null ? null : new List<Uuid>(array);
+
+    internal static Uuid RandomUuid(Func<Uuid> unsafeRandomUuid)
+    {
+        Uuid uuid = unsafeRandomUuid();
+
+        while (s_reserved.Contains(uuid) || uuid.ToString().IndexOf('-') >= 0)
+        {
+            uuid = unsafeRandomUuid();
+        }
+
+        return uuid;
+    }
+
+    internal static Uuid FromVersion4Bytes(byte[] randomBytes)
+    {
+        randomBytes[6] &= 0x0f;
+        randomBytes[6] |= 0x40;
+        randomBytes[8] &= 0x3f;
+        randomBytes[8] |= 0x80;
+        return new Uuid(ReadBigEndianInt64(randomBytes, 0), ReadBigEndianInt64(randomBytes, 8));
+    }
+
+    private static Uuid UnsafeRandomUuid()
+    {
+        byte[] bytes = new byte[ByteCount];
+
+        // A fresh instance per draw: RandomNumberGenerator's instance members carry no
+        // documented thread-safety guarantee on every target, and RandomUuid() may be
+        // called concurrently. It is not a hot path.
+        using (RandomNumberGenerator random = RandomNumberGenerator.Create())
+        {
+            random.GetBytes(bytes);
+        }
+
+        return FromVersion4Bytes(bytes);
+    }
+
+    // Rejects '+', '/' and padding short of a 4-character unit, which Convert.FromBase64String accepts and
+    // Java's URL decoder rejects.
+    private static byte[] DecodeUrlSafeBase64(string value)
+    {
+        if (value.IndexOf('+') >= 0 || value.IndexOf('/') >= 0)
+        {
+            throw new FormatException(
+                "Input contains a character outside the URL-safe base64 alphabet.");
+        }
+
+        if (value.IndexOf('=') >= 0 && value.Length % 4 != 0)
+        {
+            throw new FormatException(
+                "Input carries base64 padding but is not a whole number of 4-character units.");
+        }
+
+        return Convert.FromBase64String(ToStandardBase64(value));
+    }
+
+    private static string ToStandardBase64(string value)
+    {
+        string standard = value.Replace('-', '+').Replace('_', '/');
+        int padding = standard.Length % 4;
+        return padding == 0 ? standard : standard + new string('=', 4 - padding);
+    }
+
+    private static long ReadBigEndianInt64(byte[] bytes, int offset)
+    {
+        long value = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            value = (value << 8) | bytes[offset + i];
+        }
+
+        return value;
+    }
+
+    private static void WriteBigEndianInt64(byte[] bytes, int offset, long value)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            bytes[offset + i] = (byte)(value >> ((7 - i) * 8));
+        }
+    }
+}

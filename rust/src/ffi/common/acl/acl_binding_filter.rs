@@ -16,6 +16,8 @@
 //! `org.apache.kafka.common.acl.AclBindingFilter` (CLAUDE.md §4). The two
 //! filter getters return borrowed handles valid as long as this filter.
 
+use crate::common::Error;
+use crate::ffi::precondition::{fail, require_ref};
 use std::ffi::c_char;
 use std::ptr;
 
@@ -65,13 +67,16 @@ impl AclBindingFilterInner {
 /// # Safety
 ///
 /// `filter` must be a valid ACL-binding-filter handle, alive for `'a`.
-unsafe fn inner_ref<'a>(filter: *const kafka_common_acl_AclBindingFilter_t) -> &'a AclBindingFilterInner {
+unsafe fn inner_ref<'a>(
+    filter: *const kafka_common_acl_AclBindingFilter_t,
+    param: &'static str,
+) -> &'a AclBindingFilterInner {
     // SAFETY: Per this function's `# Safety`, `filter` is a valid ACL-binding-filter handle alive
     // for `'a`, so it points at a live `AclBindingFilterInner`: the `Box::into_raw` of
     // `box_acl_binding_filter`, or one a parent handle embeds and hands out a view on, which lives
     // as long as that parent. Nothing mutates an `AclBindingFilterInner` while a handle to it
     // exists, so the shared reference is sound for `'a`.
-    unsafe { &*(filter as *const AclBindingFilterInner) }
+    unsafe { require_ref::<_, AclBindingFilterInner>(filter, param) }
 }
 
 /// The filter behind a handle.
@@ -81,10 +86,11 @@ unsafe fn inner_ref<'a>(filter: *const kafka_common_acl_AclBindingFilter_t) -> &
 /// `filter` must be a valid ACL-binding-filter handle, alive for `'a`.
 pub(crate) unsafe fn acl_binding_filter_ref<'a>(
     filter: *const kafka_common_acl_AclBindingFilter_t,
+    param: &'static str,
 ) -> &'a AclBindingFilter {
     // SAFETY: Per this function's `# Safety`, `filter` is a valid ACL-binding-filter handle, as
     // `inner_ref` requires; the reference returned lives for the same `'a`.
-    &unsafe { inner_ref(filter) }.filter
+    &unsafe { inner_ref(filter, param) }.filter
 }
 
 /// Hands `filter` to C as an owned handle, freed with
@@ -100,6 +106,11 @@ pub(crate) fn box_acl_binding_filter(filter: AclBindingFilter) -> *mut kafka_com
 /// - `pattern_filter` - non-`NULL` pattern filter
 /// - `entry_filter` - non-`NULL` access control entry filter
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("patternFilter") if `pattern_filter` is `NULL`.
+/// - `LocalNullPointerError` ("entryFilter") if `entry_filter` is `NULL`.
+///
 /// # Safety
 ///
 /// `pattern_filter` must be a valid resource-pattern-filter handle and
@@ -112,15 +123,21 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_new(
     pattern_filter: *const kafka_common_resource_ResourcePatternFilter_t,
     entry_filter: *const kafka_common_acl_AccessControlEntryFilter_t,
 ) -> *mut kafka_common_acl_AclBindingFilter_t {
+    if pattern_filter.is_null() {
+        fail(Error::local_null_pointer("patternFilter"));
+    }
+    if entry_filter.is_null() {
+        fail(Error::local_null_pointer("entryFilter"));
+    }
     box_acl_binding_filter(AclBindingFilter::new(
         // SAFETY: Per this function's `# Safety`, `pattern_filter` is a valid
         // resource-pattern-filter handle, as `resource_pattern_filter_ref` requires; it is cloned,
         // so the borrow lasts for this call only.
-        unsafe { resource_pattern_filter_ref(pattern_filter) }.clone(),
+        unsafe { resource_pattern_filter_ref(pattern_filter, "pattern_filter") }.clone(),
         // SAFETY: Per this function's `# Safety`, `entry_filter` is a valid
         // access-control-entry-filter handle, as `access_control_entry_filter_ref` requires; it is
         // cloned, so the borrow lasts for this call only.
-        unsafe { access_control_entry_filter_ref(entry_filter) }.clone(),
+        unsafe { access_control_entry_filter_ref(entry_filter, "entry_filter") }.clone(),
     ))
 }
 
@@ -155,7 +172,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_is_unknown(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding-filter handle, as
     // `acl_binding_filter_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { acl_binding_filter_ref(self_) }.is_unknown())
+    i8::from(unsafe { acl_binding_filter_ref(self_, "self_") }.is_unknown())
 }
 
 /// `patternFilter()`.
@@ -177,7 +194,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_pattern_filter(
     // `inner_ref` requires. The handle returned points at the `ResourcePatternFilterInner` embedded
     // in the filter's `AclBindingFilterInner`, so it lives as long as the filter; that is the
     // rustdoc's "valid as long as this filter".
-    unsafe { inner_ref(self_) }.pattern_filter.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.pattern_filter.as_ptr()
 }
 
 /// `entryFilter()`.
@@ -199,7 +216,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_entry_filter(
     // `inner_ref` requires. The handle returned points at the `AccessControlEntryFilterInner`
     // embedded in the filter's `AclBindingFilterInner`, so it lives as long as the filter; that is
     // the rustdoc's "valid as long as this filter".
-    unsafe { inner_ref(self_) }.entry_filter.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.entry_filter.as_ptr()
 }
 
 /// Returns 1 if the resource and entry filters can only match one ACE. In other words, if
@@ -215,7 +232,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_matches_at_most_one(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding-filter handle, as
     // `acl_binding_filter_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { acl_binding_filter_ref(self_) }.matches_at_most_one())
+    i8::from(unsafe { acl_binding_filter_ref(self_, "self_") }.matches_at_most_one())
 }
 
 /// Returns a string describing an ANY or UNKNOWN field, or `NULL` if there is no such field.
@@ -232,7 +249,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_find_indefinite_field
     // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding-filter handle, as
     // `acl_binding_filter_ref` requires; the result is copied into an owned value before return, so
     // the borrow lasts for this call only.
-    unsafe { acl_binding_filter_ref(self_) }
+    unsafe { acl_binding_filter_ref(self_, "self_") }
         .find_indefinite_field()
         .map_or(ptr::null_mut(), |field| into_c_string(&field))
 }
@@ -257,7 +274,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_matches(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding-filter handle and
     // `binding` a valid ACL-binding handle, as `acl_binding_filter_ref` and `acl_binding_ref`
     // require. Both borrows last for this call only.
-    i8::from(unsafe { acl_binding_filter_ref(self_) }.matches(unsafe { acl_binding_ref(binding) }))
+    i8::from(unsafe { acl_binding_filter_ref(self_, "self_") }.matches(unsafe { acl_binding_ref(binding, "binding") }))
 }
 
 /// Returns the text form of the filter.
@@ -274,7 +291,7 @@ pub unsafe extern "C" fn kafka_common_acl_AclBindingFilter_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid ACL-binding-filter handle, as
     // `acl_binding_filter_ref` requires; the result is copied into an owned value before return, so
     // the borrow lasts for this call only.
-    into_c_string(&unsafe { acl_binding_filter_ref(self_) }.to_string())
+    into_c_string(&unsafe { acl_binding_filter_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned filter handle; null is a no-op.
@@ -336,7 +353,7 @@ mod tests {
             kafka_common_resource_ResourcePatternFilter_destroy(pattern_handle);
             kafka_common_acl_AccessControlEntryFilter_destroy(entry_handle);
             let expected = AclBindingFilter::new(pattern_filter, entry_filter);
-            assert_eq!(*acl_binding_filter_ref(filter), expected);
+            assert_eq!(*acl_binding_filter_ref(filter, "filter"), expected);
             assert_eq!(kafka_common_acl_AclBindingFilter_is_unknown(filter), 0);
             assert_eq!(kafka_common_acl_AclBindingFilter_matches(filter, binding), 1);
             assert_eq!(kafka_common_acl_AclBindingFilter_matches_at_most_one(filter), 0);
@@ -368,11 +385,24 @@ mod tests {
             kafka_common_acl_AclBindingFilter_destroy(filter);
 
             let any = kafka_common_acl_AclBindingFilter_any();
-            assert_eq!(*acl_binding_filter_ref(any), AclBindingFilter::any());
+            assert_eq!(*acl_binding_filter_ref(any, "any"), AclBindingFilter::any());
             assert_eq!(kafka_common_acl_AclBindingFilter_matches(any, binding), 1);
             kafka_common_acl_AclBindingFilter_destroy(any);
             kafka_common_acl_AclBindingFilter_destroy(ptr::null_mut());
             kafka_common_acl_AclBinding_destroy(binding);
+        }
+    }
+
+    #[test]
+    fn null_arguments_are_javas_null_pointer_errors() {
+        // SAFETY: Test code: both arguments are `NULL`, and `err` is a valid slot pointing at
+        // null; `stored` frees the error stored there.
+        unsafe {
+            let mut err = std::ptr::null_mut();
+            assert!(kafka_common_acl_AclBindingFilter_new_err(std::ptr::null(), std::ptr::null(), &mut err).is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "patternFilter");
         }
     }
 }

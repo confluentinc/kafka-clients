@@ -36,13 +36,23 @@
 //! version: so while the crate's PEP 440 form is the lower one (`0.2.0b1`
 //! against `4.4.0b1`), `--python-version` is required.
 //!
+//! `--dotnet-version <semver>` sets the version of the `Confluent.Kafka` NuGet
+//! package, the one `<Version>` of [`DOTNET_PROPS`], in the semver form only,
+//! where an `-alpha.N`, `-beta.N` or `-rc.N` may be followed by `.dev.M`, a dev
+//! build ([`DotnetVersion`]). It is a third line, on the Apache Kafka version
+//! like Python's (`rfc/versioning.md`), and it moves only when given: the
+//! crate's version is on another line, so it is never the default. A .NET
+//! version lower, in NuGet's (SemVer 2.0) order, than the current one is
+//! refused.
+//!
 //! What is released together:
 //!
 //!   - every member of the Rust workspace at the version of `confluent-kafka`
 //!     (a member on a version of its own, `ffi-macros`, keeps it), and
 //!     `Cargo.lock` with them;
 //!   - the Python packages in [`PYPROJECTS`] and the `__version__` of
-//!     [`PYTHON_VERSION_MODULES`].
+//!     [`PYTHON_VERSION_MODULES`];
+//!   - with `--dotnet-version`, the .NET package.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -61,11 +71,18 @@ const PYPROJECTS: [&str; 2] = ["python/pyproject.toml", "tools/translation_agent
 /// Python modules whose `__version__` follows the crate's.
 const PYTHON_VERSION_MODULES: [&str; 1] = ["tools/translation_agent/translation_agent/__init__.py"];
 
+/// The MSBuild file whose one `<Version>` is the .NET package's version.
+const DOTNET_PROPS: &str = "dotnet/Directory.Build.props";
+
 const USAGE: &str =
-    "usage: cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440_VERSION]\n\
+    "usage: cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440_VERSION] \
+     [--dotnet-version SEMVER]\n\
      The crates get the semver version; the Python packages the PEP 440 version, by default the\n\
      crate's in PEP 440 form. Python versions are their own line and only move up: a version below\n\
-     a package's current one is refused, so pass --python-version while the crate's is lower.";
+     a package's current one is refused, so pass --python-version while the crate's is lower.\n\
+     --dotnet-version sets the .NET package's version (dotnet/Directory.Build.props), in the semver\n\
+     form, where -alpha.N, -beta.N and -rc.N may be followed by .dev.M (4.4.0-alpha.0.dev.1); without\n\
+     it that version is left as it is. It only moves up too.";
 
 /// A pre-release stage, in semver precedence order (its labels compare as
 /// ASCII text).
@@ -207,15 +224,46 @@ fn number(text: &str) -> Option<u64> {
     text.parse().ok()
 }
 
-pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
-    let (text, python_override) = match args {
-        [text] => (text, None),
-        [text, flag, python] if flag == "--python-version" => (text, Some(python)),
-        _ => anyhow::bail!("{USAGE}"),
+/// The arguments: the crate version, then `--python-version` and
+/// `--dotnet-version`, each at most once, in either order.
+#[derive(Debug, PartialEq, Eq)]
+struct Args<'a> {
+    version: &'a str,
+    python: Option<&'a str>,
+    dotnet: Option<&'a str>,
+}
+
+fn parse_args(args: &[String]) -> anyhow::Result<Args<'_>> {
+    let Some((version, mut flags)) = args.split_first() else {
+        anyhow::bail!("{USAGE}");
     };
+    if version.starts_with("--") {
+        anyhow::bail!("{USAGE}");
+    }
+    let mut parsed = Args { version, python: None, dotnet: None };
+    while let [flag, value, rest @ ..] = flags {
+        let slot = match flag.as_str() {
+            "--python-version" => &mut parsed.python,
+            "--dotnet-version" => &mut parsed.dotnet,
+            _ => anyhow::bail!("{USAGE}"),
+        };
+        if slot.replace(value).is_some() {
+            anyhow::bail!("{flag} is given twice; {USAGE}");
+        }
+        flags = rest;
+    }
+    if !flags.is_empty() {
+        anyhow::bail!("{USAGE}");
+    }
+    Ok(parsed)
+}
+
+pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
+    let Args { version: text, python: python_override, dotnet } = parse_args(args)?;
     let new = PackageVersion::parse(text).with_context(|| format!("`{text}` is not a version; {USAGE}"))?;
+    let dotnet = dotnet.map(parse_dotnet_version).transpose()?;
     let python = match python_override {
-        Some(python) if is_pep440(python) => python.clone(),
+        Some(python) if is_pep440(python) => python.to_string(),
         Some(python) => anyhow::bail!("`{python}` is not a PEP 440 version in normal form, such as 0.3.0.post1"),
         None => new.pep440(),
     };
@@ -231,7 +279,10 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     if new < current {
         anyhow::bail!("{new} is below the current version {current}");
     }
-    println!("🔖 Bumping {current} → {new} (Python: {python})");
+    match dotnet {
+        Some(dotnet) => println!("🔖 Bumping {current} → {new} (Python: {python}, .NET: {dotnet})"),
+        None => println!("🔖 Bumping {current} → {new} (Python: {python})"),
+    }
 
     // Every edit is computed before any file is written, so a manifest this
     // command cannot read leaves the tree untouched.
@@ -271,6 +322,15 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
         let edited = set_module_version(&text, &python).expect("read above");
         edits.push((path, edited));
     }
+    match dotnet {
+        Some(dotnet) => {
+            let path = root.join(DOTNET_PROPS);
+            let props = read(&path)?;
+            ensure_dotnet_not_lowered(props_version(&props)?, dotnet)?;
+            edits.push((path, set_props_version(&props, &dotnet.to_string())?));
+        },
+        None => println!("   {DOTNET_PROPS} is not changed: pass --dotnet-version to set the .NET version"),
+    }
 
     for (path, text) in &edits {
         fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
@@ -303,6 +363,130 @@ fn ensure_not_lowered(file: &str, current: &str, python: &str, target: &Pep440) 
         );
     }
     Ok(())
+}
+
+/// A version of the `Confluent.Kafka` NuGet package: a [`PackageVersion`] in
+/// its semver form, where an `-alpha.N`, `-beta.N` or `-rc.N` may be followed
+/// by `.dev.M`, a dev build of it. NuGet puts a dev build after the version it
+/// extends and before the next one (`4.4.0-alpha.1` < `4.4.0-alpha.1.dev.1` <
+/// `4.4.0-alpha.2`), so the dev builds that lead up to `4.4.0-alpha.1` are
+/// `4.4.0-alpha.0.dev.M`. The derived order, `version` then `dev`, is NuGet's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DotnetVersion {
+    version: PackageVersion,
+    /// The `M` of `.dev.M`.
+    dev: Option<u64>,
+}
+
+impl DotnetVersion {
+    /// Parses the form NuGet writes, so `4.4.0-beta.1` and not `4.4.0b1`.
+    fn parse(text: &str) -> Option<Self> {
+        let (head, dev) = match text.rsplit_once(".dev.") {
+            Some((head, dev)) => (head, Some(number(dev)?)),
+            None => (text, None),
+        };
+        let version = PackageVersion::parse(head).filter(|version| version.to_string() == head)?;
+        // `.dev.M` extends an alpha, beta or rc, never a release or a `-dev.N`.
+        let extends_pre_release = matches!(version.pre_release, Some((stage, _)) if stage != Stage::Dev);
+        if dev.is_some() && !extends_pre_release {
+            return None;
+        }
+        Some(Self { version, dev })
+    }
+}
+
+/// The form NuGet writes, for [`DOTNET_PROPS`].
+impl fmt::Display for DotnetVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.version)?;
+        match self.dev {
+            Some(m) => write!(f, ".dev.{m}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The .NET version given with `--dotnet-version`, in the form
+/// [`DotnetVersion`] parses.
+fn parse_dotnet_version(text: &str) -> anyhow::Result<DotnetVersion> {
+    match DotnetVersion::parse(text) {
+        Some(version) => Ok(version),
+        None => anyhow::bail!(
+            "`{text}` is not a .NET package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N or -rc.N, such as \
+             4.4.0-beta.1; an -alpha.N, -beta.N or -rc.N may be followed by .dev.M, such as 4.4.0-alpha.0.dev.1"
+        ),
+    }
+}
+
+/// Refuses to write `new` over the .NET version `current`, when it is lower in
+/// NuGet's order: the .NET package only moves up.
+fn ensure_dotnet_not_lowered(current: &str, new: DotnetVersion) -> anyhow::Result<()> {
+    let current_version = parse_dotnet_version(current)
+        .with_context(|| format!("{DOTNET_PROPS} has `{current}`, not a version this command writes"))?;
+    if new < current_version {
+        anyhow::bail!(
+            "{DOTNET_PROPS} is at {current}: the .NET version {new} would lower it. .NET versions only move up; \
+             pass --dotnet-version with a version not below {current}"
+        );
+    }
+    Ok(())
+}
+
+/// Whether `text` starts with `prefix`, ignoring ASCII case.
+fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.len() >= prefix.len() && text.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+/// The byte range of the value of the one `<Version>` element of `props`. As
+/// for an XML reader, comments do not count, and as for MSBuild, the name's
+/// case does not matter, so this finds the element `check-nupkg.py version`
+/// reads.
+fn version_range(props: &str) -> anyhow::Result<(usize, usize)> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while let Some(offset) = props[at..].find('<') {
+        let start = at + offset;
+        let rest = &props[start..];
+        at = start + 1;
+        if let Some(comment) = rest.strip_prefix("<!--") {
+            let end = comment
+                .find("-->")
+                .with_context(|| format!("{DOTNET_PROPS} has a comment that does not end"))?;
+            at = start + "<!--".len() + end + "-->".len();
+        } else if starts_with_ignore_case(rest, "<Version>") {
+            let value_start = start + "<Version>".len();
+            let value_end = props[value_start..]
+                .find('<')
+                .map_or(props.len(), |offset| value_start + offset);
+            if value_start == value_end || !starts_with_ignore_case(&props[value_end..], "</Version>") {
+                anyhow::bail!("{DOTNET_PROPS} has a <Version> element that is not <Version>X.Y.Z</Version>");
+            }
+            found.push((value_start, value_end));
+            at = value_end + "</Version>".len();
+        } else if starts_with_ignore_case(rest, "<Version")
+            && rest["<Version".len()..].starts_with(|c: char| c.is_whitespace() || c == '/')
+        {
+            anyhow::bail!("{DOTNET_PROPS} has a <Version> element with attributes or no value");
+        }
+    }
+    match found[..] {
+        [range] => Ok(range),
+        [] => anyhow::bail!("{DOTNET_PROPS} has no <Version> element"),
+        _ => anyhow::bail!("{DOTNET_PROPS} has more than one <Version> element"),
+    }
+}
+
+/// The value of the one `<Version>` element of `props`.
+fn props_version(props: &str) -> anyhow::Result<&str> {
+    let (start, end) = version_range(props)?;
+    Ok(&props[start..end])
+}
+
+/// `props` with the value of its one `<Version>` element replaced, the rest of
+/// the file kept byte for byte.
+fn set_props_version(props: &str, value: &str) -> anyhow::Result<String> {
+    let (start, end) = version_range(props)?;
+    Ok(format!("{}{value}{}", &props[..start], &props[end..]))
 }
 
 /// Whether `text` is a PEP 440 version in normal form:
@@ -530,6 +714,10 @@ mod tests {
 
     fn v(text: &str) -> PackageVersion {
         PackageVersion::parse(text).unwrap_or_else(|| panic!("{text} should parse"))
+    }
+
+    fn dotnet(text: &str) -> DotnetVersion {
+        DotnetVersion::parse(text).unwrap_or_else(|| panic!("{text} should parse"))
     }
 
     #[test]
@@ -766,5 +954,234 @@ version = \"9.9.9\"
             let current = module_version(&text).expect("module version");
             assert!(Pep440::parse(current).is_some(), "{module}: {current}");
         }
+        let props = read(&root.join(DOTNET_PROPS)).expect("props");
+        let current = props_version(&props).expect("one <Version>");
+        parse_dotnet_version(current).expect("a semver .NET version");
+        let edited = set_props_version(&props, "99.0.0").expect("settable");
+        assert_eq!(props_version(&edited).unwrap(), "99.0.0");
+        assert_eq!(
+            edited,
+            props.replacen(&format!("<Version>{current}</Version>"), "<Version>99.0.0</Version>", 1)
+        );
+    }
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn flags_follow_the_version_in_either_order() {
+        let args = strings(&[
+            "0.3.0",
+            "--dotnet-version",
+            "4.4.0-beta.1",
+            "--python-version",
+            "4.4.0b1",
+        ]);
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Args { version: "0.3.0", python: Some("4.4.0b1"), dotnet: Some("4.4.0-beta.1") }
+        );
+        let args = strings(&["0.3.0", "--python-version", "4.4.0b1"]);
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Args { version: "0.3.0", python: Some("4.4.0b1"), dotnet: None }
+        );
+        let args = strings(&["0.3.0"]);
+        assert_eq!(
+            parse_args(&args).unwrap(),
+            Args { version: "0.3.0", python: None, dotnet: None }
+        );
+        for bad in [
+            &[][..],
+            &["--dotnet-version", "4.4.0"][..],
+            &["0.3.0", "--dotnet-version"][..],
+            &["0.3.0", "--net-version", "4.4.0"][..],
+            &["0.3.0", "4.4.0"][..],
+            &["0.3.0", "--dotnet-version", "4.4.0", "--dotnet-version", "4.4.1"][..],
+        ] {
+            assert!(parse_args(&strings(bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn dotnet_version_is_the_semver_form_only() {
+        for text in [
+            "4.4.0",
+            "4.4.0-alpha.1",
+            "4.4.0-beta.2",
+            "4.4.0-dev.3",
+            "4.4.0-rc.0",
+            "10.0.100",
+            "4.4.0-alpha.0.dev.1",
+            "4.4.0-beta.0.dev.12",
+            "4.4.0-rc.1.dev.0",
+        ] {
+            assert_eq!(parse_dotnet_version(text).unwrap().to_string(), text);
+        }
+        for text in [
+            "4.4.0b1",
+            "4.4.0rc1",
+            "4.4.0.dev1",
+            "4.4",
+            "v4.4.0",
+            "4.4.0-beta",
+            "4.4.0+abc",
+            "4.4.0-pre.1",
+            "",
+            // `.dev.M` extends only an alpha, beta or rc, in the semver form.
+            "4.4.0.dev.1",
+            "4.4.0-dev.1.dev.1",
+            "4.4.0-alpha.0.dev.01",
+            "4.4.0-alpha.0.dev",
+            "4.4.0-alpha.0.dev.1.dev.2",
+            "4.4.0-alpha.dev.1",
+            "4.4.0a0.dev.1",
+            "4.4.0a1.dev1",
+        ] {
+            let error = parse_dotnet_version(text).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "`{text}` is not a .NET package version: X.Y.Z, or X.Y.Z-alpha.N, -beta.N, -dev.N or -rc.N, such \
+                     as 4.4.0-beta.1; an -alpha.N, -beta.N or -rc.N may be followed by .dev.M, such as \
+                     4.4.0-alpha.0.dev.1"
+                )
+            );
+        }
+    }
+
+    /// NuGet's order (SemVer 2.0 precedence), each version below the next: a
+    /// dev build comes after the version it extends and before the next one.
+    #[test]
+    fn dotnet_versions_compare_in_nuget_order() {
+        let ordered = [
+            "4.3.0",
+            "4.4.0-alpha.0.dev.1",
+            "4.4.0-alpha.0.dev.2",
+            "4.4.0-alpha.0.dev.10",
+            "4.4.0-alpha.1",
+            "4.4.0-alpha.1.dev.1",
+            "4.4.0-alpha.2",
+            "4.4.0-beta.0.dev.1",
+            "4.4.0-beta.1",
+            "4.4.0-beta.1.dev.1",
+            "4.4.0-dev.1",
+            "4.4.0-dev.2",
+            "4.4.0-rc.0.dev.1",
+            "4.4.0-rc.1",
+            "4.4.0",
+            "4.4.1-alpha.0.dev.1",
+        ];
+        for pair in ordered.windows(2) {
+            assert!(dotnet(pair[0]) < dotnet(pair[1]), "{} < {}", pair[0], pair[1]);
+        }
+    }
+
+    #[test]
+    fn a_lower_dotnet_version_is_refused() {
+        let check = |current: &str, new: &str| ensure_dotnet_not_lowered(current, dotnet(new));
+        let error = check("4.4.0-beta.1", "4.4.0-alpha.2").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dotnet/Directory.Build.props is at 4.4.0-beta.1: the .NET version 4.4.0-alpha.2 would lower it. .NET \
+             versions only move up; pass --dotnet-version with a version not below 4.4.0-beta.1"
+        );
+        assert!(check("4.4.0", "4.4.0-rc.9").is_err());
+        assert!(check("4.4.1", "4.4.0").is_err());
+        // A dev build is above the version it extends, so the dev builds that
+        // lead up to 4.4.0-alpha.1 are 4.4.0-alpha.0.dev.M, below it.
+        let error = check("4.4.0-alpha.1", "4.4.0-alpha.0.dev.2").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dotnet/Directory.Build.props is at 4.4.0-alpha.1: the .NET version 4.4.0-alpha.0.dev.2 would lower it. \
+             .NET versions only move up; pass --dotnet-version with a version not below 4.4.0-alpha.1"
+        );
+        assert!(check("4.4.0-alpha.1.dev.1", "4.4.0-alpha.1").is_err());
+        // Semver order, as NuGet compares: dev is above beta.
+        check("4.4.0-beta.1", "4.4.0-dev.1").unwrap();
+        check("4.4.0-beta.1", "4.4.0-beta.1").unwrap();
+        check("4.4.0-rc.1", "4.4.0").unwrap();
+        check("4.4.0", "4.5.0-alpha.0").unwrap();
+        // Each step of a release: dev builds, then the pre-release they lead up to.
+        check("4.4.0-alpha.0.dev.1", "4.4.0-alpha.0.dev.2").unwrap();
+        check("4.4.0-alpha.0.dev.1", "4.4.0-alpha.1").unwrap();
+        check("4.4.0-alpha.1", "4.4.0-alpha.1.dev.1").unwrap();
+        check("4.4.0-alpha.1", "4.4.0-beta.0.dev.1").unwrap();
+        check("4.4.0-beta.0.dev.1", "4.4.0-beta.1").unwrap();
+        check("4.4.0-dev.1", "4.4.0").unwrap();
+        let error = check("4.4.0b1", "4.4.0").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dotnet/Directory.Build.props has `4.4.0b1`, not a version this command writes"
+        );
+    }
+
+    #[test]
+    fn props_version_is_the_one_version_element() {
+        let props = "\
+<Project>
+  <!-- The one
+       <Version> element: see below.
+  <Version>0.0.0</Version>
+  -->
+  <PropertyGroup>
+    <Version>4.4.0-alpha.1</Version> <!-- <Version>0.0.1</Version> -->
+  </PropertyGroup>
+  <PropertyGroup>
+    <VersionPrefix>1.0.0</VersionPrefix>
+    <FileVersion>1.0.0.0</FileVersion>
+  </PropertyGroup>
+</Project>
+";
+        assert_eq!(props_version(props).unwrap(), "4.4.0-alpha.1");
+        let edited = set_props_version(props, "4.4.0-beta.1").unwrap();
+        assert_eq!(
+            edited,
+            props.replace("<Version>4.4.0-alpha.1</Version>", "<Version>4.4.0-beta.1</Version>")
+        );
+        let crlf = props.replace('\n', "\r\n");
+        assert_eq!(
+            set_props_version(&crlf, "4.4.0-beta.1").unwrap(),
+            crlf.replace("<Version>4.4.0-alpha.1</Version>", "<Version>4.4.0-beta.1</Version>")
+        );
+        let lower = props.replace("<Version>4.4.0-alpha.1</Version>", "<version>4.4.0-alpha.1</VERSION>");
+        assert_eq!(props_version(&lower).unwrap(), "4.4.0-alpha.1");
+
+        let error = |props: &str| props_version(props).unwrap_err().to_string();
+        assert_eq!(error("<Project/>\n"), "dotnet/Directory.Build.props has no <Version> element");
+        assert_eq!(
+            error("<Project><!-- <Version>4.4.0</Version> --></Project>"),
+            "dotnet/Directory.Build.props has no <Version> element"
+        );
+        let two = props.replace("<FileVersion>1.0.0.0</FileVersion>", "<Version>1.0.0</Version>");
+        assert_eq!(error(&two), "dotnet/Directory.Build.props has more than one <Version> element");
+        assert!(set_props_version(&two, "4.4.0").is_err());
+        for attributes in [
+            "<Version Condition=\"x\">1.0.0</Version>",
+            "<Version/>",
+            "<Version\n>1.0.0</Version>",
+        ] {
+            assert_eq!(
+                error(&props.replace("<FileVersion>1.0.0.0</FileVersion>", attributes)),
+                "dotnet/Directory.Build.props has a <Version> element with attributes or no value",
+                "{attributes}"
+            );
+        }
+        for value in [
+            "<Version></Version>",
+            "<Version>1.0.0<!-- x --></Version>",
+            "<Version>1.0.0",
+        ] {
+            assert_eq!(
+                error(&props.replace("<FileVersion>1.0.0.0</FileVersion>", value)),
+                "dotnet/Directory.Build.props has a <Version> element that is not <Version>X.Y.Z</Version>",
+                "{value}"
+            );
+        }
+        assert_eq!(
+            error("<Project><Version>4.4.0</Version><!-- no end"),
+            "dotnet/Directory.Build.props has a comment that does not end"
+        );
     }
 }

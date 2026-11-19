@@ -87,7 +87,8 @@ e.g. a Rust producer feeding a C consumer):
 
 - **roles**: `producer`, `consumer`
 - **backends**: `rust` (in-process, async-native), `python` (sync binding),
-  `python-async` (asyncio binding), `c` (C FFI). The non-Rust backends run
+  `python-async` (asyncio binding), `c` (C FFI), `dotnet` (sync .NET binding),
+  `dotnet-async` (async .NET binding). The non-Rust backends run
   the real binding in its own container over the gRPC bridge; requesting one
   makes `xtask` build with `--features multilanguage-tests` automatically
   (their gRPC-server Docker images must be built first — see
@@ -235,10 +236,11 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
     the integration suite (`INTEGRATION_TEST_PROTOCOL=ssl`).
   - `sasl_plaintext` — SASL/PLAIN over plain TCP as `admin` / `admin-secret`.
   - `sasl_ssl` — SASL/PLAIN over TLS (both of the above).
-  - **Rust workloads only.** The gRPC (python / c) backends run in a sibling
-    container and reach the broker through its container-network listener,
-    which on this branch exists for PLAINTEXT only; a secured run with a gRPC
-    workload is rejected up front with a clear error.
+  - Every protocol works for every workload. A gRPC (python / c / dotnet) backend
+    whose server runs in a sibling container reaches the broker through the
+    container-network twin of the selected listener (CONTAINER, CTLSONLY,
+    CSASLPLAIN or CSASLTLS); a natively launched server uses the host
+    listeners, as the Rust workloads do.
   ```
   cargo xtask chaos --security-protocol sasl_ssl --cycles 3 --reports
   ```
@@ -671,9 +673,12 @@ cargo xtask chaos --scenario simple_flow_clean_broker_roll
 
 - **Docker** running (the harness manages `kafka-*` containers on a private
   network; image `apache/kafka:4.2.0`).
-- For `python` / `python-async` / `c` workloads, the gRPC-server images:
-  `make build-grpc-images-c`, `make build-grpc-images-python` (built once;
-  reused across runs).
+- For `python` / `python-async` / `c` / `dotnet` / `dotnet-async` workloads,
+  the gRPC-server images: `make build-grpc-images` at the repository root, or
+  one binding's with `make -C c grpc-image`, `make -C python grpc-image
+  grpc-image-async`, `make -C dotnet grpc-image grpc-image-async` (built
+  once; reused across runs). For a natively launched .NET server
+  (`MULTILANG_BACKEND_MODE=native`), `make -C dotnet grpc-native` instead.
 
 The harness is excluded from `cargo test` (`test = false` in `Cargo.toml`
 plus `#[ignore]` on every scenario) because it is slow and destructive to its

@@ -1,0 +1,106 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Unit tests for the Confluent.Kafka binding (xUnit; CLAUDE.md §4 D4).
+    Runs the Mock* tests, no broker (CLAUDE.md §7.3/§7.4). In M0/P0 this holds only
+    a TFM-sentinel smoke test that proves the harness runs and InternalsVisibleTo
+    compiles.
+
+    Test TFMs are net462;net8.0;net10.0. net462 is the TFM smoke leg of the library's
+    net462 assembly (PLAN §5.7): it must BUILD on the floor here (Microsoft.NETFramework.-
+    ReferenceAssemblies restores the reference assemblies cross-platform), but its
+    RUN is Windows/CI-only. net8.0 runs are CI-only too (only the .NET 10 runtime is
+    installed locally), so use `dotnet test -f net10.0` locally.
+  -->
+
+  <PropertyGroup>
+    <TargetFrameworks>net462;net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.UnitTests</RootNamespace>
+    <AssemblyName>Confluent.Kafka.UnitTests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- Only NativeMemoryManager.cs, a MemoryManager<byte> over native memory, uses unsafe code. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- net462 reference assemblies so the net462 TFM smoke leg BUILDS cross-platform
+       (macOS/Linux) — a build-only package (no runtime asset). Its RUN stays
+       Windows/CI-only (PLAN §5.7). -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net462'">
+    <!-- RuntimeInformation (TfmSentinelTests) is built into .NET Framework from 4.7.1 on. -->
+    <PackageReference Include="System.Runtime.InteropServices.RuntimeInformation" Version="4.3.0" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!--
+    net462: a binding redirect to each strong-named assembly in the output folder, at the version
+    the folder holds. The .NET Framework test host runs the tests with this project's .dll.config
+    followed by its own configuration, which redirects the assemblies it ships with to its own
+    versions (System.Memory to 4.0.5.0, where this folder holds 4.0.1.2), so loading them fails.
+    The build writes a redirect only for an assembly referenced at two versions, and none is, so
+    it writes no .dll.config. For a name redirected twice the first redirect wins, so these win
+    over the test host's. Skipped in design-time builds (dotnet format, IDEs), which load the project
+    without building its references, so the copied assemblies may not exist yet.
+  -->
+  <Target Name="RedirectToCopiedAssemblies" AfterTargets="ResolveAssemblyReferences" BeforeTargets="GenerateBindingRedirects"
+          Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework' and '$(DesignTimeBuild)' != 'true'">
+    <ItemGroup>
+      <_CopiedManagedAssembly Include="@(ReferenceCopyLocalPaths)"
+                              Condition="'%(Extension)' == '.dll' and '%(ReferenceCopyLocalPaths.AssetType)' != 'native' and '%(ReferenceCopyLocalPaths.Culture)' == ''" />
+    </ItemGroup>
+    <GetAssemblyIdentity AssemblyFiles="@(_CopiedManagedAssembly)">
+      <Output TaskParameter="Assemblies" ItemName="_CopiedAssemblyIdentity" />
+    </GetAssemblyIdentity>
+    <ItemGroup>
+      <SuggestedBindingRedirects Include="%(_CopiedAssemblyIdentity.Name), Culture=neutral, PublicKeyToken=%(_CopiedAssemblyIdentity.PublicKeyToken)"
+                                 MaxVersion="%(_CopiedAssemblyIdentity.Version)"
+                                 Condition="'%(_CopiedAssemblyIdentity.PublicKeyToken)' != ''" />
+    </ItemGroup>
+  </Target>
+
+  <!-- -p:ConfluentKafkaPackageVersion=<version> tests the Confluent.Kafka package of that version,
+       restored from a feed that holds it, instead of the project: the release pipeline runs these
+       tests against the package it publishes (.semaphore/test-nupkg.sh). -->
+  <ItemGroup Condition="'$(ConfluentKafkaPackageVersion)' == ''">
+    <ProjectReference Include="..\..\src\Confluent.Kafka\Confluent.Kafka.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(ConfluentKafkaPackageVersion)' != ''">
+    <PackageReference Include="Confluent.Kafka" Version="[$(ConfluentKafkaPackageVersion)]" />
+  </ItemGroup>
+
+  <!--
+    The generated bindings header, for NativeAbiConformanceTests. The same cargo build (ffi
+    feature) that builds the native the library copies writes it to rust/target/include/ (rust/build.rs);
+    the repo root is 3 dir levels up from this project. Conditional, so a missing header fails
+    that test with a clear message instead of failing the build.
+  -->
+  <PropertyGroup>
+    <AbiHeaderPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../rust/target/include/confluent_kafka_bindings.h'))</AbiHeaderPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(AbiHeaderPath)" Link="confluent_kafka_bindings.h" CopyToOutputDirectory="PreserveNewest" Visible="false" Condition="Exists('$(AbiHeaderPath)')" />
+  </ItemGroup>
+
+  <!-- The kafka submodule's client sources, for PublicNamespaceLayoutTests. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KafkaSourceRoot</_Parameter1>
+      <_Parameter2>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../kafka/clients/src'))</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

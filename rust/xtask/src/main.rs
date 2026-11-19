@@ -16,12 +16,15 @@ mod api_compat;
 mod bump_version;
 mod config_consts;
 mod config_types;
+mod dotnet_java_name_baseline;
 mod error_hierarchy;
 mod error_predicates;
 mod java;
+mod java_api;
 mod java_parse;
 mod javadoc;
 mod lint_custom;
+mod test_selection;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -33,8 +36,40 @@ use anyhow::Context as _;
 
 mod admin_gen;
 mod chaos_matrix;
+mod perf_cloud;
+
+/// Removes the variables `cargo run` sets for the package it runs, which `cargo xtask` is.
+///
+/// Every `cargo` the xtask starts would inherit them. A build script that declares
+/// `rerun-if-env-changed` on one of them (`ring` does on `CARGO_MANIFEST_DIR`) then sees it
+/// change each time the build switches between a `cargo` run from the shell, where it is
+/// unset, and one run from here, where it names `xtask/`. The script reruns and everything
+/// above it is compiled again: `make -C rust verify` compiled the crate's tests four times.
+/// It runs first in `main`, before the xtask starts a thread.
+fn forget_cargo_run_environment() {
+    let set_by_cargo_run: Vec<_> = env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| {
+            let name = name.to_string_lossy();
+            name.starts_with("CARGO_PKG_")
+                || matches!(
+                    &*name,
+                    "CARGO_MANIFEST_DIR"
+                        | "CARGO_MANIFEST_PATH"
+                        | "CARGO_MANIFEST_LINKS"
+                        | "CARGO_CRATE_NAME"
+                        | "CARGO_BIN_NAME"
+                        | "CARGO_PRIMARY_PACKAGE"
+                )
+        })
+        .collect();
+    for name in set_by_cargo_run {
+        env::remove_var(name);
+    }
+}
 
 fn main() -> anyhow::Result<()> {
+    forget_cargo_run_environment();
     let task = env::args().nth(1);
 
     match task.as_deref() {
@@ -46,6 +81,8 @@ fn main() -> anyhow::Result<()> {
         Some("generate-admin-options") => admin_gen::options::generate(Path::new(REPO_ROOT))?,
         Some("generate-admin-results") => admin_gen::results::generate(Path::new(REPO_ROOT))?,
         Some("java-deprecated") => java_deprecated()?,
+        Some("java-api") => java_api::run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("dotnet-java-name-baseline") => dotnet_java_name_baseline::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("fetch-java-refs") => fetch_java_refs()?,
         Some("lint-custom") => lint_custom::lint_custom(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("ffi-baseline") => lint_custom::write_ffi_baseline()?,
@@ -53,7 +90,18 @@ fn main() -> anyhow::Result<()> {
         Some("javadoc") => lint_custom::javadoc(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("doc-fill") => lint_custom::doc_fill(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("doc-report") => lint_custom::doc_report()?,
-        Some("lint") => lint(env::args().skip(2).any(|arg| arg == "--keep-going"))?,
+        Some("lint") => {
+            let args: Vec<String> = env::args().skip(2).collect();
+            let unknown: Vec<&String> = args.iter().filter(|arg| !LINT_FLAGS.contains(&arg.as_str())).collect();
+            if !unknown.is_empty() {
+                anyhow::bail!("lint: unknown argument(s) {unknown:?}; it takes {LINT_FLAGS:?}");
+            }
+            lint(
+                args.iter().any(|arg| arg == "--keep-going"),
+                !args.iter().any(|arg| arg == "--without-default-features-clippy"),
+            )?
+        },
+        Some("clippy-default-features") => run_command("cargo", CLIPPY_DEFAULT_FEATURES)?,
 
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
@@ -70,7 +118,13 @@ fn main() -> anyhow::Result<()> {
         Some("chaos-matrix") => chaos_matrix::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("chaos-matrix-status") => chaos_matrix::status::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("transactional-producer-perf-test") => transactional_producer_perf_test()?,
+        Some("perf-cloud") => perf_cloud::run(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("package-smoke-test") => package_smoke_test(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("select-tests") => test_selection::select(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("selected-cargo-test") => test_selection::cargo_test(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("selected-run") => test_selection::selected_run(&env::args().skip(2).collect::<Vec<_>>())?,
+        Some("show-test-selection") => test_selection::show()?,
+        Some("pre-push") => test_selection::pre_push(&env::args().skip(2).collect::<Vec<_>>())?,
         Some("help" | "--help" | "-h") => print_help(),
         // A mistyped task must fail: CI steps, such as the release checks in
         // .semaphore/semaphore.yml, rely on the exit status of these tasks.
@@ -134,6 +188,7 @@ fn check_generated() -> anyhow::Result<()> {
     error_predicates::check_error_predicates_up_to_date()?;
     check_admin_options_up_to_date()?;
     check_admin_results_up_to_date()?;
+    check_java_api_up_to_date()?;
 
     println!("🔍 Checking generated code formatting...");
 
@@ -555,8 +610,8 @@ fn generate_error_codes() -> anyhow::Result<()> {
     println!("🔧 Generating the Python error hierarchy from the Java sources...");
     error_hierarchy::generate(Path::new(REPO_ROOT))?;
 
-    // And the ConfigDef type of every producer / consumer config key.
-    println!("🔧 Generating the Python config key types from the Java sources...");
+    // And the ConfigDef type of every producer / consumer / admin config key.
+    println!("🔧 Generating the Python and .NET config key types from the Java sources...");
     config_types::generate(Path::new(REPO_ROOT))?;
     Ok(())
 }
@@ -591,6 +646,17 @@ fn check_admin_results_up_to_date() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Fail when a binding's copy of the Java API list no longer matches the Java sources.
+fn check_java_api_up_to_date() -> anyhow::Result<()> {
+    println!("🔍 Checking the bindings' Java API lists...");
+    if let Err(e) = java_api::check_binding_copies() {
+        eprintln!("\n❌ {e}");
+        exit(1);
+    }
+    println!("✅ The bindings' Java API lists are up to date");
+    Ok(())
+}
+
 /// Fail when a generated error-code file no longer matches the Rust enum.
 fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     println!("🔍 Checking generated error-code constants...");
@@ -601,17 +667,19 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     let codes_stale = !fs::read_to_string(ERROR_CODE_RS).is_ok_and(|actual| actual == expected);
 
     // The Python exception hierarchy generated from the Java sources.
-    let mut hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
-    // The config key types generated from ProducerConfig / ConsumerConfig.
-    hierarchy_stale.extend(config_types::check_up_to_date(Path::new(REPO_ROOT))?);
+    let hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
+    // The Python and .NET config tables generated from the Java config classes.
+    let config_stale = config_types::check_up_to_date(Path::new(REPO_ROOT))?;
 
-    if codes_stale || !hierarchy_stale.is_empty() {
+    if codes_stale || !hierarchy_stale.is_empty() || !config_stale.is_empty() {
         if codes_stale {
             eprintln!("\n❌ Stale generated error-code constants: {ERROR_CODE_RS}");
         }
-        if !hierarchy_stale.is_empty() {
-            let files: Vec<String> = hierarchy_stale.iter().map(|p| p.display().to_string()).collect();
-            eprintln!("\n❌ Stale generated error hierarchy: {}", files.join(", "));
+        for (what, stale) in [("error hierarchy", &hierarchy_stale), ("config tables", &config_stale)] {
+            if !stale.is_empty() {
+                let files: Vec<String> = stale.iter().map(|p| p.display().to_string()).collect();
+                eprintln!("\n❌ Stale generated {what}: {}", files.join(", "));
+            }
         }
         eprintln!("   Run: cargo xtask generate-error-codes");
         exit(1);
@@ -619,8 +687,27 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
 
     println!("✅ Error-code constants are up to date ({} codes)", codes.len());
     println!("✅ Generated error hierarchy is up to date");
+    println!("✅ Generated config tables are up to date");
     Ok(())
 }
+
+/// The flags `cargo xtask lint` takes.
+const LINT_FLAGS: &[&str] = &["--keep-going", "--without-default-features-clippy"];
+
+/// The clippy pass over the default features (see `lint`). `cargo xtask
+/// clippy-default-features` runs it alone, so CI can run it in a job of its own.
+const CLIPPY_DEFAULT_FEATURES: &[&str] = &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"];
+
+/// The clippy pass over every feature (see `lint`).
+const CLIPPY_ALL_FEATURES: &[&str] = &[
+    "clippy",
+    "--workspace",
+    "--all-targets",
+    "--all-features",
+    "--",
+    "-D",
+    "warnings",
+];
 
 /// Runs every lint step. By default it stops at the first failing step; with
 /// `keep_going` (`cargo xtask lint --keep-going`) it runs every step regardless,
@@ -628,7 +715,12 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
 /// only *whether later steps run*, never what a step enforces: it exists so a step
 /// that is known to fail (e.g. a lint-custom finding owned by a later phase) does
 /// not hide the result of the steps after it.
-fn lint(keep_going: bool) -> anyhow::Result<()> {
+///
+/// Without `default_features_clippy` (`--without-default-features-clippy`) the
+/// clippy pass over the default features is left out, for a caller that runs it
+/// elsewhere (`cargo xtask clippy-default-features`): CI runs it in the doc-check
+/// job, off the Rust job's critical path.
+fn lint(keep_going: bool, default_features_clippy: bool) -> anyhow::Result<()> {
     let mut failures: Vec<String> = Vec::new();
     let mut step = |name: &str, result: anyhow::Result<()>| -> anyhow::Result<()> {
         match result {
@@ -669,25 +761,15 @@ fn lint(keep_going: bool) -> anyhow::Result<()> {
     //
     // `--workspace` covers every member (including `generator`), so no
     // per-crate pass is needed.
-    for (name, pass) in [
-        (
-            "clippy (default features)",
-            &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"][..],
-        ),
-        (
-            "clippy (--all-features)",
-            &[
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--all-features",
-                "--",
-                "-D",
-                "warnings",
-            ][..],
-        ),
+    for (name, pass, run) in [
+        ("clippy (default features)", CLIPPY_DEFAULT_FEATURES, default_features_clippy),
+        ("clippy (--all-features)", CLIPPY_ALL_FEATURES, true),
     ] {
-        step(name, run_command("cargo", pass))?;
+        if run {
+            step(name, run_command("cargo", pass))?;
+        } else {
+            println!("⏭️  Skipping {name}: run it with `cargo xtask clippy-default-features`");
+        }
     }
 
     // Lint the xtask crate itself. `cargo clippy` from the workspace root only
@@ -779,9 +861,54 @@ fn coverage_lcov() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Runs the unit and integration tests under coverage. `admin_examples_test`
+/// runs the example binaries from the test binary's target directory, which a
+/// plain `cargo llvm-cov` neither builds them into nor keeps them in, so the
+/// examples and the tests are built by plain `cargo` commands under the
+/// environment of `cargo llvm-cov show-env`, in its target directory, and the
+/// report is made afterwards.
 fn coverage_all() -> anyhow::Result<()> {
     println!("Running full test coverage (unit + integration, requires Docker)...");
-    run_coverage_lcov(&["--features", "integration-tests"])?;
+    fs::create_dir_all("coverage")?;
+    let target_dir = env::current_dir()?.join("target").join("llvm-cov-target");
+    let target_env = [("CARGO_TARGET_DIR".to_owned(), target_dir.display().to_string())];
+    // Every step, `clean` and `report` included, runs under the show-env
+    // environment: without it cargo-llvm-cov puts its own `llvm-cov-target`
+    // under `CARGO_TARGET_DIR` and looks for the profile data there.
+    let mut coverage_env = llvm_cov_show_env(&target_env)?;
+    coverage_env.extend(target_env.iter().cloned());
+    run_command_with_env("cargo", &["llvm-cov", "clean", "--workspace"], &coverage_env)?;
+    run_command_with_env(
+        "cargo",
+        &["build", "--examples", "--features", "integration-tests"],
+        &coverage_env,
+    )?;
+    run_command_with_env(
+        "cargo",
+        &[
+            "test",
+            "--package",
+            "confluent-kafka",
+            "--features",
+            "integration-tests",
+        ],
+        &coverage_env,
+    )?;
+    run_command_with_env(
+        "cargo",
+        &[
+            "llvm-cov",
+            "report",
+            "--package",
+            "confluent-kafka",
+            "--ignore-filename-regex",
+            COVERAGE_IGNORE_FILENAME_REGEX,
+            "--lcov",
+            "--output-path",
+            "coverage/lcov.info",
+        ],
+        &coverage_env,
+    )?;
     run_grcov_html()?;
     println!("Coverage report: coverage/html/index.html");
     Ok(())
@@ -791,9 +918,10 @@ fn test_multilanguage() -> anyhow::Result<()> {
     println!("Running multilanguage integration tests (requires Docker)...");
     println!("This builds the python + c gRPC server images, then runs");
     println!("`cargo test --features integration-tests,multilanguage-tests`.");
-    // Delegated to the repository root's Makefile so the image-build steps
-    // stay in one place; it shells out to python/Makefile and c/Makefile.
-    run_command("make", &["-C", "..", "test-integration-python", "test-integration-c"])
+    // Delegated to python/Makefile and c/Makefile, which keep the image-build
+    // steps and build what the images copy first.
+    run_command("make", &["-C", "../python", "test-integration"])?;
+    run_command("make", &["-C", "../c", "test-integration"])
 }
 
 /// Run the producer performance test as an env-driven benchmark binary.
@@ -926,7 +1054,7 @@ fn chaos() -> anyhow::Result<()> {
         let env_vars = parse_chaos_flags(&raw)?;
         let feature = chaos_test_feature(&env_vars);
         if feature == "multilanguage-tests" {
-            println!("   python/c workload requested → building with `--features multilanguage-tests`");
+            println!("   gRPC (python/c/dotnet) workload requested → building with `--features multilanguage-tests`");
         }
         let args: Vec<String> = [
             "test",
@@ -1032,7 +1160,7 @@ only once (except --workload).
                          exactly its signature is labelled KNOWN DEFECT
   --unclean              SIGKILL instead of SIGTERM for broker roll
   --workload role:backend  repeatable; role=producer|consumer,
-                           backend=rust|python|python-async|c
+                           backend=rust|python|python-async|c|dotnet|dotnet-async
                            (default: producer:rust,consumer:rust)
   --consumers N          shorthand for 1 rust producer + N rust consumers
                          (librdkafka's --consumers; not usable with --workload)
@@ -1127,14 +1255,15 @@ fn scenario_test_args(raw: &[String]) -> anyhow::Result<(Vec<String>, String)> {
 }
 
 /// The cargo feature the chaos test must be built with for a run with these
-/// `CHAOS_*` settings. A python/c workload backend needs the gRPC bridge,
-/// which only compiles under `multilanguage-tests`, so that feature is picked
-/// whenever such a workload is requested and the user does not have to.
+/// `CHAOS_*` settings. A python/c/dotnet workload backend needs the gRPC
+/// bridge, which only compiles under `multilanguage-tests`, so that feature is
+/// picked whenever such a workload is requested and the user does not have to.
+/// `:dotnet` also covers `dotnet-async`.
 fn chaos_test_feature(env_vars: &[(String, String)]) -> &'static str {
     let needs_grpc = env_vars
         .iter()
         .find(|(k, _)| k == "CHAOS_WORKLOADS")
-        .is_some_and(|(_, v)| v.contains(":python") || v.contains(":c"));
+        .is_some_and(|(_, v)| v.contains(":python") || v.contains(":c") || v.contains(":dotnet"));
     if needs_grpc {
         "multilanguage-tests"
     } else {
@@ -1580,6 +1709,45 @@ fn transactional_producer_perf_test() -> anyhow::Result<()> {
     run_command("cargo", &arg_refs)
 }
 
+/// The generated wire code, the `src/bin` tools, the test-only files (always fully run,
+/// so they only inflate the total) and the `Dyn*` client forwarders, whose forwarding
+/// `check-dyn-forwarding` already enforces, left out of every coverage report.
+const COVERAGE_IGNORE_FILENAME_REGEX: &str = concat!(
+    "(target/debug/build/.*/out/(test_)?generated/|src/bin/",
+    "|(_test|_test_utils)\\.rs$|/test_[a-z_]+\\.rs$|src/integration_tests/",
+    "|src/(consumer/dyn_consumer|producer/dyn_producer)\\.rs$)",
+);
+
+/// The environment `cargo llvm-cov show-env` gives for instrumenting the
+/// `confluent-kafka` package, its `KEY=VALUE` lines with the shell quotes
+/// removed, run with `env_vars` set.
+fn llvm_cov_show_env(env_vars: &[(String, String)]) -> anyhow::Result<Vec<(String, String)>> {
+    let output = Command::new("cargo")
+        .args(["llvm-cov", "show-env", "--package", "confluent-kafka"])
+        .envs(env_vars.iter().map(|(k, v)| (k, v)))
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Command failed: cargo llvm-cov show-env\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8(output.stdout)?
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (key, value) = line
+                .split_once('=')
+                .with_context(|| format!("unexpected cargo llvm-cov show-env line: {line}"))?;
+            let value = value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')).unwrap_or(value);
+            if value.contains('\'') {
+                anyhow::bail!("unsupported quoting in cargo llvm-cov show-env line: {line}");
+            }
+            Ok((key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
 fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
     fs::create_dir_all("coverage")?;
     let mut args = vec![
@@ -1587,7 +1755,7 @@ fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
         "--package",
         "confluent-kafka",
         "--ignore-filename-regex",
-        "(target/debug/build/.*/out/(test_)?generated/|src/bin/)",
+        COVERAGE_IGNORE_FILENAME_REGEX,
         "--lcov",
         "--output-path",
         "coverage/lcov.info",
@@ -2195,7 +2363,7 @@ fn with_ffi_macros_stripped(package: impl FnOnce() -> anyhow::Result<()>) -> any
 /// optional one whose only user, `src/ffi`, is not packaged; `ffi-macros` is not
 /// published. So the manifest loses its line and its entry in the `ffi` feature,
 /// and the lock file the line listing it, which keeps the lock file valid under
-/// `--locked`. The crates.io release blocks in `.semaphore/semaphore.yml` make
+/// `--locked`. The crates.io release blocks in `.semaphore/release.yml` make
 /// the same edit with `sed`, because no code built from the repository may run
 /// on the publish VM; `test_publish_pipeline_strips_the_same_lines` keeps the
 /// two in step.
@@ -2237,7 +2405,7 @@ fn strip_error(file: &str, pattern: &str, found: usize) -> String {
         "expected `{pattern}` once in {file}, found it {found} times. A `cargo xtask package-check` \
          interrupted while packaging leaves Cargo.toml and Cargo.lock stripped: `git diff` shows what \
          to restore. Otherwise update `strip_ffi_macros` in xtask/src/main.rs and the `sed` in \
-         .semaphore/semaphore.yml together."
+         .semaphore/release.yml together."
     )
 }
 
@@ -2274,7 +2442,15 @@ fn package_rust_version() -> anyhow::Result<String> {
 }
 
 fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
-    let status = Command::new(program).args(args).status()?;
+    run_command_with_env(program, args, &[])
+}
+
+/// [`run_command`] with `env_vars` added to the inherited environment.
+fn run_command_with_env(program: &str, args: &[&str], env_vars: &[(String, String)]) -> anyhow::Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .envs(env_vars.iter().map(|(k, v)| (k, v)))
+        .status()?;
 
     if !status.success() {
         anyhow::bail!("Command failed: {} {}", program, args.join(" "));
@@ -2467,6 +2643,12 @@ fn module_path_hygiene() -> anyhow::Result<()> {
     crate_roots.sort();
     crate_roots.dedup();
 
+    let mut by_segment: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (segment, name) in &reexports {
+        by_segment.entry(segment.as_str()).or_default().insert(name.as_str());
+    }
+    let crate_roots: BTreeSet<&str> = crate_roots.iter().map(String::as_str).collect();
+
     let mut findings: Vec<String> = Vec::new();
     for root in ["src", "tests", "examples", "consumer-perf/src"] {
         if !PathBuf::from(root).is_dir() {
@@ -2475,36 +2657,13 @@ fn module_path_hygiene() -> anyhow::Result<()> {
         for path in rust_sources(root)? {
             let text = fs::read_to_string(&path)?;
             for (number, line) in text.lines().enumerate() {
-                for (segment, name) in &reexports {
-                    let needle = format!("::{segment}::{name}");
-                    let mut from = 0;
-                    while let Some(at) = line[from..].find(&needle) {
-                        let start = from + at;
-                        let end = start + needle.len();
-                        from = start + 1;
-                        // Reject a longer identifier on either side (`::topic::TopicX`).
-                        if line[end..].starts_with(|c: char| c.is_alphanumeric() || c == '_') {
-                            continue;
-                        }
-                        let head: String = line[..start]
-                            .chars()
-                            .rev()
-                            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .collect();
-                        let root = head.trim_start_matches(':').split("::").next().unwrap_or_default();
-                        if !crate_roots.iter().any(|allowed| allowed == root) {
-                            continue;
-                        }
-                        findings.push(format!(
-                            "{}:{} reaches `{name}` through the file module `{segment}` — \
-                             import it from the parent re-export instead (CLAUDE.md §2)",
-                            path.display(),
-                            number + 1
-                        ));
-                    }
+                for (segment, name) in file_module_paths(line, &by_segment, &crate_roots) {
+                    findings.push(format!(
+                        "{}:{} reaches `{name}` through the file module `{segment}` — \
+                         import it from the parent re-export instead (CLAUDE.md §2)",
+                        path.display(),
+                        number + 1
+                    ));
                 }
             }
         }
@@ -2518,6 +2677,55 @@ fn module_path_hygiene() -> anyhow::Result<()> {
         eprintln!("  {finding}");
     }
     Err(anyhow::anyhow!("{} module-path finding(s)", findings.len()))
+}
+
+/// Every `::<segment>::<name>` in `line` whose pair `by_segment` holds and whose path
+/// starts at one of `crate_roots`, in the order they appear.
+///
+/// Both segments are whole identifiers, so each `::` starts at most one candidate pair
+/// (`::topic::TopicX` is the pair `(topic, TopicX)`, never `(topic, Topic)`). The line
+/// is scanned once and each pair is a map lookup, so the cost does not grow with the
+/// number of re-exports.
+fn file_module_paths<'a>(
+    line: &'a str,
+    by_segment: &BTreeMap<&str, BTreeSet<&str>>,
+    crate_roots: &BTreeSet<&str>,
+) -> Vec<(&'a str, &'a str)> {
+    fn identifier(text: &str) -> &str {
+        let end = text.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(text.len());
+        &text[..end]
+    }
+
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(at) = line[from..].find("::") {
+        let start = from + at;
+        from = start + 1;
+        let segment = identifier(&line[start + 2..]);
+        if segment.is_empty() {
+            continue;
+        }
+        let Some(rest) = line[start + 2 + segment.len()..].strip_prefix("::") else {
+            continue;
+        };
+        let name = identifier(rest);
+        if name.is_empty() || !by_segment.get(segment).is_some_and(|names| names.contains(name)) {
+            continue;
+        }
+        let head: String = line[..start]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let root = head.trim_start_matches(':').split("::").next().unwrap_or_default();
+        if crate_roots.contains(root) {
+            found.push((segment, name));
+        }
+    }
+    found
 }
 
 /// The body of every `use` statement in `text`, whitespace-collapsed and with the
@@ -2639,6 +2847,10 @@ fn print_help() {
   generate-admin-options  Regenerate the admin *Options Python classes from the Java sources
   generate-admin-results  Regenerate the admin *Result Python classes from the Java sources
   java-deprecated List the Java client's @Deprecated API in ../design/current/java-deprecated.txt
+  java-api        Write the Java client's public API to a file, for the bindings' Java-name checks
+                  (--check: fail when the file is out of date instead of writing it)
+  dotnet-java-name-baseline  Rewrite the .NET binding's CKRDA0013 baseline from a build; it only shrinks
+                  (--add: also take findings it does not hold yet)
   fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
   lint-custom     Run the source-level rules clippy cannot express
                   (also runs as the first step of `lint`):
@@ -2660,8 +2872,10 @@ fn print_help() {
                     check-thread-safety-probe             src/api_promises.rs asserts every public type's auto traits
                     check-ffi-translation                 every public Rust item has its C counterpart
                     check-api-docs                        public API docs list parameters, returns and errors
+                    check-ffi-null-checks                 no C argument is read before its NULL check
                   With a rule name only that rule runs; `--no-baseline` ignores
-                  xtask/ffi-baseline.txt and xtask/doc-baseline.txt so every finding is shown
+                  xtask/ffi-baseline.txt and xtask/doc-baseline.txt so every
+                  finding is shown
   ffi-baseline    Rewrite xtask/ffi-baseline.txt with the current check-ffi-translation findings
   doc-baseline    Rewrite xtask/doc-baseline.txt with the current check-api-docs findings
   javadoc         Print the translated Javadoc of a marker, Rust path or C symbol, and the item's size limit
@@ -2670,7 +2884,9 @@ fn print_help() {
                   tags give into the docs under the paths; `--write` applies them
   lint            Run doc-hygiene plus clippy lints (warnings are errors);
                   `--keep-going` runs every step even after one fails, then
-                  fails if any did
+                  fails if any did; `--without-default-features-clippy` leaves
+                  out the clippy pass over the default features
+  clippy-default-features  Run only the clippy pass over the default features
 
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
@@ -2713,6 +2929,43 @@ fn print_help() {
                     --python-version PEP440 gives the Python packages their own version;
                     Python versions are a separate line that only moves up, so one below
                     a package's current version is refused (rfc/versioning.md)
+                    --dotnet-version SEMVER sets the .NET package's version
+                    (dotnet/Directory.Build.props), a third line, left as it is without it;
+                    it only moves up too. Its -alpha.N, -beta.N and -rc.N may be followed
+                    by .dev.M, a dev build (4.4.0-alpha.0.dev.1)
+  select-tests    Ask an agent which tests the changes from a base branch can affect and write
+                  them to ../test-selection/test-selection-<HEAD>.json, keeping the four most
+                  recent files there (or to $TEST_SELECTION, relative to the repository root, when
+                  it names a .json file), to commit with the branch; the Makefiles' test recipes
+                  run only those tests while $TEST_SELECTION names the file or the folder and the
+                  working tree is the one the file was made for
+                    --base REF       compare with REF (default origin/master)
+                    --agent COMMAND  a command taking Claude Code's --model, --restricted,
+                                     --strict-mcp-config, --tools, --allowedTools,
+                                     --disallowedTools and -p (default `claude`)
+                    --model MODEL    the agent's model (default opus)
+                    --timeout SECS   give up when the agent has not answered after SECS
+                                     seconds (default 600)
+                    --reuse          keep the file when it was made at HEAD for the current
+                                     working tree
+  pre-push        The pre-push hook's task, reading the pushed refs on standard input: when HEAD
+                  is pushed without a selection made for it in its test-selection/ folder,
+                  select for it, commit the folder, push that commit with $GIT_PUSH_COMMAND
+                  (or `git push`) and fail the push that ran it; it takes --remote <the
+                  hook's remote> and select-tests' options but --reuse
+  show-test-selection  Say whether the test selection $TEST_SELECTION names applies to the working
+                  tree and, when it does, list the suites it runs with their entries and reasons
+  selected-cargo-test  `cargo test` restricted to the test selection $TEST_SELECTION names, if any
+                    --section NAME -- <cargo test arguments>; NAME is `rust`, or a filter list
+                                     such as `c.integration` applying to every test unit
+  selected-run    Run a command only when the test selection selects its section
+                    --section NAME [--default ARG]... [--ctest] [--dotnet [--dotnet-filter EXPR]]
+                                     [-C DIR] -- <command>; an argument `{{}}` stands for the
+                                     selected entries (the defaults when the whole suite is
+                                     selected); with --ctest for `-R <regex>` of the programs,
+                                     the entries (`<ctest>` or `<ctest>:<function>`) going to
+                                     them in $C_TEST_FILTER; with --dotnet for a `dotnet test
+                                     --filter` on the names, and-ed with EXPR
   chaos           Flag-driven chaos / fault-injection runner for producer + consumer (requires Docker)
                     e.g. cargo xtask chaos --brokers 3 --cycles 3 --unclean \
                              --workload producer:rust --workload consumer:rust
@@ -2740,6 +2993,9 @@ fn print_help() {
                     e.g. cargo xtask chaos-matrix-status --watch 30
                     --out DIR (default: the most recently active matrix)
   transactional-producer-perf-test  Run the env-driven transactional producer performance benchmark (requires Docker or BOOTSTRAP_SERVERS)
+  perf-cloud      Run the producer, transactional and consumer performance harnesses
+                  against a remote SASL_SSL cluster (e.g. Confluent Cloud) and compare the clients:
+                  list / check / build / run; `cargo xtask perf-cloud help` lists the flags
 
 Usage:
   cargo xtask format
@@ -2748,13 +3004,16 @@ Usage:
   cargo xtask generate-error-codes
   cargo xtask generate-error-predicates
   cargo xtask java-deprecated [kafka-ref ...]
+  cargo xtask java-api [--check] <file>
+  cargo xtask dotnet-java-name-baseline [--add]
   cargo xtask lint-custom [rule-name] [--no-baseline]
   cargo xtask ffi-baseline
   cargo xtask doc-baseline
   cargo xtask javadoc <marker|rust-path|C symbol>
   cargo xtask doc-report
   cargo xtask doc-fill [--write] <path>...
-  cargo xtask lint [--keep-going]
+  cargo xtask lint [--keep-going] [--without-default-features-clippy]
+  cargo xtask clippy-default-features
 
   cargo xtask doc-hygiene
   cargo xtask lint-fix
@@ -2766,18 +3025,50 @@ Usage:
   cargo xtask integrity-test
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
-  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440]
+  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]
   cargo xtask transactional-producer-perf-test
-  cargo xtask package-smoke-test [--registry [--version <version>]] [--with-broker] [--toolchain <name> | --msrv] [--release]"
+  cargo xtask package-smoke-test [--registry [--version <version>]] [--with-broker] [--toolchain <name> | --msrv] [--release]
+  cargo xtask perf-cloud <list|check|build|run> [FLAGS]"
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_module_paths_matches_whole_segments_under_a_crate_root() {
+        let mut by_segment: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        by_segment.entry("producer_record").or_default().insert("ProducerRecord");
+        by_segment.entry("error").or_default().insert("Error");
+        let roots: BTreeSet<&str> = ["crate", "super", "producer"].into_iter().collect();
+        let paths = |line| file_module_paths(line, &by_segment, &roots);
+
+        assert_eq!(
+            paths("use crate::producer::producer_record::ProducerRecord;"),
+            vec![("producer_record", "ProducerRecord")]
+        );
+        assert_eq!(
+            paths("let a = super::producer_record::ProducerRecord::new(); producer::producer_record::ProducerRecord"),
+            vec![
+                ("producer_record", "ProducerRecord"),
+                ("producer_record", "ProducerRecord")
+            ]
+        );
+        // The defining `pub use` in the parent's own `mod.rs` is not preceded by `::`.
+        assert!(paths("pub use producer_record::ProducerRecord;").is_empty());
+        // A longer identifier on either side is another name.
+        assert!(paths("use crate::producer::producer_record::ProducerRecordBuilder;").is_empty());
+        assert!(paths("use crate::producer::my_producer_record::ProducerRecord;").is_empty());
+        // A nested type the parent does not re-export.
+        assert!(paths("use crate::producer::producer_record::Nested;").is_empty());
+        // A path outside the crate, such as `std::error::Error`.
+        assert!(paths("impl std::error::Error for X {}").is_empty());
+        assert_eq!(paths("crate::common::error::Error"), vec![("error", "Error")]);
+    }
 
     const MANIFEST: &str = r#"[workspace]
 members = [".", "ffi-macros"]
@@ -2849,7 +3140,7 @@ version = "0.1.0"
             "expected `ffi-macros = ` once in Cargo.toml, found it 0 times. A `cargo xtask \
              package-check` interrupted while packaging leaves Cargo.toml and Cargo.lock stripped: \
              `git diff` shows what to restore. Otherwise update `strip_ffi_macros` in \
-             xtask/src/main.rs and the `sed` in .semaphore/semaphore.yml together."
+             xtask/src/main.rs and the `sed` in .semaphore/release.yml together."
         );
         let second_line = MANIFEST.replace("flate2", "ffi-macros = { path = \"ffi-macros\" }\nflate2");
         assert_eq!(
@@ -2882,12 +3173,12 @@ version = "0.1.0"
         for pattern in [FFI_MACROS_DEPENDENCY, FFI_MACROS_FEATURE_ENTRY, FFI_MACROS_LOCK_LINE] {
             assert!(!pattern.contains(['.', '*', '[', ']', '^', '$', '\\', '/']), "{pattern}");
         }
-        let pipeline = read("../.semaphore/semaphore.yml");
+        let pipeline = read("../.semaphore/release.yml");
         for command in [
             format!("sed -i -e '/^{FFI_MACROS_DEPENDENCY}/d' -e 's/{FFI_MACROS_FEATURE_ENTRY}//' rust/Cargo.toml"),
             format!("sed -i -e '/^{FFI_MACROS_LOCK_LINE}$/d' rust/Cargo.lock"),
         ] {
-            assert!(pipeline.contains(&command), "semaphore.yml does not run `{command}`");
+            assert!(pipeline.contains(&command), "release.yml does not run `{command}`");
         }
     }
 
@@ -3164,7 +3455,7 @@ version = "0.1.0"
     }
 
     #[test]
-    fn python_and_c_workloads_select_the_multilanguage_feature() {
+    fn python_and_c_workloads_select_the_multilanguage_feature_and_dotnet() {
         let env = |flags: &[&str]| parse_chaos_flags(&strings(flags)).unwrap();
         assert_eq!(chaos_test_feature(&env(&["--cycles", "1"])), "integration-tests");
         assert_eq!(
@@ -3176,5 +3467,13 @@ version = "0.1.0"
             "multilanguage-tests"
         );
         assert_eq!(chaos_test_feature(&env(&["--workload", "producer:c"])), "multilanguage-tests");
+        assert_eq!(
+            chaos_test_feature(&env(&["--workload", "producer:dotnet"])),
+            "multilanguage-tests"
+        );
+        assert_eq!(
+            chaos_test_feature(&env(&["--workload", "producer:rust", "--workload", "consumer:dotnet-async"])),
+            "multilanguage-tests"
+        );
     }
 }

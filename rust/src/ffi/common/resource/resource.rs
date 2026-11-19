@@ -15,6 +15,7 @@
 //! `kafka_common_resource_Resource_t`: `org.apache.kafka.common.resource.Resource`
 //! (CLAUDE.md §4).
 
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::common::resource::Resource;
@@ -22,7 +23,7 @@ use crate::ffi::common::resource::resource_type::{
     kafka_common_resource_ResourceType_t, singleton as resource_type_singleton, value_of as resource_type_of,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`Resource`].
 #[repr(C)]
@@ -49,12 +50,12 @@ impl ResourceInner {
 /// # Safety
 ///
 /// `resource` must be a valid resource handle, alive for `'a`.
-unsafe fn inner_ref<'a>(resource: *const kafka_common_resource_Resource_t) -> &'a ResourceInner {
+unsafe fn inner_ref<'a>(resource: *const kafka_common_resource_Resource_t, param: &'static str) -> &'a ResourceInner {
     // SAFETY: Per this function's `# Safety`, `resource` is a valid resource handle alive for `'a`,
     // so it points at a live `ResourceInner`, the `Box::into_raw` of `box_resource` (no view of
     // this type is handed out). Nothing mutates a `ResourceInner` while a handle to it exists, so
     // the shared reference is sound for `'a`.
-    unsafe { &*(resource as *const ResourceInner) }
+    unsafe { require_ref::<_, ResourceInner>(resource, param) }
 }
 
 /// The resource behind a handle.
@@ -62,10 +63,13 @@ unsafe fn inner_ref<'a>(resource: *const kafka_common_resource_Resource_t) -> &'
 /// # Safety
 ///
 /// `resource` must be a valid resource handle, alive for `'a`.
-pub(crate) unsafe fn resource_ref<'a>(resource: *const kafka_common_resource_Resource_t) -> &'a Resource {
+pub(crate) unsafe fn resource_ref<'a>(
+    resource: *const kafka_common_resource_Resource_t,
+    param: &'static str,
+) -> &'a Resource {
     // SAFETY: Per this function's `# Safety`, `resource` is a valid resource handle, as `inner_ref`
     // requires; the reference returned lives for the same `'a`.
-    &unsafe { inner_ref(resource) }.resource
+    &unsafe { inner_ref(resource, param) }.resource
 }
 
 /// Hands `resource` to C as an owned handle, freed with
@@ -94,11 +98,12 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_new(
 ) -> *mut kafka_common_resource_Resource_t {
     // SAFETY: Per this function's `# Safety`, `resource_type` is a resource-type singleton, as
     // `resource_type_of` requires, and its value is copied out; `name` is a valid NUL-terminated
-    // string, as `c_str_to_string` requires, and is copied into an owned `String`. Nothing borrows
+    // string, as `require_str` requires, and is copied into an owned `String`. Nothing borrows
     // either argument after this call.
-    box_resource(Resource::new(unsafe { resource_type_of(resource_type) }, unsafe {
-        c_str_to_string(name)
-    }))
+    box_resource(Resource::new(
+        unsafe { resource_type_of(resource_type, "resource_type") },
+        unsafe { require_str(name, "name") },
+    ))
 }
 
 /// A resource representing the whole cluster.
@@ -130,7 +135,7 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_resource_type(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource handle, as `resource_ref`
     // requires; the value is copied out and mapped to its static singleton, so the borrow lasts for
     // this call only.
-    resource_type_singleton(unsafe { resource_ref(self_) }.resource_type())
+    resource_type_singleton(unsafe { resource_ref(self_, "self_") }.resource_type())
 }
 
 /// Returns the resource name.
@@ -147,7 +152,7 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource handle, as `inner_ref`
     // requires; the string returned is the handle's own C string, so it lives as long as the
     // handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner_ref(self_) }.name_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.name_c.as_ptr()
 }
 
 /// Returns 1 if this Resource has any UNKNOWN components, else 0.
@@ -162,7 +167,7 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_is_unknown(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource handle, as `resource_ref`
     // requires; the reference is used only within this call.
-    i8::from(unsafe { resource_ref(self_) }.is_unknown())
+    i8::from(unsafe { resource_ref(self_, "self_") }.is_unknown())
 }
 
 /// Returns the text form of the resource.
@@ -179,7 +184,7 @@ pub unsafe extern "C" fn kafka_common_resource_Resource_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid resource handle, as `resource_ref`
     // requires; the result is copied into an owned value before return, so the borrow lasts for
     // this call only.
-    into_c_string(&unsafe { resource_ref(self_) }.to_string())
+    into_c_string(&unsafe { resource_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned resource handle; null is a no-op.
@@ -220,7 +225,7 @@ mod tests {
         // destroyed once.
         unsafe {
             let topic = kafka_common_resource_Resource_new(kafka_common_resource_ResourceType_topic(), name.as_ptr());
-            assert_eq!(*resource_ref(topic), Resource::new(ResourceType::Topic, "orders"));
+            assert_eq!(*resource_ref(topic, "topic"), Resource::new(ResourceType::Topic, "orders"));
             assert_eq!(
                 kafka_common_resource_Resource_resource_type(topic),
                 kafka_common_resource_ResourceType_topic()
@@ -239,7 +244,7 @@ mod tests {
             kafka_common_resource_Resource_destroy(topic);
 
             let cluster = kafka_common_resource_Resource_cluster();
-            assert_eq!(*resource_ref(cluster), Resource::cluster());
+            assert_eq!(*resource_ref(cluster, "cluster"), Resource::cluster());
             assert_eq!(
                 kafka_common_resource_Resource_resource_type(cluster),
                 kafka_common_resource_ResourceType_cluster()

@@ -36,18 +36,19 @@ would silently use another toolchain and lose `xtask`. As a consequence
 xtask's working directory is `rust/`, and it reaches shared material through
 `../kafka` and `../design/current`.
 
-**Makefiles.** Each language owns its recipes in its own Makefile —
-`rust/Makefile` (every cargo invocation), `python/Makefile` and `c/Makefile` —
-and each can be run on its own (`make -C rust test`). The root `Makefile` only
-orchestrates: its targets (`build`, `test`, `verify`, `verify-rust`,
-`test-c`, ...) delegate to `$(MAKE) -C <language>`, order the builds across
-languages (the bindings link the Rust library, so it is built first), and own
-what belongs to the whole repository: git submodules and hooks, and the shared
-`venv/` the Python targets run in. It passes `REPO_ROOT` /
-`RUST_PROJECT_ROOT` down to the binding Makefiles. A binding's
-`test-integration` builds its gRPC image(s) and then calls
-`make -C rust test-integration-grpc-{python,c}` for the matching arm of the
-multilanguage suite.
+**Makefiles.** Each language owns its targets in its own Makefile —
+`rust/Makefile` (every cargo invocation), `c/Makefile`, `python/Makefile` and
+`dotnet/Makefile` — run as `make -C <language> <target>`, and each builds what
+it needs first: the bindings build the Rust library they link
+(`make -C rust devel-build-all-features`, or the release build), `c/` its Unity
+submodule, `python/` the shared `venv/` it runs in. The root `Makefile` holds
+no single-language target: only those that span several languages (`build`,
+`test`, `verify`, `verify-commit`, `test-integration-perf`,
+`build-grpc-images`) or the whole repository (submodules, git hooks,
+`bump-version`, the test selection). A binding's `test-integration` builds its
+gRPC image(s) and then calls
+`make -C rust test-integration-grpc-{python,c,dotnet}` for the matching arm of
+the multilanguage suite.
 
 ### `rust/`
 

@@ -43,12 +43,15 @@ pub(crate) fn box_describe_features_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_DescribeFeaturesResult_t) -> &'a ResultHandle<DescribeFeaturesResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_DescribeFeaturesResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<DescribeFeaturesResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeFeaturesResult_t` is built by
     // `box_result::<DescribeFeaturesResult, _>` (in `box_describe_features_result`), as
     // `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Returns a future; its `get` delivers a `kafka_admin_FeatureMetadata_t *` owned by the future.
@@ -65,7 +68,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeFeaturesResult_feature_metadata(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_feature_metadata_element` frees exactly the handle `box_feature_metadata`
     // makes, and the handle holds only owned data and no thread-bound state, so it may be freed
     // from any thread and read from several at once, as `handle_future` requires.

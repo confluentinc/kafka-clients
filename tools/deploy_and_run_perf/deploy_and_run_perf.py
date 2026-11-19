@@ -90,6 +90,20 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TEST="${1:?usage: bootstrap.sh <rust-native|c-v2|c-v3|java|python-producer|python-consumer|rust-consumer|librdkafka-consumer|java-consumer>}"
 REPO="$(cat "$SCRIPT_DIR/.repo_path")"
 
+# Runs a command up to 5 times, 5 seconds apart: for a download, which can fail for a moment.
+retry() {
+    _n=1
+    while [ "$_n" -le 5 ]; do
+        if "$@"; then return 0; fi
+        [ "$_n" -eq 5 ] && break
+        echo "retry: attempt $_n/5 of '$*' failed; sleeping 5s" >&2
+        _n=$((_n + 1))
+        sleep 5
+    done
+    echo "retry: '$*' failed after 5 attempts" >&2
+    return 1
+}
+
 echo "== apt: base packages =="
 # zip is required by the sdkman installer (java path); unzip by the repo extract.
 sudo apt update && sudo apt install -y wget curl git unzip zip build-essential cmake pkg-config \
@@ -98,13 +112,16 @@ sudo apt update && sudo apt install -y wget curl git unzip zip build-essential c
 # The bindings' library, tuned for this host: `make -C rust build-cdylib` (the
 # feature set the C library and the Python wheel ship) in a tree that has it,
 # else, for an older tree, `cargo build --features ffi --release`. Sets
-# CDYLIB_DIR to the directory holding libconfluent_kafka.
+# CDYLIB_DIR to the directory holding libconfluent_kafka and CDYLIB_PROFILE to
+# its cargo profile.
 build_cdylib() {
   if grep -q '^build-cdylib:' "$REPO/rust/Makefile"; then
     make -C "$REPO/rust" build-cdylib RUSTFLAGS_NATIVE="-C target-cpu=native"
+    CDYLIB_PROFILE=release-cdylib
     CDYLIB_DIR="$REPO/rust/target/release-cdylib"
   else
     ( cd "$REPO/rust" && RUSTFLAGS="-C target-cpu=native" cargo build --features ffi --release )
+    CDYLIB_PROFILE=release
     CDYLIB_DIR="$REPO/rust/target/release"
   fi
 }
@@ -117,7 +134,7 @@ install_kafka_cli() {
     echo "== Installing JRE + Apache Kafka $kver (kafka CLI scripts) =="
     sudo apt install -y default-jre
     local tgz="kafka_2.13-${kver}.tgz"
-    curl -fsSL -o "/tmp/$tgz" "https://archive.apache.org/dist/kafka/${kver}/${tgz}"
+    retry curl -fsSL -o "/tmp/$tgz" "https://archive.apache.org/dist/kafka/${kver}/${tgz}"
     sudo rm -rf /opt/kafka && sudo mkdir -p /opt/kafka
     sudo tar -xzf "/tmp/$tgz" -C /opt/kafka --strip-components=1
   fi
@@ -128,8 +145,8 @@ install_kafka_cli() {
 # producer test and the librdkafka-consumer benchmark).
 install_librdkafka() {
   echo "== Confluent clients apt repo + librdkafka-dev =="
-  wget -qO - https://packages.confluent.io/clients/deb/archive.key \
-    | sudo gpg --dearmor --yes -o /usr/share/keyrings/confluent-clients-archive-keyring.gpg
+  retry wget -qO /tmp/confluent-clients-archive.key https://packages.confluent.io/clients/deb/archive.key
+  sudo gpg --dearmor --yes -o /usr/share/keyrings/confluent-clients-archive-keyring.gpg /tmp/confluent-clients-archive.key
   . /etc/os-release
   # The Confluent clients repo serves Ubuntu/Debian codenames but not the very
   # newest Debian (e.g. trixie). Use the host codename if available, else fall
@@ -153,7 +170,13 @@ install_librdkafka() {
 install_java_toolchain() {
   export SDKMAN_DIR="$HOME/.sdkman"
   if [ ! -s "$SDKMAN_DIR/bin/sdkman-init.sh" ]; then
-    curl -s "https://get.sdkman.io?rcupdate=false" | bash
+    retry curl -fsS -o /tmp/sdkman-install.sh "https://get.sdkman.io?rcupdate=false"
+    # The installer downloads SDKMAN, so it is retried too. It does nothing when $SDKMAN_DIR
+    # exists, so each attempt removes what a failed one left.
+    install_sdkman() {
+      rm -rf "$SDKMAN_DIR" && bash /tmp/sdkman-install.sh && [ -s "$SDKMAN_DIR/bin/sdkman-init.sh" ]
+    }
+    retry install_sdkman
   fi
   mkdir -p "$SDKMAN_DIR/etc"
   grep -q sdkman_auto_answer "$SDKMAN_DIR/etc/config" 2>/dev/null \
@@ -259,8 +282,10 @@ echo "== Building Rust (FFI, release) + C producer_perf_test in $REPO =="
 export PATH="$HOME/.cargo/bin:$PATH"
 build_cdylib
 cd "$REPO"
-cmake -S c -B c/build -DRUST_PROJECT_ROOT="$REPO/rust" -DRUST_LIB_DIR="$CDYLIB_DIR" \
-  -DCMAKE_C_FLAGS="-O2 -march=native"
+# RUST_PROFILE for c/CMakeLists.txt since it selects the library by profile,
+# RUST_LIB_DIR for the trees before it; each ignores the other.
+cmake -S c -B c/build -DRUST_PROJECT_ROOT="$REPO/rust" -DRUST_PROFILE="$CDYLIB_PROFILE" \
+  -DRUST_LIB_DIR="$CDYLIB_DIR" -DCMAKE_C_FLAGS="-O2 -march=native"
 cmake --build c/build --target producer_perf_test
 echo "== Bootstrap complete =="
 """
@@ -313,10 +338,11 @@ python_for_client_version() {
 # (e.g. Confluent Cloud SASL_SSL). When set it is forwarded to each consumer
 # arm's client, its spawned kafka-producer-perf-test.sh load generator
 # (--producer.config), and kafka-topics.sh (--command-config). The native
-# librdkafka consumer cannot read the Java form, so that arm instead derives
-# librdkafka-style --conf entries from SECURITY_PROTOCOL / SASL_MECHANISM /
-# SASL_USERNAME / SASL_PASSWORD in the .env (the same quartet the producer
-# tests use).
+# librdkafka consumer cannot read the Java form, so that arm instead reads
+# SECURITY_PROTOCOL / SASL_MECHANISM / SASL_USERNAME / SASL_PASSWORD from its
+# environment (the same quartet the producer tests use, exported by the
+# `set -a` above), never from its command line, where `ps` would show the
+# password.
 #
 # COMPRESSION_TYPE (optional): compression.type (none/gzip/snappy/lz4/zstd) of
 # the kafka-producer-perf-test.sh load every consumer arm generates (the same
@@ -401,14 +427,8 @@ case "$TEST" in
     if [ -n "${WARMUP_MESSAGES:-}" ]; then CONS_FLAGS+=(--warmup "$WARMUP_MESSAGES"); fi
     # Secured cluster: the Java-form CLIENT_CONFIG file only feeds the spawned
     # Java load generator (--producer.config); the native librdkafka consumer
-    # gets librdkafka-form --conf entries derived from the .env SASL quartet.
+    # reads the .env SASL quartet from its environment (exported above).
     if [ -n "${CLIENT_CONFIG:-}" ]; then CONS_FLAGS+=(--producer-config "$CLIENT_CONFIG"); fi
-    if [ -n "${SECURITY_PROTOCOL:-}" ]; then
-      CONS_FLAGS+=(--conf "security.protocol=$SECURITY_PROTOCOL")
-      if [ -n "${SASL_MECHANISM:-}" ]; then CONS_FLAGS+=(--conf "sasl.mechanism=$SASL_MECHANISM"); fi
-      if [ -n "${SASL_USERNAME:-}" ]; then CONS_FLAGS+=(--conf "sasl.username=$SASL_USERNAME"); fi
-      if [ -n "${SASL_PASSWORD:-}" ]; then CONS_FLAGS+=(--conf "sasl.password=$SASL_PASSWORD"); fi
-    fi
     mkdir -p "$RESULTS/librdkafka-consumer"
     "$REPO/rust/consumer-perf/compare/build/librdkafka_e2e" \
       --results-dir "$RESULTS/librdkafka-consumer" \
@@ -451,7 +471,9 @@ case "$TEST" in
     "$KB/kafka-producer-perf-test.sh" "${PROD_ARGS[@]}" \
       > "$OUT/producer.log" 2>&1 &
     PRODUCER_PID=$!
-    JARGS=(--bootstrap "$BS" --topic "$TN" --duration "$DUR" --warmup "$WARM")
+    # JavaE2E keeps the client's max.poll.records unless told; these runs
+    # have always used 2500.
+    JARGS=(--bootstrap "$BS" --topic "$TN" --duration "$DUR" --warmup "$WARM" --max-poll-records 2500)
     if [ -n "${INTERVAL_SECONDS:-}" ]; then JARGS+=(--interval "$INTERVAL_SECONDS"); fi
     if [ -n "${GROUP_ID:-}" ]; then JARGS+=(--group-id "$GROUP_ID"); fi
     if [ -n "${CLIENT_CONFIG:-}" ]; then JARGS+=(--client-config "$CLIENT_CONFIG"); fi

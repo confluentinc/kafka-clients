@@ -15,6 +15,7 @@
 //! `kafka_admin_RecordsToDelete_t`:
 //! `org.apache.kafka.clients.admin.RecordsToDelete` (CLAUDE.md §4).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::c_char;
 
 use crate::admin::RecordsToDelete;
@@ -37,12 +38,15 @@ pub(crate) struct RecordsToDeleteInner {
 /// # Safety
 ///
 /// `records` must be a valid records-to-delete handle, kept alive for `'a`.
-pub(crate) unsafe fn records_to_delete_ref<'a>(records: *const kafka_admin_RecordsToDelete_t) -> &'a RecordsToDelete {
+pub(crate) unsafe fn records_to_delete_ref<'a>(
+    records: *const kafka_admin_RecordsToDelete_t,
+    param: &'static str,
+) -> &'a RecordsToDelete {
     // SAFETY: Per this function's `# Safety`, `records` is a valid records-to-delete handle kept
     // alive for `'a`; every `kafka_admin_RecordsToDelete_t` is the `Box::into_raw` of a
     // `Box<RecordsToDeleteInner>` (`box_records_to_delete`, the only producer), so the shared
     // reference is to a live `RecordsToDeleteInner`, which no entry point mutates.
-    &unsafe { &*(records as *const RecordsToDeleteInner) }.records
+    &unsafe { require_ref::<_, RecordsToDeleteInner>(records, param) }.records
 }
 
 /// Hands `records` to C as an owned handle, freed with
@@ -82,7 +86,7 @@ pub extern "C" fn kafka_admin_RecordsToDelete_with_offset(offset: i64) -> *mut k
 pub unsafe extern "C" fn kafka_admin_RecordsToDelete_before_offset(self_: *const kafka_admin_RecordsToDelete_t) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid records-to-delete handle, kept
     // alive for this call, as `records_to_delete_ref` requires.
-    unsafe { records_to_delete_ref(self_) }.before_offset()
+    unsafe { records_to_delete_ref(self_, "self_") }.before_offset()
 }
 
 /// Returns the text form of the records to delete.
@@ -98,7 +102,7 @@ pub unsafe extern "C" fn kafka_admin_RecordsToDelete_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid records-to-delete handle, kept
     // alive for this call, as `records_to_delete_ref` requires.
-    into_c_string(&unsafe { records_to_delete_ref(self_) }.to_string())
+    into_c_string(&unsafe { records_to_delete_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned handle; `NULL` is a no-op.
@@ -136,7 +140,7 @@ mod tests {
         // returned, read while alive and freed once with `kafka_string_destroy`; destroying null is
         // a no-op.
         unsafe {
-            assert_eq!(*records_to_delete_ref(records), RecordsToDelete::with_offset(10));
+            assert_eq!(*records_to_delete_ref(records, "records"), RecordsToDelete::with_offset(10));
             assert_eq!(kafka_admin_RecordsToDelete_before_offset(records), 10);
             let s = kafka_admin_RecordsToDelete_to_string(records);
             assert_eq!(CStr::from_ptr(s).to_str().unwrap(), "(beforeOffset = 10)");

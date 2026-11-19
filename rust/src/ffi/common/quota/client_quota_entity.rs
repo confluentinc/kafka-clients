@@ -23,6 +23,7 @@
 //! absence is the key not being present, the default entity is a `NULL` value,
 //! and `""` is a pointer to an empty string.
 
+use crate::ffi::precondition::{require_map, require_ref};
 use std::ffi::{c_char, c_void};
 use std::ptr;
 
@@ -30,7 +31,6 @@ use crate::common::quota::ClientQuotaEntity;
 use crate::ffi::ffi_guard;
 use crate::ffi::util::{
     box_string_keyed_map, c_str_to_option, c_str_to_string, destroy_string_element, into_c_string, kafka_Map_t,
-    map_entries,
 };
 
 /// Opaque handle to a [`ClientQuotaEntity`].
@@ -49,6 +49,7 @@ pub struct kafka_common_quota_ClientQuotaEntity_t {
 /// `entity` must be a valid client-quota-entity handle, alive for `'a`.
 pub(crate) unsafe fn client_quota_entity_ref<'a>(
     entity: *const kafka_common_quota_ClientQuotaEntity_t,
+    param: &'static str,
 ) -> &'a ClientQuotaEntity {
     // SAFETY: Per this function's `# Safety`, `entity` is a valid client-quota-entity handle alive
     // for `'a`, so it points at a live `ClientQuotaEntity`: the `Box::into_raw` of
@@ -56,7 +57,7 @@ pub(crate) unsafe fn client_quota_entity_ref<'a>(
     // hands out through `client_quota_entity_ptr`, which lives as long as that parent. Nothing
     // mutates a `ClientQuotaEntity` while a handle to it exists, so the shared reference is sound
     // for `'a`.
-    unsafe { &*(entity as *const ClientQuotaEntity) }
+    unsafe { require_ref::<_, ClientQuotaEntity>(entity, param) }
 }
 
 /// A borrowed handle on `entity`, valid as long as `entity`.
@@ -88,6 +89,14 @@ pub(crate) fn sorted_entries(entity: &ClientQuotaEntity) -> Vec<(&str, Option<&s
 ///
 /// - `entries` - maps entity type to its name
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `entries` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `entries` panics; Java stores `null`.
+///
 /// # Safety
 ///
 /// `entries` must be a valid map of NUL-terminated keys and NUL-terminated or
@@ -101,9 +110,9 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_new(
     entries: *const kafka_Map_t,
 ) -> *mut kafka_common_quota_ClientQuotaEntity_t {
     // SAFETY: Per this function's `# Safety`, `entries` is a valid map, which the caller keeps
-    // alive and does not mutate for this call, as `map_entries` requires; the borrow of its entries
+    // alive and does not mutate for this call, as `require_map` requires; the borrow of its entries
     // ends when they are collected.
-    let entries = unsafe { map_entries(entries) }
+    let entries = unsafe { require_map(entries, "entries") }
         .iter()
         .map(|&(k, v)| {
             // SAFETY: Per this function's `# Safety`, every key of `entries` is a valid
@@ -157,7 +166,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_entries(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid client-quota-entity handle, as
     // `client_quota_entity_ref` requires; the result is copied into an owned value before return,
     // so the borrow lasts for this call only.
-    let entries = sorted_entries(unsafe { client_quota_entity_ref(self_) })
+    let entries = sorted_entries(unsafe { client_quota_entity_ref(self_, "self_") })
         .into_iter()
         .map(|(t, n)| (t, n.map_or(ptr::null_mut(), |n| into_c_string(n) as *mut c_void)));
     box_string_keyed_map(entries, Some(destroy_string_element))
@@ -179,7 +188,7 @@ pub unsafe extern "C" fn kafka_common_quota_ClientQuotaEntity_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid client-quota-entity handle, as
     // `client_quota_entity_ref` requires; the result is copied into an owned value before return,
     // so the borrow lasts for this call only.
-    into_c_string(&unsafe { client_quota_entity_ref(self_) }.to_string())
+    into_c_string(&unsafe { client_quota_entity_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned entity handle. Null is a no-op; an entity borrowed from a
@@ -269,11 +278,14 @@ mod tests {
                 ("user".to_string(), Some("alice".to_string())),
                 ("client-id".to_string(), None),
             ]));
-            assert_eq!(*client_quota_entity_ref(entity), expected);
+            assert_eq!(*client_quota_entity_ref(entity, "entity"), expected);
             // Compared against the same instance: `Display` walks the entity's
             // `HashMap`, whose order differs between two equal maps.
             let s = kafka_common_quota_ClientQuotaEntity_to_string(entity);
-            assert_eq!(CStr::from_ptr(s).to_str().unwrap(), client_quota_entity_ref(entity).to_string());
+            assert_eq!(
+                CStr::from_ptr(s).to_str().unwrap(),
+                client_quota_entity_ref(entity, "entity").to_string()
+            );
             kafka_string_destroy(s);
             kafka_common_quota_ClientQuotaEntity_destroy(entity);
             kafka_common_quota_ClientQuotaEntity_destroy(ptr::null_mut());

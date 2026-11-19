@@ -21,8 +21,10 @@ import sys
 # The Rust workspace, whose target/ holds the FFI header and the library.
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'rust'))
 include_dir = os.path.join(project_root, 'target', 'include')
+# Defaults to the debug build the tests use (`make -C rust devel-build-all-features`);
+# the wheel builds and python/Makefile set CONFLUENT_KAFKA_LIB_DIR.
 lib_dir = os.environ.get('CONFLUENT_KAFKA_LIB_DIR',
-                         os.path.join(project_root, 'target', 'release-cdylib'))
+                         os.path.join(project_root, 'target', 'debug'))
 
 # The x86_64 CPU level the library is built for: rust/Makefile builds it with
 # `-C target-cpu=x86-64-v3` on x86_64, so the import checks for that level and

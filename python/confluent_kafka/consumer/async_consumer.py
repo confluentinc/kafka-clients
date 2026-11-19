@@ -376,12 +376,11 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                                   callback: ConsumerRebalanceListener
                                   | AsyncConsumerRebalanceListener) -> None:
         reject_str("topics", topics)  # the shape check precedes the others
-        listener = self._subscribe_listener(callback)
-        self._check_not_null("subscribe_topics", topics)
+        listener, has_listener = self._subscribe_listener(callback)
         topic_list = blank_null_topics(topics)
         previous, self._listener = self._listener, listener
         try:
-            await self._run_async(*self._subscribe_topics_spec(topic_list, listener))
+            await self._run_async(*self._subscribe_topics_spec(topic_list, listener, has_listener))
         except BaseException:
             self._listener = previous
             raise
@@ -389,9 +388,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     async def _a_subscribe_pattern(self, pattern: SubscriptionPattern,
                                    callback: ConsumerRebalanceListener
                                    | AsyncConsumerRebalanceListener) -> None:
-        listener = self._subscribe_listener(callback)
-        self._check_not_null("subscribe_pattern", pattern)
-        if pattern.pattern() is None:
+        listener, has_listener = self._subscribe_listener(callback)
+        if pattern is not None and pattern.pattern() is None:
             # Java's subscriptionPattern.pattern().isEmpty() dereferences it; the FFI
             # cannot carry it (Types; exception 4). Java checks it after acquire()
             # (subscribeToRegex), so the closed and the concurrency checks come first.
@@ -399,14 +397,14 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
                 raise TypeError("SubscriptionPattern.pattern must not be None")
         previous, self._listener = self._listener, listener
         try:
-            await self._run_async(*self._subscribe_pattern_spec(pattern.pattern(), listener))
+            await self._run_async(*self._subscribe_pattern_spec(
+                None if pattern is None else pattern.pattern(), listener, has_listener))
         except BaseException:
             self._listener = previous
             raise
 
     async def _tp_op(self, op: str, fn: Any, partitions: Iterable[TopicPartition]) -> None:
-        self._check_not_null(op, partitions)
-        partition_list = list(partitions)
+        partition_list = None if partitions is None else list(partitions)
         if self._in_callback():
             self._reentrant_use(op, partition_list)
             return
@@ -417,7 +415,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         # assign): from inside a callback it reaches the busy consumer and
         # reports ConcurrentModificationError, as Java's acquire() does from
         # another thread.
-        partition_list = list(self._assign_partitions(partitions))
+        partition_list = self._assign_partitions(partitions)
         await self._run_async(*self._void_spec(_lib.Consumer_assign_cb, tp_to_spec(partition_list)))
 
     async def _a_unsubscribe(self) -> None:
@@ -473,7 +471,6 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         return await self._run_async(*self._position_spec(partition, timeout_ms))
 
     async def _a_current_lag(self, topic_partition: TopicPartition) -> int | None:
-        self._check_not_null("current_lag", topic_partition)
         if self._in_callback():
             in_callback: int | None = self._reentrant_use("current_lag", topic_partition)
             return in_callback
@@ -491,7 +488,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
         self._check_committed_timeout(partitions, timeout)
         timeout_ms = self._timeout_ms(timeout, group=True)
         self._check_committed_partitions(partitions)
-        partition_list = list(partitions)
+        partition_list = None if partitions is None else list(partitions)
         if self._in_callback():
             committed: dict[TopicPartition, OffsetAndMetadata | None] = self._reentrant_use(
                 "committed", partition_list, timeout_ms)
@@ -524,9 +521,8 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
     async def _a_offsets_for_times(self, timestamps_to_search: Mapping[TopicPartition, int],
                                    timeout: Duration = MISSING
                                    ) -> dict[TopicPartition, OffsetAndTimestamp | None]:
-        self._check_not_null("offsets_for_times", timestamps_to_search)
         timeout_ms = self._timeout_ms(empty_input_timeout(timestamps_to_search, timeout))
-        timestamps = dict(timestamps_to_search)
+        timestamps = None if timestamps_to_search is None else dict(timestamps_to_search)
         if self._in_callback():
             found: dict[TopicPartition, OffsetAndTimestamp | None] = self._reentrant_use(
                 "offsets_for_times", timestamps, timeout_ms)
@@ -535,8 +531,7 @@ class AsyncConsumer(Generic[K, V], _ConsumerState):
 
     async def _long_offsets(self, op: str, fn: Any, partitions: Iterable[TopicPartition],
                             timeout: Duration) -> dict[TopicPartition, int]:
-        self._check_not_null(op, partitions)
-        partition_list = list(partitions)
+        partition_list = None if partitions is None else list(partitions)
         timeout_ms = self._timeout_ms(empty_input_timeout(partition_list, timeout))
         if self._in_callback():
             offsets: dict[TopicPartition, int] = self._reentrant_use(op, partition_list,

@@ -42,12 +42,13 @@ pub(crate) fn box_delete_consumer_groups_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_DeleteConsumerGroupsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<DeleteConsumerGroupsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DeleteConsumerGroupsResult_t` is built by
     // `box_result::<DeleteConsumerGroupsResult, _>` (in `box_delete_consumer_groups_result`), as
     // `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a map from group id to futures which can be used to check the status of individual
@@ -71,7 +72,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_deleted_groups(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let groups = h.result.deleted_groups();
     h.ctx.string_keyed_future_map(groups.iter(), FutureCtx::void_future)
 }
@@ -94,7 +95,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

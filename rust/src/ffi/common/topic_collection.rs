@@ -30,6 +30,7 @@
 use crate::common::TopicCollection;
 use crate::ffi::common::uuid::list_uuids;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::{kafka_List_t, list_strings};
 
 /// Opaque handle to a [`TopicCollection`].
@@ -49,23 +50,27 @@ pub enum kafka_common_TopicCollection_e {
     kafka_common_TopicCollection_TOPIC_NAMES,
 }
 
+/// The value an `_err` twin returning [`kafka_common_TopicCollection_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_TopicCollection_e {
+    fn fail() -> Self {
+        Self::kafka_common_TopicCollection_TOPIC_IDS
+    }
+}
+
 /// Returns which variant `self_` holds.
-///
-/// A caught Rust panic returns `kafka_common_TopicCollection_TOPIC_IDS`, the first enumerator: the
-/// enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is only
-/// logged.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid topic-collection handle.
-#[ffi_guard(fallback = kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
     self_: *const kafka_common_TopicCollection_t,
 ) -> kafka_common_TopicCollection_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-collection handle, as
     // `topic_collection_ref` requires; the reference is used only for the match.
-    match unsafe { topic_collection_ref(self_) } {
+    match unsafe { topic_collection_ref(self_, "self_") } {
         TopicCollection::TopicIds(_) => kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS,
         TopicCollection::TopicNames(_) => kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_NAMES,
     }
@@ -76,12 +81,15 @@ pub unsafe extern "C" fn kafka_common_TopicCollection__enum(
 /// # Safety
 ///
 /// `topics` must be a valid topic-collection handle, alive for `'a`.
-pub(crate) unsafe fn topic_collection_ref<'a>(topics: *const kafka_common_TopicCollection_t) -> &'a TopicCollection {
+pub(crate) unsafe fn topic_collection_ref<'a>(
+    topics: *const kafka_common_TopicCollection_t,
+    param: &'static str,
+) -> &'a TopicCollection {
     // SAFETY: Per this function's `# Safety`, `topics` is a valid topic-collection handle alive for
     // `'a`, i.e. the `Box::into_raw` of a `TopicCollection` in `boxed`, the only function that
     // makes one, not yet destroyed. No call mutates a `TopicCollection` handle, so the shared
     // reference is sound for `'a`.
-    unsafe { &*(topics as *const TopicCollection) }
+    unsafe { require_ref::<_, TopicCollection>(topics, param) }
 }
 
 fn boxed(topics: TopicCollection) -> *mut kafka_common_TopicCollection_t {
@@ -90,7 +98,7 @@ fn boxed(topics: TopicCollection) -> *mut kafka_common_TopicCollection_t {
 
 /// # Parameters
 ///
-/// - `topics` - the topic ids, a list of `const kafka_common_Uuid_t *`, copied; `NULL` reads as empty
+/// - `topics` - the topic ids, a list of `const kafka_common_Uuid_t *`, copied; must not be `NULL`
 ///
 /// # Returns
 ///
@@ -98,21 +106,21 @@ fn boxed(topics: TopicCollection) -> *mut kafka_common_TopicCollection_t {
 ///
 /// # Safety
 ///
-/// `topics` must be `NULL` or a valid list of uuid handles. The returned handle is owned, freed
+/// `topics` must be a valid list of uuid handles. The returned handle is owned, freed
 /// with `kafka_common_TopicCollection_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
     topics: *const kafka_List_t,
 ) -> *mut kafka_common_TopicCollection_t {
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of uuid handles, as
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list of uuid handles, as
     // `list_uuids` requires; the uuids are copied out, so nothing borrows the list after this call.
-    boxed(TopicCollection::of_topic_ids(unsafe { list_uuids(topics) }))
+    boxed(TopicCollection::of_topic_ids(unsafe { list_uuids(topics, "topics") }))
 }
 
 /// # Parameters
 ///
-/// - `topics` - the topic names, a list of `const char *`, copied; `NULL` reads as empty
+/// - `topics` - the topic names, a list of `const char *`, copied; must not be `NULL`
 ///
 /// # Returns
 ///
@@ -120,17 +128,17 @@ pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_ids(
 ///
 /// # Safety
 ///
-/// `topics` must be `NULL` or a valid list of NUL-terminated strings. The returned handle is
+/// `topics` must be a valid list of NUL-terminated strings. The returned handle is
 /// owned, freed with `kafka_common_TopicCollection_destroy`.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_TopicCollection_of_topic_names(
     topics: *const kafka_List_t,
 ) -> *mut kafka_common_TopicCollection_t {
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list of NUL-terminated
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list of NUL-terminated
     // strings, as `list_strings` requires; the strings are copied into owned `String`s, so nothing
     // borrows the list after this call.
-    boxed(TopicCollection::of_topic_names(unsafe { list_strings(topics) }))
+    boxed(TopicCollection::of_topic_names(unsafe { list_strings(topics, "topics") }))
 }
 
 /// Frees an owned topic-collection handle. Null is a no-op.
@@ -175,7 +183,7 @@ mod tests {
                 kafka_common_TopicCollection__enum(by_name),
                 kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_NAMES
             );
-            let TopicCollection::TopicNames(names_view) = topic_collection_ref(by_name) else {
+            let TopicCollection::TopicNames(names_view) = topic_collection_ref(by_name, "by_name") else {
                 panic!("ofTopicNames builds a TopicNameCollection");
             };
             assert_eq!(names_view.topic_names(), ["orders".to_string()]);
@@ -188,7 +196,7 @@ mod tests {
                 kafka_common_TopicCollection__enum(by_id),
                 kafka_common_TopicCollection_e::kafka_common_TopicCollection_TOPIC_IDS
             );
-            let TopicCollection::TopicIds(ids_view) = topic_collection_ref(by_id) else {
+            let TopicCollection::TopicIds(ids_view) = topic_collection_ref(by_id, "by_id") else {
                 panic!("ofTopicIds builds a TopicIdCollection");
             };
             assert_eq!(ids_view.topic_ids(), [Uuid::new(1, 2)]);

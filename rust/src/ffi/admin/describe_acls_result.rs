@@ -92,11 +92,14 @@ pub(crate) fn box_describe_acls_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_DescribeAclsResult_t) -> &'a ResultHandle<DescribeAclsResultInner> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_DescribeAclsResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<DescribeAclsResultInner> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeAclsResult_t` is built by
     // `box_result::<DescribeAclsResultInner, _>`, as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a future containing the ACLs requested.
@@ -119,7 +122,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeAclsResult_values(
 ) -> *const kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    unsafe { handle(self_) }.result.values
+    unsafe { handle(self_, "self_") }.result.values
 }
 
 /// Frees a result handle and the future borrowed from it; `NULL` is a no-op.

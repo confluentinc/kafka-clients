@@ -20,6 +20,7 @@
 //! `__as_Partitioner` view is what `kafka_producer_ProducerConfig_set_partitioner`
 //! and the mock options builder take.
 
+use crate::ffi::precondition::require_ref;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::ffi::common::metrics::Interface;
@@ -43,12 +44,15 @@ struct RoundRobinPartitionerInner {
 /// # Safety
 ///
 /// `self_` must be a live handle, kept alive for `'a`.
-unsafe fn inner<'a>(self_: *const kafka_producer_RoundRobinPartitioner_t) -> &'a RoundRobinPartitionerInner {
+unsafe fn inner<'a>(
+    self_: *const kafka_producer_RoundRobinPartitioner_t,
+    param: &'static str,
+) -> &'a RoundRobinPartitionerInner {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle kept alive for `'a`, i.e.
     // the `Box::into_raw` of a `RoundRobinPartitionerInner` in
     // `kafka_producer_RoundRobinPartitioner_new`, the only constructor. The inner value is changed
     // only through its `OnceLock`, so the shared reference is sound.
-    unsafe { &*(self_ as *const RoundRobinPartitionerInner) }
+    unsafe { require_ref::<_, RoundRobinPartitionerInner>(self_, param) }
 }
 
 /// `new RoundRobinPartitioner()`.
@@ -86,7 +90,7 @@ pub unsafe extern "C" fn kafka_producer_RoundRobinPartitioner__as_Partitioner(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, as `inner` requires. The
     // view returned is the `Interface` cached in the handle's `as_partitioner` cell, which is never
     // moved or replaced, so it lives as long as the handle, as the rustdoc states.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let view = inner.as_partitioner.get_or_init(|| partitioner_view(Arc::clone(&inner.imp)));
     view as *const Interface<SharedPartitioner> as *mut kafka_producer_Partitioner_t
 }

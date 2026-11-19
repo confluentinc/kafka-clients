@@ -1,0 +1,76 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+
+namespace Confluent.Kafka.Performance.V3;
+
+/// <summary>
+/// The v3 perf executable: <c>MODE</c> selects the producer, consumer or transactional benchmark, or the version
+/// report, and the exit code carries the verdict the launcher and the perf smoke gate on.
+/// </summary>
+internal static class Program
+{
+    // Exit codes: 0 clean, 1 a benchmark failure, 2 setup not ready (the smoke retries it, so nothing else returns it),
+    // 64 a usage error, 130 interrupted.
+    private const int InterruptedExitCode = 130;
+
+    private const int UsageExitCode = 64;
+
+    private static async Task<int> Main()
+    {
+        // This exe is client version 3: results.json's client_version and the default group.id derive from it, as
+        // Python.
+        Environment.SetEnvironmentVariable("CLIENT_VERSION", "3");
+
+        PerfSignals.Install();
+
+        string mode = PerfEnv.GetString("MODE", "producer");
+        try
+        {
+            switch (mode)
+            {
+                case "producer":
+                    return await ProducerMain.Run().ConfigureAwait(false);
+                case "consumer":
+                    return await ConsumerMain.Run().ConfigureAwait(false);
+                case "transactional":
+                    return await TransactionalMain.Run().ConfigureAwait(false);
+                case "version":
+                    PrintVersion();
+                    return 0;
+                default:
+                    Console.Error.WriteLine($"Unknown MODE '{mode}' (expected 'producer', 'consumer', 'transactional' or 'version')");
+                    return UsageExitCode;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // A safety net: the engines handle their own cancellation, so a stray one exits 130 instead of crashing.
+            Console.Error.WriteLine("Interrupted; exiting.");
+            return InterruptedExitCode;
+        }
+    }
+
+    // The C ABI has no version entry point, so the native core is identified by the binding it is built and shipped
+    // with: the binding's informational version carries the source commit both come from.
+    private static void PrintVersion() =>
+        RuntimeInfo.Print(new Dictionary<string, string>
+        {
+            ["client"] = RuntimeInfo.ProducerClient("dotnet-rust"),
+            ["confluent_kafka_version"] = RuntimeInfo.AssemblyVersion(typeof(Confluent.Kafka.Producer.KafkaProducer<,>).Assembly),
+        });
+}

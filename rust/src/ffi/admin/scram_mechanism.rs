@@ -19,6 +19,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use crate::ffi::util::into_c_string;
 use std::ffi::{CString, c_char};
 use std::sync::LazyLock;
@@ -40,6 +41,14 @@ pub enum kafka_admin_ScramMechanism_e {
     kafka_admin_ScramMechanism_UNKNOWN,
     kafka_admin_ScramMechanism_SCRAM_SHA_256,
     kafka_admin_ScramMechanism_SCRAM_SHA_512,
+}
+
+/// The value an `_err` twin returning [`kafka_admin_ScramMechanism_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_ScramMechanism_e {
+    fn fail() -> Self {
+        Self::kafka_admin_ScramMechanism_UNKNOWN
+    }
 }
 
 /// One static instance per value, indexed by [`kafka_admin_ScramMechanism_e`].
@@ -74,12 +83,15 @@ pub(crate) fn scram_mechanism_singleton(mechanism: ScramMechanism) -> *const kaf
 /// # Safety
 ///
 /// `mechanism` must be a singleton returned by this module.
-pub(crate) unsafe fn scram_mechanism_value_of(mechanism: *const kafka_admin_ScramMechanism_t) -> ScramMechanism {
+pub(crate) unsafe fn scram_mechanism_value_of(
+    mechanism: *const kafka_admin_ScramMechanism_t,
+    param: &'static str,
+) -> ScramMechanism {
     // SAFETY: Per this function's `# Safety`, `mechanism` is a singleton returned by this module.
     // `scram_mechanism_singleton` is the only producer and points it at an element of the static
     // `VARIANTS`, a `ScramMechanism` that is never freed or mutated, so the read copies a live
     // value.
-    unsafe { *(mechanism as *const ScramMechanism) }
+    *unsafe { require_ref::<_, ScramMechanism>(mechanism, param) }
 }
 
 /// Returns `ScramMechanism.UNKNOWN`, a static singleton never freed.
@@ -105,19 +117,17 @@ pub extern "C" fn kafka_admin_ScramMechanism_scram_sha_512() -> *const kafka_adm
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_ScramMechanism_UNKNOWN`.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_admin_ScramMechanism_e::kafka_admin_ScramMechanism_UNKNOWN)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism__enum(
     self_: *const kafka_admin_ScramMechanism_t,
 ) -> kafka_admin_ScramMechanism_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `scram_mechanism_value_of` requires.
-    enum_of(unsafe { scram_mechanism_value_of(self_) })
+    enum_of(unsafe { scram_mechanism_value_of(self_, "self_") })
 }
 
 /// Returns the constant's name, as Java's inherited `Enum.toString()`.
@@ -133,7 +143,7 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `scram_mechanism_value_of` requires; the value is copied out and its name copied into an owned string.
-    into_c_string(&unsafe { scram_mechanism_value_of(self_) }.to_string())
+    into_c_string(&unsafe { scram_mechanism_value_of(self_, "self_") }.to_string())
 }
 
 /// # Parameters
@@ -200,7 +210,7 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_mechanism_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `scram_mechanism_value_of` requires. The returned name is a `CString` in the static
     // `MECHANISM_NAMES`, never freed.
-    MECHANISM_NAMES[enum_of(unsafe { scram_mechanism_value_of(self_) }) as usize].as_ptr()
+    MECHANISM_NAMES[enum_of(unsafe { scram_mechanism_value_of(self_, "self_") }) as usize].as_ptr()
 }
 
 /// # Returns
@@ -209,14 +219,13 @@ pub unsafe extern "C" fn kafka_admin_ScramMechanism_mechanism_name(
 ///
 /// # Safety
 ///
-/// `self_` must be a singleton returned by this module. A caught Rust panic returns -1, which is
-/// no code of this Java `byte` enum: its 0 is the valid `UNKNOWN`.
-#[ffi_guard(fallback = -1)]
+/// `self_` must be a singleton returned by this module.
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ScramMechanism_type(self_: *const kafka_admin_ScramMechanism_t) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `scram_mechanism_value_of` requires.
-    unsafe { scram_mechanism_value_of(self_) }.r#type()
+    unsafe { scram_mechanism_value_of(self_, "self_") }.r#type()
 }
 
 #[cfg(test)]
@@ -232,7 +241,7 @@ mod tests {
         unsafe {
             for (index, &mechanism) in VARIANTS.iter().enumerate() {
                 let handle = scram_mechanism_singleton(mechanism);
-                assert_eq!(scram_mechanism_value_of(handle), mechanism);
+                assert_eq!(scram_mechanism_value_of(handle, "value"), mechanism);
                 assert_eq!(kafka_admin_ScramMechanism__enum(handle) as usize, index);
                 assert_eq!(
                     kafka_admin_ScramMechanism_from_type(kafka_admin_ScramMechanism_type(handle)),

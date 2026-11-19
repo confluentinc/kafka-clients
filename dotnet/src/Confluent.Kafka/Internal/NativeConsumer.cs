@@ -1,0 +1,2891 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Internal.Interop;
+
+using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
+
+namespace Confluent.Kafka.Internal;
+
+/// <summary>
+/// The native consumer behind every consumer class: it owns the consumer's handle and, on the async consumers, its
+/// drain thread; checks that one thread uses it at a time; routes a call made inside a callback to the consumer's
+/// handle; and tears down in order: refuse new calls, close, join the drain thread, wait for the calls in flight,
+/// then destroy on the closing thread.
+/// </summary>
+internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
+{
+    private const string GroupIdConfig = "group.id";
+
+    private const string ConstructionFailedMessage = "Failed to construct kafka consumer";
+
+    // The strategy the mock consumers' two-argument constructors pass.
+    internal const string DefaultOffsetResetStrategy = "latest";
+
+    private const int LocalConcurrentModification = -2;
+
+    private const int WakeupCode = -18;
+
+    private const string CloseNegativeTimeoutMessage = "The timeout cannot be negative.";
+
+    private const string ConcurrentAccessMessage = "KafkaConsumer is not safe for multi-threaded access.";
+
+    private const string ClosedMessage = "This consumer has already been closed.";
+
+    private const string NullSubscribeTopicsMessage = "Topic collection to subscribe to cannot be null";
+
+    private const string NullSubscribeTopicMessage =
+        "Topic collection to subscribe to cannot contain null or empty topic";
+
+    private const string NullListenerMessage = "RebalanceListener cannot be null";
+
+    private const string OnPartitionsLostMethod = "OnPartitionsLost(IReadOnlyCollection<TopicPartition>)";
+
+    private const string NullSubscribePatternMessage = "Topic pattern to subscribe to cannot be null";
+
+    private const string NullMockPatternMessage = "Topic pattern cannot be null";
+
+    private const string EmptyMockPatternMessage = "Topic pattern cannot be empty";
+
+    private const string NullPatternTextMessage = "SubscriptionPattern.pattern must not be null.";
+
+    private const string NullAssignPartitionsMessage = "Topic partitions collection to assign to cannot be null";
+
+    private const string NullAssignTopicMessage = "Topic partitions to assign to cannot have null or empty topic";
+
+    private const int Open = 0;
+
+    private const int Closing = 1;
+
+    private const int ClosePending = 2;
+
+    private const string GroupIdNotDefinedMessage =
+        "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer " +
+        "configuration.";
+
+    private readonly SafeConsumerHandle _handle;
+    private readonly HandleUses _uses = new HandleUses();
+    private readonly SemaphoreSlim _closeGate = new SemaphoreSlim(1, 1);
+    private readonly bool _groupIdDefined;
+    private readonly SerdeDisposal? _serdes;
+
+    // Set once the destroy has returned and never cleared: from then on a Close or Dispose from any thread returns at
+    // once, as Python's closed check does.
+    private volatile bool _destroyed;
+    private readonly List<IntPtr> _recordBytes = new List<IntPtr>();
+
+    // The polls holding a records handle, each from inside its use until it has deserialized, and whether the teardown
+    // that destroyed the consumer while some held one handed them the deserializers: both under the _recordBytes lock.
+    private int _recordsHeld;
+    private bool _deserializersHandedOver;
+    private bool _recordBytesReleasable;
+
+    // Closing: a teardown that will close (a Dispose, or a close the core accepted). ClosePending: an explicit Close
+    // begun while a call it does not wait for is in flight (its own thread's, or one made inside a callback), which
+    // the core may still refuse; a close from inside a callback is a no-op only while Closing.
+    private int _closed;
+
+    private int _calls;
+
+    // The owner check, as Java's acquire() and Python's use table: the thread whose calls hold the consumer and
+    // how many, and the thread of an explicit Close in progress.
+    private readonly object _owner = new object();
+
+    private int _ownerThread;
+
+    private int _ownerUses;
+
+    private int _closingThread;
+
+    // The owner check knows a thread by a number no other thread gets, not by its ManagedThreadId, which .NET gives
+    // again to a new thread once the old one exits: an async call can still hold the consumer after the thread that
+    // made it has exited, and the new thread must not pass for it.
+    [ThreadStatic]
+    private static int s_threadNumber;
+
+    private static int s_lastThreadNumber;
+
+    // An AsyncMockConsumer's Rebalance or LosePartitions refuses other threads for its whole use, as Python's mock does.
+    private int _refusingUses;
+
+    private readonly ConsumerCallbackReporter _reporter;
+
+    // The registered listener's self_: replaced when a subscribe succeeds, kept across Unsubscribe and
+    // Assign, released after the consumer's destroy has returned. The core registers a subscribe's listener before
+    // most of its refusals, so a refused one becomes the registered one and the one it replaced is retained, both
+    // kept until a subscribe succeeds or the consumer's destroy has returned. One the core refuses before the
+    // registration, for an invalid argument, a missing group.id, concurrent use or an unresolvable bootstrap address,
+    // is released at once.
+    private ListenerRegistration? _listenerRegistration;
+
+    private readonly List<ListenerRegistration> _retainedListenerRegistrations = new List<ListenerRegistration>();
+
+    private bool _listenerRegistrationsReleased;
+
+    // The commit-callback registrations whose commit reported an error: the core may still fire them, so they are
+    // released after the consumer's destroy has returned.
+    private readonly List<CommitCallbackRegistration> _parkedCommitCallbacks = new List<CommitCallbackRegistration>();
+
+    private bool _parkedCommitCallbacksReleased;
+
+    private CommitCallbackRegistration? _commitCallbackRegistration;
+
+    private readonly object _wakeups = new object();
+
+    private long _userWakeups;
+
+    // A wakeup a cancel sent that its call ended without consuming: the next wakeable call the core ends with that
+    // wakeup is submitted again, as Python does. The user's Wakeup() clears it.
+    private bool _ownWakeLeft;
+
+    // While a Dispose waits for the calls in flight, a call made inside a callback that the core ends with the
+    // wakeup sends it again, so the op that delivered the callback still ends.
+    private bool _disposeWaking;
+
+    // The handle a call made inside a callback is routed to: made on first use, destroyed after the consumer.
+    private readonly object _callbackHandleGate = new object();
+
+    private NativeConsumerHandle? _callbackHandle;
+
+    private bool _closeEnded;
+
+    private NativeConsumer(SafeConsumerHandle handle, bool groupIdDefined, bool withPump, SerdeDisposal? serdes)
+    {
+        _handle = handle;
+        _groupIdDefined = groupIdDefined;
+        _serdes = serdes;
+#pragma warning disable CKRDA0005 // Reports use the raw view: the destroy runs pending callbacks while this SafeHandle is being released.
+        _reporter = new ConsumerCallbackReporter(handle.DangerousGetHandle(), PulseOwnerWaiters);
+#pragma warning restore CKRDA0005
+        if (withPump)
+        {
+            _pump = new CompletionThread(PumpThreadName, DrainOf(handle, _uses));
+        }
+
+        handle.ReleaseAfterDestroy(AfterDestroy);
+    }
+
+    private delegate void NativePartitionsCall(SafeConsumerHandle consumer, IntPtr partitions, ref IntPtr outErr);
+
+    private delegate void NativeSubscribeWithListener(
+        SafeConsumerHandle consumer, IntPtr subscription, IntPtr listener, ref IntPtr outErr);
+
+    internal SafeConsumerHandle Handle
+    {
+        get
+        {
+            ThrowIfClosed();
+            return _handle;
+        }
+    }
+
+    internal ListenerRegistration? CurrentListenerRegistration => Volatile.Read(ref _listenerRegistration);
+
+    internal int RetainedListenerRegistrationCount
+    {
+        get
+        {
+            lock (_retainedListenerRegistrations)
+            {
+                return _retainedListenerRegistrations.Count;
+            }
+        }
+    }
+
+    internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
+
+    /// <summary>
+    /// A consumer constructor's deserializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null
+    /// for configuration <paramref name="key"/>: must be non-null.", which Java throws when the
+    /// <paramref name="key"/> config names no class; .NET config cannot name one.
+    /// </summary>
+    internal static T RequireDeserializer<T>(T? deserializer, string key)
+        where T : class =>
+        deserializer ?? throw new ConfigException(key, null, "must be non-null.");
+
+    internal static NativeConsumer Create(
+        IReadOnlyDictionary<string, object?> configs,
+        bool withPump = true,
+        SerdeDisposal? serdes = null)
+    {
+        IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Consumer);
+        IntPtr classPointer;
+        try
+        {
+            classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Consumer);
+        }
+        catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+        {
+            // Java's constructor closes the deserializers when a step inside its try fails, which the core reports
+            // wrapped; a configuration it refuses before that try, such as a value it cannot parse, comes back bare
+            // and disposes nothing.
+            serdes?.DisposeOnce();
+            throw;
+        }
+
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr view = NativeMethods.KafkaConsumerAsConsumer(classPointer, ref outErr);
+            if (outErr != IntPtr.Zero)
+            {
+                IntPtr destroyErr = IntPtr.Zero;
+                NativeMethods.KafkaConsumerDestroy(classPointer, ref destroyErr);
+                FreeError(ref destroyErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+
+            return Start(
+                new SafeKafkaConsumerHandle(view, classPointer),
+                groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
+                withPump,
+                serdes);
+        }
+        catch
+        {
+            serdes?.DisposeOnce();
+            throw;
+        }
+    }
+
+    // A null strategy crosses as NULL, which the core refuses with Java's IllegalArgumentException
+    // ("Auto offset reset strategy is null"), as Java's AutoOffsetResetStrategy.fromString does.
+    internal static NativeConsumer CreateMock(string? autoOffsetReset = DefaultOffsetResetStrategy, bool withPump = true)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr classPointer;
+        using (Utf8Marshal.PinnedUtf8String? strategy = autoOffsetReset is null ? null : Utf8Marshal.Pin(autoOffsetReset))
+        {
+            classPointer = NativeMethods.MockConsumerNew(strategy?.Pointer ?? IntPtr.Zero, ref outErr);
+        }
+
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        IntPtr view = NativeMethods.MockConsumerAsConsumer(classPointer, ref outErr);
+        if (outErr != IntPtr.Zero)
+        {
+            IntPtr destroyErr = IntPtr.Zero;
+            NativeMethods.MockConsumerDestroy(classPointer, ref destroyErr);
+            FreeError(ref destroyErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+
+        return Start(new SafeMockConsumerHandle(view, classPointer), groupIdDefined: false, withPump, serdes: null);
+    }
+
+    internal void Seek(string topic, int partition, long offset)
+    {
+        CheckSeekArguments(topic, partition, offset);
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.Seek(topic, partition, offset));
+            return;
+        }
+
+        CallSync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerSeekWithOffset(_handle, arguments.TopicPartition(topic, partition), offset, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    private static void RequireSeekOffset(long offset)
+    {
+        if (offset < 0)
+        {
+            throw new IllegalArgumentException("seek offset must not be a negative number");
+        }
+    }
+
+    internal void SeekWithMetadata(string topic, int partition, OffsetAndMetadata offsetAndMetadata)
+    {
+        CheckSeekArguments(topic, partition, offsetAndMetadata);
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.SeekWithMetadata(topic, partition, offsetAndMetadata));
+            return;
+        }
+
+        CallSync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerSeekWithOffsetAndMetadata(
+                _handle,
+                arguments.TopicPartition(topic, partition),
+                arguments.OffsetAndMetadata(
+                    offsetAndMetadata.Offset(), offsetAndMetadata.LeaderEpoch() ?? -1, offsetAndMetadata.Metadata()),
+                ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    internal long? CurrentLag(string topic, int partition)
+    {
+        if (CheckInAUse(() => LagOfANullTopic(topic, partition), UseKind.UnownedOnMock))
+        {
+            return 0;
+        }
+
+        if (RoutesToTheHandle)
+        {
+            return Route(handle => handle.CurrentLag(topic, partition));
+        }
+
+        return QuerySync<long?>(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            sbyte present = NativeMethods.ConsumerCurrentLag(
+                _handle, arguments.TopicPartition(topic, partition), out long lag, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return present != 0 ? lag : null;
+        },
+        UseKind.UnownedOnMock);
+    }
+
+    internal void CommitAsync()
+    {
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.CommitAsync());
+            return;
+        }
+
+        CallSync(_ =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerCommitAsync(_handle, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    internal void CommitAsync(IOffsetCommitCallback callback)
+    {
+        CheckInAUse(() => RequireCallback(callback));
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.CommitAsync(callback));
+            return;
+        }
+
+        CallSync(_ => CommitWithRegistration(callback, emptyOffsets: false, callbackHandle =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerCommitAsyncWithCallback(_handle, callbackHandle, ref outErr);
+            return outErr;
+        }));
+    }
+
+    internal void CommitAsync(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IOffsetCommitCallback? callback)
+    {
+        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.CommitAsync(snapshot, callback));
+            return;
+        }
+
+        CallSync(arguments =>
+        {
+            IntPtr map = arguments.OffsetMap(snapshot);
+            CommitWithRegistration(callback, snapshot.Count == 0, callbackHandle =>
+            {
+                IntPtr outErr = IntPtr.Zero;
+                NativeMethods.ConsumerCommitAsyncWithOffsetsCallback(_handle, map, callbackHandle, ref outErr);
+                return outErr;
+            });
+        });
+    }
+
+    internal void CommitWithRegistration(
+        IOffsetCommitCallback? callback,
+        bool emptyOffsets,
+        Func<IntPtr, IntPtr> commit) =>
+        CommitWithRegistration(RootCommitCallback(callback, emptyOffsets), commit);
+
+    internal void CommitWithRegistration(
+        IAsyncOffsetCommitCallback callback,
+        bool emptyOffsets,
+        Func<IntPtr, IntPtr> commit) =>
+        CommitWithRegistration(RootCommitCallback(callback, emptyOffsets), commit);
+
+    private void CommitWithRegistration(CommitCallbackRegistration registration, Func<IntPtr, IntPtr> commit)
+    {
+        IntPtr outErr;
+        try
+        {
+            IntPtr callbackHandle = registration.NewHandle();
+            try
+            {
+                outErr = commit(callbackHandle);
+            }
+            finally
+            {
+                CommitCallbackRegistration.DestroyHandle(callbackHandle);
+            }
+        }
+        catch
+        {
+            registration.Release();
+            throw;
+        }
+
+        if (outErr != IntPtr.Zero)
+        {
+            ParkCommitCallback(registration);
+        }
+
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+    }
+
+    internal ConsumerCallbackReporter.HandleCommitScope EnterHandleCommit() => _reporter.EnterHandleCommit();
+
+    private CommitCallbackRegistration RootCommitCallback(IOffsetCommitCallback? callback, bool emptyOffsets) =>
+        Track(CommitCallbackRegistration.Root(callback, NullOffsetsFor(emptyOffsets), _reporter));
+
+    private CommitCallbackRegistration RootCommitCallback(IAsyncOffsetCommitCallback callback, bool emptyOffsets) =>
+        Track(CommitCallbackRegistration.Root(callback, NullOffsetsFor(emptyOffsets), _reporter));
+
+    // Java's KafkaConsumer hands an explicit empty commit's callback null offsets; its MockConsumer hands the map.
+    private bool NullOffsetsFor(bool emptyOffsets) => emptyOffsets && !IsMock;
+
+    private CommitCallbackRegistration Track(CommitCallbackRegistration registration)
+    {
+        Volatile.Write(ref _commitCallbackRegistration, registration);
+        return registration;
+    }
+
+    private void ParkCommitCallback(CommitCallbackRegistration registration)
+    {
+        lock (_parkedCommitCallbacks)
+        {
+            if (!_parkedCommitCallbacksReleased)
+            {
+                _parkedCommitCallbacks.Add(registration);
+                return;
+            }
+        }
+
+        registration.Release();
+    }
+
+    // The records are deserialized after the poll's use has ended, so a deserializer may dispose the consumer. A
+    // record that fails to deserialize ends the batch: the records before it are returned, and every partition is
+    // sought back to its first record not returned, the seeks taking one use of their own, so the failing record comes
+    // next.
+    internal ConsumerRecords<TKey, TValue> PollTyped<TKey, TValue>(
+        TimeSpan timeout,
+        IDeserializer<TKey> keyDeserializer,
+        IDeserializerWithHeaders<TKey>? keyWithHeaders,
+        IDeserializer<TValue> valueDeserializer,
+        IDeserializerWithHeaders<TValue>? valueWithHeaders)
+    {
+        long timeoutMs = TimerTimeoutMs(timeout);
+        RefuseInsideACallback();
+        IntPtr records = QuerySync(_ =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr polled = NativeMethods.ConsumerPoll(_handle, timeoutMs, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            HoldRecords();
+            return polled;
+        });
+
+        ConsumerRecords<TKey, TValue> copied;
+        RecordDeserializationException? error;
+        IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind;
+        try
+        {
+            copied = ConsumerRecordsMarshal.CopyOut(
+                records, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, out error, out rewind);
+        }
+        finally
+        {
+            DestroyRecords(records);
+        }
+
+        if (error is null)
+        {
+            return copied;
+        }
+
+        SeekBack(rewind);
+        if (copied.Count() == 0)
+        {
+            throw error;
+        }
+
+        return copied;
+    }
+
+    private void SeekBack(IReadOnlyList<KeyValuePair<TopicPartition, long>> positions)
+    {
+        if (positions.Count == 0)
+        {
+            return;
+        }
+
+        int owner;
+        try
+        {
+            owner = EnterUse();
+        }
+        catch (Exception exception)
+        {
+            TraceSeekBackFailures(positions, exception);
+            return;
+        }
+
+        try
+        {
+            using NativeCallArguments arguments = new NativeCallArguments();
+            foreach (KeyValuePair<TopicPartition, long> position in positions)
+            {
+                try
+                {
+                    IntPtr outErr = IntPtr.Zero;
+                    NativeMethods.ConsumerSeekWithOffset(
+                        _handle,
+                        arguments.TopicPartition(position.Key.Topic(), position.Key.Partition()),
+                        position.Value,
+                        ref outErr);
+                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                }
+                catch (Exception exception)
+                {
+                    TraceSeekBackFailure(position.Key, position.Value, exception);
+                }
+            }
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    private static void TraceSeekBackFailures(
+        IReadOnlyList<KeyValuePair<TopicPartition, long>> positions,
+        Exception exception)
+    {
+        foreach (KeyValuePair<TopicPartition, long> position in positions)
+        {
+            TraceSeekBackFailure(position.Key, position.Value, exception);
+        }
+    }
+
+    private static void TraceSeekBackFailure(TopicPartition partition, long offset, Exception exception) =>
+        Trace.TraceError("Could not seek {0} back to offset {1}: {2}", partition, offset, exception);
+
+    internal void Subscribe(IReadOnlyCollection<string> topics)
+    {
+        string[] topicArray = CheckAfterAcquire(() => SnapshotTopics(topics));
+        RefuseInsideACallback();
+        CallSync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerSubscribeWithTopics(_handle, arguments.StringList(topicArray), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            SettleListener(null, subscribed: true, Unsubscribes(topicArray));
+        });
+    }
+
+    internal void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener)
+    {
+        RequireListener(listener);
+        string[] topicArray = CheckAfterAcquire(() => SnapshotTopics(topics));
+        SubscribeWithListener(
+            arguments => arguments.StringList(topicArray),
+            NativeMethods.ConsumerSubscribeWithTopicsListener,
+            listener,
+            Unsubscribes(topicArray));
+    }
+
+    internal void Subscribe(SubscriptionPattern pattern)
+    {
+        string patternText = SnapshotPattern(pattern);
+        RefuseInsideACallback();
+        CallSync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerSubscribeWithPattern(_handle, arguments.SubscriptionPattern(patternText), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            SettleListener(null, subscribed: true, notRegistered: false);
+        });
+    }
+
+    internal void Subscribe(SubscriptionPattern pattern, IConsumerRebalanceListener listener)
+    {
+        RequireListener(listener);
+        string patternText = SnapshotPattern(pattern);
+        SubscribeWithListener(
+            arguments => arguments.SubscriptionPattern(patternText),
+            NativeMethods.ConsumerSubscribeWithPatternListener,
+            listener,
+            unsubscribes: false);
+    }
+
+    private void SubscribeWithListener(
+        Func<NativeCallArguments, IntPtr> subscription,
+        NativeSubscribeWithListener subscribe,
+        IConsumerRebalanceListener listener,
+        bool unsubscribes)
+    {
+        RefuseInsideACallback();
+        CallSync(arguments =>
+        {
+            IntPtr nativeSubscription = subscription(arguments);
+            ListenerRegistration registration = ListenerRegistration.Root(listener, _reporter);
+            bool called = false;
+            bool subscribed = false;
+            bool notRegistered = unsubscribes;
+            try
+            {
+                IntPtr listenerHandle = registration.NewHandle();
+                try
+                {
+                    IntPtr outErr = IntPtr.Zero;
+                    subscribe(_handle, nativeSubscription, listenerHandle, ref outErr);
+                    called = true;
+                    subscribed = outErr == IntPtr.Zero;
+                    notRegistered |= KafkaException.RefusedBeforeRegistering(outErr);
+                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                }
+                finally
+                {
+                    ListenerRegistration.DestroyHandle(listenerHandle);
+                }
+            }
+            finally
+            {
+                if (called)
+                {
+                    SettleListener(registration, subscribed, notRegistered);
+                }
+                else
+                {
+                    registration.Release();
+                }
+            }
+        });
+    }
+
+    internal void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment)
+    {
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(newAssignment, paramName: nameof(newAssignment));
+        CallMock((mock, arguments) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerRebalance(mock, arguments.TopicPartitionList(snapshot), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    internal void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost)
+    {
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitionsLost, paramName: nameof(partitionsLost));
+        CallMock((mock, arguments) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerLosePartitions(mock, arguments.TopicPartitionList(snapshot), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    private void SettleListener(ListenerRegistration? registration, bool subscribed, bool notRegistered)
+    {
+        if (notRegistered)
+        {
+            registration?.Release();
+            return;
+        }
+
+        if (!subscribed && registration is null)
+        {
+            return;
+        }
+
+        lock (_retainedListenerRegistrations)
+        {
+            if (_listenerRegistrationsReleased)
+            {
+                registration?.Release();
+                return;
+            }
+
+            ListenerRegistration? replaced = Interlocked.Exchange(ref _listenerRegistration, registration);
+            if (!subscribed)
+            {
+                if (replaced is not null)
+                {
+                    _retainedListenerRegistrations.Add(replaced);
+                }
+
+                return;
+            }
+
+            replaced?.Release();
+            foreach (ListenerRegistration retained in _retainedListenerRegistrations)
+            {
+                retained.Release();
+            }
+
+            _retainedListenerRegistrations.Clear();
+        }
+    }
+
+    // On KafkaConsumer a subscribe to no topics is unsubscribe(): whatever its outcome, the core keeps the registered
+    // listener and never stores the subscribe's own. MockConsumer registers it, as Java's does.
+    private bool Unsubscribes(string[] topics) => topics.Length == 0 && !IsMock;
+
+    // Java checks the listener before the topics. A listener with a public OnPartitionsLost the consumer would never
+    // call, since its type lacks the interface that replaces Java's default, is refused right after the null check.
+    // Only a method of the form's return type counts: a Task OnPartitionsLost on a sync listener, or a void one on an
+    // async listener, implements the other form's interface.
+    private static void RequireListener(IConsumerRebalanceListener listener)
+    {
+        RequireNotNull(listener);
+        if (listener is not IConsumerRebalanceListenerWithPartitionsLost && DeclaresOnPartitionsLost(listener, typeof(void)))
+        {
+            throw DefaultMethodGuard.NeverCalled(
+                listener,
+                OnPartitionsLostMethod,
+                nameof(IConsumerRebalanceListenerWithPartitionsLost),
+                DefaultMethodGuard.Consumer);
+        }
+    }
+
+    private static void RequireListener(IAsyncConsumerRebalanceListener listener)
+    {
+        RequireNotNull(listener);
+        if (listener is not IAsyncConsumerRebalanceListenerWithPartitionsLost && DeclaresOnPartitionsLost(listener, typeof(Task)))
+        {
+            throw DefaultMethodGuard.NeverCalled(
+                listener,
+                OnPartitionsLostMethod,
+                nameof(IAsyncConsumerRebalanceListenerWithPartitionsLost),
+                DefaultMethodGuard.Consumer);
+        }
+    }
+
+    private static void RequireNotNull(object listener)
+    {
+        if (listener is null)
+        {
+            throw new IllegalArgumentException(NullListenerMessage);
+        }
+    }
+
+    private static bool DeclaresOnPartitionsLost(object listener, Type returnType) =>
+        DefaultMethodGuard.DeclaresReturning(
+            listener,
+            returnType,
+            nameof(IConsumerRebalanceListenerWithPartitionsLost.OnPartitionsLost),
+            typeof(IReadOnlyCollection<TopicPartition>));
+
+    // KafkaConsumer refuses a null collection or topic with Java's messages, and the core refuses a blank topic
+    // with the same text. Java's KafkaConsumer checks group.id first, so without one the refusal is the core's
+    // InvalidGroupIdException, which the binding throws itself where it refuses the topics. Java's MockConsumer has no
+    // check of its own (a null is its NullPointerException).
+    private string[] SnapshotTopics(IReadOnlyCollection<string> topics)
+    {
+        if (topics is null)
+        {
+            throw IsMock
+                ? new ArgumentNullException(nameof(topics))
+                : GroupIdMissing ? GroupIdNotDefined() : new IllegalArgumentException(NullSubscribeTopicsMessage);
+        }
+
+        string[] topicArray = new string[topics.Count];
+        int index = 0;
+        foreach (string topic in topics)
+        {
+            if (topic is null)
+            {
+                throw IsMock
+                    ? new ArgumentNullException(nameof(topics), "topics must not contain null")
+                    : GroupIdMissing ? GroupIdNotDefined() : new IllegalArgumentException(NullSubscribeTopicMessage);
+            }
+
+            topicArray[index++] = topic;
+        }
+
+        return topicArray;
+    }
+
+    // KafkaConsumer refuses a null pattern after acquireAndEnsureOpen() and the group.id check, with Java's message,
+    // and the core refuses an empty one with Java's text. Java's MockConsumer refuses a null or empty pattern before
+    // ensureNotClosed(), with its own messages; the binding answers them before the use, because Close tears the
+    // native mock down. A null pattern text is Java's NullPointerException, at the same point. A NUL in the text, which
+    // the C string would cut, is refused next (AdminStrings), still after the group.id check.
+    private string SnapshotPattern(SubscriptionPattern pattern)
+    {
+        if (!IsMock)
+        {
+            return CheckAfterAcquire(() =>
+            {
+                if (pattern is null)
+                {
+                    throw GroupIdMissing
+                        ? GroupIdNotDefined()
+                        : new IllegalArgumentException(NullSubscribePatternMessage);
+                }
+
+                string text = pattern.Pattern() ?? throw (GroupIdMissing
+                    ? GroupIdNotDefined()
+                    : new ArgumentNullException(nameof(pattern), NullPatternTextMessage));
+                if (GroupIdMissing && text.IndexOf('\0') >= 0)
+                {
+                    throw GroupIdNotDefined();
+                }
+
+                AdminStrings.Validate(text, AdminStrings.InvalidSubscriptionPatternMessage, nameof(pattern));
+                return text;
+            });
+        }
+
+        if (pattern is null)
+        {
+            throw new IllegalArgumentException(NullMockPatternMessage);
+        }
+
+        string patternText = pattern.Pattern() ?? throw new ArgumentNullException(nameof(pattern), NullPatternTextMessage);
+        AdminStrings.Validate(patternText, AdminStrings.InvalidSubscriptionPatternMessage, nameof(pattern));
+        if (patternText.Length == 0)
+        {
+            throw new IllegalArgumentException(EmptyMockPatternMessage);
+        }
+
+        return CheckAfterAcquire(() => patternText);
+    }
+
+    internal void Unsubscribe()
+    {
+        RefuseInsideACallback();
+        CallSync(_ =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerUnsubscribe(_handle, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    internal void Assign(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionsSync(CheckAfterAcquire(() => SnapshotAssignPartitions(partitions)), NativeMethods.ConsumerAssign);
+
+    internal void Pause(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionsSync(
+            CheckInAUse(() => SnapshotPartitions(partitions, nullTopicIsUnassigned: true)),
+            NativeMethods.ConsumerPause,
+            (handle, snapshot) => handle.Pause(snapshot));
+
+    internal void Resume(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionsSync(
+            CheckInAUse(() => SnapshotPartitions(partitions, nullTopicIsUnassigned: true)),
+            NativeMethods.ConsumerResume,
+            (handle, snapshot) => handle.Resume(snapshot));
+
+    internal void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionsSync(
+            SnapshotSeekPartitions(partitions),
+            NativeMethods.ConsumerSeekToBeginning,
+            (handle, snapshot) => handle.SeekToBeginning(snapshot));
+
+    internal void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionsSync(
+            SnapshotSeekPartitions(partitions),
+            NativeMethods.ConsumerSeekToEnd,
+            (handle, snapshot) => handle.SeekToEnd(snapshot));
+
+    internal long Position(TopicPartition partition)
+    {
+        CheckInAUse(() => RequirePositionPartition(partition));
+        return Position(partition, timeoutMs: null);
+    }
+
+    internal long Position(TopicPartition partition, TimeSpan timeout) =>
+        Position(partition, PositionTimeoutMs(partition, timeout));
+
+    internal void CommitSync()
+    {
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.CommitSync(timeoutMs: null));
+            return;
+        }
+
+        CommitSync(timeoutMs: null);
+    }
+
+    internal void CommitSync(TimeSpan timeout)
+    {
+        long timeoutMs = CommitTimeoutMs(timeout);
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.CommitSync(timeoutMs));
+            return;
+        }
+
+        CommitSync(timeoutMs);
+    }
+
+    internal void CommitSyncOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
+    {
+        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.CommitSync(snapshot, timeoutMs: null));
+            return;
+        }
+
+        CommitSyncOffsets(snapshot, timeoutMs: null);
+    }
+
+    internal void CommitSyncOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout)
+    {
+        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
+        long timeoutMs = CommitTimeoutMs(timeout);
+        if (RoutesToTheHandle)
+        {
+            Route(handle => handle.CommitSync(snapshot, timeoutMs));
+            return;
+        }
+
+        CommitSyncOffsets(snapshot, timeoutMs);
+    }
+
+    internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
+        IReadOnlyCollection<TopicPartition> partitions)
+    {
+        (string Topic, int Partition)[] snapshot = CheckInAUse(() => CommittedPartitions(partitions));
+        return RoutesToTheHandle
+            ? Route(handle => handle.Committed(snapshot, timeoutMs: null))
+            : Committed(snapshot, timeoutMs: null);
+    }
+
+    internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout)
+    {
+        ((string Topic, int Partition)[] snapshot, long timeoutMs) = CommittedArguments(partitions, timeout);
+        return RoutesToTheHandle
+            ? Route(handle => handle.Committed(snapshot, timeoutMs))
+            : Committed(snapshot, timeoutMs);
+    }
+
+    internal IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions) =>
+        LookUpOffsets(partitions, timeout: null, beginning: true);
+
+    internal IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) =>
+        LookUpOffsets(partitions, timeout, beginning: true);
+
+    internal IReadOnlyDictionary<TopicPartition, long> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions) =>
+        LookUpOffsets(partitions, timeout: null, beginning: false);
+
+    internal IReadOnlyDictionary<TopicPartition, long> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) =>
+        LookUpOffsets(partitions, timeout, beginning: false);
+
+    internal IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
+    {
+        TimestampsSnapshot snapshot = CheckInAUse(() => SnapshotTimestamps(timestampsToSearch));
+        return RoutesToTheHandle
+            ? Route(handle => handle.OffsetsForTimes(snapshot, timeoutMs: null))
+            : OffsetsForTimes(snapshot, timeoutMs: null);
+    }
+
+    internal IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, TimeSpan timeout)
+    {
+        (TimestampsSnapshot snapshot, long timeoutMs) =
+            CheckInAUse(() => (SnapshotTimestamps(timestampsToSearch), TimeoutMs(timeout)));
+        return RoutesToTheHandle
+            ? Route(handle => handle.OffsetsForTimes(snapshot, timeoutMs))
+            : OffsetsForTimes(snapshot, timeoutMs);
+    }
+
+    internal IReadOnlyList<PartitionInfo> PartitionsFor(string topic)
+    {
+        CheckInAUse(() => RequirePartitionsForTopic(topic, timeoutMs: null));
+        return RoutesToTheHandle
+            ? Route(handle => handle.PartitionsFor(topic, timeoutMs: null))
+            : PartitionsFor(topic, timeoutMs: null);
+    }
+
+    internal IReadOnlyList<PartitionInfo> PartitionsFor(string topic, TimeSpan timeout)
+    {
+        long timeoutMs = PartitionsForTimeoutMs(topic, timeout);
+        return RoutesToTheHandle
+            ? Route(handle => handle.PartitionsFor(topic, timeoutMs))
+            : PartitionsFor(topic, timeoutMs);
+    }
+
+    internal IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics() =>
+        RoutesToTheHandle
+            ? Route(handle => handle.ListTopics(timeoutMs: null))
+            : ListTopics(timeoutMs: null);
+
+    internal IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics(TimeSpan timeout)
+    {
+        long timeoutMs = CheckInAUse(() => TimeoutMs(timeout));
+        return RoutesToTheHandle
+            ? Route(handle => handle.ListTopics(timeoutMs))
+            : ListTopics(timeoutMs);
+    }
+
+    private IReadOnlyDictionary<TopicPartition, long> LookUpOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan? timeout, bool beginning)
+    {
+        ((string Topic, int Partition)[] snapshot, long? timeoutMs) =
+            CheckInAUse(() => (SnapshotPartitions(partitions), OptionalTimeoutMs(timeout)));
+        if (RoutesToTheHandle)
+        {
+            return Route(handle => beginning
+                ? handle.BeginningOffsets(snapshot, timeoutMs)
+                : handle.EndOffsets(snapshot, timeoutMs));
+        }
+
+        return ListOffsets(snapshot, timeoutMs, beginning);
+    }
+
+    // A call checks its arguments in Python's order: closed and owner first, inside one use, then the arguments.
+    private void CheckInAUse(Action checks, UseKind kind = UseKind.Owned)
+    {
+        int owner = EnterUse(kind);
+        try
+        {
+            checks();
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    private T CheckInAUse<T>(Func<T> checks, UseKind kind = UseKind.Owned)
+    {
+        int owner = EnterUse(kind);
+        try
+        {
+            return checks();
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    private long PositionTimeoutMs(TopicPartition partition, TimeSpan timeout) =>
+        CheckInAUse(() =>
+        {
+            RequirePositionPartition(partition);
+            return TimerTimeoutMs(timeout);
+        });
+
+    private long CommitTimeoutMs(TimeSpan timeout) =>
+        CheckInAUse(() =>
+        {
+            ThrowIfNoGroupIdBefore(timeout);
+            return TimerTimeoutMs(timeout);
+        });
+
+    private ((string Topic, int Partition)[] Snapshot, long TimeoutMs) CommittedArguments(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan timeout) =>
+        CheckInAUse(() =>
+        {
+            ThrowIfNoGroupIdBefore(timeout);
+            long timeoutMs = TimeoutMs(timeout);
+            return (CommittedPartitions(partitions), timeoutMs);
+        });
+
+    private long PartitionsForTimeoutMs(string topic, TimeSpan timeout) =>
+        CheckInAUse(() =>
+        {
+            long timeoutMs = TimeoutMs(timeout);
+            RequirePartitionsForTopic(topic, timeoutMs);
+            return timeoutMs;
+        });
+
+    private OffsetsSnapshot SnapshotCommitOffsetsWhenOpen(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
+        CheckWhenOpen(() => OffsetsSnapshot.Of(offsets));
+
+    // Java checks these before acquire(), so on a KafkaConsumer they come after the closed check and before the owner
+    // check, as in Python; on the mocks they come inside the use, after the owner wait, as Python's mock takes its
+    // lock first.
+    private void CheckWhenOpen(Action checks)
+    {
+        if (IsMock)
+        {
+            CheckInAUse(checks);
+            return;
+        }
+
+        ThrowIfClosed();
+        checks();
+    }
+
+    // Java's KafkaConsumer checks subscribe's and assign's arguments after acquireAndEnsureOpen(): after the closed
+    // check, the refusal inside a callback and the owner check. Java's MockConsumer checks them after
+    // ensureNotClosed(), which the mock's use makes.
+    private T CheckAfterAcquire<T>(Func<T> checks)
+    {
+        if (IsMock)
+        {
+            return CheckInAUse(checks);
+        }
+
+        RefuseInsideACallback();
+        return CheckInAUse(checks);
+    }
+
+    // Java's KafkaConsumer checks these arguments before acquire(), so before the closed and owner checks, which the
+    // call's own use makes; Java's MockConsumer checks them after ensureNotClosed(), which the mock's use makes.
+    private T CheckBeforeAcquire<T>(Func<T> checks) => IsMock ? CheckInAUse(checks) : checks();
+
+    private T CheckWhenOpen<T>(Func<T> checks)
+    {
+        if (IsMock)
+        {
+            return CheckInAUse(checks);
+        }
+
+        ThrowIfClosed();
+        return checks();
+    }
+
+    // Java's KafkaConsumer checks the offset before acquire(), so before the closed and owner checks; Java's
+    // MockConsumer checks no offset, and the core mock answers a negative one as Java's does.
+    private void CheckSeekArguments(string topic, int partition, long offset)
+    {
+        if (IsMock)
+        {
+            CheckInAUse(() => RequireAssignedTopic(topic, partition));
+            return;
+        }
+
+        RequireSeekOffset(offset);
+        CheckInAUse(() => RequireAssignedTopic(topic, partition));
+    }
+
+    // Java's KafkaConsumer reads the offset before acquire(); Java's MockConsumer after ensureNotClosed().
+    private void CheckSeekArguments(string topic, int partition, OffsetAndMetadata offsetAndMetadata)
+    {
+        CheckBeforeAcquire(() =>
+        {
+            if (offsetAndMetadata is null)
+            {
+                throw new ArgumentNullException(nameof(offsetAndMetadata));
+            }
+
+            return true;
+        });
+        CheckInAUse(() => RequireAssignedTopic(topic, partition));
+    }
+
+    private static void RequireCallback(object callback)
+    {
+        if (callback is null)
+        {
+            throw new ArgumentNullException(nameof(callback));
+        }
+    }
+
+    // Java's committed checks the group before it reads the partitions.
+    private (string Topic, int Partition)[] CommittedPartitions(IReadOnlyCollection<TopicPartition> partitions)
+    {
+        if (partitions is null && GroupIdMissing)
+        {
+            throw GroupIdNotDefined();
+        }
+
+        return SnapshotPartitions(partitions!);
+    }
+
+    // Java's partitionsFor finds no partitions for a null topic, so a zero timeout times out at once; Java's mock
+    // answers none, which a null topic cannot reach through the native mock.
+    private void RequirePartitionsForTopic(string topic, long? timeoutMs)
+    {
+        if (topic is not null)
+        {
+            return;
+        }
+
+        if (timeoutMs == 0 && !IsMock)
+        {
+            throw new KafkaTimeoutException(string.Empty);
+        }
+
+        throw new ArgumentNullException(nameof(topic));
+    }
+
+    // Java's commitSync and committed check the group before they read the timeout.
+    private void ThrowIfNoGroupIdBefore(TimeSpan timeout)
+    {
+        if (timeout < TimeSpan.Zero && GroupIdMissing)
+        {
+            throw GroupIdNotDefined();
+        }
+    }
+
+    private bool GroupIdMissing => !IsMock && !_groupIdDefined;
+
+    private static InvalidGroupIdException GroupIdNotDefined() => new InvalidGroupIdException(GroupIdNotDefinedMessage);
+
+    private static long? OptionalTimeoutMs(TimeSpan? timeout) => timeout is TimeSpan value ? TimeoutMs(value) : null;
+
+    private long Position(TopicPartition partition, long? timeoutMs) =>
+        RoutesToTheHandle
+            ? Route(handle => handle.Position(partition.Topic(), partition.Partition(), timeoutMs))
+            : QuerySync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr topicPartition = arguments.TopicPartition(partition.Topic(), partition.Partition());
+            long position = timeoutMs is long ms
+                ? NativeMethods.ConsumerPositionWithTimeout(_handle, topicPartition, ms, ref outErr)
+                : NativeMethods.ConsumerPosition(_handle, topicPartition, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return position;
+        });
+
+    private void CommitSync(long? timeoutMs) =>
+        CallSync(_ =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            if (timeoutMs is long ms)
+            {
+                NativeMethods.ConsumerCommitSyncWithTimeout(_handle, ms, ref outErr);
+            }
+            else
+            {
+                NativeMethods.ConsumerCommitSync(_handle, ref outErr);
+            }
+
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    private void CommitSyncOffsets(OffsetsSnapshot snapshot, long? timeoutMs) =>
+        CallSync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr offsets = arguments.OffsetMap(snapshot);
+            if (timeoutMs is long ms)
+            {
+                NativeMethods.ConsumerCommitSyncWithOffsetsTimeout(_handle, offsets, ms, ref outErr);
+            }
+            else
+            {
+                NativeMethods.ConsumerCommitSyncWithOffsets(_handle, offsets, ref outErr);
+            }
+
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    private IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
+        (string Topic, int Partition)[] snapshot, long? timeoutMs) =>
+        QuerySync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr partitions = arguments.TopicPartitionList(snapshot);
+            IntPtr map = timeoutMs is long ms
+                ? NativeMethods.ConsumerCommittedWithTimeout(_handle, partitions, ms, ref outErr)
+                : NativeMethods.ConsumerCommitted(_handle, partitions, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return CopyCommitted(map, snapshot);
+        });
+
+    // Every requested partition gets an entry, null where it has no committed offset, as Java's
+    // KafkaConsumer.committed; the mock keeps Java's MockConsumer.committed, which leaves such a partition out.
+    internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> CopyCommitted(
+        IntPtr map, (string Topic, int Partition)[] requested) =>
+        OffsetMapMarshal.CopyOutAndDestroy(map, IsMock ? null : requested);
+
+    private IReadOnlyDictionary<TopicPartition, long> ListOffsets(
+        (string Topic, int Partition)[] snapshot, long? timeoutMs, bool beginning) =>
+        QuerySync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr partitions = arguments.TopicPartitionList(snapshot);
+            IntPtr map;
+            if (timeoutMs is long ms)
+            {
+                map = beginning
+                    ? NativeMethods.ConsumerBeginningOffsetsWithTimeout(_handle, partitions, ms, ref outErr)
+                    : NativeMethods.ConsumerEndOffsetsWithTimeout(_handle, partitions, ms, ref outErr);
+            }
+            else
+            {
+                map = beginning
+                    ? NativeMethods.ConsumerBeginningOffsets(_handle, partitions, ref outErr)
+                    : NativeMethods.ConsumerEndOffsets(_handle, partitions, ref outErr);
+            }
+
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return LongOffsetMapMarshal.CopyOutAndDestroy(map);
+        });
+
+    private IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
+        TimestampsSnapshot snapshot, long? timeoutMs) =>
+        QuerySync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr timestamps = arguments.LongMap(snapshot.Topics, snapshot.Partitions, snapshot.Timestamps, snapshot.Count);
+            IntPtr map = timeoutMs is long ms
+                ? NativeMethods.ConsumerOffsetsForTimesWithTimeout(_handle, timestamps, ms, ref outErr)
+                : NativeMethods.ConsumerOffsetsForTimes(_handle, timestamps, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return CopyOffsetsForTimes(map, snapshot);
+        });
+
+    internal static IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> CopyOffsetsForTimes(
+        IntPtr map, TimestampsSnapshot requested) =>
+        OffsetAndTimestampMapMarshal.CopyOutAndDestroy(map, requested.Topics, requested.Partitions, requested.Count);
+
+    private IReadOnlyList<PartitionInfo> PartitionsFor(string topic, long? timeoutMs) =>
+        QuerySync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr topicPointer = arguments.Utf8(topic);
+            IntPtr list = timeoutMs is long ms
+                ? NativeMethods.ConsumerPartitionsForWithTimeout(_handle, topicPointer, ms, ref outErr)
+                : NativeMethods.ConsumerPartitionsFor(_handle, topicPointer, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return PartitionInfoListMarshal.CopyOutAndDestroy(list);
+        });
+
+    private IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics(long? timeoutMs) =>
+        QuerySync(_ =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr map = timeoutMs is long ms
+                ? NativeMethods.ConsumerListTopicsWithTimeout(_handle, ms, ref outErr)
+                : NativeMethods.ConsumerListTopics(_handle, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return TopicPartitionInfoMapMarshal.CopyOutAndDestroy(map);
+        });
+
+    private void RunPartitionsSync(
+        (string Topic, int Partition)[] snapshot,
+        NativePartitionsCall call,
+        Action<NativeConsumerHandle, (string Topic, int Partition)[]>? routed = null)
+    {
+        if (RoutesToTheHandle)
+        {
+            if (routed is null)
+            {
+                RefuseInsideACallback();
+            }
+            else
+            {
+                Route(handle => routed(handle, snapshot));
+                return;
+            }
+        }
+
+        CallSync(arguments =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            call(_handle, arguments.TopicPartitionList(snapshot), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    // Inside a callback a call the core's ConsumerHandle has a form of, timed or not, goes to it, as Python's
+    // binding routes it; Poll, Subscribe, Unsubscribe and Assign, which it lacks, are refused before anything reaches
+    // the core.
+    private bool RoutesToTheHandle => _reporter.InCallback;
+
+    private void Route(Action<NativeConsumerHandle> call)
+    {
+        int owner = EnterUse();
+        try
+        {
+            call(CallbackHandle());
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    private T Route<T>(Func<NativeConsumerHandle, T> call)
+    {
+        int owner = EnterUse();
+        try
+        {
+            return call(CallbackHandle());
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    private NativeConsumerHandle CallbackHandle()
+    {
+        lock (_callbackHandleGate)
+        {
+            return _callbackHandle ??= NativeConsumerHandle.Create(this, _handle);
+        }
+    }
+
+    private void RefuseInsideACallback()
+    {
+        if (!_reporter.InCallback)
+        {
+            return;
+        }
+
+        if (IsClosed())
+        {
+            throw new IllegalStateException(ClosedMessage);
+        }
+
+        throw new ConcurrentModificationException(ConcurrentAccessMessage);
+    }
+
+    // Inside a callback a call is refused as closed only once the close has ended, so a listener the close runs can
+    // call back in.
+    private bool IsClosed() =>
+        _reporter.InCallback ? Volatile.Read(ref _closeEnded) : Volatile.Read(ref _closed) != Open;
+
+    private void CallSync(Action<NativeCallArguments> call, UseKind kind = UseKind.Owned)
+    {
+        int owner = EnterUse(kind);
+        try
+        {
+            ExecuteCallbacks();
+            using NativeCallArguments arguments = new NativeCallArguments();
+            call(arguments);
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    private T QuerySync<T>(Func<NativeCallArguments, T> call, UseKind kind = UseKind.Owned)
+    {
+        int owner = EnterUse(kind);
+        try
+        {
+            ExecuteCallbacks();
+            using NativeCallArguments arguments = new NativeCallArguments();
+            return call(arguments);
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    private void ExecuteCallbacks()
+    {
+        if (_pump is not null)
+        {
+            return;
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ConsumerExecuteCallbacks(_handle, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+    }
+
+    private static long TimeoutMs(TimeSpan timeout)
+    {
+        if (timeout < TimeSpan.Zero)
+        {
+            throw new IllegalArgumentException("Timeout must not be negative");
+        }
+
+        return (long)timeout.TotalMilliseconds;
+    }
+
+    // Commit and Position build Java's Timer from the timeout, so they take its message.
+    internal static long TimerTimeoutMs(TimeSpan timeout)
+    {
+        if (timeout < TimeSpan.Zero)
+        {
+            throw new IllegalArgumentException(
+                "Invalid negative timeout " + ((long)Math.Floor(timeout.TotalMilliseconds)).ToString(CultureInfo.InvariantCulture));
+        }
+
+        return (long)timeout.TotalMilliseconds;
+    }
+
+    // A null topic is never assigned and cannot cross the C ABI, so the binding throws what Java's
+    // SubscriptionState.assignedState throws for a partition that is not assigned. A negative partition goes to the
+    // core, which answers as Java does.
+    internal static void RequireAssignedTopic(string? topic, int partition)
+    {
+        if (topic is null)
+        {
+            throw new IllegalStateException(NoCurrentAssignment(partition));
+        }
+    }
+
+    // Java's MockConsumer answers a lag of 0 for a partition it has no end offset for, which a null topic never has;
+    // Java's KafkaConsumer refuses the partition as not assigned. Returns whether the lag is the mock's 0.
+    private bool LagOfANullTopic(string? topic, int partition)
+    {
+        if (topic is null && IsMock)
+        {
+            return true;
+        }
+
+        RequireAssignedTopic(topic, partition);
+        return false;
+    }
+
+    internal static string NoCurrentAssignment(int partition) =>
+        "No current assignment for partition null-" + partition.ToString(CultureInfo.InvariantCulture);
+
+    internal const string PositionNotAssigned =
+        "You can only check the position for partitions assigned to this consumer.";
+
+    // Java's position checks isAssigned first: KafkaConsumer throws IllegalStateException, MockConsumer
+    // IllegalArgumentException.
+    private void RequirePositionPartition(TopicPartition partition)
+    {
+        if (partition.Topic() is null)
+        {
+            throw IsMock
+                ? new IllegalArgumentException(PositionNotAssigned)
+                : new IllegalStateException(PositionNotAssigned);
+        }
+    }
+
+    internal void CloseSync() => CloseSync(IntPtr.Zero);
+
+    internal void CloseSync(CloseOptions option)
+    {
+        RequireCloseOptions(option);
+        IntPtr options = NewCloseOptions(option);
+        try
+        {
+            CloseSync(options);
+        }
+        finally
+        {
+            DestroyCloseOptions(options);
+        }
+    }
+
+    private void RequireCloseOptions(CloseOptions option)
+    {
+        if (option is null)
+        {
+            throw new ArgumentNullException(nameof(option));
+        }
+
+        if (option.Timeout() < TimeSpan.Zero && !IsMock)
+        {
+            throw new IllegalArgumentException(CloseNegativeTimeoutMessage);
+        }
+    }
+
+    private static IntPtr NewCloseOptions(CloseOptions option)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr options = NativeMethods.CloseOptionsWithOperation(Operation(option.GroupMembershipOperation()), ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        if (option.Timeout() is TimeSpan timeout)
+        {
+            try
+            {
+                NativeMethods.CloseOptionsWithTimeout(options, (long)timeout.TotalMilliseconds, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+            catch
+            {
+                DestroyCloseOptions(options);
+                throw;
+            }
+        }
+
+        return options;
+    }
+
+    private static void DestroyCloseOptions(IntPtr options)
+    {
+        if (options == IntPtr.Zero)
+        {
+            return;
+        }
+
+        IntPtr destroyErr = IntPtr.Zero;
+        NativeMethods.CloseOptionsDestroy(options, ref destroyErr);
+        FreeError(ref destroyErr);
+    }
+
+    private static IntPtr Operation(GroupMembershipOperation operation)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr singleton = operation switch
+        {
+            GroupMembershipOperation.LEAVE_GROUP => NativeMethods.CloseOptionsLeaveGroup(ref outErr),
+            GroupMembershipOperation.REMAIN_IN_GROUP => NativeMethods.CloseOptionsRemainInGroup(ref outErr),
+            _ => NativeMethods.CloseOptionsDefault(ref outErr),
+        };
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return singleton;
+    }
+
+    private void CloseSync(IntPtr options)
+    {
+        if (_destroyed)
+        {
+            return;
+        }
+
+        if (_reporter.InCallback)
+        {
+            ThrowUnlessClosing();
+            return;
+        }
+
+        if (TryEnterUse(out int owner))
+        {
+            try
+            {
+                ExecuteCallbacks();
+            }
+            finally
+            {
+                ExitUse(owner);
+            }
+        }
+
+        _closeGate.Wait();
+        bool destroyedBefore = _destroyed;
+        try
+        {
+            if (!TryBeginExplicitClose(CurrentThreadNumber()))
+            {
+                return;
+            }
+
+            try
+            {
+                IntPtr outErr = IntPtr.Zero;
+                if (options == IntPtr.Zero)
+                {
+                    NativeMethods.ConsumerClose(_handle, ref outErr);
+                }
+                else
+                {
+                    NativeMethods.ConsumerCloseWithOptions(_handle, options, ref outErr);
+                }
+
+                ReopenIfRefused(ref outErr);
+                TearDownThenThrow(ref outErr);
+            }
+            finally
+            {
+                EndExplicitClose();
+            }
+        }
+        finally
+        {
+            ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
+        }
+    }
+
+    private void ReopenIfRefused(ref IntPtr error)
+    {
+        if (error != IntPtr.Zero && NativeMethods.Code(error) == LocalConcurrentModification)
+        {
+            // An op still in the core holds it: Java's close() fails in acquire() and the consumer stays open.
+            lock (_owner)
+            {
+                Volatile.Write(ref _closed, Open);
+                _closingThread = 0;
+            }
+
+            KafkaException.ThrowIfFfiFailed(ref error);
+        }
+
+        Volatile.Write(ref _closed, Closing);
+    }
+
+    private void TearDownThenThrow(ref IntPtr error, Exception? kept = null)
+    {
+        try
+        {
+            TearDown();
+        }
+        catch
+        {
+            FreeError(ref error);
+            throw;
+        }
+
+        if (kept is not null)
+        {
+            FreeError(ref error);
+            throw KafkaException.WrapAtClose(kept);
+        }
+
+        KafkaException.ThrowIfFfiFailed(ref error);
+    }
+
+    internal void UpdatePartitions(
+        string topic,
+        int partitionCount,
+        int leaderId,
+        string leaderHost,
+        int leaderPort)
+    {
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        if (leaderHost is null)
+        {
+            throw new ArgumentNullException(nameof(leaderHost));
+        }
+
+        if (partitionCount < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(partitionCount), partitionCount, "Partition count must not be negative.");
+        }
+
+        CallMock((mock, arguments) =>
+        {
+            IntPtr partitions = arguments.List();
+            for (int i = 0; i < partitionCount; i++)
+            {
+                IntPtr leader = arguments.Node(leaderId, leaderHost, leaderPort, rack: null);
+                IntPtr replicas = arguments.List();
+                arguments.Add(replicas, leader);
+                arguments.Add(partitions, arguments.PartitionInfo(topic, i, leader, replicas, replicas));
+            }
+
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerUpdatePartitions(mock, arguments.Utf8(topic), partitions, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    internal void Assign(IReadOnlyList<(string Topic, int Partition)> topicPartitions)
+    {
+        if (topicPartitions is null)
+        {
+            throw new ArgumentNullException(nameof(topicPartitions));
+        }
+
+        (string Topic, int Partition)[] snapshot = new (string, int)[topicPartitions.Count];
+        for (int i = 0; i < snapshot.Length; i++)
+        {
+            (string topic, int partition) = topicPartitions[i];
+            if (topic is null)
+            {
+                throw new ArgumentNullException(nameof(topicPartitions), "topicPartitions must not contain a null topic");
+            }
+
+            if (partition < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(topicPartitions), partition, "Partition must not be negative.");
+            }
+
+            snapshot[i] = (topic, partition);
+        }
+
+        RunPartitionsSync(snapshot, NativeMethods.ConsumerAssign);
+    }
+
+    internal void AddRecord(
+        string topic,
+        int partition,
+        long offset,
+        byte[]? key,
+        byte[]? value)
+    {
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        if (partition < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(partition), partition, "Partition must not be negative.");
+        }
+
+        CallMock((mock, arguments) =>
+        {
+            IntPtr keyBytes = KeepRecordBytes(key);
+            IntPtr valueBytes = KeepRecordBytes(value);
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr record = NativeMethods.ConsumerRecordNew(
+                arguments.Utf8(topic), partition, offset, keyBytes, valueBytes, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            try
+            {
+                NativeMethods.MockConsumerAddRecord(mock, record, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            }
+            finally
+            {
+                IntPtr destroyError = IntPtr.Zero;
+                NativeMethods.ConsumerRecordDestroy(record, ref destroyError);
+                KafkaException.ThrowIfFfiFailed(ref destroyError);
+            }
+        });
+    }
+
+    // The mock shares a record's key and value bytes until the records holding them are destroyed, so each one
+    // is copied into an unmanaged kafka_Bytes_t block that lives until the consumer's destroy has returned and no
+    // poll holds a records handle any more.
+    private IntPtr KeepRecordBytes(byte[]? data)
+    {
+        if (data is null)
+        {
+            return IntPtr.Zero;
+        }
+
+        int header = Marshal.SizeOf<KafkaBytes>();
+        IntPtr block = Marshal.AllocHGlobal(header + Math.Max(data.Length, 1));
+        lock (_recordBytes)
+        {
+            _recordBytes.Add(block);
+        }
+
+        IntPtr bytes = block + header;
+        Marshal.Copy(data, 0, bytes, data.Length);
+        Marshal.StructureToPtr(new KafkaBytes(bytes, data.Length), block, false);
+        return block;
+    }
+
+    private void AfterDestroy()
+    {
+        _destroyed = true;
+        _reporter.MarkDestroyed();
+        lock (_callbackHandleGate)
+        {
+            _callbackHandle?.Dispose();
+        }
+
+        lock (_retainedListenerRegistrations)
+        {
+            Interlocked.Exchange(ref _listenerRegistration, null)?.Release();
+            foreach (ListenerRegistration retained in _retainedListenerRegistrations)
+            {
+                retained.Release();
+            }
+
+            _retainedListenerRegistrations.Clear();
+            _listenerRegistrationsReleased = true;
+        }
+
+        lock (_parkedCommitCallbacks)
+        {
+            foreach (CommitCallbackRegistration registration in _parkedCommitCallbacks)
+            {
+                registration.Release();
+            }
+
+            _parkedCommitCallbacks.Clear();
+            _parkedCommitCallbacksReleased = true;
+        }
+
+        _pump?.ReleaseNotifyOpaque();
+        lock (_recordBytes)
+        {
+            _recordBytesReleasable = true;
+            if (_recordsHeld == 0)
+            {
+                FreeRecordBytes();
+            }
+        }
+    }
+
+    // The deserializers are disposed after the close gate is released, as Python closes them outside its lifecycle
+    // lock, so a deserializer's Dispose may wait for a thread parked on the gate, which then finds the consumer
+    // closed. Only the call whose teardown destroyed the consumer disposes them, on its own thread: that is decided
+    // before the release, after which a waiting close may destroy it. While a poll is still deserializing, that call
+    // hands them over instead and returns, and the last such poll disposes them once it has deserialized.
+    private void ReleaseTheGateThenDisposeTheDeserializers(bool destroyedBefore)
+    {
+        bool destroyedByThisCall = !destroyedBefore && _destroyed;
+        _closeGate.Release();
+        if (destroyedByThisCall && !HandTheDeserializersToThePolls())
+        {
+            _serdes?.DisposeOnce();
+        }
+    }
+
+    // A poll takes its records inside its use, and the destroy runs only once the uses have ended while new ones are
+    // refused as closed, so after the destroy no poll takes records again and the count only falls: the teardown
+    // and the last poll decide under one lock, and exactly one of them disposes.
+    private bool HandTheDeserializersToThePolls()
+    {
+        lock (_recordBytes)
+        {
+            _deserializersHandedOver = _recordsHeld != 0;
+            return _deserializersHandedOver;
+        }
+    }
+
+    private void HoldRecords()
+    {
+        lock (_recordBytes)
+        {
+            _recordsHeld++;
+        }
+    }
+
+    private void DestroyRecords(IntPtr records)
+    {
+        bool disposeTheDeserializers = false;
+        try
+        {
+            ConsumerRecordsMarshal.Destroy(records);
+        }
+        finally
+        {
+            lock (_recordBytes)
+            {
+                _recordsHeld--;
+                if (_recordsHeld == 0)
+                {
+                    if (_recordBytesReleasable)
+                    {
+                        FreeRecordBytes();
+                    }
+
+                    disposeTheDeserializers = _deserializersHandedOver;
+                    _deserializersHandedOver = false;
+                }
+            }
+
+            if (disposeTheDeserializers)
+            {
+                _serdes?.DisposeOnce();
+            }
+        }
+    }
+
+    private void FreeRecordBytes()
+    {
+        foreach (IntPtr block in _recordBytes)
+        {
+            Marshal.FreeHGlobal(block);
+        }
+
+        _recordBytes.Clear();
+    }
+
+    internal void SetPollException(KafkaException? exception) =>
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerSetPollError(
+                mock, exception is null ? IntPtr.Zero : ManagedExceptionCarrier.ToError(exception), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    internal void SetOffsetsException(KafkaException? exception) =>
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerSetOffsetsError(
+                mock, exception is null ? IntPtr.Zero : ManagedExceptionCarrier.ToError(exception), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    internal void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets)
+    {
+        if (newOffsets is null)
+        {
+            throw new ArgumentNullException(nameof(newOffsets));
+        }
+
+        int count = newOffsets.Count;
+        string[] topics = new string[count];
+        int[] partitions = new int[count];
+        long[] offsets = new long[count];
+        int index = 0;
+        foreach (KeyValuePair<TopicPartition, long> entry in newOffsets)
+        {
+            topics[index] = entry.Key.Topic() ?? throw new ArgumentNullException(
+                nameof(newOffsets), "newOffsets must not contain a TopicPartition with a null topic");
+            partitions[index] = entry.Key.Partition();
+            offsets[index] = entry.Value;
+            index++;
+        }
+
+        CallMock((mock, arguments) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerUpdateDurationOffsets(mock, arguments.LongMap(topics, partitions, offsets, count), ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    internal void ScheduleNopPollTask() =>
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerScheduleNopPollTask(mock, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    internal void SetMaxPollRecords(long maxPollRecords) =>
+        CallMock((mock, _) =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.MockConsumerSetMaxPollRecords(mock, maxPollRecords, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+
+    // Java's lastPollTimeout() is the one mock helper that is not synchronized, so this read takes no ownership and
+    // answers while another thread's call holds the mock, as the native getter does.
+    internal TimeSpan? LastPollTimeout()
+    {
+        long timeoutMs = -1;
+        CallMock(
+            (mock, _) =>
+            {
+                IntPtr outErr = IntPtr.Zero;
+                timeoutMs = NativeMethods.MockConsumerLastPollTimeout(mock, ref outErr);
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            },
+            UseKind.Unowned);
+        return timeoutMs < 0 ? null : TimeSpan.FromMilliseconds(timeoutMs);
+    }
+
+    // Close tears the native mock down, so once closed the answer is the managed state's, as Java's closed() still is.
+    internal bool MockClosed()
+    {
+        if (Volatile.Read(ref _closed) != Open)
+        {
+            return true;
+        }
+
+        bool closed = false;
+        try
+        {
+            CallMock((mock, _) =>
+            {
+                IntPtr outErr = IntPtr.Zero;
+                closed = NativeMethods.MockConsumerClosed(mock, ref outErr) != 0;
+                KafkaException.ThrowIfFfiFailed(ref outErr);
+            });
+        }
+        catch (IllegalStateException) when (Volatile.Read(ref _closed) != Open)
+        {
+            return true;
+        }
+
+        return closed;
+    }
+
+    internal void Wakeup()
+    {
+        if (!TryEnterUse(out int owner, UseKind.Unowned))
+        {
+            return;
+        }
+
+        try
+        {
+            CountUserWakeup();
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerWakeup(_handle, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    internal void CountUserWakeup()
+    {
+        lock (_wakeups)
+        {
+            _userWakeups++;
+            _ownWakeLeft = false;
+        }
+    }
+
+    internal bool OwnWakeRaised(ref IntPtr error)
+    {
+        bool woken = error != IntPtr.Zero && NativeMethods.Code(error) == WakeupCode;
+        if (woken)
+        {
+            WakeAgainWhileADisposeWaits();
+        }
+
+        if (!OwnWakeOutcome(ConsumerCompletion.NoOwnWake, woken, ending: false))
+        {
+            return false;
+        }
+
+        FreeError(ref error);
+        return true;
+    }
+
+    private void WakeAgainWhileADisposeWaits()
+    {
+        lock (_wakeups)
+        {
+            if (!_disposeWaking)
+            {
+                return;
+            }
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ConsumerWakeup(_handle, ref outErr);
+        FreeError(ref outErr);
+    }
+
+    private void WakeForTheDispose(bool waking)
+    {
+        lock (_wakeups)
+        {
+            _disposeWaking = waking;
+        }
+
+        if (waking)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            NativeMethods.ConsumerWakeup(_handle, ref outErr);
+            FreeError(ref outErr);
+        }
+    }
+
+    private long OwnWake()
+    {
+        long mark = Interlocked.Read(ref _userWakeups);
+        IntPtr outErr = IntPtr.Zero;
+        NativeMethods.ConsumerWakeup(_handle, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        return mark;
+    }
+
+    private bool OwnWakeOutcome(long mark, bool woken, bool ending)
+    {
+        lock (_wakeups)
+        {
+            if (woken)
+            {
+                bool left = _ownWakeLeft;
+                _ownWakeLeft = false;
+                return left && !ending;
+            }
+
+            if (mark != ConsumerCompletion.NoOwnWake && mark == _userWakeups)
+            {
+                _ownWakeLeft = true;
+            }
+        }
+
+        return false;
+    }
+
+    internal ConsumerGroupMetadata GroupMetadata()
+    {
+        int owner = EnterUse(UseKind.UnownedOnMock);
+        try
+        {
+            if (GroupIdMissing)
+            {
+                throw GroupIdNotDefined();
+            }
+
+            if (RoutesToTheHandle)
+            {
+                return CallbackHandle().GroupMetadata();
+            }
+
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr metadata = NativeMethods.ConsumerGroupMetadata(_handle, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return ConsumerGroupMetadataMarshal.CopyOutAndKeep(metadata);
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    // Java's KafkaConsumer.metrics() takes no acquire(), so another thread's call does not refuse it; the use only keeps
+    // the handle alive. Java's MockConsumer.metrics() is synchronized, so the mock waits as for any call.
+    internal IReadOnlyDictionary<MetricName, IMetric> Metrics()
+    {
+        int owner = EnterUse(UseKind.OwnedOnMock);
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr view = NativeMethods.ConsumerMetrics(_handle, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return MetricsViewMarshal.CopyOutAndDestroy(view);
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    internal IReadOnlyCollection<TopicPartition> Assignment()
+    {
+        if (RoutesToTheHandle)
+        {
+            return Route(handle => handle.Assignment());
+        }
+
+        int owner = EnterUse();
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr list = NativeMethods.ConsumerAssignment(_handle, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return TopicPartitionListMarshal.CopyOutAndDestroy(list);
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    internal IReadOnlyCollection<string> Subscription()
+    {
+        int owner = EnterUse();
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr list = NativeMethods.ConsumerSubscription(_handle, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return StringListMarshal.CopyOutAndDestroy(list);
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    internal IReadOnlyCollection<TopicPartition> Paused()
+    {
+        if (RoutesToTheHandle)
+        {
+            return Route(handle => handle.Paused());
+        }
+
+        int owner = EnterUse();
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr list = NativeMethods.ConsumerPaused(_handle, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return TopicPartitionListMarshal.CopyOutAndDestroy(list);
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    // Java's enforceRebalance only logs (KafkaConsumer) or sets a flag (MockConsumer): it takes no acquire() and makes no
+    // closed check, so after close it returns and another thread's call does not refuse it. The use only keeps the
+    // handle alive; it runs no queued callback, which belongs to the thread that owns the consumer.
+    internal void EnforceRebalance(string? reason)
+    {
+        if (!TryEnterUse(out int owner, UseKind.Unowned))
+        {
+            return;
+        }
+
+        try
+        {
+            using NativeCallArguments arguments = new NativeCallArguments();
+            IntPtr outErr = IntPtr.Zero;
+            if (reason is null)
+            {
+                NativeMethods.ConsumerEnforceRebalance(_handle, ref outErr);
+            }
+            else
+            {
+                NativeMethods.ConsumerEnforceRebalanceWithReason(_handle, arguments.Utf8(reason), ref outErr);
+            }
+
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+        finally
+        {
+            ExitUse(owner);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_destroyed)
+        {
+            return;
+        }
+
+        if (_reporter.InCallback)
+        {
+            DisposeInsideACallback();
+            return;
+        }
+
+        _closeGate.Wait();
+        bool destroyedBefore = _destroyed;
+        try
+        {
+            if (!TryBeginClose())
+            {
+                return;
+            }
+
+            try
+            {
+                WakeUpThenCloseAfterTheUses();
+            }
+            catch (Exception)
+            {
+                // Dispose does not throw; Close reports the same error.
+            }
+
+            _reporter.WaitForKeptCallbacks();
+            try
+            {
+                TearDown();
+            }
+            catch (Exception)
+            {
+                // Dispose does not throw.
+            }
+        }
+        finally
+        {
+            ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
+        }
+    }
+
+    private void DisposeInsideACallback()
+    {
+        // The sync consumer's callback runs inside the op that holds the consumer, so Dispose throws as Close
+        // does; the async consumer's Dispose schedules the teardown, which waits for that op to end.
+        if (_pump is null)
+        {
+            ThrowUnlessClosing();
+        }
+        else
+        {
+            _ = Task.Run(DisposeOnThePumpAsync);
+        }
+    }
+
+    private void ThrowUnlessClosing()
+    {
+        if (Volatile.Read(ref _closed) != Closing)
+        {
+            throw new ConcurrentModificationException(ConcurrentAccessMessage);
+        }
+    }
+
+    private void WakeUpThenCloseAfterTheUses()
+    {
+        WakeForTheDispose(waking: true);
+        try
+        {
+            _uses.WaitForNone();
+        }
+        finally
+        {
+            WakeForTheDispose(waking: false);
+        }
+
+        IntPtr outErr = IntPtr.Zero;
+        if (_pump is null)
+        {
+            NativeMethods.ConsumerClose(_handle, ref outErr);
+        }
+        else
+        {
+            outErr = CloseOnThePump();
+        }
+
+        FreeError(ref outErr);
+    }
+
+    private void TearDown()
+    {
+        lock (_owner)
+        {
+            Volatile.Write(ref _closeEnded, true);
+        }
+
+        if (_pump is not null)
+        {
+            _uses.WaitForNone();
+            _pump.Dispose();
+        }
+
+        _uses.WaitForNoneThenMarkDestroyed();
+        _handle.CloseExplicitly();
+    }
+
+    // KafkaConsumer refuses a null collection, or a partition with a null topic, with Java's messages, and the core
+    // refuses a blank topic with the same text. Java's MockConsumer has no check of its own (a null is its
+    // NullPointerException).
+    private (string Topic, int Partition)[] SnapshotAssignPartitions(IReadOnlyCollection<TopicPartition> partitions)
+    {
+        if (!IsMock)
+        {
+            if (partitions is null)
+            {
+                throw new IllegalArgumentException(NullAssignPartitionsMessage);
+            }
+
+            foreach (TopicPartition tp in partitions)
+            {
+                if (tp.Topic() is null)
+                {
+                    throw new IllegalArgumentException(NullAssignTopicMessage);
+                }
+            }
+        }
+
+        return SnapshotPartitions(partitions!);
+    }
+
+    // KafkaConsumer's seekToBeginning and seekToEnd refuse a null collection with Java's message before acquire(), so
+    // before the closed and owner checks; Java's MockConsumer has no check of its own.
+    private (string Topic, int Partition)[] SnapshotSeekPartitions(IReadOnlyCollection<TopicPartition> partitions)
+    {
+        if (partitions is null && !IsMock)
+        {
+            throw new IllegalArgumentException("Partitions collection cannot be null");
+        }
+
+        return CheckWhenOpen(() => SnapshotPartitions(partitions!));
+    }
+
+    // A partition number goes to the core, which answers as Java does. A null topic cannot cross the C ABI: where Java
+    // looks the partition up in the assignment (pause, resume), it is refused as Java refuses a partition that is not
+    // assigned.
+    internal static (string Topic, int Partition)[] SnapshotPartitions(
+        IReadOnlyCollection<TopicPartition> partitions,
+        bool nullTopicIsUnassigned = false,
+        string paramName = "partitions")
+    {
+        if (partitions is null)
+        {
+            throw new ArgumentNullException(paramName);
+        }
+
+        (string Topic, int Partition)[] snapshot = new (string, int)[partitions.Count];
+        int index = 0;
+        foreach (TopicPartition tp in partitions)
+        {
+            if (tp.Topic() is null)
+            {
+                throw nullTopicIsUnassigned
+                    ? new IllegalStateException(NoCurrentAssignment(tp.Partition()))
+                    : new ArgumentNullException(paramName, paramName + " must not contain a TopicPartition with a null topic");
+            }
+
+            snapshot[index++] = (Topic: tp.Topic(), Partition: tp.Partition());
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>The validated timestamps to search, as the parallel arrays the timestamp map is built from.</summary>
+    internal readonly struct TimestampsSnapshot
+    {
+        internal TimestampsSnapshot(string[] topics, int[] partitions, long[] timestamps, int count)
+        {
+            Topics = topics;
+            Partitions = partitions;
+            Timestamps = timestamps;
+            Count = count;
+        }
+
+        internal string[] Topics { get; }
+
+        internal int[] Partitions { get; }
+
+        internal long[] Timestamps { get; }
+
+        internal int Count { get; }
+    }
+
+    // A negative timestamp is passed through: ListOffsets uses negative special timestamps.
+    internal static TimestampsSnapshot SnapshotTimestamps(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
+    {
+        if (timestampsToSearch is null)
+        {
+            throw new ArgumentNullException(nameof(timestampsToSearch));
+        }
+
+        int count = timestampsToSearch.Count;
+        string[] topics = new string[count];
+        int[] partitionArray = new int[count];
+        long[] timestamps = new long[count];
+        int index = 0;
+        foreach (KeyValuePair<TopicPartition, long> entry in timestampsToSearch)
+        {
+            TopicPartition tp = entry.Key;
+            if (tp.Topic() is null)
+            {
+                throw new ArgumentNullException(
+                    nameof(timestampsToSearch), "timestampsToSearch must not contain a TopicPartition with a null topic");
+            }
+
+            topics[index] = tp.Topic();
+            partitionArray[index] = tp.Partition();
+            timestamps[index] = entry.Value;
+            index++;
+        }
+
+        return new TimestampsSnapshot(topics, partitionArray, timestamps, count);
+    }
+
+    internal void UpdateBeginningOffset(string topic, int partition, long offset) =>
+        UpdateOffset(topic, partition, offset, beginning: true);
+
+    internal void UpdateEndOffset(string topic, int partition, long offset) =>
+        UpdateOffset(topic, partition, offset, beginning: false);
+
+    private void UpdateOffset(string topic, int partition, long offset, bool beginning)
+    {
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        if (partition < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(partition), partition, "Partition must not be negative.");
+        }
+
+        CallMock((mock, arguments) =>
+        {
+            IntPtr offsets = arguments.LongMap(new[] { topic }, new[] { partition }, new[] { offset }, 1);
+            IntPtr outErr = IntPtr.Zero;
+            if (beginning)
+            {
+                NativeMethods.MockConsumerUpdateBeginningOffsets(mock, offsets, ref outErr);
+            }
+            else
+            {
+                NativeMethods.MockConsumerUpdateEndOffsets(mock, offsets, ref outErr);
+            }
+
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        });
+    }
+
+    private void CallMock(Action<IntPtr, NativeCallArguments> call, UseKind kind = UseKind.Owned)
+    {
+        bool added = false;
+        int owner = EnterUse(kind);
+        try
+        {
+            using NativeCallArguments arguments = new NativeCallArguments();
+            call(_handle.DangerousAddRefClass(ref added), arguments);
+        }
+        finally
+        {
+            if (added)
+            {
+                _handle.DangerousRelease();
+            }
+
+            ExitUse(owner);
+        }
+    }
+
+    private bool TryBeginClose()
+    {
+        if (Interlocked.CompareExchange(ref _closed, Closing, Open) != Open)
+        {
+            return false;
+        }
+
+        // A mock call waiting for another thread's use is a new call: it wakes and is refused as closed.
+        PulseOwnerWaiters();
+        return true;
+    }
+
+    private bool TryBeginExplicitClose(int thread)
+    {
+        lock (_owner)
+        {
+            while (true)
+            {
+                if (Volatile.Read(ref _closed) != Open)
+                {
+                    return false;
+                }
+
+                if (!HeldByAnotherThread(UseKind.Owned, thread))
+                {
+                    break;
+                }
+
+                if (RefusedWhileBusy)
+                {
+                    throw new ConcurrentModificationException(ConcurrentAccessMessage);
+                }
+
+                Monitor.Wait(_owner);
+            }
+
+            if (Interlocked.CompareExchange(ref _closed, ClosePending, Open) != Open)
+            {
+                return false;
+            }
+
+            _closingThread = thread;
+            if (Volatile.Read(ref _calls) == 0)
+            {
+                Volatile.Write(ref _closed, Closing);
+            }
+
+            return true;
+        }
+    }
+
+    private void EndExplicitClose()
+    {
+        lock (_owner)
+        {
+            _closingThread = 0;
+            Monitor.PulseAll(_owner);
+        }
+    }
+
+    private void PulseOwnerWaiters()
+    {
+        lock (_owner)
+        {
+            Monitor.PulseAll(_owner);
+        }
+    }
+
+    // A call waiting when the window opens is woken, and refused.
+    private void RefuseOtherThreads(bool refusing)
+    {
+        lock (_owner)
+        {
+            _refusingUses += refusing ? 1 : -1;
+            Monitor.PulseAll(_owner);
+        }
+    }
+
+    private bool IsMock => _handle is SafeMockConsumerHandle;
+
+    private int EnterUse(UseKind kind = UseKind.Owned, int thread = 0)
+    {
+        if (!TryEnterUse(out int owner, kind, thread))
+        {
+            throw new IllegalStateException(ClosedMessage);
+        }
+
+        return owner;
+    }
+
+    // A use records the thread that made the call, or the thread a later step of that call is made for; an
+    // unchecked use records none. The closed check comes first, then the owner check, as in Python. On a mock, a call
+    // that another thread's use or close keeps out waits for it, as Java's synchronized MockConsumer does, unless an
+    // async callback is running, which refuses it as Python's mock does.
+    private bool TryEnterUse(out int owner, UseKind kind = UseKind.Owned, int thread = 0)
+    {
+        owner = ChecksOwner(kind) ? (thread != 0 ? thread : CurrentThreadNumber()) : 0;
+        bool refused = false;
+        bool closed = false;
+        lock (_owner)
+        {
+            while (true)
+            {
+                _uses.Enter();
+                Interlocked.Increment(ref _calls);
+                bool closingElsewhere = owner != 0 && _closingThread != 0 && _closingThread != owner;
+                closed = !closingElsewhere && IsClosed();
+                bool heldElsewhere =
+                    !closingElsewhere && !closed && owner != 0 && _ownerUses != 0 && _ownerThread != owner;
+                if (!closingElsewhere && !heldElsewhere)
+                {
+                    break;
+                }
+
+                if (RefusedWhileBusy)
+                {
+                    refused = true;
+                    break;
+                }
+
+                Interlocked.Decrement(ref _calls);
+                if (_uses.Exit() && Volatile.Read(ref _closed) != Open)
+                {
+                    _uses.Wake();
+                }
+
+                Monitor.Wait(_owner);
+            }
+
+            if (!refused && !closed && owner != 0)
+            {
+                _ownerThread = owner;
+                _ownerUses++;
+            }
+        }
+
+        if (refused || closed)
+        {
+            ExitUse(0);
+            owner = 0;
+            if (refused)
+            {
+                throw new ConcurrentModificationException(ConcurrentAccessMessage);
+            }
+
+            return false;
+        }
+
+        return true;
+    }
+
+    private void ExitUse(int owner)
+    {
+        if (owner != 0)
+        {
+            lock (_owner)
+            {
+                if (--_ownerUses == 0)
+                {
+                    _ownerThread = 0;
+                    Monitor.PulseAll(_owner);
+                }
+            }
+        }
+
+        Interlocked.Decrement(ref _calls);
+        if (_uses.Exit() && Volatile.Read(ref _closed) != Open)
+        {
+            _uses.Wake();
+        }
+    }
+
+    private bool ChecksOwner(UseKind kind) =>
+        (kind == UseKind.Owned
+            || (kind == UseKind.UnownedOnMock && !IsMock)
+            || (kind == UseKind.OwnedOnMock && IsMock))
+        && !_reporter.InCallback;
+
+    private bool RefusedWhileBusy => !IsMock || _reporter.RunsAsyncCallback || Volatile.Read(ref _refusingUses) != 0;
+
+    // Never 0, which a use records for no thread.
+    private static int CurrentThreadNumber()
+    {
+        int number = s_threadNumber;
+        if (number == 0)
+        {
+            do
+            {
+                number = Interlocked.Increment(ref s_lastThreadNumber);
+            }
+            while (number == 0);
+
+            s_threadNumber = number;
+        }
+
+        return number;
+    }
+
+    private bool HeldByAnotherThread(UseKind kind, int thread) =>
+        ChecksOwner(kind) && _ownerUses != 0 && _ownerThread != thread;
+
+    private void ThrowIfHeldByAnotherThread(int thread)
+    {
+        lock (_owner)
+        {
+            bool closingElsewhere = ChecksOwner(UseKind.Owned) && _closingThread != 0 && _closingThread != thread;
+            bool busy = closingElsewhere ||
+                (Volatile.Read(ref _closed) == Open && HeldByAnotherThread(UseKind.Owned, thread));
+            if (busy && RefusedWhileBusy)
+            {
+                throw new ConcurrentModificationException(ConcurrentAccessMessage);
+            }
+        }
+    }
+
+    private static void FreeError(ref IntPtr error)
+    {
+        if (error != IntPtr.Zero)
+        {
+            NativeMethods.ErrorDestroy(error);
+            error = IntPtr.Zero;
+        }
+    }
+
+    private void ThrowIfClosed()
+    {
+        int thread = CurrentThreadNumber();
+        bool refused;
+        lock (_owner)
+        {
+            bool closingElsewhere = ChecksOwner(UseKind.Owned) && _closingThread != 0 && _closingThread != thread;
+            refused = closingElsewhere && RefusedWhileBusy;
+            if (!closingElsewhere && IsClosed())
+            {
+                throw new IllegalStateException(ClosedMessage);
+            }
+        }
+
+        if (refused)
+        {
+            throw new ConcurrentModificationException(ConcurrentAccessMessage);
+        }
+    }
+
+    /// <summary>
+    /// Whether a use is checked against the owner: <c>Owned</c> always; <c>UnownedOnMock</c>, the calls Java's
+    /// MockConsumer leaves unsynchronized but Java's KafkaConsumer guards with acquire(), only on a real consumer;
+    /// <c>OwnedOnMock</c>, Metrics, which Java's KafkaConsumer leaves outside acquire() but Java's MockConsumer
+    /// synchronizes, only on a mock; <c>Unowned</c>, Wakeup, Handle and EnforceRebalance, never.
+    /// </summary>
+    private enum UseKind
+    {
+        Owned,
+        Unowned,
+        UnownedOnMock,
+        OwnedOnMock,
+    }
+}

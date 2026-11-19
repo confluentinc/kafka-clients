@@ -24,8 +24,9 @@ event loop, where the notify hook schedules the client's queued callbacks
 (Implementation over the FFI). ``close`` is the one ``async def``: its entry
 point has a ``_cb`` twin. ``create`` is a plain ``def``:
 ``kafka_admin_AdminClient_create`` has none. The overloads left out are
-``Admin``'s (see its module), and so are the null checks: an ``options`` left
-out is Java's ``new XxxOptions()``, an explicit ``None`` raises ``TypeError``.
+``Admin``'s (see its module), and so is the reading of ``None``: an ``options``
+left out is Java's ``new XxxOptions()``, an explicit ``None`` is Java's ``null``,
+which the C API reports as ``TypeError``.
 """
 
 from __future__ import annotations
@@ -103,6 +104,9 @@ from confluent_kafka.admin.list_partition_reassignments_options import (
 )
 from confluent_kafka.admin.list_topics_options import ListTopicsOptions
 from confluent_kafka.admin.list_transactions_options import ListTransactionsOptions
+from confluent_kafka.admin.remove_members_from_consumer_group_options import (
+    RemoveMembersFromConsumerGroupOptions,
+)
 from confluent_kafka.admin.renew_delegation_token_options import RenewDelegationTokenOptions
 from confluent_kafka.admin.terminate_transaction_options import TerminateTransactionOptions
 from confluent_kafka.admin.unregister_controller_options import UnregisterControllerOptions
@@ -175,9 +179,6 @@ if TYPE_CHECKING:
     from confluent_kafka.admin.new_topic import NewTopic
     from confluent_kafka.admin.offset_spec import OffsetSpec
     from confluent_kafka.admin.records_to_delete import RecordsToDelete
-    from confluent_kafka.admin.remove_members_from_consumer_group_options import (
-        RemoveMembersFromConsumerGroupOptions,
-    )
     from confluent_kafka.admin.remove_members_from_consumer_group_result import (
         RemoveMembersFromConsumerGroupResult,
     )
@@ -360,11 +361,10 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.create_topics`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(new_topics, "new_topics")
         args = _conversions.create_topics_args(new_topics)
-        reads = _conversions.any_topic_name(row[0] for row in args[0])
-        options = _conversions.options_or_new(options, CreateTopicsOptions, read=reads)
-        native = self._call(_lib.Admin_create_topics, *args, options._setters_ran())
+        reads = args[0] is not None and _conversions.any_topic_name(row[0] for row in args[0])
+        opts = _conversions.options_or_null(options, CreateTopicsOptions, read=reads)
+        native = self._call(_lib.Admin_create_topics, *args, _conversions.setters(opts))
         return _conversions.create_topics_result(native, Async, self._binding.loop)
 
     @overload
@@ -392,8 +392,8 @@ class AsyncAdmin(_AdminState):
         args = _conversions.delete_topics_args(topics, by_ids, keys)
         reads = (_conversions.any_topic_id(keys) if by_ids
                  else _conversions.any_topic_name(keys))
-        options = _conversions.options_or_new(options, DeleteTopicsOptions, read=reads)
-        native = self._call(_lib.Admin_delete_topics, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, DeleteTopicsOptions, read=reads)
+        native = self._call(_lib.Admin_delete_topics, *args, _conversions.setters(opts))
         return _conversions.delete_topics_result(native, by_ids, Async, self._binding.loop)
 
     @overload
@@ -405,8 +405,8 @@ class AsyncAdmin(_AdminState):
                     ) -> ListTopicsResult[Async]:
         """See :meth:`Admin.list_topics`."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, ListTopicsOptions)
-        native = self._call(_lib.Admin_list_topics, options._setters_ran())
+        opts = _conversions.options_or_null(options, ListTopicsOptions)
+        native = self._call(_lib.Admin_list_topics, _conversions.setters(opts))
         return _conversions.list_topics_result(native, Async, self._binding.loop)
 
     @overload
@@ -432,9 +432,6 @@ class AsyncAdmin(_AdminState):
             reject_str("topic_names", topic_names)  # the shape check precedes the closed check
         self._check_not_closed()
         if topics is MISSING:
-            _conversions.non_null(topic_names, "topic_names")  # TopicCollection.ofTopicNames(null)
-        if topics is MISSING:
-            assert topic_names is not None  # the non_null above
             form, keys = (_conversions.DESCRIBE_TOPIC_NAMES,
                           _conversions.describe_topic_names(topic_names))
         else:
@@ -443,9 +440,9 @@ class AsyncAdmin(_AdminState):
                     else _conversions.DESCRIBE_TOPIC_NAME_COLLECTION)
         args = _conversions.describe_topics_args(form, keys)
         reads = (form == _conversions.DESCRIBE_TOPIC_ID_COLLECTION
-                 or _conversions.any_topic_name(keys))
-        options = _conversions.options_or_new(options, DescribeTopicsOptions, read=reads)
-        native = self._call(_lib.Admin_describe_topics, *args, options._setters_ran())
+                 or (keys is not None and _conversions.any_topic_name(keys)))
+        opts = _conversions.options_or_null(options, DescribeTopicsOptions, read=reads)
+        native = self._call(_lib.Admin_describe_topics, *args, _conversions.setters(opts))
         return _conversions.describe_topics_result(
             native, form == _conversions.DESCRIBE_TOPIC_ID_COLLECTION, Async, self._binding.loop)
 
@@ -460,8 +457,8 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.describe_cluster`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, DescribeClusterOptions)
-        native = self._call(_lib.Admin_describe_cluster, options._setters_ran())
+        opts = _conversions.options_or_null(options, DescribeClusterOptions)
+        native = self._call(_lib.Admin_describe_cluster, _conversions.setters(opts))
         return _conversions.describe_cluster_result(native, Async, self._binding.loop)
 
     @overload
@@ -475,11 +472,12 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.describe_acls`; the result's future is an
         ``AsyncKafkaFuture``."""
         self._check_not_closed()
+        # An AclBindingFilter crosses as its fields: the C API cannot see a None one.
         _conversions.non_null(filter, "filter")
         args = _conversions.describe_acls_args(filter)
         reads = not filter.is_unknown()
-        options = _conversions.options_or_new(options, DescribeAclsOptions, read=reads)
-        native = self._call(_lib.Admin_describe_acls, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, DescribeAclsOptions, read=reads)
+        native = self._call(_lib.Admin_describe_acls, *args, _conversions.setters(opts))
         return _conversions.describe_acls_result(native, Async, self._binding.loop)
 
     @overload
@@ -493,10 +491,9 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.create_acls`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(acls, "acls")
         args = _conversions.create_acls_args(acls)
-        options = _conversions.options_or_new(options, CreateAclsOptions)
-        native = self._call(_lib.Admin_create_acls, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, CreateAclsOptions)
+        native = self._call(_lib.Admin_create_acls, *args, _conversions.setters(opts))
         return _conversions.create_acls_result(native, Async, self._binding.loop)
 
     @overload
@@ -510,10 +507,9 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.delete_acls`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(filters, "filters")
         args = _conversions.delete_acls_args(filters)
-        options = _conversions.options_or_new(options, DeleteAclsOptions)
-        native = self._call(_lib.Admin_delete_acls, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, DeleteAclsOptions)
+        native = self._call(_lib.Admin_delete_acls, *args, _conversions.setters(opts))
         return _conversions.delete_acls_result(native, Async, self._binding.loop)
 
     @overload
@@ -529,10 +525,11 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.describe_configs`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
+        # The C API names this parameter config_resources: Python keeps Java's name.
         _conversions.non_null(resources, "resources")
         args = _conversions.describe_configs_args(list(resources))
-        options = _conversions.options_or_new(options, DescribeConfigsOptions, read=bool(args[0]))
-        native = self._call(_lib.Admin_describe_configs, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, DescribeConfigsOptions, read=bool(args[0]))
+        native = self._call(_lib.Admin_describe_configs, *args, _conversions.setters(opts))
         return _conversions.describe_configs_result(native, Async, self._binding.loop)
 
     @overload
@@ -551,12 +548,12 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.incremental_alter_configs`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(configs, "configs")
         _conversions.check_keys(configs, "configs")  # nodeFor(resource), before options
         # Java reads options per node (3006), the ops only in createRequest.
-        options = _conversions.options_or_new(options, AlterConfigsOptions, read=bool(configs))
-        args = _conversions.incremental_alter_configs_args(configs)
-        native = self._call(_lib.Admin_incremental_alter_configs, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, AlterConfigsOptions, read=bool(configs))
+        args = _conversions.after_options(opts, _conversions.incremental_alter_configs_args,
+                                          configs)
+        native = self._call(_lib.Admin_incremental_alter_configs, *args, _conversions.setters(opts))
         return _conversions.incremental_alter_configs_result(native, Async, self._binding.loop)
 
     @overload
@@ -578,13 +575,13 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.alter_replica_log_dirs`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(replica_assignment, "replica_assignment")
         # replica.brokerId() (3048) before options (3070); the log dir is not read.
         _conversions.check_keys(replica_assignment, "replica_assignment")
         reads = bool(replica_assignment)
-        options = _conversions.options_or_new(options, AlterReplicaLogDirsOptions, read=reads)
-        args = _conversions.alter_replica_log_dirs_args(replica_assignment)
-        native = self._call(_lib.Admin_alter_replica_log_dirs, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, AlterReplicaLogDirsOptions, read=reads)
+        args = _conversions.after_options(opts, _conversions.alter_replica_log_dirs_args,
+                                          replica_assignment)
+        native = self._call(_lib.Admin_alter_replica_log_dirs, *args, _conversions.setters(opts))
         return _conversions.alter_replica_log_dirs_result(native, Async, self._binding.loop)
 
     @overload
@@ -599,14 +596,13 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.describe_log_dirs`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(brokers, "brokers")
-        broker_ids = list(brokers)
+        broker_ids = _conversions.optional_list(brokers)
         # new Call(…, calcDeadlineMs(now, options.timeoutMs()), new ConstantNodeIdProvider(
         # brokerId)) reads options before it unboxes the broker id (3128-3129).
-        options = _conversions.options_or_new(options, DescribeLogDirsOptions,
+        opts = _conversions.options_or_null(options, DescribeLogDirsOptions,
                                               read=bool(broker_ids))
-        args = _conversions.describe_log_dirs_args(broker_ids)
-        native = self._call(_lib.Admin_describe_log_dirs, *args, options._setters_ran())
+        args = _conversions.after_options(opts, _conversions.describe_log_dirs_args, broker_ids)
+        native = self._call(_lib.Admin_describe_log_dirs, *args, _conversions.setters(opts))
         return _conversions.describe_log_dirs_result(native, Async, self._binding.loop)
 
     @overload
@@ -628,11 +624,10 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.describe_replica_log_dirs`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(replicas, "replicas")
-        args = _conversions.describe_replica_log_dirs_args(list(replicas))
+        args = _conversions.describe_replica_log_dirs_args(_conversions.optional_list(replicas))
         reads = bool(args[0])
-        options = _conversions.options_or_new(options, DescribeReplicaLogDirsOptions, read=reads)
-        native = self._call(_lib.Admin_describe_replica_log_dirs, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, DescribeReplicaLogDirsOptions, read=reads)
+        native = self._call(_lib.Admin_describe_replica_log_dirs, *args, _conversions.setters(opts))
         return _conversions.describe_replica_log_dirs_result(native, Async, self._binding.loop)
 
     @overload
@@ -650,10 +645,9 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.create_partitions`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(new_partitions, "new_partitions")
         args = _conversions.create_partitions_args(new_partitions)
-        options = _conversions.options_or_new(options, CreatePartitionsOptions, read=bool(args[0]))
-        native = self._call(_lib.Admin_create_partitions, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, CreatePartitionsOptions, read=bool(args[0]))
+        native = self._call(_lib.Admin_create_partitions, *args, _conversions.setters(opts))
         return _conversions.create_partitions_result(native, Async, self._binding.loop)
 
     @overload
@@ -671,14 +665,14 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.delete_records`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(records_to_delete, "records_to_delete")
         # PartitionLeaderFuture's toUnmodifiableMap rejects a null key (3385) before
         # options (3388); the values are read by the handler.
         _conversions.check_keys(records_to_delete, "records_to_delete")
-        options = _conversions.options_or_new(options, DeleteRecordsOptions)
+        opts = _conversions.options_or_null(options, DeleteRecordsOptions)
         native = self._call(_lib.Admin_delete_records,
-                            *_conversions.delete_records_args(records_to_delete),
-                            options._setters_ran())
+                            *_conversions.after_options(opts, _conversions.delete_records_args,
+                                                        records_to_delete),
+                            _conversions.setters(opts))
         return _conversions.delete_records_result(native, Async, self._binding.loop)
 
     @overload
@@ -694,9 +688,9 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.create_delegation_token`; the result's future is an
         ``AsyncKafkaFuture``."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, CreateDelegationTokenOptions)
+        opts = _conversions.options_or_null(options, CreateDelegationTokenOptions)
         native = self._call(_lib.Admin_create_delegation_token,
-                            _conversions.create_delegation_token_options(options))
+                            _conversions.create_delegation_token_options(opts))
         return _conversions.create_delegation_token_result(native, Async, self._binding.loop)
 
     @overload
@@ -714,9 +708,10 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.renew_delegation_token`; the result's future is an
         ``AsyncKafkaFuture``."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, RenewDelegationTokenOptions)
+        opts = _conversions.options_or_null(options, RenewDelegationTokenOptions, before=(hmac,))
+        # The hmac crosses as kafka_Bytes_t by value, a NULL data reading as empty.
         _conversions.non_null(hmac, "hmac")
-        native = self._call(_lib.Admin_renew_delegation_token, hmac, options._setters_ran())
+        native = self._call(_lib.Admin_renew_delegation_token, hmac, _conversions.setters(opts))
         return _conversions.renew_delegation_token_result(native, Async, self._binding.loop)
 
     @overload
@@ -734,9 +729,10 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.expire_delegation_token`; the result's future is an
         ``AsyncKafkaFuture``."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, ExpireDelegationTokenOptions)
+        opts = _conversions.options_or_null(options, ExpireDelegationTokenOptions, before=(hmac,))
+        # The hmac crosses as kafka_Bytes_t by value, a NULL data reading as empty.
         _conversions.non_null(hmac, "hmac")
-        native = self._call(_lib.Admin_expire_delegation_token, hmac, options._setters_ran())
+        native = self._call(_lib.Admin_expire_delegation_token, hmac, _conversions.setters(opts))
         return _conversions.expire_delegation_token_result(native, Async, self._binding.loop)
 
     @overload
@@ -753,9 +749,9 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.describe_delegation_token`; the result's future is an
         ``AsyncKafkaFuture``."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, DescribeDelegationTokenOptions)
+        opts = _conversions.options_or_null(options, DescribeDelegationTokenOptions)
         native = self._call(_lib.Admin_describe_delegation_token,
-                            _conversions.describe_delegation_token_options(options))
+                            _conversions.describe_delegation_token_options(opts))
         return _conversions.describe_delegation_token_result(native, Async, self._binding.loop)
 
     @overload
@@ -777,10 +773,10 @@ class AsyncAdmin(_AdminState):
         ``AsyncKafkaFuture``\\ s."""
         reject_str("group_ids", group_ids)  # the shape check precedes the closed check
         self._check_not_closed()
-        _conversions.non_null(group_ids, "group_ids")
-        options = _conversions.options_or_new(options, DescribeConsumerGroupsOptions)
-        native = self._call(_lib.Admin_describe_consumer_groups, _conversions.group_ids_list(group_ids),
-                            options._setters_ran())
+        opts = _conversions.options_or_null(options, DescribeConsumerGroupsOptions)
+        ids = _conversions.after_options(opts, _conversions.group_ids_list, group_ids)
+        native = self._call(_lib.Admin_describe_consumer_groups, ids,
+                            _conversions.setters(opts))
         return _conversions.describe_consumer_groups_result(native, Async, self._binding.loop)
 
     @overload
@@ -814,19 +810,21 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.list_consumer_group_offsets`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        if group_specs is not MISSING:
-            _conversions.non_null(group_specs, "group_specs")  # groupSpecs.keySet()
-        options = _conversions.options_or_new(options, ListConsumerGroupOffsetsOptions)
-        if group_id is not MISSING:
-            _conversions.non_null(group_id, "group_id")
+        # The specs form dereferences groupSpecs.keySet() before options; the group id
+        # form reads options first.
+        opts = _conversions.options_or_null(
+            options, ListConsumerGroupOffsetsOptions,
+            before=(group_id,) if group_specs is MISSING else ())
         native = self._call(_lib.Admin_list_consumer_group_offsets,
-                            *_conversions.list_consumer_group_offsets_args(group_id, group_specs),
-                            options._setters_ran())
+                            *_conversions.after_options(
+                                opts, _conversions.list_consumer_group_offsets_args,
+                                group_id, group_specs),
+                            _conversions.setters(opts))
         if group_specs is MISSING:  # java_forms: one or the other
-            assert group_id is not None  # the non_null above
+            assert group_id is not None  # the C API rejected a None
             return _conversions.list_consumer_group_offsets_result([group_id], native, Async,
                                                                    self._binding.loop)
-        assert group_specs is not None  # the non_null above
+        assert group_specs is not None  # the C API rejected a None
         return _conversions.list_consumer_group_offsets_result(group_specs, native, Async,
                                                                self._binding.loop)
 
@@ -847,10 +845,10 @@ class AsyncAdmin(_AdminState):
         ``AsyncKafkaFuture``\\ s."""
         reject_str("group_ids", group_ids)  # the shape check precedes the closed check
         self._check_not_closed()
-        _conversions.non_null(group_ids, "group_ids")
-        options = _conversions.options_or_new(options, DeleteConsumerGroupsOptions)
-        native = self._call(_lib.Admin_delete_consumer_groups, _conversions.group_ids_list(group_ids),
-                            options._setters_ran())
+        opts = _conversions.options_or_null(options, DeleteConsumerGroupsOptions)
+        ids = _conversions.after_options(opts, _conversions.group_ids_list, group_ids)
+        native = self._call(_lib.Admin_delete_consumer_groups, ids,
+                            _conversions.setters(opts))
         return _conversions.delete_consumer_groups_result(native, Async, self._binding.loop)
 
     @overload
@@ -874,13 +872,15 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.delete_consumer_group_offsets`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, DeleteConsumerGroupOffsetsOptions)
-        _conversions.non_null(group_id, "group_id")
-        _conversions.non_null(partitions, "partitions")
-        tps = list(partitions)
+        opts = _conversions.options_or_null(options, DeleteConsumerGroupOffsetsOptions,
+                                              before=(group_id, partitions))
+        tps = _conversions.optional_list(partitions)
         native = self._call(_lib.Admin_delete_consumer_group_offsets,
-                            *_conversions.delete_consumer_group_offsets_args(group_id, tps),
-                            options._setters_ran())
+                            *_conversions.after_options(
+                                opts, _conversions.delete_consumer_group_offsets_args,
+                                group_id, tps),
+                            _conversions.setters(opts))
+        assert tps is not None  # the C API rejected a None
         return _conversions.delete_consumer_group_offsets_result(tps, native, Async,
                                                                  self._binding.loop)
 
@@ -894,8 +894,8 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.list_groups`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, ListGroupsOptions)
-        native = self._call(_lib.Admin_list_groups, _conversions.list_groups_options(options))
+        opts = _conversions.options_or_null(options, ListGroupsOptions)
+        native = self._call(_lib.Admin_list_groups, _conversions.list_groups_options(opts))
         return _conversions.list_groups_result(native, Async, self._binding.loop)
 
     @overload
@@ -916,11 +916,11 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.elect_leaders`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, ElectLeadersOptions)
-        _conversions.non_null(election_type, "election_type")
+        opts = _conversions.options_or_null(options, ElectLeadersOptions, before=(election_type,))
         native = self._call(_lib.Admin_elect_leaders,
-                            *_conversions.elect_leaders_args(election_type, partitions),
-                            options._setters_ran())
+                            *_conversions.after_options(opts, _conversions.elect_leaders_args,
+                                                        election_type, partitions),
+                            _conversions.setters(opts))
         return _conversions.elect_leaders_result(native, Async, self._binding.loop)
 
     @overload
@@ -942,10 +942,9 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.alter_partition_reassignments`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(reassignments, "reassignments")
         args = _conversions.alter_partition_reassignments_args(reassignments)
-        options = _conversions.options_or_new(options, AlterPartitionReassignmentsOptions)
-        native = self._call(_lib.Admin_alter_partition_reassignments, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, AlterPartitionReassignmentsOptions)
+        native = self._call(_lib.Admin_alter_partition_reassignments, *args, _conversions.setters(opts))
         return _conversions.alter_partition_reassignments_result(native, Async, self._binding.loop)
 
     @overload
@@ -984,12 +983,13 @@ class AsyncAdmin(_AdminState):
         # Left out (Java's (options) form), or None with options given (Java's
         # (Optional<Set>, options) form with Optional.empty()): every partition.
         if partitions is not MISSING and (partitions is not None or options is MISSING):
-            _conversions.non_null(partitions, "partitions")  # Optional.of(partitions)
+            # Optional.of(partitions); the C API reads a NULL set as Optional.empty().
+            _conversions.non_null(partitions, "partitions")
             targets = partitions
         args = _conversions.list_partition_reassignments_args(targets)
         reads = _conversions.all_partitions_valid(args[0])
-        options = _conversions.options_or_new(options, ListPartitionReassignmentsOptions, read=reads)
-        native = self._call(_lib.Admin_list_partition_reassignments, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, ListPartitionReassignmentsOptions, read=reads)
+        native = self._call(_lib.Admin_list_partition_reassignments, *args, _conversions.setters(opts))
         return _conversions.list_partition_reassignments_result(native, Async, self._binding.loop)
 
     def remove_members_from_consumer_group(
@@ -999,12 +999,13 @@ class AsyncAdmin(_AdminState):
         futures are ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
         # Java reads options.reason() first; the group id only later, in the call.
-        _conversions.non_null(options, "options")
-        _conversions.non_null(group_id, "group_id")
-        args = _conversions.remove_members_from_consumer_group_args(group_id, options)
+        opts = _conversions.options_or_null(options, RemoveMembersFromConsumerGroupOptions,
+                                              before=(group_id,))
+        args = _conversions.remove_members_from_consumer_group_args(group_id, opts)
         native = self._call(_lib.Admin_remove_members_from_consumer_group, *args,
-                            options._setters_ran())
-        return _conversions.remove_members_from_consumer_group_result(options, native, Async,
+                            _conversions.setters(opts))
+        assert opts is not None  # the C API rejected a None
+        return _conversions.remove_members_from_consumer_group_result(opts, native, Async,
                                                                       self._binding.loop)
 
     @overload
@@ -1028,12 +1029,13 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.alter_consumer_group_offsets`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, AlterConsumerGroupOffsetsOptions)
-        _conversions.non_null(group_id, "group_id")
-        _conversions.non_null(offsets, "offsets")
+        opts = _conversions.options_or_null(options, AlterConsumerGroupOffsetsOptions,
+                                              before=(group_id, offsets))
         native = self._call(_lib.Admin_alter_consumer_group_offsets,
-                            *_conversions.alter_consumer_group_offsets_args(group_id, offsets),
-                            options._setters_ran())
+                            *_conversions.after_options(
+                                opts, _conversions.alter_consumer_group_offsets_args,
+                                group_id, offsets),
+                            _conversions.setters(opts))
         return _conversions.alter_consumer_group_offsets_result(native, Async,
                                                                 self._binding.loop)
 
@@ -1051,11 +1053,14 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.list_offsets`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(topic_partition_offsets, "topic_partition_offsets")
         args = _conversions.list_offsets_args(topic_partition_offsets)
-        options = _conversions.options_or_new(options, ListOffsetsOptions)
-        partitions = list(topic_partition_offsets)
-        native = self._call(_lib.Admin_list_offsets, *args, options.isolation_level().id(), options._setters_ran())
+        opts = _conversions.options_or_null(options, ListOffsetsOptions)
+        partitions = _conversions.optional_list(topic_partition_offsets)
+        # A None options crosses as NULL; its isolation level is not read.
+        isolation_level = 0 if opts is None else opts.isolation_level().id()
+        native = self._call(_lib.Admin_list_offsets, *args, isolation_level,
+                            _conversions.setters(opts))
+        assert partitions is not None  # the C API rejected a None
         return _conversions.list_offsets_result(native, partitions, Async, self._binding.loop)
 
     @overload
@@ -1074,11 +1079,13 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.describe_client_quotas`; the result's future is an
         ``AsyncKafkaFuture``."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, DescribeClientQuotasOptions)
+        opts = _conversions.options_or_null(options, DescribeClientQuotasOptions, before=(filter,))
+        # A ClientQuotaFilter crosses as its fields: the C API cannot see a None one.
         _conversions.non_null(filter, "filter")
         native = self._call(_lib.Admin_describe_client_quotas,
-                            *_conversions.describe_client_quotas_args(filter),
-                            options._setters_ran())
+                            *_conversions.after_options(opts, _conversions.describe_client_quotas_args,
+                                                        filter),
+                            _conversions.setters(opts))
         return _conversions.describe_client_quotas_result(native, Async, self._binding.loop)
 
     @overload
@@ -1099,10 +1106,9 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.alter_client_quotas`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(entries, "entries")
         args = _conversions.alter_client_quotas_args(entries)
-        options = _conversions.options_or_new(options, AlterClientQuotasOptions)
-        native = self._call(_lib.Admin_alter_client_quotas, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, AlterClientQuotasOptions)
+        native = self._call(_lib.Admin_alter_client_quotas, *args, _conversions.setters(opts))
         return _conversions.alter_client_quotas_result(native, Async, self._binding.loop)
 
     @overload
@@ -1129,12 +1135,12 @@ class AsyncAdmin(_AdminState):
         if users is not MISSING and users is not None:
             reject_str("users", users)  # the shape check precedes the closed check
         self._check_not_closed()
-        options = _conversions.options_or_new(options, DescribeUserScramCredentialsOptions)
+        opts = _conversions.options_or_null(options, DescribeUserScramCredentialsOptions)
         if users is MISSING:
             users = None  # Java's describeUserScramCredentials() passes null: all users
         native = self._call(_lib.Admin_describe_user_scram_credentials,
                             *_conversions.describe_user_scram_credentials_args(users),
-                            options._setters_ran())
+                            _conversions.setters(opts))
         return _conversions.describe_user_scram_credentials_result(
             native, Async, self._binding.loop)
 
@@ -1157,10 +1163,9 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.alter_user_scram_credentials`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(alterations, "alterations")
         args = _conversions.alter_user_scram_credentials_args(alterations)
-        options = _conversions.options_or_new(options, AlterUserScramCredentialsOptions)
-        native = self._call(_lib.Admin_alter_user_scram_credentials, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, AlterUserScramCredentialsOptions)
+        native = self._call(_lib.Admin_alter_user_scram_credentials, *args, _conversions.setters(opts))
         return _conversions.alter_user_scram_credentials_result(native, Async, self._binding.loop)
 
     @overload
@@ -1174,8 +1179,8 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.describe_features`; the result's future is an
         ``AsyncKafkaFuture``."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, DescribeFeaturesOptions)
-        native = self._call(_lib.Admin_describe_features, options._setters_ran())
+        opts = _conversions.options_or_null(options, DescribeFeaturesOptions)
+        native = self._call(_lib.Admin_describe_features, _conversions.setters(opts))
         return _conversions.describe_features_result(native, Async, self._binding.loop)
 
     @overload
@@ -1193,16 +1198,16 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.update_features`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(feature_updates, "feature_updates")
-        if None in feature_updates:
+        if feature_updates is not None and None in feature_updates:
             # Utils.isBlank(null) (4726-4727), before options (4733); the FFI cannot
             # carry the null, so Python raises Java's error (a blank key gets the
             # same error from the core).
             raise IllegalArgumentError(message="Provided feature can not be empty.")
-        options = _conversions.options_or_new(options, UpdateFeaturesOptions)
+        opts = _conversions.options_or_null(options, UpdateFeaturesOptions)
         native = self._call(_lib.Admin_update_features,
-                            *_conversions.update_features_args(feature_updates),
-                            options._setters_ran())
+                            *_conversions.after_options(opts, _conversions.update_features_args,
+                                                        feature_updates),
+                            _conversions.setters(opts))
         return _conversions.update_features_result(native, Async, self._binding.loop)
 
     @overload
@@ -1220,10 +1225,11 @@ class AsyncAdmin(_AdminState):
                               ) -> UnregisterControllerResult[Async]:
         """See :meth:`Admin.unregister_controller`."""
         self._check_not_closed()
+        # Java's int: the controller id crosses as int32_t, which has no NULL.
         _conversions.non_null(controller_id, "controller_id")
-        options = _conversions.options_or_new(options, UnregisterControllerOptions)
+        opts = _conversions.options_or_null(options, UnregisterControllerOptions)
         native = self._call(_lib.Admin_unregister_controller, controller_id,
-                            options._setters_ran())
+                            _conversions.setters(opts))
         return _conversions.unregister_controller_result(native, Async, self._binding.loop)
 
     @overload
@@ -1244,13 +1250,13 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.describe_producers`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        _conversions.non_null(partitions, "partitions")
-        targets = list(partitions)
+        targets = _conversions.optional_list(partitions)
         # PartitionLeaderFuture's toUnmodifiableMap rejects a null key (4997) before
         # options (4998).
         args = _conversions.describe_producers_args(targets)
-        options = _conversions.options_or_new(options, DescribeProducersOptions)
-        native = self._call(_lib.Admin_describe_producers, *args, options._setters_ran())
+        opts = _conversions.options_or_null(options, DescribeProducersOptions)
+        native = self._call(_lib.Admin_describe_producers, *args, _conversions.setters(opts))
+        assert targets is not None  # the C API rejected a None
         return _conversions.describe_producers_result(native, Async, self._binding.loop, targets)
 
     @overload
@@ -1272,11 +1278,12 @@ class AsyncAdmin(_AdminState):
         ``AsyncKafkaFuture``\\ s."""
         reject_str("transactional_ids", transactional_ids)  # the shape check precedes the closed check
         self._check_not_closed()
-        _conversions.non_null(transactional_ids, "transactional_ids")
-        options = _conversions.options_or_new(options, DescribeTransactionsOptions)
-        ids = _conversions.transactional_ids_list(transactional_ids)
+        opts = _conversions.options_or_null(options, DescribeTransactionsOptions)
+        ids = _conversions.after_options(opts, _conversions.transactional_ids_list,
+                                         transactional_ids)
         native = self._call(_lib.Admin_describe_transactions,
-                            *_conversions.describe_transactions_args(ids), options._setters_ran())
+                            *_conversions.describe_transactions_args(ids), _conversions.setters(opts))
+        assert ids is not None  # the C API rejected a None
         return _conversions.describe_transactions_result(native, Async, self._binding.loop, ids)
 
     @overload
@@ -1292,10 +1299,11 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.abort_transaction`; the result's future is an
         ``AsyncKafkaFuture``."""
         self._check_not_closed()
+        # An AbortTransactionSpec crosses as its fields: the C API cannot see a None one.
         _conversions.non_null(spec, "spec")
-        options = _conversions.options_or_new(options, AbortTransactionOptions)
+        opts = _conversions.options_or_null(options, AbortTransactionOptions)
         native = self._call(_lib.Admin_abort_transaction, *_conversions.abort_transaction_args(spec),
-                            options._setters_ran())
+                            _conversions.setters(opts))
         return _conversions.abort_transaction_result(native, Async, self._binding.loop, spec)
 
     @overload
@@ -1309,9 +1317,9 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.list_transactions`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, ListTransactionsOptions)
+        opts = _conversions.options_or_null(options, ListTransactionsOptions)
         native = self._call(_lib.Admin_list_transactions,
-                            _conversions.list_transactions_options(options))
+                            _conversions.list_transactions_options(opts))
         return _conversions.list_transactions_result(native, Async, self._binding.loop)
 
     @overload
@@ -1328,11 +1336,12 @@ class AsyncAdmin(_AdminState):
         ``AsyncKafkaFuture``\\ s."""
         reject_str("transactional_ids", transactional_ids)  # the shape check precedes the closed check
         self._check_not_closed()
-        _conversions.non_null(transactional_ids, "transactional_ids")
-        options = _conversions.options_or_new(options, FenceProducersOptions)
-        ids = _conversions.transactional_ids_list(transactional_ids)
+        opts = _conversions.options_or_null(options, FenceProducersOptions)
+        ids = _conversions.after_options(opts, _conversions.transactional_ids_list,
+                                         transactional_ids)
         native = self._call(_lib.Admin_fence_producers, *_conversions.fence_producers_args(ids),
-                            options._setters_ran())
+                            _conversions.setters(opts))
+        assert ids is not None  # the C API rejected a None
         return _conversions.fence_producers_result(native, Async, self._binding.loop, ids)
 
     @overload
@@ -1354,11 +1363,12 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.list_config_resources`; the result's futures are
         ``AsyncKafkaFuture``\\ s."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, ListConfigResourcesOptions)
-        _conversions.non_null(config_resource_types, "config_resource_types")
+        opts = _conversions.options_or_null(options, ListConfigResourcesOptions,
+                                              before=(config_resource_types,))
         native = self._call(_lib.Admin_list_config_resources,
-                            *_conversions.list_config_resources_args(config_resource_types),
-                            options._setters_ran())
+                            *_conversions.after_options(opts, _conversions.list_config_resources_args,
+                                                        config_resource_types),
+                            _conversions.setters(opts))
         return _conversions.list_config_resources_result(native, Async, self._binding.loop)
 
     @overload
@@ -1380,10 +1390,10 @@ class AsyncAdmin(_AdminState):
         ``AsyncKafkaFuture``\\ s."""
         reject_str("group_ids", group_ids)  # the shape check precedes the closed check
         self._check_not_closed()
-        _conversions.non_null(group_ids, "group_ids")
-        options = _conversions.options_or_new(options, DescribeClassicGroupsOptions)
-        native = self._call(_lib.Admin_describe_classic_groups, _conversions.group_ids_list(group_ids),
-                            options._setters_ran())
+        opts = _conversions.options_or_null(options, DescribeClassicGroupsOptions)
+        ids = _conversions.after_options(opts, _conversions.group_ids_list, group_ids)
+        native = self._call(_lib.Admin_describe_classic_groups, ids,
+                            _conversions.setters(opts))
         return _conversions.describe_classic_groups_result(native, Async, self._binding.loop)
 
     @overload
@@ -1404,8 +1414,8 @@ class AsyncAdmin(_AdminState):
         """See :meth:`Admin.force_terminate_transaction`; the result's future is an
         ``AsyncKafkaFuture``."""
         self._check_not_closed()
-        options = _conversions.options_or_new(options, TerminateTransactionOptions)
-        _conversions.non_null(transactional_id, "transactional_id")
+        opts = _conversions.options_or_null(options, TerminateTransactionOptions,
+                                              before=(transactional_id,))
         native = self._call(_lib.Admin_force_terminate_transaction, transactional_id,
-                            options._setters_ran())
+                            _conversions.setters(opts))
         return _conversions.force_terminate_transaction_result(native, Async, self._binding.loop)

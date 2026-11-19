@@ -24,12 +24,12 @@
 //! schedule them alongside functional tests.
 //!
 //! Requires: `cargo test --features integration-tests --test performance`
-//! (or `make test-integration-perf-rust`, which runs them after the
+//! (or `make -C rust test-integration-perf`, which runs them after the
 //! functional suite has finished and released its clusters).
 //!
 //! The Python counterparts live in `python/test/performance` and are
 //! likewise excluded from the normal `pytest test/unit` run; see
-//! `make test-integration-perf-python`.
+//! `make -C python test-performance`.
 
 // The harness is shared with the functional `integration` suite; this binary
 // uses only a small part of it.

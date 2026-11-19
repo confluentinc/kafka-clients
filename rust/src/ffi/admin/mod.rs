@@ -82,6 +82,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::{Required, require_fn, require_ref};
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::future::Future;
@@ -267,7 +268,7 @@ impl Client {
     fn run_cb<F, Fut>(
         self: &Arc<Self>,
         fn_name: &'static str,
-        cb: kafka_admin_Admin_close_cb_t,
+        cb: Required<kafka_admin_Admin_close_cb_t>,
         opaque: *mut c_void,
         op: F,
     ) where
@@ -465,18 +466,23 @@ impl AdminClassHandle {
 }
 
 /// Where the guard of a `_cb` entry point delivers a caught panic: the
-/// client's callbacks vector (see [`deliver_panic_opaque`]).
+/// client's callbacks vector, or the calling thread when `admin` is NULL, so a
+/// NULL handle still reaches `cb` once, with Java's error (see
+/// [`deliver_panic_opaque`]).
 ///
 /// # Safety
 ///
-/// `admin` must be a live handle or view, as [`client_ref`] describes; the
-/// sink holds its own `Arc` to the client, so it may outlive the call.
+/// `admin` must be NULL or a live handle or view, as [`client_ref`] describes;
+/// the sink holds its own `Arc` to the client, so it may outlive the call.
 unsafe fn completion_sink(admin: *const kafka_admin_Admin_t) -> impl FnOnce(CallbackJob) {
-    // SAFETY: Per this function's `# Safety`, `admin` is a live handle or view, as `client_ref`
-    // requires; the reference is used only to clone the `Arc`, so the sink does not borrow the
-    // handle.
-    let client = Arc::clone(unsafe { client_ref(admin) });
-    move |job| client.queue.push(job)
+    // SAFETY: Per this function's `# Safety`, a non-NULL `admin` is a live handle or view, as
+    // `client_ref` requires; the reference is used only to clone the `Arc`, so the sink does not
+    // borrow the handle.
+    let client = (!admin.is_null()).then(|| Arc::clone(unsafe { client_ref(admin, "admin") }));
+    move |job| match client {
+        Some(client) => client.queue.push(job),
+        None => job(),
+    }
 }
 
 /// The client behind an interface handle.
@@ -487,7 +493,7 @@ unsafe fn completion_sink(admin: *const kafka_admin_Admin_t) -> impl FnOnce(Call
 /// a handle from `kafka_admin_AdminClient_create` or a
 /// `kafka_admin_MockAdminClient__as_Admin` view (the same pointer, see
 /// [`AdminClassHandle::as_admin`]).
-pub(crate) unsafe fn client_ref<'a>(admin: *const kafka_admin_Admin_t) -> &'a Arc<Client> {
+pub(crate) unsafe fn client_ref<'a>(admin: *const kafka_admin_Admin_t, param: &'static str) -> &'a Arc<Client> {
     // SAFETY: Per this function's `# Safety`, `admin` points at a live `AdminClassHandle` kept
     // alive for `'a`: the `Box<AdminClassHandle>` `kafka_admin_AdminClient_create` delivers is that
     // handle's address, and so is a `kafka_admin_MockAdminClient__as_Admin` view
@@ -495,7 +501,7 @@ pub(crate) unsafe fn client_ref<'a>(admin: *const kafka_admin_Admin_t) -> &'a Ar
     // as its first field, so the address is that field's, and a shared reference to it is valid for
     // `'a`. Nothing takes a `&mut` to the handle while it is live: only its destroy takes it back,
     // after the handle's last use.
-    unsafe { &*(admin as *const Arc<Client>) }
+    unsafe { require_ref::<_, Arc<Client>>(admin, param) }
 }
 
 // ---------------------------------------------------------------------------
@@ -711,12 +717,12 @@ pub(crate) fn box_result<R, P>(result: R, ctx: &FutureCtx) -> *mut P {
 ///
 /// `handle` must be a live handle built by `box_result::<R, P>`, kept alive
 /// for `'a`.
-pub(crate) unsafe fn result_ref<'a, R, P>(handle: *const P) -> &'a ResultHandle<R> {
+pub(crate) unsafe fn result_ref<'a, R, P>(handle: *const P, param: &'static str) -> &'a ResultHandle<R> {
     // SAFETY: Per this function's `# Safety`, `handle` is a live handle built by
     // `box_result::<R, P>`, i.e. the `Box::into_raw` of a `Box<ResultHandle<R>>`, kept alive for
     // `'a`, so the shared reference is to a live `ResultHandle<R>`. Nothing mutates a result handle
     // after `box_result`.
-    unsafe { &*(handle as *const ResultHandle<R>) }
+    unsafe { require_ref::<_, ResultHandle<R>>(handle, param) }
 }
 
 /// Frees a handle built by [`box_result`]; `NULL` is a no-op.
@@ -742,15 +748,15 @@ pub(crate) unsafe fn destroy_result<R, P>(handle: *mut P) {
 
 /// Completion of `close`: Java's `close()` is `void` and throws nothing, so
 /// the callback carries only the opaque pointer.
-pub type kafka_admin_Admin_close_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+pub type kafka_admin_Admin_close_cb_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
 /// Completion of `close(Duration)`: Java's `close(Duration)` is `void` and
 /// throws nothing, so the callback carries only the opaque pointer.
-pub type kafka_admin_Admin_close_with_timeout_cb_t = unsafe extern "C" fn(opaque: *mut c_void);
+pub type kafka_admin_Admin_close_with_timeout_cb_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
 
 /// The hook fired once each time the callback vector goes from empty to
 /// non-empty, from a Rust task: it may only schedule a later
 /// [`kafka_admin_Admin__execute_callbacks`], never run callbacks.
-pub type kafka_admin_Admin_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: *mut c_void);
+pub type kafka_admin_Admin_callbacks_notify_fn_t = Option<unsafe extern "C" fn(opaque: *mut c_void)>;
 
 // ---------------------------------------------------------------------------
 // Close
@@ -767,7 +773,7 @@ pub type kafka_admin_Admin_callbacks_notify_fn_t = unsafe extern "C" fn(opaque: 
 pub unsafe extern "C" fn kafka_admin_Admin_close(self_: *const kafka_admin_Admin_t) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, as `client_ref`
     // requires; the reference is used only during this call.
-    let client = unsafe { client_ref(self_) };
+    let client = unsafe { client_ref(self_, "self_") };
     client.block_on(client.admin.close());
 }
 
@@ -800,9 +806,10 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_cb(
     cb: kafka_admin_Admin_close_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, as `client_ref`
     // requires; the reference is used only during this call, the task getting its own `Arc`s.
-    unsafe { client_ref(self_) }.run_cb("kafka_admin_Admin_close_cb", cb, opaque, |admin| async move {
+    unsafe { client_ref(self_, "self_") }.run_cb("kafka_admin_Admin_close_cb", cb, opaque, |admin| async move {
         admin.close().await
     });
 }
@@ -831,7 +838,7 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_cb(
 pub unsafe extern "C" fn kafka_admin_Admin_close_with_timeout(self_: *const kafka_admin_Admin_t, timeout: i64) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, as `client_ref`
     // requires; the reference is used only during this call.
-    let client = unsafe { client_ref(self_) };
+    let client = unsafe { client_ref(self_, "self_") };
     client.block_on(client.admin.close_with_timeout(close_timeout(timeout)));
 }
 
@@ -867,10 +874,11 @@ pub unsafe extern "C" fn kafka_admin_Admin_close_with_timeout_cb(
     cb: kafka_admin_Admin_close_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     let timeout = close_timeout(timeout);
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, as `client_ref`
     // requires; the reference is used only during this call, the task getting its own `Arc`s.
-    unsafe { client_ref(self_) }.run_cb(
+    unsafe { client_ref(self_, "self_") }.run_cb(
         "kafka_admin_Admin_close_with_timeout_cb",
         cb,
         opaque,
@@ -900,7 +908,7 @@ fn close_timeout(timeout: i64) -> Duration {
 pub unsafe extern "C" fn kafka_admin_Admin__execute_callbacks(self_: *const kafka_admin_Admin_t) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, as `client_ref`
     // requires; the reference is used only during this call.
-    unsafe { client_ref(self_) }.queue.execute()
+    unsafe { client_ref(self_, "self_") }.queue.execute()
 }
 
 /// Installs the hook fired once each time the callback vector goes from
@@ -923,10 +931,11 @@ pub unsafe extern "C" fn kafka_admin_Admin__set_callbacks_notify(
     notify: kafka_admin_Admin_callbacks_notify_fn_t,
     opaque: *mut c_void,
 ) {
+    let notify = require_fn(notify, "notify");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle or view, as `client_ref`
     // requires; the reference is used only during this call. `opaque` stays valid while the hook is
     // installed and until a call in flight returns, as the doc requires.
-    unsafe { client_ref(self_) }.queue.set_notify(Some(notify), opaque);
+    unsafe { client_ref(self_, "self_") }.queue.set_notify(Some(notify), opaque);
 }
 
 // ---------------------------------------------------------------------------
@@ -972,6 +981,23 @@ pub unsafe extern "C" fn kafka_admin_Admin_destroy(self_: *mut kafka_admin_Admin
 
 #[cfg(test)]
 mod tests {
+    /// A NULL `self_` still fires `cb` once, on the calling thread: Java's `close()` throws
+    /// nothing, so `cb` gets only `opaque` back (see `completion_sink`).
+    #[test]
+    fn test_null_self_fires_close_cb_once() {
+        use crate::ffi::precondition::{Delivered, record_opaque_delivery};
+        let delivered = Delivered::default();
+        // SAFETY: Test code: a NULL handle, the recorder and a live `Delivered`.
+        unsafe {
+            kafka_admin_Admin_close_cb(
+                std::ptr::null(),
+                Some(record_opaque_delivery),
+                &delivered as *const Delivered as *mut c_void,
+            )
+        };
+        assert_eq!(*delivered.lock().unwrap(), vec![None]);
+    }
+
     use super::*;
     use crate::ffi::admin::admin_client::kafka_admin_AdminClient_create;
     use crate::ffi::admin::admin_client_config::{
@@ -1055,10 +1081,10 @@ mod tests {
 
             let close = Probe::default();
             fail_point::arm();
-            kafka_admin_Admin_close_cb(admin, on_opaque, close.as_opaque());
+            kafka_admin_Admin_close_cb(admin, Some(on_opaque), close.as_opaque());
             let close_with_timeout = Probe::default();
             fail_point::arm();
-            kafka_admin_Admin_close_with_timeout_cb(admin, 0, on_opaque, close_with_timeout.as_opaque());
+            kafka_admin_Admin_close_with_timeout_cb(admin, 0, Some(on_opaque), close_with_timeout.as_opaque());
 
             assert!(close.fired().is_empty(), "queued, not fired");
             assert!(close_with_timeout.fired().is_empty(), "queued, not fired");
@@ -1170,7 +1196,7 @@ mod tests {
             let result = kafka_admin_Admin_list_topics(admin);
             let names = kafka_admin_ListTopicsResult_names(result);
             let fired = Fired::default();
-            kafka_common_KafkaFuture_get_cb(names, record_completion, &fired as *const Fired as *mut c_void);
+            kafka_common_KafkaFuture_get_cb(names, Some(record_completion), &fired as *const Fired as *mut c_void);
             let blocking = names as usize;
             let getter = std::thread::spawn(move || {
                 let mut err = std::ptr::null_mut();
@@ -1289,7 +1315,7 @@ mod tests {
             let result = kafka_admin_Admin_list_topics(admin);
             let names = kafka_admin_ListTopicsResult_names(result);
             let fired = Fired::default();
-            kafka_common_KafkaFuture_get_cb(names, record_completion, &fired as *const Fired as *mut c_void);
+            kafka_common_KafkaFuture_get_cb(names, Some(record_completion), &fired as *const Fired as *mut c_void);
             let blocking = names as usize;
             let (got_tx, got_rx) = std::sync::mpsc::channel();
             // A `get` and a `get_with_timeout`.
@@ -1384,7 +1410,7 @@ mod tests {
             let result = kafka_admin_Admin_list_topics(admin);
             let close = Probe::default();
             let started = std::time::Instant::now();
-            kafka_admin_Admin_close_with_timeout_cb(admin, 1500, on_opaque, close.as_opaque());
+            kafka_admin_Admin_close_with_timeout_cb(admin, 1500, Some(on_opaque), close.as_opaque());
             kafka_admin_Admin_destroy(admin);
             let elapsed = started.elapsed();
             assert!(
@@ -1409,7 +1435,11 @@ mod tests {
             let mut err = std::ptr::null_mut();
             let mock = built_mock(&mut err);
             assert!(err.is_null());
-            kafka_admin_Admin_close_cb(kafka_admin_MockAdminClient__as_Admin(mock), complete_close, fired.as_opaque());
+            kafka_admin_Admin_close_cb(
+                kafka_admin_MockAdminClient__as_Admin(mock),
+                Some(complete_close),
+                fired.as_opaque(),
+            );
             let mock = mock as usize;
             let runtime = tokio::runtime::Runtime::new().expect("runtime");
             runtime.block_on(async move { kafka_admin_MockAdminClient_destroy(mock as *mut _) });

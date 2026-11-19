@@ -23,6 +23,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char};
 
 use crate::admin::UserScramCredentialAlteration;
@@ -52,6 +53,14 @@ pub enum kafka_admin_UserScramCredentialAlteration_e {
     kafka_admin_UserScramCredentialAlteration_DELETION,
 }
 
+/// The value an `_err` twin returning [`kafka_admin_UserScramCredentialAlteration_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_admin_UserScramCredentialAlteration_e {
+    fn fail() -> Self {
+        Self::kafka_admin_UserScramCredentialAlteration_UPSERTION
+    }
+}
+
 /// What a [`kafka_admin_UserScramCredentialAlteration_t`] points at: the
 /// value plus the NUL-terminated user its getter borrows out.
 pub(crate) struct UserScramCredentialAlterationInner {
@@ -73,13 +82,14 @@ impl UserScramCredentialAlterationInner {
 /// `alteration` must be a live alteration handle, kept alive for `'a`.
 unsafe fn inner_ref<'a>(
     alteration: *const kafka_admin_UserScramCredentialAlteration_t,
+    param: &'static str,
 ) -> &'a UserScramCredentialAlterationInner {
     // SAFETY: Per this function's `# Safety`, `alteration` is a live alteration handle kept alive
     // for `'a`. Every `kafka_admin_UserScramCredentialAlteration_t` comes from
     // `box_user_scram_credential_alteration`, which boxes a `UserScramCredentialAlterationInner`,
     // so the cast yields a valid shared reference. The type has no setters, so nothing mutates it
     // while borrowed.
-    unsafe { &*(alteration as *const UserScramCredentialAlterationInner) }
+    unsafe { require_ref::<_, UserScramCredentialAlterationInner>(alteration, param) }
 }
 
 /// Hands `alteration` to C as an owned handle, freed with
@@ -98,29 +108,26 @@ pub(crate) fn box_user_scram_credential_alteration(
 /// `alteration` must be a live alteration handle, kept alive for `'a`.
 pub(crate) unsafe fn user_scram_credential_alteration_ref<'a>(
     alteration: *const kafka_admin_UserScramCredentialAlteration_t,
+    param: &'static str,
 ) -> &'a UserScramCredentialAlteration {
     // SAFETY: Per this function's `# Safety`, `alteration` is a live alteration handle kept alive
     // for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(alteration) }.alteration
+    &unsafe { inner_ref(alteration, param) }.alteration
 }
 
 /// Returns which subclass the alteration is, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_admin_UserScramCredentialAlteration_UPSERTION`, the first
-/// enumerator: the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that
-/// value, and is only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a valid alteration handle.
-#[ffi_guard(fallback = kafka_admin_UserScramCredentialAlteration_e::kafka_admin_UserScramCredentialAlteration_UPSERTION)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration__enum(
     self_: *const kafka_admin_UserScramCredentialAlteration_t,
 ) -> kafka_admin_UserScramCredentialAlteration_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid alteration handle, kept alive for
     // this call, as `user_scram_credential_alteration_ref` requires.
-    match unsafe { user_scram_credential_alteration_ref(self_) } {
+    match unsafe { user_scram_credential_alteration_ref(self_, "self_") } {
         UserScramCredentialAlteration::Upsertion(_) => {
             kafka_admin_UserScramCredentialAlteration_e::kafka_admin_UserScramCredentialAlteration_UPSERTION
         },
@@ -150,7 +157,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_upsertion(
         // SAFETY: Per this function's `# Safety`, `value` is a valid upsertion handle, kept alive
         // for this call, as `user_scram_credential_upsertion_ref` requires; the borrow ends with
         // the clone.
-        unsafe { user_scram_credential_upsertion_ref(value) }.clone(),
+        unsafe { user_scram_credential_upsertion_ref(value, "value") }.clone(),
     ))
 }
 
@@ -174,7 +181,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_deletion(
         // SAFETY: Per this function's `# Safety`, `value` is a valid deletion handle, kept alive
         // for this call, as `user_scram_credential_deletion_ref` requires; the borrow ends with the
         // clone.
-        unsafe { user_scram_credential_deletion_ref(value) }.clone(),
+        unsafe { user_scram_credential_deletion_ref(value, "value") }.clone(),
     ))
 }
 
@@ -194,7 +201,7 @@ pub unsafe extern "C" fn kafka_admin_UserScramCredentialAlteration_user(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid alteration handle, kept alive for
     // this call, as `inner_ref` requires. The returned string is a `CString` the handle owns, so it
     // lives as long as the handle.
-    unsafe { inner_ref(self_) }.user_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.user_c.as_ptr()
 }
 
 /// Frees an owned alteration handle; `NULL` is a no-op. Both variants carry

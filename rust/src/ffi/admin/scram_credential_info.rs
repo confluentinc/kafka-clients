@@ -17,6 +17,7 @@
 //! handle points at the Rust value, so a `ScramCredentialInfo` held inside a
 //! `kafka_admin_UserScramCredentialUpsertion_t` is borrowed out by address.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{c_char, c_void};
 
 use crate::admin::ScramCredentialInfo;
@@ -51,13 +52,14 @@ pub(crate) fn scram_credential_info_ptr(info: &ScramCredentialInfo) -> *const ka
 /// `info` must be a live SCRAM-credential-info handle, kept alive for `'a`.
 pub(crate) unsafe fn scram_credential_info_ref<'a>(
     info: *const kafka_admin_ScramCredentialInfo_t,
+    param: &'static str,
 ) -> &'a ScramCredentialInfo {
     // SAFETY: Per this function's `# Safety`, `info` is a live SCRAM-credential-info handle kept
     // alive for `'a`. Every `kafka_admin_ScramCredentialInfo_t` points at a `ScramCredentialInfo`:
     // `box_scram_credential_info` boxes one and `scram_credential_info_ptr` borrows one inside its
     // parent handle, so the cast yields a valid shared reference. The type has no setters, so
     // nothing mutates it while borrowed.
-    unsafe { &*(info as *const ScramCredentialInfo) }
+    unsafe { require_ref::<_, ScramCredentialInfo>(info, param) }
 }
 
 /// Frees a `kafka_admin_ScramCredentialInfo_t *` element of an owned
@@ -96,7 +98,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_new(
         // SAFETY: Per this function's `# Safety`, `mechanism` is a `kafka_admin_ScramMechanism_t`
         // singleton, which only the `scram_mechanism` module hands out, as
         // `scram_mechanism_value_of` requires.
-        unsafe { scram_mechanism_value_of(mechanism) },
+        unsafe { scram_mechanism_value_of(mechanism, "mechanism") },
         iterations,
     ))
 }
@@ -114,7 +116,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_mechanism(
 ) -> *const kafka_admin_ScramMechanism_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid SCRAM-credential-info handle, kept
     // alive for this call, as `scram_credential_info_ref` requires.
-    scram_mechanism_singleton(unsafe { scram_credential_info_ref(self_) }.mechanism())
+    scram_mechanism_singleton(unsafe { scram_credential_info_ref(self_, "self_") }.mechanism())
 }
 
 /// Returns the number of iterations used when creating the credential.
@@ -129,7 +131,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_iterations(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid SCRAM-credential-info handle, kept
     // alive for this call, as `scram_credential_info_ref` requires.
-    unsafe { scram_credential_info_ref(self_) }.iterations()
+    unsafe { scram_credential_info_ref(self_, "self_") }.iterations()
 }
 
 /// Returns the text form of the credential info.
@@ -145,7 +147,7 @@ pub unsafe extern "C" fn kafka_admin_ScramCredentialInfo_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid SCRAM-credential-info handle, kept
     // alive for this call, as `scram_credential_info_ref` requires.
-    into_c_string(&unsafe { scram_credential_info_ref(self_) }.to_string())
+    into_c_string(&unsafe { scram_credential_info_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned SCRAM-credential-info handle. Null is a no-op; a handle

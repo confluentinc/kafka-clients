@@ -35,11 +35,11 @@ pub struct kafka_common_metrics_Stat_t {
 /// # Safety
 ///
 /// `stat` must be a valid stat handle, alive for `'a`.
-pub(crate) unsafe fn stat_ref<'a>(stat: *const kafka_common_metrics_Stat_t) -> &'a dyn Stat {
+pub(crate) unsafe fn stat_ref<'a>(stat: *const kafka_common_metrics_Stat_t, param: &'static str) -> &'a dyn Stat {
     // SAFETY: Per this function's `# Safety`, `stat` is a valid stat handle alive for `'a`, as
     // `Interface::from_ptr` requires: every `kafka_common_metrics_Stat_t` is an
     // `Interface<dyn Stat>`, owned or a view; the reference returned lives for the same `'a`.
-    unsafe { Interface::<dyn Stat>::from_ptr(stat as *const Interface<dyn Stat>) }.get()
+    unsafe { Interface::<dyn Stat>::from_ptr(stat as *const Interface<dyn Stat>, param) }.get()
 }
 
 /// `record(MetricConfig config, double value, long timeMs)`.
@@ -65,5 +65,5 @@ pub unsafe extern "C" fn kafka_common_metrics_Stat_record(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid stat handle, as `stat_ref`
     // requires, and `config` a valid metric-config handle, as `metric_config_ref` requires; both
     // references are used only within this call.
-    unsafe { stat_ref(self_) }.record(unsafe { metric_config_ref(config) }, value, time_ms);
+    unsafe { stat_ref(self_, "self_") }.record(unsafe { metric_config_ref(config, "config") }, value, time_ms);
 }

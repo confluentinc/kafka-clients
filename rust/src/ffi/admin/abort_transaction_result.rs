@@ -39,12 +39,15 @@ pub(crate) fn box_abort_transaction_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_AbortTransactionResult_t) -> &'a ResultHandle<AbortTransactionResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_AbortTransactionResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<AbortTransactionResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_AbortTransactionResult_t` is built by
     // `box_result::<AbortTransactionResult, _>` (in `box_abort_transaction_result`), as
     // `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// `AbortTransactionResult.all()`: a `KafkaFuture<Void>` (its `get` delivers `NULL`) that completes
@@ -66,7 +69,7 @@ pub unsafe extern "C" fn kafka_admin_AbortTransactionResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     h.ctx.void_future(&h.result.all())
 }
 

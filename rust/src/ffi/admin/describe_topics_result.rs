@@ -51,7 +51,7 @@ unsafe fn uuid_key_eq(a: *mut c_void, b: *mut c_void) -> bool {
     }
     // SAFETY: `a` and `b` are non-null (checked above) and, per this function's `# Safety`, valid
     // uuid handles, alive for this call, as `uuid_of` requires.
-    unsafe { uuid_of(a as *const kafka_common_Uuid_t) == uuid_of(b as *const kafka_common_Uuid_t) }
+    unsafe { uuid_of(a as *const kafka_common_Uuid_t, "a") == uuid_of(b as *const kafka_common_Uuid_t, "b") }
 }
 
 /// Boxes a topic id as an owned `kafka_common_Uuid_t *` map key.
@@ -117,12 +117,15 @@ pub(crate) fn box_describe_topics_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_DescribeTopicsResult_t) -> &'a ResultHandle<DescribeTopicsResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_DescribeTopicsResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<DescribeTopicsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeTopicsResult_t` is built by
     // `box_result::<DescribeTopicsResult, _>` (in `box_describe_topics_result`), as `result_ref`
     // requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Use when `kafka_admin_Admin_describe_topics_with_topics` used a TopicIdCollection
@@ -147,7 +150,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_id_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     match h.result.topic_id_values() {
         Some(map) => {
             let mut entries: Vec<(&Uuid, &KafkaFuture<TopicDescription>)> = map.iter().collect();
@@ -181,7 +184,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_topic_name_values(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     match h.result.topic_name_values() {
         Some(map) => h.ctx.string_keyed_future_map(map.iter(), description_future),
         None => std::ptr::null_mut(),
@@ -208,7 +211,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_names(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     match h.result.all_topic_names() {
         // SAFETY: `destroy_map_element` frees exactly the map `names_map` makes through
         // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state,
@@ -240,7 +243,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_all_topic_ids(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     match h.result.all_topic_ids() {
         // SAFETY: `destroy_map_element` frees exactly the map `ids_map` makes through `box_map`,
         // and the handle holds only owned data and no thread-bound state, so it may be freed from

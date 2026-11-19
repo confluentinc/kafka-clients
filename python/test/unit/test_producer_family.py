@@ -2628,7 +2628,7 @@ def test_send_offsets_to_transaction_checks_group_metadata_first() -> None:
     with KafkaProducer(configs={**UNREACHABLE, "enable.idempotence": False}) as p:
         with pytest.raises(IllegalArgumentError) as err:
             p.send_offsets_to_transaction(offsets={}, group_metadata=None)  # type: ignore[arg-type]
-        assert str(err.value) == "Consumer group metadata could not be None"
+        assert str(err.value) == "Consumer group metadata could not be null"
         with pytest.raises(IllegalStateError) as err2:
             p.send_offsets_to_transaction(offsets={}, group_metadata=_consumer_group_metadata())
         assert str(err2.value) == NO_TXN

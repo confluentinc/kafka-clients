@@ -18,6 +18,7 @@
 //! `describeFeatures` response), so there is no `_new`; the maps come out as
 //! owned copies sorted by feature name.
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{c_char, c_void};
 
 use crate::admin::FeatureMetadata;
@@ -46,12 +47,15 @@ pub(crate) struct FeatureMetadataInner {
 /// # Safety
 ///
 /// `metadata` must be a valid feature-metadata handle, kept alive for `'a`.
-pub(crate) unsafe fn feature_metadata_ref<'a>(metadata: *const kafka_admin_FeatureMetadata_t) -> &'a FeatureMetadata {
+pub(crate) unsafe fn feature_metadata_ref<'a>(
+    metadata: *const kafka_admin_FeatureMetadata_t,
+    param: &'static str,
+) -> &'a FeatureMetadata {
     // SAFETY: Per this function's `# Safety`, `metadata` is a valid feature-metadata handle kept
     // alive for `'a`. Every `kafka_admin_FeatureMetadata_t` comes from `box_feature_metadata`,
     // which boxes a `FeatureMetadataInner`, so the cast yields a valid shared reference. The type
     // has no setters, so nothing mutates it while borrowed.
-    &unsafe { &*(metadata as *const FeatureMetadataInner) }.metadata
+    &unsafe { require_ref::<_, FeatureMetadataInner>(metadata, param) }.metadata
 }
 
 /// Hands `metadata` to C as an owned handle, freed with
@@ -102,7 +106,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features(
     sorted_feature_map(
         // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-metadata handle, kept
         // alive for this call, as `feature_metadata_ref` requires.
-        unsafe { feature_metadata_ref(self_) }.finalized_features(),
+        unsafe { feature_metadata_ref(self_, "self_") }.finalized_features(),
         |range| box_finalized_version_range(range.clone()) as *mut c_void,
         destroy_finalized_version_range_element,
     )
@@ -113,20 +117,21 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features(
 ///
 /// # Returns
 ///
-/// The epoch, or `-1` for Java's empty `Optional<Long>`. A caught Rust panic returns -2, which is
-/// no finalized-features epoch: Java reads a negative one as `Optional.empty()`.
+/// The epoch, or `-1` for Java's empty `Optional<Long>`.
 ///
 /// # Safety
 ///
 /// `self_` must be a valid feature-metadata handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_FeatureMetadata_finalized_features_epoch(
     self_: *const kafka_admin_FeatureMetadata_t,
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-metadata handle, kept
     // alive for this call, as `feature_metadata_ref` requires.
-    unsafe { feature_metadata_ref(self_) }.finalized_features_epoch().unwrap_or(-1)
+    unsafe { feature_metadata_ref(self_, "self_") }
+        .finalized_features_epoch()
+        .unwrap_or(-1)
 }
 
 /// Returns a map of supported feature versions. Each entry in the map contains a key being a
@@ -146,7 +151,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_supported_features(
     sorted_feature_map(
         // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-metadata handle, kept
         // alive for this call, as `feature_metadata_ref` requires.
-        unsafe { feature_metadata_ref(self_) }.supported_features(),
+        unsafe { feature_metadata_ref(self_, "self_") }.supported_features(),
         |range| box_supported_version_range(range.clone()) as *mut c_void,
         destroy_supported_version_range_element,
     )
@@ -165,7 +170,7 @@ pub unsafe extern "C" fn kafka_admin_FeatureMetadata_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid feature-metadata handle, kept
     // alive for this call, as `feature_metadata_ref` requires.
-    into_c_string(&unsafe { feature_metadata_ref(self_) }.to_string())
+    into_c_string(&unsafe { feature_metadata_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned metadata handle; `NULL` is a no-op.
@@ -215,20 +220,20 @@ mod tests {
         // destroyed once after its last use; the map values read are range handles the maps own,
         // the keys looked up are static NUL-terminated literals, and destroying null is a no-op.
         unsafe {
-            assert_eq!(*feature_metadata_ref(handle), metadata);
+            assert_eq!(*feature_metadata_ref(handle, "handle"), metadata);
             assert_eq!(kafka_admin_FeatureMetadata_finalized_features_epoch(handle), -1);
 
             let map = kafka_admin_FeatureMetadata_finalized_features(handle);
             assert_eq!(kafka_Map_size(map), 2);
             assert_eq!(CStr::from_ptr(kafka_Map_key(map, 0) as *const c_char).to_str().unwrap(), "a");
             let b = kafka_Map_get(map, c"b".as_ptr() as *mut c_void) as *const kafka_admin_FinalizedVersionRange_t;
-            assert_eq!(*finalized_version_range_ref(b), finalized["b"]);
+            assert_eq!(*finalized_version_range_ref(b, "b"), finalized["b"]);
             kafka_Map_destroy(map);
 
             let map = kafka_admin_FeatureMetadata_supported_features(handle);
             assert_eq!(kafka_Map_size(map), 1);
             let a = kafka_Map_get(map, c"a".as_ptr() as *mut c_void) as *const kafka_admin_SupportedVersionRange_t;
-            assert_eq!(*supported_version_range_ref(a), supported["a"]);
+            assert_eq!(*supported_version_range_ref(a, "a"), supported["a"]);
             kafka_Map_destroy(map);
 
             let s = kafka_admin_FeatureMetadata_to_string(handle);

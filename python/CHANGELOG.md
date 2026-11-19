@@ -23,6 +23,16 @@ Before GA the public API is not stable, and an interface may change even in a mi
   cannot state. Importing `confluent_kafka` on an older CPU now raises an
   `ImportError` naming the missing features, instead of the process dying
   on an illegal instruction.
+- A `None` for an argument Java requires reaches the Rust core, which answers
+  with Java's error and message: a `NullPointerException` is Python's
+  `TypeError`, with the core's message and its "null" spelled "None"
+  (`pause(partitions=None)` -> `TypeError("The partitions to pause must be
+  nonnull")`), and an `IllegalArgumentError` keeps Java's text
+  (`subscribe(topics=None)` -> "Topic collection to subscribe to cannot be
+  null"). The consumer, producer and admin client no longer check these
+  arguments in Python first, so some messages differ from the previous release.
+  The admin client still checks a value that crosses as its fields or by value
+  (`describe_acls(filter=None)`, `renew_delegation_token(hmac=None)`).
 
 ## [4.4.0b1] - 2026-10-30
 

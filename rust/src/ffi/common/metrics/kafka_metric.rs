@@ -20,6 +20,7 @@
 //! `KafkaMetric` implements `Metric`, reached through
 //! [`kafka_common_metrics_KafkaMetric__as_Metric`] (§4, "Traits").
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{c_char, c_void};
 use std::sync::{Arc, OnceLock};
 
@@ -99,13 +100,13 @@ pub(crate) fn box_kafka_metric(metric: Arc<KafkaMetric>) -> *mut kafka_common_me
 /// # Safety
 ///
 /// `self_` must be a valid metric handle, alive for `'a`.
-unsafe fn inner<'a>(self_: *const kafka_common_metrics_KafkaMetric_t) -> &'a KafkaMetricInner {
+unsafe fn inner<'a>(self_: *const kafka_common_metrics_KafkaMetric_t, param: &'static str) -> &'a KafkaMetricInner {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle alive for `'a`, so
     // it points at a live `KafkaMetricInner`: an owned one, the `Box::into_raw` of
     // `box_kafka_metric`, or the local a `CMetricsReporter` callback borrows to C for the call
     // (`KafkaMetricInner::as_ptr`). Nothing takes a `&mut KafkaMetricInner` (the cached views are
     // filled through `OnceLock`), so the shared reference is sound for `'a`.
-    unsafe { &*(self_ as *const KafkaMetricInner) }
+    unsafe { require_ref::<_, KafkaMetricInner>(self_, param) }
 }
 
 /// The metric behind a handle.
@@ -113,10 +114,13 @@ unsafe fn inner<'a>(self_: *const kafka_common_metrics_KafkaMetric_t) -> &'a Kaf
 /// # Safety
 ///
 /// `metric` must be a valid metric handle, alive for `'a`.
-pub(crate) unsafe fn kafka_metric_ref<'a>(metric: *const kafka_common_metrics_KafkaMetric_t) -> &'a Arc<KafkaMetric> {
+pub(crate) unsafe fn kafka_metric_ref<'a>(
+    metric: *const kafka_common_metrics_KafkaMetric_t,
+    param: &'static str,
+) -> &'a Arc<KafkaMetric> {
     // SAFETY: Per this function's `# Safety`, `metric` is a valid metric handle alive for `'a`, as
     // `inner` requires; the reference returned lives for the same `'a`.
-    unsafe { inner(metric) }.metric()
+    unsafe { inner(metric, param) }.metric()
 }
 
 /// Frees a metric handle held as a `void *` container element.
@@ -145,7 +149,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric__as_Metric(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as `inner`
     // requires; `inner` is used only within this call, and the view returned lives in the handle's
     // own `as_metric` cell.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     inner
         .as_metric
         // SAFETY: `&*inner.metric` points at the `KafkaMetric` the handle's `Arc` keeps alive, and
@@ -177,7 +181,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_config(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as
     // `kafka_metric_ref` requires; the config `Arc` is cloned into an owned handle, so the borrow
     // lasts for this call only.
-    box_metric_config(unsafe { kafka_metric_ref(self_) }.config())
+    box_metric_config(unsafe { kafka_metric_ref(self_, "self_") }.config())
 }
 
 /// `config(MetricConfig config)`: the metric shares `config` from now on
@@ -201,7 +205,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_set_config(
     // `kafka_metric_ref` requires, and `config` a valid metric-config handle, as
     // `metric_config_arc` requires; both references are used only within this call, and the metric
     // keeps the `Arc` returned.
-    unsafe { kafka_metric_ref(self_) }.set_config(unsafe { metric_config_arc(config) });
+    unsafe { kafka_metric_ref(self_, "self_") }.set_config(unsafe { metric_config_arc(config) });
 }
 
 /// The method determines if the metric value provider is of type Measurable.
@@ -220,7 +224,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_is_measurable(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as
     // `kafka_metric_ref` requires; the reference is used only within this call.
-    i8::from(unsafe { kafka_metric_ref(self_) }.is_measurable())
+    i8::from(unsafe { kafka_metric_ref(self_, "self_") }.is_measurable())
 }
 
 /// Get the underlying metric provider, which should be a `Measurable`.
@@ -247,7 +251,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_measurable(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as `inner`
     // requires; `inner` is used only within this call, and the view written out lives in the
     // handle's own `measurable` cell.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     if let Err(error) = inner.metric.measurable() {
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         return unsafe { fail_with(out_err, error) };
@@ -275,7 +279,7 @@ pub unsafe extern "C" fn kafka_common_metrics_KafkaMetric_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid metric handle, as
     // `kafka_metric_ref` requires; the reference is used only within this call.
-    into_c_string(&unsafe { kafka_metric_ref(self_) }.to_string())
+    into_c_string(&unsafe { kafka_metric_ref(self_, "self_") }.to_string())
 }
 
 /// Frees a metric handle; null is a no-op. The metric stays registered.
@@ -381,9 +385,12 @@ mod tests {
             // Setting through the config handle does not change the metric;
             // `set_config` does.
             kafka_common_metrics_MetricConfig_set_samples(config, 7);
-            assert_eq!(kafka_metric_ref(handle).config().samples(), MetricConfig::DEFAULT_NUM_SAMPLES);
+            assert_eq!(
+                kafka_metric_ref(handle, "handle").config().samples(),
+                MetricConfig::DEFAULT_NUM_SAMPLES
+            );
             kafka_common_metrics_KafkaMetric_set_config(handle, config);
-            assert_eq!(kafka_metric_ref(handle).config().samples(), 7);
+            assert_eq!(kafka_metric_ref(handle, "handle").config().samples(), 7);
             kafka_common_metrics_MetricConfig_destroy(config);
             let config = kafka_common_metrics_KafkaMetric_config(handle);
             assert_eq!(kafka_common_metrics_MetricConfig_samples(config), 7);

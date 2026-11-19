@@ -15,11 +15,12 @@
 //! `kafka_common_TopicPartitionReplica_t`:
 //! `org.apache.kafka.common.TopicPartitionReplica` (CLAUDE.md §4).
 
+use crate::ffi::precondition::{require_ref, require_str};
 use std::ffi::{CString, c_char};
 
 use crate::common::TopicPartitionReplica;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, into_c_string, owned_c_string};
+use crate::ffi::util::{into_c_string, owned_c_string};
 
 /// Opaque handle to a [`TopicPartitionReplica`].
 #[repr(C)]
@@ -39,13 +40,16 @@ struct TopicPartitionReplicaInner {
 /// # Safety
 ///
 /// `replica` must be a valid topic-partition-replica handle, alive for `'a`.
-unsafe fn inner_ref<'a>(replica: *const kafka_common_TopicPartitionReplica_t) -> &'a TopicPartitionReplicaInner {
+unsafe fn inner_ref<'a>(
+    replica: *const kafka_common_TopicPartitionReplica_t,
+    param: &'static str,
+) -> &'a TopicPartitionReplicaInner {
     // SAFETY: Per this function's `# Safety`, `replica` is a valid topic-partition-replica handle
     // alive for `'a`, i.e. the `Box::into_raw` of a `TopicPartitionReplicaInner` in
     // `kafka_common_TopicPartitionReplica_new`, the only function that makes one, not yet
     // destroyed. No call mutates a `TopicPartitionReplicaInner`, so the shared reference is sound
     // for `'a`.
-    unsafe { &*(replica as *const TopicPartitionReplicaInner) }
+    unsafe { require_ref::<_, TopicPartitionReplicaInner>(replica, param) }
 }
 
 /// The replica behind a handle.
@@ -55,10 +59,11 @@ unsafe fn inner_ref<'a>(replica: *const kafka_common_TopicPartitionReplica_t) ->
 /// `replica` must be a valid topic-partition-replica handle, alive for `'a`.
 pub(crate) unsafe fn topic_partition_replica_ref<'a>(
     replica: *const kafka_common_TopicPartitionReplica_t,
+    param: &'static str,
 ) -> &'a TopicPartitionReplica {
     // SAFETY: Per this function's `# Safety`, `replica` is a valid topic-partition-replica handle
     // alive for `'a`, as `inner_ref` requires.
-    &unsafe { inner_ref(replica) }.replica
+    &unsafe { inner_ref(replica, param) }.replica
 }
 
 /// Creates a topic partition replica.
@@ -81,9 +86,9 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_new(
     broker_id: i32,
 ) -> *mut kafka_common_TopicPartitionReplica_t {
     // SAFETY: Per this function's `# Safety`, `topic` is a valid NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied into an owned `String`, so nothing borrows it after
+    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
-    let replica = TopicPartitionReplica::new(unsafe { c_str_to_string(topic) }, partition, broker_id);
+    let replica = TopicPartitionReplica::new(unsafe { require_str(topic, "topic") }, partition, broker_id);
     let topic_c = owned_c_string(replica.topic());
     Box::into_raw(Box::new(TopicPartitionReplicaInner { replica, topic_c }))
         as *mut kafka_common_TopicPartitionReplica_t
@@ -103,7 +108,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_topic(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-replica handle, as
     // `inner_ref` requires. The string returned is the inner's own `topic_c`, so it lives as long
     // as the handle; that is the rustdoc's "borrowed from the handle, valid until it is destroyed".
-    unsafe { inner_ref(self_) }.topic_c.as_ptr()
+    unsafe { inner_ref(self_, "self_") }.topic_c.as_ptr()
 }
 
 /// Returns the partition number.
@@ -118,7 +123,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_partition(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-replica handle, as
     // `inner_ref` requires; the reference is used only within this call.
-    unsafe { inner_ref(self_) }.replica.partition()
+    unsafe { inner_ref(self_, "self_") }.replica.partition()
 }
 
 /// Returns the id of the broker holding the replica.
@@ -133,7 +138,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_broker_id(
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-replica handle, as
     // `inner_ref` requires; the reference is used only within this call.
-    unsafe { inner_ref(self_) }.replica.broker_id()
+    unsafe { inner_ref(self_, "self_") }.replica.broker_id()
 }
 
 /// Returns `topic-partition-brokerId`.
@@ -150,7 +155,7 @@ pub unsafe extern "C" fn kafka_common_TopicPartitionReplica_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid topic-partition-replica handle, as
     // `inner_ref` requires; the reference is used only within this call, and the text is copied
     // into an owned string.
-    into_c_string(&unsafe { inner_ref(self_) }.replica.to_string())
+    into_c_string(&unsafe { inner_ref(self_, "self_") }.replica.to_string())
 }
 
 /// Frees an owned topic-partition-replica handle. Null is a no-op.

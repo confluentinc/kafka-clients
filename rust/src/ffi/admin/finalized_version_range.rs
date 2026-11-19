@@ -15,6 +15,7 @@
 //! `kafka_admin_FinalizedVersionRange_t`:
 //! `org.apache.kafka.clients.admin.FinalizedVersionRange` (CLAUDE.md §4).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{c_char, c_void};
 
 use crate::admin::FinalizedVersionRange;
@@ -42,12 +43,13 @@ pub(crate) struct FinalizedVersionRangeInner {
 /// `'a`.
 pub(crate) unsafe fn finalized_version_range_ref<'a>(
     range: *const kafka_admin_FinalizedVersionRange_t,
+    param: &'static str,
 ) -> &'a FinalizedVersionRange {
     // SAFETY: Per this function's `# Safety`, `range` is a valid finalized-version-range handle
     // kept alive for `'a`. Every `kafka_admin_FinalizedVersionRange_t` comes from
     // `box_finalized_version_range`, which boxes a `FinalizedVersionRangeInner`, so the cast yields
     // a valid shared reference. The type has no setters, so nothing mutates it while borrowed.
-    &unsafe { &*(range as *const FinalizedVersionRangeInner) }.range
+    &unsafe { require_ref::<_, FinalizedVersionRangeInner>(range, param) }.range
 }
 
 /// Hands `range` to C as an owned handle, freed with
@@ -120,7 +122,7 @@ pub unsafe extern "C" fn kafka_admin_FinalizedVersionRange_min_version_level(
 ) -> i16 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid finalized-version-range handle,
     // kept alive for this call, as `finalized_version_range_ref` requires.
-    unsafe { finalized_version_range_ref(self_) }.min_version_level()
+    unsafe { finalized_version_range_ref(self_, "self_") }.min_version_level()
 }
 
 /// Returns the maximum finalized version level.
@@ -135,7 +137,7 @@ pub unsafe extern "C" fn kafka_admin_FinalizedVersionRange_max_version_level(
 ) -> i16 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid finalized-version-range handle,
     // kept alive for this call, as `finalized_version_range_ref` requires.
-    unsafe { finalized_version_range_ref(self_) }.max_version_level()
+    unsafe { finalized_version_range_ref(self_, "self_") }.max_version_level()
 }
 
 /// Returns the text form of the range.
@@ -151,7 +153,7 @@ pub unsafe extern "C" fn kafka_admin_FinalizedVersionRange_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid finalized-version-range handle,
     // kept alive for this call, as `finalized_version_range_ref` requires.
-    into_c_string(&unsafe { finalized_version_range_ref(self_) }.to_string())
+    into_c_string(&unsafe { finalized_version_range_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned range handle; `NULL` is a no-op.
@@ -193,14 +195,14 @@ mod tests {
             let failed = kafka_admin_FinalizedVersionRange_new(3, 2, &mut error);
             assert!(failed.is_null());
             assert!(!error.is_null());
-            assert!(error_ref(error).error.is_local_illegal_argument_error());
+            assert!(error_ref(error, "error").error.is_local_illegal_argument_error());
             kafka_common_Error_destroy(error);
             error = ptr::null_mut();
 
             let range = kafka_admin_FinalizedVersionRange_new(1, 4, &mut error);
             assert!(error.is_null());
             let expected = FinalizedVersionRange::new(1, 4).unwrap();
-            assert_eq!(*finalized_version_range_ref(range), expected);
+            assert_eq!(*finalized_version_range_ref(range, "range"), expected);
             assert_eq!(kafka_admin_FinalizedVersionRange_min_version_level(range), 1);
             assert_eq!(kafka_admin_FinalizedVersionRange_max_version_level(range), 4);
             let s = kafka_admin_FinalizedVersionRange_to_string(range);

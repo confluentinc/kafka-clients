@@ -25,6 +25,7 @@
 //! the call, an output is borrowed from the handle; `data == NULL` is Java's
 //! `null`.
 
+use crate::ffi::precondition::{require_mut, require_ref};
 use std::ffi::{CString, c_char};
 use std::sync::Mutex;
 
@@ -97,11 +98,12 @@ impl SubscriptionInner {
 /// time.
 unsafe fn subscription_inner<'a>(
     sub: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
+    param: &'static str,
 ) -> &'a SubscriptionInner {
     // SAFETY: Per this function's `# Safety`, `sub` is a `Box<SubscriptionInner>` from
     // `SubscriptionInner::boxed`, the only constructor, kept alive for `'a`, during which nothing
     // takes a `&mut` to it, so the shared reference is valid for `'a`.
-    unsafe { &*(sub as *const SubscriptionInner) }
+    unsafe { require_ref::<_, SubscriptionInner>(sub, param) }
 }
 
 /// The subscription behind a handle.
@@ -112,10 +114,11 @@ unsafe fn subscription_inner<'a>(
 /// which nothing takes a `&mut` to it (see `subscription_inner`).
 pub(crate) unsafe fn subscription_ref<'a>(
     sub: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
+    param: &'static str,
 ) -> &'a Subscription {
     // SAFETY: Per this function's `# Safety`, `sub` is a valid subscription handle kept alive for
     // `'a`, during which nothing takes a `&mut` to it, as `subscription_inner` requires.
-    &unsafe { subscription_inner(sub) }.sub
+    &unsafe { subscription_inner(sub, param) }.sub
 }
 
 /// The assignment behind a handle.
@@ -125,11 +128,12 @@ pub(crate) unsafe fn subscription_ref<'a>(
 /// `assignment` must be a valid assignment handle kept alive for `'a`.
 pub(crate) unsafe fn assignment_ref<'a>(
     assignment: *const kafka_consumer_ConsumerPartitionAssignor_Assignment_t,
+    param: &'static str,
 ) -> &'a Assignment {
     // SAFETY: Per this function's `# Safety`, `assignment` is a `Box<Assignment>` from one of the
     // `Assignment` constructors here, kept alive for `'a`, and no handle to an assignment is ever
     // mutated, so the shared reference is valid for `'a`.
-    unsafe { &*(assignment as *const Assignment) }
+    unsafe { require_ref::<_, Assignment>(assignment, param) }
 }
 
 /// `userData` as a Rust value, copied during the call.
@@ -155,9 +159,17 @@ unsafe fn user_data_of(user_data: kafka_Bytes_t) -> Option<Vec<u8>> {
 ///
 /// - `topics` - The list of topics to subscribe to
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topics` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `topics` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `topics` must be null or a valid list of strings.
+/// `topics` must be a valid list of strings.
 ///
 /// `topics` is copied during the call. The returned handle is owned by the caller, freed with
 /// [`kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy`].
@@ -166,10 +178,10 @@ unsafe fn user_data_of(user_data: kafka_Bytes_t) -> Option<Vec<u8>> {
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_new(
     topics: *const kafka_List_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t {
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements are
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list whose elements are
     // NUL-terminated strings, as `list_strings` requires; the strings are copied, so the borrow
     // lasts for this call only.
-    SubscriptionInner::boxed(Subscription::new(unsafe { list_strings(topics) }))
+    SubscriptionInner::boxed(Subscription::new(unsafe { list_strings(topics, "topics") }))
 }
 
 /// `new Subscription(List<String> topics, ByteBuffer userData)`.
@@ -179,9 +191,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_n
 /// - `topics` - The list of topics to subscribe to
 /// - `user_data` - Nullable user data to include in the subscription
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topics` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `topics` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `topics` must be null or a valid list of strings; `user_data`'s `data`
+/// `topics` must be a valid list of strings; `user_data`'s `data`
 /// null or pointing to `len` readable bytes not written during the call.
 ///
 /// `topics` and `user_data` are copied during the call. The returned handle is owned by the caller,
@@ -192,13 +212,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
     topics: *const kafka_List_t,
     user_data: kafka_Bytes_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t {
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements are
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list whose elements are
     // NUL-terminated strings, as `list_strings` requires; the strings are copied, so the borrow
     // lasts for this call only. Per this function's `# Safety`, `user_data`'s `data` is null or
     // points to `len` readable bytes not written during the call, as `user_data_of` requires.
-    SubscriptionInner::boxed(Subscription::with_user_data(unsafe { list_strings(topics) }, unsafe {
-        user_data_of(user_data)
-    }))
+    SubscriptionInner::boxed(Subscription::with_user_data(
+        unsafe { list_strings(topics, "topics") },
+        unsafe { user_data_of(user_data) },
+    ))
 }
 
 /// `new Subscription(List<String> topics, ByteBuffer userData, List<TopicPartition> ownedPartitions)`;
@@ -211,9 +232,18 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
 /// - `user_data` - Nullable user data to include in the subscription
 /// - `owned_partitions` - The partitions currently owned by this consumer
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topics` is `NULL`
+/// - `LocalNullPointerError` if `owned_partitions` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `topics`, `owned_partitions` panic; Java stores `null`.
+///
 /// # Safety
 ///
-/// `topics` and `owned_partitions` must be null or valid lists of the
+/// `topics` and `owned_partitions` must be valid lists of the
 /// documented element types; `user_data`'s `data` null or pointing to `len`
 /// readable bytes not written during the call.
 #[ffi_guard]
@@ -224,17 +254,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
     owned_partitions: *const kafka_List_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Subscription_t {
     SubscriptionInner::boxed(Subscription::with_user_data_owned_partitions(
-        // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements
+        // SAFETY: Per this function's `# Safety`, `topics` is a valid list whose elements
         // are NUL-terminated strings, as `list_strings` requires; the strings are copied, so the
         // borrow lasts for this call only.
-        unsafe { list_strings(topics) },
+        unsafe { list_strings(topics, "topics") },
         // SAFETY: Per this function's `# Safety`, `user_data`'s `data` is null or points to `len`
         // readable bytes not written during the call, as `user_data_of` requires.
         unsafe { user_data_of(user_data) },
-        // SAFETY: Per this function's `# Safety`, `owned_partitions` is null or a valid list whose
+        // SAFETY: Per this function's `# Safety`, `owned_partitions` is a valid list whose
         // elements are topic-partition handles, as `list_topic_partitions` requires; the values are
         // cloned, so the borrow lasts for this call only.
-        unsafe { list_topic_partitions(owned_partitions) },
+        unsafe { list_topic_partitions(owned_partitions, "owned_partitions") },
     ))
 }
 
@@ -260,7 +290,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_w
         // SAFETY: Per this function's `# Safety`, `options` is a valid options handle, a
         // `Box<SubscriptionOptions>` from `kafka_consumer_SubscriptionOptionsBuilder_build`, which
         // nothing mutates; the value is cloned, so the borrow lasts for this call only.
-        unsafe { &*(options as *const SubscriptionOptions) }.clone(),
+        unsafe { require_ref::<_, SubscriptionOptions>(options, "options") }.clone(),
     ))
 }
 
@@ -283,7 +313,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_t
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `subscription_ref` requires.
-    box_string_list(unsafe { subscription_ref(self_) }.topics())
+    box_string_list(unsafe { subscription_ref(self_, "self_") }.topics())
 }
 
 /// `ownedPartitions()`: a list of `kafka_common_TopicPartition_t *`.
@@ -305,7 +335,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_o
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `subscription_ref` requires.
-    topic_partition_list(unsafe { subscription_ref(self_) }.owned_partitions().iter().cloned())
+    topic_partition_list(unsafe { subscription_ref(self_, "self_") }.owned_partitions().iter().cloned())
 }
 
 /// `userData()`, `data == NULL` for Java `null`.
@@ -327,7 +357,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_u
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `subscription_ref` requires. The returned view borrows the
     // handle's bytes, which the rustdoc tells the caller.
-    kafka_Bytes_t::from_option(unsafe { subscription_ref(self_) }.user_data())
+    kafka_Bytes_t::from_option(unsafe { subscription_ref(self_, "self_") }.user_data())
 }
 
 /// `groupInstanceId()`, `NULL` for `Optional.empty()`.
@@ -351,7 +381,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_g
     // the only use of the reference; only `set_group_instance_id` takes a `&mut` to it, and it
     // requires that no other call uses the handle at the same time, as `subscription_inner`
     // requires.
-    unsafe { subscription_inner(self_) }
+    unsafe { subscription_inner(self_, "self_") }
         .group_instance_id_c
         .lock()
         .unwrap()
@@ -378,7 +408,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_s
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, a `Box<SubscriptionInner>`
     // from `SubscriptionInner::boxed`, that no other call uses at the same time, so the exclusive
     // reference, used only within this call, aliases nothing.
-    let inner = unsafe { &mut *(self_ as *mut SubscriptionInner) };
+    let inner = unsafe { require_mut::<_, SubscriptionInner>(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `group_instance_id` is null or a valid NUL-terminated
     // string, as `c_str_to_option` requires.
     let id = unsafe { c_str_to_option(group_instance_id) };
@@ -404,7 +434,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_r
 ) -> *const c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `subscription_inner` requires.
-    unsafe { subscription_inner(self_) }
+    unsafe { subscription_inner(self_, "self_") }
         .rack_id_c
         .as_ref()
         .map_or(std::ptr::null(), |c| c.as_ptr())
@@ -419,16 +449,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_r
 /// # Safety
 ///
 /// `self_` must be a valid handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_generation_id(
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> i32 {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `subscription_ref` requires.
-    // A caught Rust panic returns -2, which is no generation: Java's `Subscription` stores a
-    // negative one as `Optional.empty()`.
-    unsafe { subscription_ref(self_) }.generation_id().unwrap_or(-1)
+    unsafe { subscription_ref(self_, "self_") }.generation_id().unwrap_or(-1)
 }
 
 /// Java `toString()`.
@@ -448,7 +476,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_t
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Subscription_t,
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid subscription handle, as `subscription_ref` requires; the string is built during the call.
-    into_c_string(&unsafe { subscription_ref(self_) }.to_string())
+    into_c_string(&unsafe { subscription_ref(self_, "self_") }.to_string())
 }
 
 /// Frees a handle; a null pointer is a no-op.
@@ -481,9 +509,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_d
 ///
 /// - `partitions` - The list of partitions assigned to the consumer
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `partitions` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `partitions` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `partitions` must be null or a valid list of topic-partition handles.
+/// `partitions` must be a valid list of topic-partition handles.
 ///
 /// `partitions` is copied during the call. The returned handle is owned by the caller, freed with
 /// [`kafka_consumer_ConsumerPartitionAssignor_Assignment_destroy`].
@@ -492,11 +528,12 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Subscription_d
 pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new(
     partitions: *const kafka_List_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t {
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose elements
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list whose elements
     // are topic-partition handles, as `list_topic_partitions` requires; the values are cloned, so
     // the borrow lasts for this call only.
-    Box::into_raw(Box::new(Assignment::new(unsafe { list_topic_partitions(partitions) })))
-        as *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t
+    Box::into_raw(Box::new(Assignment::new(unsafe {
+        list_topic_partitions(partitions, "partitions")
+    }))) as *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t
 }
 
 /// `new Assignment(List<TopicPartition> partitions, ByteBuffer userData)`.
@@ -506,9 +543,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_new
 /// - `partitions` - The list of partitions assigned to the consumer
 /// - `user_data` - Nullable user data to include in the assignment
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `partitions` is `NULL`
+///
+/// # Translation notes
+///
+/// WARNING: `NULL` `partitions` panics; Java stores `null`.
+///
 /// # Safety
 ///
-/// `partitions` must be null or a valid list of topic-partition handles;
+/// `partitions` must be a valid list of topic-partition handles;
 /// `user_data`'s `data` null or pointing to `len` readable bytes not written
 /// during the call.
 ///
@@ -521,10 +566,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_wit
     user_data: kafka_Bytes_t,
 ) -> *mut kafka_consumer_ConsumerPartitionAssignor_Assignment_t {
     Box::into_raw(Box::new(Assignment::with_user_data(
-        // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list whose
+        // SAFETY: Per this function's `# Safety`, `partitions` is a valid list whose
         // elements are topic-partition handles, as `list_topic_partitions` requires; the values are
         // cloned, so the borrow lasts for this call only.
-        unsafe { list_topic_partitions(partitions) },
+        unsafe { list_topic_partitions(partitions, "partitions") },
         // SAFETY: Per this function's `# Safety`, `user_data`'s `data` is null or points to `len`
         // readable bytes not written during the call, as `user_data_of` requires.
         unsafe { user_data_of(user_data) },
@@ -550,7 +595,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_par
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `assignment_ref` requires.
-    topic_partition_list(unsafe { assignment_ref(self_) }.partitions().iter().cloned())
+    topic_partition_list(unsafe { assignment_ref(self_, "self_") }.partitions().iter().cloned())
 }
 
 /// `userData()`, `data == NULL` for Java `null`.
@@ -572,7 +617,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_use
     // SAFETY: Per this function's `# Safety`, `self_` is a valid handle, alive for this expression,
     // the only use of the reference, as `assignment_ref` requires. The returned view borrows the
     // handle's bytes, which the rustdoc tells the caller.
-    kafka_Bytes_t::from_option(unsafe { assignment_ref(self_) }.user_data())
+    kafka_Bytes_t::from_option(unsafe { assignment_ref(self_, "self_") }.user_data())
 }
 
 /// Java `toString()`.
@@ -592,7 +637,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerPartitionAssignor_Assignment_to_
     self_: *const kafka_consumer_ConsumerPartitionAssignor_Assignment_t,
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid assignment handle, as `assignment_ref` requires; the string is built during the call.
-    into_c_string(&unsafe { assignment_ref(self_) }.to_string())
+    into_c_string(&unsafe { assignment_ref(self_, "self_") }.to_string())
 }
 
 /// Frees a handle; a null pointer is a no-op.
@@ -633,7 +678,7 @@ unsafe fn with_builder(
     // `Option<SubscriptionOptionsBuilder>` in `kafka_consumer_SubscriptionOptionsBuilder_new`, the
     // only constructor, that no other call uses at the same time, so the exclusive reference, used
     // only within this call, aliases nothing.
-    let slot = unsafe { &mut *(builder as *mut Option<SubscriptionOptionsBuilder>) };
+    let slot = unsafe { require_mut::<_, Option<SubscriptionOptionsBuilder>>(builder, "builder") };
     if let Some(b) = slot.take() {
         *slot = Some(f(b));
     }
@@ -657,24 +702,30 @@ pub extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_new() -> *mut kafka_
 
 /// Sets the subscribed topics.
 ///
+/// WARNING: `NULL` `topics` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `topics` - the subscribed topics (mandatory), a list of `char *` copied during the call
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `topics` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a valid builder handle that no other call uses at the
-/// same time, and `topics` null or a valid list of strings.
+/// same time, and `topics` a valid list of strings.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_topics(
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     topics: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `topics` is null or a valid list whose elements are
+    // SAFETY: Per this function's `# Safety`, `topics` is a valid list whose elements are
     // NUL-terminated strings, as `list_strings` requires; the strings are copied, so the borrow
     // lasts for this call only.
-    let topics = unsafe { list_strings(topics) };
+    let topics = unsafe { list_strings(topics, "topics") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_topics(topics)) }
@@ -707,14 +758,20 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_user_data
 
 /// Sets the owned partitions.
 ///
+/// WARNING: `NULL` `owned_partitions` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `owned_partitions` - the owned partitions, a list of `kafka_common_TopicPartition_t *` copied during the call
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `owned_partitions` is `NULL`
+///
 /// # Safety
 ///
 /// `self_` must be a valid builder handle that no other call uses at the
-/// same time, and `owned_partitions` null or a valid list of
+/// same time, and `owned_partitions` a valid list of
 /// topic-partition handles.
 #[ffi_guard]
 #[unsafe(no_mangle)]
@@ -722,10 +779,10 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_set_owned_par
     self_: *mut kafka_consumer_SubscriptionOptionsBuilder_t,
     owned_partitions: *const kafka_List_t,
 ) {
-    // SAFETY: Per this function's `# Safety`, `owned_partitions` is null or a valid list whose
+    // SAFETY: Per this function's `# Safety`, `owned_partitions` is a valid list whose
     // elements are topic-partition handles, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let owned_partitions = unsafe { list_topic_partitions(owned_partitions) };
+    let owned_partitions = unsafe { list_topic_partitions(owned_partitions, "owned_partitions") };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid builder handle that no other call
     // uses at the same time, as `with_builder` requires.
     unsafe { with_builder(self_, |b| b.set_owned_partitions(owned_partitions)) }
@@ -803,7 +860,7 @@ pub unsafe extern "C" fn kafka_consumer_SubscriptionOptionsBuilder_build(
     // `Option<SubscriptionOptionsBuilder>` in `kafka_consumer_SubscriptionOptionsBuilder_new`, the
     // only constructor, that no other call uses at the same time, so the exclusive reference, used
     // only within this call, aliases nothing.
-    let slot = unsafe { &mut *(self_ as *mut Option<SubscriptionOptionsBuilder>) };
+    let slot = unsafe { require_mut::<_, Option<SubscriptionOptionsBuilder>>(self_, "self_") };
     let Some(builder) = slot.take() else {
         // SAFETY: Per this function's `# Safety`, `out_err` is as `fail_with` requires.
         return unsafe { fail_with(out_err, Error::local_illegal_state("SubscriptionOptionsBuilder already built")) };
@@ -893,7 +950,7 @@ mod tests {
                     .unwrap(),
                 "gi"
             );
-            assert_eq!(subscription_ref(sub).group_instance_id(), Some("gi"));
+            assert_eq!(subscription_ref(sub, "sub").group_instance_id(), Some("gi"));
             assert_eq!(kafka_consumer_ConsumerPartitionAssignor_Subscription_generation_id(sub), -1);
             assert!(kafka_consumer_ConsumerPartitionAssignor_Subscription_rack_id(sub).is_null());
             kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy(sub);
@@ -933,7 +990,9 @@ mod tests {
             );
             kafka_consumer_ConsumerPartitionAssignor_Subscription_destroy(sub);
 
-            let assignment = kafka_consumer_ConsumerPartitionAssignor_Assignment_new(std::ptr::null());
+            let no_partitions = crate::ffi::util::kafka_List_new();
+            let assignment = kafka_consumer_ConsumerPartitionAssignor_Assignment_new(no_partitions);
+            kafka_List_destroy(no_partitions);
             let parts = kafka_consumer_ConsumerPartitionAssignor_Assignment_partitions(assignment);
             assert_eq!(kafka_List_size(parts), 0);
             kafka_List_destroy(parts);

@@ -21,6 +21,7 @@
 
 use crate::admin::DescribeClientQuotasOptions;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{require_mut, require_ref};
 
 /// Opaque handle to a [`DescribeClientQuotasOptions`], owned by the caller and freed with
 /// [`kafka_admin_DescribeClientQuotasOptions_destroy`].
@@ -37,12 +38,13 @@ pub struct kafka_admin_DescribeClientQuotasOptions_t {
 /// setter runs on it.
 pub(crate) unsafe fn describe_client_quotas_options_ref<'a>(
     options: *const kafka_admin_DescribeClientQuotasOptions_t,
+    param: &'static str,
 ) -> &'a DescribeClientQuotasOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_DescribeClientQuotasOptions_t` is the
     // `Box::into_raw` of a `Box<DescribeClientQuotasOptions>` (`boxed`), so the shared reference is
     // to a live `DescribeClientQuotasOptions` that nothing mutates while it is used.
-    unsafe { &*(options as *const DescribeClientQuotasOptions) }
+    unsafe { require_ref::<_, DescribeClientQuotasOptions>(options, param) }
 }
 
 /// Mutable access to the options behind a handle, for the in-place setters.
@@ -53,12 +55,13 @@ pub(crate) unsafe fn describe_client_quotas_options_ref<'a>(
 /// reference is live meanwhile.
 unsafe fn options_mut<'a>(
     options: *mut kafka_admin_DescribeClientQuotasOptions_t,
+    param: &'static str,
 ) -> &'a mut DescribeClientQuotasOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every `kafka_admin_DescribeClientQuotasOptions_t`
     // is the `Box::into_raw` of a `Box<DescribeClientQuotasOptions>` (`boxed`), so the exclusive
     // reference is to a live `DescribeClientQuotasOptions`.
-    unsafe { &mut *(options as *mut DescribeClientQuotasOptions) }
+    unsafe { require_mut::<_, DescribeClientQuotasOptions>(options, param) }
 }
 
 fn boxed(options: DescribeClientQuotasOptions) -> *mut kafka_admin_DescribeClientQuotasOptions_t {
@@ -97,7 +100,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasOptions_set_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
@@ -119,7 +122,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeClientQuotasOptions_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `describe_client_quotas_options_ref` requires.
-    unsafe { describe_client_quotas_options_ref(self_) }.timeout_ms().unwrap_or(-1)
+    unsafe { describe_client_quotas_options_ref(self_, "self_") }
+        .timeout_ms()
+        .unwrap_or(-1)
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

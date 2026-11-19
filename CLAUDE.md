@@ -5,7 +5,7 @@ Rust Kafka client implementation translated from the Java Kafka client (client o
 Any change to this prompt is to be avoided by automatic agents.
 Suggestions for changes are possible through the process highlighted in [agent-roles.md](.claude/rules/agent-roles.md).
 
-**The public API in Rust is not stable in versions <1.0, no issue in changing it**
+**The public API in Rust is stable since version 1.0.0, C FFI is experimental and may change**
 
 ## Translation Rules
 1. **Classes outside the repository**: when you find classes outside of the Kafka repository:
@@ -130,8 +130,8 @@ Suggestions for changes are possible through the process highlighted in [agent-r
     - preserve Java namespaces in first part of the function name, skipping `clients`:
       - `org.apache.kafka.clients.producer.KafkaProducer` -> `kafka_producer_KafkaProducer_t`
       - `org.apache.kafka.clients.producer.MockProducer` -> `kafka_producer_MockProducer_t`
-    - Don't check for failing programming preconditions like NULLs on required parameters
-      or parameters not following the function parameters preconditions.
+    - Do panic on failing type preconditions, for example when passing NULL for a mandatory parameter, and propagate the panic in the fallible functions, always in the calls from the bindings. The returned error and message must match the Java one including `LocalNullPointerError`. Delegate rest of precondition validation to the Rust client. In C headers dedicated to C users instead, the panic aborts instead of always returning an error.
+    Never cause a segmentation fault from the C call.
     - Overloaded C function names MUST correspond to the Rust methods plus the corresponding prefix, `Option` struct builder MUST also
       be available to C when it's present in Rust.
     - Enums: as with errors given `base_package_Foo` is the enum name, we MUST have for every value, let's say `a` or `b` the corresponding function:

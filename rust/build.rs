@@ -182,24 +182,30 @@ mod bindings_header {
  *     panic showing only in the log;
  *   - any other function T f(args) is declared only as its twin
  *     T f_err(args, kafka_common_Error_t **out_err), with the documentation and
- *     the preconditions of f. On a caught panic it stores the error in
- *     *out_err and returns the value f returns on a panic; otherwise it
- *     returns what f returns and leaves *out_err untouched.
- * out_err must not be NULL and *out_err must be NULL on entry; neither is
- * checked. The caller owns an error stored there and frees it with
- * kafka_common_Error_destroy_err. A caught panic has the code
- * kafka_common_Error_LOCAL_ILLEGAL_STATE and a message beginning "Rust panic
- * caught at the FFI boundary in <function>", naming the twin for a twin.
+ *     the preconditions of f. Where f aborts the process on a caught panic, a
+ *     NULL mandatory argument included, the twin stores the error in *out_err
+ *     and returns the failure value of its return type, as a fallible function
+ *     does; otherwise it returns what f returns and leaves *out_err untouched.
+ * out_err must not be NULL and *out_err must be NULL on entry; a NULL out_err
+ * leaves nothing to carry an error, so the process aborts when there is one.
+ * The caller owns an error stored there and frees it with
+ * kafka_common_Error_destroy_err. A NULL mandatory argument is reported with
+ * the error Java throws there (kafka_common_Error_LOCAL_NULL_POINTER, Java's
+ * NullPointerException, with the message "<parameter> must not be null",
+ * unless Java checks the argument with an error of its own). Any other caught
+ * panic is a bug: it has the code kafka_common_Error_LOCAL_ILLEGAL_STATE and a
+ * message beginning "Rust panic caught at the FFI boundary in <function>",
+ * naming the twin for a twin.
  *
- * A panic is a bug in this library and may leave the handle it happened on in
- * an inconsistent state: destroy that handle and create a new one. Later calls
+ * A panic that is a bug may leave the handle it happened on in an
+ * inconsistent state: destroy that handle and create a new one. Later calls
  * on it can keep failing, because a poisoned lock is never cleared; its
  * _destroy_err still frees it and runs its pending callbacks, each exactly
  * once.
  *
  * Include either this header or confluent_kafka.h, never both: they declare
  * the same types. C programs use confluent_kafka.h, whose infallible functions
- * return their values directly.
+ * return their values directly and abort the process on a caught panic.
  */"#;
 
     /// Replaces every function of `bindings` that has no error channel by its
@@ -233,7 +239,7 @@ mod bindings_header {
             doc.push(String::new());
         }
         doc.push(format!(
-            " The `_err` twin of `{name}`: on a caught panic it stores the error in `*out_err` and returns the value `{name}` returns on a panic; otherwise it returns what `{name}` returns and leaves `*out_err` untouched."
+            " The `_err` twin of `{name}`: on a caught panic, a NULL mandatory argument included, it stores the error in `*out_err` and returns the failure value of its return type, where `{name}` aborts the process; otherwise it returns what `{name}` returns and leaves `*out_err` untouched."
         ));
     }
 

@@ -27,7 +27,8 @@ use crate::ffi::admin::{
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{box_string_keyed_map, c_str_to_string, kafka_Map_t, map_entries};
+use crate::ffi::precondition::require_map;
+use crate::ffi::util::{box_string_keyed_map, c_str_to_string, kafka_Map_t};
 
 /// Opaque handle to a [`DescribeClassicGroupsResult`], owned by the caller
 /// and freed with [`kafka_admin_DescribeClassicGroupsResult_destroy`].
@@ -51,12 +52,13 @@ pub(crate) fn box_describe_classic_groups_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_DescribeClassicGroupsResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<DescribeClassicGroupsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_DescribeClassicGroupsResult_t` is built by
     // `box_result::<DescribeClassicGroupsResult, _>` (in `box_describe_classic_groups_result`), as
     // `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// The C shape of `all()`'s value: an owned map, sorted by group id, of
@@ -91,7 +93,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_described_group
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     let groups = h.result.described_groups();
     h.ctx.string_keyed_future_map(groups.iter(), |ctx, future| {
         // SAFETY: `destroy_classic_group_description_element` frees exactly the handle
@@ -128,7 +130,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_map_element` frees exactly the map `box_descriptions` makes through
     // `box_string_keyed_map`, and the handle holds only owned data and no thread-bound state, so it
     // may be freed from any thread and read from several at once, as `handle_future` requires.
@@ -143,14 +145,20 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
 
 /// Creates a result from a map of group id to the future of its description.
 ///
+/// WARNING: `NULL` `futures` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `futures` - a map of `const char *` group ids to `const kafka_common_KafkaFuture_t *` whose
 ///   value is a `kafka_admin_ClassicGroupDescription_t *`, copied during the call
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `futures` is `NULL`
+///
 /// # Safety
 ///
-/// `futures` must be `NULL` or a valid map whose keys are valid NUL-terminated strings and whose
+/// `futures` must be a valid map whose keys are valid NUL-terminated strings and whose
 /// values are valid future handles, each successful one's value a valid
 /// `kafka_admin_ClassicGroupDescription_t *`. The caller keeps ownership of the map, its keys, its
 /// futures and their values. Each future should already be complete
@@ -162,11 +170,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_all(
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_new(
     futures: *const kafka_Map_t,
 ) -> *mut kafka_admin_DescribeClassicGroupsResult_t {
-    // SAFETY: Per this function's `# Safety`, `futures` is null or a valid map handle. The borrow
+    // SAFETY: Per this function's `# Safety`, `futures` is a valid map handle. The borrow
     // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
     // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
-    // the same time. That is what `map_entries` requires.
-    let futures = unsafe { map_entries(futures) }
+    // the same time. That is what `require_map` requires.
+    let futures = unsafe { require_map(futures, "futures") }
         .iter()
         .map(|&(k, v)| {
             (
@@ -180,7 +188,8 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_new(
                 // ends within the call, as `resolved_future` requires.
                 unsafe {
                     resolved_future(v as *const kafka_common_KafkaFuture_t, "DescribeClassicGroupsResult", |value| {
-                        classic_group_description_ref(value as *const kafka_admin_ClassicGroupDescription_t).clone()
+                        classic_group_description_ref(value as *const kafka_admin_ClassicGroupDescription_t, "value")
+                            .clone()
                     })
                 },
             )

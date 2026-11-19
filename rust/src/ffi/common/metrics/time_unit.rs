@@ -27,6 +27,7 @@ use std::ffi::c_char;
 
 use crate::common::metrics::TimeUnit;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::require_ref;
 
 /// Opaque handle to a [`TimeUnit`] singleton.
 // the Rust-only stand-in for `java.util.concurrent.TimeUnit`
@@ -47,6 +48,14 @@ pub enum kafka_common_metrics_TimeUnit_e {
     kafka_common_metrics_TimeUnit_MINUTES,
     kafka_common_metrics_TimeUnit_HOURS,
     kafka_common_metrics_TimeUnit_DAYS,
+}
+
+/// The value an `_err` twin returning [`kafka_common_metrics_TimeUnit_e`] returns beside the error it
+/// stores in `*out_err`; the caller reads `*out_err`, not the value.
+impl crate::ffi::common::FailValue for kafka_common_metrics_TimeUnit_e {
+    fn fail() -> Self {
+        Self::kafka_common_metrics_TimeUnit_NANOSECONDS
+    }
 }
 
 /// One static instance per value, indexed by `kafka_common_metrics_TimeUnit_e`.
@@ -84,11 +93,11 @@ pub(crate) fn singleton(unit: TimeUnit) -> *const kafka_common_metrics_TimeUnit_
 /// # Safety
 ///
 /// `unit` must be a singleton returned by this module.
-pub(crate) unsafe fn value_of(unit: *const kafka_common_metrics_TimeUnit_t) -> TimeUnit {
+pub(crate) unsafe fn value_of(unit: *const kafka_common_metrics_TimeUnit_t, param: &'static str) -> TimeUnit {
     // SAFETY: Per this function's `# Safety`, `unit` is a singleton returned by this module, i.e. a
     // pointer to an element of the `static` `VARIANTS` array (`singleton`), so it points at a live,
     // initialised `TimeUnit`, which is `Copy` and read out here.
-    unsafe { *(unit as *const TimeUnit) }
+    *unsafe { require_ref::<_, TimeUnit>(unit, param) }
 }
 
 /// Returns `TimeUnit.NANOSECONDS`, a static singleton never freed.
@@ -142,21 +151,17 @@ pub extern "C" fn kafka_common_metrics_TimeUnit_days() -> *const kafka_common_me
 
 /// Returns the C enumerator of a singleton, for a `switch`.
 ///
-/// A caught Rust panic returns `kafka_common_metrics_TimeUnit_NANOSECONDS`, the first enumerator:
-/// the enum has no `UNKNOWN` constant, so the panic cannot be told apart from that value, and is
-/// only logged.
-///
 /// # Safety
 ///
 /// `self_` must be a singleton returned by this module.
-#[ffi_guard(fallback = kafka_common_metrics_TimeUnit_e::kafka_common_metrics_TimeUnit_NANOSECONDS)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_metrics_TimeUnit__enum(
     self_: *const kafka_common_metrics_TimeUnit_t,
 ) -> kafka_common_metrics_TimeUnit_e {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    enum_of(unsafe { value_of(self_) })
+    enum_of(unsafe { value_of(self_, "self_") })
 }
 
 /// Returns the Java constant name.
@@ -175,7 +180,7 @@ pub unsafe extern "C" fn kafka_common_metrics_TimeUnit_name(
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out, and the names returned are static C-string
     // literals, never freed, as the rustdoc states.
-    match unsafe { value_of(self_) } {
+    match unsafe { value_of(self_, "self_") } {
         TimeUnit::Nanoseconds => c"NANOSECONDS".as_ptr(),
         TimeUnit::Microseconds => c"MICROSECONDS".as_ptr(),
         TimeUnit::Milliseconds => c"MILLISECONDS".as_ptr(),
@@ -208,7 +213,7 @@ pub unsafe extern "C" fn kafka_common_metrics_TimeUnit_to_millis(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a singleton returned by this module, as
     // `value_of` requires; the value is copied out.
-    unsafe { value_of(self_) }.to_millis(window)
+    unsafe { value_of(self_, "self_") }.to_millis(window)
 }
 
 #[cfg(test)]
@@ -224,7 +229,7 @@ mod tests {
             // SAFETY: Test code: `handle` is a singleton from `singleton`, which points into the
             // static `VARIANTS` array and is never freed, and the names read are static literals.
             unsafe {
-                assert_eq!(value_of(handle), unit);
+                assert_eq!(value_of(handle, "value"), unit);
                 assert_eq!(kafka_common_metrics_TimeUnit__enum(handle) as usize, index);
                 assert_eq!(
                     CStr::from_ptr(kafka_common_metrics_TimeUnit_name(handle)).to_str().unwrap(),

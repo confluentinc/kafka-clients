@@ -21,6 +21,7 @@
 
 use crate::admin::AlterPartitionReassignmentsOptions;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{require_mut, require_ref};
 
 /// Opaque handle to a [`AlterPartitionReassignmentsOptions`], owned by the caller and freed with
 /// [`kafka_admin_AlterPartitionReassignmentsOptions_destroy`].
@@ -37,13 +38,14 @@ pub struct kafka_admin_AlterPartitionReassignmentsOptions_t {
 /// setter runs on it.
 pub(crate) unsafe fn alter_partition_reassignments_options_ref<'a>(
     options: *const kafka_admin_AlterPartitionReassignmentsOptions_t,
+    param: &'static str,
 ) -> &'a AlterPartitionReassignmentsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_AlterPartitionReassignmentsOptions_t`
     // is the `Box::into_raw` of a `Box<AlterPartitionReassignmentsOptions>` (`boxed`), so the
     // shared reference is to a live `AlterPartitionReassignmentsOptions` that nothing mutates while
     // it is used.
-    unsafe { &*(options as *const AlterPartitionReassignmentsOptions) }
+    unsafe { require_ref::<_, AlterPartitionReassignmentsOptions>(options, param) }
 }
 
 /// Mutable access to the options behind a handle, for the in-place setters.
@@ -54,13 +56,14 @@ pub(crate) unsafe fn alter_partition_reassignments_options_ref<'a>(
 /// reference is live meanwhile.
 unsafe fn options_mut<'a>(
     options: *mut kafka_admin_AlterPartitionReassignmentsOptions_t,
+    param: &'static str,
 ) -> &'a mut AlterPartitionReassignmentsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every
     // `kafka_admin_AlterPartitionReassignmentsOptions_t` is the `Box::into_raw` of a
     // `Box<AlterPartitionReassignmentsOptions>` (`boxed`), so the exclusive reference is to a live
     // `AlterPartitionReassignmentsOptions`.
-    unsafe { &mut *(options as *mut AlterPartitionReassignmentsOptions) }
+    unsafe { require_mut::<_, AlterPartitionReassignmentsOptions>(options, param) }
 }
 
 fn boxed(options: AlterPartitionReassignmentsOptions) -> *mut kafka_admin_AlterPartitionReassignmentsOptions_t {
@@ -100,7 +103,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_set_time
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
@@ -123,7 +126,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_timeout_
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `alter_partition_reassignments_options_ref`
     // requires.
-    unsafe { alter_partition_reassignments_options_ref(self_) }
+    unsafe { alter_partition_reassignments_options_ref(self_, "self_") }
         .timeout_ms()
         .unwrap_or(-1)
 }
@@ -146,7 +149,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_set_allo
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_allow_replication_factor_change(allow != 0);
 }
 
@@ -168,7 +171,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsOptions_allow_re
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `alter_partition_reassignments_options_ref`
     // requires.
-    i8::from(unsafe { alter_partition_reassignments_options_ref(self_) }.allow_replication_factor_change())
+    i8::from(unsafe { alter_partition_reassignments_options_ref(self_, "self_") }.allow_replication_factor_change())
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

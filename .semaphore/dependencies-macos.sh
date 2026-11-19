@@ -38,28 +38,45 @@ command -v cmake >/dev/null 2>&1 && cmake --version || echo "cmake not found"
 command -v rustc >/dev/null 2>&1 && rustc --version || echo "rustc not found"
 
 echo "=== Installing dependencies ==="
+# Each download is retried with `retry`, from .semaphore/job-start.sh, which every job sources
+# before this script. An installer downloads too, so it is retried as well.
 if ! command -v brew >/dev/null 2>&1; then
-  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  retry curl -fsSL -o /tmp/homebrew-install.sh https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh
+  retry env NONINTERACTIVE=1 /bin/bash /tmp/homebrew-install.sh
 fi
 eval "$(/opt/homebrew/bin/brew shellenv)"
-brew install cmake
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none
+retry brew install cmake
+retry curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh
+retry sh /tmp/rustup-init.sh -y --no-modify-path --default-toolchain none
 source "$HOME/.cargo/env"
-git submodule update --init --depth=1 kafka
+retry git submodule update --init --depth=1 kafka
 
 # MACOS_INSTALL_GRPC_CPP=true installs the build dependencies of the native C++
-# gRPC server (make build-grpc-native-c): the grpc++ and protobuf headers and
+# gRPC server (make -C c grpc-native): the grpc++ and protobuf headers and
 # libraries, protoc, grpc_cpp_plugin, and pkg-config. Homebrew provides prebuilt
 # bottles for this agent's macOS version, so no source build is required. Only
 # the job that needs these packages sets this variable.
 if [ "${MACOS_INSTALL_GRPC_CPP:-}" = "true" ]; then
-  brew install grpc
-  command -v pkg-config >/dev/null || brew install pkgconf
+  retry brew install grpc
+  command -v pkg-config >/dev/null || retry brew install pkgconf
+fi
+
+# MACOS_ENSURE_ROSETTA=true installs Rosetta 2 if it is missing. Building the
+# native .NET gRPC server (make -C dotnet grpc-native) runs Grpc.Tools'
+# protoc, and Grpc.Tools ships no macOS arm64 protoc, so on this arm64 agent it
+# runs the macosx_x64 one under Rosetta 2. The check runs an x86_64 slice of
+# /usr/bin/true and skips the install when that already works. Only the job that
+# needs Rosetta sets this variable.
+if [ "${MACOS_ENSURE_ROSETTA:-}" = "true" ]; then
+  if ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
+    sudo softwareupdate --install-rosetta --agree-to-license
+  fi
 fi
 
 # MACOS_SKIP_COLIMA=true skips the Colima/Docker bring-up below (the toolchain
-# setup above always runs). Intended for blocks whose tests need no container;
-# no block currently sets it.
+# setup above always runs). Intended for jobs whose tests need no container, or
+# that start Colima themselves: the "verify-dotnet (macOS arm64)" job sets it and
+# starts Colima after its unit tests.
 if [ "${MACOS_SKIP_COLIMA:-}" = "true" ]; then
   echo "=== MACOS_SKIP_COLIMA=true -- skipping Colima/Docker setup (unit-tests-only block) ==="
 else
@@ -75,7 +92,7 @@ else
   if colima status &>/dev/null; then
     echo "Colima is already running"
   else
-    command -v colima >/dev/null 2>&1 || brew install colima
+    command -v colima >/dev/null 2>&1 || retry brew install colima
     colima start --cpu 6 --memory 12 --disk 50
   fi
 

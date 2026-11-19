@@ -15,6 +15,7 @@
 //! `kafka_common_ClusterResource_t`: `org.apache.kafka.common.ClusterResource`
 //! (CLAUDE.md §4).
 
+use crate::ffi::precondition::require_ref;
 use std::ffi::{CString, c_char};
 use std::ptr;
 
@@ -52,13 +53,16 @@ impl ClusterResourceInner {
 /// # Safety
 ///
 /// `resource` must be a valid cluster-resource handle, alive for `'a`.
-unsafe fn inner_ref<'a>(resource: *const kafka_common_ClusterResource_t) -> &'a ClusterResourceInner {
+unsafe fn inner_ref<'a>(
+    resource: *const kafka_common_ClusterResource_t,
+    param: &'static str,
+) -> &'a ClusterResourceInner {
     // SAFETY: Per this function's `# Safety`, `resource` is a valid cluster-resource handle alive
     // for `'a`, so it points at a live `ClusterResourceInner`: the `Box::into_raw` of
     // `kafka_common_ClusterResource_new`, or the one a `kafka_common_Cluster_t` stores and hands
     // out through `ClusterResourceInner::as_ptr`, which lives as long as that cluster. No call
     // mutates a `ClusterResourceInner`, so the shared reference is sound for `'a`.
-    unsafe { &*(resource as *const ClusterResourceInner) }
+    unsafe { require_ref::<_, ClusterResourceInner>(resource, param) }
 }
 
 /// Create `ClusterResource` with a cluster id. Note that cluster id may be `NULL` if the
@@ -103,7 +107,7 @@ pub unsafe extern "C" fn kafka_common_ClusterResource_cluster_id(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster-resource handle, as
     // `inner_ref` requires. The string returned is the inner's own `cluster_id_c`, so it lives as
     // long as the handle; that is the rustdoc's "borrowed from the handle".
-    unsafe { inner_ref(self_) }
+    unsafe { inner_ref(self_, "self_") }
         .cluster_id_c
         .as_ref()
         .map_or(ptr::null(), |id| id.as_ptr())
@@ -123,7 +127,7 @@ pub unsafe extern "C" fn kafka_common_ClusterResource_to_string(
     // SAFETY: Per this function's `# Safety`, `self_` is a valid cluster-resource handle, as
     // `inner_ref` requires; the reference is used only within this call, and the text is copied
     // into an owned string.
-    into_c_string(&unsafe { inner_ref(self_) }.resource.to_string())
+    into_c_string(&unsafe { inner_ref(self_, "self_") }.resource.to_string())
 }
 
 /// Frees an owned cluster-resource handle. Null is a no-op; the resource

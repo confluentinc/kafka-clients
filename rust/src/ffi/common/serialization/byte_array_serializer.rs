@@ -52,12 +52,15 @@ pub(crate) struct GenericByteArraySerializer(ByteArraySerializer);
 /// or points at `len` readable bytes that outlive `'a` and are not written
 /// during it.
 unsafe fn bytes<'a>(data: Option<&GenericValue>) -> Option<&'a [u8]> {
-    let data = data.filter(|value| !value.is_null())?;
+    let data = data?.as_ptr() as *const kafka_Bytes_t;
+    if data.is_null() {
+        return None;
+    }
     // SAFETY: Per this function's `# Safety`, `data` is non-null here and points at a
     // `kafka_Bytes_t` whose `data` is null or points at `len` readable bytes that outlive `'a` and
     // are not written during it, so the read of the struct is sound and `kafka_Bytes_t::as_slice`'s
     // contract holds.
-    unsafe { (*(data.as_ptr() as *const kafka_Bytes_t)).as_slice() }
+    unsafe { (*data).as_slice() }
 }
 
 impl Serializer<GenericValue> for GenericByteArraySerializer {
@@ -110,12 +113,15 @@ impl Serializer<GenericValue> for GenericByteArraySerializer {
 /// # Safety
 ///
 /// `self_` must be a valid byte-array-serializer handle, alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_common_serialization_ByteArraySerializer_t) -> &'a SerializerHandle {
+unsafe fn handle<'a>(
+    self_: *const kafka_common_serialization_ByteArraySerializer_t,
+    param: &'static str,
+) -> &'a SerializerHandle {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid byte-array-serializer handle alive
     // for `'a`, the `SerializerHandle::boxed` of
     // `kafka_common_serialization_ByteArraySerializer_new`, as `SerializerHandle::from_ptr`
     // requires.
-    unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle) }
+    unsafe { SerializerHandle::from_ptr(self_ as *const SerializerHandle, param) }
 }
 
 /// `new ByteArraySerializer()`.
@@ -150,7 +156,7 @@ pub unsafe extern "C" fn kafka_common_serialization_ByteArraySerializer__as_Seri
     // `handle` requires; the reference is used only within this call, and the view returned lives
     // in the handle's `OnceLock`, as long as the handle, which is the rustdoc's "valid as long as
     // the handle".
-    unsafe { handle(self_) }.as_serializer().cast_mut()
+    unsafe { handle(self_, "self_") }.as_serializer().cast_mut()
 }
 
 /// Frees an owned handle; null is a no-op.

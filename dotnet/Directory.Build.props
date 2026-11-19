@@ -1,0 +1,69 @@
+<Project>
+
+  <!--
+    Shared MSBuild properties for every project in the Confluent.Kafka
+    .NET binding. Applied to the library and the unit-test project alike.
+    See dotnet/CLAUDE.md §4 (decisions) and §7.2 (build/style).
+  -->
+
+  <PropertyGroup>
+    <!-- Language + nullability (CLAUDE.md §4: #nullable enable project-wide). -->
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+
+    <!-- Style + warnings enforced at build (CLAUDE.md §7.2). -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisLevel>latest</AnalysisLevel>
+  </PropertyGroup>
+
+  <!-- The binding's own analyzers (analyzers/Confluent.Kafka.Analyzers, diagnostic ids CKRDA*), run by
+       every project but the analyzer and its tests; .editorconfig sets where each rule applies.
+       PrivateAssets keeps them out of the Confluent.Kafka package. -->
+  <ItemGroup Condition="'$(MSBuildProjectName)' != 'Confluent.Kafka.Analyzers' and '$(MSBuildProjectName)' != 'Confluent.Kafka.Analyzers.UnitTests'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)analyzers/Confluent.Kafka.Analyzers/Confluent.Kafka.Analyzers.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Common package metadata (Authors/Company = Confluent Inc.). -->
+  <PropertyGroup>
+    <Authors>Confluent Inc.</Authors>
+    <Company>Confluent Inc.</Company>
+    <Product>Confluent.Kafka</Product>
+    <Copyright>Copyright 2025 Confluent Inc.</Copyright>
+    <NeutralLanguage>en-US</NeutralLanguage>
+  </PropertyGroup>
+
+  <!-- The version of the Confluent.Kafka package, in NuGet's SemVer 2.0 form: X.Y.Z, or X.Y.Z-alpha.N,
+       -beta.N, -dev.N or -rc.N, where an -alpha.N, -beta.N or -rc.N may be followed by .dev.M for a dev
+       build (NuGet puts 4.4.0-alpha.1.dev.1 after 4.4.0-alpha.1, so the dev builds before 4.4.0-alpha.1
+       are 4.4.0-alpha.0.dev.M). MAJOR.MINOR is the Apache Kafka version (rfc/versioning.md). Set it with
+       `make bump-version VERSION=<crate version> PYTHON_VERSION=<Python version> DOTNET_VERSION=<version>`,
+       with the current crate and Python versions to change only this one; it refuses to lower it. A
+       dotnet/v<version> tag releases it (.semaphore/semaphore.yml, the "Release (.NET):" blocks). The one
+       <Version> element in this file: cargo xtask bump-version and the release scripts read and write it. -->
+  <PropertyGroup>
+    <Version>4.4.0-alpha.1</Version>
+  </PropertyGroup>
+
+  <!-- A CI build (Semaphore sets CI=true) maps the source paths in the PDBs to the repository's, so a
+       package built there names no build machine path. -->
+  <PropertyGroup Condition="'$(CI)' == 'true'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <!-- Strong-name signing. Applied to EVERY project (library + tests): a
+       strong-named library can only grant internals to a strong-named friend
+       (InternalsVisibleTo, see the library csproj). One shared key keeps the
+       identity consistent (ckd uses a separate key per project; a single key
+       is simpler for this binding). Decided early on purpose — adding a strong
+       name after the first published package would be a binary-breaking change
+       for consumers. The .snk is committed: a strong name is an identity, not
+       a security secret (publisher trust is NuGet/Authenticode signing). -->
+  <PropertyGroup>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>$(MSBuildThisFileDirectory)Confluent.Kafka.snk</AssemblyOriginatorKeyFile>
+  </PropertyGroup>
+
+</Project>

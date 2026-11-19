@@ -52,6 +52,7 @@
 
 #![expect(non_camel_case_types)]
 
+use crate::ffi::precondition::{fail, require_fn, require_ref, require_str};
 use std::ffi::{c_char, c_void};
 use std::future::Future;
 use std::sync::{Arc, Weak};
@@ -81,7 +82,7 @@ use crate::ffi::consumer::{
     topic_partition_info_map,
 };
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{c_str_to_string, kafka_List_t, kafka_Map_t};
+use crate::ffi::util::{kafka_List_t, kafka_Map_t};
 
 /// Opaque handle to a [`ConsumerHandle`].
 // Rust-only: a listener reenters the consumer through it (consumer-threading.md §31, §41), as a Java listener captures the consumer
@@ -113,12 +114,12 @@ pub(crate) fn box_consumer_handle(client: &Arc<Client>) -> *mut kafka_consumer_C
 ///
 /// `self_` must be a live handle, i.e. one from `box_consumer_handle` not yet
 /// destroyed, kept alive for `'a`.
-unsafe fn inner<'a>(self_: *const kafka_consumer_ConsumerHandle_t) -> &'a HandleInner {
+unsafe fn inner<'a>(self_: *const kafka_consumer_ConsumerHandle_t, param: &'static str) -> &'a HandleInner {
     // SAFETY: Per this function's `# Safety`, `self_` is a `Box<HandleInner>` from
     // `box_consumer_handle`, the only constructor, kept alive for `'a`; nothing takes a `&mut` to
     // it but `kafka_consumer_ConsumerHandle_destroy`, which no other call may overlap, so the
     // shared reference is valid for `'a`.
-    unsafe { &*(self_ as *const HandleInner) }
+    unsafe { require_ref::<_, HandleInner>(self_, param) }
 }
 
 fn destroyed() -> Error {
@@ -219,17 +220,21 @@ enum Wait<T> {
 
 /// Where the guard of a `_cb` entry point delivers a caught panic: the
 /// consumer's callbacks vector, or the calling thread once the consumer is
-/// destroyed, as [`HandleInner::run_cb`] delivers every completion (see
-/// [`deliver_panic`]).
+/// destroyed or `self_` is NULL, as [`HandleInner::run_cb`] delivers every
+/// completion (see [`deliver_panic`]).
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle.
+/// `self_` must be NULL or a live handle.
 unsafe fn completion_sink(self_: *const kafka_consumer_ConsumerHandle_t) -> impl FnOnce(CallbackJob) {
-    // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
-    // the only use of the reference, as `inner` requires; the sink keeps the upgraded `Arc`, if
-    // any, not the reference.
-    let client = unsafe { inner(self_) }.client.upgrade();
+    let client = if self_.is_null() {
+        None
+    } else {
+        // SAFETY: Per this function's `# Safety`, a non-NULL `self_` is a live handle, alive for
+        // this expression, the only use of the reference, as `inner` requires; the sink keeps the
+        // upgraded `Arc`, if any, not the reference.
+        unsafe { inner(self_, "self_") }.client.upgrade()
+    };
     move |job| match client {
         Some(client) => client.delivery.queue.push(job),
         None => job(),
@@ -267,10 +272,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, as `topic_partition_ref` requires; the value is cloned.
-    let partition = unsafe { topic_partition_ref(partition) }.clone();
+    let partition = unsafe { topic_partition_ref(partition, "partition") }.clone();
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -286,7 +291,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_seek_with_offset_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -326,12 +331,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_cb(
     cb: kafka_consumer_ConsumerHandle_seek_with_offset_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, as `topic_partition_ref` requires; the value is cloned.
-    let partition = unsafe { topic_partition_ref(partition) }.clone();
+    let partition = unsafe { topic_partition_ref(partition, "partition") }.clone();
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -377,14 +383,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, as `topic_partition_ref` requires; the value is cloned.
-    let partition = unsafe { topic_partition_ref(partition) }.clone();
+    let partition = unsafe { topic_partition_ref(partition, "partition") }.clone();
     // SAFETY: Per this function's `# Safety`, `offset_and_metadata` is a valid offset-and-metadata
     // handle, alive for this expression, as `offset_and_metadata_ref` requires; the value is
     // cloned.
-    let offset_and_metadata = unsafe { offset_and_metadata_ref(offset_and_metadata) }.clone();
+    let offset_and_metadata = unsafe { offset_and_metadata_ref(offset_and_metadata, "offset_and_metadata") }.clone();
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -400,7 +406,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -440,16 +446,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
     cb: kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, as `topic_partition_ref` requires; the value is cloned.
-    let partition = unsafe { topic_partition_ref(partition) }.clone();
+    let partition = unsafe { topic_partition_ref(partition, "partition") }.clone();
     // SAFETY: Per this function's `# Safety`, `offset_and_metadata` is a valid offset-and-metadata
     // handle, alive for this expression, as `offset_and_metadata_ref` requires; the value is
     // cloned.
-    let offset_and_metadata = unsafe { offset_and_metadata_ref(offset_and_metadata) }.clone();
+    let offset_and_metadata = unsafe { offset_and_metadata_ref(offset_and_metadata, "offset_and_metadata") }.clone();
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -480,6 +487,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_offset_and_meta
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Partitions collection cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -491,13 +502,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -513,7 +527,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -551,13 +565,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
     cb: kafka_consumer_ConsumerHandle_seek_to_beginning_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -588,6 +606,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_beginning_cb(
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalIllegalArgumentError` ("Partitions collection cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -599,13 +621,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -621,7 +646,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_seek_to_end_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -659,13 +684,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
     cb: kafka_consumer_ConsumerHandle_seek_to_end_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_illegal_argument("Partitions collection cannot be null"));
+    }
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -696,6 +725,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_to_end_cb(
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("The partitions to pause must be nonnull") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -707,13 +740,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to pause must be nonnull"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -727,7 +763,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_pause_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -765,13 +801,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
     cb: kafka_consumer_ConsumerHandle_pause_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to pause must be nonnull"));
+    }
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -802,6 +842,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_pause_cb(
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("The partitions to resume must be nonnull") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -813,13 +857,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to resume must be nonnull"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -836,7 +883,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_resume_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -874,13 +921,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_resume_cb(
     cb: kafka_consumer_ConsumerHandle_resume_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("The partitions to resume must be nonnull"));
+    }
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -929,10 +980,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, as `topic_partition_ref` requires; the value is cloned.
-    let partition = unsafe { topic_partition_ref(partition) }.clone();
+    let partition = unsafe { topic_partition_ref(partition, "partition") }.clone();
     let h = inner.handle.clone();
     let result = inner.run_blocking(
         "kafka_consumer_ConsumerHandle_position",
@@ -946,7 +997,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position(
 /// The completion of the `_cb` twin: `value` on success, `-1` beside
 /// an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_position_cb_t =
-    unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -984,12 +1035,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_cb(
     cb: kafka_consumer_ConsumerHandle_position_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, as `topic_partition_ref` requires; the value is cloned.
-    let partition = unsafe { topic_partition_ref(partition) }.clone();
+    let partition = unsafe { topic_partition_ref(partition, "partition") }.clone();
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -1041,10 +1093,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout(
 ) -> i64 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, as `topic_partition_ref` requires; the value is cloned.
-    let partition = unsafe { topic_partition_ref(partition) }.clone();
+    let partition = unsafe { topic_partition_ref(partition, "partition") }.clone();
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_position_with_timeout", async move {
         h.position_with_timeout(&partition, ms(timeout)?).await
@@ -1057,7 +1109,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout(
 /// The completion of the `_cb` twin: `value` on success, `-1` beside
 /// an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_position_with_timeout_cb_t =
-    unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1097,12 +1149,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_position_with_timeout_cb(
     cb: kafka_consumer_ConsumerHandle_position_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, alive
     // for this expression, as `topic_partition_ref` requires; the value is cloned.
-    let partition = unsafe { topic_partition_ref(partition) }.clone();
+    let partition = unsafe { topic_partition_ref(partition, "partition") }.clone();
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -1155,11 +1208,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    let inner = unsafe { inner(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_committed", async move {
         h.committed(&partitions).await
@@ -1172,7 +1225,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_committed_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1213,13 +1266,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_cb(
     cb: kafka_consumer_ConsumerHandle_committed_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    let inner = unsafe { inner(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -1279,11 +1333,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    let inner = unsafe { inner(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_committed_with_timeout", async move {
         h.committed_with_timeout(&partitions, ms(timeout)?).await
@@ -1296,7 +1350,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_committed_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1339,13 +1393,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_committed_with_timeout_cb
     cb: kafka_consumer_ConsumerHandle_committed_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
-    // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
+    let inner = unsafe { inner(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `partitions` is a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -1402,10 +1457,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_partitions_for", async move {
         h.partitions_for(&topic).await
@@ -1418,7 +1473,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_partitions_for_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1459,12 +1514,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_cb(
     cb: kafka_consumer_ConsumerHandle_partitions_for_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -1520,10 +1576,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_with_timeo
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_partitions_for_with_timeout", async move {
         h.partitions_for_with_timeout(&topic, ms(timeout)?).await
@@ -1536,7 +1592,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_with_timeo
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_partitions_for_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_List_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1579,12 +1635,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_partitions_for_with_timeo
     cb: kafka_consumer_ConsumerHandle_partitions_for_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic` is a NUL-terminated string, as
-    // `c_str_to_string` requires; it is copied.
-    let topic = unsafe { c_str_to_string(topic) };
+    // `require_str` requires; it is copied.
+    let topic = unsafe { require_str(topic, "topic") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -1632,7 +1689,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let h = inner.handle.clone();
     let result = inner.run_blocking(
         "kafka_consumer_ConsumerHandle_list_topics",
@@ -1646,7 +1703,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_list_topics_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1685,9 +1742,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_cb(
     cb: kafka_consumer_ConsumerHandle_list_topics_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -1741,7 +1799,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_with_timeout(
 ) -> *mut kafka_Map_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_list_topics_with_timeout", async move {
         h.list_topics_with_timeout(ms(timeout)?).await
@@ -1754,7 +1812,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_with_timeout(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_list_topics_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1795,9 +1853,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_with_timeout_
     cb: kafka_consumer_ConsumerHandle_list_topics_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -1834,6 +1893,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_list_topics_with_timeout_
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -1848,13 +1911,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_beginning_offsets", async move {
         h.beginning_offsets(&partitions).await
@@ -1867,7 +1933,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_beginning_offsets_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -1908,13 +1974,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
     cb: kafka_consumer_ConsumerHandle_beginning_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -1953,6 +2023,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_cb(
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -1968,13 +2042,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_ti
     timeout: i64,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout", async move {
         h.beginning_offsets_with_timeout(&partitions, ms(timeout)?).await
@@ -1987,7 +2064,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_ti
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2030,13 +2107,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_ti
     cb: kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -2073,6 +2154,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_beginning_offsets_with_ti
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -2087,13 +2172,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets(
     partitions: *const kafka_List_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_end_offsets", async move {
         h.end_offsets(&partitions).await
@@ -2106,7 +2194,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_end_offsets_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2147,13 +2235,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
     cb: kafka_consumer_ConsumerHandle_end_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -2192,6 +2284,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_cb(
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Partitions cannot be null") if `partitions` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -2207,13 +2303,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout(
     timeout: i64,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_end_offsets_with_timeout", async move {
         h.end_offsets_with_timeout(&partitions, ms(timeout)?).await
@@ -2226,7 +2325,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_end_offsets_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2269,13 +2368,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout_
     cb: kafka_consumer_ConsumerHandle_end_offsets_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    if partitions.is_null() {
+        fail(Error::local_null_pointer("Partitions cannot be null"));
+    }
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partitions` is null or a valid list of
     // `kafka_common_TopicPartition_t *`, as `list_topic_partitions` requires; the values are
     // cloned, so the borrow lasts for this call only.
-    let partitions = unsafe { list_topic_partitions(partitions) };
+    let partitions = unsafe { list_topic_partitions(partitions, "partitions") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -2315,6 +2418,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_end_offsets_with_timeout_
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Timestamps to search cannot be null") if `timestamps_to_search` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -2329,13 +2436,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
     timestamps_to_search: *const kafka_Map_t,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is null or a valid map of
     // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
     // entries are copied, so the borrow lasts for this call only.
-    let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
+    let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search, "timestamps_to_search") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_offsets_for_times", async move {
         h.offsets_for_times(timestamps_to_search).await
@@ -2348,7 +2458,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times(
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_offsets_for_times_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`. It receives the map of the
@@ -2390,13 +2500,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
     cb: kafka_consumer_ConsumerHandle_offsets_for_times_cb_t,
     opaque: *mut c_void,
 ) {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is null or a valid map of
     // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
     // entries are copied, so the borrow lasts for this call only.
-    let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
+    let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search, "timestamps_to_search") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -2437,6 +2551,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_cb(
 /// - `kafka_common_Error_is_local_illegal_state_error` once the consumer is destroyed;
 /// - `kafka_common_Error_is_local_unsupported_operation_error` on a `MockConsumer`'s handle.
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` ("Timestamps to search cannot be null") if `timestamps_to_search` is `NULL`.
+///
 /// # Safety
 ///
 /// `self_` must be a live handle and the other parameters valid for their
@@ -2452,13 +2570,16 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_with_ti
     timeout: i64,
     out_err: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_Map_t {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is null or a valid map of
     // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
     // entries are copied, so the borrow lasts for this call only.
-    let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
+    let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search, "timestamps_to_search") };
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout", async move {
         h.offsets_for_times_with_timeout(timestamps_to_search, ms(timeout)?).await
@@ -2471,7 +2592,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_with_ti
 /// The completion of the `_cb` twin: the owned `value` on success,
 /// `NULL` beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb_t =
-    unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(value: *mut kafka_Map_t, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`. It receives the map of the
@@ -2515,13 +2636,17 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_offsets_for_times_with_ti
     cb: kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    if timestamps_to_search.is_null() {
+        fail(Error::local_null_pointer("Timestamps to search cannot be null"));
+    }
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `timestamps_to_search` is null or a valid map of
     // `kafka_common_TopicPartition_t *` to `int64_t *`, as `map_topic_partition_i64` requires; the
     // entries are copied, so the borrow lasts for this call only.
-    let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search) };
+    let timestamps_to_search = unsafe { map_topic_partition_i64(timestamps_to_search, "timestamps_to_search") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -2562,7 +2687,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -2579,7 +2704,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_sync_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2614,9 +2739,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_cb(
     cb: kafka_consumer_ConsumerHandle_commit_sync_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -2660,7 +2786,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_timeout(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -2676,7 +2802,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_timeout(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_sync_with_timeout_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2713,9 +2839,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_timeout_
     cb: kafka_consumer_ConsumerHandle_commit_sync_with_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -2749,7 +2876,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_timeout_
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `offsets` null or a valid map of
+/// `self_` must be a live handle and `offsets` a valid map of
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
 /// that no other call mutates during this one. `out_err` must be a valid slot
 /// pointing at null.
@@ -2762,11 +2889,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    let inner = unsafe { inner(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
-    let offsets = unsafe { map_offset_and_metadata(offsets) };
+    let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -2782,7 +2909,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2819,13 +2946,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
     cb: kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    let inner = unsafe { inner(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
-    let offsets = unsafe { map_offset_and_metadata(offsets) };
+    let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -2860,7 +2988,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle and `offsets` null or a valid map of
+/// `self_` must be a live handle and `offsets` a valid map of
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
 /// that no other call mutates during this one. `out_err` must be a valid slot
 /// pointing at null.
@@ -2874,11 +3002,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    let inner = unsafe { inner(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
-    let offsets = unsafe { map_offset_and_metadata(offsets) };
+    let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -2894,7 +3022,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -2933,13 +3061,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_sync_with_offsets_
     cb: kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    let inner = unsafe { inner(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
-    let offsets = unsafe { map_offset_and_metadata(offsets) };
+    let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -2977,7 +3106,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async(
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let h = inner.handle.clone();
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
     unsafe {
@@ -2994,7 +3123,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async(
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_async_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -3029,9 +3158,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_cb(
     cb: kafka_consumer_ConsumerHandle_commit_async_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -3085,7 +3215,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_callbac
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     let Some(client) = inner.client.upgrade() else {
         // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
         return unsafe { deliver_unit(Err(destroyed()), out_err) };
@@ -3112,7 +3242,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_callbac
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_async_with_callback_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` and the `onComplete` calls the operation
 /// triggers are queued for `kafka_consumer_Consumer__execute_callbacks`.
@@ -3149,9 +3279,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_callbac
     cb: kafka_consumer_ConsumerHandle_commit_async_with_callback_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
     // `commit_callback_adapter` requires; the registration is copied, so the handle is borrowed for
     // this call only. Its `self` stays alive until `onComplete` fires, as
@@ -3205,7 +3336,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_callbac
 ///
 /// # Safety
 ///
-/// `self_` must be a live handle, `offsets` null or a valid map of
+/// `self_` must be a live handle, `offsets` a valid map of
 /// `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *`
 /// that no other call mutates during this one, and `callback` a live callback
 /// handle. `out_err` must be a valid slot pointing at null.
@@ -3219,11 +3350,11 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_offsets
 ) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    let inner = unsafe { inner(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
-    let offsets = unsafe { map_offset_and_metadata(offsets) };
+    let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
     let Some(client) = inner.client.upgrade() else {
         // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_unit` requires.
         return unsafe { deliver_unit(Err(destroyed()), out_err) };
@@ -3250,7 +3381,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_offsets
 /// The completion of the `_cb` twin: `error` is `NULL` on success,
 /// owned otherwise.
 pub type kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb_t =
-    unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` and the `onComplete` calls the operation
 /// triggers (on a `MockConsumer` handle, this commit's own `onComplete`
@@ -3290,13 +3421,14 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_commit_async_with_offsets
     cb: kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
-    // SAFETY: Per this function's `# Safety`, `offsets` is null or a valid map of
+    let inner = unsafe { inner(self_, "self_") };
+    // SAFETY: Per this function's `# Safety`, `offsets` is a valid map of
     // `kafka_common_TopicPartition_t *` to `kafka_consumer_OffsetAndMetadata_t *` that no other
     // call mutates during this one, as `map_offset_and_metadata` requires; the entries are copied.
-    let offsets = unsafe { map_offset_and_metadata(offsets) };
+    let offsets = unsafe { map_offset_and_metadata(offsets, "offsets") };
     // SAFETY: Per this function's `# Safety`, `callback` is a live callback handle, as
     // `commit_callback_adapter` requires; the registration is copied, so the handle is borrowed for
     // this call only. Its `self` stays alive until `onComplete` fires, as
@@ -3345,7 +3477,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_assignment(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
     // the only use of the reference, as `inner` requires.
-    sorted_topic_partition_list(unsafe { inner(self_) }.handle.assignment().iter())
+    sorted_topic_partition_list(unsafe { inner(self_, "self_") }.handle.assignment().iter())
 }
 
 /// Returns `paused()`: a list of `kafka_common_TopicPartition_t *`,
@@ -3369,7 +3501,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_paused(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
     // the only use of the reference, as `inner` requires.
-    sorted_topic_partition_list(unsafe { inner(self_) }.handle.paused().iter())
+    sorted_topic_partition_list(unsafe { inner(self_, "self_") }.handle.paused().iter())
 }
 
 /// Returns `groupMetadata()`. Read through the shared
@@ -3395,7 +3527,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_group_metadata(
 ) -> *mut kafka_consumer_ConsumerGroupMetadata_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
     // the only use of the reference, as `inner` requires.
-    box_group_metadata(unsafe { inner(self_) }.handle.group_metadata())
+    box_group_metadata(unsafe { inner(self_, "self_") }.handle.group_metadata())
 }
 
 /// `currentLag(TopicPartition topicPartition)`: Java's `OptionalLong` as a
@@ -3437,10 +3569,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag(
 ) -> i8 {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition handle,
     // alive for this expression, as `topic_partition_ref` requires; the value is cloned.
-    let partition = unsafe { topic_partition_ref(topic_partition) }.clone();
+    let partition = unsafe { topic_partition_ref(topic_partition, "topic_partition") }.clone();
     let h = inner.handle.clone();
     let result = inner.run_blocking("kafka_consumer_ConsumerHandle_current_lag", async move {
         h.current_lag(&partition).await
@@ -3455,7 +3587,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag(
 /// and a `lag` of 0 for `OptionalLong.empty()`, beside a null `error` on
 /// success; `present` 0 and a `lag` of 0 beside an owned `error` otherwise.
 pub type kafka_consumer_ConsumerHandle_current_lag_cb_t =
-    unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void);
+    Option<unsafe extern "C" fn(present: i8, lag: i64, error: *mut kafka_common_Error_t, opaque: *mut c_void)>;
 
 /// The non-blocking twin: `cb` is queued for
 /// `kafka_consumer_Consumer__execute_callbacks`.
@@ -3492,12 +3624,13 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag_cb(
     cb: kafka_consumer_ConsumerHandle_current_lag_cb_t,
     opaque: *mut c_void,
 ) {
+    let cb = require_fn(cb, "cb");
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call,
     // as `inner` requires.
-    let inner = unsafe { inner(self_) };
+    let inner = unsafe { inner(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `topic_partition` is a valid topic-partition handle,
     // alive for this expression, as `topic_partition_ref` requires; the value is cloned.
-    let partition = unsafe { topic_partition_ref(topic_partition) }.clone();
+    let partition = unsafe { topic_partition_ref(topic_partition, "topic_partition") }.clone();
     let h = inner.handle.clone();
     let opaque = SendPtr(opaque);
     inner.run_cb(
@@ -3522,7 +3655,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_current_lag_cb(
 pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_wakeup(self_: *const kafka_consumer_ConsumerHandle_t) {
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, alive for this expression,
     // the only use of the reference, as `inner` requires.
-    unsafe { inner(self_) }.handle.wakeup();
+    unsafe { inner(self_, "self_") }.handle.wakeup();
 }
 
 /// Frees the handle; null is a no-op. The consumer is unaffected.
@@ -3540,5 +3673,27 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_destroy(self_: *mut kafka
         // other call uses at the same time, so taking it back and dropping it frees it exactly
         // once. It holds the client weakly, so the consumer is unaffected.
         drop(unsafe { Box::from_raw(self_ as *mut HandleInner) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A NULL `self_` reaches `cb` once, on the calling thread, with Java's error (see
+    /// `completion_sink`).
+    #[test]
+    fn test_null_self_delivers_the_null_pointer_error_to_cb() {
+        use crate::ffi::precondition::{Delivered, assert_null_self_delivered, record_delivery};
+        let delivered = Delivered::default();
+        // SAFETY: Test code: a NULL handle, the recorder and a live `Delivered`.
+        unsafe {
+            kafka_consumer_ConsumerHandle_commit_sync_cb(
+                std::ptr::null(),
+                Some(record_delivery),
+                &delivered as *const Delivered as *mut c_void,
+            )
+        };
+        assert_null_self_delivered(&delivered);
     }
 }

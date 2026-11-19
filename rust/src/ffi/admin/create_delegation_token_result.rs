@@ -88,11 +88,12 @@ pub(crate) fn box_create_delegation_token_result(
 /// `self_` must be a live result handle, kept alive for `'a`.
 unsafe fn handle<'a>(
     self_: *const kafka_admin_CreateDelegationTokenResult_t,
+    param: &'static str,
 ) -> &'a ResultHandle<CreateDelegationTokenResultInner> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_CreateDelegationTokenResult_t` is built by
     // `box_result::<CreateDelegationTokenResultInner, _>`, as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Returns a future which yields a delegation token
@@ -115,7 +116,7 @@ pub unsafe extern "C" fn kafka_admin_CreateDelegationTokenResult_delegation_toke
 ) -> *const kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    unsafe { handle(self_) }.result.delegation_token
+    unsafe { handle(self_, "self_") }.result.delegation_token
 }
 
 /// Frees a result handle and the future borrowed from it; `NULL` is a no-op.

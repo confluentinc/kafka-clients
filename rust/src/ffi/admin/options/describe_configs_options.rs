@@ -21,6 +21,7 @@
 
 use crate::admin::DescribeConfigsOptions;
 use crate::ffi::ffi_guard;
+use crate::ffi::precondition::{require_mut, require_ref};
 
 /// Opaque handle to a [`DescribeConfigsOptions`], owned by the caller and freed with
 /// [`kafka_admin_DescribeConfigsOptions_destroy`].
@@ -37,12 +38,13 @@ pub struct kafka_admin_DescribeConfigsOptions_t {
 /// setter runs on it.
 pub(crate) unsafe fn describe_configs_options_ref<'a>(
     options: *const kafka_admin_DescribeConfigsOptions_t,
+    param: &'static str,
 ) -> &'a DescribeConfigsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`,
     // during which no setter runs on it. Every `kafka_admin_DescribeConfigsOptions_t` is the
     // `Box::into_raw` of a `Box<DescribeConfigsOptions>` (`boxed`), so the shared reference is to a
     // live `DescribeConfigsOptions` that nothing mutates while it is used.
-    unsafe { &*(options as *const DescribeConfigsOptions) }
+    unsafe { require_ref::<_, DescribeConfigsOptions>(options, param) }
 }
 
 /// Mutable access to the options behind a handle, for the in-place setters.
@@ -51,12 +53,15 @@ pub(crate) unsafe fn describe_configs_options_ref<'a>(
 ///
 /// `options` must be a live handle, kept alive for `'a`, to which no other
 /// reference is live meanwhile.
-unsafe fn options_mut<'a>(options: *mut kafka_admin_DescribeConfigsOptions_t) -> &'a mut DescribeConfigsOptions {
+unsafe fn options_mut<'a>(
+    options: *mut kafka_admin_DescribeConfigsOptions_t,
+    param: &'static str,
+) -> &'a mut DescribeConfigsOptions {
     // SAFETY: Per this function's `# Safety`, `options` is a live handle kept alive for `'a`, to
     // which no other reference is live meanwhile. Every `kafka_admin_DescribeConfigsOptions_t` is
     // the `Box::into_raw` of a `Box<DescribeConfigsOptions>` (`boxed`), so the exclusive reference
     // is to a live `DescribeConfigsOptions`.
-    unsafe { &mut *(options as *mut DescribeConfigsOptions) }
+    unsafe { require_mut::<_, DescribeConfigsOptions>(options, param) }
 }
 
 fn boxed(options: DescribeConfigsOptions) -> *mut kafka_admin_DescribeConfigsOptions_t {
@@ -95,7 +100,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_set_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_timeout_ms((timeout_ms >= 0).then_some(timeout_ms));
 }
 
@@ -117,7 +122,9 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_timeout_ms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `describe_configs_options_ref` requires.
-    unsafe { describe_configs_options_ref(self_) }.timeout_ms().unwrap_or(-1)
+    unsafe { describe_configs_options_ref(self_, "self_") }
+        .timeout_ms()
+        .unwrap_or(-1)
 }
 
 /// `DescribeConfigsOptions.includeSynonyms(boolean includeSynonyms)`.
@@ -138,7 +145,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_set_include_synonyms
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_include_synonyms(include_synonyms != 0);
 }
 
@@ -159,7 +166,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_include_synonyms(
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `describe_configs_options_ref` requires.
-    i8::from(unsafe { describe_configs_options_ref(self_) }.include_synonyms())
+    i8::from(unsafe { describe_configs_options_ref(self_, "self_") }.include_synonyms())
 }
 
 /// `DescribeConfigsOptions.includeDocumentation(boolean includeDocumentation)`.
@@ -180,7 +187,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_set_include_document
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle that no other call uses at
     // the same time, so no other reference to it is live while `options` is used, as `options_mut`
     // requires.
-    let options = unsafe { options_mut(self_) };
+    let options = unsafe { options_mut(self_, "self_") };
     *options = std::mem::take(options).set_include_documentation(include_documentation != 0);
 }
 
@@ -201,7 +208,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsOptions_include_documentatio
     // SAFETY: Per this function's `# Safety`, `self_` is a live handle, kept alive for this call;
     // no setter runs on it meanwhile, since the setters' `# Safety` excludes any other call using
     // the handle at the same time. That is what `describe_configs_options_ref` requires.
-    i8::from(unsafe { describe_configs_options_ref(self_) }.include_documentation())
+    i8::from(unsafe { describe_configs_options_ref(self_, "self_") }.include_documentation())
 }
 
 /// Frees a handle returned by this module; a no-op on `NULL`.

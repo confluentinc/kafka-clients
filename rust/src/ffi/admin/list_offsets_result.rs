@@ -16,6 +16,7 @@
 //! `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t`:
 //! `org.apache.kafka.clients.admin.ListOffsetsResult` (CLAUDE.md §4).
 
+use crate::ffi::precondition::{require_element, require_map, require_ref};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void};
 
@@ -32,7 +33,7 @@ use crate::ffi::common::topic_partition::{
 };
 use crate::ffi::ffi_guard;
 use crate::ffi::kafka_future::kafka_common_KafkaFuture_t;
-use crate::ffi::util::{box_map, into_c_string, kafka_Map_t, map_entries};
+use crate::ffi::util::{box_map, into_c_string, kafka_Map_t};
 
 // ---------------------------------------------------------------------------
 // ListOffsetsResult.ListOffsetsResultInfo
@@ -60,6 +61,7 @@ pub(crate) fn box_list_offsets_result_info(
 /// `'a`.
 pub(crate) unsafe fn list_offsets_result_info_ref<'a>(
     info: *const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,
+    param: &'static str,
 ) -> &'a ListOffsetsResultInfo {
     // SAFETY: Per this function's `# Safety`, `info` is a live list-offsets-result-info handle kept
     // alive for `'a`. Every `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t` is the
@@ -67,7 +69,7 @@ pub(crate) unsafe fn list_offsets_result_info_ref<'a>(
     // place one is made, for an owned handle or a value a map or future owns), so it points at a
     // live `ListOffsetsResultInfo`. Nothing takes a `&mut` to it: only the destroy takes the box
     // back, and its `# Safety` excludes any other use at the same time or afterwards.
-    unsafe { &*(info as *const ListOffsetsResultInfo) }
+    unsafe { require_ref::<_, ListOffsetsResultInfo>(info, param) }
 }
 
 /// Frees a `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *` element
@@ -125,7 +127,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_off
     // SAFETY: Per this function's `# Safety`, `self_` is a live list-offsets-result-info handle,
     // kept alive for this call, as `list_offsets_result_info_ref` requires; the borrow ends with
     // the getter.
-    unsafe { list_offsets_result_info_ref(self_) }.offset()
+    unsafe { list_offsets_result_info_ref(self_, "self_") }.offset()
 }
 
 /// Returns the timestamp.
@@ -141,17 +143,15 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_tim
     // SAFETY: Per this function's `# Safety`, `self_` is a live list-offsets-result-info handle,
     // kept alive for this call, as `list_offsets_result_info_ref` requires; the borrow ends with
     // the getter.
-    unsafe { list_offsets_result_info_ref(self_) }.timestamp()
+    unsafe { list_offsets_result_info_ref(self_, "self_") }.timestamp()
 }
 
 /// Returns `-1` for Java's empty `Optional`.
 ///
-/// A caught Rust panic returns -2, which is no leader epoch.
-///
 /// # Safety
 ///
 /// `self_` must be a live list-offsets-result-info handle.
-#[ffi_guard(fallback = -2)]
+#[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_leader_epoch(
     self_: *const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,
@@ -159,7 +159,9 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_lea
     // SAFETY: Per this function's `# Safety`, `self_` is a live list-offsets-result-info handle,
     // kept alive for this call, as `list_offsets_result_info_ref` requires; the borrow ends with
     // the getter.
-    unsafe { list_offsets_result_info_ref(self_) }.leader_epoch().unwrap_or(-1)
+    unsafe { list_offsets_result_info_ref(self_, "self_") }
+        .leader_epoch()
+        .unwrap_or(-1)
 }
 
 /// Returns as a string.
@@ -177,7 +179,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_to_
     // SAFETY: Per this function's `# Safety`, `self_` is a live list-offsets-result-info handle,
     // kept alive for this call, as `list_offsets_result_info_ref` requires; the borrow ends with
     // `to_string`.
-    into_c_string(&unsafe { list_offsets_result_info_ref(self_) }.to_string())
+    into_c_string(&unsafe { list_offsets_result_info_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned list-offsets-result-info handle; `NULL` is a no-op.
@@ -259,11 +261,14 @@ pub(crate) fn box_list_offsets_result(
 /// # Safety
 ///
 /// `self_` must be a live result handle, kept alive for `'a`.
-unsafe fn handle<'a>(self_: *const kafka_admin_ListOffsetsResult_t) -> &'a ResultHandle<ListOffsetsResult> {
+unsafe fn handle<'a>(
+    self_: *const kafka_admin_ListOffsetsResult_t,
+    param: &'static str,
+) -> &'a ResultHandle<ListOffsetsResult> {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle kept alive for `'a`,
     // and every `kafka_admin_ListOffsetsResult_t` is built by `box_result::<ListOffsetsResult, _>`
     // (in `box_list_offsets_result`), as `result_ref` requires.
-    unsafe { result_ref(self_) }
+    unsafe { result_ref(self_, param) }
 }
 
 /// Return a future which can be used to check the result for a given partition.
@@ -295,11 +300,11 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_partition_result(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: Per this function's `# Safety`, `partition` is a valid topic-partition handle, as
     // `topic_partition_ref` requires; the caller keeps it alive for this call, which the borrow
     // does not outlive.
-    let partition = unsafe { topic_partition_ref(partition) };
+    let partition = unsafe { topic_partition_ref(partition, "partition") };
     // SAFETY: Per this function's `# Safety`, `out_err` is as `deliver_value` requires. For `handle_future`, `destroy_list_offsets_result_info_element` frees exactly the
     // handle `box_list_offsets_result_info` makes, and the handle holds only owned data and no
     // thread-bound state, so it may be freed from any thread and read from several at once, as
@@ -336,7 +341,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
 ) -> *mut kafka_common_KafkaFuture_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a live result handle, kept alive for this
     // call, as `handle` requires.
-    let h = unsafe { handle(self_) };
+    let h = unsafe { handle(self_, "self_") };
     // SAFETY: `destroy_map_element` frees exactly the map `infos_map` makes through `box_map`, and
     // the handle holds only owned data and no thread-bound state, so it may be freed from any
     // thread and read from several at once, as `handle_future` requires.
@@ -345,15 +350,21 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
 
 /// Creates a result from a map of partition to the future of its offset.
 ///
+/// WARNING: `NULL` `futures` panics; Java stores `null`.
+///
 /// # Parameters
 ///
 /// - `futures` - a map of `const kafka_common_TopicPartition_t *` to `const
 ///   kafka_common_KafkaFuture_t *` whose value is a
 ///   `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *`, copied during the call
 ///
+/// # Panics
+///
+/// - `LocalNullPointerError` if `futures` is `NULL`
+///
 /// # Safety
 ///
-/// `futures` must be `NULL` or a valid map whose keys are valid topic-partition handles and whose
+/// `futures` must be a valid map whose keys are valid topic-partition handles and whose
 /// values are valid future handles, each successful one's value a valid
 /// `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *`. The caller keeps ownership of the
 /// map, its keys, its futures and their values. Each future should already be complete
@@ -365,18 +376,24 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_all(
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_new(
     futures: *const kafka_Map_t,
 ) -> *mut kafka_admin_ListOffsetsResult_t {
-    // SAFETY: Per this function's `# Safety`, `futures` is null or a valid map handle. The borrow
+    // SAFETY: Per this function's `# Safety`, `futures` is a valid map handle. The borrow
     // of its entries ends with this call, while the caller keeps the map alive, and nothing mutates
     // it meanwhile: `kafka_Map_put`, its one mutator, requires that no other call uses the map at
-    // the same time. That is what `map_entries` requires.
-    let futures = unsafe { map_entries(futures) }
+    // the same time. That is what `require_map` requires.
+    let futures = unsafe { require_map(futures, "futures") }
         .iter()
         .map(|&(k, v)| {
             (
                 // SAFETY: Per this function's `# Safety`, the key `k` is a valid topic-partition
                 // handle, which the caller keeps alive for this call, as `topic_partition_ref`
                 // requires; the borrow ends with the `clone`.
-                unsafe { topic_partition_ref(k as *const kafka_common_TopicPartition_t) }.clone(),
+                unsafe {
+                    topic_partition_ref(
+                        require_element(k, "futures") as *const kafka_common_TopicPartition_t,
+                        "futures",
+                    )
+                }
+                .clone(),
                 // SAFETY: Per this function's `# Safety`, the value `v` is a valid future handle,
                 // alive for this call, and a successful one's value a valid `kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t *`
                 // borrowed from it, as `list_offsets_result_info_ref` requires; the value is cloned, so the borrow
@@ -384,7 +401,9 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_new(
                 unsafe {
                     resolved_future(v as *const kafka_common_KafkaFuture_t, "ListOffsetsResult", |value| {
                         list_offsets_result_info_ref(
-                            value as *const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,
+                            require_element(value, "futures")
+                                as *const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t,
+                            "futures",
                         )
                         .clone()
                     })

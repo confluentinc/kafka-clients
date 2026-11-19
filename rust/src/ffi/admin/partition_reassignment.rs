@@ -17,11 +17,12 @@
 //! plain value class: the handle points at the Rust value. Java's
 //! `List<Integer>` broker-id lists cross as `kafka_List_t`s of `int32_t *`.
 
+use crate::ffi::precondition::{require_element_ref, require_list, require_ref};
 use std::ffi::{c_char, c_void};
 
 use crate::admin::PartitionReassignment;
 use crate::ffi::ffi_guard;
-use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t, list_elements};
+use crate::ffi::util::{box_list, destroy_boxed, into_c_string, kafka_List_t};
 
 /// Opaque handle to a [`PartitionReassignment`].
 #[repr(C)]
@@ -45,13 +46,14 @@ pub(crate) fn box_partition_reassignment(
 /// for `'a`.
 pub(crate) unsafe fn partition_reassignment_ref<'a>(
     reassignment: *const kafka_admin_PartitionReassignment_t,
+    param: &'static str,
 ) -> &'a PartitionReassignment {
     // SAFETY: Per this function's `# Safety`, `reassignment` is a valid partition-reassignment
     // handle kept alive for `'a`; every `kafka_admin_PartitionReassignment_t` is the
     // `Box::into_raw` of a `Box<PartitionReassignment>` (`box_partition_reassignment`, the only
     // producer), so the shared reference is to a live `PartitionReassignment`, which no entry point
     // mutates.
-    unsafe { &*(reassignment as *const PartitionReassignment) }
+    unsafe { require_ref::<_, PartitionReassignment>(reassignment, param) }
 }
 
 /// Frees a `kafka_admin_PartitionReassignment_t *` element of an owned
@@ -75,21 +77,21 @@ fn broker_id_list(ids: &[i32]) -> *mut kafka_List_t {
     box_list(elements, Some(destroy_boxed::<i32>))
 }
 
-/// Reads a list of `const int32_t *`; `NULL` reads as empty.
+/// Reads a list of `const int32_t *`; `NULL` panics.
 ///
 /// # Safety
 ///
 /// `list` must be `NULL` or a valid list whose elements point at `int32_t`s,
 /// kept alive and not mutated for this call.
-unsafe fn list_broker_ids(list: *const kafka_List_t) -> Vec<i32> {
+unsafe fn list_broker_ids(list: *const kafka_List_t, param: &'static str) -> Vec<i32> {
     // SAFETY: Per this function's `# Safety`, `list` is null or a valid list, alive and not mutated
-    // for this call, as `list_elements` requires; the borrowed slice is dropped before the call
+    // for this call, as `require_list` requires; the borrowed slice is dropped before the call
     // returns.
-    unsafe { list_elements(list) }
+    unsafe { require_list(list, param) }
         .iter()
         // SAFETY: Per this function's `# Safety`, each element of `list` points at a live
         // `int32_t`, read by copy while the list is alive.
-        .map(|&element| unsafe { *(element as *const i32) })
+        .map(|&element| *unsafe { require_element_ref::<i32>(element, param) })
         .collect()
 }
 
@@ -104,7 +106,7 @@ unsafe fn list_broker_ids(list: *const kafka_List_t) -> Vec<i32> {
 ///
 /// # Safety
 ///
-/// Each list must be `NULL`, read as empty, or a valid borrowed list whose elements point at
+/// Each list must be a valid borrowed list whose elements point at
 /// `int32_t`s; it is copied. The returned handle is owned, freed with
 /// [`kafka_admin_PartitionReassignment_destroy`].
 #[ffi_guard]
@@ -115,18 +117,18 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_new(
     removing_replicas: *const kafka_List_t,
 ) -> *mut kafka_admin_PartitionReassignment_t {
     box_partition_reassignment(PartitionReassignment::new(
-        // SAFETY: Per this function's `# Safety`, `replicas` is null or a valid list whose elements
+        // SAFETY: Per this function's `# Safety`, `replicas` is a valid list whose elements
         // point at `int32_t`s, kept alive and not mutated for this call, as `list_broker_ids`
         // requires.
-        unsafe { list_broker_ids(replicas) },
-        // SAFETY: Per this function's `# Safety`, `adding_replicas` is null or a valid list whose
+        unsafe { list_broker_ids(replicas, "replicas") },
+        // SAFETY: Per this function's `# Safety`, `adding_replicas` is a valid list whose
         // elements point at `int32_t`s, kept alive and not mutated for this call, as
         // `list_broker_ids` requires.
-        unsafe { list_broker_ids(adding_replicas) },
-        // SAFETY: Per this function's `# Safety`, `removing_replicas` is null or a valid list whose
+        unsafe { list_broker_ids(adding_replicas, "adding_replicas") },
+        // SAFETY: Per this function's `# Safety`, `removing_replicas` is a valid list whose
         // elements point at `int32_t`s, kept alive and not mutated for this call, as
         // `list_broker_ids` requires.
-        unsafe { list_broker_ids(removing_replicas) },
+        unsafe { list_broker_ids(removing_replicas, "removing_replicas") },
     ))
 }
 
@@ -147,7 +149,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_replicas(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-reassignment handle,
     // kept alive for this call, as `partition_reassignment_ref` requires.
-    broker_id_list(unsafe { partition_reassignment_ref(self_) }.replicas())
+    broker_id_list(unsafe { partition_reassignment_ref(self_, "self_") }.replicas())
 }
 
 /// The brokers that we are adding this partition to as part of a reassignment. A subset of
@@ -168,7 +170,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_adding_replicas(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-reassignment handle,
     // kept alive for this call, as `partition_reassignment_ref` requires.
-    broker_id_list(unsafe { partition_reassignment_ref(self_) }.adding_replicas())
+    broker_id_list(unsafe { partition_reassignment_ref(self_, "self_") }.adding_replicas())
 }
 
 /// The brokers that we are removing this partition from as part of a reassignment. A subset of
@@ -189,7 +191,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_removing_replicas(
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-reassignment handle,
     // kept alive for this call, as `partition_reassignment_ref` requires.
-    broker_id_list(unsafe { partition_reassignment_ref(self_) }.removing_replicas())
+    broker_id_list(unsafe { partition_reassignment_ref(self_, "self_") }.removing_replicas())
 }
 
 /// Returns the text form of the reassignment.
@@ -205,7 +207,7 @@ pub unsafe extern "C" fn kafka_admin_PartitionReassignment_to_string(
 ) -> *mut c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid partition-reassignment handle,
     // kept alive for this call, as `partition_reassignment_ref` requires.
-    into_c_string(&unsafe { partition_reassignment_ref(self_) }.to_string())
+    into_c_string(&unsafe { partition_reassignment_ref(self_, "self_") }.to_string())
 }
 
 /// Frees an owned partition-reassignment handle; `NULL` is a no-op.

@@ -37,7 +37,7 @@ from confluent_kafka.common import (
 )
 from confluent_kafka.common.security.auth import KafkaPrincipal
 from confluent_kafka.common.security.token.delegation.token_information import TokenInformation
-from confluent_kafka.consumer import ConsumerGroupMetadata, OffsetAndMetadata, OffsetAndTimestamp
+from confluent_kafka.consumer import ConsumerGroupMetadata, KafkaConsumer, OffsetAndMetadata, OffsetAndTimestamp
 from confluent_kafka.producer import (
     AsyncKafkaProducer,
     AsyncMockProducer,
@@ -54,6 +54,14 @@ RECORD: ProducerRecord[bytes, bytes] = ProducerRecord(topic="t", value=b"v")
 def _group_metadata() -> ConsumerGroupMetadata:
     return ConsumerGroupMetadata._of(group_id="g", generation_id=-1, member_id="",
                                      group_instance_id=None)
+
+
+def _kafka_group_metadata() -> ConsumerGroupMetadata:
+    # A KafkaConsumer's metadata carries the core's handle, which the FFI takes;
+    # a mock's raises UnsupportedOperationError before any null check.
+    with KafkaConsumer(configs={"bootstrap.servers": "localhost:1", "group.protocol": "consumer",
+                                "group.id": "g"}) as consumer:
+        return consumer.group_metadata()
 
 
 def _raises(error: type[BaseException], message: str) -> Any:
@@ -105,11 +113,11 @@ def test_kafka_producer_close_missing_is_close() -> None:
 def test_kafka_producer_send_offsets_null_offsets() -> None:
     # throwIfInvalidGroupMetadata first, then offsets.isEmpty().
     with KafkaProducer(configs=UNREACHABLE) as p:
-        with _raises(IllegalArgumentError, "Consumer group metadata could not be None"):
+        with _raises(IllegalArgumentError, "Consumer group metadata could not be null"):
             p.send_offsets_to_transaction(offsets=None, group_metadata=None)  # type: ignore[arg-type]
         with _raises(TypeError, "offsets must not be None"):
             p.send_offsets_to_transaction(offsets=None,  # type: ignore[arg-type]
-                                          group_metadata=_group_metadata())
+                                          group_metadata=_kafka_group_metadata())
 
 
 async def test_async_kafka_producer_null_arguments() -> None:
@@ -119,7 +127,7 @@ async def test_async_kafka_producer_null_arguments() -> None:
             await p.send(record=None)  # type: ignore[arg-type]
         with _raises(TypeError, "offsets must not be None"):
             await p.send_offsets_to_transaction(offsets=None,  # type: ignore[arg-type]
-                                                group_metadata=_group_metadata())
+                                                group_metadata=_kafka_group_metadata())
         with _raises(TypeError, "timeout must not be None"):
             await p.close(timeout=None)  # type: ignore[arg-type]
     finally:
