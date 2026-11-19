@@ -426,6 +426,7 @@ before this phase is 9,526 / 51 / 0 unit tests, 245 analyzer tests and 29 integr
 | S5 | 0 warnings, 0 errors | 9,628 / 51 / 0 | 245 | gRPC server tests 228 (net10.0); `SoakClient.Tests` 201; `PerfV2`, `PerfV3`, `Confluent.Kafka.PerformanceTests` and the nine examples build with 0 warnings, 0 errors | exit 0, and exit 0 on the twelve projects outside the solution |
 | S6 | 0 warnings, 0 errors | 9,628 / 51 / 0 (net10.0: one unrelated thread-timing test failed once, 9,628 / 51 / 0 on two reruns; open question 7) | 245 | integration tests 31 / 0 / 0 (29 and the two new ones); gRPC server tests 228 (net10.0); `SoakClient.Tests` 201 | exit 0 |
 | S7 | — (this file only) | — | — | — | — |
+| Fixups `f757a87cd`, `2adc07659` (into S4), `091ce567d` (into S7) | 0 warnings, 0 errors | 9,638 / 51 / 0: ten new cases in `PublicClientCreateTests` (92 → 102). The S4–S6 counts above are as run before the fixups, so each is ten lower than the squashed commit gives | — | integration tests 31 / 0 / 0 | exit 0 |
 
 Not run on the development host:
 
