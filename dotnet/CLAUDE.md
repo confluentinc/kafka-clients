@@ -1645,8 +1645,9 @@ are satisfied (`definition-of-done.md`).
 
 The gate is `make verify-dotnet`, run from the repository root. It runs format, the unit tests, the
 broker-backed integration tests and the soak tests on net8.0 and net10.0, the `__grpc_dotnet` and `__grpc_dotnet_async`
-multilanguage arms over the two .NET gRPC images, and the perf stage. CI runs it on Linux, and
-runs the arms again over SSL and SASL_SSL. On macOS, CI runs `make test-dotnet-macos-docker` (the
+multilanguage arms over the two .NET gRPC images, and the perf stage. CI runs it on Linux as two
+jobs, `make -C dotnet verify-except-grpc-arm` and the plaintext gRPC arm `make -C dotnet test-integration`,
+and runs the arms again over SSL and SASL_SSL. On macOS, CI runs `make test-dotnet-macos-docker` (the
 unit tests, without the integration tests, as Python's macOS job runs `test-unit` only), then starts
 Colima and runs `make test-integration-dotnet-native`: the arms with the gRPC server as a native
 process, with no perf stage. The arms skip no test. The gRPC server's own unit tests are a local
@@ -1686,7 +1687,10 @@ through `Translate.ToProto`, as every Python error crosses through `_kafka_error
   without what .NET appends to it: an `ArgumentException`'s " (Parameter '…')" and an
   `ArgumentOutOfRangeException`'s "Actual value was …" line. So the text is Python's, which sends
   Java's message alone.
-- Any other exception is sent as -4 with the message "dotnet server: <Type>: <message>". This is
+- In the consumer handlers and the producer handlers other than `CreateProducer` and `Send`, only
+  an exception with an FFI id, or an `ArgumentException` sent as -3, is a reply's error; any other
+  exception fails the call, as Python's `_binding_error` does. Elsewhere, any other exception is
+  sent as -4 with the message "dotnet server: <Type>: <message>". This is
   Python's fallback for a class with no FFI id, `TypeError` and `RuntimeError` included: an
   `ArgumentNullException`, a plain `InvalidOperationException` (an admin result's invariant error,
   ffi §A5), a plain `NotSupportedException` or `System.TimeoutException`, and the Java-named classes with no id

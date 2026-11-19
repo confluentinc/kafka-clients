@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -95,7 +96,25 @@ internal static class Translate
     }
 
     internal static TimeSpan? ConsumerTimeout(bool hasTimeoutMs, long timeoutMs) =>
-        hasTimeoutMs ? TimeSpan.FromMilliseconds(timeoutMs) : null;
+        hasTimeoutMs ? DurationOfMs(timeoutMs) : null;
+
+    // A count beyond a TimeSpan, such as Java's unbounded Long.MAX_VALUE ms, becomes TimeSpan.MaxValue (MinValue
+    // for a negative one), as Python's _duration_of_ms clamps to timedelta.max.
+    internal static TimeSpan DurationOfMs(long ms)
+    {
+        const long MaxMs = long.MaxValue / TimeSpan.TicksPerMillisecond;
+        if (ms > MaxMs)
+        {
+            return TimeSpan.MaxValue;
+        }
+
+        if (ms < -MaxMs)
+        {
+            return TimeSpan.MinValue;
+        }
+
+        return TimeSpan.FromTicks(ms * TimeSpan.TicksPerMillisecond);
+    }
 
     internal static Proto.ConsumerGroupMetadata GroupMetadataToProto(ConsumerGroupMetadata groupMetadata)
     {
@@ -122,17 +141,19 @@ internal static class Translate
         }
 
         CloseOptions options = CloseOptions.GroupMembershipOperation(GroupMembershipOperationFromName(request.GroupMembershipOperation));
-        return request.HasCloseTimeoutMs ? options.WithTimeout(TimeSpan.FromMilliseconds(request.CloseTimeoutMs)) : options;
+        return request.HasCloseTimeoutMs ? options.WithTimeout(DurationOfMs(request.CloseTimeoutMs)) : options;
     }
 
     internal static Proto.CurrentLagResponse CurrentLagResponse(long? lag) =>
         lag.HasValue ? new Proto.CurrentLagResponse { Lag = lag.Value } : new Proto.CurrentLagResponse();
 
+    private const int UnknownServerErrorCode = -1;
+
     private const int LocalIllegalArgumentCode = -3;
 
-    private const int LocalIllegalStateCode = -4;
+    internal const int LocalIllegalStateCode = -4;
 
-    private const int RequestTimedOutCode = 7;
+    private const int LocalTimeoutCode = -5;
 
     // As Python's _kafka_error_to_proto sends each class's _ffi_id: a class with an id (a KafkaException,
     // a Java-named class, CorrelationIdMismatchException) sends it; a .NET-only ArgumentException
@@ -156,6 +177,16 @@ internal static class Translate
         };
     }
 
+    // In every consumer handler and the producer handlers other than CreateProducer and Send, only an error ToProto
+    // sends with a code of the binding's own is a reply's error; any other exception fails the call (Python's
+    // _binding_error).
+    internal static bool IsBindingError(Exception error)
+    {
+        Exception sent = Unwrapped(error);
+        return KafkaException.FfiIdOf(sent) is not null
+            || (sent is ArgumentException and not ArgumentNullException and not IndexOutOfBoundsException);
+    }
+
     // The error behind a future's Get failure: Java's ExecutionException wraps the cause the future
     // failed with. Any other error is itself.
     internal static Exception Unwrapped(Exception error) =>
@@ -169,11 +200,75 @@ internal static class Translate
         _ => throw new KeyNotFoundException($"'{name}'"),
     };
 
-    private static Proto.KafkaError Coded(int code, Exception error) => new Proto.KafkaError
+    private static Proto.KafkaError Coded(int code, Exception error)
     {
-        Code = code,
-        Message = WithoutDotNetSuffix(error),
-    };
+        Proto.KafkaError proto = new Proto.KafkaError
+        {
+            Code = code,
+            Message = WithoutDotNetSuffix(error),
+        };
+        FillErrorPayload(proto, error);
+        return proto;
+    }
+
+    private static void FillErrorPayload(Proto.KafkaError proto, Exception error)
+    {
+        if (error is TopicAuthorizationException topicAuthorization)
+        {
+            proto.UnauthorizedTopics.Add(Sorted(topicAuthorization.UnauthorizedTopics()));
+        }
+
+        if (error is InvalidTopicException invalidTopic)
+        {
+            proto.InvalidTopics.Add(Sorted(invalidTopic.InvalidTopics()));
+        }
+
+        if (error is GroupAuthorizationException groupAuthorization && groupAuthorization.GroupId() is string groupId)
+        {
+            proto.GroupId = groupId;
+        }
+
+        if (error is NoOffsetForPartitionException noOffset)
+        {
+            foreach (TopicPartition partition in noOffset.Partitions())
+            {
+                proto.Partitions.Add(CallbackLogPartitionToProto(partition));
+            }
+        }
+
+        if (error is Consumer.OffsetOutOfRangeException outOfRange)
+        {
+            foreach (KeyValuePair<TopicPartition, long> pair in outOfRange.OffsetOutOfRangePartitions())
+            {
+                proto.OffsetOutOfRangePartitions.Add(new Proto.PartitionOffset
+                {
+                    Partition = CallbackLogPartitionToProto(pair.Key),
+                    Offset = pair.Value,
+                });
+            }
+        }
+
+        proto.BareKafkaError = IsBareKafkaError(proto.Code, error);
+        if (error.InnerException is { } cause && KafkaException.FfiIdOf(cause) is int causeCode)
+        {
+            proto.Cause = new Proto.KafkaErrorCause
+            {
+                Code = causeCode,
+                Message = WithoutDotNetSuffix(cause),
+                BareKafkaError = IsBareKafkaError(causeCode, cause),
+            };
+        }
+    }
+
+    private static bool IsBareKafkaError(int code, Exception error) =>
+        code == UnknownServerErrorCode && error is not ApiException;
+
+    private static List<string> Sorted(IEnumerable<string> values)
+    {
+        List<string> sorted = new List<string>(values);
+        sorted.Sort(StringComparer.Ordinal);
+        return sorted;
+    }
 
     // The message without what .NET appends to it, so the text is Java's, as Python sends it. The suffix
     // is read from a probe of the same type, so it matches this runtime and culture.
@@ -218,7 +313,7 @@ internal static class Translate
 
     internal static Proto.KafkaError SendTimedOut() => new Proto.KafkaError
     {
-        Code = RequestTimedOutCode,
+        Code = LocalTimeoutCode,
         Message = "dotnet server: producer future timed out after 120s",
     };
 
@@ -323,6 +418,8 @@ internal static class Translate
             Offset = record.Offset(),
             Timestamp = record.Timestamp(),
             TimestampType = (int)record.TimestampType(),
+            SerializedKeySize = record.SerializedKeySize(),
+            SerializedValueSize = record.SerializedValueSize(),
         };
 
         if (record.Key() is not null)
@@ -359,8 +456,7 @@ internal static class Translate
         int? partition = proto.HasPartition ? proto.Partition : (int?)null;
         long? timestamp = proto.HasTimestamp ? proto.Timestamp : (long?)null;
 
-        // The headers are sent, as C's server sends them; Python's drops them. A proto header's value is never null, so
-        // an empty value is sent empty.
+        // A proto header's value is never null, so an empty value is sent empty.
         Header[]? headers = null;
         if (proto.Headers.Count > 0)
         {

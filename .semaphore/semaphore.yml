@@ -29,7 +29,8 @@ name: build-test-release
 #      test suite, including the native-Rust arm of the multilanguage tests,
 #      and verify-c, verify-python and verify-dotnet, each over PLAINTEXT, SSL
 #      and SASL_SSL, including the gRPC multilanguage arm (__grpc_c /
-#      __grpc_python / __grpc_dotnet). The .NET gRPC images are built for
+#      __grpc_python / __grpc_dotnet); the PLAINTEXT arm of each binding runs
+#      in a job of its own. The .NET gRPC images are built for
 #      linux/amd64: Grpc.Tools' linux_arm64 protoc SIGSEGVs during C# codegen
 #      inside an arm64 Linux container, so they need an amd64 Linux agent
 #      (which this block uses anyway).
@@ -82,8 +83,9 @@ name: build-test-release
 # compiles it if a job's limit is longer than its block's, or a block's or
 # job's is longer than the pipeline's (3 hours, the explicit
 # execution_time_limit below; Semaphore's default is 1 hour). The pipeline then
-# fails with no blocks run. So a job that needs more time than its block must
-# move to a block of its own; a longer job-level limit is not enough.
+# fails with no blocks run. So a job's own limit may be shorter than its
+# block's, never longer: to give a job more time than its block allows, raise
+# the block's limit or move the job to a block of its own.
 #
 # All CI blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
@@ -239,26 +241,37 @@ blocks:
     # builds it replaced. The gRPC multilanguage container arm (__grpc_c /
     # __grpc_python / __grpc_dotnet) connects to the broker over the CONTAINER
     # listener for the active protocol:
-    #   - PLAINTEXT: `make -C c verify` / `make -C python verify` / `make -C dotnet verify`
-    #     — the binding's tests (ctest / pytest / dotnet test unit tests, the
-    #     PLAINTEXT gRPC arm, and the Python and .NET perf suites). The Python
-    #     and .NET checks that are not tests (mypy, the static checks, dotnet
+    #   - PLAINTEXT: `make -C c verify-except-grpc-arm` /
+    #     `make -C python verify-except-grpc-arm` /
+    #     `make -C dotnet verify-except-grpc-arm` — the binding's tests without
+    #     the gRPC arm (ctest; the pytest unit and broker-backed binding tests,
+    #     the soak and verifiable-clients tests; the dotnet test unit and
+    #     integration tests and the soak tests), and the Python and .NET perf
+    #     suites. Each folder's `verify` is that plus the arm. The Python and
+    #     .NET checks that are not tests (mypy, the static checks, dotnet
     #     format, the examples' build) run in "Python additional checks" and
     #     ".NET additional checks", in parallel, as Rust's do.
+    #   - PLAINTEXT gRPC arm: `make -C c test-integration` /
+    #     `make -C python test-integration` / `make -C dotnet test-integration`
+    #     — only the gRPC container arm over the PLAINTEXT CONTAINER listener,
+    #     in a job of its own so its duration and failures are attributable
+    #     apart from the binding's tests.
     #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
     #     (CTLSONLY :9100) or SASL_SSL (CSASLTLS :9101) CONTAINER listener. The
     #     unit tests and perf are protocol-independent, so running them once in
-    #     the PLAINTEXT job is enough. The .NET protocol
+    #     the PLAINTEXT job is enough. The three .NET gRPC arm
     #     jobs install no host .NET: the gRPC images build inside the .NET SDK
     #     image, and the harness is Rust.
     #
-    # The block's 45 minutes is the Rust jobs' limit and verify-dotnet's; the C
-    # and Python jobs set 30 minutes of their own (a job's limit may not exceed
-    # its block's, see the note at the top of this file). verify-dotnet's
-    # plaintext job is the longest binding job: 26 minutes on 2026-09-30 and 20
-    # on 2026-10-01, against about 11 for verify-c and verify-python, and it
-    # reached the earlier 30-minute limit in November 2026. If it outgrows 45,
-    # move the .NET jobs to a block of their own with a longer limit.
+    # The block's 45 minutes is the Rust jobs' limit; each binding job sets its
+    # own (a job's limit may not exceed its block's, see the note at the top of
+    # this file): 30, or 45 for the Python and .NET gRPC-arm jobs (plaintext
+    # gRPC arm, ssl, sasl_ssl), which take about 27 minutes. verify-dotnet's
+    # plaintext job was 26 minutes on 2026-09-30 and 20 on 2026-10-01, against
+    # about 11 for verify-c and verify-python, and reached 30 minutes in
+    # November 2026, while it still ran the .NET gRPC arm; that arm now runs in
+    # its own job, as C's and Python's do. If a job starts timing out, raise its
+    # own limit, up to the block's.
     dependencies: []
     execution_time_limit:
       minutes: 45
@@ -298,7 +311,12 @@ blocks:
           execution_time_limit:
             minutes: 30
           commands:
-            - make -C c verify
+            - make -C c verify-except-grpc-arm
+        - name: "verify-c (Linux amd64) — plaintext gRPC arm"
+          execution_time_limit:
+            minutes: 30
+          commands:
+            - make -C c test-integration
         - name: "verify-c (Linux amd64) — ssl"
           execution_time_limit:
             minutes: 30
@@ -313,20 +331,25 @@ blocks:
           execution_time_limit:
             minutes: 30
           commands:
-            - make -C python verify
+            - make -C python verify-except-grpc-arm
+        - name: "verify-python (Linux amd64) — plaintext gRPC arm"
+          execution_time_limit:
+            minutes: 45
+          commands:
+            - make -C python test-integration
         - name: "verify-python (Linux amd64) — ssl"
           execution_time_limit:
-            minutes: 30
+            minutes: 45
           commands:
             - make -C python test-integration-ssl
         - name: "verify-python (Linux amd64) — sasl_ssl (plain)"
           execution_time_limit:
-            minutes: 30
+            minutes: 45
           commands:
             - make -C python test-integration-sasl-ssl
         - name: "verify-dotnet (Linux amd64) — plaintext"
           execution_time_limit:
-            minutes: 45
+            minutes: 30
           commands:
             - ./.semaphore/install-dotnet.sh
             - export DOTNET_ROOT="$HOME/.dotnet"
@@ -334,7 +357,12 @@ blocks:
             - export DOTNET_MULTILEVEL_LOOKUP=0
             - which dotnet
             - dotnet --list-runtimes
-            - make -C dotnet verify
+            - make -C dotnet verify-except-grpc-arm
+        - name: "verify-dotnet (Linux amd64) — plaintext gRPC arm"
+          execution_time_limit:
+            minutes: 45
+          commands:
+            - make -C dotnet test-integration
         - name: "verify-dotnet (Linux amd64) — ssl"
           execution_time_limit:
             minutes: 45
