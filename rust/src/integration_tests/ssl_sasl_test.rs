@@ -36,6 +36,7 @@ use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::{RequestBuilder, RequestHeader, RequestHeaderOptionsBuilder, api_versions_request};
+use crate::common::security::JaasContext;
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::security::ssl::SslFactory;
 use crate::common::utils::internals::LogContext;
@@ -117,9 +118,11 @@ fn create_ssl_selector_with(ca_cert_pem: &str, extra: &[(&str, &str)]) -> Select
 /// Helper: create a Selector with SaslChannelBuilder for SASL_PLAINTEXT.
 fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
     let sasl_config = sasl_client_config("PLAIN", PLAIN_LOGIN_MODULE, username, password);
+    let jaas_context = JaasContext::load_client_context(sasl_config.sasl_config()).unwrap();
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
         sasl_config.sasl_config(),
+        jaas_context.as_ref(),
         None,
         None,
         "integration-test",
@@ -133,9 +136,11 @@ fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
 fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -> Selector {
     let ssl_factory = SslFactory::new(ssl_client_config(ca_cert_pem).ssl_config()).unwrap();
     let sasl_config = sasl_client_config("PLAIN", PLAIN_LOGIN_MODULE, username, password);
+    let jaas_context = JaasContext::load_client_context(sasl_config.sasl_config()).unwrap();
     let channel_builder = SaslChannelBuilder::new(
         SecurityProtocol::SaslSsl,
         sasl_config.sasl_config(),
+        jaas_context.as_ref(),
         Some(ssl_factory),
         None,
         "integration-test",
@@ -460,9 +465,11 @@ async fn test_sasl_unsupported_mechanism() {
         SASL_USERNAME,
         SASL_PASSWORD,
     );
+    let jaas_context = JaasContext::load_client_context(sasl_config.sasl_config()).unwrap();
     let error = SaslChannelBuilder::new(
         SecurityProtocol::SaslPlaintext,
         sasl_config.sasl_config(),
+        jaas_context.as_ref(),
         None,
         None,
         "integration-test",
