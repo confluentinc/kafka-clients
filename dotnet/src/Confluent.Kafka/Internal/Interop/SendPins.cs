@@ -71,7 +71,7 @@ internal unsafe struct SendPins
         }
     }
 
-    private static void Unpin(ref MemoryHandle handle)
+    internal static void Unpin(ref MemoryHandle handle)
     {
         try
         {

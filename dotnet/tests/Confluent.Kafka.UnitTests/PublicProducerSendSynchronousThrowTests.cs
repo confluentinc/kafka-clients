@@ -30,9 +30,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The async <c>Send</c>'s precondition throws (a cancelled token, a null record, a closed producer, a serializer
-/// throw) leave the call itself, not the returned <see cref="ValueTask{TResult}"/>, on both overloads and both
-/// clients. Each guard discards the returned value unawaited, so it fails if the send path becomes <c>async</c>.
+/// The async <c>Send</c>'s precondition throws (a cancelled token, a null record, a closed producer) leave the call
+/// itself, not the returned <see cref="ValueTask{TResult}"/>, on both overloads and both clients. Each guard discards
+/// the returned value unawaited, so it fails if the send path of a producer with built-in serializers becomes
+/// <c>async</c>. The throw of a serializer that is not a built-in ends the first stage instead.
 /// </summary>
 public sealed class PublicProducerSendSynchronousThrowTests
 {
@@ -50,7 +51,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
     [InlineData(Real, WithCallback)]
     public async Task AlreadyCanceledToken_ThrowsSynchronously_AndSendsNothing(string client, string overload)
     {
-        IAsyncProducer<byte[], byte[]> producer = Create(client);
+        IAsyncProducer<byte[], byte[]> producer = await Create(client);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
@@ -73,7 +74,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
     [InlineData(Real, WithCallback)]
     public async Task NullRecord_ThrowsSynchronously(string client, string overload)
     {
-        IAsyncProducer<byte[], byte[]> producer = Create(client);
+        IAsyncProducer<byte[], byte[]> producer = await Create(client);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
@@ -86,9 +87,9 @@ public sealed class PublicProducerSendSynchronousThrowTests
     }
 
     [Fact]
-    public void Disposed_RealClient_CallbackOverload_ThrowsSynchronously()
+    public async Task Disposed_RealClient_CallbackOverload_ThrowsSynchronously()
     {
-        IAsyncProducer<byte[], byte[]> producer = Create(Real);
+        IAsyncProducer<byte[], byte[]> producer = await Create(Real);
         TestTimeout.Dispose(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
@@ -102,16 +103,19 @@ public sealed class PublicProducerSendSynchronousThrowTests
     [Theory]
     [InlineData(Plain)]
     [InlineData(WithCallback)]
-    public void SerializerThrows_RealClient_ThrowsSynchronously(string overload)
+    public async Task SerializerThrows_RealClient_FaultsTheFirstStage(string overload)
     {
         ThrowingSerializer<byte[]> throwing = new ThrowingSerializer<byte[]>();
-        IAsyncProducer<byte[], byte[]> producer = Create(Real, throwing);
+        IAsyncProducer<byte[], byte[]> producer = await Create(Real, throwing.AsAsync());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
-        // A throw that is neither an ApiException nor an InvalidCastException leaves Send as it is, as Java's.
-        ThrowingSerializer<byte[]>.BoomException error = Assert.Throws<ThrowingSerializer<byte[]>.BoomException>(
-            () => { _ = Send(producer, overload, Record(), callback, CancellationToken.None); });
+        // A throw that is neither an ApiException nor an InvalidCastException leaves Send as it is, as Java's: the
+        // serializer is not a built-in, so it ends the first stage, and the call itself returns.
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage =
+            Send(producer, overload, Record(), callback, CancellationToken.None);
+        ThrowingSerializer<byte[]>.BoomException error =
+            await Assert.ThrowsAsync<ThrowingSerializer<byte[]>.BoomException>(async () => await firstStage);
 
         Assert.Same(throwing.LastThrown, error);
         Assert.Equal(1, throwing.InvocationCount);
@@ -156,13 +160,13 @@ public sealed class PublicProducerSendSynchronousThrowTests
     private static SerializedProducerRecord SerializedRecord() =>
         new SerializedProducerRecord(Topic, 0, null, null, new byte[] { 0x53, 0x59, 0x4E });
 
-    private static IAsyncProducer<byte[], byte[]> Create(string client, ISerializer<byte[]>? valueSerializer = null) =>
+    private static async Task<IAsyncProducer<byte[], byte[]>> Create(string client, IAsyncSerializer<byte[]>? valueSerializer = null) =>
         client == Mock
-            ? new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), valueSerializer ?? Serdes.ByteArray().Serializer())
-            : new AsyncKafkaProducer<byte[], byte[]>(
+            ? new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), valueSerializer ?? new AsyncByteArraySerializer())
+            : await AsyncKafkaProducer<byte[], byte[]>.Create(
                 new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1" },
-                Serdes.ByteArray().Serializer(),
-                valueSerializer ?? Serdes.ByteArray().Serializer());
+                new AsyncByteArraySerializer(),
+                valueSerializer ?? new AsyncByteArraySerializer());
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static (OperationCanceledException Error, WeakReference Value) SendCanceled(

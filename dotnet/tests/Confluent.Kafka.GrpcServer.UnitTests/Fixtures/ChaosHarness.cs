@@ -16,6 +16,9 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Producer;
+
 using Xunit;
 
 using Proto = Confluent.Kafka.Test;
@@ -79,12 +82,12 @@ internal sealed class ChaosHarness : IDisposable
                 config =>
                 {
                     probe.Config = config;
-                    return new AsyncTestProducer(behaviour, probe);
+                    return Task.FromResult<IAsyncProducer<byte[], byte[]>>(new AsyncTestProducer(behaviour, probe));
                 },
                 config =>
                 {
                     script.Config = config;
-                    return new AsyncScriptedConsumer(script);
+                    return Task.FromResult<IAsyncConsumer<byte[], byte[]>>(new AsyncScriptedConsumer(script));
                 }),
             _ => throw new ArgumentOutOfRangeException(nameof(flavour), flavour, "unknown flavour"),
         };

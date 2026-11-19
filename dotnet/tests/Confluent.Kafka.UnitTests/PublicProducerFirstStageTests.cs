@@ -56,7 +56,7 @@ public sealed class PublicProducerFirstStageTests
     {
         string topic = "first-stage-token-" + Guid.NewGuid().ToString("N");
         int maxBlockMs = outcome == WaitTimesOut ? 2000 : 60000;
-        AsyncKafkaProducer<byte[], byte[]> producer = Unreachable(maxBlockMs);
+        AsyncKafkaProducer<byte[], byte[]> producer = await Unreachable(maxBlockMs);
         RecordingCallback callback = new RecordingCallback();
         using CancellationTokenSource cts = new CancellationTokenSource();
         try
@@ -114,7 +114,7 @@ public sealed class PublicProducerFirstStageTests
     {
         string topic = "first-stage-token-after-" + Guid.NewGuid().ToString("N");
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         RecordingCallback callback = new RecordingCallback();
         using CancellationTokenSource cts = new CancellationTokenSource();
@@ -145,7 +145,7 @@ public sealed class PublicProducerFirstStageTests
     [Fact]
     public async Task AsyncSend_OnAClosedProducer_FaultsTheFirstStageInsideTheCall()
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = Unreachable(60000);
+        AsyncKafkaProducer<byte[], byte[]> producer = await Unreachable(60000);
         RecordingCallback callback = new RecordingCallback();
         try
         {
@@ -173,7 +173,7 @@ public sealed class PublicProducerFirstStageTests
     public async Task AsyncSend_UnreachableBroker_ReturnsAtOnce_AndTheFirstStageEndsWithAFailedFuture()
     {
         string topic = "first-stage-unreachable-" + Guid.NewGuid().ToString("N");
-        AsyncKafkaProducer<byte[], byte[]> producer = Unreachable(1000);
+        AsyncKafkaProducer<byte[], byte[]> producer = await Unreachable(1000);
         RecordingCallback callback = new RecordingCallback();
         try
         {
@@ -206,7 +206,7 @@ public sealed class PublicProducerFirstStageTests
     public async Task AsyncSend_RecordTakenAtOnce_FirstStageIsCompleteWhenSendReturns()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         UnreachableProducers.HoldingCallback hold = new UnreachableProducers.HoldingCallback();
         try
@@ -231,7 +231,7 @@ public sealed class PublicProducerFirstStageTests
     public async Task AsyncSend_NotifyHookFiredOnTheSendingThread_WakesThePump_WithoutADeadlock()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: true);
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: true);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         NativeProducer native = NativeOf(producer);
         CompletionThread completion = (CompletionThread)typeof(NativeProducer)
@@ -259,15 +259,15 @@ public sealed class PublicProducerFirstStageTests
         Assert.Contains(sender, s_notifiedThreads);
     }
 
-    private static AsyncKafkaProducer<byte[], byte[]> Unreachable(int maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(
+    private static async Task<AsyncKafkaProducer<byte[], byte[]>> Unreachable(int maxBlockMs) =>
+        await AsyncKafkaProducer<byte[], byte[]>.Create(
             new Dictionary<string, object?>
             {
                 ["bootstrap.servers"] = "localhost:1",
                 ["max.block.ms"] = maxBlockMs.ToString(System.Globalization.CultureInfo.InvariantCulture),
             },
-            Serdes.ByteArray().Serializer(),
-            Serdes.ByteArray().Serializer());
+            new AsyncByteArraySerializer(),
+            new AsyncByteArraySerializer());
 
     private static ProducerRecord<byte[], byte[]> MockRecord(string prefix) =>
         new ProducerRecord<byte[], byte[]>(prefix + "-" + Guid.NewGuid().ToString("N"), value: Encoding.UTF8.GetBytes("v"));

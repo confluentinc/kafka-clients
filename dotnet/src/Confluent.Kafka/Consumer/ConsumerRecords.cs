@@ -27,8 +27,10 @@ namespace Confluent.Kafka.Consumer;
 /// every topic partition returned by a poll.
 /// </summary>
 /// <remarks>
-/// It holds owned values only, so it needs no disposal, and it never changes. A poll with neither records nor next
-/// offsets returns <see cref="EMPTY"/>, not <see langword="null"/>.
+/// It needs no disposal, and it never changes. Its records hold owned values, except a key or value that is a
+/// memory over the poll's own bytes, as <see cref="ConsumerRecord{TKey, TValue}"/> describes: the bytes of the whole
+/// batch then stay in memory until no such key or value is reachable. A poll with neither records nor next offsets
+/// returns <see cref="EMPTY"/>, not <see langword="null"/>.
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
 /// <typeparam name="TValue">The deserialized value type.</typeparam>

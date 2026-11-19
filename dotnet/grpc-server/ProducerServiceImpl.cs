@@ -84,7 +84,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             }
             else
             {
-                producer = new KafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                producer = KafkaProducer<byte[], byte[]>.Create(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
             }
         }
         catch (Exception ex)

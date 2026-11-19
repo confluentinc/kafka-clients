@@ -35,14 +35,17 @@ internal static class ConsumerMain
 
         Dictionary<string, string> consumerConfig = V3Config.BuildConsumerConfig(config);
 
+        // DO_VERIFY=True: the backend reads each polled key and value and checks its partition.
+        PolledRecordVerifier? verifier = config.DoVerify ? new PolledRecordVerifier() : null;
+
         using Metrics metrics = Metrics.ForConsumer();
         ConsumerBenchmarkResult result;
         if (config.AsyncMode)
         {
-            var backend = new V3AsyncConsumerBackend(consumerConfig, config.PollTimeoutMs);
+            var backend = await V3AsyncConsumerBackend.Create(consumerConfig, config.PollTimeoutMs, verifier).ConfigureAwait(false);
             try
             {
-                result = await ConsumerBenchmark.RunAsync(config, backend, metrics).ConfigureAwait(false);
+                result = await ConsumerBenchmark.RunAsync(config, backend, metrics, verifier).ConfigureAwait(false);
             }
             finally
             {
@@ -51,8 +54,8 @@ internal static class ConsumerMain
         }
         else
         {
-            using var backend = new V3SyncConsumerBackend(consumerConfig, config.PollTimeoutMs);
-            result = ConsumerBenchmark.Run(config, backend, metrics);
+            using var backend = new V3SyncConsumerBackend(consumerConfig, config.PollTimeoutMs, verifier);
+            result = ConsumerBenchmark.Run(config, backend, metrics, verifier);
         }
 
         metrics.StopCollecting();
@@ -65,6 +68,12 @@ internal static class ConsumerMain
 
         if (result.AssignmentFailed || result.ResultsWriteFailed)
         {
+            return 1;
+        }
+
+        if (verifier is not null && verifier.Failed > 0)
+        {
+            Console.Error.WriteLine($"FAIL: {verifier.Failed} polled records had a negative partition");
             return 1;
         }
 

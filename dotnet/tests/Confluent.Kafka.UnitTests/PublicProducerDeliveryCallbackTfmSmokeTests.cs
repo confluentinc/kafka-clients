@@ -40,7 +40,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     public async Task AsyncMockProducer_SendWithCallback_RoundTrips()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
@@ -88,7 +88,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     public async Task AsyncMockProducer_SendWithCallback_FailurePath_DeliversPlaceholderMetadata()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 
@@ -111,16 +111,16 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     }
 
     [Fact]
-    public void RealProducers_DeclareTheCallbackOverload()
+    public async Task RealProducers_DeclareTheCallbackOverload()
     {
         // The real clients cannot be driven broker-free, so this pins only that the overload is callable on them.
         Dictionary<string, object?> config = new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" };
 
         AsyncKafkaProducer<byte[], byte[]> asyncProducer =
-            new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            await AsyncKafkaProducer<byte[], byte[]>.Create(config, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable asyncProducerDisposal = TestTimeout.Disposal(asyncProducer);
         KafkaProducer<byte[], byte[]> syncProducer =
-            new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            KafkaProducer<byte[], byte[]>.Create(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable syncProducerDisposal = TestTimeout.Disposal(syncProducer);
 
         Assert.NotNull(typeof(AsyncKafkaProducer<byte[], byte[]>).GetMethod(

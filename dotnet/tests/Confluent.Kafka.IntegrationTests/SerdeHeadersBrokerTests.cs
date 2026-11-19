@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
@@ -63,7 +64,7 @@ public sealed class SerdeHeadersBrokerTests
         HeaderAddingSerializer keySerializer = new HeaderAddingSerializer(KeyId);
         HeaderAddingSerializer serializer = new HeaderAddingSerializer();
         using (KafkaProducer<string, string> producer =
-            new KafkaProducer<string, string>(ProducerConfigs(), keySerializer, serializer))
+            KafkaProducer<string, string>.Create(ProducerConfigs(), keySerializer, serializer))
         {
             _ = producer.Send(new ProducerRecord<string, string>(topic, value: "v", key: "k", partition: 0)).Get(s_wait);
         }
@@ -71,7 +72,7 @@ public sealed class SerdeHeadersBrokerTests
         HeaderReadingDeserializer keyDeserializer = new HeaderReadingDeserializer(KeyId);
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer();
         using KafkaConsumer<string, string> consumer =
-            new KafkaConsumer<string, string>(ConsumerConfigs(), keyDeserializer, deserializer);
+            KafkaConsumer<string, string>.Create(ConsumerConfigs(), keyDeserializer, deserializer);
         consumer.Assign(new[] { new TopicPartition(topic, 0) });
         ConsumerRecord<string, string> record = PollOne(() => consumer.Poll(s_poll));
 
@@ -85,7 +86,7 @@ public sealed class SerdeHeadersBrokerTests
         HeaderAddingSerializer keySerializer = new HeaderAddingSerializer(KeyId);
         HeaderAddingSerializer serializer = new HeaderAddingSerializer();
         await using (AsyncKafkaProducer<string, string> producer =
-            new AsyncKafkaProducer<string, string>(ProducerConfigs(), keySerializer, serializer))
+            await AsyncKafkaProducer<string, string>.Create(ProducerConfigs(), keySerializer, serializer))
         {
             AsyncKafkaFuture<RecordMetadata> future =
                 await producer.Send(new ProducerRecord<string, string>(topic, value: "v", key: "k", partition: 0));
@@ -95,7 +96,7 @@ public sealed class SerdeHeadersBrokerTests
         HeaderReadingDeserializer keyDeserializer = new HeaderReadingDeserializer(KeyId);
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer();
         await using AsyncKafkaConsumer<string, string> consumer =
-            new AsyncKafkaConsumer<string, string>(ConsumerConfigs(), keyDeserializer, deserializer);
+            await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), keyDeserializer, deserializer);
         await consumer.Assign(new[] { new TopicPartition(topic, 0) });
         ConsumerRecord<string, string> record = await PollOneAsync(() => consumer.Poll(s_poll));
 
@@ -108,7 +109,7 @@ public sealed class SerdeHeadersBrokerTests
         string topic = await ProducedAsync();
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer(fail: true);
         using KafkaConsumer<string, string> consumer =
-            new KafkaConsumer<string, string>(ConsumerConfigs(), Serdes.String().Deserializer(), deserializer);
+            KafkaConsumer<string, string>.Create(ConsumerConfigs(), Serdes.String().Deserializer(), deserializer);
         consumer.Assign(new[] { new TopicPartition(topic, 0) });
 
         RecordDeserializationException e = PollFailure(() => consumer.Poll(s_poll));
@@ -122,7 +123,7 @@ public sealed class SerdeHeadersBrokerTests
         string topic = await ProducedAsync();
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer(fail: true);
         await using AsyncKafkaConsumer<string, string> consumer =
-            new AsyncKafkaConsumer<string, string>(ConsumerConfigs(), Serdes.String().Deserializer(), deserializer);
+            await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), new AsyncStringDeserializer(), deserializer);
         await consumer.Assign(new[] { new TopicPartition(topic, 0) });
 
         RecordDeserializationException e = await PollFailureAsync(() => consumer.Poll(s_poll));
@@ -222,7 +223,7 @@ public sealed class SerdeHeadersBrokerTests
     private async Task<string> ProducedAsync()
     {
         string topic = await TopicAsync();
-        using KafkaProducer<string, string> producer = new KafkaProducer<string, string>(
+        using KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(
             ProducerConfigs(), Serdes.String().Serializer(), new HeaderAddingSerializer());
         _ = producer.Send(new ProducerRecord<string, string>(topic, value: "v", key: "k", partition: 0)).Get(s_wait);
         return topic;
@@ -251,9 +252,9 @@ public sealed class SerdeHeadersBrokerTests
 
     /// <summary>
     /// A string serializer whose headers form adds a header (the schema id unless another is named) and records the
-    /// headers it was given.
+    /// headers it was given. The async form does the same after it has yielded, so the producer awaits it.
     /// </summary>
-    private sealed class HeaderAddingSerializer : ISerializerWithHeaders<string>
+    private sealed class HeaderAddingSerializer : ISerializerWithHeaders<string>, IAsyncSerializer<string>
     {
         private readonly string _header;
 
@@ -270,13 +271,20 @@ public sealed class SerdeHeadersBrokerTests
             headers.Add(_header, Encoding.UTF8.GetBytes("1"));
             return data is null ? (ReadOnlyMemory<byte>?)null : Encoding.UTF8.GetBytes(data);
         }
+
+        public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, Headers headers, string? data, CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            return Serialize(topic, headers, data);
+        }
     }
 
     /// <summary>
     /// A string deserializer whose headers form appends the value of a header (the schema id unless another is named)
-    /// and records the headers it was given, or throws after recording them.
+    /// and records the headers it was given, or throws after recording them. The async form does the same.
     /// </summary>
-    private sealed class HeaderReadingDeserializer : IDeserializerWithHeaders<string>
+    private sealed class HeaderReadingDeserializer : IDeserializerWithHeaders<string>, IAsyncDeserializer<string>
     {
         private readonly string _header;
 
@@ -305,5 +313,9 @@ public sealed class SerdeHeadersBrokerTests
             byte[]? id = headers.LastHeader(_header)?.Value();
             return text + "|" + (id is null ? "none" : Encoding.UTF8.GetString(id));
         }
+
+        public ValueTask<string?> Deserialize(
+            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+            new ValueTask<string?>(Deserialize(topic, headers, data.Span));
     }
 }

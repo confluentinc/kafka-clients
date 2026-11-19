@@ -121,7 +121,7 @@ public sealed class PublicSyncProducerTeardownTests
     public void RealProducer_Dispose_Returns()
     {
         // The real KafkaProducer with no broker tears down without hanging.
-        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray().Serializer(),
             Serdes.ByteArray().Serializer());

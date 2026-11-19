@@ -544,10 +544,8 @@ internal sealed partial class NativeConsumer
 
     internal Task<ConsumerRecords<TKey, TValue>> PollWithCallback<TKey, TValue>(
         TimeSpan timeout,
-        IDeserializer<TKey> keyDeserializer,
-        IDeserializerWithHeaders<TKey>? keyWithHeaders,
-        IDeserializer<TValue> valueDeserializer,
-        IDeserializerWithHeaders<TValue>? valueWithHeaders,
+        AsyncDeserializerCall<TKey> key,
+        AsyncDeserializerCall<TValue> value,
         CancellationToken cancellationToken = default)
     {
         long timeoutMs = TimerTimeoutMs(timeout);
@@ -557,8 +555,7 @@ internal sealed partial class NativeConsumer
             s_records,
             (_, opaque) => NativeMethods.ConsumerPollCb(_handle, timeoutMs, ConsumerCompletion.Pointer, opaque),
             atPoll: true);
-        return CompletePoll(
-            completion, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, cancellationToken);
+        return CompletePoll(completion, key, value, cancellationToken);
     }
 
     internal Task<long> PositionWithCallback(TopicPartition partition, CancellationToken cancellationToken = default)
@@ -1370,13 +1367,12 @@ internal sealed partial class NativeConsumer
     // The records are deserialized after the poll's use has ended, so a deserializer may dispose the consumer, and
     // the seeks back take one use of their own. Once the token has fired the poll ends canceled whatever it returned,
     // so its records are dropped and every partition is sought back to its first record, as a failed deserialization
-    // seeks back to the first record not returned.
+    // seeks back to the first record not returned. Two built-in deserializers copy the batch out as a synchronous
+    // consumer does, with nothing awaited per record; any other pair is awaited one record at a time.
     private async Task<ConsumerRecords<TKey, TValue>> CompletePoll<TKey, TValue>(
         ConsumerCompletion<IntPtr> completion,
-        IDeserializer<TKey> keyDeserializer,
-        IDeserializerWithHeaders<TKey>? keyWithHeaders,
-        IDeserializer<TValue> valueDeserializer,
-        IDeserializerWithHeaders<TValue>? valueWithHeaders,
+        AsyncDeserializerCall<TKey> key,
+        AsyncDeserializerCall<TValue> value,
         CancellationToken cancellationToken)
     {
         IntPtr records;
@@ -1408,12 +1404,33 @@ internal sealed partial class NativeConsumer
         RecordDeserializationException? error = null;
         IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind = Array.Empty<KeyValuePair<TopicPartition, long>>();
         IReadOnlyList<KeyValuePair<TopicPartition, long>>? dropped = null;
+        SafeConsumerRecordsHandle? batch = null;
+        AsyncCopyOut<TKey, TValue>? awaited = null;
         try
         {
             if (!cancellationToken.IsCancellationRequested)
             {
-                copied = ConsumerRecordsMarshal.CopyOut(
-                    records, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, out error, out rewind);
+                if (key.Inner is null || value.Inner is null)
+                {
+                    awaited = new AsyncCopyOut<TKey, TValue>();
+                    await ConsumerRecordsMarshal.CopyOutAsync(records, key, value, awaited, cancellationToken)
+                        .ConfigureAwait(false);
+                    copied = awaited.Records;
+                    error = awaited.Error;
+                    rewind = awaited.Rewind;
+                }
+                else if (key.InnerWithMemory is null && value.InnerWithMemory is null)
+                {
+                    copied = ConsumerRecordsMarshal.CopyOut(
+                        records, key.Inner, key.InnerWithHeaders, value.Inner, value.InnerWithHeaders, out error,
+                        out rewind);
+                }
+                else
+                {
+                    copied = ConsumerRecordsMarshal.CopyOut(
+                        records, key.Inner, key.InnerWithHeaders, key.InnerWithMemory, value.Inner,
+                        value.InnerWithHeaders, value.InnerWithMemory, ref batch, out error, out rewind);
+                }
             }
 
             if (cancellationToken.IsCancellationRequested)
@@ -1423,7 +1440,7 @@ internal sealed partial class NativeConsumer
         }
         finally
         {
-            DestroyRecords(records);
+            await ReleaseRecordsAsync(records, batch ?? awaited?.Batch).ConfigureAwait(false);
         }
 
         if (dropped is not null)
@@ -1546,7 +1563,7 @@ internal sealed partial class NativeConsumer
             }
             finally
             {
-                ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
+                await ReleaseTheGateThenDisposeTheDeserializersAsync(destroyedBefore).ConfigureAwait(false);
             }
         }
         finally
@@ -1597,7 +1614,7 @@ internal sealed partial class NativeConsumer
         }
         finally
         {
-            ReleaseTheGateThenDisposeTheDeserializers(destroyedBefore);
+            await ReleaseTheGateThenDisposeTheDeserializersAsync(destroyedBefore).ConfigureAwait(false);
         }
     }
 

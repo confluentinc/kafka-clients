@@ -46,10 +46,11 @@ public sealed class PublicSyncConsumerPreconditionTests
         };
         Func<IDeserializer<byte[]>?, IDeserializer<byte[]>?, object> create = consumer switch
         {
-            nameof(KafkaConsumer<byte[], byte[]>) => (k, v) => new KafkaConsumer<byte[], byte[]>(config, k!, v!),
-            nameof(AsyncKafkaConsumer<byte[], byte[]>) => (k, v) => new AsyncKafkaConsumer<byte[], byte[]>(config, k!, v!),
+            nameof(KafkaConsumer<byte[], byte[]>) => (k, v) => KafkaConsumer<byte[], byte[]>.Create(config, k!, v!),
+            // The asynchronous Create throws this check from the call, so its task is never reached.
+            nameof(AsyncKafkaConsumer<byte[], byte[]>) => (k, v) => AsyncKafkaConsumer<byte[], byte[]>.Create(config, k!.AsAsync(), v!.AsAsync()),
             nameof(MockConsumer<byte[], byte[]>) => (k, v) => new MockConsumer<byte[], byte[]>(k!, v!),
-            _ => (k, v) => new AsyncMockConsumer<byte[], byte[]>(k!, v!),
+            _ => (k, v) => new AsyncMockConsumer<byte[], byte[]>(k!.AsAsync(), v!.AsAsync()),
         };
 
         ConfigException key = Assert.Throws<ConfigException>(() => create(null, null));

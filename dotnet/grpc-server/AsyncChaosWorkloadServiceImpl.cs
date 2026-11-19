@@ -38,21 +38,25 @@ namespace Confluent.Kafka.GrpcServer;
 internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService.ChaosWorkloadServiceBase, IDisposable
 {
     private readonly ChaosRegistry _registry = new ChaosRegistry();
-    private readonly Func<IReadOnlyDictionary<string, object?>, IAsyncProducer<byte[], byte[]>> _producerFactory;
-    private readonly Func<IReadOnlyDictionary<string, object?>, IAsyncConsumer<byte[], byte[]>> _consumerFactory;
+    private readonly Func<IReadOnlyDictionary<string, object?>, Task<IAsyncProducer<byte[], byte[]>>> _producerFactory;
+    private readonly Func<IReadOnlyDictionary<string, object?>, Task<IAsyncConsumer<byte[], byte[]>>> _consumerFactory;
 
     public AsyncChaosWorkloadServiceImpl()
         : this(
-            static config => new AsyncKafkaProducer<byte[], byte[]>(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
-            static config => new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()))
+            static async config => await AsyncKafkaProducer<byte[], byte[]>
+                .Create(config, new AsyncByteArraySerializer(), new AsyncByteArraySerializer())
+                .ConfigureAwait(false),
+            static async config => await AsyncKafkaConsumer<byte[], byte[]>
+                .Create(config, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer())
+                .ConfigureAwait(false))
     {
     }
 
     // The unit tests' seam: DI activates only the public constructor, so production always gets the
     // real clients.
     internal AsyncChaosWorkloadServiceImpl(
-        Func<IReadOnlyDictionary<string, object?>, IAsyncProducer<byte[], byte[]>> producerFactory,
-        Func<IReadOnlyDictionary<string, object?>, IAsyncConsumer<byte[], byte[]>> consumerFactory)
+        Func<IReadOnlyDictionary<string, object?>, Task<IAsyncProducer<byte[], byte[]>>> producerFactory,
+        Func<IReadOnlyDictionary<string, object?>, Task<IAsyncConsumer<byte[], byte[]>>> consumerFactory)
     {
         _producerFactory = producerFactory;
         _consumerFactory = consumerFactory;
@@ -105,7 +109,7 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
         IAsyncProducer<byte[], byte[]> producer;
         try
         {
-            producer = _producerFactory(Translate.ConfigsFromProto(request.Config));
+            producer = await _producerFactory(Translate.ConfigsFromProto(request.Config)).ConfigureAwait(false);
         }
         catch (Exception e)
         {
@@ -187,7 +191,7 @@ internal sealed class AsyncChaosWorkloadServiceImpl : Proto.ChaosWorkloadService
         IAsyncConsumer<byte[], byte[]> consumer;
         try
         {
-            consumer = _consumerFactory(Translate.ConfigsFromProto(request.Config));
+            consumer = await _consumerFactory(Translate.ConfigsFromProto(request.Config)).ConfigureAwait(false);
         }
         catch (Exception e)
         {

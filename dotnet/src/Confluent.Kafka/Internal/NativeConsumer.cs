@@ -41,7 +41,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 {
     private const string GroupIdConfig = "group.id";
 
-    private const string ConstructionFailedMessage = "Failed to construct kafka consumer";
+    internal const string ConstructionFailedMessage = "Failed to construct kafka consumer";
 
     // The strategy the mock consumers' two-argument constructors pass.
     internal const string DefaultOffsetResetStrategy = "latest";
@@ -103,6 +103,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private int _recordsHeld;
     private bool _deserializersHandedOver;
     private bool _recordBytesReleasable;
+
+    // The mock's batches left to the garbage collector, whose keys and values are in _recordBytes: under its lock.
+    private int _recordsRetained;
+    private Action? _releaseRetainedRecords;
 
     // Closing: a teardown that will close (a Dispose, or a close the core accepted). ClosePending: an explicit Close
     // begun while a call it does not wait for is in flight (its own thread's, or one made inside a callback), which
@@ -219,57 +223,141 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
 
     /// <summary>
-    /// A consumer constructor's deserializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null
+    /// A mock consumer constructor's deserializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null
     /// for configuration <paramref name="key"/>: must be non-null.", which Java throws when the
-    /// <paramref name="key"/> config names no class; .NET config cannot name one.
+    /// <paramref name="key"/> config is missing too.
     /// </summary>
     internal static T RequireDeserializer<T>(T? deserializer, string key)
         where T : class =>
         deserializer ?? throw new ConfigException(key, null, "must be non-null.");
 
+    /// <summary>
+    /// Creates the consumer in Java's order: the binding's and the core's checks of the configuration, bare; then the
+    /// part inside Java's constructor <c>try</c>, where <paramref name="serdes"/> builds the deserializers that were
+    /// not given and the core builds the client.
+    /// </summary>
     internal static NativeConsumer Create(
-        IReadOnlyDictionary<string, object?> configs,
+        IReadOnlyCollection<KeyValuePair<string, object?>> configs,
         bool withPump = true,
-        SerdeDisposal? serdes = null)
+        ConfiguredSerdes? serdes = null)
     {
         IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Consumer);
         IntPtr classPointer;
-        try
+        SerdeDisposal? disposal;
+        using (ConfigMarshal.ValidatedConfig config = ConfigMarshal.Validate(prepared, ClientKind.Consumer))
         {
-            classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Consumer);
-        }
-        catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
-        {
-            // Java's constructor closes the deserializers when a step inside its try fails, which the core reports
-            // wrapped; a configuration it refuses before that try, such as a value it cannot parse, comes back bare
-            // and disposes nothing.
-            serdes?.DisposeOnce();
-            throw;
-        }
-
-        try
-        {
-            IntPtr outErr = IntPtr.Zero;
-            IntPtr view = NativeMethods.KafkaConsumerAsConsumer(classPointer, ref outErr);
-            if (outErr != IntPtr.Zero)
+            disposal = serdes?.Build();
+            try
             {
-                IntPtr destroyErr = IntPtr.Zero;
-                NativeMethods.KafkaConsumerDestroy(classPointer, ref destroyErr);
-                FreeError(ref destroyErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
+                classPointer = config.CreateClient();
             }
+            catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+            {
+                // Java's constructor closes the deserializers when a step inside its try fails, which the core
+                // reports wrapped.
+                disposal?.DisposeOnce();
+                throw;
+            }
+            catch
+            {
+                // A failure the core reports bare is one Java raises outside that try, which closes nothing: a given
+                // deserializer stays its owner's, and one built here has no other owner.
+                serdes?.DisposeBuilt();
+                throw;
+            }
+        }
 
-            return Start(
-                new SafeKafkaConsumerHandle(view, classPointer),
-                groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
-                withPump,
-                serdes);
+        try
+        {
+            return Started(classPointer, withPump, prepared, disposal);
         }
         catch
         {
-            serdes?.DisposeOnce();
+            disposal?.DisposeOnce();
             throw;
         }
+    }
+
+    /// <summary>
+    /// The awaited form of <see cref="Create"/>, for a consumer whose deserializers' <c>Configure</c> may wait: the
+    /// same steps in the same order. The checks of the configuration throw from the call; what follows, from the
+    /// first function on, completes or fails the task, and a disposal it makes is awaited.
+    /// </summary>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was cancelled before the core built the client: the deserializers built
+    /// so far are disposed, and the given ones are not. Once the client exists the token is not read again.
+    /// </exception>
+    internal static Task<NativeConsumer> CreateAwaited(
+        IReadOnlyCollection<KeyValuePair<string, object?>> configs,
+        ConfiguredSerdes serdes,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Consumer);
+        ConfigMarshal.ValidatedConfig config = ConfigMarshal.Validate(prepared, ClientKind.Consumer);
+        return CreateAwaited(config, prepared, serdes, cancellationToken);
+    }
+
+    private static async Task<NativeConsumer> CreateAwaited(
+        ConfigMarshal.ValidatedConfig validated,
+        IReadOnlyList<KeyValuePair<string, string>> prepared,
+        ConfiguredSerdes serdes,
+        CancellationToken cancellationToken)
+    {
+        IntPtr classPointer;
+        SerdeDisposal disposal;
+        using (ConfigMarshal.ValidatedConfig config = validated)
+        {
+            disposal = await serdes.BuildAwaited(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                classPointer = config.CreateClient();
+            }
+            catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+            {
+                await disposal.DisposeOnceAsync().ConfigureAwait(false);
+                throw;
+            }
+            catch
+            {
+                // A cancellation, like a failure the core reports bare, is not one of Java's constructor.
+                await serdes.DisposeBuiltAwaited().ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        try
+        {
+            return Started(classPointer, withPump: true, prepared, disposal);
+        }
+        catch
+        {
+            await disposal.DisposeOnceAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static NativeConsumer Started(
+        IntPtr classPointer,
+        bool withPump,
+        IReadOnlyList<KeyValuePair<string, string>> prepared,
+        SerdeDisposal? disposal)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr view = NativeMethods.KafkaConsumerAsConsumer(classPointer, ref outErr);
+        if (outErr != IntPtr.Zero)
+        {
+            IntPtr destroyErr = IntPtr.Zero;
+            NativeMethods.KafkaConsumerDestroy(classPointer, ref destroyErr);
+            FreeError(ref destroyErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+
+        return Start(
+            new SafeKafkaConsumerHandle(view, classPointer),
+            groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
+            withPump,
+            disposal);
     }
 
     // A null strategy crosses as NULL, which the core refuses with Java's IllegalArgumentException
@@ -497,13 +585,16 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // The records are deserialized after the poll's use has ended, so a deserializer may dispose the consumer. A
     // record that fails to deserialize ends the batch: the records before it are returned, and every partition is
     // sought back to its first record not returned, the seeks taking one use of their own, so the failing record comes
-    // next.
+    // next. A deserializer's memory form, given when it has one, is called with a memory over the batch, which is
+    // then released as ReleaseRecords says.
     internal ConsumerRecords<TKey, TValue> PollTyped<TKey, TValue>(
         TimeSpan timeout,
         IDeserializer<TKey> keyDeserializer,
         IDeserializerWithHeaders<TKey>? keyWithHeaders,
+        IDeserializerWithReadOnlyMemory<TKey>? keyWithMemory,
         IDeserializer<TValue> valueDeserializer,
-        IDeserializerWithHeaders<TValue>? valueWithHeaders)
+        IDeserializerWithHeaders<TValue>? valueWithHeaders,
+        IDeserializerWithReadOnlyMemory<TValue>? valueWithMemory)
     {
         long timeoutMs = TimerTimeoutMs(timeout);
         RefuseInsideACallback();
@@ -519,14 +610,23 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         ConsumerRecords<TKey, TValue> copied;
         RecordDeserializationException? error;
         IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind;
+        SafeConsumerRecordsHandle? batch = null;
         try
         {
             copied = ConsumerRecordsMarshal.CopyOut(
-                records, keyDeserializer, keyWithHeaders, valueDeserializer, valueWithHeaders, out error, out rewind);
+                records, keyDeserializer, keyWithHeaders, keyWithMemory, valueDeserializer, valueWithHeaders,
+                valueWithMemory, ref batch, out error, out rewind);
         }
         finally
         {
-            DestroyRecords(records);
+            if (batch is null)
+            {
+                DestroyRecords(records);
+            }
+            else
+            {
+                ReleaseRecords(batch);
+            }
         }
 
         if (error is null)
@@ -1864,8 +1964,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     // The mock shares a record's key and value bytes until the records holding them are destroyed, so each one
-    // is copied into an unmanaged kafka_Bytes_t block that lives until the consumer's destroy has returned and no
-    // poll holds a records handle any more.
+    // is copied into an unmanaged kafka_Bytes_t block that lives until the consumer's destroy has returned, no
+    // poll holds a records handle any more and every batch left to the garbage collector is released.
     private IntPtr KeepRecordBytes(byte[]? data)
     {
         if (data is null)
@@ -1922,7 +2022,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         lock (_recordBytes)
         {
             _recordBytesReleasable = true;
-            if (_recordsHeld == 0)
+            if (_recordsHeld == 0 && _recordsRetained == 0)
             {
                 FreeRecordBytes();
             }
@@ -1942,6 +2042,16 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             _serdes?.DisposeOnce();
         }
+    }
+
+    // The same for a close that runs asynchronously, which awaits an asynchronous deserializer's disposal.
+    private ValueTask ReleaseTheGateThenDisposeTheDeserializersAsync(bool destroyedBefore)
+    {
+        bool destroyedByThisCall = !destroyedBefore && _destroyed;
+        _closeGate.Release();
+        return destroyedByThisCall && !HandTheDeserializersToThePolls() && _serdes is not null
+            ? _serdes.DisposeOnceAsync()
+            : default;
     }
 
     // A poll takes its records inside its use, and the destroy runs only once the uses have ended while new ones are
@@ -1966,31 +2076,123 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private void DestroyRecords(IntPtr records)
     {
-        bool disposeTheDeserializers = false;
         try
         {
             ConsumerRecordsMarshal.Destroy(records);
         }
         finally
         {
+            EndRecordsHold();
+        }
+    }
+
+    // A batch whose bytes a deserializer was given is never destroyed here, also when one of its records failed to
+    // deserialize: what the deserializers returned may be memory over it, so it is left to the garbage collector,
+    // which releases it once no such memory is reachable. The poll's hold ends here either way.
+    private void ReleaseRecords(SafeConsumerRecordsHandle batch)
+    {
+        try
+        {
+            ReleaseBatch(batch);
+        }
+        finally
+        {
+            EndRecordsHold();
+        }
+    }
+
+    // The release of an asynchronous poll's records, by either rule above, which awaits the disposal of the
+    // deserializers when a close handed them to this poll.
+    private async ValueTask ReleaseRecordsAsync(IntPtr records, SafeConsumerRecordsHandle? batch)
+    {
+        try
+        {
+            if (batch is null)
+            {
+                ConsumerRecordsMarshal.Destroy(records);
+            }
+            else
+            {
+                ReleaseBatch(batch);
+            }
+        }
+        finally
+        {
+            if (EndRecordsHoldOnly() && _serdes is not null)
+            {
+                await _serdes.DisposeOnceAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    private void ReleaseBatch(SafeConsumerRecordsHandle batch)
+    {
+        if (!batch.HandedOut && !(IsMock && batch.Lent))
+        {
+            batch.Dispose();
+            return;
+        }
+
+        Action? released = null;
+        if (IsMock)
+        {
             lock (_recordBytes)
             {
-                _recordsHeld--;
-                if (_recordsHeld == 0)
-                {
-                    if (_recordBytesReleasable)
-                    {
-                        FreeRecordBytes();
-                    }
-
-                    disposeTheDeserializers = _deserializersHandedOver;
-                    _deserializersHandedOver = false;
-                }
+                _recordsRetained++;
             }
 
-            if (disposeTheDeserializers)
+            released = _releaseRetainedRecords ??= ReleaseRetainedRecords;
+        }
+
+        if (batch.HandedOut)
+        {
+            batch.Retain(released);
+        }
+        else
+        {
+            // A pin taken on a lent memory defers the release past this poll, and the mock's record bytes with it.
+            batch.Dispose(released!);
+        }
+    }
+
+    private void EndRecordsHold()
+    {
+        if (EndRecordsHoldOnly())
+        {
+            _serdes?.DisposeOnce();
+        }
+    }
+
+    // Ends a poll's hold and answers whether a close handed the deserializers to this poll to dispose.
+    private bool EndRecordsHoldOnly()
+    {
+        bool disposeTheDeserializers = false;
+        lock (_recordBytes)
+        {
+            _recordsHeld--;
+            if (_recordsHeld == 0)
             {
-                _serdes?.DisposeOnce();
+                if (_recordBytesReleasable && _recordsRetained == 0)
+                {
+                    FreeRecordBytes();
+                }
+
+                disposeTheDeserializers = _deserializersHandedOver;
+                _deserializersHandedOver = false;
+            }
+        }
+
+        return disposeTheDeserializers;
+    }
+
+    private void ReleaseRetainedRecords()
+    {
+        lock (_recordBytes)
+        {
+            _recordsRetained--;
+            if (_recordBytesReleasable && _recordsHeld == 0 && _recordsRetained == 0)
+            {
+                FreeRecordBytes();
             }
         }
     }

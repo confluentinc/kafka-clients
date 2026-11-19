@@ -110,7 +110,8 @@ public interface ITransactionalClientFactory
 
     IReadOnlyDictionary<string, string> ProducerConfig(string transactionalId);
 
-    ITransactionalProducer CreateProducer(string transactionalId);
+    /// <summary>Builds a worker's producer; a client that is built asynchronously is awaited here.</summary>
+    ValueTask<ITransactionalProducer> CreateProducer(string transactionalId);
 
     ITransactionalConsumer CreateConsumer();
 

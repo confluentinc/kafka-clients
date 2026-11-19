@@ -96,6 +96,12 @@ public sealed class ConsumerBenchmarkConfig
 
     public bool UseDefaults { get; private set; }
 
+    /// <summary>
+    /// <c>DO_VERIFY</c> (default True, as the producer harnesses'): each consumer backend reads every byte of each
+    /// polled key and value and checks the record's partition, through a <see cref="PolledRecordVerifier"/>.
+    /// </summary>
+    public bool DoVerify { get; private set; } = true;
+
     public bool CreateTopic { get; private set; }
 
     public int ReadinessMinRecords { get; private set; } = 20;
@@ -134,6 +140,7 @@ public sealed class ConsumerBenchmarkConfig
             AsyncMode = PerfEnv.GetBool("ASYNC", false),
             PollSingle = PerfEnv.GetBool("POLL_SINGLE", false),
             UseDefaults = useDefaults,
+            DoVerify = PerfEnv.GetBool("DO_VERIFY", true),
             CreateTopic = PerfEnv.GetBool("CREATE_TOPIC", true),
             ReadinessMinRecords = PerfEnv.GetInt("READINESS_MIN_RECORDS", 20),
             ReadinessTimeoutSeconds = PerfEnv.GetInt("READINESS_TIMEOUT_SECONDS", 20),
