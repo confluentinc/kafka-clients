@@ -27,6 +27,13 @@
 //! - **Resolvable bootstrap host, positive timeout:** against a real broker, the
 //!   asynchronous path bootstraps the client, which then works normally (a
 //!   produce, a consume and an admin call).
+//!
+//! Under `multilanguage-tests` the producer's cases also run on every backend
+//! through [`multilanguage_test!`](crate::multilanguage_test), the producer
+//! under test coming from the backend's factory: the unresolvable-host test,
+//! and the producer half of the resolvable-host test (the admin client that
+//! creates its topic stays native). Without the feature the unresolvable-host
+//! test runs on the native backend.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -37,6 +44,7 @@ use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySer
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, KafkaConsumer};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
+use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::create_topic;
@@ -60,8 +68,7 @@ fn assert_bootstrap_resolution_error<T: std::fmt::Debug>(result: Result<T, Error
 
 /// The producer's `partitions_for` waits on metadata, which the failure
 /// wakes; it and every later call return `BootstrapResolutionError`.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_producer_unresolvable_bootstrap_with_positive_timeout() {
+async fn producer_unresolvable_bootstrap_with_positive_timeout<F: ProducerBackendFactory>(factory: &F) {
     let props = HashMap::from([
         (ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), UNRESOLVABLE.to_string()),
         (
@@ -69,19 +76,44 @@ async fn test_producer_unresolvable_bootstrap_with_positive_timeout() {
             TIMEOUT_MS.to_string(),
         ),
     ]);
-    let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::new(
-        ProducerConfig::new(&props).expect("valid config"),
-        ByteArraySerializer::default(),
-        ByteArraySerializer::default(),
-    )
-    .expect("a positive timeout defers resolution, so construction succeeds");
+    let producer = factory
+        .create(props)
+        .await
+        .expect("a positive timeout defers resolution, so construction succeeds");
 
     let first = tokio::time::timeout(MAX_WAIT, producer.partitions_for("topic"))
         .await
         .expect("the bootstrap failure must end the metadata wait");
     assert_bootstrap_resolution_error(first);
-    assert_bootstrap_resolution_error(producer.partitions_for("topic").await);
+    let second = tokio::time::timeout(MAX_WAIT, producer.partitions_for("topic"))
+        .await
+        .expect("a later call must fail at once");
+    assert_bootstrap_resolution_error(second);
     producer.close_with_timeout(Duration::ZERO).await.expect("close");
+}
+
+/// [`producer_unresolvable_bootstrap_with_positive_timeout`] in the shape
+/// [`multilanguage_test!`](crate::multilanguage_test) calls: the test uses no
+/// broker, but a gRPC backend's server is attached to the context's cluster
+/// network.
+#[cfg(feature = "multilanguage-tests")]
+async fn producer_unresolvable_bootstrap_with_positive_timeout_inner<F: ProducerBackendFactory>(
+    _ctx: &mut TestContext,
+    factory: &F,
+) {
+    producer_unresolvable_bootstrap_with_positive_timeout(factory).await;
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_producer_unresolvable_bootstrap_with_positive_timeout,
+    producer_unresolvable_bootstrap_with_positive_timeout_inner
+);
+
+#[cfg(not(feature = "multilanguage-tests"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_producer_unresolvable_bootstrap_with_positive_timeout() {
+    producer_unresolvable_bootstrap_with_positive_timeout(&crate::common::backend_factory::RustNativeFactory).await;
 }
 
 /// The consumer's `poll` and every later call return `BootstrapResolutionError`;
@@ -219,3 +251,47 @@ async fn test_clients_bootstrap_asynchronously_with_positive_timeout() {
     admin.close().await;
     ctx.cleanup().await;
 }
+
+/// The producer half of [`test_clients_bootstrap_asynchronously_with_positive_timeout`]
+/// on `factory`'s backend: with a positive timeout and a resolvable bootstrap
+/// list, the asynchronous path bootstraps the producer, which delivers a
+/// record to a topic the native admin client created.
+#[cfg(feature = "multilanguage-tests")]
+async fn producer_bootstraps_asynchronously_with_positive_timeout_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let topic = ctx.topic("bootstrap_resolve_async");
+    let mut admin_props = HashMap::new();
+    ctx.configure(&mut admin_props);
+    let admin = AdminClient::create(AdminClientConfig::new(&admin_props).expect("valid config")).expect("admin");
+    create_topic(admin.as_ref(), &topic, 1, 1).await;
+
+    let mut producer_props = HashMap::from([(
+        "bootstrap.servers".to_string(),
+        ctx.protocol_bootstrap_servers_for(factory.needs_container_bootstrap())
+            .to_string(),
+    )]);
+    ctx.apply_security(&mut producer_props);
+    producer_props.insert("bootstrap.resolve.timeout.ms".to_string(), "30000".to_string());
+    let producer = factory.create(producer_props).await.expect("producer");
+    let record = ProducerRecord::with_key(topic.clone(), Some(b"key".to_vec()), Some(b"value".to_vec()));
+    let metadata = producer
+        .send(record)
+        .await
+        .expect("send")
+        .get_with_timeout(Duration::from_secs(30))
+        .await
+        .unwrap_or_else(|e| panic!("{} backend: delivery failed: {e:?}", factory.name()));
+    assert_eq!(metadata.topic(), topic, "{} backend", factory.name());
+    assert_eq!(metadata.offset(), 0, "{} backend", factory.name());
+    producer.close().await.expect("producer close");
+    admin.close().await;
+    ctx.cleanup().await;
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_producer_bootstraps_asynchronously_with_positive_timeout,
+    producer_bootstraps_asynchronously_with_positive_timeout_inner
+);

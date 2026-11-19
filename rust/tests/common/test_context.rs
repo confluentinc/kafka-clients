@@ -347,6 +347,12 @@ impl Drop for TestContext {
             // containers synchronously, one extra strong reference is leaked
             // so the `KafkaCluster` (and its `ContainerAsync`s) is never
             // dropped; that is a few hundred bytes per dedicated test.
+            //
+            // Its gRPC backends go first: the backend pool is keyed by
+            // network, so this cluster's backends are its own, and one still
+            // attached makes the network's removal fail.
+            #[cfg(feature = "multilanguage-tests")]
+            reap_backends_on(self.cluster.network_name());
             cluster_pool::teardown(&self.cluster);
             std::mem::forget(Arc::clone(&self.cluster));
         }
@@ -357,6 +363,34 @@ impl Drop for TestContext {
                 self.prefix
             );
         }
+    }
+}
+
+/// Stops and de-pools the gRPC backends attached to a dedicated cluster's
+/// `network`, before the cluster's teardown removes the network: the backend
+/// pool is keyed by network, so these backends are the dedicated cluster's
+/// own, and one left attached makes the `docker network rm` fail, leaking the
+/// network and the backend for the rest of the process.
+///
+/// [`backend_pool::take_and_remove_handles_on_network`](super::backend_pool)
+/// drops the last handle, whose `ContainerAsync::drop` needs a runtime
+/// handle, which a test's unwinding out of `#[tokio::test]` may not give.
+/// So it runs on a thread of its own, inside a current-thread runtime of its
+/// own, which `ContainerAsync::drop` supports.
+#[cfg(feature = "multilanguage-tests")]
+fn reap_backends_on(network: &str) {
+    let network = network.to_string();
+    let reaped = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime for the backend teardown");
+        let _entered = runtime.enter();
+        super::backend_pool::take_and_remove_handles_on_network(&network)
+    })
+    .join();
+    if reaped.is_err() {
+        eprintln!("WARN: the teardown of the gRPC backends on a dedicated cluster's network panicked");
     }
 }
 

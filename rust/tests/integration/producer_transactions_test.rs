@@ -82,7 +82,8 @@
 //! - `AdminFenceProducersTest.testFenceBeforeProducerCommit` →
 //!   [`test_fence_before_producer_commit`]
 //! - `ProducerIdExpirationTest.testProducerIdExpirationWithNoTransactions` →
-//!   [`test_producer_id_expiration_with_no_transactions`]
+//!   `test_producer_id_expiration_with_no_transactions` (on every backend under
+//!   `multilanguage-tests`)
 //! - `ProducerIdExpirationTest.testTransactionAfterTransactionIdExpiresButProducerIdRemains` →
 //!   [`test_transaction_after_transaction_id_expires_but_producer_id_remains`]
 //! - `TransactionsExpirationTest.testFatalErrorAfterInvalidProducerIdMappingWithTV1` /
@@ -2942,28 +2943,46 @@ async fn assert_send_fails_with_invalid_pid_mapping_then_abort_is_fatal(
 /// it stops writing, and reappears when it writes again.
 ///
 /// Translates `ProducerIdExpirationTest#testProducerIdExpirationWithNoTransactions`.
-#[tokio::test]
-async fn test_producer_id_expiration_with_no_transactions() {
-    let mut ctx = TestContext::new(producer_id_expiration_cluster()).await;
+///
+/// The producer under test comes from the backend's factory with Java's
+/// `ClusterInstance#producer(Map.of(ENABLE_IDEMPOTENCE_CONFIG, true))` config;
+/// the admin client that reads the producer state stays native. The producer is
+/// not transactional, so the JS_GRPC_SKIPS / DOTNET_GRPC_SKIPS reasons of this
+/// file's transaction tests do not apply.
+async fn producer_id_expiration_with_no_transactions_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let topic1 = ctx.topic("topic1");
     let tp0 = TopicPartition::new(topic1.clone(), 0);
-    create_expiration_topic(&ctx, &topic1, 1).await;
-    let producer = cluster_producer(ctx.bootstrap_servers(), &[("enable.idempotence", "true")]);
+    create_expiration_topic(ctx, &topic1, 1).await;
+    let bootstrap = if factory.needs_container_bootstrap() {
+        ctx.container_bootstrap_servers()
+    } else {
+        ctx.bootstrap_servers()
+    };
+    let producer = factory
+        .create(HashMap::from([
+            ("bootstrap.servers".to_string(), bootstrap.to_string()),
+            ("enable.idempotence".to_string(), "true".to_string()),
+        ]))
+        .await
+        .expect("failed to build a producer");
     let record = || {
         ProducerRecord::with_partition_key(topic1.clone(), Some(0), Some(b"key".to_vec()), Some(b"value".to_vec()))
             .expect("record")
     };
 
     // Send records to populate producer state cache.
-    send_record(&producer, record()).await.expect("send");
+    producer.send(record()).await.expect("send");
     producer.flush().await.expect("flush");
-    let admin = txn_test_admin(&ctx);
+    let admin = txn_test_admin(ctx);
     assert_eq!(1, producer_states(admin.as_ref(), &tp0).await.expect("describeProducers").len());
 
     wait_producer_id_expire(admin.as_ref(), &tp0).await;
 
     // Send more records to send producer ID back to brokers.
-    send_record(&producer, record()).await.expect("send");
+    producer.send(record()).await.expect("send");
     producer.flush().await.expect("flush");
 
     // Producer IDs should repopulate.
@@ -2972,6 +2991,23 @@ async fn test_producer_id_expiration_with_no_transactions() {
     admin.close().await;
     producer.close().await.expect("producer close");
     ctx.cleanup().await;
+}
+
+// `ProducerIdExpirationTest#testProducerIdExpirationWithNoTransactions`.
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_producer_id_expiration_with_no_transactions,
+    producer_id_expiration_with_no_transactions_inner,
+    producer_id_expiration_cluster()
+);
+
+/// `ProducerIdExpirationTest#testProducerIdExpirationWithNoTransactions`.
+#[cfg(not(feature = "multilanguage-tests"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_producer_id_expiration_with_no_transactions() {
+    let mut ctx = TestContext::new(producer_id_expiration_cluster()).await;
+    producer_id_expiration_with_no_transactions_inner(&mut ctx, &crate::common::backend_factory::RustNativeFactory)
+        .await;
 }
 
 /// A transactional id that expires while its producer id is still in the
