@@ -1,5 +1,5 @@
 # Cross-language Makefile. Each language owns its targets in its own Makefile
-# -- rust/, c/, python/, dotnet/ -- run as `make -C <language> <target>`, and
+# -- rust/, c/, python/, dotnet/, cpp/ -- run as `make -C <language> <target>`, and
 # each builds what it needs first (the Rust library, its submodule, its venv).
 # This one holds only what spans several languages or the whole repository:
 # the combined builds and gates, the git submodules and hooks, the version

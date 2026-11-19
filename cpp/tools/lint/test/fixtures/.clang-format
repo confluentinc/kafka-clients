@@ -1,0 +1,3 @@
+# Fixture headers are test data: their line numbers carry the expectations.
+DisableFormat: true
+SortIncludes: Never

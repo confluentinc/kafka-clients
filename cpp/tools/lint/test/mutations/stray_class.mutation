@@ -1,0 +1,5 @@
+# A public type that translates no Java class.
+file: confluent/kafka/consumer/subscription_pattern.hpp
+replace: class CONFLUENT_KAFKA_CPP_API SubscriptionPattern {
+with: class Stray {};\nclass CONFLUENT_KAFKA_CPP_API SubscriptionPattern {
+expect: confluent-kafka-java-class 'Stray' translates no Java class

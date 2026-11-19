@@ -1,0 +1,5 @@
+# At most 150% of the Javadoc's words (cpp/CLAUDE.md §12.1): Node#isEmpty() has 31.
+file: confluent/kafka/common/node.hpp
+replace:     /// Check whether this node is empty, which may be the case if no_node() is used as a placeholder
+with:     /// Check whether this node is empty, which may be the case if no_node() is used as a placeholder\n    /// in a response payload with an error, or when a broker answered without a host, or when the port\n    /// is negative, which a real broker never advertises, so that callers can tell a real node from the\n    /// placeholder without comparing it field by field with no_node(), which would be slower and longer.
+expect: confluent-kafka-doc more than 150% of the Javadoc's 31

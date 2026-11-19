@@ -57,6 +57,7 @@ use std::process::{exit, Command, Stdio};
 use anyhow::Context as _;
 
 use crate::bump_version::PackageVersion;
+use crate::install_c::c_abi_major;
 
 /// Where the baselines, the suppression file and the reports go.
 const API_COMPAT_DIR: &str = "target/api-compat";
@@ -127,6 +128,10 @@ enum Verdict {
     Compatible,
     /// Breaking, but the version bump allows it.
     BreakingAllowed,
+    /// A C ABI break the version bump allows, under the baseline's soname:
+    /// `C_ABI_MAJOR` in `build.rs` is not raised, so a program built against
+    /// the baseline would load the new library.
+    SonameNotRaised,
     /// Not compared: `cargo semver-checks` skips every check when the version
     /// bump allows breaking changes, since none could fail.
     NotChecked,
@@ -189,7 +194,14 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
             Verdict::Breaking => {
                 eprintln!("❌ {surface}: breaking changes since {tag} that {shown} does not allow over {old_package}")
             },
+            Verdict::SonameNotRaised => eprintln!(
+                "❌ {surface}: breaking changes since {tag} under its soname: raise C_ABI_MAJOR in build.rs, \
+                 so programs built against {tag} do not load this library"
+            ),
         }
+    }
+    if c == Verdict::SonameNotRaised {
+        exit(1);
     }
     if rust == Verdict::Breaking || c == Verdict::Breaking {
         eprintln!(
@@ -268,7 +280,23 @@ fn check_c(tag: &str, baseline_dir: &Path, old: Version, current: Version) -> an
     println!("   Report saved to {}", report_path.display());
 
     let code = output.status.code().context("abidiff was killed by a signal")?;
-    c_verdict(code, !header_changes.is_empty(), old.allows_breaking_change_to(current))
+    let verdict = c_verdict(code, !header_changes.is_empty(), old.allows_breaking_change_to(current))?;
+    let old_major = fs::read_to_string(baseline_dir.join("build.rs"))
+        .ok()
+        .and_then(|t| c_abi_major(&t));
+    let new_major = c_abi_major(&read(Path::new("build.rs"))?);
+    Ok(with_soname_rule(verdict, old_major, new_major))
+}
+
+/// The soname rule over a C verdict: a break the version bump allows must
+/// also raise `C_ABI_MAJOR`, the `N` of `libconfluent_kafka.so.N`, over the
+/// baseline's. A baseline from before the soname has no `C_ABI_MAJOR` and no
+/// rule to keep.
+fn with_soname_rule(verdict: Verdict, old_major: Option<u32>, new_major: Option<u32>) -> Verdict {
+    match (verdict, old_major) {
+        (Verdict::BreakingAllowed, Some(old)) if new_major.is_none_or(|new| new <= old) => Verdict::SonameNotRaised,
+        (verdict, _) => verdict,
+    }
 }
 
 /// The `abidiff` command line. `--no-added-syms` leaves additions out of the
@@ -710,6 +738,31 @@ mod tests {
         // x.y.z with x > 0: only a major bump.
         assert!(!v("1.2.3").allows_breaking_change_to(v("1.3.0")));
         assert!(v("1.2.3").allows_breaking_change_to(v("2.0.0")));
+    }
+
+    #[test]
+    fn a_c_break_raises_the_soname() {
+        // Allowed by the bump, but the soname is the baseline's: refused.
+        assert_eq!(
+            with_soname_rule(Verdict::BreakingAllowed, Some(0), Some(0)),
+            Verdict::SonameNotRaised
+        );
+        assert_eq!(
+            with_soname_rule(Verdict::BreakingAllowed, Some(1), None),
+            Verdict::SonameNotRaised
+        );
+        assert_eq!(
+            with_soname_rule(Verdict::BreakingAllowed, Some(0), Some(1)),
+            Verdict::BreakingAllowed
+        );
+        // A baseline from before the soname has none to keep.
+        assert_eq!(
+            with_soname_rule(Verdict::BreakingAllowed, None, Some(0)),
+            Verdict::BreakingAllowed
+        );
+        // A raised soname changes nothing else.
+        assert_eq!(with_soname_rule(Verdict::Compatible, Some(0), Some(1)), Verdict::Compatible);
+        assert_eq!(with_soname_rule(Verdict::Breaking, Some(0), Some(0)), Verdict::Breaking);
     }
 
     #[test]

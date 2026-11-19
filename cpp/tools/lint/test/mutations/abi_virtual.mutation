@@ -1,0 +1,5 @@
+# Only an interface translation has a vtable (cpp/CLAUDE.md §12.3).
+file: confluent/kafka/common/topic_partition.hpp
+replace: [[nodiscard]] int32_t partition() const
+with: [[nodiscard]] virtual int32_t partition() const
+expect: confluent-kafka-abi is virtual, but 'TopicPartition' translates no Java interface

@@ -1,0 +1,5 @@
+# A public header defines only what must be compiled into the program (§3.2).
+file: confluent/kafka/common/node.hpp
+replace: [[nodiscard]] int32_t port() const;
+with: [[nodiscard]] int32_t port() const { return 0; }
+expect: confluent-kafka-library is defined in a public header

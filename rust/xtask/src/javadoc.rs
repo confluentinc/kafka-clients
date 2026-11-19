@@ -1005,8 +1005,10 @@ fn is_warning(trimmed: &str) -> bool {
 /// The words of a doc (documentation.md §5): runs of letters, digits and
 /// `_`, after Markdown links are reduced to their text, and each code span as
 /// one word, so a symbol such as `kafka_common_Error_is_kafka_error` or
-/// `Self::foo_bar` is one. Heading lines and code-fence lines are not
-/// counted.
+/// `Self::foo_bar` is one. A code span is delimited as CommonMark delimits it:
+/// a run of N backticks opens it and the next run of exactly N closes it (so
+/// a span written with two backticks may hold one), and a run nothing closes
+/// is plain text. Heading lines and code-fence lines are not counted.
 pub fn word_count(text: &str) -> usize {
     let mut fence = false;
     let mut kept: Vec<&str> = Vec::new();
@@ -1023,26 +1025,47 @@ pub fn word_count(text: &str) -> usize {
         kept.push(line);
     }
     let text = strip_links(&kept.join("\n"));
-    let parts: Vec<&str> = text.split('`').collect();
-    // With an odd number of backticks the last one opens no span.
-    let spans = if parts.len().is_multiple_of(2) {
-        parts.len() - 2
-    } else {
-        parts.len()
-    };
-    parts
-        .iter()
-        .enumerate()
-        .map(|(i, part)| {
-            if i % 2 == 1 && i < spans {
-                usize::from(!part.trim().is_empty())
-            } else {
-                part.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                    .filter(|w| !w.is_empty())
-                    .count()
+    let bytes = text.as_bytes();
+    let run_at = |at: usize| bytes[at..].iter().take_while(|&&b| b == b'`').count();
+    let mut words = 0;
+    let mut in_word = false;
+    let mut i = 0;
+    while i < text.len() {
+        if bytes[i] == b'`' {
+            let run = run_at(i);
+            let mut close = None;
+            let mut j = i + run;
+            while j < text.len() {
+                if bytes[j] == b'`' {
+                    let other = run_at(j);
+                    if other == run {
+                        close = Some(j);
+                        break;
+                    }
+                    j += other;
+                } else {
+                    j += 1;
+                }
             }
-        })
-        .sum()
+            in_word = false;
+            match close {
+                Some(end) => {
+                    words += usize::from(!text[i + run..end].trim().is_empty());
+                    i = end + run;
+                },
+                None => i += run,
+            }
+            continue;
+        }
+        let c = text[i..].chars().next().unwrap_or(' ');
+        let is_word = c.is_alphanumeric() || c == '_';
+        if is_word && !in_word {
+            words += 1;
+        }
+        in_word = is_word;
+        i += c.len_utf8();
+    }
+    words
 }
 
 #[cfg(test)]
@@ -1289,6 +1312,12 @@ mod tests {
         assert_eq!(word_count("names `kafka_common_Error_is_kafka_error` or `Self::foo_bar`"), 4);
         assert_eq!(word_count("out_err is set"), 3);
         assert_eq!(word_count("a ` b c"), 3);
+        // A double-backtick span may hold a backtick, as Java's `PatternType.MATCH`
+        // writes one; a run with no closing run of its length is plain text.
+        assert_eq!(word_count("a `` x` `` b c d"), 5);
+        assert_eq!(word_count("a `b` c ` d"), 4);
+        assert_eq!(word_count("config ``enable.metrics.push`` is set"), 4);
+        assert_eq!(word_count("Kafka\u{2019}s na\u{ef}ve"), 3);
     }
 
     #[test]

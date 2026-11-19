@@ -1,0 +1,5 @@
+# ConfigResource.Type's constructor sets one byte field: int8_t.
+file: confluent/kafka/common/config/config_resource.hpp
+replace: enum class Type : int8_t {
+with: enum class Type : int16_t {
+expect: confluent-kafka-java-enum underlying type is int16_t
