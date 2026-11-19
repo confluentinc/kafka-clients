@@ -100,7 +100,110 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
         SerdeGuard.Check(_valueSerializer, DefaultMethodGuard.Producer, disposes: true);
         _keyWithHeaders = _keySerializer as ISerializerWithHeaders<TKey>;
         _valueWithHeaders = _valueSerializer as ISerializerWithHeaders<TValue>;
-        _native = NativeProducer.Create(configs, serdes: new SerdeDisposal(keySerializer, valueSerializer));
+        _native = NativeProducer.Create(
+            configs, serdes: ConfiguredSerdes.Serializers(configs, keySerializer, valueSerializer));
+    }
+
+    private KafkaProducer(NativeProducer native, ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer)
+    {
+        _native = native;
+        _keySerializer = keySerializer;
+        _valueSerializer = valueSerializer;
+        _keyWithHeaders = keySerializer as ISerializerWithHeaders<TKey>;
+        _valueWithHeaders = valueSerializer as ISerializerWithHeaders<TValue>;
+    }
+
+    /// <summary>
+    /// Creates a producer from a configuration map of Java's dotted keys that also holds the key and value
+    /// serializers (Java <c>KafkaProducer(Map)</c>): the same as
+    /// <see cref="Create(IReadOnlyDictionary{string, object}, ISerializer{TKey}, ISerializer{TValue})"/> with two null
+    /// serializers.
+    /// </summary>
+    /// <param name="configs">
+    /// The producer configuration, in which <c>key.serializer</c> and <c>value.serializer</c> are required: each
+    /// holds a function that returns the serializer, such as <c>() =&gt; new StringSerializer()</c>.
+    /// </param>
+    /// <returns>The producer.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ConfigException">
+    /// <c>key.serializer</c> or <c>value.serializer</c> is missing, <c>null</c> or not a function that returns the
+    /// serializer; or the configuration is refused as the other overload refuses it.
+    /// </exception>
+    /// <exception cref="KafkaException">
+    /// "Failed to construct kafka producer": a serializer could not be built, or the core could not build the
+    /// producer.
+    /// </exception>
+    public static KafkaProducer<TKey, TValue> Create(IReadOnlyDictionary<string, object?> configs) =>
+        Create(configs, null, null);
+
+    /// <summary>
+    /// Creates a producer from a configuration map of Java's dotted keys and the key and value serializers
+    /// (Java <c>KafkaProducer(Map, Serializer&lt;K&gt;, Serializer&lt;V&gt;)</c>).
+    /// </summary>
+    /// <param name="configs">
+    /// The producer configuration, keyed by Java's dotted names: each value of the type Java's <c>ConfigDef</c>
+    /// accepts for its key, or the string Java would parse. A <c>null</c> value leaves its key unset, unless the
+    /// key's validator refuses <c>null</c>. <c>key.serializer</c> and <c>value.serializer</c> are read only for a
+    /// null serializer argument: each then holds a function that returns the serializer, a
+    /// <c>Func&lt;ISerializer&lt;TKey&gt;&gt;</c> or <c>Func&lt;ISerializer&lt;TValue&gt;&gt;</c> (a function
+    /// declared to return a class that implements the interface is one), where Java's holds a class. The other
+    /// serializer keys (<c>serializer.encoding</c>, <c>key.serializer.encoding</c>,
+    /// <c>value.serializer.encoding</c>) are for the serializers the producer configures. None of the five reaches
+    /// the client.
+    /// </param>
+    /// <param name="keySerializer">
+    /// The serializer for record keys, which the producer never configures, as Java never configures a serializer it
+    /// is given; or <c>null</c> to have the producer call the function under <c>key.serializer</c> once and then
+    /// call <c>Configure(configs, true)</c> on a serializer that implements
+    /// <see cref="ISerializerWithConfigure{T}"/>, as Java configures a serializer it builds.
+    /// </param>
+    /// <param name="valueSerializer">
+    /// The serializer for record values; or <c>null</c> for the one the function under <c>value.serializer</c>
+    /// returns, built after the key's and configured with <c>Configure(configs, false)</c>.
+    /// </param>
+    /// <returns>The producer.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ConfigException">
+    /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null and <c>key.serializer</c> or
+    /// <c>value.serializer</c> is missing or <c>null</c> (Java's "Invalid value null for configuration
+    /// key.serializer: must be non-null.", the key's before the value's), or holds anything but a function that
+    /// returns the serializer.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// A given serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
+    /// <see cref="ISerializerWithHeaders{T}"/>, or a public <c>Close()</c> but is not <see cref="IDisposable"/>: the
+    /// producer would never call that method.
+    /// </exception>
+    /// <exception cref="ConfigException">
+    /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
+    /// <c>null</c>, or the client refuses a value. No serializer function has run then.
+    /// </exception>
+    /// <exception cref="KafkaException">
+    /// "Failed to construct kafka producer": the core could not build the producer; or a serializer function
+    /// returned <c>null</c> or threw, or the serializer it returned was refused as a given one is or its
+    /// <c>Configure</c> threw, with that failure as the <see cref="Exception.InnerException"/>.
+    /// </exception>
+    /// <remarks>
+    /// Each serializer that is <see cref="IDisposable"/>, given or built, is disposed once, key then value, when the
+    /// producer is closed or disposed, or when this method fails with the <see cref="KafkaException"/> "Failed to
+    /// construct kafka producer" after taking it, but a given one not for a configuration the core refuses with
+    /// another error, nor when this method throws <see cref="ArgumentNullException"/> or refuses a serializer, a
+    /// value's type or a <c>null</c> with <see cref="ConfigException"/> or a serializer with
+    /// <see cref="IllegalArgumentException"/>. So a serializer shared with another client, or used after the close,
+    /// sees it disposed. A <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not
+    /// rethrown. A serializer that is only <see cref="IAsyncDisposable"/> is not disposed. The <c>configs</c> a
+    /// built serializer's <c>Configure</c> receives is a copy of <paramref name="configs"/>; it does not have the
+    /// <c>client.id</c> the producer chooses when none is set, which Java's has.
+    /// </remarks>
+    public static KafkaProducer<TKey, TValue> Create(
+        IReadOnlyDictionary<string, object?> configs,
+        ISerializer<TKey>? keySerializer,
+        ISerializer<TValue>? valueSerializer)
+    {
+        ConfiguredSerdes<ISerializer<TKey>, ISerializer<TValue>> serializers =
+            ConfiguredSerdes.Serializers(configs, keySerializer, valueSerializer);
+        NativeProducer native = NativeProducer.Create(configs, serdes: serializers);
+        return new KafkaProducer<TKey, TValue>(native, serializers.Key, serializers.Value);
     }
 
     /// <inheritdoc/>

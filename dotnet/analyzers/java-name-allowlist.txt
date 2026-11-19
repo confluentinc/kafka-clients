@@ -448,3 +448,11 @@ missing T:Confluent.Kafka.Admin.AsyncKafkaAdminClient org.apache.kafka.clients.a
 missing T:Confluent.Kafka.Admin.AsyncMockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
 missing T:Confluent.Kafka.Admin.KafkaAdminClient org.apache.kafka.clients.admin.KafkaAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
 missing T:Confluent.Kafka.Admin.MockAdminClient org.apache.kafka.clients.admin.MockAdminClient#listClientMetricsResources(ListClientMetricsResourcesOptions)
+
+# Create is the .NET form of every constructor of the four real clients (M23/P8, ledger 573): Java's
+# KafkaProducer(Map) / KafkaConsumer(Map) and (Map, serde, serde), one static factory per constructor, so that the
+# asynchronous clients can await the Configure of a serde they build and the four clients are built the same way.
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Create(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object})
+unmatched M:Confluent.Kafka.Consumer.KafkaConsumer`2.Create(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1})
+unmatched M:Confluent.Kafka.Producer.KafkaProducer`2.Create(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object})
+unmatched M:Confluent.Kafka.Producer.KafkaProducer`2.Create(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},Confluent.Kafka.Common.Serialization.ISerializer{`0},Confluent.Kafka.Common.Serialization.ISerializer{`1})

@@ -40,7 +40,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 
     private const string RecordNotBuilt = "The producer record could not be built.";
 
-    private const string ConstructionFailedMessage = "Failed to construct kafka producer";
+    internal const string ConstructionFailedMessage = "Failed to construct kafka producer";
 
     private const string MaxBlockMsConfig = "max.block.ms";
 
@@ -108,52 +108,76 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     /// <summary>
     /// A producer constructor's serializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null for
     /// configuration <paramref name="key"/>: must be non-null.", which Java throws when the <paramref name="key"/>
-    /// config names no class; .NET config cannot name one.
+    /// config is missing too.
     /// </summary>
     internal static T RequireSerializer<T>(T? serializer, string key)
         where T : class =>
         serializer ?? throw new ConfigException(key, null, "must be non-null.");
 
+    /// <summary>
+    /// Creates the producer in Java's order: the binding's and the core's checks of the configuration, bare; then the
+    /// part inside Java's constructor <c>try</c>, where <paramref name="serdes"/> builds the serializers that were not
+    /// given and the core builds the client.
+    /// </summary>
     internal static NativeProducer Create(
         IReadOnlyDictionary<string, object?> configs,
         string completionThreadName = CompletionThreadName,
-        SerdeDisposal? serdes = null)
+        ConfiguredSerdes? serdes = null)
     {
         IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Producer);
         IntPtr classPointer;
-        try
+        SerdeDisposal? disposal;
+        using (ConfigMarshal.ValidatedConfig config = ConfigMarshal.Validate(prepared, ClientKind.Producer))
         {
-            classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Producer);
-        }
-        catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
-        {
-            // Java's constructor closes the serializers when a step inside its try fails, which the core reports
-            // wrapped; a configuration it refuses before that try, such as a value it cannot parse, comes back bare
-            // and disposes nothing.
-            serdes?.DisposeOnce();
-            throw;
-        }
-
-        try
-        {
-            IntPtr outErr = IntPtr.Zero;
-            IntPtr view = NativeMethods.KafkaProducerAsProducer(classPointer, ref outErr);
-            if (outErr != IntPtr.Zero)
+            disposal = serdes?.Build();
+            try
             {
-                IntPtr destroyErr = IntPtr.Zero;
-                NativeMethods.KafkaProducerDestroy(classPointer, ref destroyErr);
-                FreeError(ref destroyErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
+                classPointer = config.CreateClient();
             }
+            catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+            {
+                // Java's constructor closes the serializers when a step inside its try fails, which the core reports
+                // wrapped.
+                disposal?.DisposeOnce();
+                throw;
+            }
+            catch
+            {
+                // A failure the core reports bare is one Java raises outside that try, which closes nothing: a given
+                // serializer stays its owner's, and one built here has no other owner.
+                serdes?.DisposeBuilt();
+                throw;
+            }
+        }
 
-            return Start(
-                new SafeKafkaProducerHandle(view, classPointer), completionThreadName, MaxBlockMsOf(prepared), serdes);
+        try
+        {
+            return Started(classPointer, completionThreadName, prepared, disposal);
         }
         catch
         {
-            serdes?.DisposeOnce();
+            disposal?.DisposeOnce();
             throw;
         }
+    }
+
+    private static NativeProducer Started(
+        IntPtr classPointer,
+        string completionThreadName,
+        IReadOnlyList<KeyValuePair<string, string>> prepared,
+        SerdeDisposal? disposal)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr view = NativeMethods.KafkaProducerAsProducer(classPointer, ref outErr);
+        if (outErr != IntPtr.Zero)
+        {
+            IntPtr destroyErr = IntPtr.Zero;
+            NativeMethods.KafkaProducerDestroy(classPointer, ref destroyErr);
+            FreeError(ref destroyErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+
+        return Start(new SafeKafkaProducerHandle(view, classPointer), completionThreadName, MaxBlockMsOf(prepared), disposal);
     }
 
     internal static NativeProducer CreateMock(

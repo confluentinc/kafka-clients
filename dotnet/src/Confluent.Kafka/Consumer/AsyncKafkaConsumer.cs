@@ -110,7 +110,7 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         SerdeGuard.Check(value, DefaultMethodGuard.Consumer, disposes: true);
         _key = new AsyncDeserializerCall<TKey>(key);
         _value = new AsyncDeserializerCall<TValue>(value);
-        _native = NativeConsumer.Create(configs, serdes: SerdeDisposal.OfAsyncSerdes(key, value));
+        _native = NativeConsumer.Create(configs, serdes: ConfiguredSerdes.AsyncDeserializers(configs, key, value));
     }
 
     /// <inheritdoc/>

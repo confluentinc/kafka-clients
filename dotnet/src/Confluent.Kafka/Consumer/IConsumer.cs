@@ -44,8 +44,8 @@ namespace Confluent.Kafka.Consumer;
 /// consumer is in <see cref="IConsumerRebalanceListener"/>.
 /// </para>
 /// <para>
-/// A <see cref="KafkaConsumer{TKey, TValue}"/> disposes the deserializers it was given when it closes, as its
-/// constructor says; a <see cref="MockConsumer{TKey, TValue}"/> does not.
+/// A <see cref="KafkaConsumer{TKey, TValue}"/> disposes its deserializers, given or built from its configuration,
+/// when it closes, as its <c>Create</c> says; a <see cref="MockConsumer{TKey, TValue}"/> does not.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>

@@ -41,7 +41,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 {
     private const string GroupIdConfig = "group.id";
 
-    private const string ConstructionFailedMessage = "Failed to construct kafka consumer";
+    internal const string ConstructionFailedMessage = "Failed to construct kafka consumer";
 
     private const string DefaultOffsetResetStrategy = "latest";
 
@@ -224,55 +224,80 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     /// <summary>
     /// A consumer constructor's deserializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null
     /// for configuration <paramref name="key"/>: must be non-null.", which Java throws when the
-    /// <paramref name="key"/> config names no class; .NET config cannot name one.
+    /// <paramref name="key"/> config is missing too.
     /// </summary>
     internal static T RequireDeserializer<T>(T? deserializer, string key)
         where T : class =>
         deserializer ?? throw new ConfigException(key, null, "must be non-null.");
 
+    /// <summary>
+    /// Creates the consumer in Java's order: the binding's and the core's checks of the configuration, bare; then the
+    /// part inside Java's constructor <c>try</c>, where <paramref name="serdes"/> builds the deserializers that were
+    /// not given and the core builds the client.
+    /// </summary>
     internal static NativeConsumer Create(
         IReadOnlyDictionary<string, object?> configs,
         bool withPump = true,
-        SerdeDisposal? serdes = null)
+        ConfiguredSerdes? serdes = null)
     {
         IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Consumer);
         IntPtr classPointer;
-        try
+        SerdeDisposal? disposal;
+        using (ConfigMarshal.ValidatedConfig config = ConfigMarshal.Validate(prepared, ClientKind.Consumer))
         {
-            classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Consumer);
-        }
-        catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
-        {
-            // Java's constructor closes the deserializers when a step inside its try fails, which the core reports
-            // wrapped; a configuration it refuses before that try, such as a value it cannot parse, comes back bare
-            // and disposes nothing.
-            serdes?.DisposeOnce();
-            throw;
-        }
-
-        try
-        {
-            IntPtr outErr = IntPtr.Zero;
-            IntPtr view = NativeMethods.KafkaConsumerAsConsumer(classPointer, ref outErr);
-            if (outErr != IntPtr.Zero)
+            disposal = serdes?.Build();
+            try
             {
-                IntPtr destroyErr = IntPtr.Zero;
-                NativeMethods.KafkaConsumerDestroy(classPointer, ref destroyErr);
-                FreeError(ref destroyErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
+                classPointer = config.CreateClient();
             }
+            catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+            {
+                // Java's constructor closes the deserializers when a step inside its try fails, which the core
+                // reports wrapped.
+                disposal?.DisposeOnce();
+                throw;
+            }
+            catch
+            {
+                // A failure the core reports bare is one Java raises outside that try, which closes nothing: a given
+                // deserializer stays its owner's, and one built here has no other owner.
+                serdes?.DisposeBuilt();
+                throw;
+            }
+        }
 
-            return Start(
-                new SafeKafkaConsumerHandle(view, classPointer),
-                groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
-                withPump,
-                serdes);
+        try
+        {
+            return Started(classPointer, withPump, prepared, disposal);
         }
         catch
         {
-            serdes?.DisposeOnce();
+            disposal?.DisposeOnce();
             throw;
         }
+    }
+
+    private static NativeConsumer Started(
+        IntPtr classPointer,
+        bool withPump,
+        IReadOnlyList<KeyValuePair<string, string>> prepared,
+        SerdeDisposal? disposal)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr view = NativeMethods.KafkaConsumerAsConsumer(classPointer, ref outErr);
+        if (outErr != IntPtr.Zero)
+        {
+            IntPtr destroyErr = IntPtr.Zero;
+            NativeMethods.KafkaConsumerDestroy(classPointer, ref destroyErr);
+            FreeError(ref destroyErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+
+        return Start(
+            new SafeKafkaConsumerHandle(view, classPointer),
+            groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
+            withPump,
+            disposal);
     }
 
     internal static NativeConsumer CreateMock(string? autoOffsetReset = null, bool withPump = true)

@@ -26,8 +26,8 @@ namespace Confluent.Kafka.Common.Serialization;
 /// implementing <see cref="ISerializerWithHeaders{T}"/>, and its <c>configure</c> is
 /// <see cref="SerializerExtensions.Configure{T}(ISerializer{T}, IReadOnlyDictionary{string, object}, bool)"/>, which a
 /// serializer replaces by implementing <see cref="ISerializerWithConfigure{T}"/>. Java's <c>close</c> is
-/// <see cref="System.IDisposable"/>: a producer disposes a serializer it was given that implements it, and a mock
-/// producer does not.
+/// <see cref="System.IDisposable"/>: a producer disposes a serializer, given or built from its configuration, that
+/// implements it, and a mock producer does not.
 /// </summary>
 /// <typeparam name="T">The type encoded.</typeparam>
 public interface ISerializer<T>
@@ -91,9 +91,10 @@ public interface ISerializerWithHeaders<T> : ISerializer<T>
 /// does nothing.
 /// </summary>
 /// <remarks>
-/// No producer calls it: as Java configures only a serializer it builds from config, a serializer given to a producer
-/// is set up by whoever builds it. A <c>Configure</c> written on a class that implements only
-/// <see cref="ISerializer{T}"/> is not called by
+/// A producer calls it only on a serializer it builds, from the function its configuration holds under
+/// <c>key.serializer</c> or <c>value.serializer</c>: as Java configures only a serializer it builds from config, a
+/// serializer given to a producer is set up by whoever builds it. A <c>Configure</c> written on a class that
+/// implements only <see cref="ISerializer{T}"/> is not called by
 /// <see cref="SerializerExtensions.Configure{T}(ISerializer{T}, IReadOnlyDictionary{string, object}, bool)"/>, and no
 /// check at construction reports it.
 /// </remarks>

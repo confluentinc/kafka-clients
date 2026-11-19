@@ -30,7 +30,8 @@ internal static class ClientConfigs
 {
     private const string HiddenPassword = "[hidden]";
 
-    // The client's own serializer keys stay with the binding, neither checked nor sent: it always takes serde instances.
+    // The client's own serializer keys stay with the binding, neither checked here nor sent: Create reads the two that
+    // hold a serde's function, and a serde the client builds reads the encoding keys in its Configure.
     private static readonly HashSet<string> s_producerSerdeKeys = new(StringComparer.Ordinal)
     {
         "key.serializer",

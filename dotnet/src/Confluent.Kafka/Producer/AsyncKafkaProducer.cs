@@ -110,7 +110,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         _value = new AsyncSerializerCall<TValue>(value);
         _awaits = _key.Inner is null || _value.Inner is null;
         _native = NativeProducer.Create(
-            configs, NativeProducer.PumpThreadName, SerdeDisposal.OfAsyncSerdes(key, value));
+            configs, NativeProducer.PumpThreadName, ConfiguredSerdes.AsyncSerializers(configs, key, value));
     }
 
     /// <inheritdoc/>

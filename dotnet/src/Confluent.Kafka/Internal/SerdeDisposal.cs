@@ -21,36 +21,37 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The key and value serializers or deserializers a client was given, disposed once, key then value: each one that is
-/// <see cref="IDisposable"/> is disposed, and a <c>Dispose</c> that throws is written to one trace warning and never
-/// rethrown. The serdes of an asynchronous client are disposed only through <see cref="IAsyncDisposable"/>: one
-/// without it is left alone, and no <see cref="IDisposable.Dispose"/> is called on them.
+/// The key and value serializers or deserializers a client was given, or built from its configuration, disposed once,
+/// key then value: each one that is <see cref="IDisposable"/> is disposed, and a <c>Dispose</c> that throws is written
+/// to one trace warning and never rethrown. The serdes of an asynchronous client are disposed only through
+/// <see cref="IAsyncDisposable"/>: one without it is left alone, and no <see cref="IDisposable.Dispose"/> is called on
+/// them. A member that is null, one a failed construction never built, is skipped.
 /// </summary>
 internal sealed class SerdeDisposal
 {
     private const string DisposeFailedMessage = "Exception while closing serde {0}: {1}";
 
-    private readonly object _key;
+    private readonly object? _key;
 
-    private readonly object _value;
+    private readonly object? _value;
 
     private readonly bool _asynchronous;
 
     private int _disposed;
 
-    internal SerdeDisposal(object key, object value)
+    internal SerdeDisposal(object? key, object? value)
         : this(key, value, asynchronous: false)
     {
     }
 
-    private SerdeDisposal(object key, object value, bool asynchronous)
+    private SerdeDisposal(object? key, object? value, bool asynchronous)
     {
         _key = key;
         _value = value;
         _asynchronous = asynchronous;
     }
 
-    internal static SerdeDisposal OfAsyncSerdes(object key, object value) =>
+    internal static SerdeDisposal OfAsyncSerdes(object? key, object? value) =>
         new SerdeDisposal(key, value, asynchronous: true);
 
     // The blocking form, for a teardown that runs on a thread it may block: an asynchronous serde's DisposeAsync is
@@ -89,7 +90,7 @@ internal sealed class SerdeDisposal
         await DisposeAsync(_value).ConfigureAwait(false);
     }
 
-    private static async ValueTask DisposeAsync(object serde)
+    private static async ValueTask DisposeAsync(object? serde)
     {
         if (serde is not IAsyncDisposable disposable)
         {
@@ -131,7 +132,7 @@ internal sealed class SerdeDisposal
         }
     }
 
-    private void DisposeBlocking(object serde)
+    private void DisposeBlocking(object? serde)
     {
         if (!_asynchronous)
         {
@@ -164,7 +165,7 @@ internal sealed class SerdeDisposal
 
     // Only IDisposable: a synchronous client leaves a serde that is only IAsyncDisposable alone, on every path, as an
     // asynchronous client leaves one that is only IDisposable alone.
-    internal static void DisposeIfDisposable(object serde)
+    internal static void DisposeIfDisposable(object? serde)
     {
         if (serde is not IDisposable disposable)
         {

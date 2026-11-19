@@ -27,8 +27,8 @@ namespace Confluent.Kafka.Common.Serialization;
 /// deserializer replaces by implementing <see cref="IDeserializerWithHeaders{T}"/>, and its <c>configure</c> is
 /// <see cref="DeserializerExtensions.Configure{T}(IDeserializer{T}, IReadOnlyDictionary{string, object}, bool)"/>, which
 /// a deserializer replaces by implementing <see cref="IDeserializerWithConfigure{T}"/>. Java's <c>close</c> is
-/// <see cref="IDisposable"/>: a consumer disposes a deserializer it was given that implements it, and a mock
-/// consumer does not.
+/// <see cref="IDisposable"/>: a consumer disposes a deserializer, given or built from its configuration, that
+/// implements it, and a mock consumer does not.
 /// </summary>
 /// <remarks>
 /// The bytes are a <see cref="ReadOnlySpan{T}"/> over the fetched batch, where Java passes a <c>byte[]</c>, so a
@@ -121,9 +121,10 @@ public interface IDeserializerWithReadOnlyMemory<T> : IDeserializer<T>
 /// which does nothing.
 /// </summary>
 /// <remarks>
-/// No consumer calls it: as Java configures only a deserializer it builds from config, a deserializer given to a
-/// consumer is set up by whoever builds it. A <c>Configure</c> written on a class that implements only
-/// <see cref="IDeserializer{T}"/> is not called by
+/// A consumer calls it only on a deserializer it builds, from the function its configuration holds under
+/// <c>key.deserializer</c> or <c>value.deserializer</c>: as Java configures only a deserializer it builds from config,
+/// a deserializer given to a consumer is set up by whoever builds it. A <c>Configure</c> written on a class that
+/// implements only <see cref="IDeserializer{T}"/> is not called by
 /// <see cref="DeserializerExtensions.Configure{T}(IDeserializer{T}, IReadOnlyDictionary{string, object}, bool)"/>, and
 /// no check at construction reports it.
 /// </remarks>
