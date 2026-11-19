@@ -1,0 +1,5 @@
+usr/include/confluent_kafka.h
+usr/include/confluent_kafka_bindings.h
+usr/lib/*/libconfluent_kafka.a
+usr/lib/*/libconfluent_kafka.so
+usr/lib/*/pkgconfig/confluent-kafka.pc

@@ -1,0 +1,4 @@
+# The ledger's findings, placed at line 1 of the probe.
+confluent-kafka-doc the accepted entry `confluent::kafka::common::Doc::gone()` matches no item with a `WARNING:`
+confluent-kafka-doc `- Why:` is out of order
+confluent-kafka-doc `confluent::kafka::common::Doc::broken()` lacks `- Contract change:`

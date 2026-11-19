@@ -1,0 +1,5 @@
+usr/include/confluent
+usr/lib/*/cmake/ConfluentKafkaCpp
+usr/lib/*/libconfluent_kafka_cpp.a
+usr/lib/*/libconfluent_kafka_cpp.so
+usr/lib/*/pkgconfig/confluent-kafka-cpp.pc

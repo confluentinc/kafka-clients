@@ -1,0 +1,5 @@
+# Every public Java method has its C++ translation (§4.1).
+file: confluent/kafka/common/config/config_resource.hpp
+replace: [[nodiscard]] bool is_default() const;
+with: // (removed)
+expect: confluent-kafka-java-members has no method is_default
