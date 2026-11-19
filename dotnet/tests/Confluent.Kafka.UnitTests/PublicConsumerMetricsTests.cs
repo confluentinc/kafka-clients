@@ -59,9 +59,9 @@ public sealed class PublicConsumerMetricsTests
     }
 
     [Fact]
-    public void Metrics_AsyncRealConsumer_IsPopulatedAndWellFormed()
+    public async Task Metrics_AsyncRealConsumer_IsPopulatedAndWellFormed()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(
             RealConfig("metrics-async"), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
@@ -71,7 +71,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_SyncRealConsumer_IsPopulatedAndWellFormed()
     {
-        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
+        KafkaConsumer<byte[], byte[]> consumer = KafkaConsumer<byte[], byte[]>.Create(
             RealConfig("metrics-sync"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
@@ -79,10 +79,10 @@ public sealed class PublicConsumerMetricsTests
     }
 
     [Fact]
-    public void Metrics_RealConsumer_KeyHasValueIdentity_DescriptionExcluded()
+    public async Task Metrics_RealConsumer_KeyHasValueIdentity_DescriptionExcluded()
     {
         // A key rebuilt with another description finds the same entry: MetricName equality ignores the description.
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(
             RealConfig("metrics-key-identity"), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
@@ -132,7 +132,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public async Task Metrics_ConcurrentWithInFlightPoll_AnswersWhileThePollHoldsTheConsumer()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(
             RealConfig("metrics-concurrent"), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 

@@ -51,7 +51,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
     [InlineData(Real, WithCallback)]
     public async Task AlreadyCanceledToken_ThrowsSynchronously_AndSendsNothing(string client, string overload)
     {
-        IAsyncProducer<byte[], byte[]> producer = Create(client);
+        IAsyncProducer<byte[], byte[]> producer = await Create(client);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
@@ -74,7 +74,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
     [InlineData(Real, WithCallback)]
     public async Task NullRecord_ThrowsSynchronously(string client, string overload)
     {
-        IAsyncProducer<byte[], byte[]> producer = Create(client);
+        IAsyncProducer<byte[], byte[]> producer = await Create(client);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
@@ -87,9 +87,9 @@ public sealed class PublicProducerSendSynchronousThrowTests
     }
 
     [Fact]
-    public void Disposed_RealClient_CallbackOverload_ThrowsSynchronously()
+    public async Task Disposed_RealClient_CallbackOverload_ThrowsSynchronously()
     {
-        IAsyncProducer<byte[], byte[]> producer = Create(Real);
+        IAsyncProducer<byte[], byte[]> producer = await Create(Real);
         TestTimeout.Dispose(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
@@ -106,7 +106,7 @@ public sealed class PublicProducerSendSynchronousThrowTests
     public async Task SerializerThrows_RealClient_FaultsTheFirstStage(string overload)
     {
         ThrowingSerializer<byte[]> throwing = new ThrowingSerializer<byte[]>();
-        IAsyncProducer<byte[], byte[]> producer = Create(Real, throwing.AsAsync());
+        IAsyncProducer<byte[], byte[]> producer = await Create(Real, throwing.AsAsync());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         CountingDeliveryCallback callback = new CountingDeliveryCallback();
 
@@ -160,10 +160,10 @@ public sealed class PublicProducerSendSynchronousThrowTests
     private static SerializedProducerRecord SerializedRecord() =>
         new SerializedProducerRecord(Topic, 0, null, null, new byte[] { 0x53, 0x59, 0x4E });
 
-    private static IAsyncProducer<byte[], byte[]> Create(string client, IAsyncSerializer<byte[]>? valueSerializer = null) =>
+    private static async Task<IAsyncProducer<byte[], byte[]>> Create(string client, IAsyncSerializer<byte[]>? valueSerializer = null) =>
         client == Mock
             ? new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), valueSerializer ?? new AsyncByteArraySerializer())
-            : new AsyncKafkaProducer<byte[], byte[]>(
+            : await AsyncKafkaProducer<byte[], byte[]>.Create(
                 new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1" },
                 new AsyncByteArraySerializer(),
                 valueSerializer ?? new AsyncByteArraySerializer());

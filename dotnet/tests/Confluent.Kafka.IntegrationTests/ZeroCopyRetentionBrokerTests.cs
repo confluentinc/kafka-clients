@@ -67,7 +67,7 @@ public sealed class ZeroCopyRetentionBrokerTests
         List<KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>> kept =
             new List<KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>>();
         using (KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+            KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
                 ConsumerConfigs(), Serdes.ReadOnlyMemory().Deserializer(), Serdes.ReadOnlyMemory().Deserializer()))
         {
             consumer.Assign(new[] { new TopicPartition(topic, 0) });
@@ -104,7 +104,7 @@ public sealed class ZeroCopyRetentionBrokerTests
         Produce(topic, 0, FirstCount);
         PinningDeserializer values = new PinningDeserializer(FirstCount);
         await using (AsyncKafkaConsumer<string, int> consumer =
-            new AsyncKafkaConsumer<string, int>(ConsumerConfigs(), new AsyncStringDeserializer(), values))
+            await AsyncKafkaConsumer<string, int>.Create(ConsumerConfigs(), new AsyncStringDeserializer(), values))
         {
             await consumer.Assign(new[] { new TopicPartition(topic, 0) });
             Assert.Equal(FirstCount, await CountAsync(() => consumer.Poll(s_poll), FirstCount));
@@ -146,7 +146,7 @@ public sealed class ZeroCopyRetentionBrokerTests
         List<KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>> kept =
             new List<KeyValuePair<ReadOnlyMemory<byte>, ReadOnlyMemory<byte>>>();
         await using (AsyncKafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new AsyncKafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+            await AsyncKafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
                 ConsumerConfigs(), keyDeserializer, valueDeserializer))
         {
             await consumer.Assign(new[] { new TopicPartition(topic, 0) });
@@ -276,7 +276,7 @@ public sealed class ZeroCopyRetentionBrokerTests
 
     private void Produce(string topic, int first, int count)
     {
-        using KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        using KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
             ProducerConfigs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         List<KafkaFuture<RecordMetadata>> sent = new List<KafkaFuture<RecordMetadata>>();
         for (int i = first; i < first + count; i++)

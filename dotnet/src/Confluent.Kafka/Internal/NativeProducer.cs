@@ -106,15 +106,6 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// A producer constructor's serializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null for
-    /// configuration <paramref name="key"/>: must be non-null.", which Java throws when the <paramref name="key"/>
-    /// config is missing too.
-    /// </summary>
-    internal static T RequireSerializer<T>(T? serializer, string key)
-        where T : class =>
-        serializer ?? throw new ConfigException(key, null, "must be non-null.");
-
-    /// <summary>
     /// Creates the producer in Java's order: the binding's and the core's checks of the configuration, bare; then the
     /// part inside Java's constructor <c>try</c>, where <paramref name="serdes"/> builds the serializers that were not
     /// given and the core builds the client.

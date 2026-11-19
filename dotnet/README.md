@@ -47,7 +47,7 @@ var config = new Dictionary<string, object?>
     ["bootstrap.servers"] = "localhost:9092",
     ["linger.ms"] = 5,
 };
-using var producer = new KafkaProducer<string, string>(config, new StringSerializer(), new StringSerializer());
+using var producer = KafkaProducer<string, string>.Create(config, new StringSerializer(), new StringSerializer());
 var record = new ProducerRecord<string, string>("orders", "key", "value");
 RecordMetadata metadata = producer.Send(record).Get();
 ```
@@ -66,7 +66,7 @@ var config = new Dictionary<string, object?>
     ["group.id"] = "orders-reader",
     ["group.protocol"] = "consumer",
 };
-using var consumer = new KafkaConsumer<string, string>(config, new StringDeserializer(), new StringDeserializer());
+using var consumer = KafkaConsumer<string, string>.Create(config, new StringDeserializer(), new StringDeserializer());
 consumer.Subscribe(new[] { "orders" });
 foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
 {
@@ -79,10 +79,48 @@ The consumer supports the consumer group protocol of KIP-848 only, so `group.pro
 
 ## Serializers and deserializers
 
-A client takes one serializer or deserializer for keys and one for values, as constructor arguments.
+A producer or consumer is built by its static `Create`, not by a constructor; the mocks keep their
+constructors. `Create` on `AsyncKafkaProducer` and `AsyncKafkaConsumer` returns a `Task` to await,
+and takes a `CancellationToken` last. A client takes one serializer or deserializer for keys and one
+for values, either as arguments of `Create` or from its configuration.
 `Confluent.Kafka.Common.Serialization` has built-in ones for strings, byte arrays,
 `ReadOnlyMemory<byte>?`, booleans, the integer and floating-point types and `Guid`, named as in Java
 (`StringSerializer`, `LongDeserializer`, `UUIDSerializer`).
+
+### Serializers from the configuration
+
+`Create(configs)`, and `Create(configs, key, value)` for an argument that is `null`, reads the
+serializer from `key.serializer` or `value.serializer` (`key.deserializer`, `value.deserializer` on a
+consumer). Where Java's configuration holds a class, this one holds a function that returns the
+instance:
+
+```csharp
+using System;
+using System.Collections.Generic;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Producer;
+
+var config = new Dictionary<string, object?>
+{
+    ["bootstrap.servers"] = "localhost:9092",
+    ["key.serializer"] = new Func<ISerializer<string>>(() => new StringSerializer()),
+    ["value.serializer"] = new Func<ISerializer<string>>(() => new StringSerializer()),
+    ["value.serializer.encoding"] = "UTF-16",
+};
+using var producer = KafkaProducer<string, string>.Create(config);
+```
+
+The client calls each function once, the key's first, and then calls `Configure(configs, isKey)` on a
+serializer that implements `ISerializerWithConfigure<T>` (`IDeserializerWithConfigure<T>`), as Java
+configures a serializer it builds. A serializer given as an argument wins over the configuration and
+is never configured, as in Java. The function is a `Func<ISerializer<T>>` on a synchronous client and
+a `Func<IAsyncSerializer<T>>` on an asynchronous one, whose `Configure` returns a `ValueTask` that
+`Create` awaits; a function declared to return the class itself (`Func<StringSerializer>`) is
+accepted too. A `null` argument whose key is missing fails with Java's `ConfigException`
+("Invalid value null for configuration key.serializer: must be non-null."). A function that returns
+`null` or throws, or a `Configure` that throws, fails `Create` with the `KafkaException` "Failed to
+construct kafka producer" (or "consumer") around that failure. The client disposes the serializers it
+built, as it disposes the given ones.
 
 ### Synchronous and asynchronous clients
 
@@ -101,7 +139,7 @@ using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 
 var config = new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" };
-await using var producer = new AsyncKafkaProducer<string, string>(
+await using var producer = await AsyncKafkaProducer<string, string>.Create(
     config, new AsyncStringSerializer(), new AsyncStringSerializer());
 AsyncKafkaFuture<RecordMetadata> delivery =
     await producer.Send(new ProducerRecord<string, string>("orders", "key", "value"));
@@ -138,9 +176,10 @@ back, as a built-in serializer's does and as Java's `KafkaProducer.doSend`. A re
 is cancelled, or whose producer is closed, while a serializer is awaited is not sent, although on
 an `AsyncKafkaProducer` its headers are then already read-only.
 
-An `AsyncKafkaProducer` or `AsyncKafkaConsumer` disposes the serializers or deserializers it was
-given only through `IAsyncDisposable`: it never calls `IDisposable.Dispose()` on one, and refuses,
-when it is built, one that is `IDisposable` without being `IAsyncDisposable`. The
+An `AsyncKafkaProducer` or `AsyncKafkaConsumer` disposes its serializers or deserializers, given
+or built from its configuration, only through `IAsyncDisposable`: it never calls
+`IDisposable.Dispose()` on one, and its `Create` refuses one that is `IDisposable` without being
+`IAsyncDisposable`. The
 asynchronous mocks dispose none. Prefer `await using` or `DisposeAsync()` to `Dispose()`, which
 blocks its thread until the client is closed and its serdes are disposed. A serde's
 `DisposeAsync()` is always called with no synchronization context and with the default task
@@ -166,7 +205,7 @@ var config = new Dictionary<string, object?>
     ["group.id"] = "orders-reader",
     ["group.protocol"] = "consumer",
 };
-using var consumer = new KafkaConsumer<string, ReadOnlyMemory<byte>?>(
+using var consumer = KafkaConsumer<string, ReadOnlyMemory<byte>?>.Create(
     config, new StringDeserializer(), new ReadOnlyMemoryDeserializer());
 consumer.Subscribe(new[] { "orders" });
 var kept = new List<ReadOnlyMemory<byte>>();
@@ -203,9 +242,9 @@ A record consumed this way is produced again without a copy by giving the memory
 `ReadOnlyMemorySerializer`: the producer reads the consumer's bytes where they are.
 
 ```csharp
-using var consumer = new KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+using var consumer = KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
     consumerConfig, new ReadOnlyMemoryDeserializer(), new ReadOnlyMemoryDeserializer());
-using var producer = new KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+using var producer = KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
     producerConfig, new ReadOnlyMemorySerializer(), new ReadOnlyMemorySerializer());
 consumer.Subscribe(new[] { "orders" });
 foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
@@ -220,9 +259,13 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
 - `ByteBufferSerializer`, `ByteBufferDeserializer`, `Serdes.ByteBufferSerde` and `Serdes.ByteBuffer()`
   are now `ReadOnlyMemorySerializer`, `ReadOnlyMemoryDeserializer`, `Serdes.ReadOnlyMemorySerde` and
   `Serdes.ReadOnlyMemory()`, after the .NET type they handle. The old names are gone.
-- The constructors of the asynchronous clients take `IAsyncSerializer<T>` and
-  `IAsyncDeserializer<T>` where they took `ISerializer<T>` and `IDeserializer<T>`: pass the `Async`
-  class of a built-in, or an asynchronous class of your own.
+- `KafkaProducer`, `KafkaConsumer`, `AsyncKafkaProducer` and `AsyncKafkaConsumer` have no public
+  constructor: write `KafkaProducer<K, V>.Create(config, key, value)` where you wrote
+  `new KafkaProducer<K, V>(config, key, value)`, and `await AsyncKafkaProducer<K, V>.Create(...)` for
+  an asynchronous client. The mocks keep their constructors.
+- The asynchronous clients take `IAsyncSerializer<T>` and `IAsyncDeserializer<T>` where they took
+  `ISerializer<T>` and `IDeserializer<T>`: pass the `Async` class of a built-in, or an asynchronous
+  class of your own.
 
 ## Examples
 

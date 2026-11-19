@@ -154,7 +154,7 @@ public sealed class PublicConsumerCallbackScopeTests
     [Fact]
     public async Task AsyncKafkaConsumer_AThreadASyncCommitCallbackStarted_ClosesTheConsumer_AfterTheCallbackReturned()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await NewAsyncKafkaConsumer();
         using ManualResetEventSlim delivered = new ManualResetEventSlim(false);
         using ManualResetEventSlim ran = new ManualResetEventSlim(false);
         Thread? started = null;
@@ -308,10 +308,10 @@ public sealed class PublicConsumerCallbackScopeTests
     };
 
     private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer() =>
-        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        KafkaConsumer<byte[], byte[]>.Create(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
-    private static AsyncKafkaConsumer<byte[], byte[]> NewAsyncKafkaConsumer() =>
-        new AsyncKafkaConsumer<byte[], byte[]>(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+    private static async Task<AsyncKafkaConsumer<byte[], byte[]>> NewAsyncKafkaConsumer() =>
+        await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     /// <summary>A listener that runs the action it is given when partitions are assigned.</summary>
     private sealed class SyncListener : IConsumerRebalanceListener

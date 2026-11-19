@@ -52,9 +52,9 @@ public sealed class PublicConsumerListenerLifetimeTests
 
     [Theory]
     [MemberData(nameof(Kinds))]
-    public void TheListener_IsRetainedWhileSubscribed_AndAcrossUnsubscribe_AndReleasedByClose(string kind)
+    public async Task TheListener_IsRetainedWhileSubscribed_AndAcrossUnsubscribe_AndReleasedByClose(string kind)
     {
-        Subject consumer = Subject.Create(kind);
+        Subject consumer = await Subject.Create(kind);
 
         WeakReference listener = SubscribeAFreshListener(consumer);
         Collect();
@@ -71,9 +71,9 @@ public sealed class PublicConsumerListenerLifetimeTests
 
     [Theory]
     [MemberData(nameof(Kinds))]
-    public void TheListener_IsReleasedByAReplacingOrAListenerlessSubscribe(string kind)
+    public async Task TheListener_IsReleasedByAReplacingOrAListenerlessSubscribe(string kind)
     {
-        Subject consumer = Subject.Create(kind);
+        Subject consumer = await Subject.Create(kind);
         try
         {
             WeakReference first = SubscribeAFreshListener(consumer);
@@ -94,9 +94,9 @@ public sealed class PublicConsumerListenerLifetimeTests
 
     [Theory]
     [MemberData(nameof(Kinds))]
-    public void TheListeners_OfFailedSubscribes_AreRetained_UntilASubscribeSucceeds(string kind)
+    public async Task TheListeners_OfFailedSubscribes_AreRetained_UntilASubscribeSucceeds(string kind)
     {
-        Subject consumer = Subject.Create(kind);
+        Subject consumer = await Subject.Create(kind);
         try
         {
             consumer.Assign();
@@ -124,9 +124,9 @@ public sealed class PublicConsumerListenerLifetimeTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void TheListenerException_IsThrownAsTheSameInstance_AndReleasedOnceDropped(bool async)
+    public async Task TheListenerException_IsThrownAsTheSameInstance_AndReleasedOnceDropped(bool async)
     {
-        Subject consumer = Subject.Create(async ? "AsyncMockConsumer+async" : "MockConsumer");
+        Subject consumer = await Subject.Create(async ? "AsyncMockConsumer+async" : "MockConsumer");
         try
         {
             WeakReference thrown = RebalanceIntoAFreshListenerException(consumer);
@@ -206,15 +206,15 @@ public sealed class PublicConsumerListenerLifetimeTests
             _asyncListener = asyncListener;
         }
 
-        internal static Subject Create(string kind) => kind switch
+        internal static async Task<Subject> Create(string kind) => kind switch
         {
             "KafkaConsumer" => new Subject(
-                new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, false),
+                KafkaConsumer<byte[], byte[]>.Create(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, false),
             "MockConsumer" => new Subject(
                 new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, false),
-            "AsyncKafkaConsumer" => new Subject(null, Real(), false),
+            "AsyncKafkaConsumer" => new Subject(null, await Real(), false),
             "AsyncMockConsumer" => new Subject(null, Mock(), false),
-            "AsyncKafkaConsumer+async" => new Subject(null, Real(), true),
+            "AsyncKafkaConsumer+async" => new Subject(null, await Real(), true),
             "AsyncMockConsumer+async" => new Subject(null, Mock(), true),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
@@ -290,8 +290,8 @@ public sealed class PublicConsumerListenerLifetimeTests
             Await(() => _async!.Close(zero));
         }
 
-        private static AsyncKafkaConsumer<byte[], byte[]> Real() =>
-            new AsyncKafkaConsumer<byte[], byte[]>(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        private static async Task<AsyncKafkaConsumer<byte[], byte[]>> Real() =>
+            await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
         private static AsyncMockConsumer<byte[], byte[]> Mock() =>
             new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());

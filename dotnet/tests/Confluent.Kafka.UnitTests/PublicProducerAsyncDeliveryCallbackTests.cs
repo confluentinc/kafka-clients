@@ -635,7 +635,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
         Func<AsyncKafkaProducer<byte[], byte[]>, Task> body,
         params TaskCompletionSource<bool>[] gates)
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = Async(MaxBlockMs);
+        AsyncKafkaProducer<byte[], byte[]> producer = await Async(MaxBlockMs);
         try
         {
             await body(producer);

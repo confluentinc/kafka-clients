@@ -135,7 +135,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     public async Task ASubscribeStartedBeforeAnotherHasSettled_IsRefusedBeforeTheNativeCall(
         Kind kind, Form first, Form second)
     {
-        IAsyncConsumer<byte[], byte[]> consumer = Create(kind);
+        IAsyncConsumer<byte[], byte[]> consumer = await Create(kind);
         try
         {
             NativeConsumer native = Native(consumer);
@@ -169,7 +169,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     [MemberData(nameof(KindsAndForms))]
     public async Task AfterASubscribeTheConsumerRefused_TheNextSubscribeReachesTheConsumer(Kind kind, Form first)
     {
-        IAsyncConsumer<byte[], byte[]> consumer = Create(kind);
+        IAsyncConsumer<byte[], byte[]> consumer = await Create(kind);
         try
         {
             Form other = IsPattern(first) ? Form.Topics : Form.Pattern;
@@ -195,7 +195,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     [MemberData(nameof(Forms))]
     public async Task OnAKafkaConsumer_AfterASubscribeRefusedForAMissingGroupId_TheNextReachesTheConsumer(Form first)
     {
-        IAsyncConsumer<byte[], byte[]> consumer = Create(Kind.AsyncKafkaConsumer, groupId: false);
+        IAsyncConsumer<byte[], byte[]> consumer = await Create(Kind.AsyncKafkaConsumer, groupId: false);
         try
         {
             for (int attempt = 0; attempt < 2; attempt++)
@@ -217,7 +217,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     [MemberData(nameof(Forms))]
     public async Task OnAKafkaConsumer_AfterASubscribeTheCoreRefusedAsConcurrent_TheNextIsAccepted(Form first)
     {
-        IAsyncConsumer<byte[], byte[]> consumer = Create(Kind.AsyncKafkaConsumer);
+        IAsyncConsumer<byte[], byte[]> consumer = await Create(Kind.AsyncKafkaConsumer);
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, 0) }), s_deadline);
@@ -242,7 +242,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     [MemberData(nameof(KindsAndForms))]
     public async Task AfterASubscribeWhoseTokenWasCancelled_TheNextIsAccepted(Kind kind, Form first)
     {
-        IAsyncConsumer<byte[], byte[]> consumer = Create(kind);
+        IAsyncConsumer<byte[], byte[]> consumer = await Create(kind);
         try
         {
             using CancellationTokenSource cancel = new CancellationTokenSource();
@@ -268,7 +268,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     [InlineData(Kind.AsyncMockConsumer)]
     public async Task AfterASubscribeWithATokenAlreadyCancelled_TheNextIsAccepted(Kind kind)
     {
-        IAsyncConsumer<byte[], byte[]> consumer = Create(kind);
+        IAsyncConsumer<byte[], byte[]> consumer = await Create(kind);
         try
         {
             using CancellationTokenSource cancel = new CancellationTokenSource();
@@ -290,7 +290,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     [InlineData(Kind.AsyncMockConsumer)]
     public async Task AfterASubscribeWhoseNativeCallThrew_TheNextIsAccepted(Kind kind)
     {
-        IAsyncConsumer<byte[], byte[]> consumer = Create(kind);
+        IAsyncConsumer<byte[], byte[]> consumer = await Create(kind);
         try
         {
             NativeConsumer native = Native(consumer);
@@ -321,7 +321,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     [InlineData(Kind.AsyncMockConsumer)]
     public async Task AfterASubscribeWhoseSettleThrew_TheNextIsAccepted(Kind kind)
     {
-        IAsyncConsumer<byte[], byte[]> consumer = Create(kind);
+        IAsyncConsumer<byte[], byte[]> consumer = await Create(kind);
         try
         {
             NativeConsumer native = Native(consumer);
@@ -350,7 +350,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
         }
     }
 
-    private static IAsyncConsumer<byte[], byte[]> Create(Kind kind, bool groupId = true)
+    private static async Task<IAsyncConsumer<byte[], byte[]>> Create(Kind kind, bool groupId = true)
     {
         if (kind == Kind.AsyncMockConsumer)
         {
@@ -367,7 +367,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
             config["group.id"] = "overlapping-subscribe-group";
         }
 
-        return new AsyncKafkaConsumer<byte[], byte[]>(config, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        return await AsyncKafkaConsumer<byte[], byte[]>.Create(config, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
     }
 
     private static NativeConsumer Native(object consumer) =>

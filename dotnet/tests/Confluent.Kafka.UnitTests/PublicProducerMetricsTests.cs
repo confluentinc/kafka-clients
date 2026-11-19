@@ -56,7 +56,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_SyncRealProducer_IsPopulatedAndWellFormed()
     {
-        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
             RealConfig(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
@@ -64,9 +64,9 @@ public sealed class PublicProducerMetricsTests
     }
 
     [Fact]
-    public void Metrics_AsyncRealProducer_IsPopulatedAndWellFormed()
+    public async Task Metrics_AsyncRealProducer_IsPopulatedAndWellFormed()
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(
             RealConfig(), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
@@ -78,7 +78,7 @@ public sealed class PublicProducerMetricsTests
     {
         // Rebuild a real key with the same name, group and tags but another description: the dictionary keys on value
         // identity, which excludes the description.
-        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
             RealConfig(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
@@ -104,7 +104,7 @@ public sealed class PublicProducerMetricsTests
     public void Metrics_CalledTwice_ReturnsIndependentSnapshots()
     {
         // Each call copies out a fresh map and destroys its native root, so both results stay readable.
-        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
             RealConfig(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
@@ -130,7 +130,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public void Metrics_SyncRealAfterDispose_ThrowsIllegalState()
     {
-        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
             RealConfig(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         TestTimeout.Dispose(producer);
         Assert.Throws<IllegalStateException>(() => producer.Metrics());
@@ -147,7 +147,7 @@ public sealed class PublicProducerMetricsTests
     [Fact]
     public async Task Metrics_AsyncRealAfterDisposeAsync_ThrowsIllegalState()
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(
             RealConfig(), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         await TestTimeout.DisposeAsync(producer);
         Assert.Throws<IllegalStateException>(() => producer.Metrics());

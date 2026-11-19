@@ -103,7 +103,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(Abort)]
     public async Task AsyncKafkaProducer_NonTransactional_ThrowsJavasIllegalState(string operation)
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = Async(MaxBlockMs);
+        AsyncKafkaProducer<byte[], byte[]> producer = await Async(MaxBlockMs);
         await using IAsyncDisposable teardown = TestTimeout.AsyncDisposal(producer);
 
         Exception? error = await CatchAsync(() => Call(producer, operation, CancellationToken.None));
@@ -116,7 +116,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(AsyncFlavor)]
     public async Task InitTransactions_UnreachableBroker_TimesOutAfterMaxBlockMs(string flavor)
     {
-        object producer = Transactional(flavor, MaxBlockMs);
+        object producer = await Transactional(flavor, MaxBlockMs);
         try
         {
             Stopwatch elapsed = Stopwatch.StartNew();
@@ -145,7 +145,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(AsyncFlavor)]
     public async Task BeginTransaction_BeforeInitTransactions_ThrowsTheInvalidTransition(string flavor)
     {
-        object producer = Transactional(flavor, MaxBlockMs, "tx-begin-before-init");
+        object producer = await Transactional(flavor, MaxBlockMs, "tx-begin-before-init");
         try
         {
             Exception? error = Catch(() => Call(producer, Begin));
@@ -164,7 +164,7 @@ public sealed class PublicProducerTransactionTests
     [Fact]
     public async Task KafkaProducer_OverlappingTransactionCall_ThrowsConcurrentModification()
     {
-        KafkaProducer<byte[], byte[]> producer = (KafkaProducer<byte[], byte[]>)Transactional(SyncFlavor, 3000);
+        KafkaProducer<byte[], byte[]> producer = (KafkaProducer<byte[], byte[]>)await Transactional(SyncFlavor, 3000);
         try
         {
             using ManualResetEventSlim started = new ManualResetEventSlim();
@@ -191,7 +191,7 @@ public sealed class PublicProducerTransactionTests
     [Fact]
     public async Task AsyncKafkaProducer_OverlappingTransactionCall_ThrowsConcurrentModification()
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = (AsyncKafkaProducer<byte[], byte[]>)Transactional(AsyncFlavor, 3000);
+        AsyncKafkaProducer<byte[], byte[]> producer = (AsyncKafkaProducer<byte[], byte[]>)await Transactional(AsyncFlavor, 3000);
         try
         {
             Task init = producer.InitTransactions();
@@ -219,7 +219,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(Abort)]
     public async Task AsyncKafkaProducer_AlreadyCanceledToken_ThrowsAtTheCall(string operation)
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = (AsyncKafkaProducer<byte[], byte[]>)Transactional(AsyncFlavor, MaxBlockMs);
+        AsyncKafkaProducer<byte[], byte[]> producer = (AsyncKafkaProducer<byte[], byte[]>)await Transactional(AsyncFlavor, MaxBlockMs);
         await using IAsyncDisposable teardown = TestTimeout.AsyncDisposal(producer);
         using CancellationTokenSource canceled = new CancellationTokenSource();
         canceled.Cancel();
@@ -234,7 +234,7 @@ public sealed class PublicProducerTransactionTests
     [Fact]
     public async Task AsyncKafkaProducer_CanceledInitTransactions_RetryWhileItRuns_ThrowsConcurrentModification()
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = (AsyncKafkaProducer<byte[], byte[]>)Transactional(AsyncFlavor, 1500);
+        AsyncKafkaProducer<byte[], byte[]> producer = (AsyncKafkaProducer<byte[], byte[]>)await Transactional(AsyncFlavor, 1500);
         try
         {
             using CancellationTokenSource cancel = new CancellationTokenSource();
@@ -259,7 +259,7 @@ public sealed class PublicProducerTransactionTests
     [Fact]
     public async Task AsyncKafkaProducer_CanceledInitTransactions_RetryAfterItTimedOut_GetsTheTimeout()
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = (AsyncKafkaProducer<byte[], byte[]>)Transactional(AsyncFlavor, 1000);
+        AsyncKafkaProducer<byte[], byte[]> producer = (AsyncKafkaProducer<byte[], byte[]>)await Transactional(AsyncFlavor, 1000);
         try
         {
             using CancellationTokenSource cancel = new CancellationTokenSource();
@@ -313,7 +313,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(AsyncFlavor)]
     public async Task SendOffsetsToTransaction_NullGroupMetadata_ThrowsJavasIllegalArgument_BeforeTheOffsets(string flavor)
     {
-        object producer = Transactional(flavor, MaxBlockMs);
+        object producer = await Transactional(flavor, MaxBlockMs);
         try
         {
             Exception? withOffsets = await CatchAsync(() => SendOffsetsTo(producer, s_noOffsets, null));
@@ -333,7 +333,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(AsyncFlavor)]
     public async Task SendOffsetsToTransaction_NullOffsets_ThrowsArgumentNull(string flavor)
     {
-        object producer = Transactional(flavor, MaxBlockMs);
+        object producer = await Transactional(flavor, MaxBlockMs);
         try
         {
             Exception? error = await CatchAsync(() => SendOffsetsTo(producer, null, GroupMetadata()));
@@ -360,7 +360,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(AsyncFlavor, Abort)]
     public async Task TransactionCall_OnAClosedProducer_ThrowsTheClosedProducersIllegalState(string flavor, string operation)
     {
-        object producer = Transactional(flavor, MaxBlockMs);
+        object producer = await Transactional(flavor, MaxBlockMs);
         await CloseNow(producer);
 
         // The closed check comes first, before the arguments' (a recorded order deviation).
@@ -533,7 +533,7 @@ public sealed class PublicProducerTransactionTests
         ConsumerGroupMetadata metadata = GroupMetadata();
         Exception? timedOut = null;
         long elapsedMs = 0;
-        object producer = flavor == SyncFlavor ? Sync(MaxBlockMs) : Async(MaxBlockMs);
+        object producer = flavor == SyncFlavor ? Sync(MaxBlockMs) : await Async(MaxBlockMs);
         ProbeCallback callback = new ProbeCallback((_, _) =>
         {
             Stopwatch elapsed = Stopwatch.StartNew();
@@ -650,7 +650,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(AsyncFlavor)]
     public async Task SendOffsetsToTransaction_EmptyOffsets_OnAnIdempotentProducer_Completes(string flavor)
     {
-        object producer = flavor == SyncFlavor ? Sync(MaxBlockMs) : Async(MaxBlockMs);
+        object producer = flavor == SyncFlavor ? Sync(MaxBlockMs) : await Async(MaxBlockMs);
         try
         {
             Assert.Null(await CatchAsync(() => SendOffsetsTo(producer, s_noOffsets, GroupMetadata())));
@@ -666,7 +666,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(AsyncFlavor)]
     public async Task SendOffsetsToTransaction_EmptyOffsets_BeforeInitTransactions_Completes(string flavor)
     {
-        object producer = Transactional(flavor, MaxBlockMs);
+        object producer = await Transactional(flavor, MaxBlockMs);
         try
         {
             Assert.Null(await CatchAsync(() => SendOffsetsTo(producer, s_noOffsets, GroupMetadata())));
@@ -689,8 +689,8 @@ public sealed class PublicProducerTransactionTests
             ["enable.idempotence"] = false,
         };
         object producer = flavor == SyncFlavor
-            ? new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
-            : new AsyncKafkaProducer<byte[], byte[]>(configs, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
+            ? KafkaProducer<byte[], byte[]>.Create(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
+            : await AsyncKafkaProducer<byte[], byte[]>.Create(configs, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         try
         {
             IllegalStateException error = Assert.IsType<IllegalStateException>(
@@ -709,7 +709,7 @@ public sealed class PublicProducerTransactionTests
     [InlineData(AsyncFlavor, true)]
     public async Task SendOffsetsToTransaction_NullOffsetValue_ThrowsArgumentException(string flavor, bool mock)
     {
-        object producer = mock ? Mock(flavor, autoComplete: true) : Transactional(flavor, MaxBlockMs);
+        object producer = mock ? Mock(flavor, autoComplete: true) : await Transactional(flavor, MaxBlockMs);
         Dictionary<TopicPartition, OffsetAndMetadata> offsets =
             new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("txn-input", 0)] = null! };
         try
@@ -843,7 +843,7 @@ public sealed class PublicProducerTransactionTests
     public async Task InitTransactions_DisposeDuringTheWait_EndsTheCallOnce_AndDisposeReturns(string flavor)
     {
         const int LongMaxBlockMs = 1000;
-        object producer = Transactional(flavor, LongMaxBlockMs);
+        object producer = await Transactional(flavor, LongMaxBlockMs);
         Task call = flavor == SyncFlavor
             ? Task.Run(() => ((KafkaProducer<byte[], byte[]>)producer).InitTransactions())
             : ((AsyncKafkaProducer<byte[], byte[]>)producer).InitTransactions();
@@ -883,7 +883,7 @@ public sealed class PublicProducerTransactionTests
         }
     }
 
-    private static object Transactional(string flavor, int maxBlockMs, string transactionalId = "tx-tests")
+    private static async Task<object> Transactional(string flavor, int maxBlockMs, string transactionalId = "tx-tests")
     {
         Dictionary<string, object?> configs = new Dictionary<string, object?>
         {
@@ -892,8 +892,8 @@ public sealed class PublicProducerTransactionTests
             ["transactional.id"] = transactionalId,
         };
         return flavor == SyncFlavor
-            ? new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
-            : new AsyncKafkaProducer<byte[], byte[]>(configs, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
+            ? KafkaProducer<byte[], byte[]>.Create(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
+            : await AsyncKafkaProducer<byte[], byte[]>.Create(configs, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
     }
 
     private static object Mock(string flavor, bool autoComplete) => flavor == SyncFlavor

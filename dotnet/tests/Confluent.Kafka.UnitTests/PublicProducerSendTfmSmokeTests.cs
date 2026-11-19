@@ -85,7 +85,7 @@ public sealed class PublicProducerSendTfmSmokeTests
     public async Task RealProducer_CreateDisposeAsync_RoundTrips()
     {
         // A real producer is created and disposed but sends nothing: without a broker a send would not deliver.
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(
             new System.Collections.Generic.Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
             new AsyncByteArraySerializer(),
             new AsyncByteArraySerializer());

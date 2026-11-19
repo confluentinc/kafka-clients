@@ -55,7 +55,7 @@ public sealed class PublicAsyncConsumerCloseTests
     [InlineData(false)]
     public async Task Close_NullOptions_ThrowsArgumentNullException_EvenWhenClosed(bool mock)
     {
-        IAsyncConsumer<byte[], byte[]> consumer = Create(mock);
+        IAsyncConsumer<byte[], byte[]> consumer = await Create(mock);
         AssertNullOption(Assert.Throws<ArgumentNullException>(() => { _ = consumer.Close(null!); }));
 
         await TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
@@ -65,7 +65,7 @@ public sealed class PublicAsyncConsumerCloseTests
     [Fact]
     public async Task Close_NegativeTimeout_OnARealConsumer_ThrowsAndStaysOpen()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = Real();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await Real();
         try
         {
             AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Close(CloseOptions.Timeout(s_negative)); }));
@@ -87,7 +87,7 @@ public sealed class PublicAsyncConsumerCloseTests
     [Fact]
     public async Task Close_NegativeTimeout_OnAClosedRealConsumer_StillThrows()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = Real();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await Real();
         await TestTimeout.Run(() => consumer.Close(), s_deadline);
 
         AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Close(CloseOptions.Timeout(s_negative)); }));
@@ -110,7 +110,7 @@ public sealed class PublicAsyncConsumerCloseTests
     {
         foreach (bool mock in new[] { true, false })
         {
-            IAsyncConsumer<byte[], byte[]> consumer = Create(mock);
+            IAsyncConsumer<byte[], byte[]> consumer = await Create(mock);
             await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition("async-close-topic", 0) }), s_deadline);
 
             await TestTimeout.Run(
@@ -124,7 +124,7 @@ public sealed class PublicAsyncConsumerCloseTests
     [Fact]
     public async Task Close_WithATimeout_BoundsTheCommitOfTheConsumedPositions()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = Real(groupId: "async-close-group");
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await Real(groupId: "async-close-group");
         TopicPartition tp = new TopicPartition("async-close-topic", 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(tp, 1L), s_deadline);
@@ -141,17 +141,17 @@ public sealed class PublicAsyncConsumerCloseTests
     [InlineData(false)]
     public async Task Close_WithOptions_IsIdempotent_WithCloseAndDispose(bool mock)
     {
-        IAsyncConsumer<byte[], byte[]> first = Create(mock);
+        IAsyncConsumer<byte[], byte[]> first = await Create(mock);
         await TestTimeout.Run(() => first.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
         await TestTimeout.Run(() => first.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
         await TestTimeout.Run(() => first.Close(), s_deadline);
         await TestTimeout.DisposeAsync(first);
 
-        IAsyncConsumer<byte[], byte[]> second = Create(mock);
+        IAsyncConsumer<byte[], byte[]> second = await Create(mock);
         await TestTimeout.Run(() => second.Close(), s_deadline);
         await TestTimeout.Run(() => second.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
 
-        IAsyncConsumer<byte[], byte[]> third = Create(mock);
+        IAsyncConsumer<byte[], byte[]> third = await Create(mock);
         await TestTimeout.DisposeAsync(third);
         await TestTimeout.Run(() => third.Close(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.LEAVE_GROUP)), s_deadline);
     }
@@ -159,7 +159,7 @@ public sealed class PublicAsyncConsumerCloseTests
     [Fact]
     public async Task Close_WhileAnAsyncCallHoldsTheConsumer_ThrowsAndStaysOpen()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = Real();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await Real();
         try
         {
             Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> listing = consumer.ListTopics(TimeSpan.FromSeconds(60));
@@ -210,11 +210,11 @@ public sealed class PublicAsyncConsumerCloseTests
         Assert.Equal(NegativeTimeout, thrown.Message);
     }
 
-    private static IAsyncConsumer<byte[], byte[]> Create(bool mock) => mock ? Mock() : Real();
+    private static async Task<IAsyncConsumer<byte[], byte[]>> Create(bool mock) => mock ? Mock() : await Real();
 
     private static AsyncMockConsumer<byte[], byte[]> Mock() => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
-    private static AsyncKafkaConsumer<byte[], byte[]> Real(string? groupId = null)
+    private static async Task<AsyncKafkaConsumer<byte[], byte[]>> Real(string? groupId = null)
     {
         Dictionary<string, object?> config = new Dictionary<string, object?>
         {
@@ -226,6 +226,6 @@ public sealed class PublicAsyncConsumerCloseTests
             config["group.id"] = groupId;
         }
 
-        return new AsyncKafkaConsumer<byte[], byte[]>(config, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        return await AsyncKafkaConsumer<byte[], byte[]>.Create(config, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
     }
 }

@@ -861,7 +861,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         }
 
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(config, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            await AsyncKafkaConsumer<byte[], byte[]>.Create(config, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         return consumer;
     }

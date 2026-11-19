@@ -90,7 +90,7 @@ public sealed class PublicConsumerOwnerCheckTests
     [Fact]
     public async Task AsyncKafkaConsumer_AnotherThreadsCalls_WhileACallHoldsTheConsumer_AreRefused_AndWakeupHandleMetricsAndEnforceRebalancePass()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await NewAsyncKafkaConsumer();
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
@@ -137,7 +137,7 @@ public sealed class PublicConsumerOwnerCheckTests
     [Fact]
     public async Task AsyncKafkaConsumer_TheSameThread_Nests_WhileItsOwnCallHoldsTheConsumer()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await NewAsyncKafkaConsumer();
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
@@ -164,7 +164,7 @@ public sealed class PublicConsumerOwnerCheckTests
     [Fact]
     public async Task AsyncKafkaConsumer_AwaitedCallsInSequence_PassWhicheverThreadEachResumesOn()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await NewAsyncKafkaConsumer();
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
@@ -236,7 +236,7 @@ public sealed class PublicConsumerOwnerCheckTests
     [Fact]
     public async Task AsyncKafkaConsumer_DuringAnExplicitClose_AnotherThreadIsRefused_ThenTheConsumerIsClosed()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await NewAsyncKafkaConsumer();
         Thread? disposer = null;
         Exception? disposing = null;
         try
@@ -277,7 +277,7 @@ public sealed class PublicConsumerOwnerCheckTests
     [Fact]
     public async Task AsyncKafkaConsumer_ACallbacksCallsOnTheDrainThread_PassTheOwnerCheck_AndMeetTheCore()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await NewAsyncKafkaConsumer();
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
@@ -358,10 +358,10 @@ public sealed class PublicConsumerOwnerCheckTests
     };
 
     private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer() =>
-        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        KafkaConsumer<byte[], byte[]>.Create(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
-    private static AsyncKafkaConsumer<byte[], byte[]> NewAsyncKafkaConsumer() =>
-        new AsyncKafkaConsumer<byte[], byte[]>(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+    private static async Task<AsyncKafkaConsumer<byte[], byte[]>> NewAsyncKafkaConsumer() =>
+        await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     /// <summary>A commit callback that runs the action it is given.</summary>
     private sealed class DelegateCallback : IOffsetCommitCallback

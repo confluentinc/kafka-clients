@@ -52,9 +52,9 @@ internal sealed class V2TransactionalFactory : ITransactionalClientFactory
         return conf;
     }
 
-    public ITransactionalProducer CreateProducer(string transactionalId) =>
-        new V2TransactionalProducer(
-            V2ProducerFactory.Build(ProducerConfig(transactionalId), "txn"), _config.Producer.Async, _config.SourceTopic is not null);
+    public ValueTask<ITransactionalProducer> CreateProducer(string transactionalId) =>
+        new(new V2TransactionalProducer(
+            V2ProducerFactory.Build(ProducerConfig(transactionalId), "txn"), _config.Producer.Async, _config.SourceTopic is not null));
 
     public ITransactionalConsumer CreateConsumer()
     {

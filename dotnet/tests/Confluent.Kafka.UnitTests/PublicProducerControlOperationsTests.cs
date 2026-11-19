@@ -67,7 +67,7 @@ public sealed class PublicProducerControlOperationsTests
         }
         else
         {
-            AsyncKafkaProducer<byte[], byte[]> producer = Async(maxBlockMs);
+            AsyncKafkaProducer<byte[], byte[]> producer = await Async(maxBlockMs);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             Task<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(Record(topic), callback).AsTask();
             await Task.Delay(Settle);
@@ -125,7 +125,7 @@ public sealed class PublicProducerControlOperationsTests
         }
         else
         {
-            AsyncKafkaProducer<byte[], byte[]> producer = Async(maxBlockMs);
+            AsyncKafkaProducer<byte[], byte[]> producer = await Async(maxBlockMs);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             Task<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(Record(topic), callback).AsTask();
             await Task.Delay(Settle);
@@ -180,7 +180,7 @@ public sealed class PublicProducerControlOperationsTests
         }
         else
         {
-            AsyncKafkaProducer<byte[], byte[]> producer = Async(maxBlockMs);
+            AsyncKafkaProducer<byte[], byte[]> producer = await Async(maxBlockMs);
             destroys = WatchDestroy(producer);
             partitions = producer.PartitionsFor(topic);
             await Task.Delay(Settle);

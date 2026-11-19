@@ -15,6 +15,8 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -57,6 +59,45 @@ public sealed class PublicClientCreateTests
         new TheoryData<string> { SyncProducer, SyncConsumer, AsyncProducer, AsyncConsumer };
 
     public static TheoryData<string> AsyncFlavors => new TheoryData<string> { AsyncProducer, AsyncConsumer };
+
+    [Theory]
+    [InlineData(typeof(KafkaProducer<,>), typeof(KafkaProducer<,>))]
+    [InlineData(typeof(KafkaConsumer<,>), typeof(KafkaConsumer<,>))]
+    [InlineData(typeof(AsyncKafkaProducer<,>), typeof(Task<>))]
+    [InlineData(typeof(AsyncKafkaConsumer<,>), typeof(Task<>))]
+    public void ARealClient_HasNoPublicConstructor_AndIsBuiltByItsTwoCreateOverloads(Type client, Type returned)
+    {
+        Assert.Empty(client.GetConstructors(BindingFlags.Public | BindingFlags.Instance));
+
+        MethodInfo[] factories = client
+            .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
+            .Where(method => method.Name == "Create")
+            .OrderBy(method => method.GetParameters().Length)
+            .ToArray();
+        bool awaited = returned == typeof(Task<>);
+        Assert.Equal(2, factories.Length);
+        Assert.All(factories, factory => Assert.Equal(returned, factory.ReturnType.GetGenericTypeDefinition()));
+        Assert.Equal(
+            awaited ? new[] { "configs", "cancellationToken" } : new[] { "configs" },
+            factories[0].GetParameters().Select(parameter => parameter.Name));
+        string serde = client.Name.IndexOf("Producer", StringComparison.Ordinal) >= 0 ? "Serializer" : "Deserializer";
+        string[] withSerdes = { "configs", "key" + serde, "value" + serde };
+        Assert.Equal(
+            awaited ? withSerdes.Concat(new[] { "cancellationToken" }) : withSerdes,
+            factories[1].GetParameters().Select(parameter => parameter.Name));
+    }
+
+    [Theory]
+    [InlineData(typeof(MockProducer<,>))]
+    [InlineData(typeof(AsyncMockProducer<,>))]
+    [InlineData(typeof(MockConsumer<,>))]
+    [InlineData(typeof(AsyncMockConsumer<,>))]
+    public void AMock_KeepsItsPublicConstructors_AndHasNoCreate(Type mock)
+    {
+        Assert.NotEmpty(mock.GetConstructors(BindingFlags.Public | BindingFlags.Instance));
+        Assert.DoesNotContain(
+            mock.GetMethods(BindingFlags.Public | BindingFlags.Static), method => method.Name == "Create");
+    }
 
     [Theory]
     [MemberData(nameof(Flavors))]

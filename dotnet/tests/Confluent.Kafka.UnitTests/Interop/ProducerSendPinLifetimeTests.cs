@@ -418,7 +418,7 @@ public sealed class ProducerSendPinLifetimeTests
         using NativeMemoryManager value = new NativeMemoryManager(32);
         using UnpinFailureListener listener = new UnpinFailureListener(marker);
         AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
-            new AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+            await AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
                 new Dictionary<string, object?>
                 {
                     ["bootstrap.servers"] = "localhost:1",

@@ -139,7 +139,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
         (Func<IAsyncConsumer<byte[], byte[]>, TimeSpan, Task> call, string message) = s_negative[method];
         foreach (bool mock in new[] { true, false })
         {
-            IAsyncConsumer<byte[], byte[]> consumer = Create(mock);
+            IAsyncConsumer<byte[], byte[]> consumer = await Create(mock);
             try
             {
                 await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
@@ -162,7 +162,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
         Func<IAsyncConsumer<byte[], byte[]>, TimeSpan, Task> call = s_negative[method].Call;
         foreach (bool mock in new[] { true, false })
         {
-            IAsyncConsumer<byte[], byte[]> consumer = Create(mock);
+            IAsyncConsumer<byte[], byte[]> consumer = await Create(mock);
             await TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)), s_deadline);
 
             foreach (TimeSpan timeout in new[] { TimeSpan.FromSeconds(-1), TimeSpan.FromTicks(-1), TimeSpan.MinValue })
@@ -177,7 +177,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
     {
         foreach (bool mock in new[] { true, false })
         {
-            IAsyncConsumer<byte[], byte[]> consumer = Create(mock);
+            IAsyncConsumer<byte[], byte[]> consumer = await Create(mock);
             try
             {
                 AssertNegative(Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Poll(TimeSpan.FromMilliseconds(-1)); }), TimerNegative, -1);
@@ -195,7 +195,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
     {
         foreach (bool mock in new[] { true, false })
         {
-            IAsyncConsumer<byte[], byte[]> consumer = Create(mock);
+            IAsyncConsumer<byte[], byte[]> consumer = await Create(mock);
             await TestTimeout.DisposeAsync(consumer);
 
             AssertNegative(Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Poll(TimeSpan.FromSeconds(-2)); }), TimerNegative, -2000);
@@ -208,7 +208,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
     public async Task ATimedOverload_WaitsUpToItsTimeout_AndTheUntimedOneUpToTheDefault(string method)
     {
         (Func<IAsyncConsumer<byte[], byte[]>, Task> untimed, Func<IAsyncConsumer<byte[], byte[]>, TimeSpan, Task> timed, string message) = s_timed[method];
-        AsyncKafkaConsumer<byte[], byte[]> consumer = Real(defaultApiTimeoutMs: 300);
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await Real(defaultApiTimeoutMs: 300);
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
@@ -229,7 +229,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
     [Fact]
     public async Task ATimedCommitOfTheConsumedPositions_WaitsUpToItsTimeout_AndTheUntimedOneUpToTheDefault()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = Real(defaultApiTimeoutMs: 300);
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await Real(defaultApiTimeoutMs: 300);
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
@@ -256,7 +256,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
     public async Task AMetadataTimedOverload_WaitsUpToItsTimeout_AndTheUntimedOneUpToTheDefault(string method)
     {
         (Func<IAsyncConsumer<byte[], byte[]>, Task> untimed, Func<IAsyncConsumer<byte[], byte[]>, TimeSpan, Task> timed, string zero, string[] expired) = s_metadata[method];
-        AsyncKafkaConsumer<byte[], byte[]> consumer = Real(defaultApiTimeoutMs: 300);
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await Real(defaultApiTimeoutMs: 300);
         try
         {
             Stopwatch elapsed = Stopwatch.StartNew();
@@ -278,7 +278,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
     [Fact]
     public async Task AZeroTimeout_ReturnsTheOffsetsLookups_AtOnce()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = Real(defaultApiTimeoutMs: 60_000);
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await Real(defaultApiTimeoutMs: 60_000);
         try
         {
             Stopwatch elapsed = Stopwatch.StartNew();
@@ -359,11 +359,11 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
     private static Dictionary<TopicPartition, long> Timestamps(long timestamp) =>
         new Dictionary<TopicPartition, long> { [s_tp0] = timestamp };
 
-    private static IAsyncConsumer<byte[], byte[]> Create(bool mock) => mock
+    private static async Task<IAsyncConsumer<byte[], byte[]>> Create(bool mock) => mock
         ? new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer())
-        : Real(defaultApiTimeoutMs: 60_000);
+        : await Real(defaultApiTimeoutMs: 60_000);
 
-    private static AsyncKafkaConsumer<byte[], byte[]> Real(int defaultApiTimeoutMs) => new AsyncKafkaConsumer<byte[], byte[]>(
+    private static async Task<AsyncKafkaConsumer<byte[], byte[]>> Real(int defaultApiTimeoutMs) => await AsyncKafkaConsumer<byte[], byte[]>.Create(
         new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",

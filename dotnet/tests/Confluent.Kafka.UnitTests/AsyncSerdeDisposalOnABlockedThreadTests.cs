@@ -29,10 +29,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// A synchronous <c>Dispose()</c> of an asynchronous client, and its constructor when the core fails to build the
-/// client, wait on the calling thread for a serde's <c>DisposeAsync()</c>. That thread is here the only one of its
-/// synchronization context or of its task scheduler, so the wait ends only if no <c>await</c> in the serde's
-/// <c>DisposeAsync()</c> posts its continuation back to it.
+/// A synchronous <c>Dispose()</c> of an asynchronous client waits on the calling thread for a serde's
+/// <c>DisposeAsync()</c>. That thread is here the only one of its synchronization context or of its task scheduler,
+/// so the wait ends only if no <c>await</c> in the serde's <c>DisposeAsync()</c> posts its continuation back to it.
+/// A <c>Create</c> whose client the core fails to build blocks no thread: it awaits that disposal.
 /// </summary>
 public sealed class AsyncSerdeDisposalOnABlockedThreadTests
 {
@@ -44,12 +44,12 @@ public sealed class AsyncSerdeDisposalOnABlockedThreadTests
     [Theory]
     [InlineData(ContextHow)]
     [InlineData(SchedulerHow)]
-    public void AProducersDispose_Returns_AndDisposesEachSerializerOnce(string how)
+    public async Task AProducersDispose_Returns_AndDisposesEachSerializerOnce(string how)
     {
         YieldingSerde key = new YieldingSerde();
         YieldingSerde value = new YieldingSerde();
         AsyncKafkaProducer<string, string> producer =
-            new AsyncKafkaProducer<string, string>(UnreachableProducer(), key, value);
+            await AsyncKafkaProducer<string, string>.Create(UnreachableProducer(), key, value);
 
         int posted = OnItsOnlyThread(how, producer.Dispose);
 
@@ -61,12 +61,12 @@ public sealed class AsyncSerdeDisposalOnABlockedThreadTests
     [Theory]
     [InlineData(ContextHow)]
     [InlineData(SchedulerHow)]
-    public void AConsumersDispose_Returns_AndDisposesEachDeserializerOnce(string how)
+    public async Task AConsumersDispose_Returns_AndDisposesEachDeserializerOnce(string how)
     {
         YieldingSerde key = new YieldingSerde();
         YieldingSerde value = new YieldingSerde();
         AsyncKafkaConsumer<string, string> consumer =
-            new AsyncKafkaConsumer<string, string>(UnreachableConsumer(), key, value);
+            await AsyncKafkaConsumer<string, string>.Create(UnreachableConsumer(), key, value);
 
         int posted = OnItsOnlyThread(how, consumer.Dispose);
 
@@ -75,10 +75,8 @@ public sealed class AsyncSerdeDisposalOnABlockedThreadTests
         Assert.Equal(1, value.AsyncDisposals);
     }
 
-    [Theory]
-    [InlineData(ContextHow)]
-    [InlineData(SchedulerHow)]
-    public void AProducersFailedConstruction_Throws_AndDisposesEachSerializerOnce(string how)
+    [Fact]
+    public async Task AProducersFailedCreate_FailsItsTask_AndDisposesEachSerializerOnce()
     {
         YieldingSerde key = new YieldingSerde();
         YieldingSerde value = new YieldingSerde();
@@ -87,26 +85,26 @@ public sealed class AsyncSerdeDisposalOnABlockedThreadTests
             ["bootstrap.servers"] = "unresolvable.invalid:9092",
         };
 
-        KafkaException failure = Assert.ThrowsAny<KafkaException>(
-            () => OnItsOnlyThread(how, () => new AsyncKafkaProducer<string, string>(configs, key, value)));
+        Task<AsyncKafkaProducer<string, string>> created = AsyncKafkaProducer<string, string>.Create(configs, key, value);
+
+        KafkaException failure = await Assert.ThrowsAnyAsync<KafkaException>(() => TestTimeout.Run(() => created, s_bound));
 
         Assert.Equal("Failed to construct kafka producer", failure.Message);
         Assert.Equal(1, key.AsyncDisposals);
         Assert.Equal(1, value.AsyncDisposals);
     }
 
-    [Theory]
-    [InlineData(ContextHow)]
-    [InlineData(SchedulerHow)]
-    public void AConsumersFailedConstruction_Throws_AndDisposesEachDeserializerOnce(string how)
+    [Fact]
+    public async Task AConsumersFailedCreate_FailsItsTask_AndDisposesEachDeserializerOnce()
     {
         YieldingSerde key = new YieldingSerde();
         YieldingSerde value = new YieldingSerde();
         Dictionary<string, object?> configs = UnreachableConsumer();
         configs["group.id"] = string.Empty;
 
-        KafkaException failure = Assert.ThrowsAny<KafkaException>(
-            () => OnItsOnlyThread(how, () => new AsyncKafkaConsumer<string, string>(configs, key, value)));
+        Task<AsyncKafkaConsumer<string, string>> created = AsyncKafkaConsumer<string, string>.Create(configs, key, value);
+
+        KafkaException failure = await Assert.ThrowsAnyAsync<KafkaException>(() => TestTimeout.Run(() => created, s_bound));
 
         Assert.Equal("Failed to construct kafka consumer", failure.Message);
         Assert.Equal(1, key.AsyncDisposals);
@@ -119,7 +117,7 @@ public sealed class AsyncSerdeDisposalOnABlockedThreadTests
         YieldingSerde key = new YieldingSerde();
         YieldingSerde value = new YieldingSerde();
         AsyncKafkaProducer<string, string> producer =
-            new AsyncKafkaProducer<string, string>(UnreachableProducer(), key, value);
+            await AsyncKafkaProducer<string, string>.Create(UnreachableProducer(), key, value);
         Task closed = Task.CompletedTask;
 
         int posted = OnItsOnlyThread(

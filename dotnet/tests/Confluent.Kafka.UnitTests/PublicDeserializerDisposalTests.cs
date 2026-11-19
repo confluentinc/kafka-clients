@@ -80,7 +80,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         DestroyLog destroys = WatchDestroy(consumer);
         key.OnDispose = () => key.DestroysSeen = destroys.Destroys().Count;
         try
@@ -118,7 +118,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         try
         {
             _ = await CloseBy(consumer, CloseWithOptionsHow);
@@ -137,7 +137,7 @@ public sealed class PublicDeserializerDisposalTests
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
-    public void TestKafkaConsumer_test_a_failed_construction_closes_the_deserializers_built_AnEmptyGroupId_DisposesBoth(
+    public async Task TestKafkaConsumer_test_a_failed_construction_closes_the_deserializers_built_AnEmptyGroupId_DisposesBoth(
         string flavor)
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
@@ -146,7 +146,7 @@ public sealed class PublicDeserializerDisposalTests
         Dictionary<string, object?> configs = Unreachable();
         configs["group.id"] = string.Empty;
 
-        KafkaException failure = Assert.ThrowsAny<KafkaException>(() => Consumer(flavor, configs, key, value));
+        KafkaException failure = await Assert.ThrowsAnyAsync<KafkaException>(async () => await Consumer(flavor, configs, key, value));
 
         Assert.Equal("Failed to construct kafka consumer", failure.Message);
         Assert.Equal(
@@ -172,7 +172,7 @@ public sealed class PublicDeserializerDisposalTests
         Dictionary<string, object?> configs = Unreachable();
         configs[refused] = refused == "group.protocol" ? "classic" : "many";
 
-        Exception failure = Assert.ThrowsAny<Exception>(() => Consumer(flavor, configs, key, value));
+        Exception failure = await Assert.ThrowsAnyAsync<Exception>(async () => await Consumer(flavor, configs, key, value));
 
         if (refused == "group.protocol")
         {
@@ -188,7 +188,7 @@ public sealed class PublicDeserializerDisposalTests
         }
 
         Assert.Empty(log);
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         _ = await CloseBy(consumer, DisposeHow);
         Assert.Equal(new[] { "key", "value" }, log.ToArray());
     }
@@ -237,7 +237,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(Unreachable(), key.AsAsync(), value.AsAsync());
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(Unreachable(), key.AsAsync(), value.AsAsync());
         try
         {
             await TestTimeout.Run(() => consumer.Close(CloseOptions.Timeout(TimeSpan.Zero)), Deadline);
@@ -257,7 +257,7 @@ public sealed class PublicDeserializerDisposalTests
     public async Task ACloseThatFails_StillDisposesBoth_KeyThenValue(string flavor)
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
-        IConsumerCommon consumer = Consumer(
+        IConsumerCommon consumer = await Consumer(
             flavor, Unreachable(), new DisposableDeserializer("key", log), new DisposableDeserializer("value", log));
         InvalidOperationException raised = new InvalidOperationException("commit callback failed");
         try
@@ -286,7 +286,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         using ManualResetEventSlim release = new ManualResetEventSlim(false);
         RunningPoll? poll = null;
         try
@@ -327,7 +327,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         DestroyLog destroys = WatchDestroy(consumer);
         key.OnDispose = () => key.DestroysSeen = destroys.Destroys().Count;
         using ManualResetEventSlim release = new ManualResetEventSlim(false);
@@ -510,7 +510,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         Exception? closeInside = null;
         Exception? disposeInside = null;
         Task? closing = null;
@@ -572,7 +572,7 @@ public sealed class PublicDeserializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableDeserializer key = new DisposableDeserializer("key", log);
         DisposableDeserializer value = new DisposableDeserializer("value", log);
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(Unreachable(), key.AsAsync(), value.AsAsync());
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(Unreachable(), key.AsAsync(), value.AsAsync());
         DestroyLog destroys = WatchDestroy(consumer);
         Thread? drain = null;
         bool drainAliveAtDisposal = true;
@@ -635,7 +635,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         Exception? nested = null;
         bool nestedCompleted = false;
         key.OnDispose = () => nested = Xunit.Record.Exception(() => nestedCompleted = CloseAndDisposeInside(consumer));
@@ -674,7 +674,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         OtherThreadClose other = new OtherThreadClose(consumer, otherHow);
         key.OnDispose = other.RunAndWait;
         try
@@ -703,7 +703,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         SemaphoreSlim gate = CloseGateOf(consumer);
         using ManualResetEventSlim release = new ManualResetEventSlim(false);
         RunningPoll? poll = null;
@@ -748,7 +748,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         _ = await CloseBy(consumer, DisposeHow);
         SemaphoreSlim gate = CloseGateOf(consumer);
         Assert.True(gate.Wait(0), "the close gate is still held after the Dispose");
@@ -771,14 +771,14 @@ public sealed class PublicDeserializerDisposalTests
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
-    public void AConfigurationValueTheBindingRefuses_DisposesNothing(string flavor)
+    public async Task AConfigurationValueTheBindingRefuses_DisposesNothing(string flavor)
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
         Dictionary<string, object?> configs = Unreachable();
         configs["max.poll.records"] = true;
 
-        ConfigException failure = Assert.Throws<ConfigException>(() => Consumer(flavor, configs, key, value));
+        ConfigException failure = await Assert.ThrowsAsync<ConfigException>(async () => await Consumer(flavor, configs, key, value));
 
         Assert.Equal(
             "Invalid value true for configuration max.poll.records: " +
@@ -791,22 +791,22 @@ public sealed class PublicDeserializerDisposalTests
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
-    public void ANullArgument_DisposesNothing(string flavor)
+    public async Task ANullArgument_DisposesNothing(string flavor)
     {
         DisposableDeserializer key = new DisposableDeserializer("key");
         DisposableDeserializer value = new DisposableDeserializer("value");
 
-        Assert.Equal("configs", Assert.Throws<ArgumentNullException>(() => Consumer(flavor, null!, key, value)).ParamName);
-        Assert.Equal("configs", Assert.Throws<ArgumentNullException>(() => Consumer(flavor, null!, null!, null!)).ParamName);
+        Assert.Equal("configs", (await Assert.ThrowsAsync<ArgumentNullException>(async () => await Consumer(flavor, null!, key, value))).ParamName);
+        Assert.Equal("configs", (await Assert.ThrowsAsync<ArgumentNullException>(async () => await Consumer(flavor, null!, null!, null!))).ParamName);
         Assert.Equal(
             NullDeserializer("key.deserializer"),
-            Assert.Throws<ConfigException>(() => Consumer(flavor, Unreachable(), null!, null!)).Message);
+            (await Assert.ThrowsAsync<ConfigException>(async () => await Consumer(flavor, Unreachable(), null!, null!))).Message);
         Assert.Equal(
             NullDeserializer("key.deserializer"),
-            Assert.Throws<ConfigException>(() => Consumer(flavor, Unreachable(), null!, value)).Message);
+            (await Assert.ThrowsAsync<ConfigException>(async () => await Consumer(flavor, Unreachable(), null!, value))).Message);
         Assert.Equal(
             NullDeserializer("value.deserializer"),
-            Assert.Throws<ConfigException>(() => Consumer(flavor, Unreachable(), key, null!)).Message);
+            (await Assert.ThrowsAsync<ConfigException>(async () => await Consumer(flavor, Unreachable(), key, null!))).Message);
         Assert.Equal(
             NullDeserializer("key.deserializer"),
             Assert.Throws<ConfigException>(() => Mock(flavor, null!, value)).Message);
@@ -824,7 +824,7 @@ public sealed class PublicDeserializerDisposalTests
     public async Task OneInstanceGivenAsKeyAndValue_IsDisposedTwice(string flavor)
     {
         DisposableDeserializer both = new DisposableDeserializer("both");
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), both, both);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), both, both);
         try
         {
             _ = await CloseBy(consumer, CloseHow);
@@ -845,7 +845,7 @@ public sealed class PublicDeserializerDisposalTests
     public async Task TheKeyIsDisposedBeforeTheValue(string flavor, string how)
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
-        IConsumerCommon consumer = Consumer(
+        IConsumerCommon consumer = await Consumer(
             flavor, Unreachable(), new DisposableDeserializer("key", log), new DisposableDeserializer("value", log));
         try
         {
@@ -868,7 +868,7 @@ public sealed class PublicDeserializerDisposalTests
     {
         AsyncOnlyDeserializer key = new AsyncOnlyDeserializer();
         AsyncOnlyDeserializer value = new AsyncOnlyDeserializer();
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         try
         {
             _ = await CloseBy(consumer, how);
@@ -917,14 +917,14 @@ public sealed class PublicDeserializerDisposalTests
             ["enable.auto.commit"] = "false",
         };
 
-    private static IConsumerCommon Consumer(
+    private static async Task<IConsumerCommon> Consumer(
         string flavor,
         IReadOnlyDictionary<string, object?> configs,
         IDeserializer<byte[]> key,
         IDeserializer<byte[]> value) =>
         flavor == SyncFlavor
-            ? new KafkaConsumer<byte[], byte[]>(configs, key, value)
-            : new AsyncKafkaConsumer<byte[], byte[]>(configs, key.AsAsync(), value.AsAsync());
+            ? KafkaConsumer<byte[], byte[]>.Create(configs, key, value)
+            : await AsyncKafkaConsumer<byte[], byte[]>.Create(configs, key.AsAsync(), value.AsAsync());
 
     private static IConsumerCommon Mock(string flavor, IDeserializer<byte[]> key, IDeserializer<byte[]> value) =>
         flavor == SyncFlavor
@@ -1196,7 +1196,7 @@ public sealed class PublicDeserializerDisposalTests
         CloseCapturingTheTrace(string flavor, string id, DisposableDeserializer key, DisposableDeserializer value)
     {
         using TraceCapture trace = new TraceCapture(id);
-        IConsumerCommon consumer = Consumer(flavor, Unreachable(), key, value);
+        IConsumerCommon consumer = await Consumer(flavor, Unreachable(), key, value);
         try
         {
             _ = await CloseBy(consumer, CloseWithOptionsHow);

@@ -159,7 +159,7 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         TopicPartition tp1 = new TopicPartition(Topic, 1);
-        object client = NewConsumer(consumer);
+        object client = await NewConsumer(consumer);
         try
         {
             IRecording listener = asyncListener
@@ -185,7 +185,7 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     public async Task Subscribe_RefusesAListenerWithAnOnPartitionsLostItWouldNeverCall(
         string consumer, bool pattern, bool asyncListener)
     {
-        object client = NewConsumer(consumer);
+        object client = await NewConsumer(consumer);
         try
         {
             IllegalArgumentException e = await Assert.ThrowsAsync<IllegalArgumentException>(
@@ -204,7 +204,7 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     public async Task Subscribe_RefusesAnInheritedOnPartitionsLostItWouldNeverCall(
         string consumer, bool pattern, bool asyncListener)
     {
-        object client = NewConsumer(consumer);
+        object client = await NewConsumer(consumer);
         try
         {
             IllegalArgumentException e = await Assert.ThrowsAsync<IllegalArgumentException>(
@@ -226,7 +226,7 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     public async Task Subscribe_TakesAnExplicitWithPartitionsLostImplementation(
         string consumer, bool pattern, bool asyncListener)
     {
-        object client = NewConsumer(consumer);
+        object client = await NewConsumer(consumer);
         try
         {
             await TestTimeout.Run(
@@ -244,7 +244,7 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     public async Task Subscribe_TakesAWithPartitionsLostListenerWhoseMethodIsInherited(
         string consumer, bool pattern, bool asyncListener)
     {
-        object client = NewConsumer(consumer);
+        object client = await NewConsumer(consumer);
         try
         {
             await TestTimeout.Run(
@@ -262,7 +262,7 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     public async Task Subscribe_TakesAListenerOfBothFormsWhoseOnPartitionsLostIsTheOtherForms(
         string consumer, bool pattern, bool asyncListener)
     {
-        object client = NewConsumer(consumer);
+        object client = await NewConsumer(consumer);
         try
         {
             object listener = asyncListener ? new SyncLostAsyncListener() : new AsyncLostSyncListener();
@@ -284,7 +284,7 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     {
         TopicPartition tp0 = new TopicPartition(Topic, 0);
         TopicPartition tp1 = new TopicPartition(Topic, 1);
-        object client = NewConsumer(consumer);
+        object client = await NewConsumer(consumer);
         try
         {
             IRecording listener = asyncListener == withPartitionsLost
@@ -312,7 +312,7 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     public async Task Subscribe_ChecksForNullFirst_ThenTheListener_BeforeTheTopicsOrThePattern(
         string consumer, bool pattern, bool asyncListener)
     {
-        object client = NewConsumer(consumer);
+        object client = await NewConsumer(consumer);
         try
         {
             IllegalArgumentException nullListener = await Assert.ThrowsAsync<IllegalArgumentException>(
@@ -338,7 +338,7 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     [MemberData(nameof(Listeners))]
     public async Task Subscribe_RefusedForTheListener_RegistersNothing(string consumer, bool asyncListener)
     {
-        object client = NewConsumer(consumer);
+        object client = await NewConsumer(consumer);
         try
         {
             IRecording stray = asyncListener ? new StrayAsyncListener() : new StrayListener();
@@ -368,7 +368,7 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     [InlineData("AsyncMockConsumer", true)]
     public async Task Subscribe_OnAClosedMock_ReportsTheListenerFirst(string consumer, bool asyncListener)
     {
-        object client = NewConsumer(consumer);
+        object client = await NewConsumer(consumer);
         await DisposeBounded(client);
 
         IllegalArgumentException e = await Assert.ThrowsAsync<IllegalArgumentException>(
@@ -382,10 +382,10 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
             + (asyncListener ? "IAsyncConsumerRebalanceListenerWithPartitionsLost" : "IConsumerRebalanceListenerWithPartitionsLost")
             + ", so the consumer would never call it.";
 
-    private static object NewConsumer(string consumer) => consumer switch
+    private static async Task<object> NewConsumer(string consumer) => consumer switch
     {
-        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Configs(), Bytes(), Bytes()),
-        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Configs(), Bytes().AsAsync(), Bytes().AsAsync()),
+        "KafkaConsumer" => KafkaConsumer<byte[], byte[]>.Create(Configs(), Bytes(), Bytes()),
+        "AsyncKafkaConsumer" => await AsyncKafkaConsumer<byte[], byte[]>.Create(Configs(), Bytes().AsAsync(), Bytes().AsAsync()),
         "MockConsumer" => new MockConsumer<byte[], byte[]>(Bytes(), Bytes()),
         _ => new AsyncMockConsumer<byte[], byte[]>(Bytes().AsAsync(), Bytes().AsAsync()),
     };

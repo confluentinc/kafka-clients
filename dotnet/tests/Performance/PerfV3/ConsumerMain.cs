@@ -39,7 +39,7 @@ internal static class ConsumerMain
         ConsumerBenchmarkResult result;
         if (config.AsyncMode)
         {
-            var backend = new V3AsyncConsumerBackend(consumerConfig, config.PollTimeoutMs);
+            var backend = await V3AsyncConsumerBackend.Create(consumerConfig, config.PollTimeoutMs).ConfigureAwait(false);
             try
             {
                 result = await ConsumerBenchmark.RunAsync(config, backend, metrics).ConfigureAwait(false);

@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
@@ -57,7 +58,7 @@ public sealed class PublicProducerSendClosedCheckTests
     {
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
-        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(RealConfig(), key, value);
+        KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(RealConfig(), key, value);
         TestTimeout.Dispose(producer);
 
         Assert.Throws<IllegalStateException>(() => producer.Send(Record()));
@@ -80,11 +81,11 @@ public sealed class PublicProducerSendClosedCheckTests
     }
 
     [Fact]
-    public void AsyncRealSend_AfterDispose_DoesNotInvokeSerializers()
+    public async Task AsyncRealSend_AfterDispose_DoesNotInvokeSerializers()
     {
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(RealConfig(), key.AsAsync(), value.AsAsync());
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(RealConfig(), key.AsAsync(), value.AsAsync());
         TestTimeout.Dispose(producer);
 
         Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record()); });

@@ -287,7 +287,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     [Fact]
     public async Task AsyncKafkaConsumer_TheRoutingHandle_IsReleasedAfterTheConsumersDestroy()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await NewAsyncKafkaConsumer();
         Func<(bool BeforeTheRelease, bool AfterTheRelease)?> released;
         try
         {
@@ -370,7 +370,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     public async Task AsyncKafkaConsumer_ADisposeAsyncFromAnotherThread_EndsThePoll_WhoseCallbackCaughtARoutedCallsWakeup(
         int routedCalls)
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await NewAsyncKafkaConsumer();
         using ManualResetEventSlim entered = new ManualResetEventSlim(false);
         using ManualResetEventSlim release = new ManualResetEventSlim(false);
         List<string> outcomes = new List<string>();
@@ -424,7 +424,7 @@ public sealed class PublicConsumerCallbackRoutingTests
     [MemberData(nameof(WakeableCalls))]
     public async Task ARoutedCall_EndedByTheConsumersOwnWakeup_IsMadeAgain(string call)
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await NewAsyncKafkaConsumer();
         try
         {
             await TestTimeout.Run(() => consumer.Assign(s_partitions), s_deadline);
@@ -628,7 +628,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         IReadOnlyList<string> outcomes = await RunInside(
             vehicle, (consumer, _) => new[] { Call(() => Format(((IConsumerCommon)consumer).GroupMetadata())) });
 
-        Assert.Equal(new[] { "ok " + OutsideGroupMetadata(vehicle) }, outcomes);
+        Assert.Equal(new[] { "ok " + await OutsideGroupMetadata(vehicle) }, outcomes);
     }
 
     public static IEnumerable<object[]> RefusedInsideACallback()
@@ -741,7 +741,7 @@ public sealed class PublicConsumerCallbackRoutingTests
         };
     }
 
-    private static string OutsideGroupMetadata(string vehicle)
+    private static async Task<string> OutsideGroupMetadata(string vehicle)
     {
         bool mock = vehicle.Contains("Mock");
         bool async = vehicle.StartsWith("Async", StringComparison.Ordinal);
@@ -750,7 +750,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             (true, false) => NewMock(),
             (true, true) => NewAsyncMock(),
             (false, false) => NewKafkaConsumer(),
-            _ => NewAsyncKafkaConsumer(),
+            _ => await NewAsyncKafkaConsumer(),
         };
         using (TestTimeout.Disposal((IDisposable)consumer))
         {
@@ -1131,7 +1131,7 @@ public sealed class PublicConsumerCallbackRoutingTests
             case "AsyncKafkaConsumer, a commit callback":
             case "AsyncKafkaConsumer, an async commit callback after an await":
                 {
-                    AsyncKafkaConsumer<byte[], byte[]> consumer = NewAsyncKafkaConsumer();
+                    AsyncKafkaConsumer<byte[], byte[]> consumer = await NewAsyncKafkaConsumer();
                     try
                     {
                         await TestTimeout.Run(() => consumer.Assign(s_partitions), s_deadline);
@@ -1399,10 +1399,10 @@ public sealed class PublicConsumerCallbackRoutingTests
     };
 
     private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer() =>
-        new KafkaConsumer<byte[], byte[]>(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        KafkaConsumer<byte[], byte[]>.Create(Config(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
-    private static AsyncKafkaConsumer<byte[], byte[]> NewAsyncKafkaConsumer() =>
-        new AsyncKafkaConsumer<byte[], byte[]>(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+    private static async Task<AsyncKafkaConsumer<byte[], byte[]>> NewAsyncKafkaConsumer() =>
+        await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     /// <summary>A listener that runs the action it is given when partitions are assigned.</summary>
     private sealed class SyncListener : IConsumerRebalanceListener

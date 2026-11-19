@@ -56,7 +56,7 @@ public sealed class PublicProducerFirstStageTests
     {
         string topic = "first-stage-token-" + Guid.NewGuid().ToString("N");
         int maxBlockMs = outcome == WaitTimesOut ? 2000 : 60000;
-        AsyncKafkaProducer<byte[], byte[]> producer = Unreachable(maxBlockMs);
+        AsyncKafkaProducer<byte[], byte[]> producer = await Unreachable(maxBlockMs);
         RecordingCallback callback = new RecordingCallback();
         using CancellationTokenSource cts = new CancellationTokenSource();
         try
@@ -145,7 +145,7 @@ public sealed class PublicProducerFirstStageTests
     [Fact]
     public async Task AsyncSend_OnAClosedProducer_FaultsTheFirstStageInsideTheCall()
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = Unreachable(60000);
+        AsyncKafkaProducer<byte[], byte[]> producer = await Unreachable(60000);
         RecordingCallback callback = new RecordingCallback();
         try
         {
@@ -173,7 +173,7 @@ public sealed class PublicProducerFirstStageTests
     public async Task AsyncSend_UnreachableBroker_ReturnsAtOnce_AndTheFirstStageEndsWithAFailedFuture()
     {
         string topic = "first-stage-unreachable-" + Guid.NewGuid().ToString("N");
-        AsyncKafkaProducer<byte[], byte[]> producer = Unreachable(1000);
+        AsyncKafkaProducer<byte[], byte[]> producer = await Unreachable(1000);
         RecordingCallback callback = new RecordingCallback();
         try
         {
@@ -259,8 +259,8 @@ public sealed class PublicProducerFirstStageTests
         Assert.Contains(sender, s_notifiedThreads);
     }
 
-    private static AsyncKafkaProducer<byte[], byte[]> Unreachable(int maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(
+    private static async Task<AsyncKafkaProducer<byte[], byte[]>> Unreachable(int maxBlockMs) =>
+        await AsyncKafkaProducer<byte[], byte[]>.Create(
             new Dictionary<string, object?>
             {
                 ["bootstrap.servers"] = "localhost:1",

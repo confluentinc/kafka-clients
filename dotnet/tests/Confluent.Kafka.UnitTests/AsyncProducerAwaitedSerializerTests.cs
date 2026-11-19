@@ -58,7 +58,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     public async Task AnAwaitedSerializer_SerializesTheKeyThenTheValue_AndTheFirstStageCoversTheWait(string flavor, bool yields)
     {
         Awaiting serializer = new Awaiting(yields);
-        IAsyncProducer<string, string> producer = Create(flavor, serializer, serializer);
+        IAsyncProducer<string, string> producer = await Create(flavor, serializer, serializer);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record("value");
 
@@ -165,7 +165,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     {
         Gated value = new Gated();
         AsyncKafkaProducer<string, string> producer =
-            new AsyncKafkaProducer<string, string>(Unreachable(), new AsyncStringSerializer(), value);
+            await AsyncKafkaProducer<string, string>.Create(Unreachable(), new AsyncStringSerializer(), value);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> firstRecord = Record("first");
         ProducerRecord<string, string> secondRecord = Record("second");
@@ -196,7 +196,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     public async Task AFailingValueSerializer_EndsTheFirstStageWithItsException_AndNothingIsSent(string flavor, string how)
     {
         BoomException boom = new BoomException(Boom);
-        IAsyncProducer<string, string> producer = Create(flavor, new AsyncStringSerializer(), new Failing(how, boom));
+        IAsyncProducer<string, string> producer = await Create(flavor, new AsyncStringSerializer(), new Failing(how, boom));
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record("value");
 
@@ -220,7 +220,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     {
         BoomException boom = new BoomException(Boom);
         Awaiting value = new Awaiting(yields: true);
-        IAsyncProducer<string, string> producer = Create(flavor, new Failing(how, boom), value);
+        IAsyncProducer<string, string> producer = await Create(flavor, new Failing(how, boom), value);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record("value");
 
@@ -244,7 +244,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         InvalidCastException cast = new InvalidCastException("not a string");
         Failing failing = new Failing(how, cast);
         Awaiting other = new Awaiting(yields: true);
-        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(
+        AsyncKafkaProducer<string, string> producer = await AsyncKafkaProducer<string, string>.Create(
             Unreachable(), isKey ? failing : other, isKey ? other : failing);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record("value");
@@ -288,7 +288,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     {
         RecordTooLargeException tooLarge = new RecordTooLargeException("too large for the test");
         AsyncKafkaProducer<string, string> producer =
-            new AsyncKafkaProducer<string, string>(Unreachable(), new AsyncStringSerializer(), new Failing(how, tooLarge));
+            await AsyncKafkaProducer<string, string>.Create(Unreachable(), new AsyncStringSerializer(), new Failing(how, tooLarge));
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record("value");
 
@@ -327,7 +327,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     {
         Cancellable key = new Cancellable();
         Awaiting value = new Awaiting(yields: true);
-        IAsyncProducer<string, string> producer = Create(flavor, key, value);
+        IAsyncProducer<string, string> producer = await Create(flavor, key, value);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record("value");
         using CancellationTokenSource cancellation = new CancellationTokenSource();
@@ -352,7 +352,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     public async Task ATokenCancelledWhileASerializerThatIgnoresItWaits_CancelsTheFirstStageOnceItCompletes(string flavor)
     {
         Gated value = new Gated();
-        IAsyncProducer<string, string> producer = Create(flavor, new AsyncStringSerializer(), value);
+        IAsyncProducer<string, string> producer = await Create(flavor, new AsyncStringSerializer(), value);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
@@ -374,7 +374,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     {
         HeaderAdding value = new HeaderAdding();
         AsyncKafkaProducer<string, string> producer =
-            new AsyncKafkaProducer<string, string>(Unreachable(), new AsyncStringSerializer(), value);
+            await AsyncKafkaProducer<string, string>.Create(Unreachable(), new AsyncStringSerializer(), value);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record("value");
 
@@ -416,7 +416,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     public async Task WithTwoBuiltInSerializers_ASerializerThrow_LeavesSendItself(string flavor)
     {
         IAsyncProducer<Guid?, Guid?> producer = flavor == Real
-            ? new AsyncKafkaProducer<Guid?, Guid?>(Unreachable(), new AsyncUUIDSerializer(), UnsupportedEncoding())
+            ? await AsyncKafkaProducer<Guid?, Guid?>.Create(Unreachable(), new AsyncUUIDSerializer(), UnsupportedEncoding())
             : new AsyncMockProducer<Guid?, Guid?>(new AsyncUUIDSerializer(), UnsupportedEncoding());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<Guid?, Guid?> record = new ProducerRecord<Guid?, Guid?>(Topic, value: Guid.NewGuid(), key: Guid.NewGuid());
@@ -434,7 +434,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     {
         PassThrough key = new PassThrough();
         IAsyncProducer<Guid?, Guid?> producer = flavor == Real
-            ? new AsyncKafkaProducer<Guid?, Guid?>(Unreachable(), key, UnsupportedEncoding())
+            ? await AsyncKafkaProducer<Guid?, Guid?>.Create(Unreachable(), key, UnsupportedEncoding())
             : new AsyncMockProducer<Guid?, Guid?>(key, UnsupportedEncoding());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<Guid?, Guid?> record = new ProducerRecord<Guid?, Guid?>(Topic, value: Guid.NewGuid(), key: Guid.NewGuid());
@@ -457,7 +457,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     {
         Awaiting awaited = new Awaiting(yields: false);
         IAsyncSerializer<string> builtIn = new AsyncStringSerializer();
-        IAsyncProducer<string, string> producer = Create(flavor, awaitedKey ? awaited : builtIn, awaitedKey ? builtIn : awaited);
+        IAsyncProducer<string, string> producer = await Create(flavor, awaitedKey ? awaited : builtIn, awaitedKey ? builtIn : awaited);
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record("a longer value");
 
@@ -511,7 +511,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     {
         BothDisposals key = new BothDisposals();
         BothDisposals value = new BothDisposals();
-        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(Unreachable(), key, value);
+        AsyncKafkaProducer<string, string> producer = await AsyncKafkaProducer<string, string>.Create(Unreachable(), key, value);
 
         switch (how)
         {
@@ -536,13 +536,13 @@ public sealed class AsyncProducerAwaitedSerializerTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void TheKafkaProducer_RefusesASerializerThatIsOnlyIDisposable_AndDisposesNothing(bool asKey)
+    public async Task TheKafkaProducer_RefusesASerializerThatIsOnlyIDisposable_AndDisposesNothing(bool asKey)
     {
         OnlyDisposable refused = new OnlyDisposable();
         BothDisposals other = new BothDisposals();
 
-        IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
-            () => new AsyncKafkaProducer<string, string>(Unreachable(), asKey ? refused : other, asKey ? other : refused));
+        IllegalArgumentException e = await Assert.ThrowsAsync<IllegalArgumentException>(
+            async () => await AsyncKafkaProducer<string, string>.Create(Unreachable(), asKey ? refused : other, asKey ? other : refused));
 
         Assert.Equal(
             "Confluent.Kafka.UnitTests.AsyncProducerAwaitedSerializerTests+OnlyDisposable implements IDisposable but does "
@@ -557,7 +557,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     public async Task TheKafkaProducer_GivenOneSerializerForBothSides_DisposesItOncePerSide_AndNotAgainWhenDisposedAgain()
     {
         BothDisposals both = new BothDisposals();
-        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(Unreachable(), both, both);
+        AsyncKafkaProducer<string, string> producer = await AsyncKafkaProducer<string, string>.Create(Unreachable(), both, both);
 
         await TestTimeout.DisposeAsync(producer);
         await TestTimeout.DisposeAsync(producer);
@@ -581,9 +581,9 @@ public sealed class AsyncProducerAwaitedSerializerTests
         Assert.Equal(0, value.Disposals);
     }
 
-    private static IAsyncProducer<string, string> Create(string flavor, IAsyncSerializer<string> key, IAsyncSerializer<string> value) =>
+    private static async Task<IAsyncProducer<string, string>> Create(string flavor, IAsyncSerializer<string> key, IAsyncSerializer<string> value) =>
         flavor == Real
-            ? new AsyncKafkaProducer<string, string>(Unreachable(), key, value)
+            ? await AsyncKafkaProducer<string, string>.Create(Unreachable(), key, value)
             : new AsyncMockProducer<string, string>(key, value);
 
     // The Kafka producer makes the headers read-only just before it takes the record, so writable headers mean it

@@ -76,7 +76,7 @@ public sealed class PublicProducerSendWithCallbackTests
         }
         else
         {
-            AsyncKafkaProducer<byte[], byte[]> producer = AsyncUnreachable(MaxBlockMs);
+            AsyncKafkaProducer<byte[], byte[]> producer = await AsyncUnreachable(MaxBlockMs);
             try
             {
                 ValueTask<AsyncKafkaFuture<RecordMetadata>>[] stages =
@@ -108,9 +108,9 @@ public sealed class PublicProducerSendWithCallbackTests
     [Theory]
     [InlineData(Sync)]
     [InlineData(Async)]
-    public void ARefusedSend_KeepsItsStateUntilTheDestroyHasReturned(string flavour)
+    public async Task ARefusedSend_KeepsItsStateUntilTheDestroyHasReturned(string flavour)
     {
-        IDisposable producer = flavour == Sync ? SyncUnreachable(60000) : AsyncUnreachable(60000);
+        IDisposable producer = flavour == Sync ? SyncUnreachable(60000) : await AsyncUnreachable(60000);
         WeakReference callback;
         try
         {
@@ -205,7 +205,7 @@ public sealed class PublicProducerSendWithCallbackTests
         }
         else
         {
-            AsyncKafkaProducer<byte[], byte[]> producer = AsyncUnreachable(MaxBlockMs);
+            AsyncKafkaProducer<byte[], byte[]> producer = await AsyncUnreachable(MaxBlockMs);
             try
             {
                 ValueTask<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(Record(topic), throwing);
@@ -260,7 +260,7 @@ public sealed class PublicProducerSendWithCallbackTests
         }
         else
         {
-            AsyncKafkaProducer<byte[], byte[]> producer = AsyncUnreachable(MaxBlockMs);
+            AsyncKafkaProducer<byte[], byte[]> producer = await AsyncUnreachable(MaxBlockMs);
             try
             {
                 AsyncKafkaFuture<RecordMetadata> future =
@@ -346,10 +346,10 @@ public sealed class PublicProducerSendWithCallbackTests
         };
 
     private static KafkaProducer<byte[], byte[]> SyncUnreachable(int maxBlockMs) =>
-        new KafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        KafkaProducer<byte[], byte[]>.Create(Unreachable(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
-    private static AsyncKafkaProducer<byte[], byte[]> AsyncUnreachable(int maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(Unreachable(maxBlockMs), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
+    private static async Task<AsyncKafkaProducer<byte[], byte[]>> AsyncUnreachable(int maxBlockMs) =>
+        await AsyncKafkaProducer<byte[], byte[]>.Create(Unreachable(maxBlockMs), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
     private static Exception Capture(Action action)
     {

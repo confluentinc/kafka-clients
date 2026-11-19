@@ -92,7 +92,7 @@ public sealed class PublicSyncProducerTfmSmokeTests
     public void RealProducer_CreateDispose_RoundTrips()
     {
         // A real producer is created and disposed but sends nothing: without a broker a send would not deliver.
-        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
             Serdes.ByteArray().Serializer(),
             Serdes.ByteArray().Serializer());

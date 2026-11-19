@@ -118,15 +118,15 @@ public sealed class AsyncSerdeGuardTests
 
     [Theory]
     [MemberData(nameof(Refused))]
-    public void AnAsyncKafkaConsumer_RefusesACloseItWouldNeverCall_DisposingNothing(Type shape, string what)
+    public async Task AnAsyncKafkaConsumer_RefusesACloseItWouldNeverCall_DisposingNothing(Type shape, string what)
     {
         foreach (bool asKey in new[] { true, false })
         {
             Serde serde = (Serde)Activator.CreateInstance(shape)!;
             AsyncDisposable other = new AsyncDisposable();
 
-            IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
-                () => new AsyncKafkaConsumer<string, string>(
+            IllegalArgumentException e = await Assert.ThrowsAsync<IllegalArgumentException>(
+                async () => await AsyncKafkaConsumer<string, string>.Create(
                     ConsumerConfigs(), asKey ? serde : other, asKey ? other : serde));
 
             Assert.Equal(Prefix + shape.Name + string.Format(what, "consumer"), e.Message);
@@ -158,7 +158,7 @@ public sealed class AsyncSerdeGuardTests
             Serde serde = (Serde)Activator.CreateInstance(shape)!;
             Plain other = new Plain();
 
-            await TestTimeout.DisposeAsync(new AsyncKafkaConsumer<string, string>(
+            await TestTimeout.DisposeAsync(await AsyncKafkaConsumer<string, string>.Create(
                 ConsumerConfigs(), asKey ? serde : other, asKey ? other : serde));
 
             Assert.Equal(serde is IAsyncDisposable ? 1 : 0, serde.Disposals);
@@ -167,15 +167,15 @@ public sealed class AsyncSerdeGuardTests
 
     [Theory]
     [MemberData(nameof(Refused))]
-    public void AnAsyncKafkaProducer_RefusesACloseItWouldNeverCall_DisposingNothing(Type shape, string what)
+    public async Task AnAsyncKafkaProducer_RefusesACloseItWouldNeverCall_DisposingNothing(Type shape, string what)
     {
         foreach (bool asKey in new[] { true, false })
         {
             Serde serde = (Serde)Activator.CreateInstance(shape)!;
             AsyncDisposable other = new AsyncDisposable();
 
-            IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
-                () => new AsyncKafkaProducer<string, string>(
+            IllegalArgumentException e = await Assert.ThrowsAsync<IllegalArgumentException>(
+                async () => await AsyncKafkaProducer<string, string>.Create(
                     ProducerConfigs(), asKey ? serde : other, asKey ? other : serde));
 
             Assert.Equal(Prefix + shape.Name + string.Format(what, "producer"), e.Message);
@@ -207,7 +207,7 @@ public sealed class AsyncSerdeGuardTests
             Serde serde = (Serde)Activator.CreateInstance(shape)!;
             Plain other = new Plain();
 
-            await TestTimeout.DisposeAsync(new AsyncKafkaProducer<string, string>(
+            await TestTimeout.DisposeAsync(await AsyncKafkaProducer<string, string>.Create(
                 ProducerConfigs(), asKey ? serde : other, asKey ? other : serde));
 
             Assert.Equal(serde is IAsyncDisposable ? 1 : 0, serde.Disposals);

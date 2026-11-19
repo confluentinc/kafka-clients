@@ -34,7 +34,7 @@ string topic = args[1];
 Dictionary<string, object?> conf = new() { ["bootstrap.servers"] = broker };
 
 // Create the producer. The serializers encode keys and values as UTF-8; the records sent here have no key.
-KafkaProducer<string, string> producer = new(conf, new StringSerializer(), new StringSerializer());
+KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(conf, new StringSerializer(), new StringSerializer());
 
 try
 {

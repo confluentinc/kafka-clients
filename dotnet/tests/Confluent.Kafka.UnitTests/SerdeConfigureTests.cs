@@ -421,7 +421,7 @@ public sealed class SerdeConfigureTests
         List<string> log = new List<string>();
         ConfigurableSerializer key = new ConfigurableSerializer(log);
         ConfigurableSerializer value = new ConfigurableSerializer(log);
-        KafkaProducer<string, string> producer = new KafkaProducer<string, string>(ProducerConfigs(), key, value);
+        KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(ProducerConfigs(), key, value);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         TestTimeout.Run(() => _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k")), s_deadline);
@@ -437,7 +437,7 @@ public sealed class SerdeConfigureTests
         List<string> log = new List<string>();
         ConfigurableSerializer key = new ConfigurableSerializer(log);
         ConfigurableSerializer value = new ConfigurableSerializer(log);
-        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(ProducerConfigs(), key.AsAsync(), value.AsAsync());
+        AsyncKafkaProducer<string, string> producer = await AsyncKafkaProducer<string, string>.Create(ProducerConfigs(), key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"));
@@ -453,7 +453,7 @@ public sealed class SerdeConfigureTests
     public void KafkaConsumer_NeverConfiguresItsDeserializers()
     {
         List<string> log = new List<string>();
-        KafkaConsumer<string, string> consumer = new KafkaConsumer<string, string>(
+        KafkaConsumer<string, string> consumer = KafkaConsumer<string, string>.Create(
             ConsumerConfigs(), new ConfigurableDeserializer(log), new ConfigurableDeserializer(log));
         TestTimeout.Dispose(consumer);
 
@@ -464,7 +464,7 @@ public sealed class SerdeConfigureTests
     public async Task AsyncKafkaConsumer_NeverConfiguresItsDeserializers()
     {
         List<string> log = new List<string>();
-        AsyncKafkaConsumer<string, string> consumer = new AsyncKafkaConsumer<string, string>(
+        AsyncKafkaConsumer<string, string> consumer = await AsyncKafkaConsumer<string, string>.Create(
             ConsumerConfigs(), new ConfigurableDeserializer(log).AsAsync(), new ConfigurableDeserializer(log).AsAsync());
         await TestTimeout.DisposeAsync(consumer);
 

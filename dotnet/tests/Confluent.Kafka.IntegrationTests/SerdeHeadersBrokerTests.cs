@@ -64,7 +64,7 @@ public sealed class SerdeHeadersBrokerTests
         HeaderAddingSerializer keySerializer = new HeaderAddingSerializer(KeyId);
         HeaderAddingSerializer serializer = new HeaderAddingSerializer();
         using (KafkaProducer<string, string> producer =
-            new KafkaProducer<string, string>(ProducerConfigs(), keySerializer, serializer))
+            KafkaProducer<string, string>.Create(ProducerConfigs(), keySerializer, serializer))
         {
             _ = producer.Send(new ProducerRecord<string, string>(topic, value: "v", key: "k", partition: 0)).Get(s_wait);
         }
@@ -72,7 +72,7 @@ public sealed class SerdeHeadersBrokerTests
         HeaderReadingDeserializer keyDeserializer = new HeaderReadingDeserializer(KeyId);
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer();
         using KafkaConsumer<string, string> consumer =
-            new KafkaConsumer<string, string>(ConsumerConfigs(), keyDeserializer, deserializer);
+            KafkaConsumer<string, string>.Create(ConsumerConfigs(), keyDeserializer, deserializer);
         consumer.Assign(new[] { new TopicPartition(topic, 0) });
         ConsumerRecord<string, string> record = PollOne(() => consumer.Poll(s_poll));
 
@@ -86,7 +86,7 @@ public sealed class SerdeHeadersBrokerTests
         HeaderAddingSerializer keySerializer = new HeaderAddingSerializer(KeyId);
         HeaderAddingSerializer serializer = new HeaderAddingSerializer();
         await using (AsyncKafkaProducer<string, string> producer =
-            new AsyncKafkaProducer<string, string>(ProducerConfigs(), keySerializer, serializer))
+            await AsyncKafkaProducer<string, string>.Create(ProducerConfigs(), keySerializer, serializer))
         {
             AsyncKafkaFuture<RecordMetadata> future =
                 await producer.Send(new ProducerRecord<string, string>(topic, value: "v", key: "k", partition: 0));
@@ -96,7 +96,7 @@ public sealed class SerdeHeadersBrokerTests
         HeaderReadingDeserializer keyDeserializer = new HeaderReadingDeserializer(KeyId);
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer();
         await using AsyncKafkaConsumer<string, string> consumer =
-            new AsyncKafkaConsumer<string, string>(ConsumerConfigs(), keyDeserializer, deserializer);
+            await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), keyDeserializer, deserializer);
         await consumer.Assign(new[] { new TopicPartition(topic, 0) });
         ConsumerRecord<string, string> record = await PollOneAsync(() => consumer.Poll(s_poll));
 
@@ -109,7 +109,7 @@ public sealed class SerdeHeadersBrokerTests
         string topic = await ProducedAsync();
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer(fail: true);
         using KafkaConsumer<string, string> consumer =
-            new KafkaConsumer<string, string>(ConsumerConfigs(), Serdes.String().Deserializer(), deserializer);
+            KafkaConsumer<string, string>.Create(ConsumerConfigs(), Serdes.String().Deserializer(), deserializer);
         consumer.Assign(new[] { new TopicPartition(topic, 0) });
 
         RecordDeserializationException e = PollFailure(() => consumer.Poll(s_poll));
@@ -123,7 +123,7 @@ public sealed class SerdeHeadersBrokerTests
         string topic = await ProducedAsync();
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer(fail: true);
         await using AsyncKafkaConsumer<string, string> consumer =
-            new AsyncKafkaConsumer<string, string>(ConsumerConfigs(), new AsyncStringDeserializer(), deserializer);
+            await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), new AsyncStringDeserializer(), deserializer);
         await consumer.Assign(new[] { new TopicPartition(topic, 0) });
 
         RecordDeserializationException e = await PollFailureAsync(() => consumer.Poll(s_poll));
@@ -223,7 +223,7 @@ public sealed class SerdeHeadersBrokerTests
     private async Task<string> ProducedAsync()
     {
         string topic = await TopicAsync();
-        using KafkaProducer<string, string> producer = new KafkaProducer<string, string>(
+        using KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(
             ProducerConfigs(), Serdes.String().Serializer(), new HeaderAddingSerializer());
         _ = producer.Send(new ProducerRecord<string, string>(topic, value: "v", key: "k", partition: 0)).Get(s_wait);
         return topic;

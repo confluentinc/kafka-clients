@@ -123,7 +123,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task CurrentLag_WaitsForTheBackgroundTask_OnTheAsyncKafkaConsumer()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(
             RealConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
@@ -145,7 +145,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void CurrentLag_WaitsForTheBackgroundTask_OnTheKafkaConsumer()
     {
-        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
+        KafkaConsumer<byte[], byte[]> consumer = KafkaConsumer<byte[], byte[]>.Create(
             RealConfig(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {

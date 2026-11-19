@@ -356,7 +356,7 @@ public sealed class ConsumerCommitCallbackBridgeTests
     [Fact]
     public void KafkaConsumer_ACommitTheCoreRefused_KeepsItsRegistrationUntilTheConsumerIsDestroyed()
     {
-        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
+        KafkaConsumer<byte[], byte[]> consumer = KafkaConsumer<byte[], byte[]>.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1", ["group.protocol"] = "consumer" },
             Serdes.ByteArray().Deserializer(),
             Serdes.ByteArray().Deserializer());

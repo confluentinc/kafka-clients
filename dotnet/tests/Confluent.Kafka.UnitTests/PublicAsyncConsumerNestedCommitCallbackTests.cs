@@ -517,7 +517,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
     private static async Task<AsyncKafkaConsumer<byte[], byte[]>> NewAsyncKafkaConsumer()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(KafkaConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            await AsyncKafkaConsumer<byte[], byte[]>.Create(KafkaConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         return consumer;
     }

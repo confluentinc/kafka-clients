@@ -88,7 +88,7 @@ public sealed class PublicConsumerPatternSubscribeTests
     [MemberData(nameof(Mocks))]
     public async Task Re2JPatternSubscription_OnTheMocks(string kind)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         await AssertIllegalArgument("Topic pattern cannot be null", () => Subscribe(consumer, null!));
@@ -108,7 +108,7 @@ public sealed class PublicConsumerPatternSubscribeTests
     [MemberData(nameof(RealConsumers))]
     public async Task SubscribeToRe2JPatternValidation(string kind)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         await AssertIllegalArgument("Topic pattern to subscribe to cannot be null", () => Subscribe(consumer, null!));
@@ -130,7 +130,7 @@ public sealed class PublicConsumerPatternSubscribeTests
     [MemberData(nameof(RealConsumers))]
     public async Task SubscribeToRe2JPattern_ThrowsIfNoGroupId(string kind)
     {
-        object consumer = Create(kind, groupId: false);
+        object consumer = await Create(kind, groupId: false);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         await AssertGroupIdNotDefined(() => Subscribe(consumer, new SubscriptionPattern("t*")));
@@ -147,7 +147,7 @@ public sealed class PublicConsumerPatternSubscribeTests
     [MemberData(nameof(AllConsumersAndOverloads))]
     public async Task ANullPatternText_ThrowsArgumentNull(string kind, bool withListener)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         await AssertNullPatternText(
@@ -162,7 +162,7 @@ public sealed class PublicConsumerPatternSubscribeTests
     [MemberData(nameof(AllConsumersAndOverloads))]
     public async Task ANulInThePatternText_ThrowsArgument_AndSubscribesToNothing(string kind, bool withListener)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         await AssertNulPatternText(
@@ -182,7 +182,7 @@ public sealed class PublicConsumerPatternSubscribeTests
     [InlineData("AsyncMockConsumer+async")]
     public async Task OnTheMocks_APatternListener_FiresOnRebalance_UntilAPlainPatternSubscribeReleasesIt(string kind)
     {
-        object consumer = Create(kind.Split('+')[0], groupId: true);
+        object consumer = await Create(kind.Split('+')[0], groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
         SubscriptionPattern pattern = new SubscriptionPattern(Topic + ".*");
         TopicPartition tp0 = new TopicPartition(Topic, 0);
@@ -215,7 +215,7 @@ public sealed class PublicConsumerPatternSubscribeTests
     [InlineData("AsyncMockConsumer+async")]
     public async Task OnTheMocks_APatternListener_RefusedAfterTopics_IsTheOneTheNextRebalanceFires(string kind)
     {
-        object consumer = Create(kind.Split('+')[0], groupId: true);
+        object consumer = await Create(kind.Split('+')[0], groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
         SubscriptionPattern pattern = new SubscriptionPattern(Topic + ".*");
         TopicPartition tp0 = new TopicPartition(Topic, 0);
@@ -246,7 +246,7 @@ public sealed class PublicConsumerPatternSubscribeTests
     [MemberData(nameof(AllConsumers))]
     public async Task AfterDispose_BothOverloads_ReportTheClosedConsumer(string kind)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         TestTimeout.Dispose((IDisposable)consumer);
         SubscriptionPattern pattern = new SubscriptionPattern("t.*");
 
@@ -262,7 +262,7 @@ public sealed class PublicConsumerPatternSubscribeTests
     [MemberData(nameof(Mocks))]
     public async Task OnAClosedMock_ThePatternErrors_ComeBeforeTheClosedConsumer(string kind)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
         await TestTimeout.Run(() => Close(consumer), s_deadline);
 
@@ -281,10 +281,10 @@ public sealed class PublicConsumerPatternSubscribeTests
         await AssertClosed(() => Subscribe(consumer, new SubscriptionPattern("t.*")));
     }
 
-    private static object Create(string kind, bool groupId) => kind switch
+    private static async Task<object> Create(string kind, bool groupId) => kind switch
     {
-        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
-        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Config(groupId), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
+        "KafkaConsumer" => KafkaConsumer<byte[], byte[]>.Create(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        "AsyncKafkaConsumer" => await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(groupId), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
         "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
         _ => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
     };

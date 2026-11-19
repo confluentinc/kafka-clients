@@ -316,7 +316,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
     private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer()
     {
         KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(KafkaConfig(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            KafkaConsumer<byte[], byte[]>.Create(KafkaConfig(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         consumer.Assign(new[] { s_tp0 });
         return consumer;
     }
@@ -332,7 +332,7 @@ public sealed class PublicConsumerCommitInsideACallbackTests
     private static async Task<AsyncKafkaConsumer<byte[], byte[]>> NewAsyncKafkaConsumer()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(KafkaConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            await AsyncKafkaConsumer<byte[], byte[]>.Create(KafkaConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         return consumer;
     }

@@ -48,7 +48,7 @@ public sealed class AsyncDeserializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         Both key = new Both("key", log);
         Both value = new Both("value", log);
-        AsyncKafkaConsumer<string, string> consumer = new AsyncKafkaConsumer<string, string>(Unreachable(), key, value);
+        AsyncKafkaConsumer<string, string> consumer = await AsyncKafkaConsumer<string, string>.Create(Unreachable(), key, value);
 
         await CloseBy(consumer, how);
 
@@ -69,7 +69,7 @@ public sealed class AsyncDeserializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         AsyncOnly key = new AsyncOnly("key", log);
         AsyncOnly value = new AsyncOnly("value", log);
-        AsyncKafkaConsumer<string, string> consumer = new AsyncKafkaConsumer<string, string>(Unreachable(), key, value);
+        AsyncKafkaConsumer<string, string> consumer = await AsyncKafkaConsumer<string, string>.Create(Unreachable(), key, value);
 
         await CloseBy(consumer, how);
 
@@ -82,14 +82,14 @@ public sealed class AsyncDeserializerDisposalTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void ADeserializerThatIsOnlyIDisposable_IsRefused_AndNothingIsDisposed(bool asKey)
+    public async Task ADeserializerThatIsOnlyIDisposable_IsRefused_AndNothingIsDisposed(bool asKey)
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         SyncOnly refused = new SyncOnly("refused", log);
         Both other = new Both("other", log);
 
-        IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
-            () => new AsyncKafkaConsumer<string, string>(
+        IllegalArgumentException e = await Assert.ThrowsAsync<IllegalArgumentException>(
+            async () => await AsyncKafkaConsumer<string, string>.Create(
                 Unreachable(), asKey ? refused : other, asKey ? other : refused));
 
         Assert.Equal(
@@ -111,7 +111,7 @@ public sealed class AsyncDeserializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         Neither key = new Neither("key", log);
         Both value = new Both("value", log);
-        AsyncKafkaConsumer<string, string> consumer = new AsyncKafkaConsumer<string, string>(Unreachable(), key, value);
+        AsyncKafkaConsumer<string, string> consumer = await AsyncKafkaConsumer<string, string>.Create(Unreachable(), key, value);
 
         await CloseBy(consumer, how);
 
@@ -124,7 +124,7 @@ public sealed class AsyncDeserializerDisposalTests
     }
 
     [Fact]
-    public void AFailedConstruction_DisposesBoth_ThroughIAsyncDisposable_BeforeItThrows()
+    public async Task AFailedConstruction_DisposesBoth_ThroughIAsyncDisposable_BeforeItThrows()
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         Both key = new Both("key", log);
@@ -132,8 +132,8 @@ public sealed class AsyncDeserializerDisposalTests
         Dictionary<string, object?> configs = Unreachable();
         configs["group.id"] = string.Empty;
 
-        KafkaException failure = Assert.ThrowsAny<KafkaException>(
-            () => new AsyncKafkaConsumer<string, string>(configs, key, value));
+        KafkaException failure = await Assert.ThrowsAnyAsync<KafkaException>(
+            async () => await AsyncKafkaConsumer<string, string>.Create(configs, key, value));
 
         Assert.Equal("Failed to construct kafka consumer", failure.Message);
         Assert.Equal(

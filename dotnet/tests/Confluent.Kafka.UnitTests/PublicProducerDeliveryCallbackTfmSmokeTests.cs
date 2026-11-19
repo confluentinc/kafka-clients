@@ -111,16 +111,16 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     }
 
     [Fact]
-    public void RealProducers_DeclareTheCallbackOverload()
+    public async Task RealProducers_DeclareTheCallbackOverload()
     {
         // The real clients cannot be driven broker-free, so this pins only that the overload is callable on them.
         Dictionary<string, object?> config = new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" };
 
         AsyncKafkaProducer<byte[], byte[]> asyncProducer =
-            new AsyncKafkaProducer<byte[], byte[]>(config, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
+            await AsyncKafkaProducer<byte[], byte[]>.Create(config, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable asyncProducerDisposal = TestTimeout.Disposal(asyncProducer);
         KafkaProducer<byte[], byte[]> syncProducer =
-            new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            KafkaProducer<byte[], byte[]>.Create(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable syncProducerDisposal = TestTimeout.Disposal(syncProducer);
 
         Assert.NotNull(typeof(AsyncKafkaProducer<byte[], byte[]>).GetMethod(

@@ -142,7 +142,7 @@ public sealed class PublicProducerTeardownTests
     public async Task RealProducer_DisposeAsync_Returns()
     {
         // The real AsyncKafkaProducer with no broker tears down without hanging.
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(
             new System.Collections.Generic.Dictionary<string, object?>
             {
                 ["bootstrap.servers"] = "localhost:9092",

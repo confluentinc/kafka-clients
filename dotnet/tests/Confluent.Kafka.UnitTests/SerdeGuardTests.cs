@@ -210,13 +210,13 @@ public sealed class SerdeGuardTests
 
     private static object Producer(string producer, ISerializer<string> key, ISerializer<string> value) => producer switch
     {
-        "KafkaProducer" => new KafkaProducer<string, string>(ProducerConfigs(), key, value),
+        "KafkaProducer" => KafkaProducer<string, string>.Create(ProducerConfigs(), key, value),
         _ => new MockProducer<string, string>(key, value),
     };
 
     private static object Consumer(string consumer, IDeserializer<string> key, IDeserializer<string> value) => consumer switch
     {
-        "KafkaConsumer" => new KafkaConsumer<string, string>(ConsumerConfigs(), key, value),
+        "KafkaConsumer" => KafkaConsumer<string, string>.Create(ConsumerConfigs(), key, value),
         _ => new MockConsumer<string, string>(key, value),
     };
 

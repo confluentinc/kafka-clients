@@ -204,7 +204,7 @@ public sealed class ConsumerAsyncCancelTests
     public async Task CancellingAnAsyncPoll_WakesTheConsumerAndLetsItEnd()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            await AsyncKafkaConsumer<byte[], byte[]>.Create(RealConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             await WithDeadline(consumer.Subscribe(new[] { Topic }));
@@ -232,7 +232,7 @@ public sealed class ConsumerAsyncCancelTests
     public async Task CancellingACallWhoseCompletionIsQueued_LeavesNoWakeupArmed()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            await AsyncKafkaConsumer<byte[], byte[]>.Create(RealConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));
@@ -323,7 +323,7 @@ public sealed class ConsumerAsyncCancelTests
     public async Task DisposeDuringAPendingOperation_Returns_AndTheOperationEndsWithItsOwnError()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            await AsyncKafkaConsumer<byte[], byte[]>.Create(RealConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await WithDeadline(consumer.Assign(new[] { s_tp0 }));
         Task<IReadOnlyDictionary<TopicPartition, long>> pending = consumer.BeginningOffsets(new[] { s_tp0 });
         await Task.Delay(TimeSpan.FromMilliseconds(200));
@@ -388,7 +388,7 @@ public sealed class ConsumerAsyncCancelTests
         Func<AsyncKafkaConsumer<byte[], byte[]>, CancellationToken, Task> operation)
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(RealConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            await AsyncKafkaConsumer<byte[], byte[]>.Create(RealConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));

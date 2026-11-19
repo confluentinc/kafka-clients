@@ -100,7 +100,7 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
 
     internal V3SyncProducerBackend(IReadOnlyDictionary<string, string> config)
     {
-        _producer = new KafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        _producer = KafkaProducer<byte[], byte[]>.Create(V3Config.ClientConfigs(config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
     }
 
     public PerfSendHandle Send(string topic, byte[]? key, byte[]? value) =>
@@ -127,10 +127,13 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 {
     private readonly AsyncKafkaProducer<byte[], byte[]> _producer;
 
-    internal V3AsyncProducerBackend(IReadOnlyDictionary<string, string> config)
-    {
-        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
-    }
+    private V3AsyncProducerBackend(AsyncKafkaProducer<byte[], byte[]> producer) => _producer = producer;
+
+    internal static async Task<V3AsyncProducerBackend> Create(IReadOnlyDictionary<string, string> config) =>
+        new V3AsyncProducerBackend(
+            await AsyncKafkaProducer<byte[], byte[]>
+                .Create(V3Config.ClientConfigs(config), new AsyncByteArraySerializer(), new AsyncByteArraySerializer())
+                .ConfigureAwait(false));
 
     public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value)
     {
@@ -206,7 +209,7 @@ internal sealed class V3SyncConsumerBackend : IConsumerBackend
 
     internal V3SyncConsumerBackend(IReadOnlyDictionary<string, string> config, int pollTimeoutMs)
     {
-        _consumer = new KafkaConsumer<int, int>(
+        _consumer = KafkaConsumer<int, int>.Create(
             V3Config.ClientConfigs(config), ByteCountDeserializer.Instance, ByteCountDeserializer.Instance);
         _timeout = TimeSpan.FromMilliseconds(pollTimeoutMs);
     }
@@ -254,12 +257,18 @@ internal sealed class V3AsyncConsumerBackend : IAsyncConsumerBackend
     private readonly AsyncKafkaConsumer<int, int> _consumer;
     private readonly TimeSpan _timeout;
 
-    internal V3AsyncConsumerBackend(IReadOnlyDictionary<string, string> config, int pollTimeoutMs)
+    private V3AsyncConsumerBackend(AsyncKafkaConsumer<int, int> consumer, int pollTimeoutMs)
     {
-        _consumer = new AsyncKafkaConsumer<int, int>(
-            V3Config.ClientConfigs(config), ByteCountDeserializer.Instance, ByteCountDeserializer.Instance);
+        _consumer = consumer;
         _timeout = TimeSpan.FromMilliseconds(pollTimeoutMs);
     }
+
+    internal static async Task<V3AsyncConsumerBackend> Create(IReadOnlyDictionary<string, string> config, int pollTimeoutMs) =>
+        new V3AsyncConsumerBackend(
+            await AsyncKafkaConsumer<int, int>
+                .Create(V3Config.ClientConfigs(config), ByteCountDeserializer.Instance, ByteCountDeserializer.Instance)
+                .ConfigureAwait(false),
+            pollTimeoutMs);
 
     public Task Subscribe(string topic) => _consumer.Subscribe(new[] { topic });
 

@@ -222,7 +222,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
 
     /// <summary>
-    /// A consumer constructor's deserializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null
+    /// A mock consumer constructor's deserializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null
     /// for configuration <paramref name="key"/>: must be non-null.", which Java throws when the
     /// <paramref name="key"/> config is missing too.
     /// </summary>

@@ -722,7 +722,7 @@ public sealed class SerializationTests
         DisposableDeserializer deserializer = new DisposableDeserializer(new List<string>());
         ISerde<string> serde = Serdes.SerdeFrom(serializer, deserializer);
 
-        KafkaProducer<string, string> producer = new KafkaProducer<string, string>(
+        KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1" },
             Serdes.String().Serializer(),
             serde.Serializer());
@@ -731,7 +731,7 @@ public sealed class SerializationTests
         Assert.Equal(1, serializer.Disposals);
         Assert.Equal(0, deserializer.Disposals);
 
-        KafkaConsumer<string, string> consumer = new KafkaConsumer<string, string>(
+        KafkaConsumer<string, string> consumer = KafkaConsumer<string, string>.Create(
             new Dictionary<string, object?>
             {
                 ["bootstrap.servers"] = "localhost:1",

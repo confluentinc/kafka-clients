@@ -104,7 +104,7 @@ public sealed class PublicProducerSendStringTests
     [MemberData(nameof(RejectedCases))]
     public async Task Send_ATopicOrAHeaderKeyTheAbiWouldChange_IsRejected(string producer, string field, string label)
     {
-        await using Subject subject = Create(producer);
+        await using Subject subject = await Create(producer);
         string altered = s_altered[label];
         ProducerRecord<string, string> record = field == TopicField ? Record(altered, "h") : Record(Topic, altered);
 
@@ -134,7 +134,7 @@ public sealed class PublicProducerSendStringTests
     public async Task Send_WithACallback_ARejectedRecordFiresNoCallback(string producer)
     {
         CountingCallback callback = new CountingCallback();
-        Subject subject = Create(producer);
+        Subject subject = await Create(producer);
         try
         {
             subject.Reject(Record(s_altered["nul"], "h"), callback);
@@ -155,7 +155,7 @@ public sealed class PublicProducerSendStringTests
     [MemberData(nameof(Producers))]
     public async Task Send_ANonAsciiTopicAndHeaderKey_IsSent(string producer)
     {
-        await using Subject subject = Create(producer);
+        await using Subject subject = await Create(producer);
         ProducerRecord<string, string> record = Record(NonAsciiTopic, NonAsciiKey);
 
         RecordMetadata? metadata = await subject.Deliver(record);
@@ -174,7 +174,7 @@ public sealed class PublicProducerSendStringTests
     {
         foreach (string label in s_loneSurrogates.Keys)
         {
-            await using Subject subject = Create(producer);
+            await using Subject subject = await Create(producer);
             string lone = s_loneSurrogates[label];
             ProducerRecord<string, string> record = Record(lone, lone);
 
@@ -190,16 +190,16 @@ public sealed class PublicProducerSendStringTests
         }
     }
 
-    private static Subject Create(string producer)
+    private static async Task<Subject> Create(string producer)
     {
         switch (producer)
         {
             case Kafka:
                 return new SyncSubject(
-                    new KafkaProducer<string, string>(Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer()), historyCount: null);
+                    KafkaProducer<string, string>.Create(Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer()), historyCount: null);
             case AsyncKafka:
                 return new AsyncSubject(
-                    new AsyncKafkaProducer<string, string>(Unreachable(), new AsyncStringSerializer(), new AsyncStringSerializer()),
+                    await AsyncKafkaProducer<string, string>.Create(Unreachable(), new AsyncStringSerializer(), new AsyncStringSerializer()),
                     historyCount: null);
             case Mock:
                 MockProducer<string, string> mock = new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer());
