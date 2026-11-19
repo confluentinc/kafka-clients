@@ -220,7 +220,10 @@ public sealed class PublicConsumerRecordTests
         Array.Sort(constructors, (left, right) => left.MetadataToken.CompareTo(right.MetadataToken));
 
         Assert.Equal(expected.Count, constructors.Length);
-        Assert.Empty(type.GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance));
+        // The one non-public constructor is the internal one of a polled record; none is visible outside the library.
+        Assert.All(
+            type.GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance),
+            constructor => Assert.True(constructor.IsAssembly, constructor.ToString()));
         for (int i = 0; i < expected.Count; i++)
         {
             ParameterInfo[] parameters = constructors[i].GetParameters();

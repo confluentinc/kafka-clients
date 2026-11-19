@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
 using System.Globalization;
 
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Consumer;
 
@@ -26,8 +28,9 @@ namespace Confluent.Kafka.Consumer;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A polled record's key and value are the deserializers' output, and its topic and headers are owned copies, so
-/// the record stays valid after the poll's native batch is freed.
+/// A polled record's key and value are the deserializers' output, and its topic and headers are owned copies. Its
+/// other fields are read from the poll's native batch on each call, so the record keeps the batch in memory while it
+/// is reachable, after later polls and after the consumer is disposed, and the garbage collector frees it.
 /// </para>
 /// <para>
 /// A deserializer that may keep its memory,
@@ -69,6 +72,10 @@ public sealed class ConsumerRecord<TKey, TValue>
     private readonly int _serializedKeySize;
     private readonly int _serializedValueSize;
     private readonly short? _deliveryCount;
+
+    // The native batch a polled record reads its fields from, and the record in it; null for a constructed record.
+    private readonly SafeConsumerRecordsHandle? _batch;
+    private readonly IntPtr _record;
 
     /// <summary>
     /// Creates a record to be received from a specified topic and partition (provided for compatibility with Kafka 0.9
@@ -189,6 +196,25 @@ public sealed class ConsumerRecord<TKey, TValue>
         _deliveryCount = deliveryCount;
     }
 
+    // A polled record of `batch`, whose fields other than these are read from `record` on each call.
+    internal ConsumerRecord(
+        SafeConsumerRecordsHandle batch,
+        IntPtr record,
+        string topic,
+        int partition,
+        TKey? key,
+        TValue? value,
+        Headers headers)
+    {
+        _batch = batch;
+        _record = record;
+        _topic = topic;
+        _partition = partition;
+        _key = key;
+        _value = value;
+        _headers = headers;
+    }
+
     /// <summary>The topic name.</summary>
     /// <returns>The topic name.</returns>
     public string Topic() => _topic;
@@ -199,7 +225,17 @@ public sealed class ConsumerRecord<TKey, TValue>
 
     /// <summary>The record's offset within its partition.</summary>
     /// <returns>The record's offset within its partition.</returns>
-    public long Offset() => _offset;
+    public long Offset()
+    {
+        if (_batch is null)
+        {
+            return _offset;
+        }
+
+        long offset = ConsumerRecordMarshal.Offset(_record);
+        GC.KeepAlive(_batch);
+        return offset;
+    }
 
     /// <summary>
     /// The record timestamp in milliseconds since the epoch, or
@@ -207,11 +243,31 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// </summary>
     /// <returns>The record timestamp in milliseconds since the epoch, or <see cref="NO_TIMESTAMP"/> (<c>-1</c>)
     /// when absent.</returns>
-    public long Timestamp() => _timestamp;
+    public long Timestamp()
+    {
+        if (_batch is null)
+        {
+            return _timestamp;
+        }
+
+        long timestamp = ConsumerRecordMarshal.Timestamp(_record);
+        GC.KeepAlive(_batch);
+        return timestamp;
+    }
 
     /// <summary>The kind of <see cref="Timestamp()"/> the record carries.</summary>
     /// <returns>The kind of <see cref="Timestamp()"/> the record carries.</returns>
-    public TimestampType TimestampType() => _timestampType;
+    public TimestampType TimestampType()
+    {
+        if (_batch is null)
+        {
+            return _timestampType;
+        }
+
+        Common.Record.TimestampType timestampType = ConsumerRecordMarshal.TimestampTypeOf(_record);
+        GC.KeepAlive(_batch);
+        return timestampType;
+    }
 
     /// <summary>
     /// The deserialized key, or <c>default(TKey)</c> when the key is absent; the deserializer is not called then.
@@ -236,7 +292,17 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// <c>Optional&lt;Integer&gt; leaderEpoch()</c>).
     /// </summary>
     /// <returns>The record's leader epoch, or <see langword="null"/> when the record format has none.</returns>
-    public int? LeaderEpoch() => _leaderEpoch;
+    public int? LeaderEpoch()
+    {
+        if (_batch is null)
+        {
+            return _leaderEpoch;
+        }
+
+        int? leaderEpoch = ConsumerRecordMarshal.LeaderEpoch(_record);
+        GC.KeepAlive(_batch);
+        return leaderEpoch;
+    }
 
     /// <summary>
     /// The delivery count of the record, if available (Java's <c>Optional&lt;Short&gt; deliveryCount()</c>).
@@ -246,7 +312,17 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// The delivery count, or <see langword="null"/> when deliveries are not counted, as for every record this
     /// consumer polls.
     /// </returns>
-    public short? DeliveryCount() => _deliveryCount;
+    public short? DeliveryCount()
+    {
+        if (_batch is null)
+        {
+            return _deliveryCount;
+        }
+
+        short? deliveryCount = ConsumerRecordMarshal.DeliveryCount(_record);
+        GC.KeepAlive(_batch);
+        return deliveryCount;
+    }
 
     /// <summary>
     /// The size of the serialized, uncompressed key in bytes, or <c>-1</c> if the key is
@@ -254,7 +330,17 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// </summary>
     /// <returns>The size of the serialized, uncompressed key in bytes, or <c>-1</c> if the key is
     /// <see langword="null"/>.</returns>
-    public int SerializedKeySize() => _serializedKeySize;
+    public int SerializedKeySize()
+    {
+        if (_batch is null)
+        {
+            return _serializedKeySize;
+        }
+
+        int size = ConsumerRecordMarshal.SerializedKeySize(_record);
+        GC.KeepAlive(_batch);
+        return size;
+    }
 
     /// <summary>
     /// The size of the serialized, uncompressed value in bytes, or <c>-1</c> if the value is
@@ -262,7 +348,17 @@ public sealed class ConsumerRecord<TKey, TValue>
     /// </summary>
     /// <returns>The size of the serialized, uncompressed value in bytes, or <c>-1</c> if the value is
     /// <see langword="null"/>.</returns>
-    public int SerializedValueSize() => _serializedValueSize;
+    public int SerializedValueSize()
+    {
+        if (_batch is null)
+        {
+            return _serializedValueSize;
+        }
+
+        int size = ConsumerRecordMarshal.SerializedValueSize(_record);
+        GC.KeepAlive(_batch);
+        return size;
+    }
 
     /// <summary>
     /// A diagnostic rendering in Java's <c>toString()</c> form: the timestamp is named by Java's
@@ -272,13 +368,13 @@ public sealed class ConsumerRecord<TKey, TValue>
     public override string ToString() =>
         "ConsumerRecord(topic = " + _topic
         + ", partition = " + _partition.ToString(CultureInfo.InvariantCulture)
-        + ", leaderEpoch = " + JavaText.ValueOf(_leaderEpoch)
-        + ", offset = " + _offset.ToString(CultureInfo.InvariantCulture)
-        + ", " + TimestampTypeMethods.ToString(_timestampType)
-        + " = " + _timestamp.ToString(CultureInfo.InvariantCulture)
-        + ", deliveryCount = " + JavaText.ValueOf(_deliveryCount)
-        + ", serialized key size = " + _serializedKeySize.ToString(CultureInfo.InvariantCulture)
-        + ", serialized value size = " + _serializedValueSize.ToString(CultureInfo.InvariantCulture)
+        + ", leaderEpoch = " + JavaText.ValueOf(LeaderEpoch())
+        + ", offset = " + Offset().ToString(CultureInfo.InvariantCulture)
+        + ", " + TimestampTypeMethods.ToString(TimestampType())
+        + " = " + Timestamp().ToString(CultureInfo.InvariantCulture)
+        + ", deliveryCount = " + JavaText.ValueOf(DeliveryCount())
+        + ", serialized key size = " + SerializedKeySize().ToString(CultureInfo.InvariantCulture)
+        + ", serialized value size = " + SerializedValueSize().ToString(CultureInfo.InvariantCulture)
         + ", headers = " + _headers
         + ", key = " + JavaText.ValueOf(_key)
         + ", value = " + JavaText.ValueOf(_value) + ")";

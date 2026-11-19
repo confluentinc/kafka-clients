@@ -704,6 +704,9 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_leader_epoch_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int ConsumerRecordLeaderEpoch(IntPtr self, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_delivery_count_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern short ConsumerRecordDeliveryCount(IntPtr self, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_destroy_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerRecordDestroy(IntPtr self, ref IntPtr outErr);
 

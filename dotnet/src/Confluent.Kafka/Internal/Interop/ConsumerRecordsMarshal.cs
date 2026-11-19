@@ -198,21 +198,24 @@ internal static class ConsumerRecordsMarshal
                         }
 
                         IntPtr record = Get(partitionRecords, i);
-                        RecordFields fields = reader.Fields(record);
+                        IntPtr recordKey = NativeMethods.ConsumerRecordKey(record, ref outErr);
+                        KafkaException.ThrowIfFfiFailed(ref outErr);
+                        IntPtr recordValue = NativeMethods.ConsumerRecordValue(record, ref outErr);
+                        KafkaException.ThrowIfFfiFailed(ref outErr);
                         Headers headers = CopyHeaders(record);
-                        batch.AddRecord((long)Length(fields.Key) + Length(fields.Value));
+                        batch.AddRecord((long)Length(recordKey) + Length(recordValue));
 
                         TKey? deserializedKey = default;
                         TValue? deserializedValue = default;
                         Exception? cause = null;
                         RecordDeserializationException.DeserializationExceptionOrigin origin =
                             RecordDeserializationException.DeserializationExceptionOrigin.KEY;
-                        if (fields.Key != IntPtr.Zero)
+                        if (recordKey != IntPtr.Zero)
                         {
                             try
                             {
                                 deserializedKey = await DeserializeAsync(
-                                    key, batch, topic, headers, fields.Key, cancellationToken).ConfigureAwait(false);
+                                    key, batch, topic, headers, recordKey, cancellationToken).ConfigureAwait(false);
                             }
                             catch (Exception thrown)
                             {
@@ -220,13 +223,13 @@ internal static class ConsumerRecordsMarshal
                             }
                         }
 
-                        if (cause is null && fields.Value != IntPtr.Zero)
+                        if (cause is null && recordValue != IntPtr.Zero)
                         {
                             origin = RecordDeserializationException.DeserializationExceptionOrigin.VALUE;
                             try
                             {
                                 deserializedValue = await DeserializeAsync(
-                                    value, batch, topic, headers, fields.Value, cancellationToken).ConfigureAwait(false);
+                                    value, batch, topic, headers, recordValue, cancellationToken).ConfigureAwait(false);
                             }
                             catch (Exception thrown)
                             {
@@ -237,8 +240,8 @@ internal static class ConsumerRecordsMarshal
                         if (cause is not null)
                         {
                             RecordDeserializationException error = NewError(
-                                origin, new TopicPartition(topic, partitionId), fields.Offset, fields.Timestamp,
-                                fields.TimestampType, fields.Key, fields.Value, headers, cause);
+                                origin, new TopicPartition(topic, partitionId), record, recordKey, recordValue, headers,
+                                cause);
                             copy.Error = error;
                             copy.Rewind = Rewind(records, partitions, p, error);
                             AddPartition(byPartition, topic, partitionId, list);
@@ -246,7 +249,8 @@ internal static class ConsumerRecordsMarshal
                             return;
                         }
 
-                        list.Add(NewRecord(record, topic, partitionId, fields, deserializedKey, deserializedValue, headers));
+                        list.Add(new ConsumerRecord<TKey, TValue>(
+                            batch, record, topic, partitionId, deserializedKey, deserializedValue, headers));
                     }
 
                     AddPartition(byPartition, topic, partitionId, list);
@@ -409,8 +413,7 @@ internal static class ConsumerRecordsMarshal
             {
                 if (Size(partitionRecords) > 0)
                 {
-                    long offset = NativeMethods.ConsumerRecordOffset(Get(partitionRecords, 0), ref outErr);
-                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    long offset = ConsumerRecordMarshal.Offset(Get(partitionRecords, 0));
                     positions.Add(new KeyValuePair<TopicPartition, long>(new TopicPartition(topic, partitionId), offset));
                 }
             }
@@ -581,43 +584,23 @@ internal static class ConsumerRecordsMarshal
         }
     }
 
-    private static ConsumerRecord<TKey, TValue> NewRecord<TKey, TValue>(
-        IntPtr record,
-        string topic,
-        int partition,
-        RecordFields fields,
-        TKey? key,
-        TValue? value,
-        Headers headers)
-    {
-        IntPtr outErr = IntPtr.Zero;
-        int serializedKeySize = NativeMethods.ConsumerRecordSerializedKeySize(record, ref outErr);
-        KafkaException.ThrowIfFfiFailed(ref outErr);
-        int serializedValueSize = NativeMethods.ConsumerRecordSerializedValueSize(record, ref outErr);
-        KafkaException.ThrowIfFfiFailed(ref outErr);
-        int leaderEpoch = NativeMethods.ConsumerRecordLeaderEpoch(record, ref outErr);
-        KafkaException.ThrowIfFfiFailed(ref outErr);
-        return new ConsumerRecord<TKey, TValue>(
-            topic, partition, fields.Offset, fields.Timestamp, fields.TimestampType, serializedKeySize,
-            serializedValueSize, key, value, headers, leaderEpoch < 0 ? null : leaderEpoch);
-    }
-
+    // The failed record's offset and timestamp are read here, on the failure path only.
     private static RecordDeserializationException NewError(
         RecordDeserializationException.DeserializationExceptionOrigin origin,
         TopicPartition partition,
-        long offset,
-        long timestamp,
-        TimestampType timestampType,
+        IntPtr record,
         IntPtr key,
         IntPtr value,
         Headers headers,
-        Exception cause) =>
-        new RecordDeserializationException(
+        Exception cause)
+    {
+        long offset = ConsumerRecordMarshal.Offset(record);
+        return new RecordDeserializationException(
             origin,
             partition,
             offset,
-            timestamp,
-            timestampType,
+            ConsumerRecordMarshal.Timestamp(record),
+            ConsumerRecordMarshal.TimestampTypeOf(record),
             CopyBytes(key),
             CopyBytes(value),
             headers,
@@ -627,45 +610,14 @@ internal static class ConsumerRecordsMarshal
                 + offset.ToString(CultureInfo.InvariantCulture)
                 + ". If needed, please seek past the record to continue consumption.",
             cause);
-
-    private static TimestampType ToTimestampType(int value) => value switch
-    {
-        1 => TimestampType.CREATE_TIME,
-        2 => TimestampType.LOG_APPEND_TIME,
-        _ => TimestampType.NO_TIMESTAMP_TYPE,
-    };
-
-    // What the awaiting copy-out reads of one record before it deserializes its key and value.
-    private readonly struct RecordFields
-    {
-        internal RecordFields(long offset, long timestamp, TimestampType timestampType, IntPtr key, IntPtr value)
-        {
-            Offset = offset;
-            Timestamp = timestamp;
-            TimestampType = timestampType;
-            Key = key;
-            Value = value;
-        }
-
-        internal long Offset { get; }
-
-        internal long Timestamp { get; }
-
-        internal TimestampType TimestampType { get; }
-
-        internal IntPtr Key { get; }
-
-        internal IntPtr Value { get; }
     }
 
-    // A topic decoded once per run of partitions of the same topic, and a timestamp type read once per singleton:
-    // the batch is read partition by partition, so neither is decoded per record.
+    // A topic decoded once per run of partitions of the same topic: the batch is read partition by partition, so it
+    // is not decoded per record.
     private struct RecordReader
     {
         private IntPtr _topicPointer;
         private string? _topic;
-        private IntPtr _timestampTypePointer;
-        private TimestampType _timestampType;
 
         internal string Topic(IntPtr partition)
         {
@@ -695,11 +647,6 @@ internal static class ConsumerRecordsMarshal
             List<ConsumerRecord<TKey, TValue>> records)
         {
             IntPtr outErr = IntPtr.Zero;
-            long offset = NativeMethods.ConsumerRecordOffset(record, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            long timestamp = NativeMethods.ConsumerRecordTimestamp(record, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            TimestampType timestampType = TimestampTypeOf(record);
             IntPtr key = NativeMethods.ConsumerRecordKey(record, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             IntPtr value = NativeMethods.ConsumerRecordValue(record, ref outErr);
@@ -719,7 +666,7 @@ internal static class ConsumerRecordsMarshal
                 {
                     return NewError(
                         RecordDeserializationException.DeserializationExceptionOrigin.KEY,
-                        new TopicPartition(topic, partition), offset, timestamp, timestampType, key, value, headers, cause);
+                        new TopicPartition(topic, partition), record, key, value, headers, cause);
                 }
             }
 
@@ -735,57 +682,13 @@ internal static class ConsumerRecordsMarshal
                 {
                     return NewError(
                         RecordDeserializationException.DeserializationExceptionOrigin.VALUE,
-                        new TopicPartition(topic, partition), offset, timestamp, timestampType, key, value, headers, cause);
+                        new TopicPartition(topic, partition), record, key, value, headers, cause);
                 }
             }
 
-            int serializedKeySize = NativeMethods.ConsumerRecordSerializedKeySize(record, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            int serializedValueSize = NativeMethods.ConsumerRecordSerializedValueSize(record, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            int leaderEpoch = NativeMethods.ConsumerRecordLeaderEpoch(record, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-
             records.Add(new ConsumerRecord<TKey, TValue>(
-                topic, partition, offset, timestamp, timestampType, serializedKeySize, serializedValueSize,
-                deserializedKey, deserializedValue, headers, leaderEpoch < 0 ? null : leaderEpoch));
+                batch, record, topic, partition, deserializedKey, deserializedValue, headers));
             return null;
-        }
-
-        internal RecordFields Fields(IntPtr record)
-        {
-            IntPtr outErr = IntPtr.Zero;
-            long offset = NativeMethods.ConsumerRecordOffset(record, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            long timestamp = NativeMethods.ConsumerRecordTimestamp(record, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            TimestampType timestampType = TimestampTypeOf(record);
-            IntPtr key = NativeMethods.ConsumerRecordKey(record, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            IntPtr value = NativeMethods.ConsumerRecordValue(record, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            return new RecordFields(offset, timestamp, timestampType, key, value);
-        }
-
-        private TimestampType TimestampTypeOf(IntPtr record)
-        {
-            IntPtr outErr = IntPtr.Zero;
-            IntPtr pointer = NativeMethods.ConsumerRecordTimestampType(record, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            if (pointer == IntPtr.Zero)
-            {
-                return TimestampType.NO_TIMESTAMP_TYPE;
-            }
-
-            if (pointer != _timestampTypePointer)
-            {
-                int value = NativeMethods.TimestampTypeEnum(pointer, ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
-                _timestampType = ToTimestampType(value);
-                _timestampTypePointer = pointer;
-            }
-
-            return _timestampType;
         }
 
         private static unsafe bool SameUtf8(IntPtr a, IntPtr b)
