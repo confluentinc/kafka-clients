@@ -277,6 +277,63 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// The awaited form of <see cref="Create"/>, for a consumer whose deserializers' <c>Configure</c> may wait: the
+    /// same steps in the same order. The checks of the configuration throw from the call; what follows, from the
+    /// first function on, completes or fails the task, and a disposal it makes is awaited.
+    /// </summary>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was cancelled before the core built the client: the deserializers built
+    /// so far are disposed, and the given ones are not. Once the client exists the token is not read again.
+    /// </exception>
+    internal static Task<NativeConsumer> CreateAwaited(
+        IReadOnlyDictionary<string, object?> configs, ConfiguredSerdes serdes, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Consumer);
+        ConfigMarshal.ValidatedConfig config = ConfigMarshal.Validate(prepared, ClientKind.Consumer);
+        return CreateAwaited(config, prepared, serdes, cancellationToken);
+    }
+
+    private static async Task<NativeConsumer> CreateAwaited(
+        ConfigMarshal.ValidatedConfig validated,
+        IReadOnlyList<KeyValuePair<string, string>> prepared,
+        ConfiguredSerdes serdes,
+        CancellationToken cancellationToken)
+    {
+        IntPtr classPointer;
+        SerdeDisposal disposal;
+        using (ConfigMarshal.ValidatedConfig config = validated)
+        {
+            disposal = await serdes.BuildAwaited(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                classPointer = config.CreateClient();
+            }
+            catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+            {
+                await disposal.DisposeOnceAsync().ConfigureAwait(false);
+                throw;
+            }
+            catch
+            {
+                // A cancellation, like a failure the core reports bare, is not one of Java's constructor.
+                await serdes.DisposeBuiltAwaited().ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        try
+        {
+            return Started(classPointer, withPump: true, prepared, disposal);
+        }
+        catch
+        {
+            await disposal.DisposeOnceAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
     private static NativeConsumer Started(
         IntPtr classPointer,
         bool withPump,

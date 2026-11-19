@@ -28,8 +28,9 @@ namespace Confluent.Kafka.Common.Serialization;
 /// always passed. Java's <c>configure</c> is
 /// <see cref="AsyncSerializerExtensions.Configure{T}(IAsyncSerializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// which a serializer replaces by implementing <see cref="IAsyncSerializerWithConfigure{T}"/>. Java's <c>close</c> is
-/// <see cref="IAsyncDisposable"/> and nothing else: a producer disposes a serializer it was given only through it and
-/// refuses one that is <see cref="IDisposable"/> without it, and a mock producer disposes none.
+/// <see cref="IAsyncDisposable"/> and nothing else: a producer disposes a serializer, given or built from its
+/// configuration, only through it and refuses one that is <see cref="IDisposable"/> without it, and a mock producer
+/// disposes none.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -78,8 +79,10 @@ public interface IAsyncSerializer<T>
 /// registry does, where the <c>Configure</c> of <see cref="ISerializerWithConfigure{T}"/> returns when it is done.
 /// </summary>
 /// <remarks>
-/// No producer calls it: as Java configures only a serializer it builds from config, a serializer given to a producer
-/// is set up by whoever builds it. A <c>Configure</c> written on a class that implements only
+/// A producer calls and awaits it only on a serializer it builds, from the function its configuration holds under
+/// <c>key.serializer</c> or <c>value.serializer</c>: as Java configures only a serializer it builds from config, a
+/// serializer given to a producer is set up by whoever builds it. A <c>Configure</c> written on a class that
+/// implements only
 /// <see cref="IAsyncSerializer{T}"/> is not called by
 /// <see cref="AsyncSerializerExtensions.Configure{T}(IAsyncSerializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// and no check at construction reports it.

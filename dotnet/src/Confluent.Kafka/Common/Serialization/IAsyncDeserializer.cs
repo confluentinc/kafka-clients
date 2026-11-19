@@ -29,8 +29,9 @@ namespace Confluent.Kafka.Common.Serialization;
 /// headers are always passed. Java's <c>configure</c> is
 /// <see cref="AsyncDeserializerExtensions.Configure{T}(IAsyncDeserializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// which a deserializer replaces by implementing <see cref="IAsyncDeserializerWithConfigure{T}"/>. Java's <c>close</c>
-/// is <see cref="IAsyncDisposable"/> and nothing else: a consumer disposes a deserializer it was given only through
-/// it and refuses one that is <see cref="IDisposable"/> without it, and a mock consumer disposes none.
+/// is <see cref="IAsyncDisposable"/> and nothing else: a consumer disposes a deserializer, given or built from its
+/// configuration, only through it and refuses one that is <see cref="IDisposable"/> without it, and a mock consumer
+/// disposes none.
 /// </summary>
 /// <remarks>
 /// Each built-in deserializer has a class of this interface, named <c>Async</c> and the deserializer's name
@@ -85,8 +86,10 @@ public interface IAsyncDeserializerWithRetention<T> : IAsyncDeserializer<T>
 /// registry does, where the <c>Configure</c> of <see cref="IDeserializerWithConfigure{T}"/> returns when it is done.
 /// </summary>
 /// <remarks>
-/// No consumer calls it: as Java configures only a deserializer it builds from config, a deserializer given to a
-/// consumer is set up by whoever builds it. A <c>Configure</c> written on a class that implements only
+/// A consumer calls and awaits it only on a deserializer it builds, from the function its configuration holds under
+/// <c>key.deserializer</c> or <c>value.deserializer</c>: as Java configures only a deserializer it builds from config,
+/// a deserializer given to a consumer is set up by whoever builds it. A <c>Configure</c> written on a class that
+/// implements only
 /// <see cref="IAsyncDeserializer{T}"/> is not called by
 /// <see cref="AsyncDeserializerExtensions.Configure{T}(IAsyncDeserializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// and no check at construction reports it.

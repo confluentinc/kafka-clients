@@ -16,11 +16,13 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -44,10 +46,17 @@ public sealed class PublicClientCreateTests
 
     private const string SyncConsumer = "KafkaConsumer";
 
+    private const string AsyncProducer = "AsyncKafkaProducer";
+
+    private const string AsyncConsumer = "AsyncKafkaConsumer";
+
     private const string ClassicUnsupported =
         "Classic group protocol is not yet supported in this client; set group.protocol=consumer (KIP-848).";
 
-    public static TheoryData<string> Flavors => new TheoryData<string> { SyncProducer, SyncConsumer };
+    public static TheoryData<string> Flavors =>
+        new TheoryData<string> { SyncProducer, SyncConsumer, AsyncProducer, AsyncConsumer };
+
+    public static TheoryData<string> AsyncFlavors => new TheoryData<string> { AsyncProducer, AsyncConsumer };
 
     [Theory]
     [MemberData(nameof(Flavors))]
@@ -215,7 +224,7 @@ public sealed class PublicClientCreateTests
             (instance, "an instance", nested + instance.GetType().Name),
             (new Func<object>(() => instance), "System.Func`1[System.Object]", "System.Func<object>"),
             (new Func<int>(() => 1), "System.Func`1[System.Int32]", "System.Func<int>"),
-            (OfAnotherClient(flavor), OfAnotherClientText(flavor), OfAnotherClientType(flavor)),
+            (OfTheOtherForm(flavor), OfTheOtherFormText(flavor), OfTheOtherFormType(flavor)),
         };
 
         foreach ((object held, string text, string type) in kinds)
@@ -474,7 +483,357 @@ public sealed class PublicClientCreateTests
         }
     }
 
-    private static bool IsProducer(string flavor) => flavor == SyncProducer;
+    [Theory]
+    [MemberData(nameof(AsyncFlavors))]
+    public async Task AsyncCreate_ThrowsItsChecksFromTheCall_AndReportsTheRestThroughItsTask(string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        Dictionary<string, object?> failing = FailingInTheCore(flavor);
+        failing[KeyConfig(flavor)] = Function(flavor, "key", log, NewProbe(flavor, "key", log));
+        failing[ValueConfig(flavor)] = Function(flavor, "value", log, NewProbe(flavor, "value", log));
+        Dictionary<string, object?> notANumber = new Dictionary<string, object?>(failing)
+        {
+            ["request.timeout.ms"] = "hello",
+        };
+
+        Assert.Throws<ArgumentNullException>(() => { _ = CreateTask(flavor, null!, CancellationToken.None); });
+        ConfigException missing =
+            Assert.Throws<ConfigException>(() => { _ = CreateTask(flavor, Configs(flavor), CancellationToken.None); });
+        ConfigException refused =
+            Assert.Throws<ConfigException>(() => { _ = CreateTask(flavor, notANumber, CancellationToken.None); });
+        Assert.Empty(log);
+        Task created = CreateTask(flavor, failing, CancellationToken.None);
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => created);
+
+        Assert.Equal(MustBeNonNull(KeyConfig(flavor)), missing.Message);
+        Assert.Equal(
+            "Invalid value hello for configuration request.timeout.ms: Not a number of type INT", refused.Message);
+        Assert.Equal(FailedToConstruct(flavor), failure.Message);
+        Assert.Equal(
+            new[]
+            {
+                "key function", "key Configure(isKey: True)", "value function", "value Configure(isKey: False)",
+                "key Dispose", "value Dispose",
+            },
+            log.ToArray());
+    }
+
+    [Theory]
+    [MemberData(nameof(AsyncFlavors))]
+    public async Task AsyncCreate_ReturnsWhileAConfigureIsPending_AndCompletesOnlyOnceBothAreConfigured(string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        TaskCompletionSource<bool> keyGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> valueGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> valueStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        AsyncProbe key = (AsyncProbe)NewProbe(flavor, "key", log);
+        key.ConfigureWaits = _ => keyGate.Task;
+        AsyncProbe value = (AsyncProbe)NewProbe(flavor, "value", log);
+        value.ConfigureWaits = _ =>
+        {
+            valueStarted.TrySetResult(true);
+            return valueGate.Task;
+        };
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs[KeyConfig(flavor)] = Function(flavor, "key", log, key);
+        configs[ValueConfig(flavor)] = Function(flavor, "value", log, value);
+
+        // The call comes back on this thread while the key's Configure waits: nothing waits for it on a thread.
+        Task<object> created = Create(flavor, configs);
+
+        Assert.False(created.IsCompleted);
+        Assert.Equal(new[] { "key function", "key Configure(isKey: True)" }, log.ToArray());
+
+        keyGate.SetResult(true);
+        await TestTimeout.Run(() => valueStarted.Task, TimeSpan.FromSeconds(30));
+
+        Assert.False(created.IsCompleted);
+        Assert.Equal(
+            new[] { "key function", "key Configure(isKey: True)", "value function", "value Configure(isKey: False)" },
+            log.ToArray());
+
+        valueGate.SetResult(true);
+        object? client = null;
+        await TestTimeout.Run(async () => client = await created, TimeSpan.FromSeconds(30));
+        await Close(client!);
+
+        Assert.Equal(
+            new[]
+            {
+                "key function", "key Configure(isKey: True)", "value function", "value Configure(isKey: False)",
+                "key Dispose", "value Dispose",
+            },
+            log.ToArray());
+    }
+
+    [Theory]
+    [MemberData(nameof(AsyncFlavors))]
+    public async Task AsyncCreate_PassesItsTokenToConfigure(string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        using CancellationTokenSource source = new CancellationTokenSource();
+        List<CancellationToken> seen = new List<CancellationToken>();
+        AsyncProbe key = (AsyncProbe)NewProbe(flavor, "key", log);
+        key.ConfigureWaits = token => Record(seen, token);
+        AsyncProbe value = (AsyncProbe)NewProbe(flavor, "value", log);
+        value.ConfigureWaits = token => Record(seen, token);
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs[KeyConfig(flavor)] = Function(flavor, "key", log, key);
+        configs[ValueConfig(flavor)] = Function(flavor, "value", log, value);
+
+        object client = await Create(flavor, configs, source.Token);
+        await Close(client);
+
+        Assert.Equal(new[] { source.Token, source.Token }, seen);
+    }
+
+    [Theory]
+    [MemberData(nameof(AsyncFlavors))]
+    public async Task AsyncCreate_WithATokenAlreadyCancelled_IsCancelledAfterItsChecks_AndRunsNoFunction(string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        using CancellationTokenSource source = new CancellationTokenSource();
+        source.Cancel();
+        Probe value = NewProbe(flavor, "given value", log);
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs[KeyConfig(flavor)] = Function(flavor, "key", log, NewProbe(flavor, "key", log));
+
+        OperationCanceledException cancelled = Assert.ThrowsAny<OperationCanceledException>(
+            () => { _ = CreateTask(flavor, configs, null, value, source.Token); });
+        ConfigException missing = await Assert.ThrowsAsync<ConfigException>(
+            () => Create(flavor, Configs(flavor), null, value, source.Token));
+
+        Assert.Equal(source.Token, cancelled.CancellationToken);
+        Assert.Equal(MustBeNonNull(KeyConfig(flavor)), missing.Message);
+        Assert.Empty(log);
+    }
+
+    [Theory]
+    [MemberData(nameof(AsyncFlavors))]
+    public async Task AsyncCreate_CancelledWhileTheKeyIsConfigured_IsCancelled_DisposesTheBuiltKey_AndLeavesAGivenValue(
+        string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        using CancellationTokenSource source = new CancellationTokenSource();
+        TaskCompletionSource<bool> gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        AsyncProbe key = (AsyncProbe)NewProbe(flavor, "key", log);
+        key.ConfigureWaits = token => ThrowWhenCancelled(gate.Task, token);
+        Probe value = NewProbe(flavor, "given value", log);
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs[KeyConfig(flavor)] = Function(flavor, "key", log, key);
+
+        Task<object> created = Create(flavor, configs, null, value, source.Token);
+        source.Cancel();
+        gate.SetResult(true);
+        OperationCanceledException cancelled =
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => created);
+
+        Assert.Equal(source.Token, cancelled.CancellationToken);
+        Assert.Equal(new[] { "key function", "key Configure(isKey: True)", "key Dispose" }, log.ToArray());
+        Assert.Equal(0, value.Disposals);
+    }
+
+    [Theory]
+    [MemberData(nameof(AsyncFlavors))]
+    public async Task AsyncCreate_CancelledWhileTheValueIsConfigured_IsCancelled_DisposesWhatItBuilt_AndLeavesAGivenKey(
+        string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        using CancellationTokenSource source = new CancellationTokenSource();
+        AsyncProbe value = (AsyncProbe)NewProbe(flavor, "value", log);
+        value.ConfigureWaits = token =>
+        {
+            source.Cancel();
+            return ThrowWhenCancelled(Task.CompletedTask, token);
+        };
+        Probe givenKey = NewProbe(flavor, "given key", log);
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs[KeyConfig(flavor)] = Function(flavor, "key", log, NewProbe(flavor, "built key", log));
+        configs[ValueConfig(flavor)] = Function(flavor, "value", log, value);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Create(flavor, configs, givenKey, null, source.Token));
+
+        Assert.Equal(new[] { "value function", "value Configure(isKey: False)", "value Dispose" }, log.ToArray());
+        Assert.Equal(0, givenKey.Disposals);
+
+        using CancellationTokenSource second = new CancellationTokenSource();
+        ConcurrentQueue<string> secondLog = new ConcurrentQueue<string>();
+        AsyncProbe secondValue = (AsyncProbe)NewProbe(flavor, "value", secondLog);
+        secondValue.ConfigureWaits = token =>
+        {
+            second.Cancel();
+            return ThrowWhenCancelled(Task.CompletedTask, token);
+        };
+        Dictionary<string, object?> both = Configs(flavor);
+        both[KeyConfig(flavor)] = Function(flavor, "key", secondLog, NewProbe(flavor, "key", secondLog));
+        both[ValueConfig(flavor)] = Function(flavor, "value", secondLog, secondValue);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Create(flavor, both, second.Token));
+
+        Assert.Equal(
+            new[]
+            {
+                "key function", "key Configure(isKey: True)", "value function", "value Configure(isKey: False)",
+                "value Dispose", "key Dispose",
+            },
+            secondLog.ToArray());
+    }
+
+    [Theory]
+    [MemberData(nameof(AsyncFlavors))]
+    public async Task AsyncCreate_CancelledOnceBothAreConfigured_IsCancelledBeforeTheClientIsBuilt_AndDisposesWhatItBuilt(
+        string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        using CancellationTokenSource source = new CancellationTokenSource();
+        AsyncProbe value = (AsyncProbe)NewProbe(flavor, "value", log);
+        value.ConfigureWaits = _ =>
+        {
+            // The Configure itself succeeds; the token is read once more before the core builds the client.
+            source.Cancel();
+            return Task.CompletedTask;
+        };
+        Probe givenKey = NewProbe(flavor, "given key", log);
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs[ValueConfig(flavor)] = Function(flavor, "value", log, value);
+
+        OperationCanceledException cancelled = await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => Create(flavor, configs, givenKey, null, source.Token));
+
+        Assert.Equal(source.Token, cancelled.CancellationToken);
+        Assert.Equal(new[] { "value function", "value Configure(isKey: False)", "value Dispose" }, log.ToArray());
+        Assert.Equal(0, givenKey.Disposals);
+    }
+
+    [Theory]
+    [MemberData(nameof(AsyncFlavors))]
+    public async Task AsyncCreate_WhenConfigureIsCancelledByAnotherToken_IsJavasWrappedFailure(string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        OperationCanceledException thrown = new OperationCanceledException("the registry call was cancelled");
+        Probe key = NewProbe(flavor, "key", log);
+        key.ConfigureThrows = thrown;
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs[KeyConfig(flavor)] = Function(flavor, "key", log, key);
+        configs[ValueConfig(flavor)] = Function(flavor, "value", log, NewProbe(flavor, "never built", log));
+
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => Create(flavor, configs));
+
+        Assert.Equal(FailedToConstruct(flavor), failure.Message);
+        Assert.Same(thrown, failure.InnerException);
+        Assert.Equal(new[] { "key function", "key Configure(isKey: True)", "key Dispose" }, log.ToArray());
+    }
+
+    [Theory]
+    [MemberData(nameof(AsyncFlavors))]
+    public async Task AsyncCreate_BuiltSerdesAreDisposedByTheBlockingDisposeToo(string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs[KeyConfig(flavor)] = Function(flavor, "key", log, NewProbe(flavor, "key", log));
+        configs[ValueConfig(flavor)] = Function(flavor, "value", log, NewProbe(flavor, "value", log));
+
+        object client = await Create(flavor, configs);
+        TestTimeout.Dispose((IDisposable)client);
+
+        Assert.Equal(
+            new[]
+            {
+                "key function", "key Configure(isKey: True)", "value function", "value Configure(isKey: False)",
+                "key Dispose", "value Dispose",
+            },
+            log.ToArray());
+    }
+
+    [Fact]
+    public async Task AsyncKafkaProducerCreate_TakesAFunctionDeclaredToReturnTheClass_AndConfiguresItsEncodingFromTheConfiguration()
+    {
+        AsyncStringSerializer? key = null;
+        AsyncStringSerializer? value = null;
+        Dictionary<string, object?> configs = Configs(AsyncProducer);
+        configs["key.serializer"] = new Func<AsyncStringSerializer>(() => key = new AsyncStringSerializer());
+        configs["value.serializer"] = new Func<AsyncStringSerializer>(() => value = new AsyncStringSerializer());
+        configs["key.serializer.encoding"] = "UTF-16";
+        configs["serializer.encoding"] = "ISO-8859-1";
+
+        await using (TestTimeout.AsyncDisposal(await AsyncKafkaProducer<string, string>.Create(configs)))
+        {
+            ReadOnlyMemory<byte>? keyBytes = await key!.Serialize("t", new Headers(), "k", CancellationToken.None);
+            ReadOnlyMemory<byte>? valueBytes = await value!.Serialize("t", new Headers(), "é", CancellationToken.None);
+            Assert.Equal(Encoding.BigEndianUnicode.GetPreamble().Length + 2, keyBytes!.Value.Length);
+            Assert.Equal(new byte[] { 0xE9 }, valueBytes!.Value.ToArray());
+        }
+    }
+
+    [Fact]
+    public async Task AsyncKafkaConsumerCreate_TakesAFunctionDeclaredToReturnTheClass_AndConfiguresItsEncodingFromTheConfiguration()
+    {
+        AsyncStringDeserializer? key = null;
+        AsyncStringDeserializer? value = null;
+        Dictionary<string, object?> configs = Configs(AsyncConsumer);
+        configs["key.deserializer"] = new Func<AsyncStringDeserializer>(() => key = new AsyncStringDeserializer());
+        configs["value.deserializer"] = new Func<AsyncStringDeserializer>(() => value = new AsyncStringDeserializer());
+        configs["key.deserializer.encoding"] = "UTF-16BE";
+        configs["deserializer.encoding"] = "ISO-8859-1";
+
+        await using (TestTimeout.AsyncDisposal(await AsyncKafkaConsumer<string, string>.Create(configs)))
+        {
+            Assert.Equal("k", await key!.Deserialize("t", new Headers(), new byte[] { 0x00, 0x6B }, CancellationToken.None));
+            Assert.Equal("é", await value!.Deserialize("t", new Headers(), new byte[] { 0xE9 }, CancellationToken.None));
+        }
+    }
+
+    [Fact]
+    public async Task AsyncKafkaConsumerCreate_WithTheClassicProtocol_IsBare_DisposesABuiltDeserializer_AndLeavesAGivenOne()
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        Probe value = NewProbe(AsyncConsumer, "given value", log);
+        Dictionary<string, object?> configs = Configs(AsyncConsumer);
+        configs["group.protocol"] = "classic";
+        configs[KeyConfig(AsyncConsumer)] = Function(AsyncConsumer, "key", log, NewProbe(AsyncConsumer, "built key", log));
+
+        UnsupportedOperationException failure = await Assert.ThrowsAsync<UnsupportedOperationException>(
+            () => Create(AsyncConsumer, configs, null, value));
+
+        Assert.Equal(ClassicUnsupported, failure.Message);
+        Assert.Equal(new[] { "key function", "built key Configure(isKey: True)", "built key Dispose" }, log.ToArray());
+        Assert.Equal(0, value.Disposals);
+    }
+
+    // The asynchronous client's own call, whose checks throw from it.
+    private static Task CreateTask(
+        string flavor, IReadOnlyDictionary<string, object?> configs, CancellationToken cancellationToken) =>
+        flavor == AsyncProducer
+            ? AsyncKafkaProducer<string, string>.Create(configs, cancellationToken)
+            : AsyncKafkaConsumer<string, string>.Create(configs, cancellationToken);
+
+    private static Task CreateTask(
+        string flavor,
+        IReadOnlyDictionary<string, object?> configs,
+        object? key,
+        object? value,
+        CancellationToken cancellationToken) =>
+        flavor == AsyncProducer
+            ? AsyncKafkaProducer<string, string>.Create(
+                configs, (IAsyncSerializer<string>?)key, (IAsyncSerializer<string>?)value, cancellationToken)
+            : AsyncKafkaConsumer<string, string>.Create(
+                configs, (IAsyncDeserializer<string>?)key, (IAsyncDeserializer<string>?)value, cancellationToken);
+
+    private static Task Record(List<CancellationToken> seen, CancellationToken cancellationToken)
+    {
+        seen.Add(cancellationToken);
+        return Task.CompletedTask;
+    }
+
+    private static async Task ThrowWhenCancelled(Task gate, CancellationToken cancellationToken)
+    {
+        await gate.ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+    }
+
+    private static bool IsProducer(string flavor) => flavor is SyncProducer or AsyncProducer;
+
+    private static bool IsAsync(string flavor) => flavor is AsyncProducer or AsyncConsumer;
 
     private static string KeyConfig(string flavor) => IsProducer(flavor) ? "key.serializer" : "key.deserializer";
 
@@ -488,40 +847,55 @@ public sealed class PublicClientCreateTests
 
     private static string SerdeInterface(string flavor) => flavor switch
     {
-        SyncProducer => "Confluent.Kafka.Common.Serialization.ISerializer<string>",
-        _ => "Confluent.Kafka.Common.Serialization.IDeserializer<string>",
+        SyncProducer => "ISerializer",
+        SyncConsumer => "IDeserializer",
+        AsyncProducer => "IAsyncSerializer",
+        _ => "IAsyncDeserializer",
     };
+
+    private static string SerdeInterfaceText(string flavor) =>
+        "Confluent.Kafka.Common.Serialization." + SerdeInterface(flavor) + "<string>";
 
     private static string NotAFunction(string flavor, string config, string text, string type) =>
         "Invalid value " + text + " for configuration " + config + ": Expected value to be a System.Func<"
-            + SerdeInterface(flavor) + ">, but it was a " + type;
+            + SerdeInterfaceText(flavor) + ">, but it was a " + type;
 
     private static string ReturnedNull(string flavor, string config) =>
-        "Invalid value null for configuration " + config + ": Expected the function to return a " + SerdeInterface(flavor)
-            + ", but it returned null";
+        "Invalid value null for configuration " + config + ": Expected the function to return a "
+            + SerdeInterfaceText(flavor) + ", but it returned null";
 
-    private static string ClosingRefused(string flavor, object closing) =>
-        closing.GetType().ToString() + " declares Close() but does not implement IDisposable, so the "
-            + (IsProducer(flavor) ? "producer" : "consumer") + " would never call it.";
-
-    // A function of the right shape for a client of another kind.
-    private static object OfAnotherClient(string flavor) => flavor switch
+    private static string ClosingRefused(string flavor, object closing)
     {
-        SyncProducer => new Func<IDeserializer<string>>(() => new StringDeserializer()),
-        _ => new Func<ISerializer<string>>(() => new StringSerializer()),
+        string client = IsProducer(flavor) ? "producer" : "consumer";
+        return IsAsync(flavor)
+            ? closing.GetType() + " implements IDisposable but does not implement IAsyncDisposable, so the " + client
+                + " would never dispose it."
+            : closing.GetType() + " declares Close() but does not implement IDisposable, so the " + client
+                + " would never call it.";
+    }
+
+    // The function of the client's other form: the asynchronous serde for a synchronous client, and the reverse.
+    private static object OfTheOtherForm(string flavor) => flavor switch
+    {
+        SyncProducer => new Func<IAsyncSerializer<string>>(() => new AsyncStringSerializer()),
+        SyncConsumer => new Func<IAsyncDeserializer<string>>(() => new AsyncStringDeserializer()),
+        AsyncProducer => new Func<ISerializer<string>>(() => new StringSerializer()),
+        _ => new Func<IDeserializer<string>>(() => new StringDeserializer()),
     };
 
-    private static string OfAnotherClientText(string flavor) => flavor switch
+    private static string OtherForm(string flavor) => flavor switch
     {
-        SyncProducer => "System.Func`1[Confluent.Kafka.Common.Serialization.IDeserializer`1[System.String]]",
-        _ => "System.Func`1[Confluent.Kafka.Common.Serialization.ISerializer`1[System.String]]",
+        SyncProducer => "IAsyncSerializer",
+        SyncConsumer => "IAsyncDeserializer",
+        AsyncProducer => "ISerializer",
+        _ => "IDeserializer",
     };
 
-    private static string OfAnotherClientType(string flavor) => flavor switch
-    {
-        SyncProducer => "System.Func<Confluent.Kafka.Common.Serialization.IDeserializer<string>>",
-        _ => "System.Func<Confluent.Kafka.Common.Serialization.ISerializer<string>>",
-    };
+    private static string OfTheOtherFormText(string flavor) =>
+        "System.Func`1[Confluent.Kafka.Common.Serialization." + OtherForm(flavor) + "`1[System.String]]";
+
+    private static string OfTheOtherFormType(string flavor) =>
+        "System.Func<Confluent.Kafka.Common.Serialization." + OtherForm(flavor) + "<string>>";
 
     private static Dictionary<string, object?> Configs(string flavor) =>
         IsProducer(flavor)
@@ -564,19 +938,26 @@ public sealed class PublicClientCreateTests
     private static Probe NewProbe(string flavor, string name, ConcurrentQueue<string> log) => flavor switch
     {
         SyncProducer => new SerializerProbe(name, log),
-        _ => new DeserializerProbe(name, log),
+        SyncConsumer => new DeserializerProbe(name, log),
+        AsyncProducer => new AsyncSerializerProbe(name, log),
+        _ => new AsyncDeserializerProbe(name, log),
     };
 
     private static object Plain(string flavor) => flavor switch
     {
         SyncProducer => new PlainSerializer(),
-        _ => new PlainDeserializer(),
+        SyncConsumer => new PlainDeserializer(),
+        AsyncProducer => new PlainAsyncSerializer(),
+        _ => new PlainAsyncDeserializer(),
     };
 
+    // A serde the client refuses, given or built: its close is one the client would never call.
     private static object Closing(string flavor) => flavor switch
     {
         SyncProducer => new ClosingSerializer(),
-        _ => new ClosingDeserializer(),
+        SyncConsumer => new ClosingDeserializer(),
+        AsyncProducer => new DisposableOnlyAsyncSerializer(),
+        _ => new DisposableOnlyAsyncDeserializer(),
     };
 
     private static object Function(string flavor, string name, ConcurrentQueue<string> log, object serde) =>
@@ -594,18 +975,25 @@ public sealed class PublicClientCreateTests
         return flavor switch
         {
             SyncProducer => new Func<ISerializer<string>>(() => (ISerializer<string>)Logged()!),
-            _ => new Func<IDeserializer<string>>(() => (IDeserializer<string>)Logged()!),
+            SyncConsumer => new Func<IDeserializer<string>>(() => (IDeserializer<string>)Logged()!),
+            AsyncProducer => new Func<IAsyncSerializer<string>>(() => (IAsyncSerializer<string>)Logged()!),
+            _ => new Func<IAsyncDeserializer<string>>(() => (IAsyncDeserializer<string>)Logged()!),
         };
     }
 
-    private static Task<object> Create(string flavor, IReadOnlyDictionary<string, object?> configs)
+    // What the call throws comes back as a failed task, so a synchronous client's failure, an asynchronous client's
+    // check and an asynchronous client's failed task are asserted alike.
+    private static Task<object> Create(
+        string flavor, IReadOnlyDictionary<string, object?> configs, CancellationToken cancellationToken = default)
     {
         try
         {
             return flavor switch
             {
                 SyncProducer => Task.FromResult<object>(KafkaProducer<string, string>.Create(configs)),
-                _ => Task.FromResult<object>(KafkaConsumer<string, string>.Create(configs)),
+                SyncConsumer => Task.FromResult<object>(KafkaConsumer<string, string>.Create(configs)),
+                AsyncProducer => Upcast(AsyncKafkaProducer<string, string>.Create(configs, cancellationToken)),
+                _ => Upcast(AsyncKafkaConsumer<string, string>.Create(configs, cancellationToken)),
             };
         }
         catch (Exception failure)
@@ -615,7 +1003,11 @@ public sealed class PublicClientCreateTests
     }
 
     private static Task<object> Create(
-        string flavor, IReadOnlyDictionary<string, object?> configs, object? key, object? value)
+        string flavor,
+        IReadOnlyDictionary<string, object?> configs,
+        object? key,
+        object? value,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -623,8 +1015,14 @@ public sealed class PublicClientCreateTests
             {
                 SyncProducer => Task.FromResult<object>(
                     KafkaProducer<string, string>.Create(configs, (ISerializer<string>?)key, (ISerializer<string>?)value)),
-                _ => Task.FromResult<object>(
+                SyncConsumer => Task.FromResult<object>(
                     KafkaConsumer<string, string>.Create(configs, (IDeserializer<string>?)key, (IDeserializer<string>?)value)),
+                AsyncProducer => Upcast(
+                    AsyncKafkaProducer<string, string>.Create(
+                        configs, (IAsyncSerializer<string>?)key, (IAsyncSerializer<string>?)value, cancellationToken)),
+                _ => Upcast(
+                    AsyncKafkaConsumer<string, string>.Create(
+                        configs, (IAsyncDeserializer<string>?)key, (IAsyncDeserializer<string>?)value, cancellationToken)),
             };
         }
         catch (Exception failure)
@@ -633,8 +1031,17 @@ public sealed class PublicClientCreateTests
         }
     }
 
+    private static async Task<object> Upcast<TClient>(Task<TClient> client)
+        where TClient : class =>
+        await client.ConfigureAwait(false);
+
     private static Task Close(object client)
     {
+        if (client is IAsyncDisposable asynchronous)
+        {
+            return TestTimeout.DisposeAsync(asynchronous);
+        }
+
         TestTimeout.Dispose((IDisposable)client);
         return Task.CompletedTask;
     }
@@ -661,7 +1068,7 @@ public sealed class PublicClientCreateTests
 
         internal IReadOnlyCollection<IReadOnlyDictionary<string, object?>> Configured => _configured;
 
-        internal int Disposals => System.Threading.Volatile.Read(ref _disposals);
+        internal int Disposals => Volatile.Read(ref _disposals);
 
         public override string ToString() => _name;
 
@@ -677,9 +1084,59 @@ public sealed class PublicClientCreateTests
 
         protected void OnDispose()
         {
-            System.Threading.Interlocked.Increment(ref _disposals);
+            Interlocked.Increment(ref _disposals);
             _log.Enqueue(_name + " Dispose");
         }
+    }
+
+    /// <summary>The asynchronous form: its <c>Configure</c> may wait, and may do something once it is done.</summary>
+    private abstract class AsyncProbe : Probe
+    {
+        protected AsyncProbe(string name, ConcurrentQueue<string> log)
+            : base(name, log)
+        {
+        }
+
+        // What Configure awaits, with the token it was given, after logging the call.
+        internal Func<CancellationToken, Task>? ConfigureWaits { get; set; }
+
+        public async ValueTask Configure(
+            IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken)
+        {
+            OnConfigure(configs, isKey);
+            if (ConfigureWaits is not null)
+            {
+                await ConfigureWaits(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            OnDispose();
+            return default;
+        }
+    }
+
+    private sealed class AsyncSerializerProbe : AsyncProbe, IAsyncSerializerWithConfigure<string>, IAsyncDisposable
+    {
+        internal AsyncSerializerProbe(string name, ConcurrentQueue<string> log)
+            : base(name, log)
+        {
+        }
+
+        public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+    }
+
+    private sealed class AsyncDeserializerProbe : AsyncProbe, IAsyncDeserializerWithConfigure<string>, IAsyncDisposable
+    {
+        internal AsyncDeserializerProbe(string name, ConcurrentQueue<string> log)
+            : base(name, log)
+        {
+        }
+
+        public ValueTask<string?> Deserialize(
+            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
     }
 
     private sealed class SerializerProbe : Probe, ISerializerWithConfigure<string>, IDisposable
@@ -734,6 +1191,38 @@ public sealed class PublicClientCreateTests
         public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
 
         public void Close()
+        {
+        }
+    }
+
+    private sealed class PlainAsyncSerializer : IAsyncSerializer<string>
+    {
+        public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+    }
+
+    private sealed class PlainAsyncDeserializer : IAsyncDeserializer<string>
+    {
+        public ValueTask<string?> Deserialize(
+            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
+    }
+
+    private sealed class DisposableOnlyAsyncSerializer : IAsyncSerializer<string>, IDisposable
+    {
+        public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class DisposableOnlyAsyncDeserializer : IAsyncDeserializer<string>, IDisposable
+    {
+        public ValueTask<string?> Deserialize(
+            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
+
+        public void Dispose()
         {
         }
     }
