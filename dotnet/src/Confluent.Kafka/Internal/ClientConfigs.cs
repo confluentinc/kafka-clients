@@ -162,27 +162,13 @@ internal static class ClientConfigs
     };
 
     // Only a one-dimensional, zero-based array is a list: any other array's indexer throws, so it cannot be read by
-    // position.
+    // position. An IList that is also only a generic map is a list here, where Java refuses a Map: telling it apart
+    // needs reflection that Native AOT does not keep, and the core still checks the text.
     private static bool IsList(object value) => value switch
     {
         Array array => array.Rank == 1 && array.GetLowerBound(0) == 0,
         IDictionary => false,
-        IList => !IsGenericMap(value.GetType()),
+        IList => true,
         _ => false,
     };
-
-    private static bool IsGenericMap(Type type)
-    {
-        foreach (Type contract in type.GetInterfaces())
-        {
-            if (contract.IsGenericType
-                && (contract.GetGenericTypeDefinition() == typeof(IDictionary<,>)
-                    || contract.GetGenericTypeDefinition() == typeof(IReadOnlyDictionary<,>)))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
 }

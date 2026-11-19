@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1.7
+# Copyright 2026 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# The Native AOT twin of Dockerfile.grpc.async: identical to Dockerfile.grpc.aot,
+# differing only by ENV CONSUMER_FLAVOR=async, as Dockerfile.grpc.async differs
+# from Dockerfile.grpc. Its builder stage is the same as Dockerfile.grpc.aot's, so
+# a build after that one reuses its cached layers and compiles nothing again.
+#
+# Build context MUST be the repo root. Use the Makefile target:
+#   make -C dotnet grpc-image-async-aot
+#
+# Tags the result as confluent-kafka-rust/dotnet-async-grpc-server:$MULTILANG_IMAGE_TAG-aot,
+# `dev-aot` by default.
+
+# ---------------------------------------------------------------------------
+# Stage 1: Restore + publish the grpc-server app as a Native AOT executable.
+# (Identical to Dockerfile.grpc.aot.)
+# ---------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble-aot AS builder
+
+WORKDIR /src
+
+ARG RUST_PROFILE=debug
+
+COPY rust/target/${RUST_PROFILE}/libconfluent_kafka.so /src/rust/target/${RUST_PROFILE}/libconfluent_kafka.so
+COPY rust/target/include/confluent_kafka.h /src/rust/target/include/confluent_kafka.h
+COPY dotnet/Directory.Build.props /src/dotnet/Directory.Build.props
+COPY dotnet/.editorconfig /src/dotnet/.editorconfig
+COPY dotnet/Confluent.Kafka.snk /src/dotnet/Confluent.Kafka.snk
+COPY dotnet/analyzers/Confluent.Kafka.Analyzers /src/dotnet/analyzers/Confluent.Kafka.Analyzers
+COPY dotnet/analyzers/*.txt /src/dotnet/analyzers/
+COPY dotnet/src /src/dotnet/src
+COPY dotnet/grpc-server /src/dotnet/grpc-server
+COPY rust/multilanguage-test-server/proto /src/rust/multilanguage-test-server/proto
+
+RUN find /src/dotnet -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
+
+RUN dotnet publish /src/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj \
+        -c Release -p:CargoProfileDir=${RUST_PROFILE} -p:GrpcServerAot=true -f net8.0 \
+        --use-current-runtime -o /app
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime-deps, with no .NET runtime. (Identical to Dockerfile.grpc.aot
+# but for CONSUMER_FLAVOR.)
+# ---------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/runtime-deps:8.0-noble AS runtime
+
+WORKDIR /app
+
+ARG RUST_PROFILE=debug
+
+COPY --from=builder /app /app
+COPY --from=builder /src/rust/target/${RUST_PROFILE}/libconfluent_kafka.so /app/libconfluent_kafka.so
+
+ENV LD_LIBRARY_PATH=/app
+
+# The only difference from Dockerfile.grpc.aot, as in Dockerfile.grpc.async.
+ENV CONSUMER_FLAVOR=async
+
+ENV GRPC_HOST=0.0.0.0
+
+EXPOSE 50053
+
+CMD ["/app/Confluent.Kafka.GrpcServer"]

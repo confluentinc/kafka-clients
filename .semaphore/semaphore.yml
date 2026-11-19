@@ -30,7 +30,8 @@ name: build-test-release
 #      and verify-c, verify-python and verify-dotnet, each over PLAINTEXT, SSL
 #      and SASL_SSL, including the gRPC multilanguage arm (__grpc_c /
 #      __grpc_python / __grpc_dotnet); the PLAINTEXT arm of each binding runs
-#      in a job of its own. The .NET gRPC images are built for
+#      in a job of its own, and the .NET one again against Native AOT builds of
+#      the .NET gRPC images. The .NET gRPC images are built for
 #      linux/amd64: Grpc.Tools' linux_arm64 protoc SIGSEGVs during C# codegen
 #      inside an arm64 Linux container, so they need an amd64 Linux agent
 #      (which this block uses anyway).
@@ -39,7 +40,9 @@ name: build-test-release
 #      verify-python (pytest test/unit) and verify-dotnet (dotnet test, net8.0 +
 #      net10.0), each followed by the gRPC multilanguage arm with the gRPC
 #      server running as a native host process (MULTILANG_BACKEND_MODE=native),
-#      which tests the macOS build of each binding. dependencies-macos.sh brings
+#      which tests the macOS build of each binding; a second .NET job runs the
+#      Native AOT check and the .NET arms against a Native AOT build of the
+#      server. dependencies-macos.sh brings
 #      up Docker via Colima for the broker. The native .NET server is the
 #      net10.0 build; Grpc.Tools has no macOS arm64 protoc and runs its
 #      macosx_x64 one under Rosetta 2, which is unaffected by the linux_arm64
@@ -56,8 +59,9 @@ name: build-test-release
 #      not the test suite: mypy --strict over the package and the static checks
 #      of test/static (`make -C python check`).
 #   5. ".NET additional checks (Linux amd64)" -- the .NET checks that are not
-#      the test suite, one job each: dotnet format over the solution and the
-#      soak projects and the examples' build and format check (check-dotnet),
+#      the test suite, one job each: dotnet format over the solution, the soak
+#      projects and tools/AotSmoke, the examples' build and format check, and
+#      the Native AOT check, AotSmoke (check-dotnet),
 #      and the .NET unit tests' code coverage (coverage-dotnet), which runs
 #      every unit test on every build, a pull request's included.
 #   On a release tag, the "Release" promotion then starts release.yml, which
@@ -255,17 +259,22 @@ blocks:
     #     — only the gRPC container arm over the PLAINTEXT CONTAINER listener,
     #     in a job of its own so its duration and failures are attributable
     #     apart from the binding's tests.
+    #   - PLAINTEXT Native AOT gRPC arm, for .NET only:
+    #     `make -C dotnet test-integration-aot` — the same arm against Native
+    #     AOT builds of the two .NET gRPC images, whose server and binding are
+    #     one native executable, in an image with no .NET runtime.
     #   - SSL / SASL_SSL: only the gRPC container arm re-run over the SSL
     #     (CTLSONLY :9100) or SASL_SSL (CSASLTLS :9101) CONTAINER listener. The
     #     unit tests and perf are protocol-independent, so running them once in
-    #     the PLAINTEXT job is enough. The three .NET gRPC arm
-    #     jobs install no host .NET: the gRPC images build inside the .NET SDK
-    #     image, and the harness is Rust.
+    #     the PLAINTEXT job is enough. The four .NET gRPC arm
+    #     jobs install no host .NET: the gRPC images, the Native AOT ones
+    #     included, build inside a .NET SDK image, and the harness is Rust.
     #
     # The block's 45 minutes is the Rust jobs' limit; each binding job sets its
     # own (a job's limit may not exceed its block's, see the note at the top of
     # this file): 30, or 45 for the Python and .NET gRPC-arm jobs (plaintext
-    # gRPC arm, ssl, sasl_ssl), which take about 27 minutes. verify-dotnet's
+    # gRPC arm, ssl, sasl_ssl, and .NET's plaintext Native AOT gRPC arm), which
+    # take about 27 minutes. verify-dotnet's
     # plaintext job was 26 minutes on 2026-09-30 and 20 on 2026-10-01, against
     # about 11 for verify-c and verify-python, and reached 30 minutes in
     # November 2026, while it still ran the .NET gRPC arm; that arm now runs in
@@ -362,6 +371,13 @@ blocks:
             minutes: 45
           commands:
             - make -C dotnet test-integration
+        - name: "verify-dotnet (Linux amd64) — plaintext Native AOT gRPC arm"
+          execution_time_limit:
+            minutes: 45
+          commands:
+            # The plaintext gRPC arm again, against Native AOT builds of the two .NET gRPC images
+            # (Dockerfile.grpc.aot, Dockerfile.grpc.async.aot), tagged <MULTILANG_IMAGE_TAG>-aot.
+            - make -C dotnet test-integration-aot
         - name: "verify-dotnet (Linux amd64) — ssl"
           execution_time_limit:
             minutes: 45
@@ -386,6 +402,13 @@ blocks:
     # Grpc.Tools' macosx_x64 protoc under Rosetta 2. It also packs the NuGet
     # package with this machine's native library and installs it into a fresh
     # project (make package-check-dotnet), which needs no Docker.
+    # "verify-dotnet (macOS arm64) — Native AOT" runs the Native AOT check
+    # (make -C dotnet test-aot-dotnet), then the .NET arms against a Native AOT
+    # build of the server and binding (make -C dotnet
+    # test-integration-native-aot), with MACOS_ENSURE_ROSETTA for the server's
+    # build. It is a job of its own because verify-dotnet has no room for a
+    # second pass of the arms: on 2026-11-19 it took 25 of its 30 minutes, 14 of
+    # them for the 724 arms.
     #
     # The binding jobs use PLAINTEXT only. The SSL and SASL_SSL variants of
     # their arm run on Linux. The TLS and SASL code paths are in the Rust
@@ -393,9 +416,11 @@ blocks:
     # and rust/tests/integration/sasl_ssl_consumer_test.rs in the verify-rust job.
     #
     # The block's 45 minutes is the verify-rust job's limit; each binding job
-    # sets 30 minutes of its own (a job's limit may not exceed its block's).
-    # verify-dotnet took 10 minutes on 2026-10-01, before the package check,
-    # which takes about a minute.
+    # sets 30 minutes of its own (a job's limit may not exceed its block's),
+    # and the Native AOT job 45, as the Linux gRPC-arm jobs do: it builds the
+    # library, AotSmoke and the AOT server before its arms. verify-dotnet took
+    # 10 minutes on 2026-10-01, before the package check, which takes about a
+    # minute.
     dependencies: []
     execution_time_limit:
       minutes: 45
@@ -487,6 +512,24 @@ blocks:
             # commands (it did after the Colima bring-up), so the .NET 10 environment is set again
             # on the make's own command line.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make -C dotnet test-integration-native
+        - name: "verify-dotnet (macOS arm64) — Native AOT"
+          execution_time_limit:
+            minutes: 45
+          env_vars:
+            # Installs Rosetta 2 if it is missing, for Grpc.Tools' macosx_x64 protoc, which the build
+            # of the Native AOT server runs.
+            - name: MACOS_ENSURE_ROSETTA
+              value: "true"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            # The .NET 10 environment is set on each make's own command line, for the reason given in
+            # verify-dotnet. The Native AOT check: publishes a net8.0 and a net10.0 Native AOT
+            # executable with the whole library rooted, so a trim or AOT warning fails the job, then
+            # runs them.
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make -C dotnet test-aot-dotnet
+            # The .NET arms against a Native AOT build of the gRPC server and binding, linked with
+            # Xcode's clang, over the Colima broker the prologue starts.
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make -C dotnet test-integration-native-aot
 
   - name: "Verify language bindings (Windows amd64)"
     # The .NET client on Windows, whose package carries a win-x64 and a win-x86
@@ -494,7 +537,8 @@ blocks:
     # the .NET unit tests, which drive the mock clients, on net462, net8.0 and
     # net10.0 in a process of that platform
     # (.semaphore/verify-dotnet-windows.ps1), only those the test selection
-    # selects on a pull request, as in the other blocks. The broker-backed tests and the
+    # selects on a pull request, as in the other blocks, then, on x64, the
+    # Native AOT check. The broker-backed tests and the
     # multilanguage arms run on Linux and macOS only: they need Linux
     # containers, which the Windows agents do not run. The agent's shell is
     # PowerShell, so the block starts with job-start.ps1 and records its result
@@ -659,8 +703,13 @@ blocks:
     #
     # check-dotnet (`make -C dotnet check-dotnet`) builds the
     # solution against the debug all-features library, then runs dotnet format
-    # --verify-no-changes over the solution and the soak projects, and builds
-    # and format-checks the examples.
+    # --verify-no-changes over the solution, the soak projects and
+    # tools/AotSmoke, and builds and format-checks the examples. The job then
+    # runs the Native AOT check, AotSmoke (`make -C dotnet test-aot-dotnet`): it
+    # publishes tools/AotSmoke as a Native AOT executable for net8.0 and net10.0
+    # with the whole Confluent.Kafka library rooted, so any trim or AOT warning
+    # fails the job, then runs both executables, whose 28 checks must pass. The
+    # macOS and Windows x64 jobs run it too, for their platforms.
     #
     # coverage-dotnet runs the .NET unit tests with code coverage
     # (`make -C dotnet coverage-dotnet`), against the debug
@@ -692,6 +741,10 @@ blocks:
             - export PATH="$HOME/.dotnet:$PATH"
             - export DOTNET_MULTILEVEL_LOOKUP=0
             - make -C dotnet check-dotnet
+            # The Native AOT check, AotSmoke: the solution is built already. Native AOT links with
+            # clang, or with gcc where clang is missing; the net8.0 link also needs the zlib
+            # development files.
+            - make -C dotnet test-aot-dotnet
         - name: "coverage-dotnet (Linux amd64)"
           commands:
             - ./.semaphore/install-dotnet.sh
