@@ -36,7 +36,7 @@
 #       machine loads, for the unit tests' ABI conformance test. With <checksum-file>, writes
 #       `<sha256>  <package>` to it once every test has passed.
 #   .semaphore/test-nupkg.sh --smoke <package-dir>
-#       Runs the smoke tests on this machine only (make package-check-dotnet).
+#       Runs the smoke tests on this machine only (make -C dotnet package-check-dotnet).
 # Override the distribution list (Linux) with DISTRO_IMAGES="img1 img2 ...".
 
 set -eu

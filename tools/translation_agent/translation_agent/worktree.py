@@ -79,9 +79,8 @@ def worktree_for_branch(
 
     Pass `ak_commit=<sha>` to bootstrap the worktree for plan/impl agent
     work: the orchestrator runs `make` (= `make build`, the Makefile's
-    default target -- which walks `submodules -> build-rust -> build-c
-    -> build-python` in dependency order, so the kafka submodule is
-    initialized as a prerequisite of the C build), checks out
+    default target -- which initializes every submodule, the kafka one
+    included, before the Rust, C and Python builds), checks out
     `ak_commit` in the `kafka/` submodule, and commits the submodule
     pointer bump as its own commit BEFORE the agent runs. The agent's
     subsequent commits (e.g. "Design document") sit on top of the bump
@@ -258,10 +257,9 @@ def _local_branch_exists(repo_path: str, branch_name: str) -> bool:
 def _make_build(worktree_dir: Path) -> None:
     """Run `make` (= `make build`, the default target) inside the worktree.
 
-    Per the root Makefile, `build` depends on `build-rust`, `build-c`
-    (which itself depends on `submodules` -> `git submodule update --init
-    --recursive`), and `build-python`. So a single `make` call walks the
-    full prerequisite chain in the right order: submodules first, then
+    Per the root Makefile, `build` first runs `submodules` (`git submodule
+    update --init --recursive`), then the Rust, C and Python builds. So a
+    single `make` call does it all in the right order: submodules first, then
     cargo + cmake + python build. Required so the spawned agent can read
     AK source under `kafka/` and the C bindings have generated headers.
 

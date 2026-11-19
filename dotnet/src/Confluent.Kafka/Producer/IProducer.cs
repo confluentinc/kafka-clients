@@ -156,9 +156,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <param name="groupMetadata">The consumer group metadata, from the consumer's <c>GroupMetadata()</c>.</param>
     /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
     /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A key of <paramref name="offsets"/> has a null topic, or a value is
-    /// null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null, a key of it has a null topic, or a
+    /// value is null.</exception>
     /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
     /// been started, or the producer is closed.</exception>
     /// <exception cref="ProducerFencedException">Fatal error indicating another producer with the same

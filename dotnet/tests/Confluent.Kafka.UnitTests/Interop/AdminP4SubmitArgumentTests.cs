@@ -138,18 +138,18 @@ public sealed class AdminP4SubmitArgumentTests
 
         Assert.Equal(
             "partitions",
-            Assert.Throws<ArgumentException>(
+            Assert.Throws<ArgumentNullException>(
                 () => admin.ElectLeaders(ElectionType.PREFERRED, new[] { default(TopicPartition) }, options: new ElectLeadersOptions()))
                 .ParamName);
         Assert.Equal(
             "reassignments",
-            Assert.Throws<ArgumentException>(
+            Assert.Throws<ArgumentNullException>(
                 () => admin.AlterPartitionReassignments(
                     new Dictionary<TopicPartition, NewPartitionReassignment?> { [default] = null }, options: new AlterPartitionReassignmentsOptions()))
                 .ParamName);
         Assert.Equal(
             "partitions",
-            Assert.Throws<ArgumentException>(
+            Assert.Throws<ArgumentNullException>(
                 () => admin.ListPartitionReassignments(new[] { default(TopicPartition) }, options: new ListPartitionReassignmentsOptions()))
                 .ParamName);
     }

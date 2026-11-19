@@ -1,12 +1,12 @@
 version: v1.0
 name: publish-testpypi
 
-# The manual "Publish to Test PyPI" promotion of semaphore.yml. It publishes a
+# The manual "Publish to Test PyPI" promotion of release.yml. It publishes a
 # Python version to Test PyPI from the build of its python/v<version> tag, with
 # exactly the wheels that build's "Release (Python): packaging" block recorded
-# (see the Python release blocks of semaphore.yml), and checks them there. Its
+# (see the Python release blocks of release.yml), and checks them there. Its
 # blocks run on the tag of any Python version, final or not; the tag pattern
-# must stay the pattern of semaphore.yml. The "Publish to PyPI" promotion of
+# must stay the pattern of release.yml. The "Publish to PyPI" promotion of
 # this pipeline (publish-pypi.yml) then publishes the same wheels to PyPI once
 # the checks here have passed.
 #

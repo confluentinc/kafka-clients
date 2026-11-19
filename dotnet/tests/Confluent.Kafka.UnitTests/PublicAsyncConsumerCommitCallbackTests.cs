@@ -150,7 +150,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
             Assert.Empty(Snapshot(events));
 
             CommitCallbackException propagated = await Assert.ThrowsAsync<CommitCallbackException>(
-                () => TestTimeout.Run(() => consumer.CommitAsync(Empty()), s_deadline));
+                () => TestTimeout.Run(() => consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null), s_deadline));
             Assert.Same(raised, propagated);
             Assert.Equal(new[] { "boom" }, Snapshot(events));
 
@@ -181,7 +181,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
             }));
 
             using CancellationTokenSource cancel = new CancellationTokenSource();
-            Task running = consumer.CommitAsync(Empty(), cancellationToken: cancel.Token);
+            Task running = consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null, cancellationToken: cancel.Token);
             await TestTimeout.Run(() => started.Task, s_deadline);
             cancel.Cancel();
             ReleaseAfter(release, TimeSpan.FromMilliseconds(50));
@@ -271,7 +271,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         {
             await CancelACommitAwaitingTheAsyncCallbackItDelivered(consumer, afterTheOwnWake: null);
 
-            using ConsumerHandle handle = consumer.Handle();
+            using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
             handle.Wakeup();
 
             WakeupException woken = await Assert.ThrowsAsync<WakeupException>(
@@ -298,7 +298,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         {
             await CancelACommitAwaitingTheAsyncCallbackItDelivered(consumer, afterTheOwnWake: null);
 
-            using ConsumerHandle handle = consumer.Handle();
+            using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
             TaskCompletionSource<Exception?> raised =
                 new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
             await TestTimeout.Run(
@@ -315,7 +315,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
                     }
                 })),
                 s_deadline);
-            await TestTimeout.Run(() => consumer.CommitAsync(Empty()), s_deadline);
+            await TestTimeout.Run(() => consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null), s_deadline);
 
             KafkaTimeoutException timeout = Assert.IsType<KafkaTimeoutException>(await TestTimeout.Run(() => raised.Task, s_deadline));
             Assert.Equal(7, timeout.Code);
@@ -681,7 +681,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         Assert.False(withOffsets.GetParameters()[1].HasDefaultValue);
         Assert.True(withOffsets.GetParameters()[2].HasDefaultValue);
 
-        foreach (Type surface in new[] { typeof(IConsumer<byte[], byte[]>), typeof(IConsumerCommon), typeof(ConsumerHandle) })
+        foreach (Type surface in new[] { typeof(IConsumer<byte[], byte[]>), typeof(IConsumerCommon) })
         {
             Assert.DoesNotContain(
                 surface.GetMethods(),
@@ -714,26 +714,26 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         {
             "poll" => consumer.Poll(TimeSpan.Zero),
             "commit" => consumer.Commit(Empty()),
-            "commit_nowait" => consumer.CommitAsync(Empty()),
+            "commit_nowait" => consumer.CommitAsync(Empty(), (IOffsetCommitCallback?)null),
             _ => consumer.Close(CloseOptions.Timeout(TimeSpan.FromSeconds(5))),
         };
 
-    private static void CallTheHandle(ConsumerHandle handle, string call)
+    private static void CallTheHandle(NativeConsumerHandle handle, string call)
     {
         switch (call)
         {
             case "committed":
-                handle.Committed(new[] { s_tp0 });
+                handle.Committed(NativeConsumer.SnapshotPartitions(new[] { s_tp0 }), timeoutMs: null);
                 break;
             case "position":
-                handle.Position(s_tp0);
+                handle.Position(Topic, 0, timeoutMs: null);
                 break;
             case "commit":
-                handle.Commit(Offsets(1));
+                handle.CommitSync(OffsetsSnapshot.Of(Offsets(1)), timeoutMs: null);
                 break;
             default:
-                handle.Seek(s_tp0, 1);
-                handle.Commit();
+                handle.Seek(Topic, 0, 1);
+                handle.CommitSync(timeoutMs: null);
                 break;
         }
     }

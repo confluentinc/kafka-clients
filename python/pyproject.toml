@@ -20,7 +20,7 @@ Repository = "https://github.com/confluentinc/kafka-clients"
 # No PyPI confluent-kafka here: it installs the same top-level package
 # `confluent_kafka` as this project, and the two in one site-packages break each
 # other. The perf benchmarks' librdkafka baseline has its own venv
-# (test/performance/requirements-librdkafka.txt, `make init-venv-librdkafka`).
+# (test/performance/requirements-librdkafka.txt, `make -C python venv-librdkafka`).
 dev = [
     "psutil",
     "matplotlib",

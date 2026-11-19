@@ -306,7 +306,9 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
 
     public IReadOnlyCollection<TopicPartition> Paused() => _inner.Paused();
 
-    public void EnforceRebalance(string? reason = null) => _inner.EnforceRebalance(reason);
+    public void EnforceRebalance() => _inner.EnforceRebalance();
+
+    public void EnforceRebalance(string? reason) => _inner.EnforceRebalance(reason);
 
     public Task CommitAsync(CancellationToken cancellationToken = default)
     {
@@ -324,7 +326,7 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
 
     public Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null,
+        IOffsetCommitCallback? callback,
         CancellationToken cancellationToken = default)
     {
         _script.Tokens.Record(nameof(CommitAsync), cancellationToken);
@@ -371,13 +373,6 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
     }
 
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _inner.Metrics();
-
-    public ConsumerHandle Handle()
-    {
-        ConsumerHandle handle = _inner.Handle();
-        _script.Handle = handle;
-        return handle;
-    }
 
     public void Dispose()
     {

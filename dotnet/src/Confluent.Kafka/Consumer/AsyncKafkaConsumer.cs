@@ -390,7 +390,10 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     public IReadOnlyCollection<TopicPartition> Paused() => _native.Paused();
 
     /// <inheritdoc/>
-    public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
+    public void EnforceRebalance() => _native.EnforceRebalance(null);
+
+    /// <inheritdoc/>
+    public void EnforceRebalance(string? reason) => _native.EnforceRebalance(reason);
 
     /// <inheritdoc/>
     public Task CommitAsync(CancellationToken cancellationToken = default) =>
@@ -403,7 +406,7 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// <inheritdoc/>
     public Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null,
+        IOffsetCommitCallback? callback,
         CancellationToken cancellationToken = default) =>
         _native.CommitAsyncWithCallback(offsets, callback, cancellationToken);
 
@@ -420,9 +423,6 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
-
-    /// <inheritdoc/>
-    public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
 
     /// <inheritdoc/>
     /// <remarks>

@@ -1,0 +1,147 @@
+# The multilanguage test harness: one scenario, six arms, shared containers.
+#
+# Source of truth for design/current/img/multilanguage-tests.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: a scenario is written once and expanded into six
+# arms. The __rust arm runs the real Rust client inside the test process and
+# talks to the broker's host listeners. The five __grpc_* arms use stand-in
+# clients that forward each call over gRPC to a test server, which runs the
+# real binding on the same Rust core; the core talks to the broker's container
+# listeners. Two pools start the Kafka cluster and the test servers on first
+# use and share them with every later test.
+#
+# Colours, shared with the other multilanguage-tests diagrams: orange is gRPC
+# and the test server, teal dashed the Kafka protocol and teal the Rust core,
+# grey solid a call inside one process, grey dotted "starts and shares".
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    pad: 24
+  }
+}
+
+classes: {
+  part: {
+    style: {
+      fill: "#eef2f6"
+      stroke: "#9aa7b4"
+      border-radius: 8
+      font-color: "#16202a"
+      font-size: 15
+    }
+  }
+  server: {
+    style: {
+      fill: "#fbeade"
+      stroke: "#b3470e"
+      stroke-width: 2
+      border-radius: 8
+      font-color: "#7a2f08"
+      font-size: 15
+    }
+  }
+  core: {
+    style: {
+      fill: "#dcf0ec"
+      stroke: "#0d7368"
+      stroke-width: 2
+      border-radius: 8
+      font-color: "#0b4f47"
+      font-size: 15
+    }
+  }
+  note: {
+    style: {
+      fill: "#ffffff"
+      stroke: "#9aa7b4"
+      stroke-dash: 3
+      border-radius: 6
+      font-color: "#586675"
+      font-size: 14
+    }
+  }
+  panel: {
+    style: {
+      fill: "#fbfcfd"
+      stroke: "#9aa7b4"
+      stroke-dash: 4
+      border-radius: 10
+      font-color: "#3d4a57"
+      font-size: 16
+      bold: true
+    }
+  }
+  start: {
+    style: {
+      stroke: "#9aa7b4"
+      stroke-width: 2
+      stroke-dash: 2
+      font-color: "#586675"
+      font-size: 14
+    }
+  }
+  grpc: {
+    style: {
+      stroke: "#b3470e"
+      stroke-width: 2
+      font-color: "#b3470e"
+      font-size: 14
+    }
+  }
+  call: {
+    style: {
+      stroke: "#586675"
+      stroke-width: 2
+      font-color: "#586675"
+      font-size: 14
+    }
+  }
+  kafka: {
+    style: {
+      stroke: "#0d7368"
+      stroke-width: 2
+      stroke-dash: 4
+      font-color: "#0d7368"
+      font-size: 14
+    }
+  }
+}
+
+
+direction: down
+
+test: "cargo test · one process" {
+  class: panel
+
+  scenario: "scenario body\none async fn, generic over the factory" {class: part}
+  rust: "__rust\nRustNativeFactory: the real Rust client" {class: part}
+  grpc: "__grpc_* (five arms)\nPythonGrpcFactory, CGrpcFactory, …\nstand-in clients, same traits" {class: part}
+  cpool: "cluster pool\none cluster per ClusterConfig" {class: part}
+  bpool: "backend pool\none server per gRPC arm" {class: part}
+
+  scenario -> rust: "macro" {class: call}
+  scenario -> grpc: "macro" {class: call}
+}
+
+servers: "server container ×5\npython · python-async · c · dotnet · dotnet-async" {
+  class: panel
+  server: "test server\nC++ · Python · C#" {class: server}
+  binding: "binding\nC header · confluent_kafka · Confluent.Kafka" {class: part}
+  core: "Rust core\nthrough the C FFI" {class: core}
+  server -> binding: "calls" {class: call}
+  binding -> core: "calls" {class: call}
+}
+
+kafka: "Kafka cluster · Docker\nbrokers and KRaft controllers" {
+  class: panel
+  host: "host listeners\n9092 · 9096 · 9097\nPLAINTEXT · SSL · SASL_SSL" {class: part}
+  container: "container listeners\n9099 · 9100 · 9101\nPLAINTEXT · SSL · SASL_SSL" {class: part}
+}
+
+test.rust -> kafka.host: "Kafka protocol" {class: kafka}
+test.grpc -> servers.server: "gRPC" {class: grpc}
+servers.core -> kafka.container: "Kafka protocol" {class: kafka}
+test.bpool -> servers: "starts each server once" {class: start}
+test.cpool -> kafka: "starts a cluster per config, keeps it" {class: start}

@@ -44,6 +44,20 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     private readonly bool _awaits;
 
     /// <summary>
+    /// Creates a broker-free mock producer whose sends complete at once: the three-argument constructor with
+    /// <c>autoComplete</c> set to <see langword="true"/>.
+    /// </summary>
+    /// <param name="keySerializer">The serializer for record keys.</param>
+    /// <param name="valueSerializer">The serializer for record values.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
+    /// </exception>
+    public AsyncMockProducer(IAsyncSerializer<TKey> keySerializer, IAsyncSerializer<TValue> valueSerializer)
+        : this(keySerializer, valueSerializer, true)
+    {
+    }
+
+    /// <summary>
     /// Creates a broker-free mock producer with the key and value serializers, as Java's <c>MockProducer</c> takes them.
     /// <c>Send</c> awaits the serializers unless both are built-in ones, as on
     /// <see cref="AsyncKafkaProducer{TKey, TValue}"/>. The mock never disposes them.
@@ -51,7 +65,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <param name="keySerializer">The serializer for record keys.</param>
     /// <param name="valueSerializer">The serializer for record values.</param>
     /// <param name="autoComplete">
-    /// When <see langword="true"/> (the default), each send completes at once. When <see langword="false"/>, a
+    /// When <see langword="true"/>, each send completes at once. When <see langword="false"/>, a
     /// send's future stays pending until <see cref="CompleteNext"/> or <see cref="ErrorNext"/> resolves it;
     /// <see cref="Dispose"/> and <see cref="DisposeAsync"/> first flush, completing the pending sends, unless a
     /// close has begun, and <c>Close</c> leaves a pending send pending.
@@ -62,7 +76,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public AsyncMockProducer(
         IAsyncSerializer<TKey> keySerializer,
         IAsyncSerializer<TValue> valueSerializer,
-        bool autoComplete = true)
+        bool autoComplete)
     {
         IAsyncSerializer<TKey> key = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
         IAsyncSerializer<TValue> value = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
@@ -77,6 +91,12 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
     {
+        _native.ThrowIfClosed();
+        if (_native.MockSendRefusal() is { } refused)
+        {
+            return Refused(refused);
+        }
+
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
@@ -91,6 +111,12 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         ICallback callback,
         CancellationToken cancellationToken = default)
     {
+        _native.ThrowIfClosed();
+        if (_native.MockSendRefusal() is { } refused)
+        {
+            return Refused(refused);
+        }
+
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
@@ -110,6 +136,12 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         IAsyncCallback callback,
         CancellationToken cancellationToken = default)
     {
+        _native.ThrowIfClosed();
+        if (_native.MockSendRefusal() is { } refused)
+        {
+            return Refused(refused);
+        }
+
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
@@ -123,6 +155,11 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         return SendValidated(record, null, cancellationToken, callback);
     }
 
+    // As Java's MockProducer.send: a closed producer, then a fenced one, then the send exception, all before the
+    // record is read. The last two end the returned ValueTask, as the async mock reports a refused send.
+    private static ValueTask<AsyncKafkaFuture<RecordMetadata>> Refused(Exception refused) =>
+        new ValueTask<AsyncKafkaFuture<RecordMetadata>>(Task.FromException<AsyncKafkaFuture<RecordMetadata>>(refused));
+
     // Not async, so with two built-in serializers a serializer throw stays synchronous and no state machine runs.
     private ValueTask<AsyncKafkaFuture<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
@@ -130,16 +167,6 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         CancellationToken cancellationToken,
         IAsyncCallback? asyncCallback = null)
     {
-        // Java's doSend checks for a closed producer before it serializes.
-        _native.ThrowIfClosed();
-
-        Exception? refused = _native.MockSendRefusal();
-        if (refused is not null)
-        {
-            return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(
-                Task.FromException<AsyncKafkaFuture<RecordMetadata>>(refused));
-        }
-
         if (_awaits)
         {
             return SendAwaited(record, callback, cancellationToken, asyncCallback);

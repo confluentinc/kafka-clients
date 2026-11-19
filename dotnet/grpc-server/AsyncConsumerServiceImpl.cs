@@ -40,6 +40,8 @@ internal sealed class AsyncConsumerServiceImpl
 
     private readonly CallbackLog _callbackLog = new CallbackLog();
 
+    private readonly ConcurrentDictionary<ulong, ListenerAction> _listenerActions = new ConcurrentDictionary<ulong, ListenerAction>();
+
     private readonly GroupMetadataStore _groupMetadata;
 
     private long _nextId;
@@ -107,7 +109,7 @@ internal sealed class AsyncConsumerServiceImpl
                     .ConfigureAwait(false);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.CreateConsumerResponse { ConsumerId = 0, Error = Translate.ToProto(ex) };
         }
@@ -126,6 +128,12 @@ internal sealed class AsyncConsumerServiceImpl
             SubscriptionPattern pattern = new SubscriptionPattern(request.Pattern);
             if (request.WithListener)
             {
+                if (TakeListenerAction(request.ConsumerId) is (IAsyncConsumer<byte[], byte[]> consumer, ListenerAction action))
+                {
+                    AsyncActionLoggingRebalanceListener scripted = new AsyncActionLoggingRebalanceListener(_callbackLog, request.ConsumerId, consumer, action);
+                    return RunStatus(request.ConsumerId, c => c.Subscribe(pattern, scripted));
+                }
+
                 LoggingRebalanceListener listener = new LoggingRebalanceListener(_callbackLog, request.ConsumerId);
                 return RunStatus(request.ConsumerId, c => c.Subscribe(pattern, listener));
             }
@@ -136,6 +144,12 @@ internal sealed class AsyncConsumerServiceImpl
         List<string> topics = new List<string>(request.Topics);
         if (request.WithListener)
         {
+            if (TakeListenerAction(request.ConsumerId) is (IAsyncConsumer<byte[], byte[]> consumer, ListenerAction action))
+            {
+                AsyncActionLoggingRebalanceListener scripted = new AsyncActionLoggingRebalanceListener(_callbackLog, request.ConsumerId, consumer, action);
+                return RunStatus(request.ConsumerId, c => c.Subscribe(topics, scripted));
+            }
+
             LoggingRebalanceListener listener = new LoggingRebalanceListener(_callbackLog, request.ConsumerId);
             return RunStatus(request.ConsumerId, c => c.Subscribe(topics, listener));
         }
@@ -164,7 +178,7 @@ internal sealed class AsyncConsumerServiceImpl
             try
             {
                 ConsumerRecords<byte[], byte[]> polled =
-                    await entry.Consumer.Poll(TimeSpan.FromMilliseconds(request.TimeoutMs)).ConfigureAwait(false);
+                    await entry.Consumer.Poll(Translate.DurationOfMs(request.TimeoutMs)).ConfigureAwait(false);
                 foreach (ConsumerRecord<byte[], byte[]> record in polled)
                 {
                     records.Records.Add(Translate.RecordToProto(record));
@@ -177,7 +191,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return new Proto.PollResponse { Records = records };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.PollResponse { Error = Translate.ToProto(ex) };
         }
@@ -188,8 +202,7 @@ internal sealed class AsyncConsumerServiceImpl
         {
             TimeSpan? timeout = Translate.ConsumerTimeout(request.HasTimeoutMs, request.TimeoutMs);
 
-            // Empty offsets => commit the current consumed positions; otherwise commit these.
-            if (request.Offsets.Count > 0)
+            if (request.Offsets.Count > 0 || request.WithOffsets)
             {
                 Dictionary<TopicPartition, OffsetAndMetadata> offsets = Translate.ProtoOffsetsToDictionary(request.Offsets);
                 return timeout.HasValue ? c.Commit(offsets, timeout.Value) : c.Commit(offsets);
@@ -206,7 +219,7 @@ internal sealed class AsyncConsumerServiceImpl
 
         return RunStatus(request.ConsumerId, c =>
         {
-            if (request.Offsets.Count > 0)
+            if (request.Offsets.Count > 0 || request.WithOffsets)
             {
                 // This overload honours a null callback (Java's commitAsync(Map, null)).
                 return c.CommitAsync(Translate.ProtoOffsetsToDictionary(request.Offsets), callback);
@@ -253,7 +266,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return new Proto.CommittedResponse { Offsets = map };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.CommittedResponse { Error = Translate.ToProto(ex) };
         }
@@ -286,7 +299,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return new Proto.PositionResponse { Offset = offset };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.PositionResponse { Error = Translate.ToProto(ex) };
         }
@@ -366,7 +379,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return new Proto.OffsetAndTimestampResponse { Offsets = map };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.OffsetAndTimestampResponse { Error = Translate.ToProto(ex) };
         }
@@ -399,7 +412,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return response;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.PartitionsForResponse { Error = Translate.ToProto(ex) };
         }
@@ -439,7 +452,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return new Proto.ListTopicsResponse { Topics = listing };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.ListTopicsResponse { Error = Translate.ToProto(ex) };
         }
@@ -477,7 +490,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return new Proto.MetricsResponse { Metrics = list };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.MetricsResponse { Error = Translate.ToProto(ex) };
         }
@@ -509,7 +522,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return new Proto.SubscriptionResponse { Topics = topics };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.SubscriptionResponse { Error = Translate.ToProto(ex) };
         }
@@ -542,7 +555,7 @@ internal sealed class AsyncConsumerServiceImpl
                 GroupMetadata = Translate.GroupMetadataToProto(groupMetadata),
             };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.GroupMetadataResponse { Error = Translate.ToProto(ex) };
         }
@@ -603,6 +616,11 @@ internal sealed class AsyncConsumerServiceImpl
             }
 
             _consumers.TryRemove(request.ConsumerId, out _);
+            if (!Translate.IsBindingError(ex))
+            {
+                throw;
+            }
+
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
     }
@@ -630,7 +648,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return Translate.CurrentLagResponse(lag);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.CurrentLagResponse { Error = Translate.ToProto(ex) };
         }
@@ -640,6 +658,35 @@ internal sealed class AsyncConsumerServiceImpl
     // their consumer, as in Python.
     public override Task<Proto.CallbackLogResponse> GetCallbackLog(Proto.CallbackLogRequest request, ServerCallContext context) =>
         Task.FromResult(_callbackLog.Response(request.ConsumerId));
+
+    public override Task<Proto.StatusResponse> SetListenerAction(Proto.ListenerActionRequest request, ServerCallContext context)
+    {
+        if (Get(request.ConsumerId) is null)
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownConsumer(request.ConsumerId) });
+        }
+
+        ListenerAction? action;
+        try
+        {
+            action = ListenerAction.FromRequest(request);
+        }
+        catch (Exception ex) when (Translate.IsBindingError(ex))
+        {
+            return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
+        }
+
+        if (action is null)
+        {
+            _listenerActions.TryRemove(request.ConsumerId, out _);
+        }
+        else
+        {
+            _listenerActions[request.ConsumerId] = action;
+        }
+
+        return Task.FromResult(new Proto.StatusResponse());
+    }
 
     private static bool IsEmptyConfig(IReadOnlyDictionary<string, string> config)
     {
@@ -670,6 +717,16 @@ internal sealed class AsyncConsumerServiceImpl
         return result;
     }
 
+    private (IAsyncConsumer<byte[], byte[]>, ListenerAction)? TakeListenerAction(ulong consumerId)
+    {
+        if (_listenerActions.TryRemove(consumerId, out ListenerAction? action) && Get(consumerId) is ConsumerEntry entry)
+        {
+            return (entry.Consumer, action);
+        }
+
+        return null;
+    }
+
     private ConsumerEntry? Get(ulong consumerId) =>
         _consumers.TryGetValue(consumerId, out ConsumerEntry? entry) ? entry : null;
 
@@ -695,7 +752,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
@@ -732,7 +789,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return new Proto.LongOffsetsResponse { Offsets = map };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.LongOffsetsResponse { Error = Translate.ToProto(ex) };
         }
@@ -766,7 +823,7 @@ internal sealed class AsyncConsumerServiceImpl
 
             return new Proto.TopicPartitionListResponse { Partitions = list };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.TopicPartitionListResponse { Error = Translate.ToProto(ex) };
         }

@@ -50,6 +50,23 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     private readonly AsyncDeserializerCall<TValue> _value;
 
     /// <summary>
+    /// Creates a broker-free mock consumer with the default reset strategy, <c>"latest"</c>: the three-argument
+    /// constructor with <c>"latest"</c>.
+    /// </summary>
+    /// <param name="keyDeserializer">
+    /// Deserializer for record keys, called or awaited as <see cref="AsyncKafkaConsumer{TKey, TValue}"/> does.
+    /// </param>
+    /// <param name="valueDeserializer">Deserializer for record values, as for keys.</param>
+    /// <exception cref="ConfigException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
+    /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/>.
+    /// </exception>
+    public AsyncMockConsumer(IAsyncDeserializer<TKey> keyDeserializer, IAsyncDeserializer<TValue> valueDeserializer)
+        : this(keyDeserializer, valueDeserializer, NativeConsumer.DefaultOffsetResetStrategy)
+    {
+    }
+
+    /// <summary>
     /// Creates a broker-free mock consumer whose <see cref="Poll"/> decodes the records queued by
     /// <see cref="AddRecord"/> with the two asynchronous deserializers, which it never disposes.
     /// </summary>
@@ -59,17 +76,20 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <param name="valueDeserializer">Deserializer for record values, as for keys.</param>
     /// <param name="autoOffsetReset">
     /// The reset-strategy name (<c>"earliest"</c> / <c>"latest"</c> / <c>"none"</c> /
-    /// <c>"by_duration:&lt;ISO-8601&gt;"</c>), or <see langword="null"/> for the default
-    /// (<c>"latest"</c>).
+    /// <c>"by_duration:&lt;ISO-8601&gt;"</c>).
     /// </param>
     /// <exception cref="ConfigException">
     /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
     /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/>.
     /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="autoOffsetReset"/> is <see langword="null"/> ("Auto offset reset strategy is null", as
+    /// Java's <c>MockConsumer(String)</c>) or not a valid strategy.
+    /// </exception>
     public AsyncMockConsumer(
         IAsyncDeserializer<TKey> keyDeserializer,
         IAsyncDeserializer<TValue> valueDeserializer,
-        string? autoOffsetReset = null)
+        string autoOffsetReset)
     {
         IAsyncDeserializer<TKey> key = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
         IAsyncDeserializer<TValue> value = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
@@ -281,7 +301,10 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     public IReadOnlyCollection<TopicPartition> Paused() => _native.Paused();
 
     /// <inheritdoc/>
-    public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
+    public void EnforceRebalance() => _native.EnforceRebalance(null);
+
+    /// <inheritdoc/>
+    public void EnforceRebalance(string? reason) => _native.EnforceRebalance(reason);
 
     /// <inheritdoc/>
     public Task CommitAsync(CancellationToken cancellationToken = default) =>
@@ -294,7 +317,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <inheritdoc/>
     public Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        IOffsetCommitCallback? callback = null,
+        IOffsetCommitCallback? callback,
         CancellationToken cancellationToken = default) =>
         _native.CommitAsyncWithCallback(offsets, callback, cancellationToken);
 
@@ -311,9 +334,6 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
 
     /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
-
-    /// <inheritdoc/>
-    public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
 
     /// <summary>
     /// Sets the beginning offset of a partition, used when <see cref="SeekToBeginning"/> resets it (Java
@@ -393,8 +413,9 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <c>MockConsumer.updateDurationOffsets(Map)</c>).
     /// </summary>
     /// <param name="newOffsets">The offset of each partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="newOffsets"/> is null.</exception>
-    /// <exception cref="ArgumentException">A partition in <paramref name="newOffsets"/> has a null topic.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="newOffsets"/> is null, or a partition in it has a null topic.
+    /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
         _native.UpdateDurationOffsets(newOffsets);

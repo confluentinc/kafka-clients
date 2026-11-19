@@ -272,6 +272,9 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
 Runnable producer, consumer and admin examples, blocking and async, are in
 [dotnet/examples](https://github.com/confluentinc/kafka-clients/tree/master/dotnet/examples).
 
+The verifiable producer and consumer, which run Kafka's system tests against this client, are in
+[dotnet/tools/VerifiableClients](https://github.com/confluentinc/kafka-clients/tree/master/dotnet/tools/VerifiableClients).
+
 ## License
 
 Apache License 2.0. The source is at https://github.com/confluentinc/kafka-clients.

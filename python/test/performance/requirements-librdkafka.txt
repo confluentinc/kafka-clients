@@ -1,4 +1,4 @@
-# The librdkafka venv of the Python perf benchmarks (`make init-venv-librdkafka`,
+# The librdkafka venv of the Python perf benchmarks (`make -C python venv-librdkafka`,
 # venv-librdkafka/ at the repo root). It holds the PyPI confluent-kafka client
 # for the CLIENT_VERSION=2 baseline and for librdkafka_helpers.py (topic
 # recreation, end-of-run verification). It must not share a venv with this

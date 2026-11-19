@@ -175,13 +175,13 @@ internal sealed partial class NativeAdminClient
             {
                 if (entry.Key is null)
                 {
-                    throw new ArgumentException("The configs map must not contain a null resource.", nameof(configs));
+                    throw new ArgumentNullException(nameof(configs), "configs must not contain null");
                 }
 
                 AdminStrings.Validate(entry.Key.Name(), nameof(configs));
                 if (entry.Value is null)
                 {
-                    throw new ArgumentException($"The operations for '{entry.Key}' must not be null.", nameof(configs));
+                    throw new ArgumentNullException(nameof(configs), "configs must not contain null");
                 }
 
                 if (!merged.TryGetValue(entry.Key, out List<AlterConfigOp>? ops))
@@ -195,8 +195,7 @@ internal sealed partial class NativeAdminClient
                 {
                     if (op is null)
                     {
-                        throw new ArgumentException(
-                            $"The operations for '{entry.Key}' must not contain a null element.", nameof(configs));
+                        throw new ArgumentNullException(nameof(configs), "configs must not contain null");
                     }
 
                     AdminStrings.Validate(op.ConfigEntry().Name(), nameof(configs));
@@ -383,7 +382,7 @@ internal sealed partial class NativeAdminClient
         {
             if (resource is null)
             {
-                throw new ArgumentException("The resources must not contain a null element.", parameterName);
+                throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
             }
 
             AdminStrings.Validate(resource.Name(), parameterName);

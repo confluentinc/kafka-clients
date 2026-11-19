@@ -96,7 +96,7 @@ internal sealed class AsyncAdminServiceImpl : Proto.AdminService.AdminServiceBas
         {
             if (request.HasTimeoutMs)
             {
-                await admin.Close(TimeSpan.FromMilliseconds(request.TimeoutMs)).ConfigureAwait(false);
+                await admin.Close(Translate.DurationOfMs(request.TimeoutMs)).ConfigureAwait(false);
             }
             else
             {

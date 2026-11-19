@@ -195,7 +195,7 @@ internal sealed partial class NativeAdminClient
         {
             if (topic is null)
             {
-                throw new ArgumentException("The topics to create must not contain a null element.", nameof(newTopics));
+                throw new ArgumentNullException(nameof(newTopics), "newTopics must not contain null");
             }
 
             AdminStrings.Validate(topic.Name(), nameof(newTopics));
@@ -206,8 +206,8 @@ internal sealed partial class NativeAdminClient
                     AdminStrings.Validate(config.Key, nameof(newTopics));
                     if (config.Value is null)
                     {
-                        throw new ArgumentException(
-                            "The topics to create must not contain a null configuration value.", nameof(newTopics));
+                        throw new ArgumentNullException(
+                            nameof(newTopics), "newTopics must not contain a NewTopic with a null config value");
                     }
 
                     AdminStrings.Validate(config.Value, nameof(newTopics));
@@ -841,7 +841,7 @@ internal sealed partial class NativeAdminClient
     private static IntPtr NewTopicNameList(
         IReadOnlyCollection<string> topicNames, string parameterName, List<Utf8Marshal.PinnedUtf8String> pins)
     {
-        List<string> names = DistinctNames(topicNames, "topic names", parameterName);
+        List<string> names = DistinctNames(topicNames, parameterName);
         IntPtr[] elements = new IntPtr[names.Count];
         for (int i = 0; i < elements.Length; i++)
         {

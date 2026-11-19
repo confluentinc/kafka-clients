@@ -711,18 +711,18 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike(() => sync.AlterReplicaLogDirs(null!), () => async.AlterReplicaLogDirs(null!));
         AssertThrowAlike(() => sync.DescribeReplicaLogDirs(null!), () => async.DescribeReplicaLogDirs(null!));
 
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.DescribeConfigs(new ConfigResource[] { null! }),
             () => async.DescribeConfigs(new ConfigResource[] { null! }));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> { [resource] = null! }),
             () => async.IncrementalAlterConfigs(
                 new Dictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> { [resource] = null! }));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = null! }),
             () => async.AlterReplicaLogDirs(new Dictionary<TopicPartitionReplica, string> { [replica] = null! }));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.DescribeReplicaLogDirs(new TopicPartitionReplica[] { null! }),
             () => async.DescribeReplicaLogDirs(new TopicPartitionReplica[] { null! }));
     }
@@ -960,18 +960,18 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike(() => sync.AlterPartitionReassignments(null!), () => async.AlterPartitionReassignments(null!));
         AssertThrowAlike(() => sync.ListOffsets(null!), () => async.ListOffsets(null!));
 
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.ElectLeaders(ElectionType.PREFERRED, new[] { nullTopic }),
             () => async.ElectLeaders(ElectionType.PREFERRED, new[] { nullTopic }));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.AlterPartitionReassignments(
                 new Dictionary<TopicPartition, NewPartitionReassignment?> { [nullTopic] = new NewPartitionReassignment(new[] { 0 }) }),
             () => async.AlterPartitionReassignments(
                 new Dictionary<TopicPartition, NewPartitionReassignment?> { [nullTopic] = new NewPartitionReassignment(new[] { 0 }) }));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.ListPartitionReassignments(new[] { nullTopic }),
             () => async.ListPartitionReassignments(new[] { nullTopic }));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullTopic] = OffsetSpec.Latest() }),
             () => async.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullTopic] = OffsetSpec.Latest() }));
     }
@@ -1328,13 +1328,13 @@ public sealed class PublicAdminP14DifferentialTests
             () => async.ListGroups(new ListGroupsOptions().InGroupStates(new[] { (GroupState)(-1) })));
 
         AssertThrowAlike(() => sync.DescribeConsumerGroups(null!), () => async.DescribeConsumerGroups(null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.DescribeConsumerGroups(nullGroup!), () => async.DescribeConsumerGroups(nullGroup!));
         AssertThrowAlike(() => sync.DescribeClassicGroups(null!), () => async.DescribeClassicGroups(null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.DescribeClassicGroups(nullGroup!), () => async.DescribeClassicGroups(nullGroup!));
         AssertThrowAlike(() => sync.DeleteConsumerGroups(null!), () => async.DeleteConsumerGroups(null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.DeleteConsumerGroups(nullGroup!), () => async.DeleteConsumerGroups(nullGroup!));
 
         AssertThrowAlike(
@@ -1342,12 +1342,12 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike(
             () => sync.ListConsumerGroupOffsets((IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec>)null!),
             () => async.ListConsumerGroupOffsets((IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec>)null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.ListConsumerGroupOffsets(
                 new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal) { ["diff-ae-group"] = null! }),
             () => async.ListConsumerGroupOffsets(
                 new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal) { ["diff-ae-group"] = null! }));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.ListConsumerGroupOffsets(
                 new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                 {
@@ -1371,16 +1371,20 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike(
             () => sync.AlterConsumerGroupOffsets("diff-ae-group", null!),
             () => async.AlterConsumerGroupOffsets("diff-ae-group", null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.AlterConsumerGroupOffsets(
                 "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [nullTopic] = new OffsetAndMetadata(0L) }),
             () => async.AlterConsumerGroupOffsets(
                 "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [nullTopic] = new OffsetAndMetadata(0L) }));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.AlterConsumerGroupOffsets(
                 "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = null! }),
             () => async.AlterConsumerGroupOffsets(
                 "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = null! }));
+        ArgumentNullException nullValue = Assert.Throws<ArgumentNullException>(
+            () => sync.AlterConsumerGroupOffsets(
+                "diff-ae-group", new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = null! }));
+        Assert.Equal(new ArgumentNullException("offsets", "offsets must not contain null").Message, nullValue.Message);
 
         AssertThrowAlike(
             () => sync.DeleteConsumerGroupOffsets(null!, new[] { partition }),
@@ -1388,7 +1392,7 @@ public sealed class PublicAdminP14DifferentialTests
         AssertThrowAlike(
             () => sync.DeleteConsumerGroupOffsets("diff-ae-group", null!),
             () => async.DeleteConsumerGroupOffsets("diff-ae-group", null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.DeleteConsumerGroupOffsets("diff-ae-group", new[] { nullTopic }),
             () => async.DeleteConsumerGroupOffsets("diff-ae-group", new[] { nullTopic }));
     }
@@ -1529,11 +1533,11 @@ public sealed class PublicAdminP14DifferentialTests
         ClientQuotaAlteration[] nulAlteration = { QuotaAlteration(QuotaEntity("diff-ak"), "producer\0byte_rate", 1d) };
 
         AssertThrowAlike(() => sync.CreateAcls(null!), () => async.CreateAcls(null!));
-        AssertThrowAlike<ArgumentException>(() => sync.CreateAcls(nullBinding!), () => async.CreateAcls(nullBinding!));
+        AssertThrowAlike(() => sync.CreateAcls(nullBinding!), () => async.CreateAcls(nullBinding!));
         AssertThrowAlike<ArgumentException>(() => sync.CreateAcls(nulBinding), () => async.CreateAcls(nulBinding));
 
         AssertThrowAlike(() => sync.DeleteAcls(null!), () => async.DeleteAcls(null!));
-        AssertThrowAlike<ArgumentException>(() => sync.DeleteAcls(nullFilter!), () => async.DeleteAcls(nullFilter!));
+        AssertThrowAlike(() => sync.DeleteAcls(nullFilter!), () => async.DeleteAcls(nullFilter!));
         AssertThrowAlike<ArgumentException>(() => sync.DeleteAcls(nulFilter), () => async.DeleteAcls(nulFilter));
 
         AssertThrowAlike(() => sync.DescribeAcls(null!), () => async.DescribeAcls(null!));
@@ -1544,16 +1548,16 @@ public sealed class PublicAdminP14DifferentialTests
             () => sync.DescribeClientQuotas(nulQuotaFilter), () => async.DescribeClientQuotas(nulQuotaFilter));
 
         AssertThrowAlike(() => sync.AlterClientQuotas(null!), () => async.AlterClientQuotas(null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.AlterClientQuotas(nullAlteration!), () => async.AlterClientQuotas(nullAlteration!));
         AssertThrowAlike<ArgumentException>(
             () => sync.AlterClientQuotas(nulAlteration), () => async.AlterClientQuotas(nulAlteration));
 
         // The null-element and request-string guards are the core's, with its messages.
-        AssertArgument("The ACL bindings must not contain a null element.", "acls", () => sync.CreateAcls(nullBinding!));
-        AssertArgument("The ACL filters must not contain a null element.", "filters", () => sync.DeleteAcls(nullFilter!));
-        AssertArgument(
-            "The client quota alterations must not contain a null element.",
+        AssertNullArgument("acls must not contain null", "acls", () => sync.CreateAcls(nullBinding!));
+        AssertNullArgument("filters must not contain null", "filters", () => sync.DeleteAcls(nullFilter!));
+        AssertNullArgument(
+            "entries must not contain null",
             "entries",
             () => sync.AlterClientQuotas(nullAlteration!));
         AssertArgument(AdminStrings.InvalidStringMessage, "acls", () => sync.CreateAcls(nulBinding));
@@ -1837,20 +1841,20 @@ public sealed class PublicAdminP14DifferentialTests
             () => sync.DescribeUserScramCredentials(nulUser), () => async.DescribeUserScramCredentials(nulUser));
 
         AssertThrowAlike(() => sync.AlterUserScramCredentials(null!), () => async.AlterUserScramCredentials(null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.AlterUserScramCredentials(nullAlteration!), () => async.AlterUserScramCredentials(nullAlteration!));
         AssertThrowAlike<ArgumentException>(
             () => sync.AlterUserScramCredentials(nulAlteration), () => async.AlterUserScramCredentials(nulAlteration));
 
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.CreateDelegationToken(noRenewers), () => async.CreateDelegationToken(noRenewers));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.CreateDelegationToken(nullRenewer), () => async.CreateDelegationToken(nullRenewer));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.DescribeDelegationToken(nullOwner), () => async.DescribeDelegationToken(nullOwner));
 
         AssertThrowAlike(() => sync.UpdateFeatures(null!), () => async.UpdateFeatures(null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.UpdateFeatures(nullUpdate), () => async.UpdateFeatures(nullUpdate));
         AssertThrowAlike<ArgumentException>(() => sync.UpdateFeatures(nulFeature), () => async.UpdateFeatures(nulFeature));
 
@@ -1862,27 +1866,27 @@ public sealed class PublicAdminP14DifferentialTests
         // parameter.
         Assert.Equal("alterations", Assert.Throws<ArgumentNullException>(() => sync.AlterUserScramCredentials(null!)).ParamName);
         Assert.Equal("featureUpdates", Assert.Throws<ArgumentNullException>(() => sync.UpdateFeatures(null!)).ParamName);
-        AssertArgument(
-            "The SCRAM credential alterations must not contain a null element.",
+        AssertNullArgument(
+            "alterations must not contain null",
             "alterations",
             () => sync.AlterUserScramCredentials(nullAlteration!));
-        AssertArgument(
-            "The feature updates must not contain a null update.", "featureUpdates", () => sync.UpdateFeatures(nullUpdate));
+        AssertNullArgument(
+            "featureUpdates must not contain null", "featureUpdates", () => sync.UpdateFeatures(nullUpdate));
         AssertArgument(AdminStrings.InvalidStringMessage, "users", () => sync.DescribeUserScramCredentials(nulUser));
         AssertArgument(
             AdminStrings.InvalidStringMessage, "alterations", () => sync.AlterUserScramCredentials(nulAlteration));
         AssertArgument(AdminStrings.InvalidStringMessage, "featureUpdates", () => sync.UpdateFeatures(nulFeature));
         AssertArgument(AdminStrings.InvalidStringMessage, "userName", () => syncResult.Description("diff\0ar"));
-        AssertArgument(
-            "CreateDelegationTokenOptions.Renewers must not be null; use an empty list.",
+        AssertNullArgument(
+            "CreateDelegationTokenOptions.Renewers must not be null",
             "options",
             () => sync.CreateDelegationToken(noRenewers));
-        AssertArgument(
-            "CreateDelegationTokenOptions.Renewers must not contain a null element.",
+        AssertNullArgument(
+            "CreateDelegationTokenOptions.Renewers must not contain null",
             "options",
             () => sync.CreateDelegationToken(nullRenewer));
-        AssertArgument(
-            "DescribeDelegationTokenOptions.Owners must not contain a null element.",
+        AssertNullArgument(
+            "DescribeDelegationTokenOptions.Owners must not contain null",
             "options",
             () => sync.DescribeDelegationToken(nullOwner));
     }
@@ -2062,21 +2066,21 @@ public sealed class PublicAdminP14DifferentialTests
         ListTransactionsOptions nulPattern = new ListTransactionsOptions().FilterOnTransactionalIdPattern("diff\0pg");
 
         AssertThrowAlike(() => sync.FenceProducers(null!), () => async.FenceProducers(null!));
-        AssertThrowAlike<ArgumentException>(() => sync.FenceProducers(nullId), () => async.FenceProducers(nullId));
+        AssertThrowAlike(() => sync.FenceProducers(nullId), () => async.FenceProducers(nullId));
         AssertThrowAlike<ArgumentException>(() => sync.FenceProducers(nulId), () => async.FenceProducers(nulId));
 
         AssertThrowAlike(() => sync.DescribeTransactions(null!), () => async.DescribeTransactions(null!));
-        AssertThrowAlike<ArgumentException>(() => sync.DescribeTransactions(nullId), () => async.DescribeTransactions(nullId));
+        AssertThrowAlike(() => sync.DescribeTransactions(nullId), () => async.DescribeTransactions(nullId));
         AssertThrowAlike<ArgumentException>(() => sync.DescribeTransactions(nulId), () => async.DescribeTransactions(nulId));
 
         AssertThrowAlike(() => sync.DescribeProducers(null!), () => async.DescribeProducers(null!));
-        AssertThrowAlike<ArgumentException>(() => sync.DescribeProducers(nullTopic), () => async.DescribeProducers(nullTopic));
+        AssertThrowAlike(() => sync.DescribeProducers(nullTopic), () => async.DescribeProducers(nullTopic));
         AssertThrowAlike<ArgumentException>(() => sync.DescribeProducers(nulTopic), () => async.DescribeProducers(nulTopic));
 
         AssertThrowAlike<ArgumentException>(() => sync.ListTransactions(nulPattern), () => async.ListTransactions(nulPattern));
 
         AssertThrowAlike(() => sync.AbortTransaction(null!), () => async.AbortTransaction(null!));
-        AssertThrowAlike<ArgumentException>(
+        AssertThrowAlike(
             () => sync.AbortTransaction(nullTopicSpec), () => async.AbortTransaction(nullTopicSpec));
         AssertThrowAlike<ArgumentException>(
             () => sync.AbortTransaction(nulTopicSpec), () => async.AbortTransaction(nulTopicSpec));
@@ -2120,16 +2124,16 @@ public sealed class PublicAdminP14DifferentialTests
         Assert.Equal(
             "TransactionalId `null` was not included in the request",
             Assert.Throws<IllegalArgumentException>(() => syncDescribed.Description(null!)).Message);
-        AssertArgument(
-            "The transactional ids must not contain a null element.", "transactionalIds", () => sync.FenceProducers(nullId));
-        AssertArgument(
-            "The transactional ids must not contain a null element.", "transactionalIds", () => sync.DescribeTransactions(nullId));
-        AssertArgument(
-            "The partitions must not contain a topic partition with a null topic.",
+        AssertNullArgument(
+            "transactionalIds must not contain null", "transactionalIds", () => sync.FenceProducers(nullId));
+        AssertNullArgument(
+            "transactionalIds must not contain null", "transactionalIds", () => sync.DescribeTransactions(nullId));
+        AssertNullArgument(
+            "partitions must not contain a TopicPartition with a null topic",
             "partitions",
             () => sync.DescribeProducers(nullTopic));
-        AssertArgument(
-            "The abort transaction spec must not carry a topic partition with a null topic.",
+        AssertNullArgument(
+            "spec must not have a TopicPartition with a null topic",
             "spec",
             () => sync.AbortTransaction(nullTopicSpec));
         AssertArgument(AdminStrings.InvalidStringMessage, "transactionalIds", () => sync.FenceProducers(nulId));
@@ -2155,6 +2159,13 @@ public sealed class PublicAdminP14DifferentialTests
         ArgumentException failure = Assert.Throws<ArgumentException>(call);
         Assert.Equal(parameterName, failure.ParamName);
         Assert.Equal(new ArgumentException(message, parameterName).Message, failure.Message);
+    }
+
+    private static void AssertNullArgument(string message, string parameterName, Action call)
+    {
+        ArgumentNullException failure = Assert.Throws<ArgumentNullException>(call);
+        Assert.Equal(parameterName, failure.ParamName);
+        Assert.Equal(new ArgumentNullException(parameterName, message).Message, failure.Message);
     }
 
     private static async Task<object?> Agree(FutureProbe sync, FutureProbe async)

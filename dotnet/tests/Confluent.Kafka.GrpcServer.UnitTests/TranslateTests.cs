@@ -13,11 +13,13 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Requests;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 
 using Confluent.Kafka.Producer;
@@ -215,13 +217,126 @@ public sealed class TranslateTests
     public static TheoryData<Exception> ExceptionsWithoutAnId() => new TheoryData<Exception>
     {
         new InvalidOperationException("the admin result produced no value"),
-        new ObjectDisposedException("ConsumerHandle"),
+        new ObjectDisposedException("CancellationTokenSource"),
         new NotSupportedException("not supported"),
         new System.TimeoutException("Timeout expired after 500ms"),
         new NoSuchElementException("no such element"),
         new IndexOutOfBoundsException("index 3 out of bounds"),
         new FormatException("not a number"),
     };
+
+    [Fact]
+    public void ATopicAuthorizationException_CarriesItsTopicsSorted()
+    {
+        Proto.KafkaError proto = Translate.ToProto(new TopicAuthorizationException(new[] { "b", "a" }));
+
+        Assert.Equal(new[] { "a", "b" }, proto.UnauthorizedTopics);
+        Assert.False(proto.BareKafkaError);
+        Assert.Null(proto.Cause);
+    }
+
+    [Fact]
+    public void AnInvalidTopicException_CarriesItsTopicsSorted()
+    {
+        Proto.KafkaError proto = Translate.ToProto(new InvalidTopicException("invalid", new[] { "y", "x" }));
+
+        Assert.Equal(new[] { "x", "y" }, proto.InvalidTopics);
+    }
+
+    [Fact]
+    public void AGroupAuthorizationException_CarriesItsGroupId()
+    {
+        Proto.KafkaError proto = Translate.ToProto(new GroupAuthorizationException("denied", "g"));
+
+        Assert.Equal("g", proto.GroupId);
+    }
+
+    [Fact]
+    public void ANoOffsetForPartitionException_CarriesItsPartitionsInOrder()
+    {
+        Proto.KafkaError proto = Translate.ToProto(new NoOffsetForPartitionException(
+            new[] { new TopicPartition("t", 1), new TopicPartition("t", 0) }));
+
+        Assert.Equal(new[] { ("t", 1), ("t", 0) }, Pairs(proto.Partitions));
+    }
+
+    [Fact]
+    public void AConsumerOffsetOutOfRangeException_CarriesItsOffsets()
+    {
+        Proto.KafkaError proto = Translate.ToProto(new Consumer.OffsetOutOfRangeException(
+            new Dictionary<TopicPartition, long> { [new TopicPartition("t", 2)] = 42 }));
+
+        Proto.PartitionOffset entry = Assert.Single(proto.OffsetOutOfRangePartitions);
+        Assert.Equal(("t", 2, 42L), (entry.Partition.Topic, entry.Partition.Partition, entry.Offset));
+    }
+
+    [Fact]
+    public void ABareKafkaException_IsBare_AnUnknownServerException_IsNot()
+    {
+        Assert.True(Translate.ToProto(new KafkaException("bare")).BareKafkaError);
+        Assert.False(Translate.ToProto(new UnknownServerException("unknown")).BareKafkaError);
+    }
+
+    [Fact]
+    public void ACauseWithAnId_IsCarriedOneLevelDeep()
+    {
+        KafkaException cause = new KafkaException("inner", new IllegalStateException("innermost"));
+        Proto.KafkaError proto = Translate.ToProto(new KafkaException("outer", cause));
+
+        Assert.NotNull(proto.Cause);
+        Assert.Equal((-1, "inner", true), (proto.Cause.Code, proto.Cause.Message, proto.Cause.BareKafkaError));
+    }
+
+    [Fact]
+    public void ACauseWithNoId_IsNotCarried()
+    {
+        Proto.KafkaError proto = Translate.ToProto(new KafkaException("outer", new InvalidOperationException("plain")));
+
+        Assert.Null(proto.Cause);
+    }
+
+    [Fact]
+    public void DurationOfMs_IsExactWholeMilliseconds()
+    {
+        Assert.Equal(TimeSpan.FromTicks(1234 * TimeSpan.TicksPerMillisecond), Translate.DurationOfMs(1234));
+        Assert.Equal(TimeSpan.Zero, Translate.DurationOfMs(0));
+        Assert.Equal(TimeSpan.FromTicks(-TimeSpan.TicksPerMillisecond), Translate.DurationOfMs(-1));
+    }
+
+    [Fact]
+    public void DurationOfMs_BeyondATimeSpan_IsItsBound()
+    {
+        Assert.Equal(TimeSpan.MaxValue, Translate.DurationOfMs(long.MaxValue));
+        Assert.Equal(TimeSpan.MinValue, Translate.DurationOfMs(long.MinValue));
+    }
+
+    [Fact]
+    public void IsBindingError_IsTrueForAClassWithAnIdOrANetPrecondition()
+    {
+        Assert.True(Translate.IsBindingError(new KafkaException("bare")));
+        Assert.True(Translate.IsBindingError(new IllegalStateException("closed")));
+        Assert.True(Translate.IsBindingError(new ExecutionException(new IllegalArgumentException("inner"))));
+        Assert.True(Translate.IsBindingError(new ArgumentException("a .NET-only precondition")));
+    }
+
+    [Fact]
+    public void IsBindingError_IsFalseForTheServerMadeFallback()
+    {
+        Assert.False(Translate.IsBindingError(new InvalidOperationException("plain")));
+        Assert.False(Translate.IsBindingError(new ArgumentNullException("topic")));
+        Assert.False(Translate.IsBindingError(new NoSuchElementException("none")));
+    }
+
+    private static (string, int)[] Pairs(IEnumerable<Proto.CallbackLogPartition> partitions)
+    {
+        List<(string, int)> pairs = new List<(string, int)>();
+        foreach (Proto.CallbackLogPartition partition in partitions)
+        {
+            pairs.Add((partition.Topic, partition.Partition));
+        }
+
+        return pairs.ToArray();
+    }
 
     private static void AssertBare(Exception error, int code) => AssertBare(error, code, error.Message);
 

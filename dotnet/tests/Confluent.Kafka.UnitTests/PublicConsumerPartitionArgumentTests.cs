@@ -216,25 +216,6 @@ public sealed class PublicConsumerPartitionArgumentTests
         }
     }
 
-    [Fact]
-    public void OnTheHandle_ANullTopic_IsRefusedAsKafkaConsumerRefusesIt()
-    {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
-        using IDisposable disposal = TestTimeout.Disposal(consumer);
-        using ConsumerHandle handle = consumer.Handle();
-
-        AssertNotAssigned(NullNotAssigned, () => handle.Seek(s_nullTopic, 0));
-        AssertNotAssigned(NullNotAssigned, () => handle.Seek(s_nullTopic, new OffsetAndMetadata(0)));
-        AssertNotAssigned(NullNotAssigned, () => handle.Pause(new[] { s_nullTopic }));
-        AssertNotAssigned(NullNotAssigned, () => handle.Resume(new[] { s_nullTopic }));
-        AssertNotAssigned(NullNotAssigned, () => handle.CurrentLag(s_nullTopic));
-        AssertNotAssigned(PositionNotAssigned, () => handle.Position(s_nullTopic));
-
-        // Java's seek checks the offset first.
-        IllegalArgumentException negative = Assert.Throws<IllegalArgumentException>(() => handle.Seek(s_nullTopic, -1));
-        Assert.Equal("seek offset must not be a negative number", negative.Message);
-    }
-
     private static void AssertNotAssigned(string message, Action call)
     {
         IllegalStateException error = Assert.Throws<IllegalStateException>(call);

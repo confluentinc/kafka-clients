@@ -18,7 +18,7 @@
 Build the client into the repository's venv, then start a broker:
 
 ```bash
-make devel-build-python        # from the repository root
+make -C python build           # from the repository root
 docker run -d --rm --name kafka -p 9092:9092 apache/kafka:4.4.0
 ```
 

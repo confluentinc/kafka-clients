@@ -132,13 +132,13 @@ public sealed class AdminP7SubmitArgumentTests
     {
         using MockAdminClient admin = MockAdminClient.Create().Build();
 
-        ArgumentException thrown = Assert.Throws<ArgumentException>(
+        ArgumentNullException thrown = Assert.Throws<ArgumentNullException>(
             () => admin.AlterUserScramCredentials(new UserScramCredentialAlteration[] { Upsert("u"), null! }));
 
         Assert.Equal("alterations", thrown.ParamName);
         Assert.Equal(
             new ArgumentException(
-                "The SCRAM credential alterations must not contain a null element.", "alterations").Message,
+                "alterations must not contain null", "alterations").Message,
             thrown.Message);
     }
 

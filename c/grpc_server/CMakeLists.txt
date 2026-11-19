@@ -13,7 +13,7 @@
 # Built in two places:
 #   - inside c/Dockerfile.grpc, which stages the default layout below
 #     (libconfluent_kafka.a in lib/, the header in include/, protos in proto/);
-#   - natively on the host by `make build-grpc-native-c`, which passes
+#   - natively on the host by `make -C c grpc-native`, which passes
 #     RUST_LIB_DIR, RUST_INCLUDE_DIR and PROTO_DIR to point at the repo tree.
 
 cmake_minimum_required(VERSION 3.16)

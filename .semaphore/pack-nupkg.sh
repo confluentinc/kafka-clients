@@ -16,8 +16,8 @@
 #
 #
 # Packs the Confluent.Kafka NuGet package with the native library of each RID, then checks it
-# with check-nupkg.py. Used by the "Release (.NET): pack" block of semaphore.yml and by
-# `make package-check-dotnet`. Must be POSIX sh, with `dotnet` (SDK 10) on PATH or in
+# with check-nupkg.py. Used by the "Release (.NET): pack" block of release.yml and by
+# `make -C dotnet package-check-dotnet`. Must be POSIX sh, with `dotnet` (SDK 10) on PATH or in
 # $HOME/.dotnet, and python3.
 #
 # Usage, from the repository root:

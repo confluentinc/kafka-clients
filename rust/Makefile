@@ -1,5 +1,6 @@
-# Rust client targets. Invoked by the repository root's cross-language
-# Makefile (`make -C rust <target>`), or directly from this directory.
+# Rust client targets: `make -C rust <target>` from the repository root, or
+# `make <target>` from this directory. The root's cross-language targets call
+# them the same way.
 #
 # Every cargo command runs from this directory: rust-toolchain.toml and
 # .cargo/config.toml (the `xtask` alias) are looked up from the current
@@ -19,14 +20,29 @@ endif
 # macOS perf p99 budget (ms), used by test-integration-perf-macos.
 MACOS_P99_LIMIT_MS ?= 150
 
+# `cargo test` through the test selection (`cargo xtask selected-cargo-test`):
+# while TEST_SELECTION names a selection file made for the working tree (the
+# root's `select-tests`), only the tests it selects run; otherwise this is
+# plain `cargo test`. `--section` names the part of the file that applies: `rust`
+# for the Rust suites, the binding's own section for its gRPC arm.
+CARGO_TEST = cargo xtask selected-cargo-test --section rust --
+CARGO_TEST_GRPC_PYTHON = cargo xtask selected-cargo-test --section python.grpc --
+CARGO_TEST_GRPC_C = cargo xtask selected-cargo-test --section c.integration --
+CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc --
+
+# The tag of the gRPC images the multilanguage arms run; tests/common/backend_pool.rs
+# reads it from the environment (see the root Makefile).
+MULTILANG_IMAGE_TAG ?= dev
+export MULTILANG_IMAGE_TAG
+
 .PHONY: build build-integration-tests build-all-features \
-	devel-build devel-build-integration-tests devel-build-all-features \
+	devel-build devel-build-integration-tests devel-build-all-features build-tests-all-features \
 	test test-all-features test-all-features-ssl test-all-features-sasl-ssl \
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
-	test-integration-perf test-integration-perf-macos producer-perf-test \
-	format-check check-generated lint doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
+	test-integration-perf test-integration-perf-macos producer-perf-test verify verify-macos \
+	format-check check-generated lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
 build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
@@ -39,8 +55,24 @@ devel-build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi
 devel-build-integration-tests:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi,integration-tests
+# The debug library the binding tests link: exactly the library unit that
+# `build-tests-all-features` builds, uplifted to target/debug/, so after the Rust
+# tests this compiles nothing. Three things make it the same unit: the `test`
+# profile (line-tables-only debug info, see Cargo.toml), no RUSTFLAGS, and a test
+# target, `integration`, whose dev-dependencies change the features of shared
+# dependencies (resolver 2), and so the library. A plain `cargo build
+# --all-features` differs in all three and compiles the library a second time.
 devel-build-all-features:
-	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features
+	cargo build --all-features --profile test --lib --test integration
+
+# The one build of the Rust verify jobs: the debug, all-features build of the
+# library, its unit and integration tests and the examples, which
+# `test-all-features` and `test-integration-perf` then reuse. It also writes the
+# generated protocol code under target/debug/build that `check-generated` reads.
+# No RUSTFLAGS: the tests run without them, and different RUSTFLAGS would make
+# cargo compile everything a second time.
+build-tests-all-features:
+	cargo test --all-features --no-run
 
 test: build
 	# --workspace, not the root package alone: `cargo test` from the root only
@@ -50,13 +82,13 @@ test: build
 	# unification is not a hazard here: only `consumer-perf` depends on the root
 	# package and it takes default features, so neither `integration-tests` nor
 	# `ffi` is activated by the extra members.
-	cargo test --workspace
+	$(CARGO_TEST) --workspace
 	# And once more with `ffi` on: `src/ffi` is behind `#[cfg(feature = "ffi")]`,
 	# so the C FFI modules' own unit tests (~500 across producer, consumer and
 	# admin) are invisible to the run above. Not `--workspace --features ffi`:
 	# `ffi` is a root-package feature the other members do not declare, so a
 	# second root-only invocation is both simpler and sufficient.
-	cargo test --features ffi
+	$(CARGO_TEST) --features ffi
 
 # The whole Rust test suite, compiled with every feature but running only the
 # native-Rust tests: unit tests, the functional integration suite, and the
@@ -66,15 +98,16 @@ test: build
 # joining a job that has no image for it.
 #
 # The feature stays ON rather than being dropped, because it is the *compile*
-# that matters: with `multilanguage-tests` off, the whole gRPC harness
-# (`backend_pool`, `backend_factory`, `multilanguage_consumer`, the two test
-# macros) is not built at all, and silently rots whenever the client API
-# changes. Compiling it here catches that immediately, for the cost of one
-# compile and no test runtime.
+# that matters: with `multilanguage-tests` off, the gRPC harness
+# (`backend_pool`, the gRPC factories, `multilanguage_consumer`,
+# `multilanguage_producer`) is not built, and the test macros expand only their
+# `__rust` arms, so the harness silently rots whenever the client API changes.
+# Compiling it here catches that immediately, for the cost of one compile and no
+# test runtime.
 #
 # Only the non-Rust backends are filtered, and only at runtime: they are the
-# ones needing prebuilt gRPC images and a container per test. Each binding's
-# own verify job owns its arm (`test-integration-grpc-python` /
+# ones needing prebuilt gRPC images and a container per test. The CI "gRPC arm"
+# jobs of each binding run them (`test-integration-grpc-python` /
 # `test-integration-grpc-c` below, driven by python/'s and c/'s
 # `test-integration`), so this job never builds Docker images it never starts.
 #
@@ -89,10 +122,13 @@ test: build
 # only, so without it a stale generator or xtask test (Critic 115 R1) stays red
 # without failing `verify`.
 #
-# Part of the root `verify` (through `test`) and of the CI `verify-rust` job.
-test-all-features: build-all-features
-	cargo test --all-features -- --skip __grpc
-	cargo test -p xtask -p generator
+# Part of the root `verify` (through `test`) and of `verify` below, and the CI
+# PLAINTEXT Rust job.
+# It builds nothing in release: no test runs a release artifact. The binding
+# test jobs reuse the same debug build (`devel-build-all-features`).
+test-all-features: build-tests-all-features
+	$(CARGO_TEST) --all-features -- --skip __grpc
+	$(CARGO_TEST) -p xtask -p generator
 
 # Functional integration tests only. The performance tests live in their own
 # `performance` cargo test target (tests/performance/main.rs), so `--test
@@ -100,10 +136,10 @@ test-all-features: build-all-features
 test-integration: build-integration-tests
 	# admin_examples_test runs the example binaries, which `--test` does not build.
 	cargo build --examples
-	cargo test --features integration-tests --test integration
+	$(CARGO_TEST) --features integration-tests --test integration
 	# The integration tests that drive crate internals live in the lib test
 	# binary (src/integration_tests), since those types are not public API.
-	cargo test --features integration-tests --lib -- integration_tests::
+	$(CARGO_TEST) --features integration-tests --lib -- integration_tests::
 
 # ── Protocol-parameterized functional integration runs ───────────────────
 #
@@ -126,16 +162,16 @@ test-integration: build-integration-tests
 # against a newer broker. It combines with INTEGRATION_TEST_PROTOCOL.
 test-integration-plaintext: build-integration-tests
 	cargo build --examples
-	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --test integration
-	INTEGRATION_TEST_PROTOCOL=plaintext cargo test --features integration-tests --lib -- integration_tests::
+	INTEGRATION_TEST_PROTOCOL=plaintext $(CARGO_TEST) --features integration-tests --test integration
+	INTEGRATION_TEST_PROTOCOL=plaintext $(CARGO_TEST) --features integration-tests --lib -- integration_tests::
 test-integration-ssl: build-integration-tests
 	cargo build --examples
-	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --test integration
-	INTEGRATION_TEST_PROTOCOL=ssl cargo test --features integration-tests --lib -- integration_tests::
+	INTEGRATION_TEST_PROTOCOL=ssl $(CARGO_TEST) --features integration-tests --test integration
+	INTEGRATION_TEST_PROTOCOL=ssl $(CARGO_TEST) --features integration-tests --lib -- integration_tests::
 test-integration-sasl-ssl: build-integration-tests
 	cargo build --examples
-	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --test integration
-	INTEGRATION_TEST_PROTOCOL=sasl_ssl cargo test --features integration-tests --lib -- integration_tests::
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(CARGO_TEST) --features integration-tests --test integration
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(CARGO_TEST) --features integration-tests --lib -- integration_tests::
 
 # ── Whole native-Rust test suite, per protocol (no format/lint/perf) ──────
 #
@@ -144,11 +180,10 @@ test-integration-sasl-ssl: build-integration-tests
 # `test = false` so it is never scheduled), but with the client connections
 # driven over the SSL / SASL_SSL listener via INTEGRATION_TEST_PROTOCOL.
 #
-# These are what the SSL / SASL_SSL CI jobs run (through the root
-# `test-rust-all-features-{ssl,sasl-ssl}`), so those jobs exercise the
+# These are what the SSL / SASL_SSL CI jobs run, so those jobs exercise the
 # entire suite over their listener rather than only the `integration` binary.
 # They deliberately OMIT format-check, clippy and the performance tail that
-# the root `verify-rust` wraps around `test-all-features`: those checks are
+# `verify` wraps around `test-all-features`: those checks are
 # protocol-independent, so running them once in the PLAINTEXT job is enough.
 # (The unit tests are protocol-independent too and so overlap the PLAINTEXT
 # run; they are kept here so a job failure points at one whole suite, not a
@@ -175,34 +210,34 @@ test-all-features-sasl-ssl:
 # `--skip __grpc_python_async`.
 #
 # The `__rust` arm is not a target here: it needs no gRPC image and already runs
-# as part of `test-all-features` / the root `verify-rust`.
+# as part of `test-all-features` / `verify`.
 #
 # These only run the tests: the binding's gRPC image must already be built,
 # which is what python/'s and c/'s `test-integration` do before calling them.
 test-integration-grpc-python:
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python
+	$(CARGO_TEST_GRPC_PYTHON) --all-features --test integration -- __grpc_python
 
 test-integration-grpc-c:
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+	$(CARGO_TEST_GRPC_C) --all-features --test integration -- __grpc_c
 
 # The same arms with each gRPC server run as a native host process instead of a
 # container (MULTILANG_BACKEND_MODE=native; see tests/common/backend_pool.rs).
-# The servers must already be built under target/grpc-native/, which the root
-# `build-grpc-native-{python,c}` do before calling these.
+# The servers must already be built under target/grpc-native/, which python/'s
+# and c/'s `test-integration-native` do before calling these.
 test-integration-grpc-python-native:
 	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python
+		$(CARGO_TEST_GRPC_PYTHON) --all-features --test integration -- __grpc_python
 
 test-integration-grpc-c-native:
 	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+		$(CARGO_TEST_GRPC_C) --all-features --test integration -- __grpc_c
 
 # ── The .NET-backend arms ─────────────────────────────────────────────────
 #
 # The same pair for the .NET binding: the container arm, run by dotnet/'s
 # `test-integration` after it builds the two .NET gRPC images, and the native
-# arm, run by the root `test-integration-dotnet-native` after the root
-# `build-grpc-native-dotnet` builds the server under target/grpc-native/dotnet.
+# arm, run by dotnet/'s `test-integration-native` after its `grpc-native` builds
+# the server under target/grpc-native/dotnet.
 #
 # The `__grpc_dotnet` filter matches both the sync (`__grpc_dotnet`) and async
 # (`__grpc_dotnet_async`) backends -- exactly as `__grpc_python` matches both
@@ -210,23 +245,40 @@ test-integration-grpc-c-native:
 # sync backend, add `--skip __grpc_dotnet_async`.
 
 test-integration-grpc-dotnet:
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
+	$(CARGO_TEST_GRPC_DOTNET) --all-features --test integration -- __grpc_dotnet
 
 test-integration-grpc-dotnet-native:
 	MULTILANG_BACKEND_MODE=native \
-		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
+		$(CARGO_TEST_GRPC_DOTNET) --all-features --test integration -- __grpc_dotnet
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138
 # functional tests they contend for CPU, memory and Docker, and their p99
 # budgets fail for reasons unrelated to the code under test. Expects an
 # otherwise-idle machine.
-test-integration-perf: build-integration-tests
-	cargo test --features integration-tests --test performance -- --nocapture
+#
+# They run in debug, as the other tests do. `--all-features` matches the build
+# of `build-tests-all-features`, so only the `performance` binary is compiled
+# here; the features add only code these tests do not use.
+test-integration-perf: build-tests-all-features
+	$(CARGO_TEST) --all-features --test performance -- --nocapture
 
 # macOS variant; the perf tail uses MACOS_P99_LIMIT_MS.
 test-integration-perf-macos:
 	P99_LIMIT_MS=$(MACOS_P99_LIMIT_MS) $(MAKE) test-integration-perf
+
+# The Rust gate: one debug all-features build of the tests (the one the binding
+# jobs also link), the checks, the tests, then the perf suite; nothing in
+# release, since no Rust test runs a release artifact. The build comes before
+# check-generated, which reads its generated code. CI runs the checks in their
+# own jobs ("Rust additional checks") and the tests and perf in
+# "verify-rust (Linux amd64) — plaintext".
+verify: build-tests-all-features format-check check-generated lint test-all-features
+	$(MAKE) test-integration-perf
+
+# The macOS gate, whose perf tail uses MACOS_P99_LIMIT_MS.
+verify-macos: build-tests-all-features format-check check-generated lint test-all-features
+	$(MAKE) test-integration-perf-macos
 
 # Env-driven producer performance benchmark. Configure via environment
 # variables (BOOTSTRAP_SERVERS, VALUE_SIZE, LIMIT_RPS, TEST_DURATION_SECONDS,
@@ -245,8 +297,17 @@ format-check:
 check-generated:
 	cargo xtask check-generated
 
+# LINT_ARGS goes to `cargo xtask lint`: CI passes
+# `--without-default-features-clippy` and runs that pass in another job, through
+# `clippy-default-features`.
+LINT_ARGS ?=
 lint:
-	cargo xtask lint
+	cargo xtask lint $(LINT_ARGS)
+
+# The clippy pass over the default features alone; `lint` runs it too unless
+# LINT_ARGS leaves it out.
+clippy-default-features:
+	cargo xtask clippy-default-features
 
 # Build the rustdoc of every workspace crate with warnings denied, so a broken
 # or private intra-doc link fails CI instead of surfacing only when someone

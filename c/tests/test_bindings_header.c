@@ -27,6 +27,7 @@
 #include <string.h>
 #include <time.h>
 #include "unity.h"
+#include "test_filter.h"
 
 /* The Consumer interface's assign(NULL) reports the IllegalArgumentException
  * of Java's AsyncKafkaConsumer.assign, whichever class is behind the view. */

@@ -178,8 +178,6 @@ public sealed class ChaosConsumerTests
         Assert.Equal(new[] { "Commit", "Commit", "Committed", "Close", "Dispose" }, harness.Consumer.Calls);
         Assert.Equal(flavour == ChaosFlavour.Async, harness.Consumer.DisposedAsync);
 
-        // The listener calls its consumer, so the workload never takes a handle.
-        Assert.Null(harness.Consumer.Handle);
         Assert.DoesNotContain(events, e => e.ConsumerError is not null);
     }
 

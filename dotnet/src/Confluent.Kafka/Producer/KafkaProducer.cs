@@ -152,6 +152,9 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <inheritdoc/>
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record)
     {
+        // As Java's doSend and MockProducer.send, a closed producer is reported before the record is read.
+        _native.ThrowIfClosed();
+
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
@@ -163,6 +166,8 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <inheritdoc/>
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback callback)
     {
+        _native.ThrowIfClosed();
+
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
@@ -178,9 +183,6 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
 
     private KafkaFuture<RecordMetadata> SendValidated(ProducerRecord<TKey, TValue> record, ICallback? callback)
     {
-        // Java's doSend checks for a closed producer before it serializes.
-        _native.ThrowIfClosed();
-
         SerializedProducerRecord serialized;
         try
         {

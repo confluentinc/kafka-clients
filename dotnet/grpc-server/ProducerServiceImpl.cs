@@ -105,23 +105,38 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             return Task.FromResult(new Proto.SendResponse { Error = Translate.UnknownProducer(request.ProducerId) });
         }
 
-        KafkaFuture<RecordMetadata>? future = null;
+        ProducerRecord<byte[], byte[]> record;
         try
         {
-            ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(request.Record);
+            record = Translate.ProducerRecordFromProto(request.Record);
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.SendResponse { Error = Translate.ToProto(ex) });
+        }
 
-            // The delivery callback runs before the future completes, so its entry is logged before
-            // the response is built. The 120 s bound is Python's future.get(timeout=120).
+        KafkaFuture<RecordMetadata> future;
+        try
+        {
             future = request.WithCallback
                 ? producer.Send(record, new LoggingDeliveryCallback(_callbackLog, request.ProducerId))
                 : producer.Send(record);
-            RecordMetadata metadata = future.Value.Get(_sendTimeout);
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.SendResponse { Error = Translate.ToProto(ex), RaisedBySend = true });
+        }
+
+        try
+        {
+            // The 120 s bound is Python's future.get(timeout=120).
+            RecordMetadata metadata = future.Get(_sendTimeout);
             return Task.FromResult(new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) });
         }
-        catch (System.TimeoutException) when (future is { } pending && !pending.IsDone())
+        catch (System.TimeoutException) when (!future.IsDone())
         {
-            // Only the server's own bound is code 7: a future that failed with a TimeoutException
-            // (the core's -5) is done, and goes out through ToProto.
+            // Only the server's own bound is LOCAL_TIMEOUT: a future that failed with a TimeoutException is
+            // done, and goes out through ToProto.
             return Task.FromResult(new Proto.SendResponse { Error = Translate.SendTimedOut() });
         }
         catch (Exception ex)
@@ -143,7 +158,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             producer.Flush();
             return Task.FromResult(new Proto.StatusResponse());
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
@@ -168,7 +183,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
 
             return Task.FromResult(response);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.PartitionsForResponse { Error = Translate.ToProto(ex) });
         }
@@ -193,7 +208,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
 
             return Task.FromResult(new Proto.MetricsResponse { Metrics = list });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.MetricsResponse { Error = Translate.ToProto(ex) });
         }
@@ -225,7 +240,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             producer.SendOffsetsToTransaction(Translate.OffsetEntriesToDictionary(request.Offsets), groupMetadata);
             return Task.FromResult(new Proto.StatusResponse());
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
@@ -241,7 +256,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
         Task.FromResult(CloseProducer(request.ProducerId, null));
 
     public override Task<Proto.StatusResponse> CloseTimeout(Proto.CloseTimeoutRequest request, ServerCallContext context) =>
-        Task.FromResult(CloseProducer(request.ProducerId, TimeSpan.FromMilliseconds(request.TimeoutMs)));
+        Task.FromResult(CloseProducer(request.ProducerId, Translate.DurationOfMs(request.TimeoutMs)));
 
     public override Task<Proto.CallbackLogResponse> GetCallbackLog(Proto.ProducerCallbackLogRequest request, ServerCallContext context) =>
         Task.FromResult(_callbackLog.Response(request.ProducerId));
@@ -277,7 +292,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             operation(producer);
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
@@ -304,7 +319,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
 
             return new Proto.StatusResponse();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (Translate.IsBindingError(ex))
         {
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }

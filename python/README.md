@@ -303,28 +303,29 @@ test/
 └── performance/        # Latency-budget and benchmark tests (need a broker)
 tools/                  # format_arity.py
 soak/                   # Long-running soak client — see soak/README.md
-Makefile                # Targets the repository root's Makefile delegates to
+Makefile                # The binding's targets (`make -C python <target>` from the root)
 ```
 
 ## Where commands run
 
 Run the commands below **from this directory**, inside a Python environment
-(3.10+). The repository root's `make` targets use the shared `../venv/`,
-which `make init` at the root creates.
+(3.10+). The `make` targets use the shared `../venv/` (`VENV_DIR`), which they
+create when it is missing; `make init` at the root also installs the
+development dependencies into it.
 
 ## Prerequisites
 
-The extension links the Rust library and includes its C header, so build the
-Rust client first:
+The extension links the Rust library and includes its C header. `make build`
+below builds the Rust client first; by hand:
 
 ```bash
-make -C ../rust build-all-features   # or: cd ../rust && cargo build --all-features --release
+make -C ../rust devel-build-all-features   # the debug build the tests use
 ```
 
-This produces `../rust/target/release/libconfluent_kafka.*` and
+This produces `../rust/target/debug/libconfluent_kafka.*` and
 `../rust/target/include/confluent_kafka.h`. `setup.py` finds them there;
 set `CONFLUENT_KAFKA_LIB_DIR` to link a library from another directory
-(e.g. `../rust/target/debug`).
+(e.g. `../rust/target/release`, from `make -C ../rust build-all-features`).
 
 ## Building
 
@@ -353,27 +354,33 @@ Docker required).
 
 ## Make targets
 
-`Makefile` wraps the commands above. The repository root's Makefile delegates
-to it (activating the venv and building the Rust library first); it can also
-be run directly:
+`Makefile` wraps the commands above, in the venv, and builds the Rust library
+(of `PROFILE`) first. Run it here, or as `make -C python <target>` from the
+repository root:
 
 ```bash
 make build                # pip install -e . against ../rust/target/$(PROFILE)
-make test                 # typecheck, unit, integration, static and soak tests, then test-integration
+make test                 # unit, integration, soak and verifiable-clients tests, then test-integration
 make test-unit            # unit tests only
+make check                # typecheck and check-static, the checks that are not tests
 make typecheck            # mypy --strict over the package and test/unit/test_typing.py
 make check-static         # static checks only
 make test-integration     # gRPC images + the __grpc_python arms (Linux, Docker)
+make test-integration-ssl # the same over SSL (also -sasl-ssl)
+make test-integration-native  # the __grpc_python arms with host-run servers
+make verify               # what CI runs on Linux (test, then test-performance); verify-macos on macOS
 make test-performance     # latency-budget tests (idle machine, broker needed)
 make consumer-perf-test producer-perf-test   # env-driven benchmarks
 make grpc-image grpc-image-async
 make clean
 ```
 
-`PROFILE` (`release` by default, or `debug`) selects which Rust build to link.
+`PROFILE` (`debug` by default, or `release`) selects which Rust build to link;
+the benchmarks always link `release`.
 `CLIENT_VERSION=2` runs the benchmarks against the PyPI librdkafka client in
-its own venv (`make init-venv-librdkafka` at the root): it installs the same
-top-level `confluent_kafka` package as this client, so the two cannot share one.
+its own venv, `../venv-librdkafka/` (`make venv-librdkafka`, which the
+benchmarks run): it installs the same top-level `confluent_kafka` package as
+this client, so the two cannot share one.
 
 ## License
 

@@ -279,7 +279,7 @@ internal sealed partial class NativeAdminClient
         {
             if (acl is null)
             {
-                throw new ArgumentException("The ACL bindings must not contain a null element.", parameterName);
+                throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
             }
 
             AdminStrings.Validate(acl.Pattern().Name(), parameterName);
@@ -302,7 +302,7 @@ internal sealed partial class NativeAdminClient
         {
             if (filter is null)
             {
-                throw new ArgumentException("The ACL filters must not contain a null element.", parameterName);
+                throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
             }
 
             AdminStrings.Validate(filter.PatternFilter().Name(), parameterName);

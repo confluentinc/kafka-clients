@@ -69,7 +69,7 @@ settings apply to no arm. The tests and batches are in `tools/perf-cloud/`.
 ## Run them by hand
 
 ```sh
-BOOTSTRAP_SERVERS=localhost:9092 CLIENT_VERSION=3 make producer-perf-test-dotnet
-BOOTSTRAP_SERVERS=localhost:9092 CLIENT_VERSION=2 make consumer-perf-test-dotnet
+BOOTSTRAP_SERVERS=localhost:9092 CLIENT_VERSION=3 make -C dotnet producer-perf-test-dotnet
+BOOTSTRAP_SERVERS=localhost:9092 CLIENT_VERSION=2 make -C dotnet consumer-perf-test-dotnet
 make -C dotnet perf-unit-test-dotnet
 ```

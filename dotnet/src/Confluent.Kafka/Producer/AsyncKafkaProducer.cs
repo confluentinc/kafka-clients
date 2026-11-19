@@ -189,6 +189,9 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
     {
+        // As Java's doSend and MockProducer.send, a closed producer is reported before the record is read.
+        _native.ThrowIfClosed();
+
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
@@ -203,6 +206,8 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         ICallback callback,
         CancellationToken cancellationToken = default)
     {
+        _native.ThrowIfClosed();
+
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
@@ -222,6 +227,8 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         IAsyncCallback callback,
         CancellationToken cancellationToken = default)
     {
+        _native.ThrowIfClosed();
+
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
@@ -242,9 +249,6 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         CancellationToken cancellationToken,
         IAsyncCallback? asyncCallback = null)
     {
-        // Java's doSend checks for a closed producer before it serializes.
-        _native.ThrowIfClosed();
-
         if (_awaits)
         {
             return SendAwaited(record, callback, cancellationToken, asyncCallback);

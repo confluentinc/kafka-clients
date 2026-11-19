@@ -43,7 +43,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal const string ConstructionFailedMessage = "Failed to construct kafka consumer";
 
-    private const string DefaultOffsetResetStrategy = "latest";
+    // The strategy the mock consumers' two-argument constructors pass.
+    internal const string DefaultOffsetResetStrategy = "latest";
 
     private const int LocalConcurrentModification = -2;
 
@@ -359,13 +360,15 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             disposal);
     }
 
-    internal static NativeConsumer CreateMock(string? autoOffsetReset = null, bool withPump = true)
+    // A null strategy crosses as NULL, which the core refuses with Java's IllegalArgumentException
+    // ("Auto offset reset strategy is null"), as Java's AutoOffsetResetStrategy.fromString does.
+    internal static NativeConsumer CreateMock(string? autoOffsetReset = DefaultOffsetResetStrategy, bool withPump = true)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr classPointer;
-        using (Utf8Marshal.PinnedUtf8String strategy = Utf8Marshal.Pin(autoOffsetReset ?? DefaultOffsetResetStrategy))
+        using (Utf8Marshal.PinnedUtf8String? strategy = autoOffsetReset is null ? null : Utf8Marshal.Pin(autoOffsetReset))
         {
-            classPointer = NativeMethods.MockConsumerNew(strategy.Pointer, ref outErr);
+            classPointer = NativeMethods.MockConsumerNew(strategy?.Pointer ?? IntPtr.Zero, ref outErr);
         }
 
         KafkaException.ThrowIfFfiFailed(ref outErr);
@@ -924,7 +927,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             if (topic is null)
             {
                 throw IsMock
-                    ? new ArgumentException("Topic names must not be null.", nameof(topics))
+                    ? new ArgumentNullException(nameof(topics), "topics must not contain null")
                     : GroupIdMissing ? GroupIdNotDefined() : new IllegalArgumentException(NullSubscribeTopicMessage);
             }
 
@@ -1513,7 +1516,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    // Inside a callback a call the consumer's own ConsumerHandle has a form of, timed or not, goes to it, as Python's
+    // Inside a callback a call the core's ConsumerHandle has a form of, timed or not, goes to it, as Python's
     // binding routes it; Poll, Subscribe, Unsubscribe and Assign, which it lacks, are refused before anything reaches
     // the core.
     private bool RoutesToTheHandle => _reporter.InCallback;
@@ -1905,7 +1908,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             (string topic, int partition) = topicPartitions[i];
             if (topic is null)
             {
-                throw new ArgumentException("Topic names must not be null.", nameof(topicPartitions));
+                throw new ArgumentNullException(nameof(topicPartitions), "topicPartitions must not contain a null topic");
             }
 
             if (partition < 0)
@@ -2236,7 +2239,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         int index = 0;
         foreach (KeyValuePair<TopicPartition, long> entry in newOffsets)
         {
-            topics[index] = entry.Key.Topic() ?? throw new ArgumentException("Topic names must not be null.", nameof(newOffsets));
+            topics[index] = entry.Key.Topic() ?? throw new ArgumentNullException(
+                nameof(newOffsets), "newOffsets must not contain a TopicPartition with a null topic");
             partitions[index] = entry.Key.Partition();
             offsets[index] = entry.Value;
             index++;
@@ -2450,19 +2454,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr view = NativeMethods.ConsumerMetrics(_handle, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             return MetricsViewMarshal.CopyOutAndDestroy(view);
-        }
-        finally
-        {
-            ExitUse(owner);
-        }
-    }
-
-    internal ConsumerHandle CreateReentrancyHandle()
-    {
-        int owner = EnterUse(UseKind.Unowned);
-        try
-        {
-            return ConsumerHandle.Create(this);
         }
         finally
         {
@@ -2727,7 +2718,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             {
                 throw nullTopicIsUnassigned
                     ? new IllegalStateException(NoCurrentAssignment(tp.Partition()))
-                    : new ArgumentException("Topic names must not be null.", paramName);
+                    : new ArgumentNullException(paramName, paramName + " must not contain a TopicPartition with a null topic");
             }
 
             snapshot[index++] = (Topic: tp.Topic(), Partition: tp.Partition());
@@ -2774,7 +2765,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             TopicPartition tp = entry.Key;
             if (tp.Topic() is null)
             {
-                throw new ArgumentException("Topic names must not be null.", nameof(timestampsToSearch));
+                throw new ArgumentNullException(
+                    nameof(timestampsToSearch), "timestampsToSearch must not contain a TopicPartition with a null topic");
             }
 
             topics[index] = tp.Topic();

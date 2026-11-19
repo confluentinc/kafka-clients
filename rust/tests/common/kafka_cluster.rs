@@ -16,7 +16,12 @@
 //!
 //! Wraps one or more testcontainers Kafka containers on a shared Docker
 //! network. Each broker exposes all four security protocols: PLAINTEXT,
-//! SSL, SASL_PLAINTEXT, and SASL_SSL.
+//! SSL, SASL_PLAINTEXT, and SASL_SSL, each on a host-mapped listener and on a
+//! container-network twin (CONTAINER, CTLSONLY, CSASLPLAIN, CSASLTLS) that the
+//! multilanguage gRPC backends reach by container name. A combined node also
+//! has two extra PLAINTEXT controller listeners for `bootstrap.controllers`
+//! clients, CONTROLLERHOST on the host and CONTROLLERCONTAINER on the container
+//! network; the quorum keeps using CONTROLLER.
 //!
 //! Created by [`super::cluster_pool`], shared across tests with the same
 //! [`super::cluster_config::ClusterConfig`] — or, for a
@@ -125,6 +130,10 @@ const CONTAINER_SSL_PORT_NUM: u16 = 9100;
 /// container hostname, for the multilanguage gRPC backends when the run selects
 /// the SASL_SSL protocol. Container-internal only (no host mapping).
 const CONTAINER_SASL_SSL_PORT_NUM: u16 = 9101;
+/// SASL_PLAINTEXT twin of the CONTAINER listener: reachable from sibling
+/// containers by container hostname, for the multilanguage gRPC backends of the
+/// tests Java runs on SASL_PLAINTEXT. Container-internal only (no host mapping).
+const CONTAINER_SASL_PLAINTEXT_PORT_NUM: u16 = 9102;
 /// Container port for the SASL_PLAINTEXT listener.
 const SASL_PLAINTEXT_PORT: ContainerPort = ContainerPort::Tcp(9095);
 /// Container port for the SSL listener.
@@ -137,6 +146,14 @@ const SASL_SSL_PORT: ContainerPort = ContainerPort::Tcp(9097);
 /// client on the host connects to. The quorum keeps using the first controller
 /// listener, CONTROLLER, which is advertised by container name.
 const CONTROLLER_HOST_PORT_NUM: u16 = 9098;
+/// Container port for the CONTROLLERCONTAINER listener of a combined node: a
+/// third PLAINTEXT controller listener, the container-network twin of
+/// CONTROLLERHOST, advertised by container name, so a `bootstrap.controllers`
+/// client inside a sibling container (a multilanguage gRPC backend) reaches
+/// the controllers it learns from `DescribeCluster`. Container-internal only
+/// (no host mapping). Listed last in `controller.listener.names`, so the quorum
+/// keeps using CONTROLLER.
+const CONTROLLER_CONTAINER_PORT_NUM: u16 = 9103;
 /// [`CONTROLLER_HOST_PORT_NUM`] as a mapped container port.
 const CONTROLLER_HOST_PORT: ContainerPort = ContainerPort::Tcp(CONTROLLER_HOST_PORT_NUM);
 
@@ -794,10 +811,11 @@ impl KafkaAllProtocols {
         // Using TLSONLY (for SSL) and SASLTLS (for SASL_SSL) avoids the
         // substring match. listener.security.protocol.map maps them to
         // the actual protocols. The CONTAINER family (CONTAINER / CTLSONLY /
-        // CSASLTLS) is the container-internal counterpart of the three
-        // client-facing protocols, advertised by container hostname so the
-        // multilanguage gRPC backends can reach the broker over PLAINTEXT, SSL
-        // or SASL_SSL — the container names likewise avoid the "SSL://" match.
+        // CSASLTLS / CSASLPLAIN) is the container-internal counterpart of the
+        // four client-facing protocols, advertised by container hostname so the
+        // multilanguage gRPC backends can reach the broker over PLAINTEXT, SSL,
+        // SASL_SSL or SASL_PLAINTEXT — the container names likewise avoid the
+        // "SSL://" match.
         // A broker-only node (Java `Type.KRAFT`) has no CONTROLLER listener; it
         // still maps the CONTROLLER listener name below because
         // `controller.listener.names` is how it reaches the quorum.
@@ -814,14 +832,28 @@ impl KafkaAllProtocols {
         // the first controller listener name, and a controller answers
         // `DescribeCluster` with the endpoints of the listener the request came
         // in on.
+        //
+        // It also gets CONTROLLERCONTAINER, the container-network twin of
+        // CONTROLLERHOST (see [`CONTROLLER_CONTAINER_PORT_NUM`]), listed third:
+        // a containerized `bootstrap.controllers` client bootstraps there and is
+        // answered with the endpoints of that same listener, which it can reach.
         let (controller_host_listener, advertised_controller_host_listener, controller_host_protocol) =
             match node.controller_host_port {
                 Some(port) => {
-                    env_vars.insert("KAFKA_CONTROLLER_LISTENER_NAMES".into(), "CONTROLLER,CONTROLLERHOST".into());
+                    env_vars.insert(
+                        "KAFKA_CONTROLLER_LISTENER_NAMES".into(),
+                        "CONTROLLER,CONTROLLERHOST,CONTROLLERCONTAINER".into(),
+                    );
                     (
-                        format!(",CONTROLLERHOST://0.0.0.0:{CONTROLLER_HOST_PORT_NUM}"),
-                        format!(",CONTROLLERHOST://127.0.0.1:{port}"),
-                        ",CONTROLLERHOST:PLAINTEXT",
+                        format!(
+                            ",CONTROLLERHOST://0.0.0.0:{CONTROLLER_HOST_PORT_NUM},\
+                             CONTROLLERCONTAINER://0.0.0.0:{CONTROLLER_CONTAINER_PORT_NUM}"
+                        ),
+                        format!(
+                            ",CONTROLLERHOST://127.0.0.1:{port},\
+                             CONTROLLERCONTAINER://{this_container}:{CONTROLLER_CONTAINER_PORT_NUM}"
+                        ),
+                        ",CONTROLLERHOST:PLAINTEXT,CONTROLLERCONTAINER:PLAINTEXT",
                     )
                 },
                 None => (String::new(), String::new(), ""),
@@ -832,7 +864,8 @@ impl KafkaAllProtocols {
                 "PLAINTEXT://0.0.0.0:9092,TLSONLY://0.0.0.0:9096,SASLPLAIN://0.0.0.0:9095,\
                  SASLTLS://0.0.0.0:9097,BROKER://0.0.0.0:9093{controller_listener}{controller_host_listener},\
                  CONTAINER://0.0.0.0:{CONTAINER_PORT_NUM},CTLSONLY://0.0.0.0:{CONTAINER_SSL_PORT_NUM},\
-                 CSASLTLS://0.0.0.0:{CONTAINER_SASL_SSL_PORT_NUM}"
+                 CSASLTLS://0.0.0.0:{CONTAINER_SASL_SSL_PORT_NUM},\
+                 CSASLPLAIN://0.0.0.0:{CONTAINER_SASL_PLAINTEXT_PORT_NUM}"
             ),
         );
 
@@ -847,11 +880,13 @@ impl KafkaAllProtocols {
                 "PLAINTEXT://127.0.0.1:{},TLSONLY://127.0.0.1:{},SASLPLAIN://127.0.0.1:{},\
                  SASLTLS://127.0.0.1:{},BROKER://{}:9093,\
                  CONTAINER://{}:{CONTAINER_PORT_NUM},CTLSONLY://{}:{CONTAINER_SSL_PORT_NUM},\
-                 CSASLTLS://{}:{CONTAINER_SASL_SSL_PORT_NUM}{advertised_controller_host_listener}",
+                 CSASLTLS://{}:{CONTAINER_SASL_SSL_PORT_NUM},\
+                 CSASLPLAIN://{}:{CONTAINER_SASL_PLAINTEXT_PORT_NUM}{advertised_controller_host_listener}",
                 ports.plaintext,
                 ports.ssl,
                 ports.sasl_plaintext,
                 ports.sasl_ssl,
+                this_container,
                 this_container,
                 this_container,
                 this_container,
@@ -863,7 +898,7 @@ impl KafkaAllProtocols {
             format!(
                 "PLAINTEXT:PLAINTEXT,TLSONLY:SSL,SASLPLAIN:SASL_PLAINTEXT,\
                  SASLTLS:SASL_SSL,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT,CONTAINER:PLAINTEXT,\
-                 CTLSONLY:SSL,CSASLTLS:SASL_SSL{controller_host_protocol}"
+                 CTLSONLY:SSL,CSASLTLS:SASL_SSL,CSASLPLAIN:SASL_PLAINTEXT{controller_host_protocol}"
             ),
         );
 
@@ -998,6 +1033,15 @@ pub struct KafkaCluster {
     /// Container-network `container_name:port` pairs for the CSASLTLS
     /// (SASL_SSL) listener — the SASL_SSL twin of [`container_bootstrap_servers`].
     container_sasl_ssl_bootstrap_servers: String,
+    /// Container-network `container_name:port` pairs for the CSASLPLAIN
+    /// (SASL_PLAINTEXT) listener — the SASL_PLAINTEXT twin of
+    /// [`container_bootstrap_servers`].
+    container_sasl_plaintext_bootstrap_servers: String,
+    /// Container-network `container_name:port` pairs for the
+    /// CONTROLLERCONTAINER listener of every combined node, or `None` when no
+    /// node publishes one ([`Type::Kraft`]) — the container twin of
+    /// [`bootstrap_controllers`].
+    container_bootstrap_controllers: Option<String>,
     /// CA certificate PEM for SSL tests.
     ca_cert_pem: String,
     /// The config this cluster was started with.
@@ -1214,6 +1258,7 @@ impl KafkaCluster {
         let mut container_addrs = Vec::with_capacity(nodes.len());
         let mut container_ssl_addrs = Vec::with_capacity(nodes.len());
         let mut container_sasl_ssl_addrs = Vec::with_capacity(nodes.len());
+        let mut container_sasl_plaintext_addrs = Vec::with_capacity(nodes.len());
         let mut broker_ports = BTreeMap::new();
         let mut proxies = BTreeMap::new();
         for node in &nodes {
@@ -1236,12 +1281,18 @@ impl KafkaCluster {
             container_addrs.push(format!("{}:{CONTAINER_PORT_NUM}", node.container_name));
             container_ssl_addrs.push(format!("{}:{CONTAINER_SSL_PORT_NUM}", node.container_name));
             container_sasl_ssl_addrs.push(format!("{}:{CONTAINER_SASL_SSL_PORT_NUM}", node.container_name));
+            container_sasl_plaintext_addrs.push(format!("{}:{CONTAINER_SASL_PLAINTEXT_PORT_NUM}", node.container_name));
             broker_ports.insert(node.node_id, ports.plaintext);
         }
         let controller_addrs: Vec<String> = nodes
             .iter()
             .filter_map(|node| node.controller_host_port)
             .map(|port| format!("127.0.0.1:{port}"))
+            .collect();
+        let container_controller_addrs: Vec<String> = nodes
+            .iter()
+            .filter(|node| node.controller_host_port.is_some())
+            .map(|node| format!("{}:{CONTROLLER_CONTAINER_PORT_NUM}", node.container_name))
             .collect();
 
         Ok(Self {
@@ -1269,6 +1320,9 @@ impl KafkaCluster {
             container_bootstrap_servers: container_addrs.join(","),
             container_ssl_bootstrap_servers: container_ssl_addrs.join(","),
             container_sasl_ssl_bootstrap_servers: container_sasl_ssl_addrs.join(","),
+            container_sasl_plaintext_bootstrap_servers: container_sasl_plaintext_addrs.join(","),
+            container_bootstrap_controllers: (!container_controller_addrs.is_empty())
+                .then(|| container_controller_addrs.join(",")),
             ca_cert_pem,
             config: config.clone(),
         })
@@ -1329,6 +1383,23 @@ impl KafkaCluster {
     /// [`container_bootstrap_servers`](Self::container_bootstrap_servers).
     pub fn container_sasl_ssl_bootstrap_servers(&self) -> &str {
         &self.container_sasl_ssl_bootstrap_servers
+    }
+
+    /// Container-network bootstrap servers for the CSASLPLAIN (SASL_PLAINTEXT)
+    /// listener — `<container_name>:9102` per broker. The SASL_PLAINTEXT twin of
+    /// [`container_bootstrap_servers`](Self::container_bootstrap_servers).
+    pub fn container_sasl_plaintext_bootstrap_servers(&self) -> &str {
+        &self.container_sasl_plaintext_bootstrap_servers
+    }
+
+    /// The container-network twin of
+    /// [`bootstrap_controllers`](Self::bootstrap_controllers):
+    /// `<container_name>:9103` per combined node, the CONTROLLERCONTAINER
+    /// (PLAINTEXT) listener, for a `bootstrap.controllers` client in a sibling
+    /// container. `None` for a [`Type::Kraft`] cluster, as
+    /// [`bootstrap_controllers`](Self::bootstrap_controllers).
+    pub fn container_bootstrap_controllers(&self) -> Option<&str> {
+        self.container_bootstrap_controllers.as_deref()
     }
 
     /// CA certificate PEM for SSL tests.

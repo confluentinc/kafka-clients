@@ -182,7 +182,7 @@ public sealed class PublicConsumerCommitCallbackTests
 
         await TestTimeout.Run(
             () => consumer.CommitAsync(
-                new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(17) }),
+                new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(17) }, (IOffsetCommitCallback?)null),
             s_deadline);
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed =
@@ -202,7 +202,7 @@ public sealed class PublicConsumerCommitCallbackTests
             new Dictionary<TopicPartition, OffsetAndMetadata>
             {
                 [partition] = new OffsetAndMetadata(31, 2, "no-callback-meta"),
-            });
+            }, null);
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> committed = consumer.Committed(new[] { partition });
         Assert.Equal(31, committed[partition]!.Offset());
@@ -221,7 +221,7 @@ public sealed class PublicConsumerCommitCallbackTests
         for (int i = 0; i < 500; i++)
         {
             consumer.CommitAsync(
-                new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(i) });
+                new Dictionary<TopicPartition, OffsetAndMetadata> { [partition] = new OffsetAndMetadata(i) }, null);
         }
 
         Assert.Equal(499, consumer.Committed(new[] { partition })[partition]!.Offset());
@@ -353,7 +353,7 @@ public sealed class PublicConsumerCommitCallbackTests
 
         Assert.Throws<IllegalStateException>(() => consumer.CommitAsync(new RecordingCommitCallback()));
         Assert.Throws<IllegalStateException>(() => consumer.CommitAsync(
-            new Dictionary<TopicPartition, OffsetAndMetadata>()));
+            new Dictionary<TopicPartition, OffsetAndMetadata>(), null));
     }
 
     [Fact]
@@ -379,7 +379,7 @@ public sealed class PublicConsumerCommitCallbackTests
             typeof(IOffsetCommitCallback));
         Assert.Equal(typeof(void), syncCallback.ReturnType);
         Assert.Equal(typeof(void), syncOffsets.ReturnType);
-        Assert.True(syncOffsets.GetParameters()[1].HasDefaultValue);
+        Assert.False(syncOffsets.GetParameters()[1].HasDefaultValue);
 
         MethodInfo asyncCallback = Single(
             typeof(IAsyncConsumer<byte[], byte[]>), typeof(IOffsetCommitCallback), typeof(CancellationToken));
@@ -390,7 +390,7 @@ public sealed class PublicConsumerCommitCallbackTests
             typeof(CancellationToken));
         Assert.Equal(typeof(Task), asyncCallback.ReturnType);
         Assert.Equal(typeof(Task), asyncOffsets.ReturnType);
-        Assert.True(asyncOffsets.GetParameters()[1].HasDefaultValue);
+        Assert.False(asyncOffsets.GetParameters()[1].HasDefaultValue);
     }
 
     [Fact]
