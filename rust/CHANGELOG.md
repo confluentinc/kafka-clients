@@ -4,6 +4,24 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 
 ## [Unreleased]
 
+### Common
+
+- **Breaking:** `sasl.jaas.config` is parsed with Java's `JaasConfig` grammar,
+  `<loginModuleClass> <controlFlag> (<optionName>=<optionValue>)*;`, when a
+  client with `security.protocol` `SASL_PLAINTEXT` or `SASL_SSL` is built, and
+  Java's `JaasContext` checks apply to it: exactly one login module, and not
+  `com.sun.security.auth.module.JndiLoginModule` or
+  `com.sun.security.auth.module.LdapLoginModule`. The clients used to accept any
+  value in which they found a `username` and a `password`. A value Java
+  refuses now fails the constructor as it fails Java's: a Kafka error ("Failed
+  to construct kafka producer", "Failed to construct kafka consumer", "Failed
+  to create new KafkaAdminClient") caused by the Kafka error "Failed to create
+  new NetworkClient", caused by an `IllegalArgumentError` with Java's message,
+  such as "JAAS config entry not terminated by semi-colon" or "Invalid login
+  module control flag 'requiredX' in JAAS config". An empty `sasl.jaas.config`
+  is no longer taken as unset: it fails with "Login module not specified in
+  JAAS config". Under `PLAINTEXT` and `SSL` the value is still not read.
+
 ### C FFI
 
 - A NULL mandatory argument (a handle, a string, a list, a map, an element, a
