@@ -145,9 +145,11 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// another client, or used after the close, sees it disposed. A <c>Dispose</c> that throws is written to
     /// <see cref="System.Diagnostics.Trace"/> and not rethrown. A deserializer that is only
     /// <see cref="IAsyncDisposable"/> is not disposed. When a <c>Poll</c> is still deserializing, <c>Close</c> or
-    /// <c>Dispose</c> returns first, and that <c>Poll</c> disposes the deserializers after it ends. The
-    /// <c>configs</c> a built deserializer's <c>Configure</c> receives is a copy of <paramref name="configs"/>; it
-    /// does not have the <c>client.id</c> the consumer chooses when none is set, which Java's has.
+    /// <c>Dispose</c> returns first, and that <c>Poll</c> disposes the deserializers after it ends. This method
+    /// copies <paramref name="configs"/> once, before it reads it, and uses only that copy, so a later change to
+    /// <paramref name="configs"/>, a function's included, changes nothing. The <c>configs</c> a built
+    /// deserializer's <c>Configure</c> receives is its own copy of that one; it does not have the <c>client.id</c>
+    /// the consumer chooses when none is set, which Java's has.
     /// </remarks>
     public static KafkaConsumer<TKey, TValue> Create(
         IReadOnlyDictionary<string, object?> configs,
@@ -156,7 +158,8 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     {
         ConfiguredSerdes<IDeserializer<TKey>, IDeserializer<TValue>> deserializers =
             ConfiguredSerdes.Deserializers(configs, keyDeserializer, valueDeserializer);
-        NativeConsumer native = NativeConsumer.Create(configs, withPump: false, serdes: deserializers);
+        // The copy of configs the call took: the checks, the core and each Configure read the same entries.
+        NativeConsumer native = NativeConsumer.Create(deserializers.Configs, withPump: false, serdes: deserializers);
         return new KafkaConsumer<TKey, TValue>(native, deserializers.Key, deserializers.Value);
     }
 

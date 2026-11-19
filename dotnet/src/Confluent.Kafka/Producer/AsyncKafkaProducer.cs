@@ -158,9 +158,11 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <c>await</c> in it never needs the thread that waits. A serializer's <c>DisposeAsync</c> that throws is
     /// written to <see cref="System.Diagnostics.Trace"/> and not rethrown. A function and the <c>Configure</c> of
     /// the serializer it returns start on the flow that reaches them: the key's on the caller's, with its
-    /// synchronization context, and the value's wherever the key's <c>Configure</c> completed. The <c>configs</c> a
-    /// built serializer's <c>Configure</c> receives is a copy of <paramref name="configs"/>; it does not have the
-    /// <c>client.id</c> the producer chooses when none is set, which Java's has.
+    /// synchronization context, and the value's wherever the key's <c>Configure</c> completed. This method copies
+    /// <paramref name="configs"/> once, before it reads it and before it returns, and uses only that copy, so a
+    /// later change to <paramref name="configs"/>, while the returned task is pending or by a function, changes
+    /// nothing. The <c>configs</c> a built serializer's <c>Configure</c> receives is its own copy of that one; it
+    /// does not have the <c>client.id</c> the producer chooses when none is set, which Java's has.
     /// </remarks>
     public static Task<AsyncKafkaProducer<TKey, TValue>> Create(
         IReadOnlyDictionary<string, object?> configs,
@@ -171,8 +173,12 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         ConfiguredSerdes<IAsyncSerializer<TKey>, IAsyncSerializer<TValue>> serializers =
             ConfiguredSerdes.AsyncSerializers(configs, keySerializer, valueSerializer);
         cancellationToken.ThrowIfCancellationRequested();
+
+        // The copy of configs the call took: the checks, the core and each Configure read the same entries, whatever
+        // the caller does to its dictionary while the returned task is pending.
         return Created(
-            NativeProducer.CreateAwaited(configs, NativeProducer.PumpThreadName, serializers, cancellationToken),
+            NativeProducer.CreateAwaited(
+                serializers.Configs, NativeProducer.PumpThreadName, serializers, cancellationToken),
             serializers);
     }
 

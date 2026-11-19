@@ -131,9 +131,11 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// value's type or a <c>null</c> with <see cref="ConfigException"/> or a serializer with
     /// <see cref="IllegalArgumentException"/>. So a serializer shared with another client, or used after the close,
     /// sees it disposed. A <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not
-    /// rethrown. A serializer that is only <see cref="IAsyncDisposable"/> is not disposed. The <c>configs</c> a
-    /// built serializer's <c>Configure</c> receives is a copy of <paramref name="configs"/>; it does not have the
-    /// <c>client.id</c> the producer chooses when none is set, which Java's has.
+    /// rethrown. A serializer that is only <see cref="IAsyncDisposable"/> is not disposed. This method copies
+    /// <paramref name="configs"/> once, before it reads it, and uses only that copy, so a later change to
+    /// <paramref name="configs"/>, a function's included, changes nothing. The <c>configs</c> a built serializer's
+    /// <c>Configure</c> receives is its own copy of that one; it does not have the <c>client.id</c> the producer
+    /// chooses when none is set, which Java's has.
     /// </remarks>
     public static KafkaProducer<TKey, TValue> Create(
         IReadOnlyDictionary<string, object?> configs,
@@ -142,7 +144,8 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     {
         ConfiguredSerdes<ISerializer<TKey>, ISerializer<TValue>> serializers =
             ConfiguredSerdes.Serializers(configs, keySerializer, valueSerializer);
-        NativeProducer native = NativeProducer.Create(configs, serdes: serializers);
+        // The copy of configs the call took: the checks, the core and each Configure read the same entries.
+        NativeProducer native = NativeProducer.Create(serializers.Configs, serdes: serializers);
         return new KafkaProducer<TKey, TValue>(native, serializers.Key, serializers.Value);
     }
 

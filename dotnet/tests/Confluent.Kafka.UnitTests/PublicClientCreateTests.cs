@@ -135,6 +135,51 @@ public sealed class PublicClientCreateTests
         Assert.Equal(1, value.Disposals);
     }
 
+    // Java's appendSerializerToConfig / appendDeserializerToConfig copies the map once, at the call, and the
+    // constructor reads only that copy.
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public async Task Create_ReadsTheConfigurationOnce_AtTheCall_WhateverAFunctionDoesToTheCallersDictionary(string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        Probe key = NewProbe(flavor, "key", log);
+        Probe value = NewProbe(flavor, "value", log);
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs["client.id"] = "as-called";
+        configs[KeyConfig(flavor)] = Function(
+            flavor,
+            "key",
+            log,
+            () =>
+            {
+                // A value the client refuses when it reads it, a changed entry, a new one, a removed one, and another
+                // function for the value.
+                configs["request.timeout.ms"] = "not a number";
+                configs["client.id"] = "changed";
+                configs["added.by.the.function"] = "late";
+                configs.Remove("bootstrap.servers");
+                configs[ValueConfig(flavor)] = Function(flavor, "late value", log, NewProbe(flavor, "late value", log));
+                return key;
+            });
+        configs[ValueConfig(flavor)] = Function(flavor, "value", log, value);
+        Dictionary<string, object?> asCalled = new Dictionary<string, object?>(configs);
+
+        // The client is built: neither the binding's checks nor the core read the dictionary again.
+        object client = await Create(flavor, configs);
+
+        Assert.Equal(
+            new[] { "key function", "key Configure(isKey: True)", "value function", "value Configure(isKey: False)" },
+            log.ToArray());
+        IReadOnlyDictionary<string, object?> keyConfigs = Assert.Single(key.Configured);
+        IReadOnlyDictionary<string, object?> valueConfigs = Assert.Single(value.Configured);
+        AssertACopyOf(asCalled, keyConfigs);
+        AssertACopyOf(asCalled, valueConfigs);
+        Assert.NotSame(keyConfigs, valueConfigs);
+        Assert.Equal("changed", configs["client.id"]);
+
+        await Close(client);
+    }
+
     [Theory]
     [MemberData(nameof(Flavors))]
     public async Task Create_WithBothSerdesGiven_UsesThem_CallsNoFunction_AndConfiguresNothing(string flavor)
@@ -605,6 +650,65 @@ public sealed class PublicClientCreateTests
                 "key Dispose", "value Dispose",
             },
             log.ToArray());
+    }
+
+    [Theory]
+    [MemberData(nameof(AsyncFlavors))]
+    public async Task AsyncCreate_ReadsTheConfigurationOnce_AtTheCall_WhateverChangesWhileTheKeysConfigureIsPending(
+        string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        TaskCompletionSource<bool> keyGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        AsyncProbe key = (AsyncProbe)NewProbe(flavor, "key", log);
+        key.ConfigureWaits = _ => keyGate.Task;
+        Probe value = NewProbe(flavor, "value", log);
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs["client.id"] = "as-called";
+        configs[KeyConfig(flavor)] = Function(flavor, "key", log, key);
+        configs[ValueConfig(flavor)] = Function(flavor, "value", log, value);
+        Dictionary<string, object?> asCalled = new Dictionary<string, object?>(configs);
+
+        Task<object> created = Create(flavor, configs);
+
+        Assert.False(created.IsCompleted);
+        Assert.Equal(new[] { "key function", "key Configure(isKey: True)" }, log.ToArray());
+
+        // The caller has its dictionary back, and reuses it while the key's Configure is pending: a value the client
+        // refuses when it reads it, a changed entry, a new one, a removed one, and another function for the value.
+        configs["request.timeout.ms"] = "not a number";
+        configs["client.id"] = "changed";
+        configs["added.after.the.call"] = "late";
+        configs.Remove("bootstrap.servers");
+        configs[ValueConfig(flavor)] = Function(flavor, "late value", log, NewProbe(flavor, "late value", log));
+
+        // The key serde owns the map it was given, and changes it too.
+        IReadOnlyDictionary<string, object?> keyConfigs = Assert.Single(key.Configured);
+        AssertACopyOf(asCalled, keyConfigs);
+        IDictionary<string, object?> keysOwn = Assert.IsAssignableFrom<IDictionary<string, object?>>(keyConfigs);
+        keysOwn["client.id"] = "the key serde's";
+        keysOwn["added.by.the.key.serde"] = "its own";
+        keysOwn.Remove("bootstrap.servers");
+
+        keyGate.SetResult(true);
+        object? client = null;
+        await TestTimeout.Run(async () => client = await created, TimeSpan.FromSeconds(30));
+
+        Assert.Equal(
+            new[] { "key function", "key Configure(isKey: True)", "value function", "value Configure(isKey: False)" },
+            log.ToArray());
+        IReadOnlyDictionary<string, object?> valueConfigs = Assert.Single(value.Configured);
+        AssertACopyOf(asCalled, valueConfigs);
+        Assert.NotSame(keyConfigs, valueConfigs);
+        Assert.False(configs.ContainsKey("added.by.the.key.serde"));
+        Assert.Equal("changed", configs["client.id"]);
+
+        // And the value serde's map is its own as well.
+        IDictionary<string, object?> valuesOwn = Assert.IsAssignableFrom<IDictionary<string, object?>>(valueConfigs);
+        valuesOwn["added.by.the.value.serde"] = "its own";
+        Assert.False(keyConfigs.ContainsKey("added.by.the.value.serde"));
+        Assert.False(configs.ContainsKey("added.by.the.value.serde"));
+
+        await Close(client!);
     }
 
     [Theory]

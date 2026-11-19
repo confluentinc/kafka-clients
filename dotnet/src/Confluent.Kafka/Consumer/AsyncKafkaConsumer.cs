@@ -162,8 +162,11 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// or <c>Dispose</c> returns first, and that <c>Poll</c> disposes the deserializers after it ends. A function
     /// and the <c>Configure</c> of the deserializer it returns start on the flow that reaches them: the key's on the
     /// caller's, with its synchronization context, and the value's wherever the key's <c>Configure</c> completed.
-    /// The <c>configs</c> a built deserializer's <c>Configure</c> receives is a copy of <paramref name="configs"/>;
-    /// it does not have the <c>client.id</c> the consumer chooses when none is set, which Java's has.
+    /// This method copies <paramref name="configs"/> once, before it reads it and before it returns, and uses only
+    /// that copy, so a later change to <paramref name="configs"/>, while the returned task is pending or by a
+    /// function, changes nothing. The <c>configs</c> a built deserializer's <c>Configure</c> receives is its own
+    /// copy of that one; it does not have the <c>client.id</c> the consumer chooses when none is set, which Java's
+    /// has.
     /// </remarks>
     public static Task<AsyncKafkaConsumer<TKey, TValue>> Create(
         IReadOnlyDictionary<string, object?> configs,
@@ -174,7 +177,10 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         ConfiguredSerdes<IAsyncDeserializer<TKey>, IAsyncDeserializer<TValue>> deserializers =
             ConfiguredSerdes.AsyncDeserializers(configs, keyDeserializer, valueDeserializer);
         cancellationToken.ThrowIfCancellationRequested();
-        return Created(NativeConsumer.CreateAwaited(configs, deserializers, cancellationToken), deserializers);
+
+        // The copy of configs the call took: the checks, the core and each Configure read the same entries, whatever
+        // the caller does to its dictionary while the returned task is pending.
+        return Created(NativeConsumer.CreateAwaited(deserializers.Configs, deserializers, cancellationToken), deserializers);
     }
 
     private static async Task<AsyncKafkaConsumer<TKey, TValue>> Created(

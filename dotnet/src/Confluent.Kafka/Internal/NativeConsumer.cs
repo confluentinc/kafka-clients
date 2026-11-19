@@ -236,7 +236,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     /// not given and the core builds the client.
     /// </summary>
     internal static NativeConsumer Create(
-        IReadOnlyDictionary<string, object?> configs,
+        IReadOnlyCollection<KeyValuePair<string, object?>> configs,
         bool withPump = true,
         ConfiguredSerdes? serdes = null)
     {
@@ -287,7 +287,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     /// so far are disposed, and the given ones are not. Once the client exists the token is not read again.
     /// </exception>
     internal static Task<NativeConsumer> CreateAwaited(
-        IReadOnlyDictionary<string, object?> configs, ConfiguredSerdes serdes, CancellationToken cancellationToken)
+        IReadOnlyCollection<KeyValuePair<string, object?>> configs,
+        ConfiguredSerdes serdes,
+        CancellationToken cancellationToken)
     {
         IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Consumer);
         ConfigMarshal.ValidatedConfig config = ConfigMarshal.Validate(prepared, ClientKind.Consumer);

@@ -111,7 +111,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     /// given and the core builds the client.
     /// </summary>
     internal static NativeProducer Create(
-        IReadOnlyDictionary<string, object?> configs,
+        IReadOnlyCollection<KeyValuePair<string, object?>> configs,
         string completionThreadName = CompletionThreadName,
         ConfiguredSerdes? serdes = null)
     {
@@ -162,7 +162,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     /// far are disposed, and the given ones are not. Once the client exists the token is not read again.
     /// </exception>
     internal static Task<NativeProducer> CreateAwaited(
-        IReadOnlyDictionary<string, object?> configs,
+        IReadOnlyCollection<KeyValuePair<string, object?>> configs,
         string completionThreadName,
         ConfiguredSerdes serdes,
         CancellationToken cancellationToken)

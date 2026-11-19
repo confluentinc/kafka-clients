@@ -53,7 +53,7 @@ internal static class ClientConfigs
     private static readonly HashSet<string> s_noSerdeKeys = new(StringComparer.Ordinal);
 
     internal static IReadOnlyList<KeyValuePair<string, string>> Prepare(
-        IReadOnlyDictionary<string, object?> configs,
+        IReadOnlyCollection<KeyValuePair<string, object?>> configs,
         ClientKind client)
     {
         if (configs is null)

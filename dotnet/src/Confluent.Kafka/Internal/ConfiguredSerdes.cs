@@ -183,12 +183,21 @@ internal abstract class ConfiguredSerdes
 /// The constructor makes the checks Java makes before its client constructor's <c>try</c>, all bare: a null
 /// <c>configs</c>; for a null argument a missing or null key (the key's, then the value's); then, for each serde, the
 /// guard of a given one or the kind of value of a configured one. A build is the part inside that <c>try</c>.
+/// <para>
+/// The constructor also copies <c>configs</c>, once, as Java's <c>appendSerializerToConfig</c> /
+/// <c>appendDeserializerToConfig</c> does at the call (<c>new HashMap&lt;&gt;(configs)</c>): its own checks, the
+/// client's checks and the core read <see cref="Configs"/>, and each <c>Configure</c> gets its own copy of it. So a
+/// change made to the caller's dictionary after the call, by the caller while an asynchronous <c>Create</c> is
+/// pending or by a function, reaches none of them.
+/// </para>
 /// </remarks>
 internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerdes
     where TKeySerde : class
     where TValueSerde : class
 {
-    private readonly IReadOnlyDictionary<string, object?> _configs;
+    // The caller's entries as they were at the call, in its order: a key it holds twice, or a null one, is kept for
+    // the client's own checks.
+    private readonly KeyValuePair<string, object?>[] _configs;
 
     private readonly Role<TKeySerde> _keyRole;
 
@@ -222,10 +231,11 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
             throw new ArgumentNullException(nameof(configs));
         }
 
-        // Java's appendSerializerToConfig / appendDeserializerToConfig: a null argument needs its key, and both are
-        // looked at before anything else.
-        object? keyValue = key is null ? Required(configs, keyRole.Config) : null;
-        object? valueValue = value is null ? Required(configs, valueRole.Config) : null;
+        // Java's appendSerializerToConfig / appendDeserializerToConfig: the map is copied once, before anything reads
+        // it; then a null argument needs its key, and both are looked at before anything else.
+        KeyValuePair<string, object?>[] snapshot = new List<KeyValuePair<string, object?>>(configs).ToArray();
+        object? keyValue = key is null ? Required(snapshot, keyRole.Config) : null;
+        object? valueValue = value is null ? Required(snapshot, valueRole.Config) : null;
         if (key is null)
         {
             _keyFunction = FunctionOf<TKeySerde>(keyRole.Config, keyValue!);
@@ -244,7 +254,7 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
             valueRole.Check(value);
         }
 
-        _configs = configs;
+        _configs = snapshot;
         _key = key;
         _value = value;
         _keyRole = keyRole;
@@ -252,6 +262,12 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
         _constructionFailedMessage = constructionFailedMessage;
         _asynchronous = asynchronous;
     }
+
+    /// <summary>
+    /// The configuration as it was when the client's <c>Create</c> was called: what the client checks and hands to
+    /// the core, whatever happens to the caller's dictionary afterwards.
+    /// </summary>
+    internal IReadOnlyCollection<KeyValuePair<string, object?>> Configs => _configs;
 
     /// <summary>The key serde: the given one, or, once a build returned, the built one.</summary>
     internal TKeySerde Key => _key ?? throw new InvalidOperationException("The key serde was not built.");
@@ -366,12 +382,12 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
 
     // Java's "Invalid value null for configuration <key>: must be non-null.", for a null argument whose key is missing
     // or null.
-    private static object Required(IReadOnlyDictionary<string, object?> configs, string config) =>
+    private static object Required(KeyValuePair<string, object?>[] configs, string config) =>
         ValueOf(configs, config) ?? throw new ConfigException(config, null, "must be non-null.");
 
     // The last entry of that key, as the core keeps the last text of a key; a dictionary whose own comparer is not
     // ordinal is still read by the exact key the core's configuration uses.
-    private static object? ValueOf(IReadOnlyDictionary<string, object?> configs, string config)
+    private static object? ValueOf(KeyValuePair<string, object?>[] configs, string config)
     {
         object? value = null;
         foreach (KeyValuePair<string, object?> entry in configs)
@@ -412,7 +428,7 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
         try
         {
             role.Check(serde);
-            role.Configure!(serde, Snapshot(), isKey);
+            role.Configure!(serde, OwnCopy(), isKey);
         }
         catch
         {
@@ -432,7 +448,7 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
         try
         {
             role.Check(serde);
-            await role.ConfigureAwaited!(serde, Snapshot(), isKey, cancellationToken).ConfigureAwait(false);
+            await role.ConfigureAwaited!(serde, OwnCopy(), isKey, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -443,16 +459,16 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
         return serde;
     }
 
-    // Java's originals(): each Configure gets its own copy, so one serde cannot change what the other, or the
-    // caller, sees.
-    private Dictionary<string, object?> Snapshot()
+    // Java's originals(): each Configure gets its own copy of the entries the call found, so one serde cannot change
+    // what the other, or the caller, sees, and a later change to the caller's dictionary is not seen either.
+    private Dictionary<string, object?> OwnCopy()
     {
-        Dictionary<string, object?> snapshot = new Dictionary<string, object?>(_configs.Count, StringComparer.Ordinal);
+        Dictionary<string, object?> copy = new Dictionary<string, object?>(_configs.Length, StringComparer.Ordinal);
         foreach (KeyValuePair<string, object?> entry in _configs)
         {
-            snapshot[entry.Key] = entry.Value;
+            copy[entry.Key] = entry.Value;
         }
 
-        return snapshot;
+        return copy;
     }
 }
