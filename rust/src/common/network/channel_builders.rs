@@ -22,7 +22,6 @@
 //! structs in their constructors, so there is no separate `configure()` step.
 //!
 //! Excluded Java code:
-//! - `JaasContext` loading -- simplified to direct `SaslConfigs` struct
 //! - `channelBuilderConfigs()` -- Java's config extraction from `AbstractConfig` is not applicable
 //! - `serverChannelBuilder()` -- server-side, out of scope
 //! - `createPrincipalBuilder()` -- server-side, out of scope
@@ -30,6 +29,7 @@
 
 use std::io;
 
+use crate::common::Error;
 use crate::common::config::{SaslConfigs, SslConfigs};
 use crate::common::network::ChannelBuilder;
 use crate::common::network::ListenerName;
@@ -37,6 +37,7 @@ use crate::common::network::PlaintextChannelBuilder;
 use crate::common::network::SaslChannelBuilder;
 #[cfg(feature = "rustls")]
 use crate::common::network::SslChannelBuilder;
+use crate::common::security::JaasContext;
 use crate::common::security::auth::SecurityProtocol;
 #[cfg(feature = "rustls")]
 use crate::common::security::ssl::SslFactory;
@@ -52,7 +53,13 @@ pub struct ChannelBuilders;
 impl ChannelBuilders {
     /// Creates a client-side `ChannelBuilder` for the given security protocol.
     ///
-    /// Translated from `ChannelBuilders.clientChannelBuilder()` (Java).
+    /// Translated from `ChannelBuilders.clientChannelBuilder()` (Java). For
+    /// `SASL_PLAINTEXT` and `SASL_SSL` it first loads the client's JAAS context
+    /// from `sasl.jaas.config`, as Java's `ChannelBuilders#create` does before
+    /// it builds the `SaslChannelBuilder` (whose `configure` then builds the
+    /// `SslFactory` of `SASL_SSL`), so a value Java rejects fails here, and
+    /// only for those protocols. (Without the `rustls` feature, `SSL` and
+    /// `SASL_SSL` are refused before any configuration is read.)
     ///
     /// # Arguments
     ///
@@ -65,7 +72,19 @@ impl ChannelBuilders {
     ///
     /// # Errors
     ///
-    /// Returns an error if required configs are missing for the given protocol.
+    /// - [`Error::is_kafka_error`] `Failed to create new NetworkClient`, caused
+    ///   by Java's `IllegalArgumentException`
+    ///   ([`Error::is_local_illegal_argument_error`]) when `sasl.jaas.config`
+    ///   is not a valid JAAS configuration of one allowed login module
+    ///   ([`JaasContext::load_client_context`]). The clients create their
+    ///   channel builder where Java's `ClientUtils#createNetworkClient` does,
+    ///   which wraps the failure in that `KafkaException`, so the clients'
+    ///   constructors report Java's chain.
+    /// - [`Error::is_config_error`] `Failed to create channel builder:
+    ///   <reason>` for any other failure: a missing sub-configuration, an SSL
+    ///   configuration the `SslFactory` rejects, a SASL mechanism other than
+    ///   PLAIN or missing PLAIN credentials (see [`SaslChannelBuilder::new`]),
+    ///   or a TLS protocol without the `rustls` feature.
     #[doc(alias = "org.apache.kafka.common.network.ChannelBuilders#clientChannelBuilder")]
     pub fn client_channel_builder(
         security_protocol: SecurityProtocol,
@@ -74,53 +93,75 @@ impl ChannelBuilders {
         listener_name: Option<ListenerName>,
         client_id: &str,
         log_context: LogContext,
-    ) -> io::Result<Box<dyn ChannelBuilder>> {
+    ) -> Result<Box<dyn ChannelBuilder>, Error> {
         match security_protocol {
             SecurityProtocol::Plaintext => Ok(Box::new(PlaintextChannelBuilder::new(listener_name))),
             #[cfg(feature = "rustls")]
             SecurityProtocol::Ssl => {
-                let ssl_config = ssl_config
-                    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SSL protocol requires ssl_config"))?;
-                let ssl_factory = SslFactory::new(ssl_config)?;
+                let ssl_config = ssl_config.ok_or_else(|| Self::invalid_input("SSL protocol requires ssl_config"))?;
+                let ssl_factory = SslFactory::new(ssl_config).map_err(Self::config_error)?;
                 Ok(Box::new(SslChannelBuilder::new(ssl_factory, listener_name)))
             },
             SecurityProtocol::SaslPlaintext => {
-                let sasl_config = sasl_config.ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "SASL_PLAINTEXT protocol requires sasl_config")
-                })?;
-                Ok(Box::new(SaslChannelBuilder::new(
+                let sasl_config =
+                    sasl_config.ok_or_else(|| Self::invalid_input("SASL_PLAINTEXT protocol requires sasl_config"))?;
+                let jaas_context = Self::load_client_context(sasl_config)?;
+                let channel_builder = SaslChannelBuilder::new(
                     SecurityProtocol::SaslPlaintext,
                     sasl_config,
+                    jaas_context.as_ref(),
                     None,
                     listener_name,
                     client_id,
                     log_context,
-                )?))
+                )
+                .map_err(Self::config_error)?;
+                Ok(Box::new(channel_builder))
             },
             #[cfg(feature = "rustls")]
             SecurityProtocol::SaslSsl => {
-                let ssl_config = ssl_config.ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "SASL_SSL protocol requires ssl_config")
-                })?;
-                let sasl_config = sasl_config.ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "SASL_SSL protocol requires sasl_config")
-                })?;
-                let ssl_factory = SslFactory::new(ssl_config)?;
-                Ok(Box::new(SaslChannelBuilder::new(
+                let ssl_config =
+                    ssl_config.ok_or_else(|| Self::invalid_input("SASL_SSL protocol requires ssl_config"))?;
+                let sasl_config =
+                    sasl_config.ok_or_else(|| Self::invalid_input("SASL_SSL protocol requires sasl_config"))?;
+                let jaas_context = Self::load_client_context(sasl_config)?;
+                let ssl_factory = SslFactory::new(ssl_config).map_err(Self::config_error)?;
+                let channel_builder = SaslChannelBuilder::new(
                     SecurityProtocol::SaslSsl,
                     sasl_config,
+                    jaas_context.as_ref(),
                     Some(ssl_factory),
                     listener_name,
                     client_id,
                     log_context,
-                )?))
+                )
+                .map_err(Self::config_error)?;
+                Ok(Box::new(channel_builder))
             },
             #[cfg(not(feature = "rustls"))]
             SecurityProtocol::Ssl | SecurityProtocol::SaslSsl => {
                 let _ = ssl_config;
-                Err(Self::tls_disabled_error(security_protocol))
+                Err(Self::config_error(Self::tls_disabled_error(security_protocol)))
             },
         }
+    }
+
+    /// The client's JAAS context ([`JaasContext::load_client_context`]), its
+    /// failure wrapped as Java's `ClientUtils#createNetworkClient` wraps it.
+    fn load_client_context(sasl_config: &SaslConfigs) -> Result<Option<JaasContext>, Error> {
+        JaasContext::load_client_context(sasl_config)
+            .map_err(|e| Error::kafka_message_source("Failed to create new NetworkClient", e))
+    }
+
+    /// A channel builder failure other than the JAAS context's, as the
+    /// clients have reported it.
+    fn config_error(e: io::Error) -> Error {
+        Error::config_message(format!("Failed to create channel builder: {e}"))
+    }
+
+    /// The error of a missing sub-configuration.
+    fn invalid_input(message: &str) -> Error {
+        Self::config_error(io::Error::new(io::ErrorKind::InvalidInput, message))
     }
 
     /// The error a TLS security protocol fails with on a client built without
@@ -293,11 +334,135 @@ mod tests {
             )
             .err()
             .expect("TLS needs the rustls feature");
-            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert!(err.is_config_error(), "{err:?}");
             assert_eq!(
-                err.to_string(),
-                format!("Security protocol {name} is not available: the client was built without the `rustls` feature")
+                err.message(),
+                format!(
+                    "Failed to create channel builder: Security protocol {name} is not available: the client was \
+                     built without the `rustls` feature"
+                )
             );
         }
+    }
+
+    /// Java's `ChannelBuilders#create` loads the client's JAAS context for the
+    /// two SASL protocols, before `SASL_SSL`'s `SslFactory` is configured, and
+    /// `ClientUtils#createNetworkClient` wraps its failure in
+    /// `KafkaException("Failed to create new NetworkClient")`. Each message is
+    /// Kafka 4.4.0's for that value.
+    #[test]
+    fn test_sasl_protocols_reject_the_jaas_config_java_rejects() {
+        const PLAIN: &str = "org.apache.kafka.common.security.plain.PlainLoginModule";
+        let cases = [
+            (
+                format!("{PLAIN} required username=\"a\" password=\"b\""),
+                "JAAS config entry not terminated by semi-colon",
+            ),
+            (
+                format!("{PLAIN} requiredX username=\"a\" password=\"b\";"),
+                "Invalid login module control flag 'requiredX' in JAAS config",
+            ),
+            (
+                format!("{PLAIN} username=\"a\" password=\"b\";"),
+                "Invalid login module control flag 'username' in JAAS config",
+            ),
+            (String::new(), "Login module not specified in JAAS config"),
+            (
+                format!(
+                    "{PLAIN} required username=\"a\" password=\"b\"; {PLAIN} required username=\"c\" password=\"d\";"
+                ),
+                "JAAS config property contains 2 login modules, should be 1 module",
+            ),
+        ];
+        // An SSL configuration `SslFactory` rejects: the JAAS context fails first.
+        let ssl_config = SslConfigs {
+            truststore_location: Some("/nonexistent/truststore.pem".to_string()),
+            ..SslConfigs::default()
+        };
+        for (jaas, message) in cases {
+            let sasl_config = SaslConfigs {
+                mechanism: "PLAIN".to_string(),
+                jaas_config: Some(Password::new(jaas.clone())),
+                ..SaslConfigs::default()
+            };
+            #[cfg(feature = "rustls")]
+            let protocols = [SecurityProtocol::SaslPlaintext, SecurityProtocol::SaslSsl];
+            // Without `rustls`, `SASL_SSL` is refused before its configs are read.
+            #[cfg(not(feature = "rustls"))]
+            let protocols = [SecurityProtocol::SaslPlaintext];
+            for protocol in protocols {
+                let err = ChannelBuilders::client_channel_builder(
+                    protocol,
+                    Some(&ssl_config),
+                    Some(&sasl_config),
+                    None,
+                    "test",
+                    LogContext::empty(),
+                )
+                .err()
+                .unwrap_or_else(|| panic!("{protocol:?} {jaas:?} must be refused"));
+                assert!(err.is_kafka_error(), "{err:?}");
+                assert_eq!("Failed to create new NetworkClient", err.message());
+                let cause = err.source().expect("the JAAS error is the cause");
+                assert!(cause.is_local_illegal_argument_error(), "{cause:?}");
+                assert_eq!(message, cause.message(), "{protocol:?} {jaas:?}");
+            }
+            // The other protocols never read `sasl.jaas.config`.
+            ChannelBuilders::client_channel_builder(
+                SecurityProtocol::Plaintext,
+                Some(&ssl_config),
+                Some(&sasl_config),
+                None,
+                "test",
+                LogContext::empty(),
+            )
+            .unwrap();
+        }
+    }
+
+    /// The credentials of a valid `sasl.jaas.config` reach the builder: its
+    /// login module's `username` and `password` options.
+    #[test]
+    fn test_sasl_plaintext_builder_from_jaas_config() {
+        let sasl_config = SaslConfigs {
+            mechanism: "PLAIN".to_string(),
+            jaas_config: Some(Password::new(
+                "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"secret\";",
+            )),
+            ..SaslConfigs::default()
+        };
+        ChannelBuilders::client_channel_builder(
+            SecurityProtocol::SaslPlaintext,
+            None,
+            Some(&sasl_config),
+            None,
+            "test",
+            LogContext::empty(),
+        )
+        .unwrap();
+
+        // Without a password option the builder still refuses PLAIN, as before.
+        let sasl_config = SaslConfigs {
+            mechanism: "PLAIN".to_string(),
+            jaas_config: Some(Password::new(
+                "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\";",
+            )),
+            ..SaslConfigs::default()
+        };
+        let err = ChannelBuilders::client_channel_builder(
+            SecurityProtocol::SaslPlaintext,
+            None,
+            Some(&sasl_config),
+            None,
+            "test",
+            LogContext::empty(),
+        )
+        .err()
+        .expect("no password");
+        assert!(err.is_config_error(), "{err:?}");
+        assert_eq!(
+            "Failed to create channel builder: SASL PLAIN authentication requires a password",
+            err.message()
+        );
     }
 }

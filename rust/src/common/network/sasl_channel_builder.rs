@@ -23,7 +23,9 @@
 //! This is a simplified client-only translation that supports the PLAIN
 //! mechanism only; the client configurations reject any other `sasl.mechanism`
 //! when they are built (`CommonClientConfigs::post_validate_supported_sasl_mechanism`).
-//! Server-side logic (JAAS contexts, callback handlers, login managers) is omitted.
+//! The JAAS context it reads the credentials from is the client's, which
+//! `ChannelBuilders` loads from `sasl.jaas.config`; server-side logic
+//! (callback handlers, login managers) is omitted.
 
 use super::ChannelBuilder;
 use super::ChannelMetadataRegistry;
@@ -35,6 +37,7 @@ use super::SslTransportLayer;
 
 use crate::common::config::SaslConfigs;
 use crate::common::config::types::Password;
+use crate::common::security::JaasContext;
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::security::authenticator::SaslClientAuthenticator;
 #[cfg(feature = "rustls")]
@@ -101,6 +104,10 @@ impl SaslChannelBuilder {
     /// * `security_protocol` - Must be `SASL_PLAINTEXT` or `SASL_SSL`
     /// * `sasl_config` - SASL configuration (mechanism, username, password),
     ///   read here: the builder keeps the mechanism and the credentials
+    /// * `jaas_context` - The client's JAAS context, loaded from
+    ///   `sasl.jaas.config` ([`JaasContext::load_client_context`]), whose login
+    ///   module's `username` and `password` options are the credentials
+    ///   unless `sasl_config` sets them itself
     /// * `ssl_factory` - Required for `SASL_SSL`, `None` for `SASL_PLAINTEXT`
     /// * `listener_name` - The listener name (server-side only, `None` for clients)
     /// * `client_id` - The Kafka client ID
@@ -118,6 +125,7 @@ impl SaslChannelBuilder {
     pub fn new(
         security_protocol: SecurityProtocol,
         sasl_config: &SaslConfigs,
+        jaas_context: Option<&JaasContext>,
         ssl_factory: Option<SslFactory>,
         listener_name: Option<ListenerName>,
         client_id: &str,
@@ -153,13 +161,13 @@ impl SaslChannelBuilder {
         }
 
         // Validate credentials
-        let Some(username) = sasl_config.resolve_username() else {
+        let Some(username) = sasl_config.resolve_username(jaas_context) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "SASL PLAIN authentication requires a username",
             ));
         };
-        let Some(password) = sasl_config.resolve_password() else {
+        let Some(password) = sasl_config.resolve_password(jaas_context) else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "SASL PLAIN authentication requires a password",
@@ -282,6 +290,7 @@ mod tests {
             &sasl_config,
             None,
             None,
+            None,
             "test-client",
             LogContext::empty(),
         )
@@ -316,6 +325,7 @@ mod tests {
         let builder = SaslChannelBuilder::new(
             SecurityProtocol::SaslSsl,
             &sasl_config,
+            None,
             Some(ssl_factory),
             None,
             "test-client",
@@ -347,6 +357,7 @@ mod tests {
             &sasl_config,
             None,
             None,
+            None,
             "test-client",
             LogContext::empty(),
         );
@@ -362,6 +373,7 @@ mod tests {
         let result = SaslChannelBuilder::new(
             SecurityProtocol::SaslPlaintext,
             &sasl_config,
+            None,
             None,
             None,
             "test-client",
@@ -383,6 +395,7 @@ mod tests {
         let result = SaslChannelBuilder::new(
             SecurityProtocol::Plaintext,
             &sasl_config,
+            None,
             None,
             None,
             "test-client",
@@ -408,6 +421,7 @@ mod tests {
             let result = SaslChannelBuilder::new(
                 SecurityProtocol::SaslPlaintext,
                 &sasl_config,
+                None,
                 None,
                 None,
                 "test-client",
@@ -438,6 +452,7 @@ mod tests {
         let result = SaslChannelBuilder::new(
             SecurityProtocol::SaslSsl,
             &sasl_config,
+            None,
             Some(SslFactory::new(&SslConfigs::default()).unwrap()),
             None,
             "test-client",
@@ -460,6 +475,7 @@ mod tests {
         let err = SaslChannelBuilder::new(
             SecurityProtocol::SaslSsl,
             &sasl_config,
+            None,
             None,
             None,
             "test-client",
@@ -489,6 +505,7 @@ mod tests {
         let builder = SaslChannelBuilder::new(
             SecurityProtocol::SaslPlaintext,
             &sasl_config,
+            None,
             None,
             None,
             "visible-client",

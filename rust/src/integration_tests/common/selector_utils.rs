@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use crate::admin::AdminClientConfig;
 use crate::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
 use crate::common::network::{PlaintextChannelBuilder, SaslChannelBuilder, Selectable, Selector, SslChannelBuilder};
+use crate::common::security::JaasContext;
 use crate::common::security::auth::SecurityProtocol;
 use crate::common::security::ssl::SslFactory;
 use crate::common::utils::internals::LogContext;
@@ -65,9 +66,11 @@ pub(crate) fn protocol_selector(ctx: &TestContext) -> Selector {
             Box::new(SslChannelBuilder::new(ssl_factory(), None)),
         ),
         TestProtocol::SaslSsl => {
+            let jaas_context = JaasContext::load_client_context(config.sasl_config()).expect("valid test JAAS config");
             let channel_builder = SaslChannelBuilder::new(
                 SecurityProtocol::SaslSsl,
                 config.sasl_config(),
+                jaas_context.as_ref(),
                 Some(ssl_factory()),
                 None,
                 "integration-test",

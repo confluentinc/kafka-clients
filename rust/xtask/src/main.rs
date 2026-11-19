@@ -21,8 +21,10 @@ mod error_hierarchy;
 mod error_predicates;
 mod java;
 mod java_api;
+mod java_index_json;
 mod java_parse;
 mod javadoc;
+mod javascript_gen;
 mod lint_custom;
 mod test_selection;
 
@@ -613,6 +615,11 @@ fn generate_error_codes() -> anyhow::Result<()> {
     // And the ConfigDef type of every producer / consumer / admin config key.
     println!("🔧 Generating the Python and .NET config key types from the Java sources...");
     config_types::generate(Path::new(REPO_ROOT))?;
+
+    // And the Node.js client's error hierarchy, config classes and key types,
+    // from the same sources.
+    println!("🔧 Generating the Node.js error hierarchy and config modules from the Java sources...");
+    javascript_gen::generate(Path::new(REPO_ROOT))?;
     Ok(())
 }
 
@@ -646,14 +653,15 @@ fn check_admin_results_up_to_date() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fail when a binding's copy of the Java API list no longer matches the Java sources.
+/// Fail when a binding's committed copy of the Java client (`cargo xtask java-api`'s
+/// outputs) no longer matches the Java sources.
 fn check_java_api_up_to_date() -> anyhow::Result<()> {
-    println!("🔍 Checking the bindings' Java API lists...");
-    if let Err(e) = java_api::check_binding_copies() {
+    println!("🔍 Checking the bindings' copies of the Java client...");
+    if let Err(e) = java_api::check_outputs() {
         eprintln!("\n❌ {e}");
         exit(1);
     }
-    println!("✅ The bindings' Java API lists are up to date");
+    println!("✅ The bindings' copies of the Java client are up to date");
     Ok(())
 }
 
@@ -667,7 +675,9 @@ fn check_error_codes_up_to_date() -> anyhow::Result<()> {
     let codes_stale = !fs::read_to_string(ERROR_CODE_RS).is_ok_and(|actual| actual == expected);
 
     // The Python exception hierarchy generated from the Java sources.
-    let hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
+    let mut hierarchy_stale = error_hierarchy::check_up_to_date(Path::new(REPO_ROOT))?;
+    // The Node.js client's generated modules, from the same sources.
+    hierarchy_stale.extend(javascript_gen::check_up_to_date(Path::new(REPO_ROOT))?);
     // The Python and .NET config tables generated from the Java config classes.
     let config_stale = config_types::check_up_to_date(Path::new(REPO_ROOT))?;
 
@@ -1160,7 +1170,8 @@ only once (except --workload).
                          exactly its signature is labelled KNOWN DEFECT
   --unclean              SIGKILL instead of SIGTERM for broker roll
   --workload role:backend  repeatable; role=producer|consumer,
-                           backend=rust|python|python-async|c|dotnet|dotnet-async
+                           backend=rust|python|python-async|c|dotnet|dotnet-async|
+                           javascript (producer only)
                            (default: producer:rust,consumer:rust)
   --consumers N          shorthand for 1 rust producer + N rust consumers
                          (librdkafka's --consumers; not usable with --workload)
@@ -1260,10 +1271,9 @@ fn scenario_test_args(raw: &[String]) -> anyhow::Result<(Vec<String>, String)> {
 /// picked whenever such a workload is requested and the user does not have to.
 /// `:dotnet` also covers `dotnet-async`.
 fn chaos_test_feature(env_vars: &[(String, String)]) -> &'static str {
-    let needs_grpc = env_vars
-        .iter()
-        .find(|(k, _)| k == "CHAOS_WORKLOADS")
-        .is_some_and(|(_, v)| v.contains(":python") || v.contains(":c") || v.contains(":dotnet"));
+    let needs_grpc = env_vars.iter().find(|(k, _)| k == "CHAOS_WORKLOADS").is_some_and(|(_, v)| {
+        v.contains(":python") || v.contains(":c") || v.contains(":dotnet") || v.contains(":javascript")
+    });
     if needs_grpc {
         "multilanguage-tests"
     } else {
@@ -2847,8 +2857,10 @@ fn print_help() {
   generate-admin-options  Regenerate the admin *Options Python classes from the Java sources
   generate-admin-results  Regenerate the admin *Result Python classes from the Java sources
   java-deprecated List the Java client's @Deprecated API in ../design/current/java-deprecated.txt
-  java-api        Write the Java client's public API to a file, for the bindings' Java-name checks
-                  (--check: fail when the file is out of date instead of writing it)
+  java-api        Scan the Java client once and write every binding's committed copy of it:
+                  ../dotnet/analyzers/java-api.txt (the public API, for the .NET Java-name check) and
+                  ../javascript/java-index.json (the class index the Node.js linter and tests read)
+                  (--check: fail when one is out of date instead of writing them)
   dotnet-java-name-baseline  Rewrite the .NET binding's CKRDA0013 baseline from a build; it only shrinks
                   (--add: also take findings it does not hold yet)
   fetch-java-refs Fetch the Kafka tags lint-custom reads into the kafka submodule
@@ -2933,6 +2945,9 @@ fn print_help() {
                     (dotnet/Directory.Build.props), a third line, left as it is without it;
                     it only moves up too. Its -alpha.N, -beta.N and -rc.N may be followed
                     by .dev.M, a dev build (4.4.0-alpha.0.dev.1)
+                    --javascript-version SEMVER sets the Node.js package's version
+                    (javascript/package.json and its lockfile), 4.0.0 or higher, a fourth
+                    line, left as it is without it; it only moves up too
   select-tests    Ask an agent which tests the changes from a base branch can affect and write
                   them to ../test-selection/test-selection-<HEAD>.json, keeping the four most
                   recent files there (or to $TEST_SELECTION, relative to the repository root, when
@@ -3004,7 +3019,7 @@ Usage:
   cargo xtask generate-error-codes
   cargo xtask generate-error-predicates
   cargo xtask java-deprecated [kafka-ref ...]
-  cargo xtask java-api [--check] <file>
+  cargo xtask java-api [--check]
   cargo xtask dotnet-java-name-baseline [--add]
   cargo xtask lint-custom [rule-name] [--no-baseline]
   cargo xtask ffi-baseline
@@ -3025,7 +3040,7 @@ Usage:
   cargo xtask integrity-test
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
-  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER]
+  cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER] [--javascript-version SEMVER]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]
@@ -3473,6 +3488,10 @@ version = "0.1.0"
         );
         assert_eq!(
             chaos_test_feature(&env(&["--workload", "producer:rust", "--workload", "consumer:dotnet-async"])),
+            "multilanguage-tests"
+        );
+        assert_eq!(
+            chaos_test_feature(&env(&["--workload", "producer:javascript", "--workload", "consumer:rust"])),
             "multilanguage-tests"
         );
     }

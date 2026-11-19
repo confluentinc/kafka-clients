@@ -1567,6 +1567,7 @@ mod tests {
 
     use super::*;
     use crate::common::config::types::Password;
+    use crate::common::security::JaasContext;
     use crate::test_log_capture::capture_logs;
     use log::Level;
 
@@ -1937,8 +1938,9 @@ mod tests {
         );
         let c = ConsumerConfig::new(&props).unwrap();
         assert_eq!(c.sasl_config.mechanism, "PLAIN");
-        assert_eq!(c.sasl_config.resolve_username().as_deref(), Some("alice"));
-        assert_eq!(c.sasl_config.resolve_password().as_deref(), Some("secret"));
+        let jaas_context = JaasContext::load_client_context(&c.sasl_config).unwrap();
+        assert_eq!(c.sasl_config.resolve_username(jaas_context.as_ref()), Some("alice"));
+        assert_eq!(c.sasl_config.resolve_password(jaas_context.as_ref()), Some("secret"));
     }
 
     /// Rust-only (`CommonClientConfigs::post_validate_supported_sasl_mechanism`):
@@ -2035,7 +2037,8 @@ mod tests {
         let c = ConsumerConfig::new(&props).unwrap();
 
         // The secrets did reach the config; they are only hidden from `Debug`.
-        assert_eq!(c.sasl_config.resolve_password().as_deref(), Some("jaas-S3cr3t"));
+        let jaas_context = JaasContext::load_client_context(&c.sasl_config).unwrap();
+        assert_eq!(c.sasl_config.resolve_password(jaas_context.as_ref()), Some("jaas-S3cr3t"));
         assert_eq!(
             c.ssl_config.keystore_key.as_ref().map(Password::value),
             Some("KEYSTORE-KEY-PEM")
@@ -2060,13 +2063,17 @@ mod tests {
         }
     }
 
-    /// Empty `sasl.jaas.config` → `None`.
+    /// An empty `sasl.jaas.config` is kept, as Java's `ConfigDef` keeps it
+    /// (`Password("")`): it is set, and names no login module, which the
+    /// channel builder of a SASL protocol rejects.
     #[test]
-    fn test_sasl_jaas_config_empty_is_none() {
+    fn test_sasl_jaas_config_empty_is_kept() {
         let mut props = base_props();
         props.insert("sasl.jaas.config".to_string(), String::new());
         let c = ConsumerConfig::new(&props).unwrap();
-        assert_eq!(c.sasl_config.jaas_config, None);
+        assert_eq!(c.sasl_config.jaas_config, Some(Password::new("")));
+        let error = JaasContext::load_client_context(&c.sasl_config).unwrap_err();
+        assert_eq!("Login module not specified in JAAS config", error.message());
     }
 
     /// `ssl.*` keys land on `ssl_config` via the shared helper.

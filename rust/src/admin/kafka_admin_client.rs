@@ -487,7 +487,10 @@ impl KafkaAdminClient {
         // Selects the channel builder from `security.protocol` + `ssl.*` /
         // `sasl.*` (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL); SASL mechanism
         // PLAIN only (`AdminClientConfig` rejected any other one). Mirrors `ClientUtils.createChannelBuilder(config, time,
-        // logContext)` as used by `KafkaAdminClient.createInternal`.
+        // logContext)` as used by `KafkaAdminClient.createInternal`. Its errors
+        // are in their final form (`ChannelBuilders::client_channel_builder`):
+        // a `sasl.jaas.config` Java rejects is Java's `KafkaException("Failed
+        // to create new NetworkClient")`, any other failure a `ConfigError`.
         let channel_builder = ChannelBuilders::client_channel_builder(
             config.security_protocol(),
             Some(config.ssl_config()),
@@ -495,13 +498,7 @@ impl KafkaAdminClient {
             None,
             &client_id,
             log_context.clone(),
-        )
-        // `ConfigException` in Java
-        // (`org.apache.kafka.common.security.ssl.SslFactory#configure`), i.e.
-        // inside the `KafkaException` hierarchy; `illegal_argument` put it
-        // outside, where `is_kafka_error()` answers `false`. Same fix as
-        // `KafkaProducer::new`.
-        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
+        )?;
         let mut selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms(),
             channel_builder,
@@ -8185,6 +8182,39 @@ mod tests {
             .expect("the cause is a crate Error");
         assert!(matches!(cause, Error::Config(_)), "got {cause:?}");
         assert_eq!(cause.message(), "No resolvable bootstrap urls given in bootstrap.servers");
+    }
+
+    /// `sasl.jaas.config` is parsed with Java's `JaasConfig` grammar when the
+    /// channel builder of a SASL protocol is created, so the values Kafka
+    /// 4.4.0's `KafkaAdminClient` refuses fail creation with its error chain.
+    /// Under `PLAINTEXT` the value is never read, and the client is built, as
+    /// in Java.
+    #[tokio::test]
+    async fn test_creation_parses_sasl_jaas_config_as_java_does() {
+        use crate::common::security::jaas_context::tests::{
+            CLIENT_CONSTRUCTION_REFUSALS, assert_sasl_jaas_config_refusal,
+        };
+
+        for (jaas, message) in CLIENT_CONSTRUCTION_REFUSALS {
+            let config = |protocol: &str| {
+                let props = HashMap::from([
+                    (
+                        AdminClientConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(),
+                        "127.0.0.1:9092".to_string(),
+                    ),
+                    ("security.protocol".to_string(), protocol.to_string()),
+                    ("sasl.mechanism".to_string(), "PLAIN".to_string()),
+                    ("sasl.jaas.config".to_string(), jaas.to_string()),
+                ]);
+                AdminClientConfig::new(&props).expect("valid config")
+            };
+            let error = KafkaAdminClient::new(config("SASL_PLAINTEXT")).expect_err("Java refuses the value");
+            assert_sasl_jaas_config_refusal(&error, "Failed to create new KafkaAdminClient", message);
+
+            let admin = KafkaAdminClient::new(config("PLAINTEXT"))
+                .unwrap_or_else(|e| panic!("PLAINTEXT does not read {jaas:?}: {e:?}"));
+            admin.close_with_timeout(Duration::ZERO).await;
+        }
     }
 
     /// The same for a client bootstrapping from `bootstrap.controllers`: its

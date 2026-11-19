@@ -1750,6 +1750,7 @@ mod tests {
 
     use super::*;
     use crate::common::config::types::Password;
+    use crate::common::security::JaasContext;
     use crate::test_log_capture::capture_logs;
     use log::Level;
 
@@ -2611,8 +2612,9 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let config = ProducerConfig::new(&props).unwrap();
         assert_eq!(config.sasl_config.mechanism, "PLAIN");
-        assert_eq!(config.sasl_config.resolve_username().as_deref(), Some("alice"));
-        assert_eq!(config.sasl_config.resolve_password().as_deref(), Some("secret"));
+        let jaas_context = JaasContext::load_client_context(&config.sasl_config).unwrap();
+        assert_eq!(config.sasl_config.resolve_username(jaas_context.as_ref()), Some("alice"));
+        assert_eq!(config.sasl_config.resolve_password(jaas_context.as_ref()), Some("secret"));
     }
 
     /// Rust-only (`CommonClientConfigs::post_validate_supported_sasl_mechanism`):
@@ -3201,7 +3203,8 @@ mod tests {
         // The secrets did reach the config, typed and raw (so `originals` can
         // still be forwarded, e.g. to a `Partitioner`); they are only hidden
         // from `Debug`.
-        assert_eq!(config.sasl_config.resolve_password().as_deref(), Some("jaas-S3cr3t"));
+        let jaas_context = JaasContext::load_client_context(&config.sasl_config).unwrap();
+        assert_eq!(config.sasl_config.resolve_password(jaas_context.as_ref()), Some("jaas-S3cr3t"));
         assert_eq!(
             config.ssl_config.keystore_key.as_ref().map(Password::value),
             Some("keystore-key-S3cr3t")
