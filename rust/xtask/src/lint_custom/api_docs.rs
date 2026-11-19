@@ -1447,7 +1447,7 @@ impl ApiDocs {
 
     /// The translator the rule and its helpers share.
     pub(super) fn translator(&self) -> Translator<'_> {
-        Translator { index: Some(&self.java), panics: false }
+        Translator { index: Some(&self.java), panics: false, markdown: false }
     }
 
     /// The translated Javadocs of `item`'s markers, the empty ones (only
