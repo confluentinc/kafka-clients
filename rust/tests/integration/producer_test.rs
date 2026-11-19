@@ -50,17 +50,27 @@
 //!   `test_produce_to_non_existent_topic` / `test_produce_invalid_partition`.
 //! - `kafka.api.SslProducerSendTest` (the `BaseProducerSendTest` bodies over
 //!   the SSL listener): `testSendOffset` (`test_ssl_send_offset`),
-//!   `testClose` (`test_ssl_close`), `testFlush` (`test_ssl_flush`).
+//!   `testClose` (`test_ssl_close`), `testFlush` (`test_ssl_flush`),
+//!   `testSendToPartition` (`test_ssl_send_to_partition`, JavaScript only) and
+//!   `testSendBeforeAndAfterPartitionExpansion`
+//!   (`test_ssl_send_before_and_after_partition_expansion`, JavaScript only).
+//! - `org.apache.kafka.clients.producer.KafkaProducerTest`:
+//!   `testTopicRefreshInMetadata` and `testTopicNotExistingInMetadata` (as
+//!   `test_partitions_for_unknown_topic_times_out_with_the_broker_error`,
+//!   JavaScript only).
 //!
 //! Each scenario is instantiated through [`multilanguage_test!`], once per
-//! backend (rust / python / python_async / c / dotnet / dotnet_async). Test
-//! bodies are generic over [`ProducerBackendFactory`] so the same scenario
-//! exercises the native Rust producer, the Python binding (sync and asyncio),
-//! the C binding and the .NET binding (sync and asyncio) through their gRPC
-//! server containers. The macro gates the five container-backed arms on
-//! `multilanguage-tests`, so under `integration-tests` alone each scenario
-//! runs its `__rust` arm only. The tests marked native only above are plain
-//! `#[tokio::test]`s on the native backend, each with its reason beside it.
+//! backend (rust / python / python_async / c / dotnet / dotnet_async / js).
+//! Test bodies are generic over [`ProducerBackendFactory`] so the same
+//! scenario exercises the native Rust producer, the Python binding (sync and
+//! asyncio), the C binding, the .NET binding (sync and asyncio) and the
+//! Node.js producer through their gRPC server containers. The macro gates the
+//! six container-backed arms on `multilanguage-tests`, so under
+//! `integration-tests` alone each scenario runs its `__rust` arm only. The
+//! tests marked native only above are plain `#[tokio::test]`s on the native
+//! backend, each with its reason beside it. The tests marked JavaScript only
+//! run their `__grpc_js` arm alone, through
+//! [`multilanguage_js_test!`](crate::multilanguage_js_test).
 //!
 //! See `design/history/MILESTONE-6/DESIGN-multilanguage-tests.md`.
 
@@ -649,15 +659,22 @@ async fn send_offset_with_security<F: ProducerBackendFactory>(
 /// respected, and the consumed records keep the partition, ordering, null key,
 /// value, and explicit timestamp.
 async fn send_to_partition_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    send_to_partition_with_security(ctx, factory, SendTestSecurity::Plaintext).await;
+}
+
+/// [`send_to_partition_inner`] with the suite's `securityProtocol` (PLAINTEXT
+/// or, for `SslProducerSendTest`, SSL).
+async fn send_to_partition_with_security<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    security: SendTestSecurity,
+) {
     let topic = ctx.topic("topic");
     let producer = factory
-        .create(send_test_producer_config(
-            &bootstrap_for(factory, ctx),
-            &SendTestProducerOpts::default(),
-        ))
+        .create(security.producer_config(factory, ctx, &SendTestProducerOpts::default()))
         .await
         .expect("Failed to create producer");
-    let admin = send_test_admin(ctx);
+    let admin = send_test_admin_with_security(ctx, security);
     create_topic_with_admin(admin.as_ref(), &topic, 2, 2).await;
     let partition = 1;
 
@@ -747,17 +764,28 @@ async fn send_before_and_after_partition_expansion_inner<F: ProducerBackendFacto
     ctx: &mut TestContext,
     factory: &F,
 ) {
+    send_before_and_after_partition_expansion_with_security(ctx, factory, SendTestSecurity::Plaintext).await;
+}
+
+/// [`send_before_and_after_partition_expansion_inner`] with the suite's
+/// `securityProtocol` (PLAINTEXT or, for `SslProducerSendTest`, SSL).
+async fn send_before_and_after_partition_expansion_with_security<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+    security: SendTestSecurity,
+) {
     let topic = ctx.topic("topic");
     let producer = factory
-        .create(send_test_producer_config(
-            &bootstrap_for(factory, ctx),
+        .create(security.producer_config(
+            factory,
+            ctx,
             &SendTestProducerOpts { max_block_ms: 5 * 1000, ..SendTestProducerOpts::default() },
         ))
         .await
         .expect("Failed to create producer");
 
     // create topic
-    let admin = send_test_admin(ctx);
+    let admin = send_test_admin_with_security(ctx, security);
     create_topic_with_admin(admin.as_ref(), &topic, 1, 2).await;
 
     let partition0 = 0;
@@ -2398,6 +2426,58 @@ async fn partitions_for_timeout_error_when_topic_does_not_exist_inner<F: Produce
     producer.close().await.expect("close");
 }
 
+/// Translated from `KafkaProducerTest.testTopicRefreshInMetadata` and
+/// `KafkaProducerTest.testTopicNotExistingInMetadata`: while the broker
+/// answers `UNKNOWN_TOPIC_OR_PARTITION` for the topic, `partitionsFor` times out
+/// after `max.block.ms` with a `TimeoutException` whose cause is the broker's
+/// `UnknownTopicOrPartitionException` (`KafkaProducer#waitOnMetadata`:
+/// `new TimeoutException(errorMessage, metadata.getError(topic).exception())`).
+///
+/// Java scripts the error with a `MockClient`; here a broker with
+/// `auto.create.topics.enable=false` (`no_auto_create_cluster_config`) answers it
+/// for a topic that is never created. Java's two tests differ only in how the
+/// `MockClient` replays the error and in `max.block.ms` (3000, 2000); one body
+/// with 2000 covers both. Java asserts the classes; the message is asserted too.
+///
+/// The cause is asserted on the native backend only: a gRPC arm's error is
+/// rebuilt with its cause only for a bare `KafkaException`
+/// (`multilanguage_producer::kafka_error_from_proto`), so a gRPC arm cannot
+/// see the timeout's cause. The class and the message are asserted on every
+/// backend.
+async fn partitions_for_unknown_topic_times_out_with_the_broker_error_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let config = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_for(factory, ctx)),
+        ("max.block.ms".to_string(), "2000".to_string()),
+        // test under normal producer for simplicity
+        ("enable.idempotence".to_string(), "false".to_string()),
+    ]);
+    let producer = factory.create(config).await.expect("Failed to create producer");
+
+    let topic = ctx.topic("topic");
+    let err = producer
+        .partitions_for(&topic)
+        .await
+        .expect_err("partitions_for on a topic the broker reports unknown should fail");
+    assert!(
+        matches!(err, Error::Timeout(_)),
+        "{} backend: expected Timeout, got: {err:?}",
+        factory.name()
+    );
+    assert_eq!(err.message(), format!("Topic {topic} not present in metadata after 2000 ms."));
+    if factory.name() == "rust" {
+        assert!(
+            matches!(err.source(), Some(Error::UnknownTopicOrPartition(_))),
+            "expected the UnknownTopicOrPartition cause, got {:?}",
+            err.source()
+        );
+    }
+
+    producer.close().await.expect("close");
+}
+
 /// End-to-end check on the Milestone-12 producer `metrics()` wiring. For the
 /// Python / C backends the snapshot crosses the `Metrics` RPC, the binding, and
 /// the `kafka_producer_MetricMap_t` FFI surface before being rebuilt
@@ -2544,6 +2624,32 @@ async fn ssl_flush_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, facto
 crate::multilanguage_test!(test_ssl_send_offset, ssl_send_offset_inner, producer_send_cluster_config());
 crate::multilanguage_test!(test_ssl_close, ssl_close_inner, producer_send_cluster_config());
 crate::multilanguage_test!(test_ssl_flush, ssl_flush_inner, producer_send_cluster_config());
+
+/// `SslProducerSendTest.testSendToPartition`.
+async fn ssl_send_to_partition_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    send_to_partition_with_security(ctx, factory, SendTestSecurity::Ssl).await;
+}
+
+/// `SslProducerSendTest.testSendBeforeAndAfterPartitionExpansion`.
+async fn ssl_send_before_and_after_partition_expansion_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    send_before_and_after_partition_expansion_with_security(ctx, factory, SendTestSecurity::Ssl).await;
+}
+
+// MULTILANGUAGE: JavaScript arm only: added with the JavaScript binding, which leaves the other backends' tests as they are; `multilanguage_test!` gives them every arm.
+crate::multilanguage_js_test!(
+    test_ssl_send_to_partition,
+    ssl_send_to_partition_inner,
+    producer_send_cluster_config()
+);
+// MULTILANGUAGE: JavaScript arm only, as `test_ssl_send_to_partition`.
+crate::multilanguage_js_test!(
+    test_ssl_send_before_and_after_partition_expansion,
+    ssl_send_before_and_after_partition_expansion_inner,
+    producer_send_cluster_config()
+);
 
 // ---------------------------------------------------------------------------
 // Broker fault injection: the scenarios stop a broker of a dedicated cluster.
@@ -2867,6 +2973,12 @@ crate::multilanguage_test!(test_produce_partitions_for, produce_partitions_for_i
 crate::multilanguage_test!(
     test_partitions_for_timeout_error_when_topic_does_not_exist,
     partitions_for_timeout_error_when_topic_does_not_exist_inner,
+    no_auto_create_cluster_config()
+);
+// MULTILANGUAGE: JavaScript arm only, as `test_ssl_send_to_partition`.
+crate::multilanguage_js_test!(
+    test_partitions_for_unknown_topic_times_out_with_the_broker_error,
+    partitions_for_unknown_topic_times_out_with_the_broker_error_inner,
     no_auto_create_cluster_config()
 );
 // `testCompression` is native-only, also under `multilanguage-tests` — see
