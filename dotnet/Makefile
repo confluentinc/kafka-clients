@@ -15,6 +15,10 @@ RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 MULTILANG_IMAGE_TAG ?= dev
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-grpc-server:$(MULTILANG_IMAGE_TAG)
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-async-grpc-server:$(MULTILANG_IMAGE_TAG)
+# The Native AOT builds of the two images: the same repositories, under the tag
+# $(MULTILANG_IMAGE_TAG)-aot, which test-integration-aot runs the harness with.
+GRPC_AOT_IMAGE_TAG ?= confluent-kafka-rust/dotnet-grpc-server:$(MULTILANG_IMAGE_TAG)-aot
+GRPC_ASYNC_AOT_IMAGE_TAG ?= confluent-kafka-rust/dotnet-async-grpc-server:$(MULTILANG_IMAGE_TAG)-aot
 # Native (non-container) gRPC server build for the multilanguage harness,
 # written under the Rust target dir, where rust/tests/common/backend_pool.rs
 # looks for it in MULTILANG_BACKEND_MODE=native (rust/target/grpc-native/dotnet).
@@ -54,7 +58,8 @@ SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 # through `env`.
 selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
 
-.PHONY: grpc-image grpc-image-async grpc-native grpc-native-aot rust-lib test-integration test-integration-ssl test-integration-sasl-ssl \
+.PHONY: grpc-image grpc-image-async grpc-image-aot grpc-image-async-aot grpc-native grpc-native-aot rust-lib \
+	test-integration test-integration-ssl test-integration-sasl-ssl test-integration-aot \
 	test-integration-native test-integration-native-aot build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
 	test-examples-dotnet test-verifiable-clients-dotnet test-dotnet-macos verify verify-except-grpc-arm verify-macos \
 	pack-dotnet package-check-dotnet coverage-dotnet test-aot-dotnet
@@ -83,6 +88,25 @@ grpc-image-async: rust-lib
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
 		--build-arg RUST_PROFILE=$(RUST_PROFILE) \
 		-f $(REPO_ROOT)/dotnet/Dockerfile.grpc.async \
+		$(REPO_ROOT)
+
+# The Native AOT builds of the same two images (Dockerfile.grpc.aot,
+# Dockerfile.grpc.async.aot): the server and binding compiled to one native
+# executable, which runs in runtime-deps, an image with no .NET runtime. Same build
+# context and prerequisites as grpc-image; the async build reuses the sync one's
+# cached builder stage.
+grpc-image-aot: rust-lib
+	docker build \
+		-t $(GRPC_AOT_IMAGE_TAG) \
+		--build-arg RUST_PROFILE=$(RUST_PROFILE) \
+		-f $(REPO_ROOT)/dotnet/Dockerfile.grpc.aot \
+		$(REPO_ROOT)
+
+grpc-image-async-aot: rust-lib
+	docker build \
+		-t $(GRPC_ASYNC_AOT_IMAGE_TAG) \
+		--build-arg RUST_PROFILE=$(RUST_PROFILE) \
+		-f $(REPO_ROOT)/dotnet/Dockerfile.grpc.async.aot \
 		$(REPO_ROOT)
 
 # Build the .NET gRPC server for the native (host-process) multilanguage arm
@@ -159,6 +183,21 @@ test-integration-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration
 test-integration-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration
+
+# The same container arm against the Native AOT images (grpc-image-aot,
+# grpc-image-async-aot), which the harness runs under the tag
+# $(MULTILANG_IMAGE_TAG)-aot. Off Linux it skips, for test-integration's reason;
+# there the AOT arms run natively (test-integration-native-aot). The images go
+# with `MULTILANG_IMAGE_TAG=<tag>-aot make clean-grpc-images`.
+test-integration-aot: rust-lib
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+		printf '\nSKIP .NET test-integration-aot: host is %s, not Linux. The AOT gRPC-server images COPY the\n' "$$(uname -s)"; \
+		printf 'host-built Linux rust/target/$(RUST_PROFILE)/libconfluent_kafka.so, as the regular images do.\n'; \
+		printf 'Run the AOT arms natively on this host with: make -C dotnet test-integration-native-aot\n\n'; \
+	else \
+		$(call selected_run,--section dotnet.grpc -- $(MAKE) -C $(CURDIR) grpc-image-aot grpc-image-async-aot) && \
+		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet MULTILANG_IMAGE_TAG=$(MULTILANG_IMAGE_TAG)-aot; \
+	fi
 
 # The .NET arms with the gRPC server as a host process instead of a container
 # (MULTILANG_BACKEND_MODE=native, rust/tests/common/backend_pool.rs): only the
