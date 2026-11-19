@@ -383,9 +383,13 @@ public sealed class PublicClientCreateTests
         Assert.Equal(0, value.Disposals);
     }
 
+    // Java's KafkaProducer holds the key serializer, given or built, before it builds the value serializer, and its
+    // catch closes it. Java's consumer builds both inside one new Deserializers(…) and holds neither when the value
+    // fails: a given key stays its owner's. A key the client built has no other owner and is disposed on all four.
     [Theory]
     [MemberData(nameof(Flavors))]
-    public async Task Create_WhenTheValueFunctionFails_IsJavasWrappedFailure_AndDisposesTheKey_BuiltOrGiven(string flavor)
+    public async Task Create_WhenTheValueFunctionFails_IsJavasWrappedFailure_DisposesABuiltKey_AndAGivenOneOnlyOnAProducer(
+        string flavor)
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         InvalidOperationException thrown = new InvalidOperationException("no value today");
@@ -406,15 +410,40 @@ public sealed class PublicClientCreateTests
         Assert.Equal(FailedToConstruct(flavor), fromNull.Message);
         ConfigException cause = Assert.IsType<ConfigException>(fromNull.InnerException);
         Assert.Equal(ReturnedNull(flavor, ValueConfig(flavor)), cause.Message);
+        string[] builtKeyFailure =
+        {
+            "key function", "built key Configure(isKey: True)", "value function", "built key Dispose", "value function",
+        };
         Assert.Equal(
-            new[]
-            {
-                "key function", "built key Configure(isKey: True)", "value function", "built key Dispose",
-                "value function", "given key Dispose",
-            },
+            IsProducer(flavor) ? builtKeyFailure.Concat(new[] { "given key Dispose" }) : builtKeyFailure,
             log.ToArray());
         Assert.Equal(1, builtKey.Disposals);
-        Assert.Equal(1, givenKey.Disposals);
+        Assert.Equal(IsProducer(flavor) ? 1 : 0, givenKey.Disposals);
+    }
+
+    // The same split when the value serde is built and then fails: it is disposed first, then the key.
+    [Theory]
+    [MemberData(nameof(Flavors))]
+    public async Task Create_WhenTheValuesConfigureThrows_DisposesTheValue_AndAGivenKeyOnlyOnAProducer(string flavor)
+    {
+        ConcurrentQueue<string> log = new ConcurrentQueue<string>();
+        InvalidOperationException thrown = new InvalidOperationException("the value cannot be configured");
+        Probe givenKey = NewProbe(flavor, "given key", log);
+        Probe failingValue = NewProbe(flavor, "failing value", log);
+        failingValue.ConfigureThrows = thrown;
+        Dictionary<string, object?> configs = Configs(flavor);
+        configs[ValueConfig(flavor)] = Function(flavor, "value", log, failingValue);
+
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(() => Create(flavor, configs, givenKey, null));
+
+        Assert.Equal(FailedToConstruct(flavor), failure.Message);
+        Assert.Same(thrown, failure.InnerException);
+        string[] valueFailure = { "value function", "failing value Configure(isKey: False)", "failing value Dispose" };
+        Assert.Equal(
+            IsProducer(flavor) ? valueFailure.Concat(new[] { "given key Dispose" }) : valueFailure,
+            log.ToArray());
+        Assert.Equal(1, failingValue.Disposals);
+        Assert.Equal(IsProducer(flavor) ? 1 : 0, givenKey.Disposals);
     }
 
     [Theory]

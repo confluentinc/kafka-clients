@@ -140,7 +140,8 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// to construct kafka consumer" after taking it, but a given one not for a configuration the core refuses with
     /// another error, nor when this method throws <see cref="ArgumentNullException"/> or refuses a deserializer, a
     /// value's type or a <c>null</c> with <see cref="ConfigException"/> or a deserializer with
-    /// <see cref="IllegalArgumentException"/>, nor by a close refused with
+    /// <see cref="IllegalArgumentException"/>, nor a given key deserializer when the value deserializer could not
+    /// be built from <paramref name="configs"/>, as Java's consumer holds neither yet, nor by a close refused with
     /// <see cref="ConcurrentModificationException"/>, which leaves the consumer open. So a deserializer shared with
     /// another client, or used after the close, sees it disposed. A <c>Dispose</c> that throws is written to
     /// <see cref="System.Diagnostics.Trace"/> and not rethrown. A deserializer that is only

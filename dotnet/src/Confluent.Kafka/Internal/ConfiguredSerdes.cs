@@ -52,7 +52,8 @@ internal abstract class ConfiguredSerdes
                 serializer => SerdeGuard.Check(serializer, DefaultMethodGuard.Producer, disposes: true),
                 SerializerExtensions.Configure),
             NativeProducer.ConstructionFailedMessage,
-            asynchronous: false);
+            asynchronous: false,
+            holdsKeyBeforeValue: true);
 
     internal static ConfiguredSerdes<IDeserializer<TKey>, IDeserializer<TValue>> Deserializers<TKey, TValue>(
         IReadOnlyDictionary<string, object?> configs,
@@ -71,7 +72,8 @@ internal abstract class ConfiguredSerdes
                 deserializer => SerdeGuard.Check(deserializer, DefaultMethodGuard.Consumer, disposes: true),
                 DeserializerExtensions.Configure),
             NativeConsumer.ConstructionFailedMessage,
-            asynchronous: false);
+            asynchronous: false,
+            holdsKeyBeforeValue: false);
 
     internal static ConfiguredSerdes<IAsyncSerializer<TKey>, IAsyncSerializer<TValue>> AsyncSerializers<TKey, TValue>(
         IReadOnlyDictionary<string, object?> configs,
@@ -90,7 +92,8 @@ internal abstract class ConfiguredSerdes
                 serializer => SerdeGuard.Check(serializer, DefaultMethodGuard.Producer, disposes: true),
                 AsyncSerializerExtensions.Configure),
             NativeProducer.ConstructionFailedMessage,
-            asynchronous: true);
+            asynchronous: true,
+            holdsKeyBeforeValue: true);
 
     internal static ConfiguredSerdes<IAsyncDeserializer<TKey>, IAsyncDeserializer<TValue>> AsyncDeserializers<TKey, TValue>(
         IReadOnlyDictionary<string, object?> configs,
@@ -109,7 +112,8 @@ internal abstract class ConfiguredSerdes
                 deserializer => SerdeGuard.Check(deserializer, DefaultMethodGuard.Consumer, disposes: true),
                 AsyncDeserializerExtensions.Configure),
             NativeConsumer.ConstructionFailedMessage,
-            asynchronous: true);
+            asynchronous: true,
+            holdsKeyBeforeValue: false);
 
     /// <summary>
     /// The part inside Java's constructor <c>try</c>, for a synchronous client: builds and configures each serde that
@@ -119,7 +123,9 @@ internal abstract class ConfiguredSerdes
     /// <returns>The pair's disposal, given and built ones alike, which the client owns from here on.</returns>
     /// <exception cref="KafkaException">
     /// Java's "Failed to construct kafka …", with the cause inside: a function returned null or threw, or the instance
-    /// was refused or its <c>Configure</c> threw. What Java's constructor would hold by then is disposed.
+    /// was refused or its <c>Configure</c> threw. A serde built here is disposed, the one that failed first; a given
+    /// key is disposed when the value fails only on a producer, whose Java constructor holds the key by then and
+    /// closes it, and not on a consumer, whose Java constructor holds neither deserializer yet.
     /// </exception>
     internal abstract SerdeDisposal Build();
 
@@ -207,6 +213,12 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
 
     private readonly bool _asynchronous;
 
+    // Whether Java's constructor holds the key serde, given or built, while it builds the value serde. KafkaProducer
+    // does: it assigns keySerializerPlugin first, and its catch closes it. The consumer does not: one
+    // new Deserializers(config, keyDeserializer, valueDeserializer, metrics) builds both, the field stays null when
+    // the value fails, and its catch closes neither.
+    private readonly bool _holdsKeyBeforeValue;
+
     // Null for a serde that was given.
     private readonly Func<TKeySerde>? _keyFunction;
 
@@ -223,7 +235,8 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
         Role<TKeySerde> keyRole,
         Role<TValueSerde> valueRole,
         string constructionFailedMessage,
-        bool asynchronous)
+        bool asynchronous,
+        bool holdsKeyBeforeValue)
     {
         // Java copies the config map first, so a null one fails before a missing serde.
         if (configs is null)
@@ -261,6 +274,7 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
         _valueRole = valueRole;
         _constructionFailedMessage = constructionFailedMessage;
         _asynchronous = asynchronous;
+        _holdsKeyBeforeValue = holdsKeyBeforeValue;
     }
 
     /// <summary>
@@ -298,8 +312,8 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
             }
             catch (Exception failure)
             {
-                // Java's constructor holds the key serde by now, given or built, and closes it.
-                Disposal(TakeKey(builtOnly: false), null).DisposeOnce();
+                // A key built here is disposed; a given one only where Java's constructor holds it by now.
+                Disposal(TakeKey(builtOnly: !_holdsKeyBeforeValue), null).DisposeOnce();
                 throw new KafkaException(_constructionFailedMessage, failure);
             }
         }
@@ -331,7 +345,9 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
             {
                 // A cancellation is no failure of Java's constructor, so it leaves a given key to its owner.
                 bool cancelled = IsCancellation(failure, cancellationToken);
-                await Disposal(TakeKey(builtOnly: cancelled), null).DisposeOnceAsync().ConfigureAwait(false);
+                await Disposal(TakeKey(builtOnly: cancelled || !_holdsKeyBeforeValue), null)
+                    .DisposeOnceAsync()
+                    .ConfigureAwait(false);
                 if (cancelled)
                 {
                     throw;
@@ -355,7 +371,9 @@ internal sealed class ConfiguredSerdes<TKeySerde, TValueSerde> : ConfiguredSerde
     private SerdeDisposal Disposal(object? key, object? value) =>
         _asynchronous ? SerdeDisposal.OfAsyncSerdes(key, value) : new SerdeDisposal(key, value);
 
-    // The key serde to dispose, which this then no longer holds when it built it: a later disposal skips it.
+    // The key serde to dispose, which this then no longer holds when it built it: a later disposal skips it. When
+    // the value serde fails, a key built here is always disposed, since nothing else holds it (Java's consumer leaks
+    // it); a given one only where Java's constructor holds it by then and closes it, on a producer.
     private TKeySerde? TakeKey(bool builtOnly)
     {
         TKeySerde? key = _key;
