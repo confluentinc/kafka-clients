@@ -1,0 +1,46 @@
+version: v1.0
+name: Memory checks of the JavaScript client
+
+# Run as a Semaphore Task (the `memory-javascript` task in service.yml), every
+# night or by hand. Two jobs on Linux amd64:
+#   - `make -C javascript test-asan`: the addon built with AddressSanitizer in
+#     a scratch copy of the package, and the unit and memory Jest projects run
+#     against it with gcc's libasan preloaded into Node;
+#   - `make -C javascript test-memory-mutation`: each mutant of the addon, built
+#     in a scratch copy, must make the memory probes that guard what it breaks
+#     fail (its scratch broker started by the target).
+#
+# This pipeline is not part of semaphore.yml, so none of its jobs is listed in
+# REQUIRED_CI_JOBS (create-release-tag.yml): a release does not wait for it.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+global_job_config:
+  env_vars:
+    - name: NPM_CONFIG_REGISTRY
+      value: https://registry.npmjs.org/
+  prologue:
+    commands:
+      - . .semaphore/job-start.sh
+      - ./.semaphore/dependencies.sh
+      - sem-version node 22
+      - node --version && npm --version
+      - (cd javascript && npm ci --no-audit --no-fund)
+      # libconfluent_kafka and its header, which the addon links and includes.
+      - make build-javascript
+
+blocks:
+  - name: "Memory (Linux amd64)"
+    dependencies: []
+    execution_time_limit:
+      minutes: 90
+    task:
+      jobs:
+        - name: "javascript test-asan (Linux amd64)"
+          commands:
+            - make -C javascript test-asan
+        - name: "javascript test-memory-mutation (Linux amd64)"
+          commands:
+            - make -C javascript test-memory-mutation
