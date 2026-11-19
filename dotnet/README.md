@@ -139,7 +139,8 @@ is cancelled, or whose producer is closed, while a serializer is awaited is not 
 an `AsyncKafkaProducer` its headers are then already read-only.
 
 An `AsyncKafkaProducer` or `AsyncKafkaConsumer` disposes the serializers or deserializers it was
-given, through `IAsyncDisposable` when they have it and otherwise through `IDisposable`; the
+given only through `IAsyncDisposable`: it never calls `IDisposable.Dispose()` on one, and refuses,
+when it is built, one that is `IDisposable` without being `IAsyncDisposable`. The
 asynchronous mocks dispose none. Prefer `await using` or `DisposeAsync()` to `Dispose()`, which
 blocks its thread until the client is closed and its serdes are disposed. A serde's
 `DisposeAsync()` is always called with no synchronization context and with the default task

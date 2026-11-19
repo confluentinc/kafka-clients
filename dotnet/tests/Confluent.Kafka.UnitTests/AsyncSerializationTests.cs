@@ -318,7 +318,8 @@ public sealed class AsyncSerializationTests
         Assert.Equal(SerializationNamespace, asyncType.Namespace);
         Assert.Equal("Async" + syncType.Name, asyncType.Name);
         Assert.Equal(Implements(syncType, "WithConfigure"), Implements(asyncType, "WithConfigure"));
-        Assert.Equal(typeof(IDisposable).IsAssignableFrom(syncType), typeof(IDisposable).IsAssignableFrom(asyncType));
+        Assert.False(typeof(IDisposable).IsAssignableFrom(syncType));
+        Assert.False(typeof(IDisposable).IsAssignableFrom(asyncType));
         Assert.False(typeof(IAsyncDisposable).IsAssignableFrom(asyncType));
         Assert.Equal(syncType.GetMethod("Close") is null, asyncType.GetMethod("Close") is null);
         Assert.Equal(Constructors(syncType), Constructors(asyncType));

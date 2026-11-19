@@ -28,9 +28,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// How <see cref="AsyncKafkaConsumer{TKey, TValue}"/> disposes its asynchronous deserializers: through
-/// <see cref="IAsyncDisposable"/> when a deserializer has it, else through <see cref="IDisposable"/>, once, the key
-/// before the value, and it waits for a <c>DisposeAsync()</c> on every path, the synchronous ones included.
+/// How <see cref="AsyncKafkaConsumer{TKey, TValue}"/> disposes its asynchronous deserializers: only through
+/// <see cref="IAsyncDisposable"/>, once, the key before the value, and it waits for a <c>DisposeAsync()</c> on every
+/// path, the synchronous ones included. One that is only <see cref="IDisposable"/> is refused when the consumer is
+/// built, and one with no disposal interface is left alone.
 /// </summary>
 public sealed class AsyncDeserializerDisposalTests
 {
@@ -79,40 +80,45 @@ public sealed class AsyncDeserializerDisposalTests
     }
 
     [Theory]
-    [InlineData(CloseHow)]
-    [InlineData(DisposeHow)]
-    [InlineData(DisposeAsyncHow)]
-    public async Task ADeserializerThatIsOnlyIDisposable_IsDisposedOnce_ThroughIt(string how)
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ADeserializerThatIsOnlyIDisposable_IsRefused_AndNothingIsDisposed(bool asKey)
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
-        SyncOnly key = new SyncOnly("key", log);
-        SyncOnly value = new SyncOnly("value", log);
-        AsyncKafkaConsumer<string, string> consumer = new AsyncKafkaConsumer<string, string>(Unreachable(), key, value);
+        SyncOnly refused = new SyncOnly("refused", log);
+        Both other = new Both("other", log);
 
-        await CloseBy(consumer, how);
+        IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
+            () => new AsyncKafkaConsumer<string, string>(
+                Unreachable(), asKey ? refused : other, asKey ? other : refused));
 
-        Assert.Equal(new[] { "key disposed", "value disposed" }, log.ToArray());
-        await TestTimeout.DisposeAsync(consumer);
-        Assert.Equal(1, key.Disposals);
-        Assert.Equal(1, value.Disposals);
+        Assert.Equal(
+            "Confluent.Kafka.UnitTests.AsyncDeserializerDisposalTests+SyncOnly implements IDisposable but does not "
+                + "implement IAsyncDisposable, so the consumer would never dispose it.",
+            e.Message);
+        Assert.Empty(log);
+        Assert.Equal(0, refused.Disposals);
+        Assert.Equal(0, other.AsyncDisposals);
+        Assert.Equal(0, other.Disposals);
     }
 
     [Theory]
     [InlineData(CloseHow)]
     [InlineData(DisposeHow)]
     [InlineData(DisposeAsyncHow)]
-    public async Task OneOfEachKind_IsDisposedThroughItsOwnInterface_TheKeyFirst(string how)
+    public async Task ADeserializerWithNoDisposalInterface_IsLeftAlone_AndTheOtherIsDisposedThroughIAsyncDisposable(string how)
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
-        SyncOnly key = new SyncOnly("key", log);
+        Neither key = new Neither("key", log);
         Both value = new Both("value", log);
         AsyncKafkaConsumer<string, string> consumer = new AsyncKafkaConsumer<string, string>(Unreachable(), key, value);
 
         await CloseBy(consumer, how);
 
-        Assert.Equal(new[] { "key disposed", "value began", "value ended" }, log.ToArray());
+        Assert.Equal(new[] { "value began", "value ended" }, log.ToArray());
         await TestTimeout.DisposeAsync(consumer);
-        Assert.Equal(1, key.Disposals);
+        Assert.Equal(0, key.AsyncDisposals);
+        Assert.Equal(0, key.Disposals);
         Assert.Equal(1, value.AsyncDisposals);
         Assert.Equal(0, value.Disposals);
     }
@@ -229,5 +235,13 @@ public sealed class AsyncDeserializerDisposalTests
         }
 
         public void Dispose() => Disposed();
+    }
+
+    private sealed class Neither : Recording
+    {
+        internal Neither(string name, ConcurrentQueue<string> log)
+            : base(name, log)
+        {
+        }
     }
 }

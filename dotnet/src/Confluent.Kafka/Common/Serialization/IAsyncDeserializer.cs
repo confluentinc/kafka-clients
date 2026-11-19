@@ -29,8 +29,8 @@ namespace Confluent.Kafka.Common.Serialization;
 /// headers are always passed. Java's <c>configure</c> is
 /// <see cref="AsyncDeserializerExtensions.Configure{T}(IAsyncDeserializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// which a deserializer replaces by implementing <see cref="IAsyncDeserializerWithConfigure{T}"/>. Java's <c>close</c>
-/// is <see cref="IAsyncDisposable"/>, or else <see cref="IDisposable"/>: a consumer disposes a deserializer it was
-/// given through the first of the two it implements, and a mock consumer does not.
+/// is <see cref="IAsyncDisposable"/> and nothing else: a consumer disposes a deserializer it was given only through
+/// it and refuses one that is <see cref="IDisposable"/> without it, and a mock consumer disposes none.
 /// </summary>
 /// <remarks>
 /// Each built-in deserializer has a class of this interface, named <c>Async</c> and the deserializer's name

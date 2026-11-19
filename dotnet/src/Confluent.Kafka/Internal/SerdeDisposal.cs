@@ -23,8 +23,8 @@ namespace Confluent.Kafka.Internal;
 /// <summary>
 /// The key and value serializers or deserializers a client was given, disposed once, key then value: each one that is
 /// <see cref="IDisposable"/> is disposed, and a <c>Dispose</c> that throws is written to one trace warning and never
-/// rethrown. The serdes of an asynchronous client are disposed through <see cref="IAsyncDisposable"/> when they have
-/// it, and through <see cref="IDisposable"/> otherwise.
+/// rethrown. The serdes of an asynchronous client are disposed only through <see cref="IAsyncDisposable"/>: one
+/// without it is left alone, and no <see cref="IDisposable.Dispose"/> is called on them.
 /// </summary>
 internal sealed class SerdeDisposal
 {
@@ -93,7 +93,6 @@ internal sealed class SerdeDisposal
     {
         if (serde is not IAsyncDisposable disposable)
         {
-            DisposeIfDisposable(serde);
             return;
         }
 
@@ -134,9 +133,14 @@ internal sealed class SerdeDisposal
 
     private void DisposeBlocking(object serde)
     {
-        if (!_asynchronous || serde is not IAsyncDisposable disposable)
+        if (!_asynchronous)
         {
             DisposeIfDisposable(serde);
+            return;
+        }
+
+        if (serde is not IAsyncDisposable disposable)
+        {
             return;
         }
 
@@ -158,7 +162,8 @@ internal sealed class SerdeDisposal
         }
     }
 
-    // Only IDisposable: a synchronous client leaves a serde that is only IAsyncDisposable alone, on every path.
+    // Only IDisposable: a synchronous client leaves a serde that is only IAsyncDisposable alone, on every path, as an
+    // asynchronous client leaves one that is only IDisposable alone.
     internal static void DisposeIfDisposable(object serde)
     {
         if (serde is not IDisposable disposable)

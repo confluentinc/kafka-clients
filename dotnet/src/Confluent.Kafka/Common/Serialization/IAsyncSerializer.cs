@@ -28,8 +28,8 @@ namespace Confluent.Kafka.Common.Serialization;
 /// always passed. Java's <c>configure</c> is
 /// <see cref="AsyncSerializerExtensions.Configure{T}(IAsyncSerializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// which a serializer replaces by implementing <see cref="IAsyncSerializerWithConfigure{T}"/>. Java's <c>close</c> is
-/// <see cref="IAsyncDisposable"/>, or else <see cref="IDisposable"/>: a producer disposes a serializer it was given
-/// through the first of the two it implements, and a mock producer does not.
+/// <see cref="IAsyncDisposable"/> and nothing else: a producer disposes a serializer it was given only through it and
+/// refuses one that is <see cref="IDisposable"/> without it, and a mock producer disposes none.
 /// </summary>
 /// <remarks>
 /// <para>

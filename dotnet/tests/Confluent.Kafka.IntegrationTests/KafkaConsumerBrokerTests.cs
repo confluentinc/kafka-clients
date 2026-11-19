@@ -185,7 +185,7 @@ public sealed class KafkaConsumerBrokerTests
     /// A deserializer that takes a while for each record and records whether it was disposed while one was still
     /// being deserialized.
     /// </summary>
-    private sealed class SlowDeserializer : IAsyncDeserializer<byte[]>, IDisposable
+    private sealed class SlowDeserializer : IAsyncDeserializer<byte[]>, IAsyncDisposable
     {
         private readonly TimeSpan _delay;
         private readonly ManualResetEventSlim _disposed = new ManualResetEventSlim(false);
@@ -226,7 +226,7 @@ public sealed class KafkaConsumerBrokerTests
             return new ValueTask<byte[]?>(copy);
         }
 
-        public void Dispose()
+        public ValueTask DisposeAsync()
         {
             if (Volatile.Read(ref _inside) > 0)
             {
@@ -235,6 +235,7 @@ public sealed class KafkaConsumerBrokerTests
 
             _ = Interlocked.Increment(ref _disposals);
             _disposed.Set();
+            return default;
         }
     }
 }

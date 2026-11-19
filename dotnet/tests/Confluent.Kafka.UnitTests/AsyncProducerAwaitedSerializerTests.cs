@@ -507,10 +507,10 @@ public sealed class AsyncProducerAwaitedSerializerTests
     [InlineData("DisposeAsync")]
     [InlineData("Dispose")]
     [InlineData("Close")]
-    public async Task TheKafkaProducer_DisposesASerializerThroughDisposeAsyncWhenItHasIt_ElseThroughDispose_EachOnce(string how)
+    public async Task TheKafkaProducer_DisposesASerializerOnlyThroughDisposeAsync_EachOnce(string how)
     {
         BothDisposals key = new BothDisposals();
-        OnlyDisposable value = new OnlyDisposable();
+        BothDisposals value = new BothDisposals();
         AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(Unreachable(), key, value);
 
         switch (how)
@@ -529,7 +529,28 @@ public sealed class AsyncProducerAwaitedSerializerTests
 
         Assert.Equal(1, key.AsyncDisposals);
         Assert.Equal(0, key.Disposals);
-        Assert.Equal(1, value.Disposals);
+        Assert.Equal(1, value.AsyncDisposals);
+        Assert.Equal(0, value.Disposals);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheKafkaProducer_RefusesASerializerThatIsOnlyIDisposable_AndDisposesNothing(bool asKey)
+    {
+        OnlyDisposable refused = new OnlyDisposable();
+        BothDisposals other = new BothDisposals();
+
+        IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
+            () => new AsyncKafkaProducer<string, string>(Unreachable(), asKey ? refused : other, asKey ? other : refused));
+
+        Assert.Equal(
+            "Confluent.Kafka.UnitTests.AsyncProducerAwaitedSerializerTests+OnlyDisposable implements IDisposable but does "
+                + "not implement IAsyncDisposable, so the producer would never dispose it.",
+            e.Message);
+        Assert.Equal(0, refused.Disposals);
+        Assert.Equal(0, other.AsyncDisposals);
+        Assert.Equal(0, other.Disposals);
     }
 
     [Fact]

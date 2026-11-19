@@ -25,7 +25,7 @@ namespace Confluent.Kafka.UnitTests;
 /// deserializer has one, returns a completed <see cref="ValueTask{TResult}"/>, throws what the deserializer throws
 /// from the call itself, and disposes a disposable one.
 /// </summary>
-internal sealed class AsyncDeserializerOver<T> : IAsyncDeserializer<T>, IDisposable
+internal sealed class AsyncDeserializerOver<T> : IAsyncDeserializer<T>, IAsyncDisposable
 {
     private readonly IDeserializer<T> _inner;
     private readonly IDeserializerWithHeaders<T>? _withHeaders;
@@ -42,7 +42,12 @@ internal sealed class AsyncDeserializerOver<T> : IAsyncDeserializer<T>, IDisposa
             ? _inner.Deserialize(topic, data.Span)
             : _withHeaders.Deserialize(topic, headers, data.Span));
 
-    public void Dispose() => (_inner as IDisposable)?.Dispose();
+    // The one interface an asynchronous client disposes a serde through; the inner one's Dispose() does not wait.
+    public ValueTask DisposeAsync()
+    {
+        (_inner as IDisposable)?.Dispose();
+        return default;
+    }
 
     // The consumer's trace names a serde by this, so it names the test's deserializer.
     public override string ToString() => _inner.ToString() ?? string.Empty;

@@ -67,9 +67,8 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <c>key.serializer</c> / <c>value.serializer</c> config, which .NET config cannot set.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A serializer declares a public <c>DisposeAsync()</c> but is not <see cref="IAsyncDisposable"/>, a public
-    /// <c>Dispose()</c> but is not <see cref="IDisposable"/>, or a public <c>Close()</c> and is neither: the producer
-    /// would never call that method.
+    /// A serializer is <see cref="IDisposable"/>, or declares a public <c>DisposeAsync()</c>, <c>Dispose()</c> or
+    /// <c>Close()</c>, but is not <see cref="IAsyncDisposable"/>: the producer would never dispose it.
     /// </exception>
     /// <exception cref="ConfigException">
     /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
@@ -77,9 +76,9 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// </exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
     /// <remarks>
-    /// Each serializer is disposed once, key then value, through <see cref="IAsyncDisposable"/> when it has it and
-    /// otherwise through <see cref="IDisposable"/>, when the producer is closed or disposed, or when the core fails to
-    /// build it with the <see cref="KafkaException"/> "Failed to construct kafka
+    /// Each serializer that is <see cref="IAsyncDisposable"/> is disposed once, key then value, through its
+    /// <c>DisposeAsync()</c> and never through <see cref="IDisposable"/>, when the producer is closed or disposed, or
+    /// when the core fails to build it with the <see cref="KafkaException"/> "Failed to construct kafka
     /// producer", but not for a configuration the core refuses with another error, nor when this constructor throws
     /// <see cref="ArgumentNullException"/> or refuses a serializer, a value's type or a <c>null</c> with
     /// <see cref="ConfigException"/> or a serializer with <see cref="IllegalArgumentException"/>. So a serializer
@@ -89,7 +88,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <c>await using</c> or <c>DisposeAsync()</c> is the form to prefer. A serializer's <c>DisposeAsync()</c> is
     /// always called with no synchronization context and with the default task scheduler current, so an
     /// <c>await</c> in it never needs the thread that waits. A serializer's
-    /// <c>DisposeAsync</c> or <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not
+    /// <c>DisposeAsync</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not
     /// rethrown.
     /// </remarks>
     public AsyncKafkaProducer(

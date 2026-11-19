@@ -28,33 +28,38 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The construction check of an asynchronous serializer or deserializer: a client that disposes its serdes refuses a
-/// public <c>DisposeAsync()</c>, <c>Dispose()</c> or <c>Close()</c> it would never call, since it disposes through
-/// <see cref="IAsyncDisposable"/> or else <see cref="IDisposable"/>; one that does not dispose them takes every shape,
-/// and a <c>Configure</c> without its interface is taken, as on the synchronous interfaces. The asynchronous consumers
+/// The construction check of an asynchronous serializer or deserializer: a client that disposes its serdes refuses
+/// one that is <see cref="IDisposable"/>, or has a public <c>DisposeAsync()</c>, <c>Dispose()</c> or <c>Close()</c>,
+/// without <see cref="IAsyncDisposable"/>, the one interface it disposes through; one that does not dispose them
+/// takes every shape, and a <c>Configure</c> without its interface is taken, as on the synchronous interfaces. The asynchronous consumers
 /// and producers make the check when they are built: the real ones dispose their serdes, the mocks do not.
 /// </summary>
 public sealed class AsyncSerdeGuardTests
 {
     private const string Prefix = "Confluent.Kafka.UnitTests.AsyncSerdeGuardTests+";
 
+    private const string NeverDisposed =
+        " implements IDisposable but does not implement IAsyncDisposable, so the {0} would never dispose it.";
+
+    // The text after the type's name, {0} being the client.
     public static TheoryData<Type, string> Refused => new TheoryData<Type, string>
     {
-        { typeof(StrayDisposeAsync), "DisposeAsync() but does not implement IAsyncDisposable" },
-        { typeof(StrayDispose), "Dispose() but does not implement IDisposable" },
-        { typeof(StrayClose), "Close() but does not implement IAsyncDisposable or IDisposable" },
-        { typeof(AsyncDisposableWithStrayDispose), "Dispose() but does not implement IDisposable" },
-        { typeof(DisposableWithStrayDisposeAsync), "DisposeAsync() but does not implement IAsyncDisposable" },
+        { typeof(StrayDisposeAsync), NeverCalled("DisposeAsync()") },
+        { typeof(StrayDispose), NeverCalled("Dispose()") },
+        { typeof(StrayClose), NeverCalled("Close()") },
+        { typeof(DisposableWithStrayDisposeAsync), NeverCalled("DisposeAsync()") },
+        { typeof(Disposable), NeverDisposed },
+        { typeof(ExplicitlyDisposable), NeverDisposed },
+        { typeof(ClosingDisposable), NeverDisposed },
     };
 
     public static TheoryData<Type> Accepted => new TheoryData<Type>
     {
         typeof(Plain),
         typeof(AsyncDisposable),
-        typeof(Disposable),
         typeof(AsyncDisposableAndDisposable),
+        typeof(AsyncDisposableWithStrayDispose),
         typeof(ClosingAsyncDisposable),
-        typeof(ClosingDisposable),
         typeof(StrayConfigure),
     };
 
@@ -69,10 +74,8 @@ public sealed class AsyncSerdeGuardTests
         IllegalArgumentException asDeserializer = Assert.Throws<IllegalArgumentException>(
             () => SerdeGuard.Check((IAsyncDeserializer<string>)serde, DefaultMethodGuard.Consumer, disposes: true));
 
-        Assert.Equal(
-            Prefix + shape.Name + " declares " + what + ", so the producer would never call it.", asSerializer.Message);
-        Assert.Equal(
-            Prefix + shape.Name + " declares " + what + ", so the consumer would never call it.", asDeserializer.Message);
+        Assert.Equal(Prefix + shape.Name + string.Format(what, "producer"), asSerializer.Message);
+        Assert.Equal(Prefix + shape.Name + string.Format(what, "consumer"), asDeserializer.Message);
         Assert.Equal(0, serde.Disposals);
     }
 
@@ -91,7 +94,7 @@ public sealed class AsyncSerdeGuardTests
 
     [Theory]
     [MemberData(nameof(Accepted))]
-    public void AClient_TakesASerdeItDisposesThroughAnInterface_OrThatDeclaresNoClose(Type shape)
+    public void AClient_TakesASerdeItDisposesThroughIAsyncDisposable_OrThatDeclaresNoClose(Type shape)
     {
         Serde serde = (Serde)Activator.CreateInstance(shape)!;
 
@@ -120,13 +123,13 @@ public sealed class AsyncSerdeGuardTests
         foreach (bool asKey in new[] { true, false })
         {
             Serde serde = (Serde)Activator.CreateInstance(shape)!;
-            Disposable other = new Disposable();
+            AsyncDisposable other = new AsyncDisposable();
 
             IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
                 () => new AsyncKafkaConsumer<string, string>(
                     ConsumerConfigs(), asKey ? serde : other, asKey ? other : serde));
 
-            Assert.Equal(Prefix + shape.Name + " declares " + what + ", so the consumer would never call it.", e.Message);
+            Assert.Equal(Prefix + shape.Name + string.Format(what, "consumer"), e.Message);
             Assert.Equal(0, serde.Disposals);
             Assert.Equal(0, other.Disposals);
         }
@@ -148,7 +151,7 @@ public sealed class AsyncSerdeGuardTests
 
     [Theory]
     [MemberData(nameof(Accepted))]
-    public async Task AnAsyncKafkaConsumer_TakesASerdeItDisposesThroughAnInterface_AndDisposesItOnce(Type shape)
+    public async Task AnAsyncKafkaConsumer_TakesASerdeItDisposesThroughIAsyncDisposable_AndCallsOnlyItsDisposeAsyncOnce(Type shape)
     {
         foreach (bool asKey in new[] { true, false })
         {
@@ -158,7 +161,7 @@ public sealed class AsyncSerdeGuardTests
             await TestTimeout.DisposeAsync(new AsyncKafkaConsumer<string, string>(
                 ConsumerConfigs(), asKey ? serde : other, asKey ? other : serde));
 
-            Assert.Equal(serde is IAsyncDisposable || serde is IDisposable ? 1 : 0, serde.Disposals);
+            Assert.Equal(serde is IAsyncDisposable ? 1 : 0, serde.Disposals);
         }
     }
 
@@ -169,13 +172,13 @@ public sealed class AsyncSerdeGuardTests
         foreach (bool asKey in new[] { true, false })
         {
             Serde serde = (Serde)Activator.CreateInstance(shape)!;
-            Disposable other = new Disposable();
+            AsyncDisposable other = new AsyncDisposable();
 
             IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
                 () => new AsyncKafkaProducer<string, string>(
                     ProducerConfigs(), asKey ? serde : other, asKey ? other : serde));
 
-            Assert.Equal(Prefix + shape.Name + " declares " + what + ", so the producer would never call it.", e.Message);
+            Assert.Equal(Prefix + shape.Name + string.Format(what, "producer"), e.Message);
             Assert.Equal(0, serde.Disposals);
             Assert.Equal(0, other.Disposals);
         }
@@ -197,7 +200,7 @@ public sealed class AsyncSerdeGuardTests
 
     [Theory]
     [MemberData(nameof(Accepted))]
-    public async Task AnAsyncKafkaProducer_TakesASerdeItDisposesThroughAnInterface_AndDisposesItOnce(Type shape)
+    public async Task AnAsyncKafkaProducer_TakesASerdeItDisposesThroughIAsyncDisposable_AndCallsOnlyItsDisposeAsyncOnce(Type shape)
     {
         foreach (bool asKey in new[] { true, false })
         {
@@ -207,9 +210,12 @@ public sealed class AsyncSerdeGuardTests
             await TestTimeout.DisposeAsync(new AsyncKafkaProducer<string, string>(
                 ProducerConfigs(), asKey ? serde : other, asKey ? other : serde));
 
-            Assert.Equal(serde is IAsyncDisposable || serde is IDisposable ? 1 : 0, serde.Disposals);
+            Assert.Equal(serde is IAsyncDisposable ? 1 : 0, serde.Disposals);
         }
     }
+
+    private static string NeverCalled(string method) =>
+        " declares " + method + " but does not implement IAsyncDisposable, so the {0} would never call it.";
 
     private static Dictionary<string, object?> ProducerConfigs() =>
         new Dictionary<string, object?>
@@ -266,10 +272,10 @@ public sealed class AsyncSerdeGuardTests
         public void Close() => Disposals++;
     }
 
-    /// <summary>An IAsyncDisposable serde with a public Dispose() but not IDisposable.</summary>
+    /// <summary>An IAsyncDisposable serde with a public Dispose() but not IDisposable, which nothing calls.</summary>
     private sealed class AsyncDisposableWithStrayDispose : Serde, IAsyncDisposable
     {
-        public void Dispose() => Disposals++;
+        public void Dispose() => Disposals += 10;
 
         public ValueTask DisposeAsync()
         {
@@ -306,10 +312,16 @@ public sealed class AsyncSerdeGuardTests
         public void Dispose() => Disposals++;
     }
 
-    /// <summary>A serde with both disposal interfaces.</summary>
+    /// <summary>An IDisposable serde whose Dispose() is not public.</summary>
+    private sealed class ExplicitlyDisposable : Serde, IDisposable
+    {
+        void IDisposable.Dispose() => Disposals++;
+    }
+
+    /// <summary>A serde with both disposal interfaces, whose Dispose() nothing calls.</summary>
     private sealed class AsyncDisposableAndDisposable : Serde, IAsyncDisposable, IDisposable
     {
-        public void Dispose() => Disposals++;
+        public void Dispose() => Disposals += 10;
 
         public ValueTask DisposeAsync()
         {

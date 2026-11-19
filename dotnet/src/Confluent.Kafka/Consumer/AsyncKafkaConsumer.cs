@@ -62,9 +62,8 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// <c>key.deserializer</c> / <c>value.deserializer</c> config, which .NET config cannot set.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A deserializer declares a public <c>DisposeAsync()</c> but is not <see cref="IAsyncDisposable"/>, a public
-    /// <c>Dispose()</c> but is not <see cref="IDisposable"/>, or a public <c>Close()</c> and is neither: the
-    /// consumer would never call that method.
+    /// A deserializer is <see cref="IDisposable"/>, or declares a public <c>DisposeAsync()</c>, <c>Dispose()</c> or
+    /// <c>Close()</c>, but is not <see cref="IAsyncDisposable"/>: the consumer would never dispose it.
     /// </exception>
     /// <exception cref="ConfigException">
     /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
@@ -76,8 +75,8 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     /// also the default when the key is unset.
     /// </exception>
     /// <remarks>
-    /// Each deserializer is disposed once, key then value, through <see cref="IAsyncDisposable"/> when it implements
-    /// it and else through <see cref="IDisposable"/>, when the consumer is
+    /// Each deserializer that is <see cref="IAsyncDisposable"/> is disposed once, key then value, through its
+    /// <c>DisposeAsync()</c> and never through <see cref="IDisposable"/>, when the consumer is
     /// closed or disposed, or when the core fails to build it with the <see cref="KafkaException"/> "Failed to
     /// construct kafka consumer", but not for a configuration the core refuses with another error, nor when this
     /// constructor throws

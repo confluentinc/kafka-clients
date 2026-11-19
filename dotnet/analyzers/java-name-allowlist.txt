@@ -332,8 +332,8 @@ missing T:Confluent.Kafka.Common.Serialization.ISerializer`1 org.apache.kafka.co
 # The asynchronous serde interfaces (M23/P7, ledger 536, 538) have one method each: Java's serialize(String, Headers, T)
 # and deserialize(String, Headers, ByteBuffer), with a required CancellationToken and a ValueTask result, the bytes a
 # ReadOnlyMemory<byte>. Java's forms without headers and its byte[] forms have no asynchronous counterpart. Java's
-# close() is an optional IAsyncDisposable, or else IDisposable, as it is an optional IDisposable on the synchronous
-# interfaces above.
+# close() is an optional IAsyncDisposable and nothing else (M23/P8), as it is an optional IDisposable on the
+# synchronous interfaces above.
 missing T:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1 org.apache.kafka.common.serialization.Serializer#close()
 missing T:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1 org.apache.kafka.common.serialization.Serializer#serialize(String,Headers,T)
 missing T:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1 org.apache.kafka.common.serialization.Serializer#serialize(String,T)

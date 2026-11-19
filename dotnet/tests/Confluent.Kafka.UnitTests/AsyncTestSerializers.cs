@@ -25,7 +25,7 @@ namespace Confluent.Kafka.UnitTests;
 /// has one, returns a completed <see cref="ValueTask{TResult}"/>, throws what the serializer throws from the call
 /// itself, and disposes a disposable one.
 /// </summary>
-internal sealed class AsyncSerializerOver<T> : IAsyncSerializer<T>, IDisposable
+internal sealed class AsyncSerializerOver<T> : IAsyncSerializer<T>, IAsyncDisposable
 {
     private readonly ISerializer<T> _inner;
     private readonly ISerializerWithHeaders<T>? _withHeaders;
@@ -42,7 +42,12 @@ internal sealed class AsyncSerializerOver<T> : IAsyncSerializer<T>, IDisposable
             ? _inner.Serialize(topic, data)
             : _withHeaders.Serialize(topic, headers, data));
 
-    public void Dispose() => (_inner as IDisposable)?.Dispose();
+    // The one interface an asynchronous client disposes a serde through; the inner one's Dispose() does not wait.
+    public ValueTask DisposeAsync()
+    {
+        (_inner as IDisposable)?.Dispose();
+        return default;
+    }
 
     // The producer's log names a serde by this, so it names the test's serializer.
     public override string ToString() => _inner.ToString() ?? string.Empty;

@@ -23,8 +23,9 @@ namespace Confluent.Kafka.Internal;
 /// Refuses, when a client is built, a serializer or deserializer with a public method the client would never call: a
 /// headers form or a memory form without the interface that makes the client call it, or a <c>Close()</c> without
 /// <see cref="IDisposable"/>. For an asynchronous serializer or deserializer, whose one method a client always calls,
-/// it is a <c>DisposeAsync()</c>, a <c>Dispose()</c> or a <c>Close()</c> without the interface the client disposes
-/// it through.
+/// it is a serde that is <see cref="IDisposable"/>, or has a public <c>DisposeAsync()</c>, <c>Dispose()</c> or
+/// <c>Close()</c>, without <see cref="IAsyncDisposable"/>, the one interface an asynchronous client disposes it
+/// through.
 /// </summary>
 internal static class SerdeGuard
 {
@@ -71,30 +72,42 @@ internal static class SerdeGuard
     internal static void Check<T>(IAsyncDeserializer<T> deserializer, string client, bool disposes) =>
         CheckAsyncClose(deserializer, client, disposes);
 
-    // An asynchronous client disposes a serde through IAsyncDisposable, or else through IDisposable. One that is both
-    // is taken, as .NET pairs the two, although its Dispose() is then not called.
+    // An asynchronous client disposes a serde only through IAsyncDisposable. One that is also IDisposable is taken, as
+    // .NET pairs the two, and only its DisposeAsync() is called. One that is IDisposable alone would never be disposed,
+    // so it is refused, as is a public DisposeAsync(), Dispose() or Close() on a serde that is not IAsyncDisposable.
     private static void CheckAsyncClose(object serde, string client, bool disposes)
     {
-        if (!disposes)
+        if (!disposes || serde is IAsyncDisposable)
         {
             return;
         }
 
-        if (serde is not IAsyncDisposable && DefaultMethodGuard.Declares(serde, "DisposeAsync"))
+        if (DefaultMethodGuard.Declares(serde, "DisposeAsync"))
         {
             throw DefaultMethodGuard.NeverCalled(serde, "DisposeAsync()", "IAsyncDisposable", client);
         }
 
-        if (serde is not IDisposable && DefaultMethodGuard.Declares(serde, "Dispose"))
+        if (serde is IDisposable)
         {
-            throw DefaultMethodGuard.NeverCalled(serde, "Dispose()", "IDisposable", client);
+            throw NeverDisposed(serde, client);
         }
 
-        if (serde is not IAsyncDisposable && serde is not IDisposable && DefaultMethodGuard.Declares(serde, "Close"))
+        if (DefaultMethodGuard.Declares(serde, "Dispose"))
         {
-            throw DefaultMethodGuard.NeverCalled(serde, "Close()", "IAsyncDisposable or IDisposable", client);
+            throw DefaultMethodGuard.NeverCalled(serde, "Dispose()", "IAsyncDisposable", client);
+        }
+
+        if (DefaultMethodGuard.Declares(serde, "Close"))
+        {
+            throw DefaultMethodGuard.NeverCalled(serde, "Close()", "IAsyncDisposable", client);
         }
     }
+
+    // The interface itself, not a method's name: an explicit IDisposable.Dispose() is refused as a public one is.
+    private static IllegalArgumentException NeverDisposed(object serde, string client) =>
+        new IllegalArgumentException(
+            DefaultMethodGuard.TypeText(serde.GetType()) + " implements IDisposable but does not implement IAsyncDisposable, "
+                + "so the " + client + " would never dispose it.");
 
     // The mocks never dispose a serde, so only the clients that do refuse a Close() they would not call.
     private static void CheckClose(object serde, string client, bool disposes)
