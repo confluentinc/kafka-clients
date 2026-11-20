@@ -154,11 +154,11 @@ C5-24).
 
 | # | Behaviour | Test |
 |---|---|---|
-| D1 | `dyn DynShareConsumer` and its box are `Send + !Sync` | `dyn_share_consumer_is_send_and_not_sync`; `api_promises.rs` `consumers_are_send_but_not_sync` |
+| D1 | `dyn DynShareConsumer` and its box are `Send + !Sync` | `dyn_share_consumer_is_send_and_not_sync`; `api_promises.rs` `share_consumers_are_send_but_not_sync` |
 | D2 | Different implementations live behind one type (`Vec<&mut dyn …>`, `Vec<Box<dyn …>>`) and each call reaches its own consumer | `test_different_share_consumers_in_one_vec`, `test_boxed_share_consumers_in_one_vec` |
 | D3 | `dyn DynShareConsumer` implements `ShareConsumer`: generic code over `C: ShareConsumer + ?Sized` accepts a box, including the method with a borrowed argument (`acknowledge_with_record`) | `test_dyn_share_consumer_is_a_share_consumer` |
 | D4 | Errors pass through unchanged (message and variant) | `test_errors_pass_through_unchanged` |
-| D5 | The sync methods (`wakeup`, `handle`, `acquisition_lock_timeout_ms`, `set_acknowledgement_commit_callback`) and `close` reach the consumer | `test_sync_methods_reach_the_share_consumer` |
+| D5 | The sync methods (`wakeup`, `handle`, `metrics`, `acquisition_lock_timeout_ms`, `set_acknowledgement_commit_callback`) and `close` / `close_with_timeout` reach the consumer, each observed on its own (each forward made a no-op fails a test) | `test_sync_methods_reach_the_share_consumer` (mock: `wakeup`, `handle`, `close`, `metrics`); `dyn_share_consumer_forwards_reach_a_kafka_share_consumer` (`metrics`, `wakeup`, `close_with_timeout`, and `acquisition_lock_timeout_ms` / `set_acknowledgement_commit_callback` through the closed check; the mock's are Java's constants) |
 | D6 | The boxed futures are `Send`: a boxed consumer can be driven from a spawned task | `test_dyn_share_consumer_futures_can_be_spawned` |
 | D7 | It cannot be implemented outside the crate (sealed) | doc test `compile_fail` on the trait |
 
@@ -173,6 +173,7 @@ holds `&mut self` and the consumer is `!Sync`; `share_consumer_handle.rs`):
 | H4 | A `wakeup` from another task also ends a waiting `commit_sync` (Java's `setActiveTask(commitFuture)`) | `handle_wakeup_from_another_task_ends_a_waiting_commit_sync` |
 | H5 | Clones share the consumer: a wakeup through a clone wakes the consumer | `handle_clones_wake_the_same_consumer` |
 | H6 | The handle outlives `close`: `wakeup` after `close` does nothing and does not panic (Java's `wakeup` does not check `closed`) | `handle_wakeup_after_close_does_not_panic` |
+| H8 | `close` disables wakeups (Java's `disableWakeups`): a wakeup pending when `close` starts is discarded and a later one does nothing, so `wakeup()` cannot interrupt close | `close_disables_wakeups` (`share_consumer_impl.rs`; fails if `wakeup_trigger.disable()` is removed from `close_internal`) |
 | H7 | mock: the handle's `wakeup` sets the mock's flag, as `MockShareConsumer::wakeup` does (Java's mock never reads it) | `mock_handle_wakeup_sets_the_mock_flag` (`mock_share_consumer.rs`) |
 
 **`AcknowledgeOptions` / `AcknowledgeOptionsBuilder`** (the CLAUDE.md §2 `Options` form of
