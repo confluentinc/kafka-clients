@@ -1519,6 +1519,80 @@ pub async fn send_record(
     <BytesProducer as Producer<Vec<u8>, Vec<u8>>>::send(producer, record).await
 }
 
+/// The JMX port the brokers of a [`with_broker_jmx`] cluster listen on, inside
+/// their containers only (it is not mapped to the host).
+pub const BROKER_JMX_PORT: u16 = 9999;
+
+/// `config` with the brokers' JMX enabled on [`BROKER_JMX_PORT`] (the
+/// `apache/kafka` image's `KAFKA_JMX_PORT`), so [`broker_meter_count`] can read
+/// their meters.
+pub fn with_broker_jmx(mut config: ClusterConfig) -> ClusterConfig {
+    config
+        .server_properties
+        .insert("KAFKA_JMX_PORT".to_string(), BROKER_JMX_PORT.to_string());
+    config
+}
+
+/// The `Count` of the broker meter `object_name` (a JMX object name such as
+/// `kafka.server:type=ShareGroupMetrics,name=DeadLetterQueueRecordCount,group=g`)
+/// on the first broker of a [`with_broker_jmx`] cluster, or `-1` when the
+/// broker has not registered it.
+///
+/// Java's suites read the meter from the broker's Yammer registry, which runs
+/// in the test JVM (`KafkaYammerMetrics.defaultRegistry()`). The broker here
+/// runs in a container, so this reads the same meter through the broker's JMX
+/// with the image's own `org.apache.kafka.tools.JmxTool`, run by `docker exec`.
+pub async fn broker_meter_count(ctx: &TestContext, object_name: &str) -> i64 {
+    let container = ctx.cluster().container_ids().first().expect("a broker container").clone();
+    let query = object_name.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("docker")
+            .args([
+                "exec",
+                &container,
+                "/opt/kafka/bin/kafka-run-class.sh",
+                "org.apache.kafka.tools.JmxTool",
+                "--jmx-url",
+                &format!("service:jmx:rmi:///jndi/rmi://localhost:{BROKER_JMX_PORT}/jmxrmi"),
+                "--object-name",
+                &query,
+                "--attributes",
+                "Count",
+                "--one-time",
+                "true",
+            ])
+            .output()
+            .expect("docker exec JmxTool")
+    })
+    .await
+    .expect("JmxTool task");
+    // JmxTool exits with an error when no registered object matches the name:
+    // that is the unregistered meter. Any other failure (no connection) fails
+    // the caller rather than reading as an unregistered meter.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        assert!(
+            stderr.contains("No matched attributes for the queried objects"),
+            "JmxTool failed for {object_name}: {stderr}"
+        );
+        return -1;
+    }
+    // The output is a CSV header (`"time","<object name>:Count"`) and one row of
+    // values. For an object name the broker has not registered the header is
+    // `"time"` alone, and the row only the time.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines().filter(|line| !line.trim().is_empty());
+    let header = lines.by_ref().find(|line| line.starts_with("\"time\""));
+    if !header.is_some_and(|header| header.contains(":Count\"")) {
+        return -1;
+    }
+    lines
+        .next()
+        .and_then(|row| row.rsplit(',').next())
+        .and_then(|count| count.trim().parse::<i64>().ok())
+        .unwrap_or_else(|| panic!("JmxTool printed no count for {object_name}: {stdout}"))
+}
+
 /// Closes `consumer`, failing the test when the close fails or hangs.
 pub async fn close_share_consumer<K, V>(mut consumer: KafkaShareConsumer<K, V>)
 where
