@@ -138,14 +138,15 @@ where
     /// afterwards, as `ShareFetchCollector#collect` throws a batch's failure
     /// only when the fetch is otherwise empty. As the collector stops at the
     /// first partition that fails, so does this: the batches after it take
-    /// their renewals, and report their own failures, on later calls.
+    /// their renewals, and report their own failures, on later calls. The
+    /// application can then acknowledge the released record differently, as
+    /// after any delivery failure
+    /// (`ShareFetch#acknowledge(String, int, long, AcknowledgeType)`).
     ///
     /// # Cancellation
     ///
     /// A call dropped mid-way leaves every renewal it did not redeliver
-    /// pending for the next call ([`ShareInFlightBatch::take_renewals`]). The application can then
-    /// acknowledge the released record differently, as after any delivery
-    /// failure (`ShareFetch#acknowledge(String, int, long, AcknowledgeType)`).
+    /// pending for the next call ([`ShareInFlightBatch::take_renewals`]).
     ///
     /// # Errors
     ///
