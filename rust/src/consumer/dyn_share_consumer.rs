@@ -550,22 +550,39 @@ mod tests {
         assert_eq!(expected.to_string(), error.to_string());
     }
 
-    /// R8 D5: the sync methods and `close` reach the consumer.
+    /// R8 D5 (mock side): `wakeup`, `handle`, `close` and `metrics` reach the
+    /// mock, each observed on its own. The mock's
+    /// `acquisition_lock_timeout_ms` and `set_acknowledgement_commit_callback`
+    /// are constants, as Java's, so their forwards are pinned on a
+    /// `KafkaShareConsumer` (`kafka_share_consumer.rs`,
+    /// `dyn_share_consumer_forwards_reach_a_kafka_share_consumer`).
     #[tokio::test]
     async fn test_sync_methods_reach_the_share_consumer() {
         let mut inner = mock();
         {
             let as_dyn: &mut dyn DynShareConsumer<String, String> = &mut inner;
             DynShareConsumer::wakeup(as_dyn);
-            assert_eq!(None, DynShareConsumer::acquisition_lock_timeout_ms(as_dyn));
-            DynShareConsumer::set_acknowledgement_commit_callback(as_dyn, None);
-            assert!(DynShareConsumer::metrics(as_dyn).is_empty());
-            DynShareConsumer::handle(as_dyn).wakeup();
-            DynShareConsumer::close_with_timeout(as_dyn, Duration::ZERO)
-                .await
-                .expect("close");
         }
         assert!(inner.wakeup_requested(), "wakeup through DynShareConsumer reaches the mock");
+
+        let other = mock();
+        {
+            let as_dyn: &dyn DynShareConsumer<String, String> = &other;
+            DynShareConsumer::handle(as_dyn).wakeup();
+        }
+        assert!(other.wakeup_requested(), "the handle through DynShareConsumer is the mock's");
+
+        let as_dyn: &mut dyn DynShareConsumer<String, String> = &mut inner;
+        assert!(DynShareConsumer::metrics(as_dyn).is_empty());
+        DynShareConsumer::close(as_dyn).await.expect("close");
+        // The mock's `metrics` panics once it is closed, so a panic shows that
+        // both `close` and `metrics` reached it.
+        let metrics = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| DynShareConsumer::metrics(as_dyn)));
+        let panic = metrics.expect_err("metrics on a closed mock panics");
+        assert_eq!(
+            Some(&"This consumer has already been closed.".to_string()),
+            panic.downcast_ref::<String>()
+        );
         let error = inner.add_record(record("topic", 0)).expect_err("closed");
         assert_eq!("This consumer has already been closed.", error.message());
     }

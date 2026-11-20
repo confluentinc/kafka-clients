@@ -1674,6 +1674,49 @@ mod tests {
         handle.wakeup();
     }
 
+    /// R8 D5 (`KafkaShareConsumer` side): through `&mut dyn
+    /// DynShareConsumer`, `metrics` returns the consumer's own registry,
+    /// `wakeup` fails its next `poll`, `close_with_timeout` closes it, and
+    /// `acquisition_lock_timeout_ms` and `set_acknowledgement_commit_callback`
+    /// then reach its closed check (each panics with Java's message).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dyn_share_consumer_forwards_reach_a_kafka_share_consumer() {
+        use crate::consumer::DynShareConsumer;
+
+        fn closed_panic(call: impl FnOnce()) -> String {
+            let panic =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)).expect_err("a closed consumer panics");
+            panic.downcast_ref::<String>().cloned().expect("a formatted panic message")
+        }
+
+        let f = Fixture::new();
+        let mut consumer = new_subscribed_consumer(&f).await;
+        {
+            let as_dyn: &mut dyn DynShareConsumer<String, String> = &mut consumer;
+            assert!(!DynShareConsumer::metrics(as_dyn).is_empty(), "the consumer's registry");
+            DynShareConsumer::wakeup(as_dyn);
+        }
+        let error = ShareConsumer::poll(&mut consumer, Duration::ZERO)
+            .await
+            .expect_err("woken up through DynShareConsumer");
+        assert!(error.is_wakeup_error(), "{error:?}");
+
+        let as_dyn: &mut dyn DynShareConsumer<String, String> = &mut consumer;
+        DynShareConsumer::close_with_timeout(as_dyn, Duration::ZERO)
+            .await
+            .expect("closed");
+        assert_eq!(
+            "This consumer has already been closed.",
+            closed_panic(|| {
+                DynShareConsumer::acquisition_lock_timeout_ms(as_dyn);
+            })
+        );
+        assert_eq!(
+            "This consumer has already been closed.",
+            closed_panic(|| DynShareConsumer::set_acknowledgement_commit_callback(as_dyn, None))
+        );
+    }
+
     /// R8 O3: `acknowledge_with_options` keeps Java's misuse errors.
     #[tokio::test(flavor = "multi_thread")]
     async fn acknowledge_with_options_reports_java_misuse_errors() {
