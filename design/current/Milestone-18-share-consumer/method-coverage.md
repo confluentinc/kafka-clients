@@ -691,6 +691,115 @@ event, `Display` prints the variant name (`ApplicationEvent::type_name`).
 
 No unmapped method.
 
+## P7
+
+`ShareConsumerImpl` (`share_consumer_impl.rs`), `KafkaShareConsumerMetrics`
+(`metrics/kafka_share_consumer_metrics.rs`), `ShareConsumerMetrics`
+(`share_consumer_metrics.rs`), and the shared helpers P7 added. Overload names
+follow CLAUDE.md §2 provisionally; P8 fixes the public ones
+(`share-consumer.md` §1).
+
+### `ShareConsumerImpl`
+
+| Java member | Rust |
+|---|---|
+| `ShareConsumerImpl(ConsumerConfig, Deserializer, Deserializer)` | `ShareConsumerImpl::new` (wraps every failure as "Failed to construct Kafka share consumer"; body `new_inner`) |
+| `ShareConsumerImpl(ConsumerConfig, Deserializer, Deserializer, Time, ApplicationEventHandlerFactory, CompletableEventReaperFactory, ShareFetchCollectorFactory, LinkedBlockingQueue, LinkedBlockingQueue)` (visible for testing) | none: it exists to inject Mockito mocks. The tests that use it assert construction through `new` and behaviour through `with_components` (`ShareConsumerImplTest` module doc) |
+| `ShareConsumerImpl(LogContext, String, String, ConsumerConfig, Deserializer, Deserializer, Time, KafkaClient, SubscriptionState, ShareConsumerMetadata)` (visible for testing) | `ShareConsumerImpl::with_client` (`#[cfg(test)]`; `LogContext` dropped; the background task is spawned on the caller's runtime) |
+| `ShareConsumerImpl(LogContext, String, Deserializer, Deserializer, ShareFetchBuffer, ShareFetchCollector, ShareFetchMetricsManager, Time, ApplicationEventHandler, BlockingQueue, BlockingQueue, CompletableEventReaper, Metrics, SubscriptionState, ShareConsumerMetadata, int, int, String, String)` (visible for testing) | `ShareConsumerImpl::with_components(ShareConsumerImplComponents)`, which the other constructors end in; the acknowledgement mode comes parsed |
+| `ApplicationEventHandlerFactory#build`, `ShareFetchCollectorFactory#build` (test interfaces) | none: the Mockito seams; `collect_stub` / `await_not_empty_stub` (`#[cfg(test)]`) stand in for the mocked collector and buffer |
+| `ShareAcknowledgementEventProcessor()`, `#process(ShareAcknowledgementEvent)` | inlined in `process_acknowledgement_events`, its only caller (renew, then queue for the callback) |
+| `BackgroundEventProcessor()`, `#process(BackgroundEvent)`, `#process(ErrorEvent)` | inlined in `process_background_events` (`BackgroundEvent::Error` → its error; any other variant → `"Background event type .. was not expected"`) |
+| `subscription()` | `subscription` (`&mut self`; panics when closed) |
+| `subscribe(Collection)` | `subscribe` |
+| `unsubscribe()` | `unsubscribe` |
+| `poll(Duration)` | `poll` (try body `poll_inner`; `finally` = `RecordPollEnd` guard; `catch (ShareFetchException)` = `PollError::ShareFetch`) |
+| `checkInFlightPoll(Timer, boolean)` | `check_in_flight_poll` |
+| `maybeClearPreviousInFlightPoll()` | `maybe_clear_previous_in_flight_poll` |
+| `maybeClearCurrentInFlightPoll(boolean)` | `maybe_clear_current_in_flight_poll` |
+| `pollForFetches(Timer)` | `poll_for_fetches` (+ `await_not_empty`, the buffer wait raced on the wakeup token) |
+| `collect(Map)` | `collect` (+ `collect_from_buffer`, `maybe_send_share_fetch_event`) |
+| `sendShareAcknowledgeAsyncEvent(Map)` | `send_share_acknowledge_async_event` |
+| `acknowledge(ConsumerRecord)` | `acknowledge_with_record` |
+| `acknowledge(ConsumerRecord, AcknowledgeType)` | `acknowledge_with_record_type` (`Result`, D7) |
+| `acknowledge(String, int, long, AcknowledgeType)` | `acknowledge_with_topic_partition_offset_type` (`Result`, D7) |
+| `commitSync()` | `commit_sync` |
+| `commitSync(Duration)` | `commit_sync_with_timeout` |
+| `commitAsync()` | `commit_async` (async: runs the callback) |
+| `setAcknowledgementCommitCallback(AcknowledgementCommitCallback)` | `set_acknowledgement_commit_callback` (`Option`; panics when closed) |
+| `clientInstanceId(Duration)` | `client_instance_id` (Java's no-reporter `IllegalStateException`, G16) |
+| `acquisitionLockTimeoutMs()` | `acquisition_lock_timeout_ms` (`&mut self`; panics when closed) |
+| `metrics()` | `metrics` |
+| `registerMetricForSubscription(KafkaMetric)`, `unregisterMetricFromSubscription(KafkaMetric)` | none: decision D2 (P8 deferral row) |
+| `close()` | `close` |
+| `close(Duration)` | `close_with_timeout` (`closed = true` in a drop guard; a `Duration` cannot be negative) |
+| `close(Duration, boolean)` (private) | `close_internal` |
+| `stopFindCoordinatorOnClose()` | `stop_find_coordinator_on_close` |
+| `createTimerForCloseRequests(Duration)` | `create_timer_for_close_requests` (returns the deadline) |
+| `sendAcknowledgementsAndLeaveGroup(Timer, AtomicReference)` | `send_acknowledgements_and_leave_group` |
+| `wakeup()` | `wakeup` |
+| `acquireAndEnsureOpen()` | `acquire_and_ensure_open` (closed check, bootstrap fatal error) and `panic_if_closed` for the methods without an error channel |
+| `acquire()`, `release()` | none: `&mut self` (module doc, D6) |
+| `createLogContext(String, String)` (static) | `create_log_context` |
+| `maybeThrowInvalidGroupIdException()` | `maybe_return_invalid_group_id_error` |
+| `handleCompletedAcknowledgements()` | `handle_completed_acknowledgements` (one entry at a time, removed before its callback) |
+| `acknowledgeBatchIfImplicitAcknowledgement()` | `acknowledge_batch_if_implicit_acknowledgement` (records handed out only) |
+| `ensureInFlightAcknowledgedIfExplicitAcknowledgement()` | `ensure_in_flight_acknowledged_if_explicit_acknowledgement` (records handed out only) |
+| `acknowledgementsToSend()` | `acknowledgements_to_send` |
+| `ensureExplicitAcknowledgement()` | `ensure_explicit_acknowledgement` |
+| `initializeAcknowledgementMode(ConsumerConfig)` (static) | `initialize_acknowledgement_mode` |
+| `processAcknowledgementEvents()` | `process_acknowledgement_events` |
+| `processBackgroundEventsOnClose()` | `process_background_events_on_close` |
+| `processBackgroundEvents()` | `process_background_events` |
+| `processBackgroundEvents(Future, Timer, Predicate)` | `process_background_events_with_future_deadline_ms_ignore_error_event_error` |
+| `completeQuietly(ThrowingRunnable, String, AtomicReference)` | `complete_quietly` (takes the outcome of the started call) |
+| `clientId()` | `client_id` |
+| `metricsRegistry()` | `metrics_registry` |
+| `asyncConsumerMetrics()` (visible for testing) | `async_consumer_metrics` (`#[cfg(test)]`) |
+| `kafkaShareConsumerMetrics()` | `kafka_share_consumer_metrics` |
+| `NO_CURRENT_THREAD`, `currentThread`, `refCount` | none: `acquire` / `release` state |
+| *(Rust-only)* | `ShareConsumerImplComponents`; `InFlightPoll` (the kept `SharePollEvent` deadline and flag); `Collected`, `PollError`; the drop guards `PendingAcknowledgements`, `RecordPollEnd`, `SetClosed`; `start_background_task` (Java's `ApplicationEventHandler` constructor starting the network thread); `has_records`, `is_not_empty`, `pending_acknowledgements`, `result_error` (`ConsumerUtils#getResult`'s mapping), `swallow` / `close_quietly_failed` (`Utils#swallow` / `#closeQuietly`), `lock_subscriptions`, `maybe_trigger_wakeup`, `is_closed`; `Debug` |
+
+### `KafkaShareConsumerMetrics`
+
+| Java method | Rust |
+|---|---|
+| `KafkaShareConsumerMetrics(Metrics)` / private `(MetricsLedger)` | `KafkaShareConsumerMetrics::new` |
+| `recordPollStart(long)` | `record_poll_start` |
+| `recordPollEnd(long)` | `record_poll_end` |
+| `close()` (inherited from `AbstractConsumerMetricsManager`) | `close` |
+
+### `ShareConsumerMetrics`
+
+| Java method | Rust |
+|---|---|
+| `ShareConsumerMetrics()` | `ShareConsumerMetrics::new` |
+| `ShareConsumerMetrics(Set, String)` | `ShareConsumerMetrics::with_metrics_tags_metric_grp_prefix` |
+| `shareFetchMetrics` (public field) | `share_fetch_metrics` (`pub(crate)`) |
+
+### Additions to translated classes
+
+| Class | Rust (all Rust-only, cancellation, module doc of `share_consumer_impl.rs`) |
+|---|---|
+| `ShareCompletedFetch` | `fetch_records_into` (Java's `fetchRecords` into a caller-kept batch; `fetch_records` delegates), `new_in_flight_batch` |
+| `ShareFetchCollector` | `collect_with_state` (Java's `collect` into a caller-kept `ShareFetchCollectState`; `collect` delegates), `ShareFetchCollectState`; `deserializers` / `close_deserializers` (Java's `ShareConsumerImpl` holds the shared `Deserializers` itself) |
+| `ShareInFlightBatch` | `acknowledge_all_handed_out`, `check_all_handed_out_are_acknowledged` (Java's `acknowledgeAll` / `checkAllInFlightAreAcknowledged` over the records handed out), `has_records_not_handed_out` (`#[cfg(test)]`) |
+| `ShareFetch` | the same three, over every batch |
+| `ShareAcknowledgementEvent` | `into_acknowledgements_map` |
+| `NetworkClientDelegate` | `supplier`: Java's `NetworkClientDelegate#supplier(Time, LogContext, Metadata, ConsumerConfig, ApiVersions, Metrics, Sensor, ClientTelemetrySender, BackgroundEventHandler, boolean, AsyncConsumerMetrics)`, eager; Java's `(Time, ConsumerConfig, LogContext, KafkaClient, ..)` overload is `NetworkClientDelegate::new` plus `set_async_consumer_metrics` at its one caller (`with_client`) |
+| `ConsumerUtils` | `create_metrics`: Java's `ConsumerUtils#createMetrics(ConsumerConfig, Time, List)` (no reporters) |
+| `RequestManager` | `type_name_for_test` (`#[cfg(test)]`, the `entries()` order pin) |
+
+### Summary
+
+| Class | Java members | Mapped to a Rust function | No Rust function, with reason |
+|---|---|---|---|
+| `ShareConsumerImpl` | 4 constructors, 49 methods, 2 nested processors (5 members), 2 test factory interfaces | 3 constructors, 45 methods, the 5 processor members (inlined) | 1 constructor (Mockito injection); 4 methods: `registerMetricForSubscription`, `unregisterMetricFromSubscription` (D2, P8), `acquire`, `release` (`&mut self`); the 2 factory interfaces (Mockito seams) |
+| `KafkaShareConsumerMetrics` | 4 | 4 | 0 |
+| `ShareConsumerMetrics` | 3 | 3 | 0 |
+
+No unmapped method.
+
 ## P9
 
 Admin share-group RPCs (`org.apache.kafka.clients.admin`). Paths are under
