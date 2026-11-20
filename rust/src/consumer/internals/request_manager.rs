@@ -97,6 +97,13 @@ pub(crate) trait RequestManager: Send + 'static {
     /// every network poll, in `run_once` and in the close loop of `cleanup`.
     /// `ShareConsumeRequestManager` is the one manager that overrides it.
     fn handle_completed_requests(&mut self) {}
+
+    /// The implementing type's name, for the tests that pin the order of
+    /// [`super::RequestManagers::entries`]. Rust-only, test-only.
+    #[cfg(test)]
+    fn type_name_for_test(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 }
 
 #[cfg(test)]

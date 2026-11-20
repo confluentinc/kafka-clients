@@ -819,6 +819,39 @@ mod tests {
         );
     }
 
+    /// Java's share `entries()` order, which the share background task polls
+    /// in: share heartbeat, share membership, share consume (the coordinator
+    /// is polled separately). The membership manager's poll applies an
+    /// assignment the share consume manager fetches in the same iteration
+    /// (PLAN §8.1 row 10), so moving the heartbeat or the membership manager
+    /// after it must fail here (Critic 270).
+    #[test]
+    fn share_entries_are_heartbeat_then_membership_then_consume() {
+        let metrics = Arc::new(Metrics::new());
+        let mut rm = share_request_managers(&metrics);
+        let names: Vec<&str> = rm
+            .entries()
+            .iter()
+            // `ShareHeartbeatRequestManager`, `Arc<ShareMembershipManager>`,
+            // `Arc<Mutex<ShareConsumeRequestManager>>`: the last path segment.
+            .map(|m| {
+                m.type_name_for_test()
+                    .trim_end_matches('>')
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(
+            vec![
+                "ShareHeartbeatRequestManager",
+                "ShareMembershipManager",
+                "ShareConsumeRequestManager"
+            ],
+            names
+        );
+    }
+
     /// Java's `RequestManagers#close` closes every `Closeable` entry; for a
     /// share consumer that is `ShareConsumeRequestManager#close`, which
     /// removes the share fetch metrics. A second close does nothing.
