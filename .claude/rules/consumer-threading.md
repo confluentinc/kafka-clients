@@ -670,8 +670,13 @@ A fetched `ConsumerRecord` does not build its headers. It keeps one `Bytes`
 slice of the record's still-encoded header section, with the header count
 (`RecordHeaders::from_wire`), and the list is read the first time something
 asks for it: the application, or a deserializer that uses the
-`&mut RecordHeaders` it is given. A record whose headers are never read costs
-no allocation and no copy for them.
+`&mut RecordHeaders` it is given. In an uncompressed batch a record whose
+headers are never read costs no allocation and no copy for them. In a
+compressed batch the slice keeps the buffer the record was decompressed into,
+read or not, so the next record is read into a new one: a buffer per record
+with headers, as Java's `DefaultRecord.readFrom` allocates one per record,
+where a record without headers reuses the previous record's buffer. Nothing is
+built or copied per header in either case.
 
 When the list is read, each `RecordHeader` holds slices of that same buffer
 (`RecordHeader::with_key_buffer_value_buffer`, Java's
@@ -685,10 +690,10 @@ fail on such a key.
 `DefaultRecord`'s parser validates the whole header section when it parses the
 record, so the later read cannot fail.
 
-A record with headers that the application keeps holds its buffer alive: the
-fetched data, or, for a compressed batch, the buffer the record was
-decompressed into, which the cursor then cannot reuse for the next record. A
-`Bytes` value from `BytesDeserializer` does the same.
+A record with headers holds its buffer alive for as long as the record, or a
+clone of its headers, lives: the fetched data (the whole fetch response the
+record came in), or, for a compressed batch, the buffer the record was
+decompressed into. A `Bytes` value from `BytesDeserializer` does the same.
 
 Do NOT add a lifetime parameter to `ConsumerRecord<K, V>` for borrowed
 headers: it would propagate through `ConsumerRecords<K, V>` and every
@@ -725,9 +730,12 @@ Per-record allocation-budget test on the receive path, following the
 existing producer hot-path allocation test precedent (Phase 6). Assert
 the per-record allocation count matches the user-deserializer budget;
 specifically, no allocations attributable to topic name, key/value bytes
-on the buffer, batch traversal, or headers that are never read. Tests also
-assert that the key and value of a header that is read point into the fetch
-buffer (the record's own buffer for a compressed batch).
+on the buffer, batch traversal, or headers that are never read. A compressed
+batch has its own budget, stated and tested apart: the buffer each record is
+read into, and for a record with headers that buffer's reference count, with
+nothing per header. Tests also assert that the key and value of a header that
+is read point into the fetch buffer (the record's own buffer for a compressed
+batch).
 
 ## 28. Event variants: mirror Java's `CompletableApplicationEvent<T>` hierarchy
 

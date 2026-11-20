@@ -9,9 +9,13 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 - The headers of a fetched record are read on demand, as Java reads them. A
   record keeps a slice of its encoded header section and builds the header
   list the first time it is asked for; each header's key and value are then
-  views of the fetched data, not copies. A record whose headers are never read
-  costs no allocation for them. A record with headers that is kept holds its
-  fetch buffer alive, as a `Bytes` value from `BytesDeserializer` does.
+  views of the fetched data, not copies. In an uncompressed batch a record
+  whose headers are never read costs no allocation for them; in a compressed
+  batch a record with headers keeps the buffer it was decompressed into, so
+  each such record gets a buffer of its own, as in Java, and nothing is
+  allocated per header. A record with headers that is kept holds its buffer
+  alive (the fetch response it came in, or its decompression buffer), as a
+  `Bytes` value from `BytesDeserializer` does.
 - A header key that is not valid UTF-8 no longer fails `poll()` with "has
   invalid headers": the key is decoded with U+FFFD for the malformed bytes, as
   Java's `RecordHeader.key()` decodes it.
