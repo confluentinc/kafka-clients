@@ -409,7 +409,7 @@ test("a serializer's serialize may also return a Promise of the bytes it takes (
   assert.match(findings(r)[0], /^Serializer\.serialize: return: Java byte\[\] is not TypeScript /);
 });
 
-test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition and MetricName collections', () => {
+test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition, MetricName and Uuid collections; integer keys are a Map of numbers', () => {
   const coll = javaClass('clients.producer.Coll', {
     overloads: [
       method('take', ['Node[]'], { param_types: ['Node[]'], return_type: 'void', param_names: ['nodes'] }),
@@ -421,6 +421,8 @@ test('a Java array or collection taken is any iterable; one returned is an array
       method('metrics', [], { return_type: 'Map<MetricName, ? extends Metric>' }),
       method('labels', [], { return_type: 'Map<String, String>' }),
       method('label', ['Map'], { param_types: ['Map<String, String>'], return_type: 'void', param_names: ['labels'] }),
+      method('byId', [], { return_type: 'Map<Uuid, Long>' }),
+      method('assignments', [], { return_type: 'Map<Integer, List<Integer>>' }),
     ],
   });
   const extra = [
@@ -429,6 +431,7 @@ test('a Java array or collection taken is any iterable; one returned is an array
     javaClass('common.TopicPartition', {}),
     javaClass('common.MetricName', {}),
     javaClass('common.Metric', { kind: 'interface' }),
+    javaClass('common.Uuid', {}),
   ];
   const GOOD = {
     take: 'take(nodes: Iterable<Node>): void { void nodes; }',
@@ -440,10 +443,12 @@ test('a Java array or collection taken is any iterable; one returned is an array
     metrics: 'metrics(): MetricNameMap<Metric> { return new MetricNameMap(); }',
     labels: 'labels(): Map<string, string> { return new Map(); }',
     label: 'label(labels: ReadonlyMap<string, string> | Readonly<Record<string, string>>): void { void labels; }',
+    byId: 'byId(): UuidMap<bigint> { return new UuidMap(); }',
+    assignments: 'assignments(): ReadonlyMap<number, readonly number[]> { return new Map(); }',
   };
   const source = (/** @type {Record<string, string>} */ members) =>
     "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
-    "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport { MetricNameMap, TopicPartitionMap, TopicPartitionSet } from './collections';\n" +
+    "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport { MetricNameMap, TopicPartitionMap, TopicPartitionSet, UuidMap } from './collections';\n" +
     `void TopicPartition;\nexport class Coll {\n${Object.values(members)
       .map((m) => `  ${m}\n`)
       .join('')}}\n`;
@@ -461,7 +466,7 @@ test('a Java array or collection taken is any iterable; one returned is an array
       'src/common/metric.ts': 'export interface Metric { metricValue(): unknown }\n',
       'src/producer/collections.ts':
         'export class TopicPartitionSet { private readonly b = 1; }\nexport class TopicPartitionMap<V> { private readonly v: V | null = null; }\n' +
-        'export class MetricNameMap<V> { private readonly v: V | null = null; }\n',
+        'export class MetricNameMap<V> { private readonly v: V | null = null; }\nexport class UuidMap<V> { private readonly v: V | null = null; }\n',
       'src/producer/coll.ts': source(members),
     });
   let r = lint(files(GOOD), [RULE]);
@@ -489,6 +494,16 @@ test('a Java array or collection taken is any iterable; one returned is an array
       'label',
       'label(labels: Record<string, number>): void { void labels; }',
       'Coll.label: parameter labels: Java Map<String, String> is not TypeScript Record<string, number>',
+    ],
+    [
+      'byId',
+      'byId(): Map<string, bigint> { return new Map(); }',
+      'Coll.byId: return: Java Map<Uuid, Long> is not TypeScript Map<string, bigint>',
+    ],
+    [
+      'assignments',
+      'assignments(): Map<string, number[]> { return new Map(); }',
+      'Coll.assignments: return: Java Map<Integer, List<Integer>> is not TypeScript Map<string, number[]>',
     ],
     [
       'metrics',

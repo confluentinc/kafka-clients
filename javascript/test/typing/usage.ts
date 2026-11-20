@@ -1076,3 +1076,43 @@ async function adminClient(): Promise<void> {
   await mock.close();
 }
 void adminClient;
+
+async function adminTopics(): Promise<void> {
+  const { CreateTopicsOptions, DescribeTopicsOptions, MockAdminClient, NewPartitions, NewTopic, RecordsToDelete } =
+    await import('@confluentinc/kafka-javascript/admin');
+  const { TopicCollection, TopicPartition, TopicPartitionMap, Uuid, UuidMap } = await import('@confluentinc/kafka-javascript/common');
+  type KafkaFutureOf<T> = import('@confluentinc/kafka-javascript/common').KafkaFuture<T>;
+  type TopicDescriptionType = import('@confluentinc/kafka-javascript/admin').TopicDescription;
+  type DeletedRecordsType = import('@confluentinc/kafka-javascript/admin').DeletedRecords;
+  type UuidType = import('@confluentinc/kafka-javascript/common').Uuid;
+  const admin = new MockAdminClient();
+  const created = admin.createTopics({
+    newTopics: [new NewTopic({ name: 't', numPartitions: 1, replicationFactor: 1 }).configs({ 'cleanup.policy': 'compact' })],
+    options: new CreateTopicsOptions({ validateOnly: true }),
+  });
+  expectTypeOf(created.all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  expectTypeOf(created.values()).toEqualTypeOf<Map<string, KafkaFutureOf<void>>>();
+  expectTypeOf(created.numPartitions('t')).toEqualTypeOf<KafkaFutureOf<number>>();
+  void new NewTopic({ name: 't', numPartitions: null, replicationFactor: null });
+  void new NewTopic({ name: 't', replicasAssignments: new Map([[0, [1, 2]]]) });
+  // @ts-expect-error the two forms' keys mixed
+  void new NewTopic({ name: 't', numPartitions: 1, replicationFactor: 1, replicasAssignments: new Map() });
+  const byName = admin.describeTopics(['t']);
+  expectTypeOf(byName.allTopicNames()).toEqualTypeOf<KafkaFutureOf<Map<string, TopicDescriptionType>> | null>();
+  const byId = admin.describeTopics({ topics: TopicCollection.ofTopicIds([Uuid.randomUuid()]), options: new DescribeTopicsOptions() });
+  expectTypeOf(byId.topicIdValues()).toEqualTypeOf<InstanceType<typeof UuidMap<KafkaFutureOf<TopicDescriptionType>>> | null>();
+  // @ts-expect-error describeTopics takes the names or a TopicCollection, never both
+  admin.describeTopics({ topicNames: ['t'], topics: TopicCollection.ofTopicNames(['t']) });
+  void admin.deleteTopics(['t']);
+  void admin.deleteTopics({ topics: TopicCollection.ofTopicIds([] as UuidType[]) });
+  void admin.createPartitions({ newPartitions: { t: NewPartitions.increaseTo(2) } });
+  void admin.createPartitions(new Map([['t', NewPartitions.increaseTo({ totalCount: 3, newAssignments: [[1], [2]] })]]));
+  const deleted = admin.deleteRecords(
+    new TopicPartitionMap([[new TopicPartition({ topic: 't', partition: 0 }), RecordsToDelete.beforeOffset(5n)]]),
+  );
+  expectTypeOf(deleted.lowWatermarks()).toEqualTypeOf<InstanceType<typeof TopicPartitionMap<KafkaFutureOf<DeletedRecordsType>>> | null>();
+  // @ts-expect-error deleteRecords takes a TopicPartitionMap
+  admin.deleteRecords(new Map());
+  await admin.close();
+}
+void adminTopics;
