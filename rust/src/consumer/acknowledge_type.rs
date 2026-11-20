@@ -20,8 +20,9 @@ use std::fmt;
 
 use crate::common::Error;
 
-/// The acknowledge type is used with `KafkaShareConsumer::acknowledge` to
-/// indicate whether the record was consumed successfully.
+/// The acknowledge type is used with
+/// [`KafkaShareConsumer::acknowledge_with_record_type`](crate::consumer::ShareConsumer::acknowledge_with_record_type)
+/// to indicate whether the record was consumed successfully.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 #[doc(alias = "org.apache.kafka.clients.consumer.AcknowledgeType")]
@@ -36,6 +37,15 @@ pub enum AcknowledgeType {
     Reject,
     /// The record is still being processed. Renew the acquisition lock so
     /// processing can continue.
+    ///
+    /// A renewed record is returned again by a later
+    /// [`ShareConsumer::poll`](crate::consumer::ShareConsumer::poll) as a new
+    /// `ConsumerRecord`: its key and value are deserialized again from the
+    /// fetched bytes, so the deserializers run once more for it. Java returns
+    /// the same record object.
+    // Milestone 18 decision D5, option (c): the renewed record is re-decoded
+    // inside `ShareInFlightBatch` rather than kept, because `ConsumerRecords`
+    // owns its records and hands them out by value.
     Renew,
 }
 
