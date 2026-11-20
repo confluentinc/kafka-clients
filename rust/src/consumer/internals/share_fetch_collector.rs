@@ -936,4 +936,47 @@ mod tests {
             acks[&f.topic_a_partition0].acknowledgements().get(0)
         );
     }
+
+    /// Translation-checklist R4 item 8: a collect dropped while a deserializer
+    /// is pending sets the fetch it was reading back as the next in line, so
+    /// it stays buffered and is read again.
+    #[test]
+    fn test_collect_dropped_mid_deserialize_puts_the_fetch_back() {
+        struct PendingDeserializer;
+        impl crate::common::serialization::Deserializer<String> for PendingDeserializer {
+            async fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, Error> {
+                std::future::pending().await
+            }
+        }
+
+        let mut f = Fixture::new();
+        f.subscribe_and_assign(&f.topic_a_partition0);
+        let metadata = Arc::new(ShareConsumerMetadata::new(
+            0,
+            1000,
+            10000,
+            false,
+            Arc::clone(&f.subscriptions),
+            ClusterResourceListeners::new(),
+        ));
+        f.fetch_collector = ShareFetchCollector::new(
+            metadata,
+            Arc::clone(&f.subscriptions),
+            f.fetch_collector.share_fetch_config.clone(),
+            Arc::new(Deserializers::new(
+                Box::new(crate::common::serialization::StringDeserializer::new()),
+                Box::new(PendingDeserializer),
+            )),
+        );
+        f.fetch_buffer.add([f.build(f.builder().record_count(3))]);
+
+        // The first poll initializes the fetch and blocks on its first value.
+        assert!(f.fetch_collector.collect(&f.fetch_buffer).now_or_never().is_none());
+        assert!(f.fetch_buffer.next_in_line_fetch(|cf| cf.is_some_and(|cf| !cf.is_consumed())));
+        assert_eq!(
+            HashSet::from([f.topic_a_partition0.clone()]),
+            f.fetch_buffer.buffered_partitions()
+        );
+        assert_eq!(HashSet::from([0]), f.fetch_buffer.buffered_nodes());
+    }
 }
