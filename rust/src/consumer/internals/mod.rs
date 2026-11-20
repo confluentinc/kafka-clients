@@ -100,6 +100,11 @@ pub(crate) mod share_acquire_mode;
 mod share_consumer_metadata;
 #[cfg_attr(
     not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3b on")
+)]
+mod share_fetch_config;
+#[cfg_attr(
+    not(test),
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
 )]
 mod share_fetch_metrics_aggregator;
@@ -184,10 +189,11 @@ pub(crate) use request_managers::RequestManagers;
 pub(crate) use request_state::RequestState;
 #[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")]
 pub(crate) use share_acknowledgement_mode::ShareAcknowledgementMode;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P5a on")]
 pub(crate) use share_acquire_mode::ShareAcquireMode;
 #[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P6 on")]
 pub(crate) use share_consumer_metadata::ShareConsumerMetadata;
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3b on")]
+pub(crate) use share_fetch_config::ShareFetchConfig;
 #[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3a on")]
 pub(crate) use share_fetch_metrics_aggregator::ShareFetchMetricsAggregator;
 pub(crate) use share_fetch_metrics_manager::ShareFetchMetricsManager;

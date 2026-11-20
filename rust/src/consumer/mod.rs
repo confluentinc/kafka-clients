@@ -66,7 +66,10 @@ pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
 pub use offset_commit_callback::OffsetCommitCallback;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")]
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")
+)]
 pub(crate) use share_consumer_config::ShareConsumerConfig;
 pub use subscription_pattern::SubscriptionPattern;
 
