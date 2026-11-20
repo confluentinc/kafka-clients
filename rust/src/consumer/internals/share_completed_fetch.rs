@@ -29,6 +29,15 @@
 //!
 //! Java's `CloseableIterator<Record>` over the current batch (ledger gap G15)
 //! is the cursor's record source, as in `CompletedFetch`.
+//!
+//! Deviations, both from the shared decoder: the decoder refuses message
+//! formats v0 and v1 by their magic (the consumer's decision D7), and it
+//! reports a compressed batch whose stream fails through its batch error,
+//! which is `CorruptRecordError` here (Java's `maybeEnsureValid` text), so that
+//! batch's acquired records are rejected. Java's stream throws a bare
+//! `KafkaException` from `DefaultRecordBatch.StreamRecordIterator#readNext`,
+//! which escapes `ShareCompletedFetch#fetchRecords` and fails every later call
+//! on the same fetch until the broker's acquisition lock releases the records.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -509,12 +518,15 @@ impl ShareCompletedFetch {
 
     /// Scans for the next record in the available batches, skipping control
     /// records. Returns whether the current batch has more records; leaves
-    /// [`Self::last_record`] on the record found, `None` when there is none.
+    /// `last_record` on the record found, `None` when there is none.
     ///
     /// # Errors
     ///
-    /// A corrupt batch or record (Java's `CorruptRecordException`, which
-    /// `InvalidRecordException` extends).
+    /// A corrupt batch (`CorruptRecordError`, Java's `CorruptRecordException`),
+    /// or a malformed record (`InvalidRecordError`; Java's
+    /// `org.apache.kafka.common.InvalidRecordException` extends
+    /// `InvalidConfigurationException`, not `CorruptRecordException`, so
+    /// `fetch_records` lets it escape as Java's `fetchRecords` does).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareCompletedFetch#nextFetchedRecord")]
     fn next_fetched_record(&mut self, check_crcs: bool) -> Result<bool, Error> {
         loop {
