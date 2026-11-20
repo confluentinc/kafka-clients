@@ -99,6 +99,10 @@ pub(crate) struct BatchMetadata {
     pub(crate) has_producer_id: bool,
     pub(crate) producer_id: i64,
     pub(crate) magic: i8,
+    /// Where the batch starts in the cursor's buffer, its size field first.
+    pub(crate) batch_start: usize,
+    /// Where the batch ends in the cursor's buffer (exclusive).
+    pub(crate) batch_end: usize,
 }
 
 /// Cursor through the batches and records inside a [`CompletedFetch`].
@@ -482,6 +486,31 @@ impl BatchCursor {
         }
     }
 
+    /// The buffer the cursor reads: the fetch's record batches.
+    pub(crate) fn buffer_bytes(&self) -> &bytes::Bytes {
+        self.memory_records.buffer_bytes()
+    }
+
+    /// Checks the checksum of `batch`, a batch [`Self::next_batch`] returned:
+    /// the half of Java's `RecordBatch#ensureValid` that `next_batch` leaves to
+    /// `check.crcs` (its size is always checked there).
+    ///
+    /// # Errors
+    ///
+    /// The checksum does not match.
+    pub(crate) fn ensure_valid(&self, batch: &BatchMetadata) -> Result<(), InvalidRecordError> {
+        let batch_bytes = self
+            .memory_records
+            .buffer()
+            .get(batch.batch_start..batch.batch_end)
+            .unwrap_or_default();
+        let batch = DefaultRecordBatchRef::new(batch_bytes)?;
+        if batch.magic() >= RecordVersion::V2.value() {
+            batch.ensure_valid()?;
+        }
+        Ok(())
+    }
+
     /// Reads the header of the next batch and moves past it, without installing
     /// it: the batch's metadata, where its records are, and its declared record
     /// count. `Ok(None)` once no batch remains.
@@ -579,6 +608,8 @@ impl BatchCursor {
             has_producer_id: batch.producer_id() >= 0,
             producer_id: batch.producer_id(),
             magic: batch.magic(),
+            batch_start,
+            batch_end: batch_start + batch_size,
         };
 
         // Describe where this batch's records live; they are materialized
