@@ -60,6 +60,8 @@
 // | Set<TopicPartition>, returned                | TopicPartitionSet                       |
 // | Map<TopicPartition, V>                       | TopicPartitionMap<V>                    |
 // | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
+// | Map<Uuid, V>                                 | UuidMap<V>                              |
+// | Map<Integer, V> (broker ids, partitions)     | Map<number, V>, or a ReadonlyMap (taken, or an unmodifiable view returned) |
 // | Map<String, V>, returned                     | Map<string, V>                          |
 // | Map<String, V>, taken                        | a Map or ReadonlyMap, or a plain object (Record) of string to V |
 // | Map, Properties (a client's configuration)   | the `...Configs` configuration type (& its serde keys) |
@@ -351,6 +353,22 @@ module.exports = {
         };
         return parts(t).every(part);
       }
+      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'Uuid') {
+        // A map keyed by another value class, one class per key type
+        // (javascript/design/current/admin/PLAN.md, D2).
+        return symbolName(t) === 'UuidMap' && matches(j.args[1], typeArgs(t)[0]) === true;
+      }
+      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'Integer' && j.args[0].dims === 0) {
+        // Integer keys (broker ids, partitions) are the number keys of a Map;
+        // a ReadonlyMap is taken, or returned for Java's unmodifiable view
+        // (NewTopic#replicasAssignments).
+        return parts(t).every((p) => {
+          const n = symbolName(p);
+          if (n !== 'Map' && n !== 'ReadonlyMap') return false;
+          const [k, v] = typeArgs(p);
+          return matches(j.args[0], k) === true && matches(j.args[1], v) === true;
+        });
+      }
       if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'MetricName') {
         return symbolName(t) === 'MetricNameMap' && matches(j.args[1], typeArgs(t)[0]) === true;
       }
@@ -476,10 +494,9 @@ module.exports = {
       if (jm.kind === 'field') continue;
       const forms = liveForms(jm.overloads);
       const names = formOptionNames(forms);
-      // The bare value's name: the one parameter of the one-parameter forms
-      // (one name only; src/internal/args.ts gives no bare value otherwise).
+      // The bare values' names: the one parameter of each one-parameter form
+      // (several names told apart by type, src/internal/args.ts `bareTypes`).
       const bareNames = [...new Set(forms.filter((f) => f.params.length === 1).map((f) => names[forms.indexOf(f)][0]))];
-      const bareName = bareNames.length === 1 ? bareNames[0] : null;
       // Every signature: the overload signatures, else the implementation.
       signaturesOf(ts, m.node).forEach((node, n) => {
         const where = n === 0 ? subject : `${subject}#${n + 1}`;
@@ -499,7 +516,8 @@ module.exports = {
           if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking, awaited });
         }
         const p0 = params.length === 1 ? params[0] : null;
-        if (p0 !== null && bareName !== null && ts.isIdentifier(p0.name) && p0.name.text === bareName) {
+        const bareName = p0 !== null && ts.isIdentifier(p0.name) && bareNames.includes(p0.name.text) ? p0.name.text : null;
+        if (bareName !== null) {
           // The bare value of the one-parameter forms: against their Java types.
           const types = forms.filter((f, k) => f.params.length === 1 && names[k][0] === bareName).map((f) => f.types[0]);
           const bare = unwrapBare(checker.getTypeAtLocation(p0));

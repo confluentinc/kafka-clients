@@ -91,6 +91,8 @@ const DATA_CLASSES = new Set([
   'org.apache.kafka.common.TopicPartition',
   'org.apache.kafka.common.Node',
   'org.apache.kafka.clients.consumer.OffsetAndMetadata',
+  // The admin client's descriptions (the owner's decision of 2026-11-20).
+  'org.apache.kafka.clients.admin.TopicDescription',
 ]);
 
 /**
@@ -455,15 +457,35 @@ const ENUM_TO_STRING = {
 function javaMember(index, cls, m, { anyStatic = false } = {}) {
   const chain = index.chain(cls);
   const fits = (isStatic) => anyStatic || isStatic === m.isStatic;
+  // Java's overload set of a name: the class's own methods and those it
+  // inherits (an interface's `default` forms, `Admin#deleteTopics(Collection)`
+  // beside `KafkaAdminClient#deleteTopics(TopicCollection, DeleteTopicsOptions)`),
+  // an override hiding the form it overrides; the owner is the first class
+  // of the chain that declares the name.
   const methods = (name, arity) => {
+    let owner = null;
+    const found = [];
+    const seen = new Set();
     for (const c of chain) {
-      const found = c.overloads.filter(
-        (o) =>
-          o.name === name && o.name !== c.path[c.path.length - 1] && (arity === undefined || o.params.length === arity) && fits(o.static),
-      );
-      if (found.length > 0) return { kind: 'methods', name, owner: c, overloads: found };
+      for (const o of c.overloads) {
+        if (
+          o.name !== name ||
+          o.name === c.path[c.path.length - 1] ||
+          (arity !== undefined && o.params.length !== arity) ||
+          !fits(o.static)
+        )
+          continue;
+        // A static method is not inherited into another class's overload set
+        // (`Admin.create(Properties)` is not `MockAdminClient.create()`'s).
+        if (owner !== null && owner !== c && o.static) continue;
+        const key = o.params.map((p) => (typeof p === 'string' ? p : JSON.stringify(p))).join(',');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (owner === null) owner = c;
+        found.push(o);
+      }
     }
-    return null;
+    return owner === null ? null : { kind: 'methods', name, owner, overloads: found };
   };
   const field = (name) => {
     for (const c of chain) {

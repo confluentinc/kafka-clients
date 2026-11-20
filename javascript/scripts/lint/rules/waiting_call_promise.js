@@ -47,7 +47,15 @@ const { nativeUses, reachedBodies } = require('../native_uses');
  * returns at once, so theirs does. Each with its reason; an entry that
  * matches nothing is a finding.
  */
-const DEPENDANTS = [{ key: 'KafkaFuture.allOf', reason: "allOf's future, completed once every source's wait completed" }];
+const DEPENDANTS = [
+  { key: 'KafkaFuture.allOf', reason: "allOf's future, completed once every source's wait completed" },
+  { key: 'CreatePartitionsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'CreateTopicsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DeleteRecordsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DeleteTopicsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DescribeTopicsResult.allTopicNames', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'DescribeTopicsResult.allTopicIds', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+];
 
 /** The C call graph of native/*.c: function name -> the names it calls. */
 function callGraph(ctx) {

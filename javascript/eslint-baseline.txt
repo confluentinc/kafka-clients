@@ -72,7 +72,6 @@ missing common.serialization.Serializer#configure
 # KafkaProducer's constructor: a Map and Properties are one configs type, so
 # Java's (Properties, Serializer, Serializer) form is the (Map, Serializer,
 # Serializer) one.
-overload-missing KafkaProducer.constructor/KafkaProducer(Properties,Serializer,Serializer)
 # RecordHeader's constructor takes Java's (String, byte[]) form: JavaScript has
 # no ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
 overload-missing RecordHeader.constructor/RecordHeader(ByteBuffer,ByteBuffer)
@@ -147,6 +146,7 @@ missing clients.admin.MockAdminClient#handleDescribeTopicsUsingIds
 missing clients.admin.MockAdminClient#injectTimeoutException
 missing clients.admin.MockAdminClient#setClientInstanceId
 missing clients.admin.MockAdminClient#setMockMetrics
+overload-missing MockAdminClient.addTopic/addTopic(boolean,String,List,Map,boolean)
 # The admin RPCs, and the mock's methods of their families, not translated
 # yet: each family comes with its own commit of the admin client's branch,
 # which removes its lines here.
@@ -158,13 +158,9 @@ missing clients.admin.Admin#alterReplicaLogDirs
 missing clients.admin.Admin#alterUserScramCredentials
 missing clients.admin.Admin#createAcls
 missing clients.admin.Admin#createDelegationToken
-missing clients.admin.Admin#createPartitions
-missing clients.admin.Admin#createTopics
 missing clients.admin.Admin#deleteAcls
 missing clients.admin.Admin#deleteConsumerGroupOffsets
 missing clients.admin.Admin#deleteConsumerGroups
-missing clients.admin.Admin#deleteRecords
-missing clients.admin.Admin#deleteTopics
 missing clients.admin.Admin#describeAcls
 missing clients.admin.Admin#describeClassicGroups
 missing clients.admin.Admin#describeClientQuotas
@@ -175,7 +171,6 @@ missing clients.admin.Admin#describeFeatures
 missing clients.admin.Admin#describeLogDirs
 missing clients.admin.Admin#describeProducers
 missing clients.admin.Admin#describeReplicaLogDirs
-missing clients.admin.Admin#describeTopics
 missing clients.admin.Admin#describeTransactions
 missing clients.admin.Admin#describeUserScramCredentials
 missing clients.admin.Admin#electLeaders
@@ -201,13 +196,9 @@ missing clients.admin.KafkaAdminClient#alterReplicaLogDirs
 missing clients.admin.KafkaAdminClient#alterUserScramCredentials
 missing clients.admin.KafkaAdminClient#createAcls
 missing clients.admin.KafkaAdminClient#createDelegationToken
-missing clients.admin.KafkaAdminClient#createPartitions
-missing clients.admin.KafkaAdminClient#createTopics
 missing clients.admin.KafkaAdminClient#deleteAcls
 missing clients.admin.KafkaAdminClient#deleteConsumerGroupOffsets
 missing clients.admin.KafkaAdminClient#deleteConsumerGroups
-missing clients.admin.KafkaAdminClient#deleteRecords
-missing clients.admin.KafkaAdminClient#deleteTopics
 missing clients.admin.KafkaAdminClient#describeAcls
 missing clients.admin.KafkaAdminClient#describeClassicGroups
 missing clients.admin.KafkaAdminClient#describeClientQuotas
@@ -218,7 +209,6 @@ missing clients.admin.KafkaAdminClient#describeFeatures
 missing clients.admin.KafkaAdminClient#describeLogDirs
 missing clients.admin.KafkaAdminClient#describeProducers
 missing clients.admin.KafkaAdminClient#describeReplicaLogDirs
-missing clients.admin.KafkaAdminClient#describeTopics
 missing clients.admin.KafkaAdminClient#describeTransactions
 missing clients.admin.KafkaAdminClient#describeUserScramCredentials
 missing clients.admin.KafkaAdminClient#electLeaders
@@ -237,7 +227,6 @@ missing clients.admin.KafkaAdminClient#renewDelegationToken
 missing clients.admin.KafkaAdminClient#unregisterController
 missing clients.admin.KafkaAdminClient#updateFeatures
 missing clients.admin.MockAdminClient#abortTransaction
-missing clients.admin.MockAdminClient#addTopic
 missing clients.admin.MockAdminClient#alterClientQuotas
 missing clients.admin.MockAdminClient#alterConsumerGroupOffsets
 missing clients.admin.MockAdminClient#alterPartitionReassignments
@@ -245,13 +234,9 @@ missing clients.admin.MockAdminClient#alterReplicaLogDirs
 missing clients.admin.MockAdminClient#alterUserScramCredentials
 missing clients.admin.MockAdminClient#createAcls
 missing clients.admin.MockAdminClient#createDelegationToken
-missing clients.admin.MockAdminClient#createPartitions
-missing clients.admin.MockAdminClient#createTopics
 missing clients.admin.MockAdminClient#deleteAcls
 missing clients.admin.MockAdminClient#deleteConsumerGroupOffsets
 missing clients.admin.MockAdminClient#deleteConsumerGroups
-missing clients.admin.MockAdminClient#deleteRecords
-missing clients.admin.MockAdminClient#deleteTopics
 missing clients.admin.MockAdminClient#describeAcls
 missing clients.admin.MockAdminClient#describeClassicGroups
 missing clients.admin.MockAdminClient#describeClientQuotas
@@ -262,7 +247,6 @@ missing clients.admin.MockAdminClient#describeFeatures
 missing clients.admin.MockAdminClient#describeLogDirs
 missing clients.admin.MockAdminClient#describeProducers
 missing clients.admin.MockAdminClient#describeReplicaLogDirs
-missing clients.admin.MockAdminClient#describeTopics
 missing clients.admin.MockAdminClient#describeTransactions
 missing clients.admin.MockAdminClient#describeUserScramCredentials
 missing clients.admin.MockAdminClient#electLeaders
@@ -276,10 +260,8 @@ missing clients.admin.MockAdminClient#listGroups
 missing clients.admin.MockAdminClient#listOffsets
 missing clients.admin.MockAdminClient#listPartitionReassignments
 missing clients.admin.MockAdminClient#listTransactions
-missing clients.admin.MockAdminClient#markTopicForDeletion
 missing clients.admin.MockAdminClient#removeMembersFromConsumerGroup
 missing clients.admin.MockAdminClient#renewDelegationToken
-missing clients.admin.MockAdminClient#setFetchesRemainingUntilVisible
 missing clients.admin.MockAdminClient#unregisterController
 missing clients.admin.MockAdminClient#updateBeginningOffsets
 missing clients.admin.MockAdminClient#updateConsumerGroupOffsets
