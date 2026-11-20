@@ -314,7 +314,7 @@ where Java hashes a set), `toString` to `Display`.
 | 5 options classes | 17 (7 own: 5 constructors and the `includeAuthorizedOperations` pair; 10 inherited: `timeoutMs` ×2 on each) | 17 | 0 |
 | 5 result classes | 16 | 16 | 0 |
 | 5 value types | 40 (incl. `equals` / `hashCode` / `toString`) | 40 | 0 |
-| 5 handlers | 35 | 35 | 0 |
+| 5 handlers | 37 | 37 | 0 |
 | `Admin` / `KafkaAdminClient` / `MockAdminClient` | 20 | 20 | 0 |
 
 No unmapped method. `ForwardingAdmin`'s five overrides are outside the
