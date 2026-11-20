@@ -1426,12 +1426,6 @@ mod tests {
         assert_eq!(mgr_arc.state(), MemberState::Acknowledging);
     }
 
-    /// Phase 41b / §31 required test #2 at the membership-state-machine
-    /// level: the rebalance does NOT advance out of `RECONCILING` until the
-    /// listener ack arrives, AND the bg-loop drive (`reconcile`) is NOT
-    /// frozen while the ack is pending — repeated `reconcile` calls return
-    /// promptly (each is a non-blocking `try_recv`), leaving the state in
-    /// `RECONCILING`, until the ack is delivered.
     /// Rust-only: after a reconciliation the subscription state holds the
     /// assignment in Java's order, topic name then partition, whatever the
     /// order of the heartbeat's assignment. Java gets it from
@@ -1482,6 +1476,12 @@ mod tests {
         }
     }
 
+    /// Phase 41b / §31 required test #2 at the membership-state-machine
+    /// level: the rebalance does NOT advance out of `RECONCILING` until the
+    /// listener ack arrives, AND the bg-loop drive (`reconcile`) is NOT
+    /// frozen while the ack is pending — repeated `reconcile` calls return
+    /// promptly (each is a non-blocking `try_recv`), leaving the state in
+    /// `RECONCILING`, until the ack is delivered.
     #[tokio::test]
     async fn reconcile_does_not_advance_until_ack_and_loop_is_not_frozen() {
         let (mgr, mut rx) = make(None, None, None);
