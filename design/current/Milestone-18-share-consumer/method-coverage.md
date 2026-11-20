@@ -214,8 +214,8 @@ No unmapped method.
 ### `ShareInFlightBatch` (`share_in_flight_batch.rs`)
 
 The record objects Java keeps are offset → delivery-count entries (D5 option
-(c)); a renewed record is decoded again behind the private seam
-`redeliver_record`.
+(c)); renewed records are decoded again behind the private seam
+`redelivery_walk` (one pass over the record batches per `take_renewals`).
 
 | Java method | Rust |
 |---|---|
@@ -243,7 +243,9 @@ The record objects Java keeps are offset → delivery-count entries (D5 option
 | `hasCachedException()` | `ShareInFlightBatch::has_cached_error` |
 
 Rust-only: `set_record_batches` (the seam's input from `ShareCompletedFetch`),
-`redeliver_record` (the seam), `retain_record_batches_for_redelivery` (memory
+`redelivery_walk` + `RedeliveryWalk` (the seam: `redeliver_record`, `step_to`,
+`not_found`), `share_stream_error` (Java's bare stream `KafkaException`),
+`retain_record_batches_for_redelivery` (memory
 policy), `release_after_failed_delivery`, `status` + `ShareInFlightBatchStatus`
 (Java shares the batch with `ShareCompletedFetch#deliveredBatch`),
 `publish_status`; `corrupt_batch_error` (Java's
@@ -266,7 +268,7 @@ policy), `release_after_failed_delivery`, `status` + `ShareInFlightBatchStatus`
 | `isInitialized()` | `ShareCompletedFetch::is_initialized` |
 | `setInitialized()` | `ShareCompletedFetch::set_initialized` |
 | `isConsumed()` | `ShareCompletedFetch::is_consumed` |
-| `trackDeliveredBatch(ShareInFlightBatch)` | `ShareCompletedFetch::track_delivered_batch` (takes the batch's `ShareInFlightBatchStatus`) |
+| `trackDeliveredBatch(ShareInFlightBatch)` | `ShareCompletedFetch::track_delivered_batch` (takes the batch's `ShareInFlightBatchStatus`), called from `hand_out` as the batch is returned, not at the start of `fetch_records`, so a dropped call's batch is never tracked |
 | `hasPendingAcknowledgements()` | `ShareCompletedFetch::has_pending_acknowledgements` |
 | `drain()` | `ShareCompletedFetch::drain` (also drops the cursor, releasing this fetch's hold on the response) |
 | `recordAggregatedMetrics(int, int)` | `ShareCompletedFetch::record_aggregated_metrics` |
@@ -284,8 +286,13 @@ policy), `release_after_failed_delivery`, `status` + `ShareInFlightBatchStatus`
 | `OffsetAndDeliveryCount` (nested, `toString`) | `(i64, i16)` tuples; the `toString` is never called |
 
 Rust-only: `records_size` (the collector's trace line), `consume_current_record`
-(Java's `records.next()` consumes on read; here on parse return, cancel-safe),
-`skip_current_batch` (leaves a failed batch unread).
+(Java's `records.next()` consumes on read; an acquired record is consumed once
+its parse returns, and `parse_pending` makes a call dropped mid-parse resume on
+the same record, so the next call decodes it again), `hand_out` (tracks the
+batch as it is returned), `skip_current_batch` (leaves a failed batch unread).
+Failures are moved past as Java's iterators do: a record that fails to be read
+is consumed, and a batch refused by the decoder is the current batch and is
+moved past (`BatchCursor::next_batch_moving_past_refused`).
 
 ### `CompletedFetch` decoder extraction (`batch_cursor.rs`, behaviour-neutral)
 

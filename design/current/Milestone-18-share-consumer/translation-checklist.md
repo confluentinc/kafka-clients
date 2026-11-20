@@ -121,7 +121,11 @@ async Rust, check each of:
      iterations;
   8. a Java `finally` (or `try/finally` state reset) around a call that becomes
      an `.await` needs a drop guard, because the future can be cancelled; test it
-     by dropping the future mid-await.
+     by dropping the future mid-await **and asserting what the next call
+     returns**, not only what the guard restored. M18 P3 (Critic 251 Issues 1
+     and 2): both drop tests passed while the next call skipped the interrupted
+     record (acknowledging it as a gap, which the broker archives) or lost the
+     renewals the dropped call had not redelivered.
 
 **Applies to:** share code translating a Java callback, `whenComplete` /
 `thenApply` chain, `synchronized` section reached re-entrantly, or a Java thread
