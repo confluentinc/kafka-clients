@@ -35,6 +35,8 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use bytes::BytesMut;
+
 use crate::common::Cluster;
 use crate::common::Error;
 use crate::common::TopicPartition;
@@ -582,7 +584,7 @@ impl ChunkedRecordAccumulator {
         topic_info: &TopicInfo,
         topic: &str,
         partition: i32,
-    ) -> Result<Option<Vec<Vec<u8>>>, Error> {
+    ) -> Result<Option<Vec<BytesMut>>, Error> {
         match self.allocate_chunks(extension_bytes_needed, 0).await {
             Ok(chunks) => Ok(Some(chunks)),
             Err(Error::ProducerBufferExhausted(_)) => {
@@ -619,7 +621,7 @@ impl ChunkedRecordAccumulator {
 
     /// Return any held extension chunks to the pool. No-op when none are held.
     #[doc(alias = "org.apache.kafka.clients.producer.internals.ChunkedRecordAccumulator#deallocateExtensionChunks")]
-    fn deallocate_extension_chunks(&self, extension_chunks: Option<Vec<Vec<u8>>>) {
+    fn deallocate_extension_chunks(&self, extension_chunks: Option<Vec<BytesMut>>) {
         let Some(extension_chunks) = extension_chunks else {
             return;
         };
@@ -736,7 +738,7 @@ impl ChunkedRecordAccumulator {
 
     /// The pool acquire behind both paths: Java's `chunkedFree.allocateChunks(totalSize,
     /// maxTimeToBlockMs)`, through the test seam that stands in for Java's tests overriding it.
-    async fn allocate_chunks(&self, total_size: i32, max_time_to_block_ms: i64) -> Result<Vec<Vec<u8>>, Error> {
+    async fn allocate_chunks(&self, total_size: i32, max_time_to_block_ms: i64) -> Result<Vec<BytesMut>, Error> {
         #[cfg(test)]
         if let Some(hooks) = &self.test_hooks {
             return hooks.allocate_chunks(self, total_size, max_time_to_block_ms).await;
@@ -747,7 +749,7 @@ impl ChunkedRecordAccumulator {
     /// The real pool acquire. A zero budget is the non-blocking form Java's `allocateChunks(..,
     /// 0L)` reduces to (see `BufferPool::try_allocate_chunks`), which never parks; any other
     /// budget may wait for memory.
-    async fn pool_allocate_chunks(&self, total_size: i32, max_time_to_block_ms: i64) -> Result<Vec<Vec<u8>>, Error> {
+    async fn pool_allocate_chunks(&self, total_size: i32, max_time_to_block_ms: i64) -> Result<Vec<BytesMut>, Error> {
         if max_time_to_block_ms <= 0 {
             self.chunked_free.try_allocate_chunks(total_size)
         } else {
@@ -781,7 +783,7 @@ pub(crate) struct ChunkedAppendGuard<'a> {
     free: &'a BufferPool,
     appends_in_progress: &'a AtomicI32,
     pub(crate) new_batch: Option<NewBatchBuffer>,
-    pub(crate) extension_chunks: Option<Vec<Vec<u8>>>,
+    pub(crate) extension_chunks: Option<Vec<BytesMut>>,
 }
 
 impl<'a> ChunkedAppendGuard<'a> {
@@ -820,7 +822,7 @@ pub(crate) struct NewBatchBuffer {
 /// The future a [`ChunkedAccumulatorTestHooks::allocate_chunks`] hook returns (test-only).
 #[cfg(test)]
 pub(crate) type ChunkAllocation<'a> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Vec<u8>>, Error>> + Send + 'a>>;
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<BytesMut>, Error>> + Send + 'a>>;
 
 /// Test seam for `ChunkedRecordAccumulatorTest`. Java's tests subclass `BufferPool` (overriding
 /// `allocateChunks`) and `ChunkedRecordAccumulator` (overriding `partitionChanged` and
@@ -869,7 +871,7 @@ impl ChunkedRecordAccumulator {
         &self,
         total_size: i32,
         max_time_to_block_ms: i64,
-    ) -> Result<Vec<Vec<u8>>, Error> {
+    ) -> Result<Vec<BytesMut>, Error> {
         self.pool_allocate_chunks(total_size, max_time_to_block_ms).await
     }
 }
@@ -1810,7 +1812,7 @@ mod tests {
     )]
     fn test_chunked_batch_rejects_non_chunked_stream() {
         let plain_builder = MemoryRecords::builder_with_buffer_magic(
-            vec![0u8; 256],
+            BytesMut::zeroed(256),
             RecordBatch::CURRENT_MAGIC_VALUE,
             Compression::none().build(),
             TimestampType::CreateTime,

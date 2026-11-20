@@ -64,6 +64,16 @@ public enum GroupType
 /// </summary>
 public static class GroupTypeMethods
 {
+    // Java's values(), written out: Enum.GetValues(Type) is not Native AOT safe.
+    private static readonly GroupType[] s_values =
+    {
+        GroupType.UNKNOWN,
+        GroupType.CONSUMER,
+        GroupType.CLASSIC,
+        GroupType.SHARE,
+        GroupType.STREAMS,
+    };
+
     private static readonly Dictionary<string, GroupType> s_byLowerCaseText = ByLowerCaseText();
 
     extension(GroupType)
@@ -103,7 +113,7 @@ public static class GroupTypeMethods
     private static Dictionary<string, GroupType> ByLowerCaseText()
     {
         var table = new Dictionary<string, GroupType>(StringComparer.Ordinal);
-        foreach (GroupType type in (GroupType[])Enum.GetValues(typeof(GroupType)))
+        foreach (GroupType type in s_values)
         {
             table.Add(TextOf(type)!.ToLowerInvariant(), type);
         }
