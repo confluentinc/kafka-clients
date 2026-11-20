@@ -48,6 +48,7 @@ use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::DefaultRecordBatch;
 use crate::common::record::internal::RecordBatch;
+use crate::common::utils::Utils;
 use crate::common::utils::internals::ByteUtils;
 
 /// The default (v2) record format for Kafka.
@@ -160,6 +161,26 @@ impl DefaultRecord {
         let header_value = Self::slice_bytes(buffer, pos, header_value_size)?;
 
         Ok((header_key, header_value))
+    }
+
+    /// Read `num_headers` headers from `buffer`, the header section of a
+    /// record. Each header holds the slices of `buffer` its key and value
+    /// are: nothing is copied, and the key is decoded when it is first read.
+    #[doc(alias = "org.apache.kafka.common.record.internal.DefaultRecord#readHeaders")]
+    pub(crate) fn read_headers(
+        buffer: &bytes::Bytes,
+        num_headers: i32,
+    ) -> Result<Vec<RecordHeader>, InvalidRecordError> {
+        let mut headers = Vec::with_capacity(num_headers.max(0) as usize);
+        let mut pos = 0;
+        for _ in 0..num_headers {
+            let (header_key, header_value) = Self::parse_one_header(buffer, &mut pos)?;
+            headers.push(RecordHeader::with_key_buffer_value_buffer(
+                buffer.slice_ref(header_key),
+                header_value.map(|value| buffer.slice_ref(value)),
+            ));
+        }
+        Ok(headers)
     }
 
     /// Maximum overhead of a default record, excluding key, value, and headers.
@@ -740,11 +761,24 @@ impl<'a> DefaultRecordRef<'a> {
         self.value
     }
 
-    /// Decode and return the record's headers as owned `RecordHeader`s.
-    ///
-    /// Per `consumer-threading.md` §27, Milestone-8 holds owned headers on the
-    /// emitted `ConsumerRecord`; this is the single point where that owned copy
-    /// is produced (only when the caller actually needs headers).
+    /// The record's header section, still encoded
+    /// (`[HeaderKeyLength HeaderKey HeaderValueLength HeaderValue]*`),
+    /// borrowed from the buffer. The consumer keeps a slice of it and reads
+    /// the headers when they are first accessed
+    /// (`RecordHeaders::from_wire`, `consumer-threading.md` §27).
+    pub fn headers_bytes(&self) -> &'a [u8] {
+        self.headers_bytes
+    }
+
+    /// The number of headers in [`Self::headers_bytes`].
+    pub fn num_headers(&self) -> i32 {
+        self.num_headers
+    }
+
+    /// Decode and return the record's headers as owned `RecordHeader`s,
+    /// copying each key and value: the form an owned [`DefaultRecord`] holds,
+    /// which has no buffer to keep slices of. A key that is not valid UTF-8
+    /// is decoded with U+FFFD, as Java's `RecordHeader.key()` decodes it.
     pub fn headers(&self) -> Result<Vec<RecordHeader>, InvalidRecordError> {
         if self.num_headers == 0 {
             return Ok(Vec::new());
@@ -753,9 +787,8 @@ impl<'a> DefaultRecordRef<'a> {
         let mut pos = 0;
         for _ in 0..self.num_headers {
             let (header_key, header_value) = DefaultRecord::parse_one_header(self.headers_bytes, &mut pos)?;
-            let header_key =
-                std::str::from_utf8(header_key).map_err(|_| InvalidRecordError::new("Invalid UTF-8 in header key"))?;
-            headers.push(RecordHeader::new(header_key.to_string(), header_value.map(|v| v.to_vec())));
+            let header_key = Utils::utf8(header_key).into_owned();
+            headers.push(RecordHeader::new(header_key, header_value.map(|v| v.to_vec())));
         }
         Ok(headers)
     }
@@ -1336,6 +1369,96 @@ mod tests {
         assert_eq!(record.headers().len(), 2);
         assert_eq!(record.headers()[0].key(), "key1");
         assert_eq!(record.headers()[1].key(), "key2");
+    }
+
+    /// A record with the headers `"key1"` = `"val1"` and `"key2"` with no
+    /// value, as `DefaultRecord::write_to` writes it.
+    fn record_with_two_headers() -> Vec<u8> {
+        let headers = vec![
+            RecordHeader::new("key1".to_string(), Some(b"val1".to_vec())),
+            RecordHeader::new("key2".to_string(), None),
+        ];
+        let mut out = Vec::new();
+        DefaultRecord::write_to(&mut out, 5, 100, Some(b"mykey"), Some(b"myvalue"), &headers).unwrap();
+        out
+    }
+
+    /// `read_headers` reads the header section a record view hands out, and
+    /// each header it returns holds slices of that section: no key and no
+    /// value is copied.
+    #[test]
+    fn test_read_headers_keeps_slices_of_the_buffer() {
+        let buffer = bytes::Bytes::from(record_with_two_headers());
+        let (record, _) = DefaultRecord::read_ref_from_buffer(&buffer, 0, 0, 0, None).unwrap();
+        assert_eq!(record.num_headers(), 2);
+        let section = buffer.slice_ref(record.headers_bytes());
+
+        let headers = DefaultRecord::read_headers(&section, record.num_headers()).unwrap();
+
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0].key(), "key1");
+        assert_eq!(headers[0].value(), Some(b"val1".as_slice()));
+        assert_eq!(headers[1].key(), "key2");
+        assert_eq!(headers[1].value(), None);
+        // The owned copy `headers()` makes holds the same headers.
+        assert_eq!(headers, record.headers().unwrap());
+
+        // `[HeaderKeyLength HeaderKey HeaderValueLength HeaderValue]*`, each length one byte.
+        let start = section.as_ptr();
+        assert_eq!(headers[0].key().as_ptr(), start.wrapping_add(1));
+        assert_eq!(headers[0].value().unwrap().as_ptr(), start.wrapping_add(1 + 4 + 1));
+        assert_eq!(headers[1].key().as_ptr(), start.wrapping_add(1 + 4 + 1 + 4 + 1));
+    }
+
+    /// `read_headers` reports a section that ends before its last header.
+    #[test]
+    fn test_read_headers_of_a_truncated_section() {
+        let buffer = bytes::Bytes::from(record_with_two_headers());
+        let (record, _) = DefaultRecord::read_ref_from_buffer(&buffer, 0, 0, 0, None).unwrap();
+        let section = buffer.slice_ref(record.headers_bytes());
+        let truncated = section.slice(..section.len() - 3);
+
+        let error = DefaultRecord::read_headers(&truncated, record.num_headers()).unwrap_err();
+
+        assert_eq!(error.to_string(), "InvalidRecordError: Found invalid record structure");
+    }
+
+    /// A header key that is not valid UTF-8 is no longer an invalid record:
+    /// it is decoded with U+FFFD for the malformed bytes, as Java's
+    /// `RecordHeader.key()` decodes it (`Utils.utf8`), by the owned copy and
+    /// by the slices alike.
+    #[test]
+    fn test_header_key_that_is_not_utf8_is_decoded_lossily() {
+        let mut out = record_with_two_headers();
+        let key1 = out.windows(4).position(|window| window == b"key1").expect("the key1 key");
+        out[key1] = 0xff;
+        let buffer = bytes::Bytes::from(out);
+
+        let (record, _) = DefaultRecord::read_ref_from_buffer(&buffer, 0, 0, 0, None).unwrap();
+        let owned = record.headers().unwrap();
+        let slices =
+            DefaultRecord::read_headers(&buffer.slice_ref(record.headers_bytes()), record.num_headers()).unwrap();
+
+        assert_eq!(owned[0].key(), "\u{fffd}ey1");
+        assert_eq!(slices[0].key(), "\u{fffd}ey1");
+        assert_eq!(owned, slices);
+        let (owned_record, _) = DefaultRecord::read_from_buffer(&buffer, 0, 0, 0, None).unwrap();
+        assert_eq!(owned_record.headers()[0].key(), "\u{fffd}ey1");
+
+        // A surrogate code point written in three bytes is one malformed
+        // sequence, as it is for Java, where `String::from_utf8_lossy` counts
+        // three: "key1" becomes ED A0 80 and "1".
+        let mut out = record_with_two_headers();
+        out[key1..key1 + 3].copy_from_slice(b"\xED\xA0\x80");
+        let buffer = bytes::Bytes::from(out);
+
+        let (record, _) = DefaultRecord::read_ref_from_buffer(&buffer, 0, 0, 0, None).unwrap();
+        let owned = record.headers().unwrap();
+        let slices =
+            DefaultRecord::read_headers(&buffer.slice_ref(record.headers_bytes()), record.num_headers()).unwrap();
+
+        assert_eq!(owned[0].key(), "\u{fffd}1");
+        assert_eq!(slices[0].key(), "\u{fffd}1");
     }
 
     #[test]
