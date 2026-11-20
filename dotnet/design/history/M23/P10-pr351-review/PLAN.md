@@ -96,9 +96,18 @@ every built-in async serializer implement only the form without headers, as thei
 
 **Tokens left without a default** (decision 1's report): `KafkaFuture<T>.Get(CancellationToken)`,
 `KafkaFuture.Get(CancellationToken)` (the `Void` future), `AsyncKafkaFuture<T>.Get(CancellationToken)` and
-`AsyncKafkaFuture.Get(CancellationToken)`. Each sits beside a parameterless `Get()` (and `Get(TimeSpan)`), so a
-default would make `Get()` ambiguous (CS0121) and break §3 Java names rule 8 (an overload per member). No other public
-method in `src/` has a token without a default.
+`AsyncKafkaFuture.Get(CancellationToken)`. They keep a required token because decision 1 names the asynchronous serde
+methods only, and the parameterless `Get()` beside each already serves a call without a token: a default would add a
+second member for the same call. It would not be ambiguous (C# prefers `Get()`, which needs no default filled in, and
+a method-group conversion binds `Get()` too), and §3 Java names rule 8 allows it (a last optional `CancellationToken`
+is rule 7's own). No other public method in `src/` has a token without a default.
+
+*Open for the owner:* whether the futures take rule 7's shape, one `Get(CancellationToken cancellationToken = default)`
+in place of both `Get()` and `Get(CancellationToken)`. That shape removes a public member, which breaks compiled
+callers and method-group uses such as `Task.Run(future.Get)`. The four overloads are open CKRDA0013 findings in
+`analyzers/java-name-baseline.txt` (the four `overload M:…Get(System.Threading.CancellationToken)` lines):
+`JavaNameAnalyzer` treats a last token as rule 7's own only when it is optional. A default added beside `Get()` would
+likely leave one of the two members unpaired and not close them (read from `JavaNameAnalyzer.Match`, not run).
 
 **Rule text (decision 4).** P7's R1, R3, R4 and R5 and P8's R1–R7, R9, R10, R13 and R14 applied as written. P7's R2
 written as decisions 1–3 make it, with P8's R11 added and adjusted to decision 1 (`Configure`'s token optional on the
