@@ -149,6 +149,13 @@ where
     K: Send + 'static,
     V: Send + 'static,
 {
+    /// Returns the topics of the last [`ShareConsumer::subscribe`].
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"This consumer has already been closed."` on a closed
+    /// mock, where Java's `ensureNotClosed()` throws `IllegalStateException`:
+    /// calling it after `close()` is a programming error.
     fn subscription(&mut self) -> HashSet<String> {
         self.panic_if_closed();
         self.subscriptions.subscription()
@@ -206,12 +213,27 @@ where
         Ok(())
     }
 
+    /// Does nothing, as Java's mock; it does not check whether the mock is
+    /// closed.
+    ///
+    /// # Arguments
+    ///
+    /// - `_callback` - ignored
     fn set_acknowledgement_commit_callback(&mut self, _callback: Option<Arc<dyn AcknowledgementCommitCallback>>) {}
 
+    /// Returns `None`, as Java's mock; it does not check whether the mock is
+    /// closed.
     fn acquisition_lock_timeout_ms(&mut self) -> Option<i32> {
         None
     }
 
+    /// Returns an empty view: the mock keeps no metrics.
+    ///
+    /// # Panics
+    ///
+    /// Panics with `"This consumer has already been closed."` on a closed
+    /// mock, where Java's `ensureNotClosed()` throws `IllegalStateException`:
+    /// calling it after `close()` is a programming error.
     fn metrics(&self) -> MetricsView {
         self.panic_if_closed();
         MetricsView::default()

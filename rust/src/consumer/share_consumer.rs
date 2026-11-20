@@ -79,9 +79,11 @@ where
     ///
     /// # Panics
     ///
-    /// With `"This consumer has already been closed."` when the consumer is
-    /// closed, where Java throws `IllegalStateException`: calling it after
-    /// `close()` is a programming error.
+    /// On [`KafkaShareConsumer`](crate::consumer::KafkaShareConsumer) and
+    /// [`MockShareConsumer`](crate::consumer::MockShareConsumer), with `"This
+    /// consumer has already been closed."` when the consumer is closed, where
+    /// Java throws `IllegalStateException`: calling it after `close()` is a
+    /// programming error.
     #[doc(alias = "org.apache.kafka.clients.consumer.ShareConsumer#subscription")]
     fn subscription(&mut self) -> HashSet<String>;
 
@@ -313,8 +315,11 @@ where
     ///
     /// # Panics
     ///
-    /// With `"This consumer has already been closed."` when the consumer is
-    /// closed, where Java throws `IllegalStateException`.
+    /// On [`KafkaShareConsumer`](crate::consumer::KafkaShareConsumer), with
+    /// `"This consumer has already been closed."` when the consumer is closed,
+    /// where Java throws `IllegalStateException`.
+    /// [`MockShareConsumer`](crate::consumer::MockShareConsumer) follows Java's
+    /// `MockShareConsumer`, which does not check.
     #[doc(alias = "org.apache.kafka.clients.consumer.ShareConsumer#setAcknowledgementCommitCallback")]
     fn set_acknowledgement_commit_callback(&mut self, callback: Option<Arc<dyn AcknowledgementCommitCallback>>);
 
@@ -327,8 +332,11 @@ where
     ///
     /// # Panics
     ///
-    /// With `"This consumer has already been closed."` when the consumer is
-    /// closed, where Java throws `IllegalStateException`.
+    /// On [`KafkaShareConsumer`](crate::consumer::KafkaShareConsumer), with
+    /// `"This consumer has already been closed."` when the consumer is closed,
+    /// where Java throws `IllegalStateException`.
+    /// [`MockShareConsumer`](crate::consumer::MockShareConsumer) follows Java's
+    /// `MockShareConsumer`, which does not check.
     #[doc(alias = "org.apache.kafka.clients.consumer.ShareConsumer#acquisitionLockTimeoutMs")]
     fn acquisition_lock_timeout_ms(&mut self) -> Option<i32>;
 
@@ -340,6 +348,12 @@ where
     /// # Returns
     ///
     /// An unmodifiable live view of the map of metrics currently maintained by the consumer
+    ///
+    /// # Panics
+    ///
+    /// On [`MockShareConsumer`](crate::consumer::MockShareConsumer), with
+    /// `"This consumer has already been closed."` when the mock is closed, as
+    /// Java's mock throws. `KafkaShareConsumer` does not check, as Java's.
     #[doc(alias = "org.apache.kafka.clients.consumer.ShareConsumer#metrics")]
     fn metrics(&self) -> MetricsView;
 
