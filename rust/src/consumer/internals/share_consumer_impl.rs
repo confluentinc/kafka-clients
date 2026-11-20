@@ -60,8 +60,8 @@
 //!   entry leaves the queue before its callback runs, so a call dropped while
 //!   the callback runs neither repeats that entry nor loses the ones after it.
 //! - **`close`.** A dropped `close` leaves the consumer open; the next `close`
-//!   finishes it and stops the background task
-//!   ([`ShareConsumerImpl::close_with_timeout`]).
+//!   resumes it without repeating the acknowledge-on-close or the stop signal,
+//!   and stops the background task ([`ShareConsumerImpl::close_with_timeout`]).
 //!
 //! # Not translated
 //!
@@ -191,9 +191,9 @@ where
     /// Java's `volatile boolean closed`, set once `close` has run every step
     /// (see `close_with_timeout`).
     closed: Arc<AtomicBool>,
-    /// Whether `close` has joined the background task: a `close` retried
-    /// after a dropped one skips the steps that need the task.
-    network_thread_joined: bool,
+    /// How far a dropped `close` got, so a retried one resumes there
+    /// (see `close_with_timeout`).
+    close_progress: CloseProgress,
     in_flight_poll: Option<InFlightPoll>,
     wakeup_trigger: WakeupTrigger,
     should_send_share_fetch_event: bool,
@@ -363,6 +363,30 @@ struct BackgroundTask {
     max_time_to_wait_ms: Arc<AtomicI64>,
     #[cfg(test)]
     request_managers: Arc<Mutex<RequestManagers>>,
+}
+
+/// How far `close` has gone, kept so that a `close` retried after a dropped
+/// one resumes where it stopped.
+///
+/// Rust-only (DoD §7): Java's `close` cannot be abandoned, so it makes each
+/// step once. Sending the `ShareAcknowledgeOnCloseEvent` twice is not
+/// harmless (the background task's second `acknowledgeOnClose` fails the close
+/// requests in flight and reports their acknowledgements again), so it is
+/// sent once and a retry awaits the same completion; signalling the
+/// background task to stop is also done once, a retry after it only joins.
+/// Re-sending the `ShareUnsubscribeEvent` is harmless (a second leave returns
+/// the one in progress, or completes at once).
+enum CloseProgress {
+    /// Nothing sent yet.
+    NotStarted,
+    /// The `ShareAcknowledgeOnCloseEvent` is sent; its completion is awaited.
+    AcknowledgingOnClose(oneshot::Receiver<Result<(), Error>>),
+    /// The acknowledge-on-close step is done.
+    AcknowledgedOnClose,
+    /// The background task was told to stop; only the join is left.
+    Signalled,
+    /// The background task has been joined.
+    Joined,
 }
 
 impl<K, V> ShareConsumerImpl<K, V>
@@ -678,7 +702,7 @@ where
             request_timeout_ms: components.request_timeout_ms,
             default_api_timeout_ms: components.default_api_timeout_ms,
             closed: Arc::new(AtomicBool::new(false)),
-            network_thread_joined: false,
+            close_progress: CloseProgress::NotStarted,
             in_flight_poll: None,
             wakeup_trigger: components.wakeup_trigger,
             should_send_share_fetch_event: false,
@@ -770,7 +794,8 @@ where
     pub(crate) fn subscription(&mut self) -> HashSet<String> {
         // Java's `acquireAndEnsureOpen` also throws a permanent bootstrap
         // failure (KIP-909); with no error channel, this keeps working after
-        // one, as `AsyncKafkaConsumer::subscription` does.
+        // one, as the consumer's sync getters do
+        // (`AsyncKafkaConsumer::subscription`, `assignment`, `paused`).
         self.panic_if_closed();
         self.lock_subscriptions().subscription()
     }
@@ -1354,7 +1379,8 @@ where
     ) {
         // Java's `acquireAndEnsureOpen` also throws a permanent bootstrap
         // failure (KIP-909); with no error channel, this keeps working after
-        // one, as `AsyncKafkaConsumer::subscription` does.
+        // one, as the consumer's sync getters do
+        // (`AsyncKafkaConsumer::subscription`, `assignment`, `paused`).
         self.panic_if_closed();
         match callback {
             Some(callback) => {
@@ -1412,7 +1438,8 @@ where
     pub(crate) fn acquisition_lock_timeout_ms(&mut self) -> Option<i32> {
         // Java's `acquireAndEnsureOpen` also throws a permanent bootstrap
         // failure (KIP-909); with no error channel, this keeps working after
-        // one, as `AsyncKafkaConsumer::subscription` does.
+        // one, as the consumer's sync getters do
+        // (`AsyncKafkaConsumer::subscription`, `assignment`, `paused`).
         self.panic_if_closed();
         self.current_fetch.acquisition_lock_timeout_ms()
     }
@@ -1447,8 +1474,11 @@ where
     /// Java sets `closed` in a `finally`, after every close step has run,
     /// the network thread's join included. A dropped call has not run them
     /// all, so it leaves the consumer open, as `AsyncKafkaConsumer::close`
-    /// does: a later `close` runs the steps again (those that need the
-    /// background task only while it has not been joined) and stops the task.
+    /// does, and a later `close` resumes it: it awaits the acknowledge-on-close
+    /// the dropped call sent instead of sending another, sends the leave again,
+    /// and only joins the background task when the dropped call had already
+    /// told it to stop. The later `close` stops the task; like any `close`, it
+    /// returns the first failure of its steps.
     ///
     /// # Errors
     ///
@@ -1476,9 +1506,9 @@ where
 
         let close_deadline_ms = self.create_timer_for_close_requests(timeout);
 
-        // A `close` retried after a dropped one that had joined the background
-        // task has nothing left to send it.
-        if !self.network_thread_joined {
+        // A `close` retried after a dropped one resumes where that one stopped
+        // (`CloseProgress`).
+        if !matches!(self.close_progress, CloseProgress::Signalled | CloseProgress::Joined) {
             // Prepare shutting down the network thread
             if let Err(e) = self
                 .send_acknowledgements_and_leave_group(close_deadline_ms, &mut first_error)
@@ -1499,10 +1529,13 @@ where
             self.network_thread_close
                 .signal_close(Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(0)));
             self.network_thread_close.wakeup();
+            self.close_progress = CloseProgress::Signalled;
+        }
+        if matches!(self.close_progress, CloseProgress::Signalled) {
             if let Err(e) = self.network_thread_close.await_join().await {
                 Self::close_quietly_failed("Failed shutting down network thread", e, &mut first_error);
             }
-            self.network_thread_joined = true;
+            self.close_progress = CloseProgress::Joined;
         }
 
         // Java's `backgroundEventReaper.reap(backgroundEventQueue)`: the queue's
@@ -1570,19 +1603,39 @@ where
         first_error: &mut Option<Error>,
     ) -> Result<(), Error> {
         let timeout_ms = deadline_ms.saturating_sub(self.time.milliseconds()).max(0);
-        let acknowledgements_map = self.acknowledgements_to_send();
-        let (handle, receiver) = CompletableEventHandle::new(deadline_ms);
-        let event = ApplicationEvent::ShareAcknowledgeOnClose { handle, acknowledgements_map };
-        let acknowledged = self
-            .application_event_handler
-            .add_and_get(event, receiver, self.time.milliseconds())
-            .await
-            .map_err(Self::result_error);
-        Self::complete_quietly(
-            acknowledged,
-            &format!("Failed to send pending acknowledgements with a timeout(ms)={timeout_ms}"),
-            first_error,
-        );
+        // Java's `applicationEventHandler.addAndGet(new ShareAcknowledgeOnCloseEvent(..))`,
+        // made once: a `close` retried after a dropped one awaits the event the
+        // dropped one sent (`CloseProgress`).
+        if matches!(self.close_progress, CloseProgress::NotStarted) {
+            let acknowledgements_map = self.acknowledgements_to_send();
+            let (handle, receiver) = CompletableEventHandle::new(deadline_ms);
+            let event = ApplicationEvent::ShareAcknowledgeOnClose { handle, acknowledgements_map };
+            match self.application_event_handler.add(event, self.time.milliseconds()) {
+                Ok(()) => self.close_progress = CloseProgress::AcknowledgingOnClose(receiver),
+                Err(e) => {
+                    self.close_progress = CloseProgress::AcknowledgedOnClose;
+                    Self::complete_quietly(
+                        Err(e),
+                        &format!("Failed to send pending acknowledgements with a timeout(ms)={timeout_ms}"),
+                        first_error,
+                    );
+                },
+            }
+        }
+        if let CloseProgress::AcknowledgingOnClose(receiver) = &mut self.close_progress {
+            let acknowledged = match receiver.await {
+                Ok(result) => result.map_err(Self::result_error),
+                Err(_) => Err(Error::local_illegal_state(
+                    "Background task dropped the completion sender for ShareAcknowledgeOnClose without completing it",
+                )),
+            };
+            self.close_progress = CloseProgress::AcknowledgedOnClose;
+            Self::complete_quietly(
+                acknowledged,
+                &format!("Failed to send pending acknowledgements with a timeout(ms)={timeout_ms}"),
+                first_error,
+            );
+        }
 
         let (handle, receiver) = CompletableEventHandle::new(deadline_ms);
         self.application_event_handler
@@ -2103,6 +2156,10 @@ mod tests {
         /// Called after the `ShareUnsubscribeEvent` is completed: the last
         /// event `close` waits for before it processes the background events.
         on_share_unsubscribe: Option<Box<dyn FnMut() + Send>>,
+        /// Whether the `ShareAcknowledgeOnCloseEvent` is held instead of
+        /// completed (an acknowledge-on-close in flight).
+        hold_share_acknowledge_on_close: bool,
+        held_share_acknowledge_on_close: Option<CompletableEventHandle<()>>,
     }
 
     impl Responder {
@@ -2132,7 +2189,11 @@ mod tests {
                 },
                 ApplicationEvent::ShareAcknowledgeOnClose { handle, acknowledgements_map } => {
                     recorded.acknowledgements_map = acknowledgements_map;
-                    handle.complete(());
+                    if self.hold_share_acknowledge_on_close {
+                        self.held_share_acknowledge_on_close = Some(handle);
+                    } else {
+                        handle.complete(());
+                    }
                 },
                 ApplicationEvent::ShareAcknowledgeSync { handle, acknowledgements_map } => {
                     recorded.acknowledgements_map = acknowledgements_map;
@@ -2295,6 +2356,8 @@ mod tests {
                 complete_share_subscription_change: false,
                 complete_share_unsubscribe: false,
                 on_share_unsubscribe: None,
+                hold_share_acknowledge_on_close: false,
+                held_share_acknowledge_on_close: None,
             },
             background_event_tx,
             acknowledgement_event_handler,
@@ -3899,6 +3962,137 @@ mod tests {
         assert_eq!(events, f.responder.events.len(), "nothing is sent to the stopped task");
         let e = f.poll(Duration::ZERO).await.expect_err("closed");
         assert_eq!("This consumer has already been closed.", e.message());
+    }
+
+    /// A `close` dropped while the acknowledge-on-close event is in flight
+    /// does not make the retried `close` send another one (the background
+    /// task's second `acknowledgeOnClose` would fail the close requests in
+    /// flight and report their acknowledgements twice): the retry awaits the
+    /// same event, succeeds, and each acknowledgement gets one callback with
+    /// its result.
+    #[tokio::test]
+    async fn dropped_close_does_not_send_the_acknowledge_on_close_again() {
+        let mut f = new_consumer_mode("explicit");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        f.consumer
+            .set_acknowledgement_commit_callback(Some(Arc::new(ResultRecordingCallback { calls: Arc::clone(&calls) })));
+        let tip = new_tip("t", 0);
+        f.stub_collect_once(fetch_with_records(&tip, &[0, 1]));
+        f.responder.complete_share_subscription_change = true;
+        f.subscribe(&["t"]).await.expect("subscribed");
+        let records = f.poll(Duration::ZERO).await.expect("records");
+        let mut iterator = records.into_iter();
+        f.consumer
+            .acknowledge_with_record_type(&iterator.next().expect("0"), AcknowledgeType::Accept)
+            .expect("in flight");
+        f.consumer
+            .acknowledge_with_record_type(&iterator.next().expect("1"), AcknowledgeType::Reject)
+            .expect("in flight");
+        f.complete_close_events();
+        f.responder.hold_share_acknowledge_on_close = true;
+
+        {
+            let mut close = std::pin::pin!(f.consumer.close());
+            while f.responder.held_share_acknowledge_on_close.is_none() {
+                assert!(futures_util::poll!(close.as_mut()).is_pending());
+                f.responder.drain();
+            }
+            assert!(futures_util::poll!(close.as_mut()).is_pending(), "it waits for the event");
+        }
+        assert_eq!(
+            vec![(
+                "ShareAcknowledgeOnClose",
+                vec![(0, Some(AcknowledgeType::Accept)), (1, Some(AcknowledgeType::Reject))]
+            )],
+            f.responder.acknowledgements_sent(&tip)
+        );
+
+        // The background task completes the close acknowledgements and the
+        // event; a second event would be completed at once (and counted).
+        f.responder.hold_share_acknowledge_on_close = false;
+        let mut acks = Acknowledgements::empty();
+        acks.add(0, Some(AcknowledgeType::Accept));
+        acks.add(1, Some(AcknowledgeType::Reject));
+        acks.complete(None);
+        f.acknowledgement_event_handler.add(ShareAcknowledgementEvent::new(
+            HashMap::from([(tip.clone(), acks)]),
+            false,
+            None,
+        ));
+        f.responder.held_share_acknowledge_on_close.take().expect("held").complete(());
+
+        f.close().await.expect("the retried close succeeds");
+        assert_eq!(1, f.responder.count("ShareAcknowledgeOnClose"), "sent once");
+        assert_eq!(
+            vec![(tip, vec![0, 1], None)],
+            *calls.lock().unwrap(),
+            "one callback, with the result"
+        );
+    }
+
+    /// A `close` dropped while it joins the background task, which it has
+    /// already told to stop, is retried with the join only: no event is sent
+    /// again, and the retry succeeds.
+    #[tokio::test]
+    async fn dropped_close_at_the_join_only_joins_on_retry() {
+        let mut f = new_consumer();
+        f.complete_close_events();
+        let signalled = Arc::new(AtomicBool::new(false));
+        let signalled_in_fn = Arc::clone(&signalled);
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        f.consumer.network_thread_close = NetworkThreadCloseHandle::new(
+            Box::new(move |_| signalled_in_fn.store(true, Ordering::SeqCst)),
+            Box::new(|| {}),
+            tokio::spawn(async move {
+                let _ = stop_rx.await;
+            }),
+        );
+
+        {
+            let mut close = std::pin::pin!(f.consumer.close());
+            while !signalled.load(Ordering::SeqCst) {
+                assert!(futures_util::poll!(close.as_mut()).is_pending());
+                f.responder.drain();
+            }
+            assert!(futures_util::poll!(close.as_mut()).is_pending(), "it waits for the join");
+        }
+        f.responder.drain();
+        let counts = |r: &Responder| {
+            [
+                r.count("ShareAcknowledgeOnClose"),
+                r.count("ShareUnsubscribe"),
+                r.count("StopFindCoordinatorOnClose"),
+            ]
+        };
+        assert_eq!([1, 1, 1], counts(&f.responder));
+        signalled.store(false, Ordering::SeqCst);
+        stop_tx.send(()).expect("the task waits");
+
+        f.close().await.expect("the retried close succeeds");
+        assert_eq!([1, 1, 1], counts(&f.responder), "no event step runs again");
+        assert!(!signalled.load(Ordering::SeqCst), "the task is not told to stop again");
+    }
+
+    /// A callback's partition, sorted offsets and error message.
+    type CallbackCall = (TopicIdPartition, Vec<i64>, Option<String>);
+
+    /// Records each callback's partition, offsets and error message.
+    struct ResultRecordingCallback {
+        calls: Arc<Mutex<Vec<CallbackCall>>>,
+    }
+
+    #[async_trait]
+    impl AcknowledgementCommitCallback for ResultRecordingCallback {
+        async fn on_complete(&self, offsets: &HashMap<TopicIdPartition, HashSet<i64>>, error: Option<&Error>) {
+            for (tip, offsets) in offsets {
+                let mut offsets: Vec<i64> = offsets.iter().copied().collect();
+                offsets.sort_unstable();
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((tip.clone(), offsets, error.map(|e| e.message().to_string())));
+            }
+        }
     }
 
     /// A `poll` dropped while it collects sends the acknowledgements it had
