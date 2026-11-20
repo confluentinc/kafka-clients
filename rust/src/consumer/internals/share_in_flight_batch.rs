@@ -582,7 +582,15 @@ where
         let partition = self.partition.topic_partition();
         let mut cursor = BatchCursor::new(record_batches.clone(), corrupt_batch_error, share_stream_error);
         let mut span: Option<(usize, usize)> = None;
-        while let Ok(Some((meta, _, _))) = cursor.next_batch(partition, false) {
+        // A batch the fetch refused (and moved past) holds nothing to
+        // redeliver and is skipped; a batch whose size is unusable ends the
+        // walk, as it ended the fetch.
+        loop {
+            let meta = match cursor.next_batch_moving_past_refused(partition, false) {
+                Ok(Some((meta, _, _))) => meta,
+                Err((_, Some(_))) => continue,
+                Ok(None) | Err((_, None)) => break,
+            };
             if meta.last_offset >= first && meta.base_offset <= last {
                 span = Some((span.map_or(meta.batch_start, |(start, _)| start), meta.batch_end));
             }
@@ -690,8 +698,13 @@ impl RedeliveryWalk {
             }
             cursor.close_record_stream();
             cursor.records_remaining = 0;
-            let Some((meta, source, records_count)) = cursor.next_batch(&self.partition, false)? else {
-                break;
+            // A batch the fetch refused (and moved past) holds nothing to
+            // redeliver and is skipped; one whose size is unusable ends the walk.
+            let (meta, source, records_count) = match cursor.next_batch_moving_past_refused(&self.partition, false) {
+                Ok(Some(batch)) => batch,
+                Err((_, Some(_))) => continue,
+                Ok(None) => break,
+                Err((error, None)) => return Err(error),
             };
             if meta.last_offset < offset || meta.is_control_batch {
                 continue;
@@ -1176,5 +1189,55 @@ mod tests {
             batch.in_flight_records().iter().map(ConsumerRecord::offset).collect::<Vec<_>>()
         );
         assert_eq!(1, batch.redelivery_batches_installed, "the batch is walked once");
+    }
+
+    /// Critic 251 Issue 7 (probe H): records 0-2, a refused v1 batch at 3,
+    /// then 4-6. Offset 5, renewed, is redelivered past the refused batch,
+    /// both when only renewed records remain (the copied span) and when 6 is
+    /// still in flight (the response's bytes).
+    #[test]
+    fn test_renewed_record_after_a_refused_batch_is_redelivered() {
+        use crate::consumer::internals::share_completed_fetch::tests::legacy_v1_record;
+
+        for keep_six_in_flight in [false, true] {
+            let mut records = new_records(0, 3).to_vec();
+            records.extend_from_slice(&legacy_v1_record(3, b"legacy"));
+            records.extend_from_slice(&new_records(4, 3));
+            let tip = tip();
+            let data = partition_data(Some(bytes::Bytes::from(records)), acquired_records(0, 7));
+            let mut completed_fetch = new_share_completed_fetch(&tip, data);
+            let deserializers = new_string_deserializers();
+
+            let mut first = fetch(&mut completed_fetch, &deserializers, 3, false);
+            assert_eq!(
+                vec![0, 1, 2],
+                first.in_flight_records().iter().map(ConsumerRecord::offset).collect::<Vec<_>>()
+            );
+            let refused = fetch(&mut completed_fetch, &deserializers, 3, false);
+            assert_eq!(Some(AcknowledgeType::Reject), refused.acknowledgements().get(3));
+            let mut batch = fetch(&mut completed_fetch, &deserializers, 3, false);
+            let delivered = batch.in_flight_records();
+            assert_eq!(vec![4, 5, 6], delivered.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
+
+            batch.acknowledge(&delivered[0], AcknowledgeType::Accept).unwrap();
+            batch.acknowledge(&delivered[1], AcknowledgeType::Renew).unwrap();
+            if !keep_six_in_flight {
+                batch.acknowledge(&delivered[2], AcknowledgeType::Accept).unwrap();
+            }
+            let mut acknowledgements = batch.take_acknowledged_records();
+            assert_eq!(!keep_six_in_flight, batch.holds_own_record_batches());
+            acknowledgements.complete(None);
+            assert_eq!(1, batch.renew(&acknowledgements).unwrap());
+
+            assert!(
+                take_renewals_now(&mut batch, &deserializers).is_none(),
+                "keep_six_in_flight={keep_six_in_flight}"
+            );
+            assert!(batch.error().is_none());
+            assert_eq!(None, batch.acknowledgements().get(5));
+            let redelivered = batch.in_flight_records();
+            assert_eq!(vec![5], redelivered.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
+            assert_eq!(Some("value-"), redelivered[0].value().map(String::as_str));
+        }
     }
 }

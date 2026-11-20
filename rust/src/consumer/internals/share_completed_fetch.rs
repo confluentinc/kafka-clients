@@ -37,10 +37,19 @@
 //! whose stream fails surfaces a bare `KafkaError` (Java's `KafkaException`
 //! from `DefaultRecordBatch.StreamRecordIterator#readNext` or the codec's
 //! `wrapForInput`), which escapes `fetch_records`; the batch's acquired offsets
-//! end as gaps once the fetch reads past them. A stream that fails before the
-//! batch's first record ends the batch at once, as Java's codecs read their
-//! header as the stream is opened; one that fails later fails once per record
-//! the batch still declares, as Java's iterator does. The message is the decoder's
+//! end as gaps once the fetch reads past them. A stream that fails after the
+//! batch's first record fails once per record the batch still declares, as
+//! Java's iterator does. One that fails before the first record ends the batch
+//! at once: an approximation. The Rust codecs read their header with the first
+//! record, so the decoder cannot tell a header failure from a failure in the
+//! first block. Java's gzip, lz4 and snappy streams read the header as they are
+//! opened (`GzipCompression#wrapForInput`, `Lz4Compression#wrapForInput`,
+//! `SnappyCompression#wrapForInput`), so a header failure there ends the batch
+//! as here; but zstd-jni reads its frame header on the first read
+//! (`ZstdCompression#wrapForInput`), and a failure in the first block of any
+//! codec comes from `StreamRecordIterator#readNext` too, and Java then fails
+//! up to once per declared record where Rust fails once. The acknowledgements
+//! end the same (gaps); only the number of failing calls differs. The message is the decoder's
 //! (`Failed to decompress record stream: ...`), where Java's codec wrapper may
 //! carry the underlying `IOException`'s text instead.
 //!
@@ -110,8 +119,8 @@ pub(crate) struct ShareCompletedFetch {
     parse_pending: bool,
     /// Whether a record of the current batch has been read. A compressed
     /// batch's stream that fails before its first record is treated as Java's
-    /// stream failing as it is opened (`streamingIterator`): see
-    /// [`Self::next_fetched_record`].
+    /// gzip/lz4/snappy stream failing as it is opened (`streamingIterator`), an
+    /// approximation for zstd and first-block failures: see the module doc.
     batch_record_read: bool,
     /// Java's `currentBatch`, as the offset range a corrupt batch rejects:
     /// `(base offset, last offset)`.
@@ -634,11 +643,14 @@ impl ShareCompletedFetch {
                 // Java's does.
                 //
                 // A compressed batch's stream that fails before its first record
-                // ends the batch instead: the Rust codecs read their header
-                // with the first record, where Java's read it as the stream is
-                // opened (`GzipCompression#wrapForInput` and the other codecs'),
-                // so Java's `streamingIterator` throws, `records` stays null, and
-                // the next call takes the next batch.
+                // ends the batch instead, an approximation: the Rust codecs read
+                // their header with the first record. Java's gzip, lz4 and
+                // snappy streams read it as they are opened, so their
+                // `streamingIterator` throws, `records` stays null, and the next
+                // call takes the next batch, as here. A zstd header failure, or
+                // a failure in any codec's first block, fails in Java's
+                // `readNext` instead, once per declared record; the gaps it
+                // ends with are the same (see the module doc).
                 if let Err(error) = cursor.read_current_record(partition) {
                     if self.batch_record_read {
                         self.consumed_record_size = Some(0);
@@ -1820,7 +1832,7 @@ pub(crate) mod tests {
     /// A message-format v1 record, as its own legacy batch: Java's
     /// `LegacyRecord` layout (offset, size, crc, magic, attributes, timestamp,
     /// key, value).
-    fn legacy_v1_record(offset: i64, value: &[u8]) -> Vec<u8> {
+    pub(crate) fn legacy_v1_record(offset: i64, value: &[u8]) -> Vec<u8> {
         let mut body = vec![0u8; 4]; // crc, not checked here
         body.push(1); // magic
         body.push(0); // attributes
@@ -1910,5 +1922,139 @@ pub(crate) mod tests {
             assert!(batch.acknowledgements().acknowledgements_type_map().contains_key(&offset));
             assert_eq!(None, batch.acknowledgements().get(offset), "offset {offset} is a gap");
         }
+    }
+
+    /// Calls `fetch_records` until it succeeds, returning the errors it
+    /// returned first and the batch it then returned. Gives up after `limit`
+    /// calls, which fails the test: a fetch that never moves past a failure.
+    fn fetch_past_failures(
+        completed_fetch: &mut ShareCompletedFetch,
+        deserializers: &Deserializers<String, String>,
+        limit: usize,
+    ) -> (Vec<Error>, ShareInFlightBatch<String, String>) {
+        let mut errors = Vec::new();
+        for _ in 0..limit {
+            match completed_fetch
+                .fetch_records(deserializers, 10, false)
+                .now_or_never()
+                .expect("ready")
+            {
+                Ok(batch) => return (errors, batch),
+                Err(error) => errors.push(error),
+            }
+        }
+        panic!("still failing after {limit} calls: {:?}", errors.last());
+    }
+
+    fn assert_gaps(batch: &ShareInFlightBatch<String, String>, offsets: std::ops::Range<i64>) {
+        let map = batch.acknowledgements().acknowledgements_type_map();
+        assert_eq!(offsets.clone().count(), map.len(), "{map:?}");
+        for offset in offsets {
+            assert_eq!(Some(&None), map.get(&offset), "offset {offset} is a gap");
+        }
+    }
+
+    /// Critic 251 Issue 8, premature EOF: a batch declaring 5 records but
+    /// holding 3 fails once per declared record past the end, each counted as
+    /// read (`DefaultRecordBatch.RecordIterator#next`), then the fetch moves on
+    /// and acknowledges the missing offsets as gaps.
+    #[test]
+    fn test_premature_eof_fails_once_per_missing_record_then_moves_on() {
+        let mut records = new_records(0, 3).to_vec();
+        records[RecordBatch::RECORDS_COUNT_OFFSET..RecordBatch::RECORDS_COUNT_OFFSET + 4]
+            .copy_from_slice(&5i32.to_be_bytes());
+        let tip = tip();
+        let data = partition_data(Some(bytes::Bytes::from(records)), acquired_records(0, 5));
+        let mut completed_fetch = new_share_completed_fetch(&tip, data);
+        let deserializers = new_string_deserializers();
+
+        let (errors, batch) = fetch_past_failures(&mut completed_fetch, &deserializers, 10);
+        assert_eq!(2, errors.len(), "{errors:?}");
+        for error in &errors {
+            assert!(matches!(error, Error::InvalidRecord(_)), "{error:?}");
+            assert_eq!(
+                "Incorrect declared batch size for partition test-0, premature EOF reached (declared record count \
+                 exceeds the records present in the batch)",
+                error.message()
+            );
+        }
+        assert!(completed_fetch.is_consumed());
+        assert_gaps(&batch, 3..5);
+    }
+
+    /// Critic 251 Issue 8, malformed record body: the second record's
+    /// timestamp delta is a varint that never ends. It fails once per record
+    /// the batch still declares, then the fetch moves on with gaps.
+    #[test]
+    fn test_malformed_record_fails_once_per_remaining_record_then_moves_on() {
+        let mut records = new_records(0, 3).to_vec();
+        let first = RecordBatch::RECORD_BATCH_OVERHEAD;
+        let (size, size_length) =
+            crate::common::utils::internals::ByteUtils::read_varint(&records[first..]).expect("a size");
+        let second = first + size_length + size as usize;
+        let (_, second_size_length) =
+            crate::common::utils::internals::ByteUtils::read_varint(&records[second..]).expect("a size");
+        // After the size and the attributes byte.
+        let timestamp_delta = second + second_size_length + 1;
+        records[timestamp_delta..timestamp_delta + 10].fill(0xFF);
+        let tip = tip();
+        let data = partition_data(Some(bytes::Bytes::from(records)), acquired_records(0, 3));
+        let mut completed_fetch = new_share_completed_fetch(&tip, data);
+        let deserializers = new_string_deserializers();
+
+        let (errors, batch) = fetch_past_failures(&mut completed_fetch, &deserializers, 10);
+        assert_eq!(2, errors.len(), "records 1 and 2 each fail once: {errors:?}");
+        for error in &errors {
+            assert!(matches!(error, Error::InvalidRecord(_)), "{error:?}");
+            assert!(
+                error
+                    .message()
+                    .starts_with("Record batch for partition test-0 at offset 0 is invalid, cause: "),
+                "{error:?}"
+            );
+        }
+        assert!(completed_fetch.is_consumed());
+        assert_gaps(&batch, 1..3);
+    }
+
+    /// Critic 251 Issue 8, mid-stream decompression failure: a gzip batch cut
+    /// after its first records. The stream fails on the record it is cut in,
+    /// and on every record the batch still declares after it, with Java's bare
+    /// `KafkaException`; then the fetch moves on and acknowledges the offsets
+    /// not delivered as gaps.
+    #[test]
+    fn test_mid_stream_decompression_failure_fails_once_per_remaining_record_then_moves_on() {
+        const RECORD_COUNT: i64 = 40;
+        let mut builder = MemoryRecords::builder_with_initial_capacity(
+            64 * 1024,
+            Compression::gzip().build(),
+            TimestampType::CreateTime,
+            0,
+        );
+        for i in 0..RECORD_COUNT {
+            let value: String = (0..100).map(|j| format!("{i}-{j},")).collect();
+            builder.append_kv(0, None, Some(value.as_bytes()));
+        }
+        let whole = builder.build().into_buffer();
+        let records_length = whole.len() - RecordBatch::RECORD_BATCH_OVERHEAD;
+        let mut records = whole[..RecordBatch::RECORD_BATCH_OVERHEAD + records_length / 2].to_vec();
+        let length = (records.len() - crate::common::record::internal::AbstractRecords::LOG_OVERHEAD) as i32;
+        records[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&length.to_be_bytes());
+        let tip = tip();
+        let data = partition_data(Some(bytes::Bytes::from(records)), acquired_records(0, RECORD_COUNT));
+        let mut completed_fetch = new_share_completed_fetch(&tip, data);
+        let deserializers = new_string_deserializers();
+
+        let (errors, batch) = fetch_past_failures(&mut completed_fetch, &deserializers, 100);
+        let failed = errors.len() as i64;
+        assert!(failed > 1 && failed < RECORD_COUNT, "the cut is mid-stream: {failed} failures");
+        for error in &errors {
+            assert!(matches!(error, Error::KafkaError(_)), "{error:?}");
+            assert_eq!("Failed to decompress record stream: unexpected end of file", error.message());
+        }
+        assert!(completed_fetch.is_consumed());
+        // The records before the cut were decoded into the failing call's batch,
+        // which the error dropped, as Java's escaping exception drops it.
+        assert_gaps(&batch, RECORD_COUNT - failed..RECORD_COUNT);
     }
 }
