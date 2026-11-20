@@ -59,6 +59,9 @@
 //! - **Completed acknowledgements.** Each `(partition, acknowledgements)`
 //!   entry leaves the queue before its callback runs, so a call dropped while
 //!   the callback runs neither repeats that entry nor loses the ones after it.
+//! - **`close`.** A dropped `close` leaves the consumer open; the next `close`
+//!   finishes it and stops the background task
+//!   ([`ShareConsumerImpl::close_with_timeout`]).
 //!
 //! # Not translated
 //!
@@ -185,9 +188,12 @@ where
     metrics: Arc<Metrics>,
     request_timeout_ms: i32,
     default_api_timeout_ms: i32,
-    /// Java's `volatile boolean closed`; an `Arc` so that a dropped `close`
-    /// still sets it (Java sets it in a `finally`).
+    /// Java's `volatile boolean closed`, set once `close` has run every step
+    /// (see `close_with_timeout`).
     closed: Arc<AtomicBool>,
+    /// Whether `close` has joined the background task: a `close` retried
+    /// after a dropped one skips the steps that need the task.
+    network_thread_joined: bool,
     in_flight_poll: Option<InFlightPoll>,
     wakeup_trigger: WakeupTrigger,
     should_send_share_fetch_event: bool,
@@ -344,16 +350,6 @@ struct RecordPollEnd {
 impl Drop for RecordPollEnd {
     fn drop(&mut self) {
         self.kafka_share_consumer_metrics.record_poll_end(self.time.milliseconds());
-    }
-}
-
-/// Sets the closed flag when dropped: Java's `finally { closed = true; }` in
-/// `close(Duration)`, which a dropped `close` must run too.
-struct SetClosed(Arc<AtomicBool>);
-
-impl Drop for SetClosed {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
     }
 }
 
@@ -682,6 +678,7 @@ where
             request_timeout_ms: components.request_timeout_ms,
             default_api_timeout_ms: components.default_api_timeout_ms,
             closed: Arc::new(AtomicBool::new(false)),
+            network_thread_joined: false,
             in_flight_poll: None,
             wakeup_trigger: components.wakeup_trigger,
             should_send_share_fetch_event: false,
@@ -771,6 +768,9 @@ where
     /// closed (Java's `IllegalStateException`; CLAUDE.md §12.5).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#subscription")]
     pub(crate) fn subscription(&mut self) -> HashSet<String> {
+        // Java's `acquireAndEnsureOpen` also throws a permanent bootstrap
+        // failure (KIP-909); with no error channel, this keeps working after
+        // one, as `AsyncKafkaConsumer::subscription` does.
         self.panic_if_closed();
         self.lock_subscriptions().subscription()
     }
@@ -1352,6 +1352,9 @@ where
         &mut self,
         callback: Option<Arc<dyn AcknowledgementCommitCallback>>,
     ) {
+        // Java's `acquireAndEnsureOpen` also throws a permanent bootstrap
+        // failure (KIP-909); with no error channel, this keeps working after
+        // one, as `AsyncKafkaConsumer::subscription` does.
         self.panic_if_closed();
         match callback {
             Some(callback) => {
@@ -1407,6 +1410,9 @@ where
     /// closed (Java's `IllegalStateException`; CLAUDE.md §12.5).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#acquisitionLockTimeoutMs")]
     pub(crate) fn acquisition_lock_timeout_ms(&mut self) -> Option<i32> {
+        // Java's `acquireAndEnsureOpen` also throws a permanent bootstrap
+        // failure (KIP-909); with no error channel, this keeps working after
+        // one, as `AsyncKafkaConsumer::subscription` does.
         self.panic_if_closed();
         self.current_fetch.acquisition_lock_timeout_ms()
     }
@@ -1436,19 +1442,28 @@ where
     /// Java's negative-timeout check has no counterpart: a `Duration` cannot
     /// be negative.
     ///
+    /// # Cancellation
+    ///
+    /// Java sets `closed` in a `finally`, after every close step has run,
+    /// the network thread's join included. A dropped call has not run them
+    /// all, so it leaves the consumer open, as `AsyncKafkaConsumer::close`
+    /// does: a later `close` runs the steps again (those that need the
+    /// background task only while it has not been joined) and stops the task.
+    ///
     /// # Errors
     ///
     /// A `KafkaError` with `"Failed to close Kafka share consumer"` whose
     /// source is the first failure of a close step.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#close")]
     pub(crate) async fn close_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        let _set_closed = SetClosed(Arc::clone(&self.closed));
         if self.is_closed() {
             return Ok(());
         }
         // need to close before setting the flag since the close function
         // itself may trigger code that needs the consumer to be open still
-        self.close_internal(timeout, false).await
+        let result = self.close_internal(timeout, false).await;
+        self.closed.store(true, Ordering::Release);
+        result
     }
 
     /// Java's `close(Duration, boolean swallowException)`.
@@ -1461,28 +1476,33 @@ where
 
         let close_deadline_ms = self.create_timer_for_close_requests(timeout);
 
-        // Prepare shutting down the network thread
-        if let Err(e) = self
-            .send_acknowledgements_and_leave_group(close_deadline_ms, &mut first_error)
-            .await
-        {
-            Self::swallow("Failed to release assignment before closing consumer", e, &mut first_error);
-        }
-        if let Err(e) = self.stop_find_coordinator_on_close() {
-            Self::swallow("Failed to stop finding coordinator", e, &mut first_error);
-        }
-        // Java swallows a failure of the callback here; the handler catches it.
-        self.handle_completed_acknowledgements().await;
-        if let Err(e) = self.process_background_events_on_close() {
-            Self::swallow("Failed processing background events", e, &mut first_error);
-        }
-        // Java's `applicationEventHandler.close(Duration.ofMillis(closeTimer.remainingMs()))`.
-        let remaining_ms = close_deadline_ms.saturating_sub(self.time.milliseconds()).max(0);
-        self.network_thread_close
-            .signal_close(Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(0)));
-        self.network_thread_close.wakeup();
-        if let Err(e) = self.network_thread_close.await_join().await {
-            Self::close_quietly_failed("Failed shutting down network thread", e, &mut first_error);
+        // A `close` retried after a dropped one that had joined the background
+        // task has nothing left to send it.
+        if !self.network_thread_joined {
+            // Prepare shutting down the network thread
+            if let Err(e) = self
+                .send_acknowledgements_and_leave_group(close_deadline_ms, &mut first_error)
+                .await
+            {
+                Self::swallow("Failed to release assignment before closing consumer", e, &mut first_error);
+            }
+            if let Err(e) = self.stop_find_coordinator_on_close() {
+                Self::swallow("Failed to stop finding coordinator", e, &mut first_error);
+            }
+            // Java swallows a failure of the callback here; the handler catches it.
+            self.handle_completed_acknowledgements().await;
+            if let Err(e) = self.process_background_events_on_close() {
+                Self::swallow("Failed processing background events", e, &mut first_error);
+            }
+            // Java's `applicationEventHandler.close(Duration.ofMillis(closeTimer.remainingMs()))`.
+            let remaining_ms = close_deadline_ms.saturating_sub(self.time.milliseconds()).max(0);
+            self.network_thread_close
+                .signal_close(Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(0)));
+            self.network_thread_close.wakeup();
+            if let Err(e) = self.network_thread_close.await_join().await {
+                Self::close_quietly_failed("Failed shutting down network thread", e, &mut first_error);
+            }
+            self.network_thread_joined = true;
         }
 
         // Java's `backgroundEventReaper.reap(backgroundEventQueue)`: the queue's
@@ -1999,8 +2019,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    //! Translated from `ShareConsumerImplTest` (37 tests and one parameterised
-    //! over three errors), plus Rust-only tests of the cancellation contract
+    //! Translated from `ShareConsumerImplTest` (36 of its 38 tests, and the one
+    //! parameterised over three errors), plus Rust-only tests of the cancellation contract
     //! (module doc) and of the production constructors (translation-checklist
     //! R3).
     //!
@@ -2080,8 +2100,9 @@ mod tests {
         complete_share_subscription_change: bool,
         /// `completeShareUnsubscribeApplicationEventSuccessfully`.
         complete_share_unsubscribe: bool,
-        /// Java's `doAnswer(..).when(applicationEventHandler).add(any(StopFindCoordinatorOnCloseEvent.class))`.
-        on_stop_find_coordinator: Option<Box<dyn FnMut() + Send>>,
+        /// Called after the `ShareUnsubscribeEvent` is completed: the last
+        /// event `close` waits for before it processes the background events.
+        on_share_unsubscribe: Option<Box<dyn FnMut() + Send>>,
     }
 
     impl Responder {
@@ -2105,6 +2126,9 @@ mod tests {
                         self.subscriptions.lock().unwrap().unsubscribe();
                     }
                     handle.complete(());
+                    if let Some(hook) = self.on_share_unsubscribe.as_mut() {
+                        hook();
+                    }
                 },
                 ApplicationEvent::ShareAcknowledgeOnClose { handle, acknowledgements_map } => {
                     recorded.acknowledgements_map = acknowledgements_map;
@@ -2120,11 +2144,6 @@ mod tests {
                 },
                 ApplicationEvent::ShareAcknowledgementCommitCallbackRegistration { is_callback_registered } => {
                     recorded.is_callback_registered = Some(is_callback_registered);
-                },
-                ApplicationEvent::StopFindCoordinatorOnClose => {
-                    if let Some(hook) = self.on_stop_find_coordinator.as_mut() {
-                        hook();
-                    }
                 },
                 _ => {},
             }
@@ -2275,7 +2294,7 @@ mod tests {
                 events: Vec::new(),
                 complete_share_subscription_change: false,
                 complete_share_unsubscribe: false,
-                on_stop_find_coordinator: None,
+                on_share_unsubscribe: None,
             },
             background_event_tx,
             acknowledgement_event_handler,
@@ -2441,6 +2460,7 @@ mod tests {
         let config = ConsumerConfig::new(&props).expect("the configuration itself is valid");
         let e = ShareConsumerImpl::<String, String>::new(config, Box::new(closed.clone()), Box::new(closed.clone()))
             .expect_err("an unparseable bootstrap address fails construction");
+        assert!(matches!(e, Error::KafkaError(_)), "{e:?}");
         assert!(
             e.message().contains("Failed to construct Kafka share consumer"),
             "Unexpected error message: {}",
@@ -2487,11 +2507,8 @@ mod tests {
         f.poll(Duration::ZERO).await.expect("poll succeeds");
 
         // Verify that a ShareAcknowledgeAsyncEvent was sent with the acknowledgement GAP for offset 1
-        assert!(
-            f.responder
-                .acknowledgements_sent(&tip)
-                .contains(&("ShareAcknowledgeAsync", vec![(1, None)])),
-            "{:?}",
+        assert_eq!(
+            vec![("ShareAcknowledgeAsync", vec![(1, None)])],
             f.responder.acknowledgements_sent(&tip)
         );
     }
@@ -2623,6 +2640,7 @@ mod tests {
             .poll(Duration::from_millis(100))
             .await
             .expect_err("one record is unacknowledged");
+        assert!(matches!(exception, Error::LocalIllegalState(_)), "{exception:?}");
         assert_eq!(
             "All records must be acknowledged in explicit acknowledgement mode.",
             exception.message(),
@@ -2893,6 +2911,7 @@ mod tests {
         f.add_background_error(Error::kafka_message("Spam, Spam, Spam"));
         f.subscribe(&["t1"]).await.expect("subscribe returns");
         let exception = f.poll(Duration::ZERO).await.expect_err("the background error is raised");
+        assert!(exception.is_kafka_error(), "{exception:?}");
         assert_eq!(expected_exception1.message(), exception.message());
         assert!(f.consumer.background_event_rx.is_empty());
     }
@@ -2900,6 +2919,7 @@ mod tests {
     #[tokio::test]
     async fn test_group_id_null() {
         let e = new_consumer_from_config(&required_consumer_properties()).expect_err("no group id fails");
+        assert!(matches!(e, Error::KafkaError(_)), "{e:?}");
         assert_eq!("Failed to construct Kafka share consumer", e.message());
     }
 
@@ -2907,6 +2927,7 @@ mod tests {
         let mut props = required_consumer_properties();
         props.insert(ConsumerConfig::GROUP_ID_CONFIG.to_string(), group_id.to_string());
         let e = new_consumer_from_config(&props).expect_err("an invalid group id fails");
+        assert!(matches!(e, Error::KafkaError(_)), "{e:?}");
         assert_eq!("Failed to construct Kafka share consumer", e.message());
     }
 
@@ -2976,6 +2997,14 @@ mod tests {
         assert_eq!(1, f.responder.count("SharePoll"));
     }
 
+    /// Java's `doAnswer` on `add(StopFindCoordinatorOnCloseEvent)` queues the
+    /// error inside `close`, before `processBackgroundEventsOnClose` drains
+    /// it. The responder runs only while `close` waits, and the last wait
+    /// before that step is the unsubscribe, so the error is queued as the
+    /// unsubscribe completes. The queue is empty after `close` whatever the
+    /// step does (the final reap clears it, where Java's mocked reaper does
+    /// not), so `close`'s success is what shows the error was swallowed; the
+    /// next test shows the step runs.
     #[tokio::test]
     async fn test_close_with_background_queue_errors_after_unsubscribe() {
         for error in [
@@ -2988,13 +3017,7 @@ mod tests {
             f.complete_close_events();
 
             // Add errors to the queue after unsubscribe event is processed
-            let background_event_tx = f.background_event_tx.clone();
-            f.responder.on_stop_find_coordinator = Some(Box::new(move || {
-                let error = error.error().expect("an error code");
-                background_event_tx
-                    .send(BackgroundEventEnvelope { event: BackgroundEvent::Error { error }, enqueued_ms: 0 })
-                    .expect("the consumer holds the receiver");
-            }));
+            f.responder.on_share_unsubscribe = Some(queue_background_error(&f, move || error.error()));
 
             // Close should complete successfully despite the errors in the background queue
             f.close().await.unwrap_or_else(|e| panic!("{error:?}: {e:?}"));
@@ -3005,6 +3028,37 @@ mod tests {
                 "Background queue should be empty after close"
             );
         }
+    }
+
+    /// Rust-only: the background error queued as the unsubscribe completes is
+    /// processed before the background task is stopped; one that `close` does
+    /// not ignore fails it.
+    #[tokio::test]
+    async fn close_processes_the_background_errors_after_unsubscribe() {
+        let mut f = new_consumer();
+        f.complete_close_events();
+        f.responder.on_share_unsubscribe = Some(queue_background_error(&f, || {
+            Some(Error::kafka_message("not ignored on close"))
+        }));
+
+        let e = f.close().await.expect_err("the error is not ignored");
+        assert!(e.is_kafka_error(), "{e:?}");
+        assert_eq!("Failed to close Kafka share consumer", e.message());
+        assert_eq!("not ignored on close", source_of(&e).message());
+    }
+
+    /// A hook queuing the error `error` returns on the background-event queue.
+    fn queue_background_error(
+        f: &Fixture,
+        error: impl Fn() -> Option<Error> + Send + 'static,
+    ) -> Box<dyn FnMut() + Send> {
+        let background_event_tx = f.background_event_tx.clone();
+        Box::new(move || {
+            let error = error().expect("an error");
+            background_event_tx
+                .send(BackgroundEventEnvelope { event: BackgroundEvent::Error { error }, enqueued_ms: 0 })
+                .expect("the consumer holds the receiver");
+        })
     }
 
     /// The fixture on `time`. Java's tests time the wait with a `MockTime`
@@ -3021,9 +3075,11 @@ mod tests {
     }
 
     /// Java's future times out twice in its 100 ms slices and then completes,
-    /// leaving exactly 800 ms of the mock clock. Here the event completes after
-    /// 200 ms of real time, two 100 ms waits, so at most 800 ms are left (the
-    /// lower bound only allows for a slow machine).
+    /// leaving exactly 800 ms of the mock clock: the assertion pins the slice.
+    /// The Rust wait is a `tokio::time::timeout` the test cannot intercept, so
+    /// this checks less: the event completes after 200 ms of real time, so at
+    /// most 800 ms are left, and it is returned well before the deadline (the
+    /// lower bound only allows for a slow machine). The slice is not pinned.
     #[tokio::test]
     async fn test_process_background_events_with_initial_delay() {
         let (mut f, time) = consumer_on_clock(Arc::new(crate::common::utils::SystemTime));
@@ -3146,11 +3202,11 @@ mod tests {
         assert_metrics_map(&f, false);
     }
 
-    /// Java builds a `KafkaShareConsumer` whose SASL login module does not
-    /// exist, so the `NetworkClient` cannot be created. The Rust client
-    /// supports SASL `PLAIN` only and reads no login module, so the network
-    /// client is made to fail on its channel builder instead (an SSL keystore
-    /// that does not exist), through the same wrap.
+    /// Java's configuration: SASL `PLAIN` with a JAAS configuration naming a
+    /// login module that does not exist. The outer two levels of the chain are
+    /// Java's; beneath them Java has the `LoginException` of the missing module,
+    /// the Rust client (which reads no login module) the channel builder's
+    /// `ConfigError` for the missing PLAIN username.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_constructor_fails_on_network_client_constructor_failure() {
         let mut props = required_consumer_properties();
@@ -3158,14 +3214,27 @@ mod tests {
             ConsumerConfig::GROUP_ID_CONFIG.to_string(),
             "invalid-login-test-group".to_string(),
         );
-        props.insert("security.protocol".to_string(), "SSL".to_string());
-        props.insert("ssl.keystore.location".to_string(), "/nonexistent/keystore.jks".to_string());
-        props.insert("ssl.keystore.password".to_string(), "secret".to_string());
-        let e = new_consumer_from_config(&props).expect_err("the channel builder fails");
+        props.insert("security.protocol".to_string(), "SASL_PLAINTEXT".to_string());
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert(
+            "sasl.jaas.config".to_string(),
+            "org.example.InvalidLoginModule required ;".to_string(),
+        );
+        let e = new_consumer_from_config(&props).expect_err("the network client cannot be created");
+        assert!(matches!(e, Error::KafkaError(_)), "{e:?}");
         assert_eq!("Failed to construct Kafka share consumer", e.message());
+
+        // The root cause is multiple errors deep.
         let cause = source_of(&e);
-        assert!(cause.is_kafka_error(), "{cause:?}");
-        assert!(cause.message().starts_with("Failed to create channel builder: "), "{cause:?}");
+        assert!(matches!(cause, Error::KafkaError(_)), "{cause:?}");
+        assert_eq!("Failed to create new NetworkClient", cause.message());
+
+        let cause = source_of(cause);
+        assert!(matches!(cause, Error::Config(_)), "{cause:?}");
+        assert_eq!(
+            "Failed to create channel builder: SASL PLAIN authentication requires a username",
+            cause.message()
+        );
     }
 
     // ── KafkaShareConsumerMetricsTest, through ShareConsumerImpl ───────────
@@ -3681,6 +3750,155 @@ mod tests {
             )],
             f.responder.acknowledgements_sent(&tip)
         );
+    }
+
+    /// The explicit-mode twin of the test above: the explicit-mode check
+    /// skips the records the dropped `poll` did not hand out, so the next
+    /// `poll` returns them instead of failing with "All records must be
+    /// acknowledged in explicit acknowledgement mode.".
+    #[tokio::test]
+    async fn dropped_poll_in_the_callback_hands_the_records_out_in_explicit_mode() {
+        let mut f = new_consumer_mode("explicit");
+        f.consumer.set_acknowledgement_commit_callback(Some(Arc::new(RecordingCallback {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            pend_once: AtomicBool::new(true),
+        })));
+        let (tip, tip_done) = (new_tip("t", 0), new_tip("done", 0));
+        let acknowledgement_event_handler = Arc::clone(&f.acknowledgement_event_handler);
+        let (tip_in_stub, tip_done_in_stub) = (tip.clone(), tip_done.clone());
+        let mut first = true;
+        f.stub_collect(move || {
+            if !std::mem::replace(&mut first, false) {
+                return ShareFetch::empty();
+            }
+            acknowledgement_event_handler.add(completed_event(&tip_done_in_stub, 7));
+            fetch_with_records(&tip_in_stub, &[0, 1])
+        });
+        f.responder.complete_share_subscription_change = true;
+        f.subscribe(&["t"]).await.expect("subscribed");
+
+        assert!(
+            f.consumer.poll(Duration::ZERO).now_or_never().is_none(),
+            "dropped in the callback"
+        );
+        let records = f
+            .poll(Duration::ZERO)
+            .await
+            .expect("the records not handed out need no acknowledgement");
+        assert_eq!(vec![0, 1], offsets(&records));
+        let e = f.poll(Duration::ZERO).await.expect_err("now they do");
+        assert_eq!(
+            "All records must be acknowledged in explicit acknowledgement mode.",
+            e.message()
+        );
+    }
+
+    /// Java 4.4 (PLAN §8.1 row 17): when the collector fails, the
+    /// acknowledgements `pollForFetches` took (here the implicit ACCEPTs of
+    /// the records the first `poll` returned) are not sent.
+    #[tokio::test]
+    async fn collector_failure_does_not_send_the_acknowledgements_taken() {
+        let mut f = new_consumer();
+        let tip = new_tip("t", 0);
+        let tip_in_stub = tip.clone();
+        let mut calls = 0;
+        f.consumer.collect_stub = Some(Box::new(move || {
+            calls += 1;
+            match calls {
+                1 => Ok(Ok(fetch_with_records(&tip_in_stub, &[0, 1]))),
+                _ => Err(Error::topic_authorization(HashSet::from(["t".to_string()]))),
+            }
+        }));
+        f.responder.complete_share_subscription_change = true;
+        f.subscribe(&["t"]).await.expect("subscribed");
+        let records = f.poll(Duration::ZERO).await.expect("records");
+        assert_eq!(vec![0, 1], offsets(&records));
+
+        let e = f.poll(Duration::ZERO).await.expect_err("the collector fails");
+        assert!(matches!(e, Error::TopicAuthorization(_)), "{e:?}");
+        assert!(
+            f.responder.acknowledgements_sent(&tip).is_empty(),
+            "{:?}",
+            f.responder.acknowledgements_sent(&tip)
+        );
+    }
+
+    /// A `close` dropped while it waits for the acknowledge-on-close event
+    /// leaves the consumer open; the next `close` finishes it and stops the
+    /// background task, which then lets go of the request managers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropped_close_is_finished_by_the_next_close() {
+        let time = Arc::new(MockTime::with_auto_tick_ms(1));
+        let mut consumer = new_share_consumer_over_mock_client(time);
+        let request_managers = Arc::clone(consumer.request_managers.as_ref().expect("built"));
+        let held_by_the_consumer = 2;
+        assert!(
+            Arc::strong_count(&request_managers) > held_by_the_consumer,
+            "the task holds them"
+        );
+
+        assert!(
+            consumer.close_with_timeout(Duration::from_secs(5)).now_or_never().is_none(),
+            "dropped while it waits for the acknowledge-on-close event"
+        );
+        assert_eq!(HashSet::<String>::new(), consumer.subscription(), "the consumer is still open");
+
+        consumer
+            .close_with_timeout(Duration::from_secs(5))
+            .await
+            .expect("the second close finishes");
+        assert_eq!(
+            held_by_the_consumer,
+            Arc::strong_count(&request_managers),
+            "the background task has stopped"
+        );
+        let e = consumer.unsubscribe().await.expect_err("closed");
+        assert_eq!("This consumer has already been closed.", e.message());
+    }
+
+    /// A `close` dropped after it joined the background task (here while a
+    /// deserializer closes) leaves the consumer open; the next `close` sends
+    /// nothing to the stopped task and succeeds.
+    #[tokio::test]
+    async fn dropped_close_after_the_join_is_finished_by_the_next_close() {
+        #[derive(Clone, Default)]
+        struct PendOnceOnClose {
+            entered: Arc<AtomicBool>,
+        }
+        impl Deserializer<String> for PendOnceOnClose {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                Ok(String::from_utf8_lossy(data).into_owned())
+            }
+            async fn close(&mut self) -> Result<(), Error> {
+                if !self.entered.swap(true, Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+                Ok(())
+            }
+        }
+        let deserializer = PendOnceOnClose::default();
+        let mut f = new_consumer_with(
+            Arc::new(MockTime::with_auto_tick_ms(1)),
+            "group-id",
+            "implicit",
+            Box::new(deserializer.clone()),
+        );
+        f.complete_close_events();
+        {
+            let mut close = std::pin::pin!(f.consumer.close());
+            while !deserializer.entered.load(Ordering::SeqCst) {
+                assert!(futures_util::poll!(close.as_mut()).is_pending(), "dropped before it ends");
+                f.responder.drain();
+                tokio::task::yield_now().await;
+            }
+        }
+        let events = f.responder.events.len();
+        assert_eq!(1, f.responder.count("ShareUnsubscribe"));
+
+        f.close().await.expect("the second close finishes");
+        assert_eq!(events, f.responder.events.len(), "nothing is sent to the stopped task");
+        let e = f.poll(Duration::ZERO).await.expect_err("closed");
+        assert_eq!("This consumer has already been closed.", e.message());
     }
 
     /// A `poll` dropped while it collects sends the acknowledgements it had
