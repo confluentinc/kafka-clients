@@ -60,6 +60,9 @@ use confluent_kafka::producer::ProducerRecord;
 use confluent_kafka::producer::RecordMetadata;
 
 use super::share_consumer_test_base::*;
+use confluent_kafka::consumer::AcknowledgementCommitCallback;
+use confluent_kafka::consumer::acknowledgement_commit_callback;
+use std::sync::atomic::AtomicBool;
 
 /// A `key`/`value` record for `tp`, Java's
 /// `new ProducerRecord<>(tp.topic(), tp.partition(), null, "key".getBytes(), "value".getBytes())`.
@@ -1335,6 +1338,789 @@ async fn test_fetch_record_larger_than_max_partition_fetch_bytes() {
 
     let records = base.waited_poll(&mut share_consumer, 2500, 2).await;
     assert_eq!(2, records.count());
+    base.verify_share_group_state_topic_records_produced().await;
+    close_producer(producer).await;
+    close_share_consumer(share_consumer).await;
+}
+
+/// Java's `CompletableFuture.allOf(futures).get(timeout)` followed by `join`:
+/// waits for every task within `timeout` and returns their results in order.
+/// A task that panicked fails the test with its panic, as Java's `join`
+/// rethrows the task's exception.
+async fn join_all_within<T: Send + 'static>(
+    what: &str,
+    timeout: Duration,
+    handles: Vec<tokio::task::JoinHandle<T>>,
+) -> Vec<T> {
+    let joined = tokio::time::timeout(timeout, futures_util::future::join_all(handles))
+        .await
+        .unwrap_or_else(|_| panic!("{what} did not complete within {timeout:?}"));
+    joined
+        .into_iter()
+        .map(|result| result.unwrap_or_else(|e| std::panic::resume_unwind(e.into_panic())))
+        .collect()
+}
+
+/// A dedicated cluster with the class defaults, for the tests that stop the
+/// broker (Java starts a fresh cluster per test).
+fn dedicated_share_cluster_config() -> crate::common::cluster_config::ClusterConfig {
+    let mut config = default_share_cluster_config();
+    config.dedicated = true;
+    config
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_with_different_group_ids() {
+    let base = ShareConsumerTestBase::setup(default_share_cluster_config()).await;
+    let group1 = base.group("group1");
+    let group2 = base.group("group2");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    base.alter_share_auto_offset_reset(&group2, "earliest").await;
+    let producer = base.create_producer().await;
+    let mut share_consumer1 = base.create_share_consumer(&group1);
+    let mut share_consumer2 = base.create_share_consumer(&group2);
+
+    share_consumer1
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+    share_consumer2
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+
+    // producing 3 records to the topic
+    for _ in 0..3 {
+        send_record(&producer, key_value_record(&base)).await.expect("send");
+    }
+    producer.flush().await.expect("flush");
+
+    // Both the consumers should read all the messages, because they are part of different share groups (both have different group IDs)
+    let mut share_consumer1_records = 0;
+    let mut share_consumer2_records = 0;
+    let mut deadline = WaitDeadline::new(DEFAULT_MAX_WAIT_MS, 100, "Failed to consume records for both consumers");
+    loop {
+        share_consumer1_records += share_consumer1.poll(Duration::from_millis(2000)).await.expect("poll").count();
+        share_consumer2_records += share_consumer2.poll(Duration::from_millis(2000)).await.expect("poll").count();
+        if share_consumer1_records == 3 && share_consumer2_records == 3 {
+            break;
+        }
+        deadline.fail_or_pause().await;
+    }
+
+    send_record(&producer, key_value_record(&base)).await.expect("send");
+    send_record(&producer, key_value_record(&base)).await.expect("send");
+
+    share_consumer1_records = 0;
+    let mut deadline = WaitDeadline::new(DEFAULT_MAX_WAIT_MS, 100, "Failed to consume records for share consumer 1");
+    loop {
+        share_consumer1_records += share_consumer1.poll(Duration::from_millis(2000)).await.expect("poll").count();
+        if share_consumer1_records == 2 {
+            break;
+        }
+        deadline.fail_or_pause().await;
+    }
+
+    for _ in 0..3 {
+        send_record(&producer, key_value_record(&base)).await.expect("send");
+    }
+
+    share_consumer1_records = 0;
+    share_consumer2_records = 0;
+    let mut deadline = WaitDeadline::new(
+        DEFAULT_MAX_WAIT_MS,
+        100,
+        "Failed to consume records for both consumers for the last batch",
+    );
+    loop {
+        share_consumer1_records += share_consumer1.poll(Duration::from_millis(2000)).await.expect("poll").count();
+        share_consumer2_records += share_consumer2.poll(Duration::from_millis(2000)).await.expect("poll").count();
+        if share_consumer1_records == 3 && share_consumer2_records == 5 {
+            break;
+        }
+        deadline.fail_or_pause().await;
+    }
+    base.verify_share_group_state_topic_records_produced().await;
+    close_producer(producer).await;
+    close_share_consumer(share_consumer1).await;
+    close_share_consumer(share_consumer2).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_consumer_close_on_broker_shutdown() {
+    let base = ShareConsumerTestBase::setup(dedicated_share_cluster_config()).await;
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let mut share_consumer = base.create_share_consumer(&group1);
+    share_consumer
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+
+    // To ensure coordinator discovery is complete before shutting down the broker
+    share_consumer.poll(Duration::from_millis(100)).await.expect("poll");
+
+    // Shutdown the broker.
+    assert_eq!(1, base.ctx().cluster().broker_ids().len());
+    // Java's `cluster.shutdownBroker(0)` then `broker.awaitShutdown()`: the
+    // harness returns once the broker container has stopped.
+    base.ctx().cluster().shutdown_broker(0).await;
+
+    // Assert that close completes in less than 5 seconds, not the full 30-second timeout.
+    tokio::time::timeout(Duration::from_secs(5), share_consumer.close())
+        .await
+        .expect("Consumer close should not wait for full timeout when broker is already shut down")
+        .expect("close");
+}
+
+/// The acknowledgement commit callback of the leader-restart tests: Java's
+/// lambda `assertInstanceOf(NetworkException.class, exception);
+/// callbackCalled.set(true)`. The Rust consumer catches a panicking callback
+/// (as Java catches an `Exception`, though not the `AssertionError` its
+/// assertion throws), so the callback records what it was called with and the
+/// test asserts it afterwards.
+struct NetworkErrorCallback {
+    callback_called: Arc<AtomicBool>,
+    unexpected: Arc<Mutex<Vec<String>>>,
+}
+
+impl NetworkErrorCallback {
+    fn new() -> Self {
+        Self {
+            callback_called: Arc::new(AtomicBool::new(false)),
+            unexpected: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn callback(&self) -> Arc<dyn AcknowledgementCommitCallback> {
+        let callback_called = Arc::clone(&self.callback_called);
+        let unexpected = Arc::clone(&self.unexpected);
+        Arc::new(acknowledgement_commit_callback::new(
+            move |_offsets_by_topic_partition, error| match error {
+                Some(error) if error.is_network_error() => callback_called.store(true, Ordering::SeqCst),
+                other => unexpected.lock().expect("lock").push(format!("{other:?}")),
+            },
+        ))
+    }
+
+    /// Java's `assertTrue(callbackCalled.get())`, plus the callback's own
+    /// `assertInstanceOf(NetworkException.class, exception)`.
+    fn assert_called(&self) {
+        let unexpected = self.unexpected.lock().expect("lock");
+        assert!(
+            unexpected.is_empty(),
+            "the callback expected a NetworkException, got {unexpected:?}"
+        );
+        assert!(self.callback_called.load(Ordering::SeqCst));
+    }
+}
+
+/// The shared opening of the three leader-restart tests: a consumer of
+/// `group1` with `properties` and the [`NetworkErrorCallback`], one record
+/// produced and polled (20 s), then the broker shut down and restarted.
+async fn leader_restart_consume_one_record(
+    base: &ShareConsumerTestBase,
+    properties: &HashMap<String, String>,
+    callback: &NetworkErrorCallback,
+) -> (BytesShareConsumer, BytesRecord) {
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let producer = base.create_producer().await;
+    let mut share_consumer = base.create_share_consumer_with_properties(&group1, properties);
+    share_consumer.set_acknowledgement_commit_callback(Some(callback.callback()));
+
+    share_consumer
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+
+    send_record(&producer, key_value_record(base)).await.expect("send");
+    producer.flush().await.expect("flush");
+
+    let records = share_consumer.poll(Duration::from_millis(20000)).await.expect("poll");
+    assert_eq!(1, records.count());
+    let consumer_record = records.into_iter().next().expect("a record");
+
+    // Shutdown the broker
+    assert_eq!(1, base.ctx().cluster().broker_ids().len());
+    base.ctx().cluster().shutdown_broker(0).await;
+
+    // Restart the broker
+    base.ctx().cluster().start_broker(0).await;
+
+    close_producer(producer).await;
+    (share_consumer, consumer_record)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_leader_restart_without_leadership_change_explicit_acknowledgement_sync() {
+    let base = ShareConsumerTestBase::setup(dedicated_share_cluster_config()).await;
+    let callback = NetworkErrorCallback::new();
+    let explicit = HashMap::from([("share.acknowledgement.mode".to_string(), EXPLICIT.to_string())]);
+    let (mut share_consumer, consumer_record) = leader_restart_consume_one_record(&base, &explicit, &callback).await;
+
+    share_consumer.acknowledge_with_record(&consumer_record).expect("acknowledge");
+    let commit_result = share_consumer
+        .commit_sync_with_timeout(Duration::from_millis(30000))
+        .await
+        .expect("commitSync");
+    assert_eq!(1, commit_result.len());
+    let (_tidp, error) = commit_result.iter().next().expect("one partition");
+    let error = error.as_ref().expect("the acknowledgement failed");
+    assert!(error.is_network_error(), "{error:?}");
+
+    callback.assert_called();
+    close_share_consumer(share_consumer).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_leader_restart_without_leadership_change_explicit_acknowledgement_async() {
+    let base = ShareConsumerTestBase::setup(dedicated_share_cluster_config()).await;
+    let callback = NetworkErrorCallback::new();
+    let explicit = HashMap::from([("share.acknowledgement.mode".to_string(), EXPLICIT.to_string())]);
+    let (mut share_consumer, consumer_record) = leader_restart_consume_one_record(&base, &explicit, &callback).await;
+
+    share_consumer.acknowledge_with_record(&consumer_record).expect("acknowledge");
+    share_consumer.commit_async().await.expect("commitAsync");
+
+    let max_retries = 15;
+    let mut retries = 0;
+    while retries < max_retries {
+        share_consumer.poll(Duration::from_millis(2000)).await.expect("poll");
+        if callback.callback_called.load(Ordering::SeqCst) {
+            break;
+        }
+        retries += 1;
+    }
+
+    callback.assert_called();
+    close_share_consumer(share_consumer).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_leader_restart_without_leadership_change_implicit_acknowledgement() {
+    let base = ShareConsumerTestBase::setup(dedicated_share_cluster_config()).await;
+    let callback = NetworkErrorCallback::new();
+    let (mut share_consumer, _consumer_record) =
+        leader_restart_consume_one_record(&base, &HashMap::new(), &callback).await;
+
+    let max_retries = 15;
+    let mut retries = 0;
+    while retries < max_retries {
+        share_consumer.poll(Duration::from_millis(2000)).await.expect("poll");
+        if callback.callback_called.load(Ordering::SeqCst) {
+            break;
+        }
+        retries += 1;
+    }
+
+    callback.assert_called();
+    close_share_consumer(share_consumer).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_group_sequential_consumption() {
+    if skip_from(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInGroupSequentialConsumption",
+    ) {
+        return;
+    }
+    multiple_consumers_in_group_sequential_consumption(default_share_cluster_config()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_group_sequential_consumption_assignment_interval_0() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInGroupSequentialConsumption (interval 0)",
+    ) {
+        return;
+    }
+    multiple_consumers_in_group_sequential_consumption(assignment_interval_config("0")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_group_sequential_consumption_assignment_interval_1000() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInGroupSequentialConsumption (interval 1000)",
+    ) {
+        return;
+    }
+    multiple_consumers_in_group_sequential_consumption(assignment_interval_config("1000")).await;
+}
+
+/// Java's `testMultipleConsumersInGroupSequentialConsumption`.
+async fn multiple_consumers_in_group_sequential_consumption(config: crate::common::cluster_config::ClusterConfig) {
+    let base = ShareConsumerTestBase::setup(config).await;
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let producer = base.create_producer().await;
+    let mut share_consumer1 = base.create_share_consumer(&group1);
+    let mut share_consumer2 = base.create_share_consumer(&group1);
+
+    share_consumer1
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+    share_consumer2
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+
+    let total_messages = 2000;
+    for _ in 0..total_messages {
+        send_record(&producer, key_value_record(&base)).await.expect("send");
+    }
+    producer.flush().await.expect("flush");
+
+    let mut consumer1_message_count = 0;
+    let mut consumer2_message_count = 0;
+
+    let max_retries = 10;
+    let mut retries = 0;
+    while retries < max_retries {
+        let records1 = share_consumer1.poll(Duration::from_millis(2000)).await.expect("poll");
+        consumer1_message_count += records1.count();
+        let records2 = share_consumer2.poll(Duration::from_millis(2000)).await.expect("poll");
+        consumer2_message_count += records2.count();
+        if records1.count() + records2.count() == 0 {
+            break;
+        }
+        retries += 1;
+    }
+
+    assert_eq!(total_messages, consumer1_message_count + consumer2_message_count);
+    close_producer(producer).await;
+    close_share_consumer(share_consumer1).await;
+    close_share_consumer(share_consumer2).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_group_concurrent_consumption() {
+    if skip_from(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInGroupConcurrentConsumption",
+    ) {
+        return;
+    }
+    multiple_consumers_in_group_concurrent_consumption(default_share_cluster_config()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_group_concurrent_consumption_assignment_interval_0() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInGroupConcurrentConsumption (interval 0)",
+    ) {
+        return;
+    }
+    multiple_consumers_in_group_concurrent_consumption(assignment_interval_config("0")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_group_concurrent_consumption_assignment_interval_1000() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInGroupConcurrentConsumption (interval 1000)",
+    ) {
+        return;
+    }
+    multiple_consumers_in_group_concurrent_consumption(assignment_interval_config("1000")).await;
+}
+
+/// Java's `testMultipleConsumersInGroupConcurrentConsumption`.
+async fn multiple_consumers_in_group_concurrent_consumption(config: crate::common::cluster_config::ClusterConfig) {
+    let base = Arc::new(ShareConsumerTestBase::setup(config).await);
+    let total_messages_consumed = Arc::new(AtomicUsize::new(0));
+
+    let consumer_count = 4;
+    let producer_count = 4;
+    let messages_per_producer = 5000;
+
+    let group_id = base.group("group1");
+    base.alter_share_auto_offset_reset(&group_id, "earliest").await;
+
+    let mut producer_futures = Vec::new();
+    for _ in 0..producer_count {
+        let base = Arc::clone(&base);
+        producer_futures.push(tokio::spawn(async move { base.produce_messages(messages_per_producer).await }));
+    }
+
+    let max_bytes = 100000;
+    let mut consumer_futures = Vec::new();
+    for i in 0..consumer_count {
+        let consumer_number = i + 1;
+        let base = Arc::clone(&base);
+        let total_messages_consumed = Arc::clone(&total_messages_consumed);
+        let group_id = group_id.clone();
+        consumer_futures.push(tokio::spawn(async move {
+            base.consume_messages_with_max_fetch_bytes(
+                &total_messages_consumed,
+                producer_count * messages_per_producer,
+                &group_id,
+                consumer_number,
+                30,
+                true,
+                max_bytes,
+            )
+            .await
+        }));
+    }
+
+    join_all_within("the producers", Duration::from_secs(60), producer_futures).await;
+    let total_result: usize = join_all_within("the consumers", Duration::from_secs(60), consumer_futures)
+        .await
+        .into_iter()
+        .sum();
+    assert_eq!(producer_count * messages_per_producer, total_result);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_multiple_groups_concurrent_consumption() {
+    if skip_from(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInMultipleGroupsConcurrentConsumption",
+    ) {
+        return;
+    }
+    multiple_consumers_in_multiple_groups_concurrent_consumption(default_share_cluster_config()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_multiple_groups_concurrent_consumption_assignment_interval_0() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInMultipleGroupsConcurrentConsumption (interval 0)",
+    ) {
+        return;
+    }
+    multiple_consumers_in_multiple_groups_concurrent_consumption(assignment_interval_config("0")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_multiple_groups_concurrent_consumption_assignment_interval_1000() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInMultipleGroupsConcurrentConsumption (interval 1000)",
+    ) {
+        return;
+    }
+    multiple_consumers_in_multiple_groups_concurrent_consumption(assignment_interval_config("1000")).await;
+}
+
+/// Java's `testMultipleConsumersInMultipleGroupsConcurrentConsumption`.
+async fn multiple_consumers_in_multiple_groups_concurrent_consumption(
+    config: crate::common::cluster_config::ClusterConfig,
+) {
+    let base = Arc::new(ShareConsumerTestBase::setup(config).await);
+    let total_messages_consumed_group1 = Arc::new(AtomicUsize::new(0));
+    let total_messages_consumed_group2 = Arc::new(AtomicUsize::new(0));
+    let total_messages_consumed_group3 = Arc::new(AtomicUsize::new(0));
+
+    let producer_count = 4;
+    let messages_per_producer = 2000;
+    let total_messages_sent = producer_count * messages_per_producer;
+
+    let group_id1 = base.group("group1");
+    let group_id2 = base.group("group2");
+    let group_id3 = base.group("group3");
+
+    base.alter_share_auto_offset_reset(&group_id1, "earliest").await;
+    base.alter_share_auto_offset_reset(&group_id2, "earliest").await;
+    base.alter_share_auto_offset_reset(&group_id3, "earliest").await;
+
+    let mut producer_futures = Vec::new();
+    for _ in 0..producer_count {
+        let base = Arc::clone(&base);
+        producer_futures.push(tokio::spawn(async move { base.produce_messages(messages_per_producer).await }));
+    }
+    // Wait for the producers to run
+    let actual_message_sent: usize =
+        join_all_within("Exception awaiting produceMessages", Duration::from_secs(15), producer_futures)
+            .await
+            .into_iter()
+            .sum();
+
+    let mut consume_messages_futures = Vec::new();
+    let max_bytes = 100000;
+    for i in 0..2 {
+        let consumer_number = i + 1;
+        for (total, group) in [
+            (&total_messages_consumed_group1, &group_id1),
+            (&total_messages_consumed_group2, &group_id2),
+            (&total_messages_consumed_group3, &group_id3),
+        ] {
+            let base = Arc::clone(&base);
+            let total = Arc::clone(total);
+            let group = group.clone();
+            consume_messages_futures.push(tokio::spawn(async move {
+                base.consume_messages_with_max_fetch_bytes(
+                    &total,
+                    total_messages_sent,
+                    &group,
+                    consumer_number,
+                    100,
+                    true,
+                    max_bytes,
+                )
+                .await
+            }));
+        }
+    }
+
+    // The futures alternate group1, group2, group3 per consumer number.
+    let results = join_all_within("the consumers", Duration::from_secs(120), consume_messages_futures).await;
+    let total_result = |group: usize| -> usize { results.iter().skip(group).step_by(3).sum() };
+
+    assert_eq!(total_messages_sent, total_result(0));
+    assert_eq!(total_messages_sent, total_result(1));
+    assert_eq!(total_messages_sent, total_result(2));
+    assert_eq!(total_messages_sent, actual_message_sent);
+    base.verify_share_group_state_topic_records_produced().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_consumer_close_in_group_sequential() {
+    let base = ShareConsumerTestBase::setup(default_share_cluster_config()).await;
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let producer = base.create_producer().await;
+    let mut share_consumer1 = base.create_share_consumer(&group1);
+    let mut share_consumer2 = base.create_share_consumer(&group1);
+
+    share_consumer1
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+    share_consumer2
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+
+    let total_messages = 1500;
+    for _ in 0..total_messages {
+        send_record(&producer, key_value_record(&base)).await.expect("send");
+    }
+    close_producer(producer).await;
+
+    let mut consumer1_message_count = 0;
+    let mut consumer2_message_count = 0;
+
+    // Poll until we receive all the records. The second poll acknowledges the records
+    // from the first poll, and so on.
+    // The last poll's records are not acknowledged
+    // because the consumer is closed, which makes the broker release the records fetched.
+    let max_retries = 10;
+    let mut retries = 0;
+    let mut last_poll_record_count = 0;
+    while consumer1_message_count < total_messages && retries < max_retries {
+        last_poll_record_count = share_consumer1.poll(Duration::from_millis(5000)).await.expect("poll").count();
+        consumer1_message_count += last_poll_record_count;
+        retries += 1;
+    }
+    assert_eq!(total_messages, consumer1_message_count);
+    close_share_consumer(share_consumer1).await;
+
+    // These records are released after the first consumer closes.
+    consumer1_message_count -= last_poll_record_count;
+
+    retries = 0;
+    while consumer1_message_count + consumer2_message_count < total_messages && retries < max_retries {
+        let records2 = share_consumer2.poll(Duration::from_millis(5000)).await.expect("poll");
+        consumer2_message_count += records2.count();
+        retries += 1;
+    }
+    close_share_consumer(share_consumer2).await;
+    assert_eq!(total_messages, consumer1_message_count + consumer2_message_count);
+    base.verify_share_group_state_topic_records_produced().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_group_failure_concurrent_consumption() {
+    if skip_from(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInGroupFailureConcurrentConsumption",
+    ) {
+        return;
+    }
+    multiple_consumers_in_group_failure_concurrent_consumption(default_share_cluster_config()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_group_failure_concurrent_consumption_assignment_interval_0() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInGroupFailureConcurrentConsumption (interval 0)",
+    ) {
+        return;
+    }
+    multiple_consumers_in_group_failure_concurrent_consumption(assignment_interval_config("0")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiple_consumers_in_group_failure_concurrent_consumption_assignment_interval_1000() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testMultipleConsumersInGroupFailureConcurrentConsumption (interval 1000)",
+    ) {
+        return;
+    }
+    multiple_consumers_in_group_failure_concurrent_consumption(assignment_interval_config("1000")).await;
+}
+
+/// Java's `testMultipleConsumersInGroupFailureConcurrentConsumption`.
+async fn multiple_consumers_in_group_failure_concurrent_consumption(
+    config: crate::common::cluster_config::ClusterConfig,
+) {
+    let base = Arc::new(ShareConsumerTestBase::setup(config).await);
+    let total_messages_consumed = Arc::new(AtomicUsize::new(0));
+
+    let consumer_count = 4;
+    let producer_count = 4;
+    let messages_per_producer = 5000;
+
+    let group_id = base.group("group1");
+
+    base.alter_share_auto_offset_reset(&group_id, "earliest").await;
+
+    let mut produce_message_futures = Vec::new();
+    for _ in 0..producer_count {
+        let base = Arc::clone(&base);
+        produce_message_futures.push(tokio::spawn(async move { base.produce_messages(messages_per_producer).await }));
+    }
+
+    let max_bytes = 1000000;
+
+    // The "failing" consumer polls but immediately closes, which releases the records for the other consumers
+    let failed_messages_consumed_future = {
+        let base = Arc::clone(&base);
+        let group_id = group_id.clone();
+        tokio::spawn(async move {
+            base.consume_messages(
+                &AtomicUsize::new(0),
+                producer_count * messages_per_producer,
+                &group_id,
+                0,
+                1,
+                false,
+            )
+            .await
+        })
+    };
+
+    // Wait for the failed consumer to run
+    join_all_within(
+        "Exception awaiting consumeMessages",
+        Duration::from_secs(15),
+        vec![failed_messages_consumed_future],
+    )
+    .await;
+
+    let mut consume_messages_futures = Vec::new();
+    for i in 0..consumer_count {
+        let consumer_number = i + 1;
+        let base = Arc::clone(&base);
+        let total_messages_consumed = Arc::clone(&total_messages_consumed);
+        let group_id = group_id.clone();
+        consume_messages_futures.push(tokio::spawn(async move {
+            base.consume_messages_with_max_fetch_bytes(
+                &total_messages_consumed,
+                producer_count * messages_per_producer,
+                &group_id,
+                consumer_number,
+                40,
+                true,
+                max_bytes,
+            )
+            .await
+        }));
+    }
+
+    join_all_within("the producers", Duration::from_secs(60), produce_message_futures).await;
+    let total_success_result: usize =
+        join_all_within("the consumers", Duration::from_secs(60), consume_messages_futures)
+            .await
+            .into_iter()
+            .sum();
+    assert_eq!(producer_count * messages_per_producer, total_success_result);
+    base.verify_share_group_state_topic_records_produced().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_acquisition_lock_timeout_on_consumer() {
+    let base = ShareConsumerTestBase::setup(share_cluster_config_with(&[
+        ("KAFKA_GROUP_SHARE_MIN_RECORD_LOCK_DURATION_MS", "5000"),
+        ("KAFKA_GROUP_SHARE_RECORD_LOCK_DURATION_MS", "5000"),
+    ]))
+    .await;
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let producer = base.create_producer().await;
+    let mut share_consumer = base.create_share_consumer(&group1);
+
+    let producer_record1 = producer_record(
+        base.tp.topic().to_string(),
+        Some(base.tp.partition()),
+        Some(b"key_1".to_vec()),
+        Some(b"value_1".to_vec()),
+    );
+    let producer_record2 = producer_record(
+        base.tp.topic().to_string(),
+        Some(base.tp.partition()),
+        Some(b"key_2".to_vec()),
+        Some(b"value_2".to_vec()),
+    );
+    share_consumer
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+
+    // Produce a first record which is consumed and acknowledged normally.
+    send_record(&producer, producer_record1).await.expect("send");
+    producer.flush().await.expect("flush");
+
+    // Poll twice to receive records. The first poll fetches the record and starts the acquisition lock timer.
+    // Since, we are only sending one record and the acquisition lock hasn't timed out, the second poll only
+    // acknowledges the record from the first poll and does not fetch any more records.
+    let consumer_records = base.waited_poll(&mut share_consumer, 2500, 1).await;
+    let consumer_record = &consumer_records.records_with_partition(&base.tp)[0];
+    assert_eq!(Some(&b"key_1".to_vec()), consumer_record.key());
+    assert_eq!(Some(&b"value_1".to_vec()), consumer_record.value());
+    assert_eq!(1, consumer_records.count());
+
+    let consumer_records = share_consumer.poll(Duration::from_millis(1000)).await.expect("poll");
+    assert_eq!(0, consumer_records.count());
+
+    // Produce a second record which is fetched, but not acknowledged before it times out. The record will
+    // be released automatically by the broker. It is then fetched again and acknowledged normally.
+    send_record(&producer, producer_record2).await.expect("send");
+    producer.flush().await.expect("flush");
+
+    // Poll three more times. The first poll fetches the second record and starts the acquisition lock timer.
+    // Before the second poll, acquisition lock times out and hence the consumer needs to fetch the record again.
+    // The acquisition lock doesn't time out between the second and third polls, so the third poll only acknowledges
+    // the record from the second poll and does not fetch any more records.
+    let consumer_records = share_consumer.poll(Duration::from_millis(5000)).await.expect("poll");
+    let consumer_record = &consumer_records.records_with_partition(&base.tp)[0];
+    assert_eq!(Some(&b"key_2".to_vec()), consumer_record.key());
+    assert_eq!(Some(&b"value_2".to_vec()), consumer_record.value());
+    assert_eq!(1, consumer_records.count());
+
+    // Allow the acquisition lock to time out.
+    tokio::time::sleep(Duration::from_millis(8000)).await;
+
+    let consumer_records = share_consumer.poll(Duration::from_millis(5000)).await.expect("poll");
+    let consumer_record = &consumer_records.records_with_partition(&base.tp)[0];
+    // By checking the key and value before the count, we get a bit more information if too many records are returned.
+    // This test has been observed to fail very occasionally because of this.
+    assert_eq!(Some(&b"key_2".to_vec()), consumer_record.key());
+    assert_eq!(Some(&b"value_2".to_vec()), consumer_record.value());
+    assert_eq!(1, consumer_records.count());
+
+    let consumer_records = share_consumer.poll(Duration::from_millis(1000)).await.expect("poll");
+    assert_eq!(0, consumer_records.count());
     base.verify_share_group_state_topic_records_produced().await;
     close_producer(producer).await;
     close_share_consumer(share_consumer).await;
