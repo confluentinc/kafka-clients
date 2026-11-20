@@ -374,6 +374,17 @@ added to CLAUDE.md or the DoD:
   `on_complete(&self, offsets: &HashMap<TopicIdPartition, HashSet<i64>>, error: Option<&Error>)`.
   `commit_sync` returns `HashMap<TopicIdPartition, Option<Error>>`.
 
+- **D9 — P10 harness and broker-version gates.** **Decided 2026-11-20 (user): all three approved.**
+  (a) The share fixture reads broker meters over JMX (`with_broker_jmx` / `broker_meter_count`: the image's
+  JmxTool run by `docker exec` against the broker container), where Java reads the broker's in-process Yammer
+  registry; it keeps every meter assertion of the DLQ and Renew suites. (b)
+  `ShareConsumerTest#testAddedPartitionsOfKnownTopicStartAtOffsetZero` runs only on a 4.4+ broker: it tests the
+  broker fix KAFKA-20742, and a 4.2 broker starts the added partition at its log end. (c)
+  `ShareConsumerLagTest#testSharePartitionLagAfterAlterShareGroupOffsets` runs only on a 4.3+ broker: it came with
+  the broker fix KAFKA-20034, and a 4.2 broker reports no lag after the alter. Ledger §2.4 rows. A fourth P10
+  proposal, retrying a cluster start whose broker misses the 90 s readiness deadline, was **rejected** (both cases
+  were host overload, which a retry only hides) and reverted (`780a04bbf`).
+
 ### 7.2 Which decision gates which phase
 
 | Decision | Needed before | Why |
@@ -429,6 +440,21 @@ table**: every Java method of each translated class maps to a Rust function (by 
 `#[doc(alias)]`) or to a stated reason. An unmapped method is a finding. A later `xtask` report could
 mechanise this.
 
+### Bugs found by P10
+
+**None in the client.** All 115 Java methods of the seven `clients-integration-tests` share classes were run end to
+end (110 translated, 5 skipped with reasons, ledger §2.4) on apache/kafka 4.2.0 and 4.4.0; no failure traced back
+to the share consumer, the consumer or the admin share RPCs.
+
+**Harness finding (environment, fixed in the tests):** the first run of the whole share suite on 4.4.0 failed 36
+of 126 tests when every client lost the pooled default share cluster at once. Cause: the Docker VM ran out of
+memory and its kernel OOM killer (`global_oom`) killed that cluster's broker JVM, at the second the clients saw the
+disconnect (VM `dmesg`). The share suites start about a dozen distinct cluster configurations at once; in Java's
+`KRAFT` shape (broker plus isolated controller) they peaked at 30 containers / 7.0 GiB of the VM's 7.75 GiB. Fix
+`97ed22567`: pooled share clusters are combined nodes, Java's shape only for the tests that stop brokers (§8.1 row
+27); peak 20 containers / 6.2 GiB, and the whole suite passes. Two broker-start timeouts under load were seen in the
+same phase (a cold VM, and many clusters booting together); same root cause, host overload, not retried (D9).
+
 ### 8.1 Share-consumer deviations from the consumer design (review at the full-PR stage)
 
 The user reviews these at the full-PR stage and keeps or reverts each one. Only the reasons are
@@ -462,3 +488,4 @@ summarised here; where the reasoning already lives elsewhere, the row links to i
 | 24 | **`MockShareConsumer`'s closed checks.** `subscription` and `metrics` panic on a closed mock with Java's message, `subscribe` / `unsubscribe` / `poll` / `add_record` return it; Java throws `IllegalStateException` from all six. | CLAUDE.md §12.5 and the consumer precedent (`MockConsumer::metrics` panics); the methods with no error channel keep Java's throw as a panic | `aafedd8af` |
 | 25 | **`ShareConsumer::poll` with a timeout over `i64::MAX` ms** waits without limit, where Java throws `ArithmeticException`. Proposed contract change, `design/current/doc-contract-changes.md`, awaiting the user's acceptance (two `doc-baseline.txt` lines until then). | The accepted `Consumer::poll` entry; `ConsumerUtils::duration_to_millis` saturates for both consumers | `aafedd8af` |
 | 26 | **`KafkaShareConsumerTest` runs over a `SharedMockClient` wrapper** (test code only) that shares one `MockClient` between the background task and the test, queues responses a matcher prepares, replays the last metadata on an update request (Java's `DefaultMockMetadataUpdater`), and treats a mismatched matcher as a pending response. | Java's test keeps mutating the `MockClient` it handed the consumer, including from inside a matcher; the Rust `MockClient` is owned by the background task, and it removes a prepared response before asserting the matcher, on the background task, where the consumer turns the panic into a failed request. Without the mismatch record the matchers of [B] / [C] could not fail the test (checked by mutation) | `aafedd8af` |
+| 27 | **The pooled share integration clusters are combined broker+controller nodes** (`Type::CoKraft`, `share_cluster_config`), where Java's share suites run `@ClusterTestDefaults(types = KRAFT)`, a broker plus an isolated controller; only the tests that stop or restart brokers get Java's shape (`lifecycle_cluster`, dedicated). Test harness only; no assertion changes. | With an isolated controller per pooled configuration the share suites exhausted the Docker VM's memory and the kernel OOM killer killed the pooled default broker mid-run (§8 "Bugs found by P10"). Every other pooled suite already runs combined nodes, and the topology is invisible to a test that never stops a broker | `97ed22567` |
