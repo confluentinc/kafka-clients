@@ -12,7 +12,8 @@ Conventions:
   (`design/current/interface-audience-public-4.4.txt`, cross-checked against the annotation in each
   file). Everything under `internals` is `pub(crate)`. `common::requests` is a `pub(crate) mod`
   (`common/mod.rs`), so request wrappers are crate-private whatever their Java modifier.
-- **PR** is decision D3 (settled): PR-A = P1–P2, PR-B = P3–P5, PR-C = P6–P9, PR-D = P10.
+- **PR** records the original D3 grouping (A = P1–P2, B = P3–P5, C = P6–P9, D = P10). D3 changed on
+  2026-11-20 to one milestone PR, so the column is now informational only.
 - **Status**: `todo`, `exists` (already on master, verified), `partial` (some pieces on master),
   `done`, `skipped`.
 - Java line counts are `wc -l` of the 4.4.0 file (javadoc included).

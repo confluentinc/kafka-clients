@@ -254,7 +254,10 @@ added to CLAUDE.md or the DoD:
   with a reason.
 - **D2** — KIP-714 methods on `ShareConsumer`: mirror `Consumer` and leave them untranslated
   (recommended).
-- **D3** — **Decided 2026-11-18: four PRs** — PR-A = P1–P2, PR-B = P3–P5, PR-C = P6–P9, PR-D = P10.
+- **D3** — **Decided 2026-11-20: one milestone PR** (replaces the 2026-11-18 four-PR split), so the
+  whole share consumer is tested end to end before review. The branch is pushed as phases land; the
+  PR body must list the consumer behaviour changes (`revokePartitions`, §8), since fixup messages are
+  lost on squash.
   (Options were one milestone PR, as M16, or PRs at tier boundaries.)
 - **D4** — Which §6.2 / §6.3 amendments to adopt now. They are cross-cutting, so they also bind
   producer and admin work.
@@ -317,7 +320,7 @@ added to CLAUDE.md or the DoD:
 |---|---|---|
 | D4 (rules) | P0 | P0 applies the approved rules |
 | D8 (callback shape) | P2 | `AcknowledgementCommitCallback` is a P2 type |
-| D3 (PR shape) | end of P2 | PR-A would be P1–P2 |
+| D3 (PR shape) | — | Decided: one milestone PR |
 | **D5 (renew retention)** | **P3a** | `ShareInFlightBatch` / `ShareCompletedFetch` own the record-retention shape; P3b, P5b, P7 and `ShareConsumerRenewTest` build on it |
 | D1 (admin slice) | P9, P10 | |
 | D6 (wakeup handle), D7 (`Result` vs panic), D2 (KIP-714) | P7 / P8 | |
