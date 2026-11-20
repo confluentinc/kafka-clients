@@ -23,8 +23,10 @@
  * share-group calls and the streams-group calls; `MockAdminClient`'s
  * `brokers()`, `broker(int)`, `injectTimeoutException`,
  * `handleDescribeTopicsUsingIds`, `setMockMetrics`, `addedMetrics`,
- * `disableTelemetry`, `setClientInstanceId`, `advanceTimeOnClientInstanceId`
- * and `addStreamsGroupDescription`. `AdminClient`, Java's abstract base class
+ * `disableTelemetry`, `setClientInstanceId`, `advanceTimeOnClientInstanceId`,
+ * `addStreamsGroupDescription`, and the five-parameter form of `addTopic`
+ * (`addTopic(internal, name, partitions, configs, usesTopicId)`).
+ * `AdminClient`, Java's abstract base class
  * of `KafkaAdminClient`, is not translated.
  *
  * `MockAdminClient` wraps the C FFI's mock, as the .NET client's does; Java
@@ -36,13 +38,30 @@
 export { AbstractOptions } from './abstract_options';
 export { Admin } from './admin';
 export type { AdminClientConfigs } from './admin_client_configs';
+export { Config } from './config';
+export { ConfigEntry } from './config_entry';
+export { CreatePartitionsOptions } from './create_partitions_options';
+export { CreatePartitionsResult } from './create_partitions_result';
+export { CreateTopicsOptions } from './create_topics_options';
+export { CreateTopicsResult } from './create_topics_result';
+export { DeleteRecordsOptions } from './delete_records_options';
+export { DeleteRecordsResult } from './delete_records_result';
+export { DeleteTopicsOptions } from './delete_topics_options';
+export { DeleteTopicsResult } from './delete_topics_result';
+export { DeletedRecords } from './deleted_records';
 export { DescribeClusterOptions } from './describe_cluster_options';
 export { DescribeClusterResult } from './describe_cluster_result';
+export { DescribeTopicsOptions } from './describe_topics_options';
+export { DescribeTopicsResult } from './describe_topics_result';
 export { KafkaAdminClient } from './kafka_admin_client';
 export type { CloseArgs } from './kafka_admin_client';
 export { ListTopicsOptions } from './list_topics_options';
 export { ListTopicsResult } from './list_topics_result';
 export { MockAdminClient } from './mock_admin_client';
+export { NewPartitions } from './new_partitions';
+export { NewTopic } from './new_topic';
+export { RecordsToDelete } from './records_to_delete';
+export { TopicDescription } from './topic_description';
 export { TopicListing } from './topic_listing';
 
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)

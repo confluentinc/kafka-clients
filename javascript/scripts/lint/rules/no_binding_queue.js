@@ -133,6 +133,42 @@ const ALLOWED = [
   { key: 'PartitionInfo.#replicas', reason: "one partition's replicas (Java's Node[]), not a store of records" },
   { key: 'PartitionInfo.#inSyncReplicas', reason: "one partition's in-sync replicas (Java's Node[]), not a store of records" },
   { key: 'PartitionInfo.#offlineReplicas', reason: "one partition's offline replicas (Java's Node[]), not a store of records" },
+  { key: 'Config.#entries', reason: "one resource's configuration entries (Java's Map<String, ConfigEntry>), not a store of records" },
+  { key: 'ConfigEntry.#synonyms', reason: "one configuration entry's synonyms (Java's List<ConfigSynonym>), not a store of records" },
+  {
+    key: 'CreatePartitionsResult.#values',
+    reason: "one call's futures by topic (Java's Map<String, KafkaFuture<Void>>), not a store of records",
+  },
+  {
+    key: 'CreateTopicsResult.#futures',
+    reason: "one call's futures by topic (Java's Map<String, KafkaFuture<...>>), not a store of records",
+  },
+  {
+    key: 'DeleteTopicsResult.#nameFutures',
+    reason: "one call's futures by topic name (Java's Map<String, KafkaFuture<Void>>), not a store of records",
+  },
+  {
+    key: 'DescribeTopicsResult.#nameFutures',
+    reason: "one call's futures by topic name (Java's Map<String, KafkaFuture<TopicDescription>>), not a store of records",
+  },
+  {
+    key: 'src/admin/describe_topics_options.ts:PARTITION_SIZE_LIMIT_PER_RESPONSE',
+    reason: "the forms of Java's DescribeTopicsOptions#partitionSizeLimitPerResponse setter, a broker-side page size, not a cap on records",
+  },
+  {
+    key: 'NewPartitions.#newAssignments',
+    reason: "one request's replica assignments (Java's List<List<Integer>>), not a store of records",
+  },
+  { key: 'NewTopic.#configs', reason: "one new topic's configuration (Java's Map<String, String>), not a store of records" },
+  { key: 'TopicDescription.partitions', reason: "one topic's partitions (Java's List<TopicPartitionInfo>), not a store of records" },
+  { key: 'TopicPartitionInfo.#replicas', reason: "one partition's replicas (Java's List<Node>), not a store of records" },
+  { key: 'TopicPartitionInfo.#isr', reason: "one partition's in-sync replicas (Java's List<Node>), not a store of records" },
+  { key: 'TopicPartitionInfo.#elr', reason: "one partition's eligible leader replicas (Java's List<Node>), not a store of records" },
+  {
+    key: 'TopicPartitionInfo.#lastKnownElr',
+    reason: "one partition's last known eligible leader replicas (Java's List<Node>), not a store of records",
+  },
+  { key: 'UuidMap.#entries', reason: "the entries of Java's Map<Uuid, V> the caller builds or a call returns, not a store of records" },
   { key: 'SslClientAuth.VALUES', reason: "Java's SslClientAuth.VALUES, the enum's constants in order" },
   {
     key: 'src/common/kafka_future.ts:MAX_TIMER_MS',
