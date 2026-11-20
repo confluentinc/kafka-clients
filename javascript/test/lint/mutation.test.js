@@ -57,6 +57,8 @@ function realCopy() {
   // The test that calls the test-only registration probe (check-native-registry).
   fs.mkdirSync(path.join(root, 'test', 'unit'), { recursive: true });
   copy(ROOT, root, 'test/unit/internal/native.test.js');
+  fs.mkdirSync(path.join(root, 'test', 'unit', 'admin'), { recursive: true });
+  copy(ROOT, root, 'test/unit/admin/kafka_admin_client.test.js');
   copy(ROOT, root, 'java-index.json');
   // The bindings header, where the lint helper looks for it.
   fs.copyFileSync(require('../../scripts/header').headerPath(), path.join(root, 'confluent_kafka_bindings.h'));
@@ -1167,6 +1169,81 @@ MUTATIONS.push(
         '"default": "./dist/producer/index.js"\n',
         '"default": "./dist/producer/index.js",\n      "import": "./dist/producer/index.mjs"\n',
       ),
+  },
+);
+
+// The admin client's files: one injected violation per rule of the addon's
+// and the sources' that reads them, so a rule written for the producer's
+// names alone fails here.
+MUTATIONS.push(
+  {
+    rule: 'check-cb-twin-only',
+    what: 'an admin future read through the blocking get',
+    apply: (root) =>
+      edit(
+        root,
+        'native/admin.c',
+        '    cbq_call_begin(env, &a->queue);\n    kafka_common_KafkaFuture_get_cb(f->future, future_on_wait, w);',
+        '    {\n        kafka_common_Error_t* ffi_err = NULL;\n        FFI_DISCARD(kafka_common_KafkaFuture_get(f->future, &ffi_err));\n    }\n' +
+          '    cbq_call_begin(env, &a->queue);\n    kafka_common_KafkaFuture_get_cb(f->future, future_on_wait, w);',
+      ),
+  },
+  {
+    rule: 'check-out-err',
+    what: "an FFI_ERR dropped in the admin client's construction",
+    apply: (root) =>
+      edit(
+        root,
+        'native/admin.c',
+        '        err = FFI_ERR(kafka_Map_put_err(props, strings[2 * i], strings[2 * i + 1], &ffi_err));',
+        '        kafka_Map_put_err(props, strings[2 * i], strings[2 * i + 1], &ffi_err);',
+      ),
+  },
+  {
+    rule: 'check-single-drainer',
+    what: "the admin client's __execute_callbacks_err called outside cbq_drain",
+    apply: (root) =>
+      edit(
+        root,
+        'native/admin.c',
+        '    Admin* a = unwrap_mock(env, argv[0]);\n    if (a == NULL) return NULL;\n    kafka_common_Error_t* ffi_err = NULL;\n    kafka_common_Error_t* err = FFI_ERR(kafka_admin_MockAdminClient_timeout_next_request_err',
+        '    Admin* a = unwrap_mock(env, argv[0]);\n    if (a == NULL) return NULL;\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_admin_Admin__execute_callbacks_err(a->view, &ffi_err));\n    kafka_common_Error_t* err = FFI_ERR(kafka_admin_MockAdminClient_timeout_next_request_err',
+      ),
+  },
+  {
+    rule: 'check-tsfn-lifetime',
+    what: "the admin client's close made uncounted",
+    apply: (root) =>
+      edit(
+        root,
+        'native/admin.c',
+        '        cbq_call_begin(env, &a->queue);\n        kafka_admin_Admin_close_cb(a->view, close_on_complete, ctx);',
+        '        kafka_admin_Admin_close_cb(a->view, close_on_complete, ctx);',
+      ),
+  },
+  {
+    rule: 'check-ownership',
+    what: 'a result whose destroy no descriptor names',
+    apply: (root) =>
+      edit(
+        root,
+        'native/admin_values.c',
+        'ADMIN_RESULT_DESTROY_FN(kafka_admin_ListTopicsResult_destroy_err)',
+        'ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeClusterResult_destroy_err)',
+      ),
+  },
+  {
+    rule: 'check-java-completeness',
+    what: 'AclOperation.isUnknown removed',
+    apply: (root) => {
+      edit(root, 'src/common/acl/acl_operation.ts', "const IS_UNKNOWN_FORMS = new JavaForms('isUnknown', [[]], { reader: true });\n", '');
+      edit(
+        root,
+        'src/common/acl/acl_operation.ts',
+        '  /**\n   * Return true if this operation is UNKNOWN.\n   *\n   * @returns whether this is `UNKNOWN`\n   * @throws `TypeError` when it is given an argument: it only reads\n   */\n  isUnknown(): boolean {\n    IS_UNKNOWN_FORMS.match(undefined, arguments.length);\n    return this === AclOperation.UNKNOWN;\n  }\n',
+        '',
+      );
+    },
   },
 );
 

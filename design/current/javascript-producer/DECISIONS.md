@@ -416,3 +416,23 @@ rules and readings. Newest entries are at the end; dates are in IST.
     tests; the preview notice stays. The root conventions' Lifetime sentence ("…runs until the process exits, with
     a warning") and their "Not decided yet" row on when and how that warning is logged describe a case that can't
     happen: marked **(root conflict)** in `javascript/CLAUDE.md` ("Threads and liveness") for the rules' owner.
+
+## An admin future's outcome after the call (decided by the owner, 2026-11-21)
+
+36. **A `MockAdminClient` call's futures show their outcome on a later turn of the event loop, not when the call
+    returns** *(deviation)*. Java's `MockAdminClient` completes every future before it returns, so a test can read
+    `isDone()`, `isCompletedExceptionally()` and `getNow()` right after the call, and a `thenApply` / `whenComplete`
+    registered then runs inside the registering call. Here the core's mock completes its futures inside the call, but
+    `kafka_common_KafkaFuture_get_cb`, through which an admin future learns its outcome (its wait starts when its
+    Result is made), answers even a completed future from a task it spawns on the core's runtime. That
+    answer can reach the client's callback queue after the call returns, so draining the queue at the end of the call
+    (as `MockProducer`'s pump does for its callbacks) races the task. A pump was built and measured: 5 of 20
+    back-to-back `describeCluster()` calls were done at return. The JS rules forbid the blocking
+    `kafka_common_KafkaFuture_get`, which Python uses to read a done future. `await get()` is unaffected; `isDone()`,
+    `isCompletedExceptionally()` and `getNow()` show the outcome, and a `thenApply` / `whenComplete` registered
+    right after the call runs, on a later turn, once the task answers (the binding runs the answer from its queue,
+    never inside the call). The same holds for a `KafkaAdminClient` future
+    the core fails at once (a call after `close()`, an unrepresentable topic name). Marked on `MockAdminClient` and
+    on `KafkaFuture`'s `isDone()`, `isCompletedExceptionally()`, `getNow()`, `thenApply()` and `whenComplete()`. Goes when the core queues a completed future's answer before
+    `get_cb` returns (a separate core PR); the binding then answers its queued callbacks once at the end of each
+    call, as `MockProducer` does.
