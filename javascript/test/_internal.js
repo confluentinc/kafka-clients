@@ -130,4 +130,45 @@ function ffiId(cls) {
   return /** @type {{ _ffiId?: unknown }} */ (/** @type {unknown} */ (cls))._ffiId;
 }
 
-module.exports = { createFuture, internalFuture, internalHeaders, internalRecord, createRecordMetadata, ffiId };
+/**
+ * A new topic as the addon takes it (src/admin/new_topic.ts).
+ *
+ * @typedef {{ name: string | null, numPartitions: number, replicationFactor: number, assignments: Array<[number, number[]]> | null, configs: Array<[string, string | null]> | null }} NativeNewTopic
+ */
+
+/**
+ * `topic` with the library's own conversion for the addon.
+ *
+ * @param {import('@confluentinc/kafka-javascript/admin').NewTopic} topic the new topic
+ * @returns {{ internalToNative(): NativeNewTopic }} the same topic
+ */
+function internalNewTopic(topic) {
+  return /** @type {{ internalToNative(): NativeNewTopic }} */ (/** @type {unknown} */ (topic));
+}
+
+/**
+ * Java's package-private factories of a Result keyed by topic id or by name,
+ * `ofTopicIds` / `ofTopicNames`, as the library's `internalOfTopicIds` /
+ * `internalOfTopicNames` (src/admin/delete_topics_result.ts,
+ * src/admin/describe_topics_result.ts).
+ *
+ * @template V, R
+ * @param {{ prototype: R }} cls the Result class
+ * @returns {{ internalOfTopicIds(futures: import('@confluentinc/kafka-javascript/common').UuidMap<V>): R, internalOfTopicNames(futures: Map<string, V>): R }} its factories
+ */
+function topicResultFactories(cls) {
+  return /** @type {{ internalOfTopicIds(futures: import('@confluentinc/kafka-javascript/common').UuidMap<V>): R, internalOfTopicNames(futures: Map<string, V>): R }} */ (
+    /** @type {unknown} */ (cls)
+  );
+}
+
+module.exports = {
+  createFuture,
+  internalFuture,
+  internalHeaders,
+  internalRecord,
+  createRecordMetadata,
+  ffiId,
+  internalNewTopic,
+  topicResultFactories,
+};

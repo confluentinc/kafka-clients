@@ -154,3 +154,93 @@ export function objectHashCode(value: unknown): number {
 export function sameClass(self: object, o: unknown): boolean {
   return typeof o === 'object' && o !== null && Object.getPrototypeOf(o) === Object.getPrototypeOf(self);
 }
+
+/**
+ * Java's `List.equals` / `Objects.equals` of two lists (arrays, or null):
+ * the same length and each element `Objects.equals` its peer, in order.
+ *
+ * @param a - the first list, or null
+ * @param b - the second list, or null
+ * @returns whether they are equal
+ */
+export function listEquals(a: readonly unknown[] | null, b: readonly unknown[] | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || a.length !== b.length) return false;
+  return a.every((x, i) => objectsEquals(x, b[i]) || (Array.isArray(x) && Array.isArray(b[i]) && listEquals(x, b[i] as unknown[])));
+}
+
+/**
+ * Java's `List.hashCode()`: `31 * h + hash(e)` over the elements, from 1; 0
+ * for null.
+ *
+ * @param list - the list, or null
+ * @returns its hash code
+ */
+export function listHashCode(list: readonly unknown[] | null): number {
+  if (list === null) return 0;
+  let h = 1;
+  for (const e of list) h = (Math.imul(31, h) + (Array.isArray(e) ? listHashCode(e) : objectHashCode(e))) | 0;
+  return h;
+}
+
+/**
+ * Java's `Set.hashCode()`: the sum of the members' hash codes; 0 for null.
+ *
+ * @param set - the set, or null
+ * @returns its hash code
+ */
+export function setHashCode(set: ReadonlySet<unknown> | null): number {
+  if (set === null) return 0;
+  let h = 0;
+  for (const e of set) h = (h + objectHashCode(e)) | 0;
+  return h;
+}
+
+/**
+ * Java's `Set.equals` of two sets of values with Java's `equals` (or of
+ * primitives): the same size, and each member of one equal to a member of the
+ * other.
+ *
+ * @param a - the first set, or null
+ * @param b - the second set, or null
+ * @returns whether they are equal
+ */
+export function setEquals(a: ReadonlySet<unknown> | null, b: ReadonlySet<unknown> | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || a.size !== b.size) return false;
+  for (const x of a) if (!b.has(x) && ![...b].some((y) => objectsEquals(x, y))) return false;
+  return true;
+}
+
+/**
+ * Java's `Map.equals` of two maps (or null): the same keys, each value
+ * `Objects.equals` its peer.
+ *
+ * @param a - the first map, or null
+ * @param b - the second map, or null
+ * @returns whether they are equal
+ */
+export function mapEquals(a: ReadonlyMap<unknown, unknown> | null, b: ReadonlyMap<unknown, unknown> | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || a.size !== b.size) return false;
+  for (const [k, v] of a) {
+    if (!b.has(k)) return false;
+    const w = b.get(k);
+    if (!(objectsEquals(v, w) || (Array.isArray(v) && Array.isArray(w) && listEquals(v, w)))) return false;
+  }
+  return true;
+}
+
+/**
+ * Java's `Map.hashCode()`: the sum of `hash(key) ^ hash(value)` over the
+ * entries; 0 for null.
+ *
+ * @param map - the map, or null
+ * @returns its hash code
+ */
+export function mapHashCode(map: ReadonlyMap<unknown, unknown> | null): number {
+  if (map === null) return 0;
+  let h = 0;
+  for (const [k, v] of map) h = (h + (objectHashCode(k) ^ (Array.isArray(v) ? listHashCode(v) : objectHashCode(v)))) | 0;
+  return h;
+}
