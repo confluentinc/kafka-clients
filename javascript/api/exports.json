@@ -3,9 +3,17 @@
     "types": "./dist/index.d.ts",
     "default": "./dist/index.js"
   },
+  "./admin": {
+    "types": "./dist/admin/index.d.ts",
+    "default": "./dist/admin/index.js"
+  },
   "./common": {
     "types": "./dist/common/index.d.ts",
     "default": "./dist/common/index.js"
+  },
+  "./common/acl": {
+    "types": "./dist/common/acl/index.d.ts",
+    "default": "./dist/common/acl/index.js"
   },
   "./common/config": {
     "types": "./dist/common/config/index.d.ts",

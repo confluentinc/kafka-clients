@@ -354,6 +354,10 @@ void headers_destroy(napi_env env, kafka_common_header_internals_RecordHeaders_t
 // the caller's typed arrays `key` and `value`. A no-op otherwise.
 void record_spy_capture(napi_env env, const kafka_producer_ProducerRecord_t* record, napi_value key, napi_value value);
 
+// producer.c: a borrowed node as its fields ({ id, host, port, rack,
+// isFenced }), `null` for NULL; NULL when Node-API failed.
+napi_value node_to_js(napi_env env, const kafka_common_Node_t* n);
+
 // producer.c: the JS value an error JS gave a mock carries, for the
 // LocalCallbackError `opaque` the mock's error holds, or NULL when `opaque`
 // is not one (another callback's error) or its value is gone (the mock
@@ -383,6 +387,24 @@ napi_value js_producer_close(napi_env env, napi_callback_info info);
 napi_value js_producer_pump(napi_env env, napi_callback_info info);
 napi_value js_record_future_get(napi_env env, napi_callback_info info);
 napi_value js_producer_stats(napi_env env, napi_callback_info info);
+
+// admin.c and admin_values.c: the admin client handle, its futures, the RPCs
+// and the mock.
+napi_value js_admin_create(napi_env env, napi_callback_info info);
+napi_value js_admin_close(napi_env env, napi_callback_info info);
+napi_value js_admin_result_future(napi_env env, napi_callback_info info);
+napi_value js_admin_result_futures(napi_env env, napi_callback_info info);
+napi_value js_admin_future_wait(napi_env env, napi_callback_info info);
+napi_value js_admin_future_get(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_cluster(napi_env env, napi_callback_info info);
+napi_value js_admin_list_topics(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_create(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_controller(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_timeout_next_request(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_builder_new(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_builder_set(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_builder_build(napi_env env, napi_callback_info info);
+napi_value js_admin_stats(napi_env env, napi_callback_info info);
 
 // headers.c: the counts of the RecordHeaders the sends made.
 napi_value js_header_stats(napi_env env, napi_callback_info info);

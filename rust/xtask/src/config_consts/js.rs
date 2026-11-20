@@ -13,8 +13,8 @@
 // limitations under the License.
 
 //! The Node.js client's config classes: the constants of the Python ones
-//! ([`super::SPECS`]) that a producer reaches, each a class of static
-//! properties in the src/ folder of its Java package.
+//! ([`super::SPECS`]) that a producer or an admin client reaches, each a
+//! class of static properties in the src/ folder of its Java package.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,14 +28,20 @@ type Res<T> = anyhow::Result<T>;
 /// The producer's Java config class, whose `ConfigDef` documents its keys.
 const PRODUCER_CONFIG: &str = "org.apache.kafka.clients.producer.ProducerConfig";
 
+/// The admin client's Java config class, whose `ConfigDef` documents its keys.
+const ADMIN_CLIENT_CONFIG: &str = "org.apache.kafka.clients.admin.AdminClientConfig";
+
 /// The config classes of the Node.js client: Java class and src/ folder. The
-/// others the Python client generates (`ConsumerConfig`, `AdminClientConfig`,
-/// `TopicConfig`, `LogLevelConfig`) wait for a consumer and an admin client.
+/// other one the Python client generates (`ConsumerConfig`) waits for a
+/// consumer.
 const JS_SPECS: &[(&str, &str)] = &[
     (PRODUCER_CONFIG, "producer"),
+    (ADMIN_CLIENT_CONFIG, "admin"),
     ("org.apache.kafka.common.config.SaslConfigs", "common/config"),
     ("org.apache.kafka.common.config.SslConfigs", "common/config"),
     ("org.apache.kafka.common.config.SecurityConfig", "common/config"),
+    ("org.apache.kafka.common.config.TopicConfig", "common/config"),
+    ("org.apache.kafka.common.config.LogLevelConfig", "common/config"),
 ];
 
 /// Translation notes on single constants: Java's value is kept, and the note
@@ -61,8 +67,9 @@ const NOTES: &[(&str, &str, &str)] = &[
 /// 1. the constant's own Javadoc (`javadoc`), when Java documents it, so the
 ///    TSDoc stays within 150% of it, as Rust's constants do (check-doc-size);
 /// 2. else, for a configuration key, the documentation argument of the
-///    `define` call of `ProducerConfig`'s `ConfigDef` for that key (`docs`),
-///    which may be another class's `_DOC`
+///    `define` call of the client's `ConfigDef` for that key (`docs`: the
+///    admin client's for `AdminClientConfig`, the producer's for every other
+///    class), which may be another class's `_DOC`
 ///    (`CommonClientConfigs.BOOTSTRAP_SERVERS_DOC`);
 /// 3. else the sibling `<NAME>_DOC` or, for an `X_CONFIG`, `X_DOC` (any
 ///    visibility) of `owner`;
@@ -203,12 +210,19 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         .map(|l| l.trim().to_string())
         .collect();
     let mut reader = Reader::new(repo_root);
-    // The documentation of every key a producer's configuration takes.
-    let docs = crate::config_types::define_docs(repo_root, PRODUCER_CONFIG)?;
+    // The documentation of every key a producer's configuration takes, and
+    // an admin client's.
+    let producer_docs = crate::config_types::define_docs(repo_root, PRODUCER_CONFIG)?;
+    let admin_docs = crate::config_types::define_docs(repo_root, ADMIN_CLIENT_CONFIG)?;
     // The Javadoc of each constant Java documents, by the class declaring it.
     let mut field_docs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut out = Vec::new();
     for (java, dir) in JS_SPECS {
+        let docs = if *java == ADMIN_CLIENT_CONFIG {
+            &admin_docs
+        } else {
+            &producer_docs
+        };
         let spec = SPECS
             .iter()
             .find(|s| s.java == *java)
@@ -294,7 +308,7 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
                 field_docs.insert(owner.to_string(), documented);
             }
             let javadoc = field_docs.get(*owner).and_then(|d| d.get(n)).map(String::as_str);
-            let mut doc = constant_doc(&mut reader, &docs, owner, n, v, javadoc)?;
+            let mut doc = constant_doc(&mut reader, docs, owner, n, v, javadoc)?;
             if let Some((_, _, t)) = NOTES.iter().find(|(c, k, _)| c == java && k == n) {
                 doc.push_str("\n\n");
                 doc.push_str(t);
@@ -385,6 +399,28 @@ mod tests {
         assert!(producer.content.contains("  private constructor(...args: unknown[]) {\n"));
         assert!(!producer.content.contains("  constructor() {}\n"));
         assert!(ssl.content.contains("  constructor() {}\n"));
+        let admin = modules.iter().find(|m| m.name == "AdminClientConfig").unwrap();
+        assert_eq!((admin.dir.as_str(), admin.stem.as_str()), ("admin", "admin_client_config"));
+        assert!(admin
+            .content
+            .contains("  static readonly BOOTSTRAP_CONTROLLERS_CONFIG: string = 'bootstrap.controllers';\n"));
+        assert!(admin
+            .content
+            .contains("throw new TypeError('AdminClientConfig is not instantiable"));
+        let topic = modules.iter().find(|m| m.name == "TopicConfig").unwrap();
+        assert_eq!((topic.dir.as_str(), topic.stem.as_str()), ("common/config", "topic_config"));
+        assert!(topic
+            .content
+            .contains("  static readonly CLEANUP_POLICY_CONFIG: string = 'cleanup.policy';\n"));
+        assert!(topic.content.contains("  constructor() {}\n"));
+        let log_level = modules.iter().find(|m| m.name == "LogLevelConfig").unwrap();
+        assert_eq!(
+            (log_level.dir.as_str(), log_level.stem.as_str()),
+            ("common/config", "log_level_config")
+        );
+        assert!(log_level
+            .content
+            .contains("  static readonly INFO_LOG_LEVEL: string = 'INFO';\n"));
         let sasl = modules.iter().find(|m| m.name == "SaslConfigs").unwrap();
         assert!(sasl
             .content
