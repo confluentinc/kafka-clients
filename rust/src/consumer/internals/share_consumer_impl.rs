@@ -194,6 +194,10 @@ where
     /// How far a dropped `close` got, so a retried one resumes there
     /// (see `close_with_timeout`).
     close_progress: CloseProgress,
+    /// The first failure of a close step, kept with `close_progress` so that a
+    /// `close` resuming a dropped one returns it, as Java's single `close`
+    /// returns `firstException`.
+    close_first_error: Option<Error>,
     in_flight_poll: Option<InFlightPoll>,
     wakeup_trigger: WakeupTrigger,
     should_send_share_fetch_event: bool,
@@ -703,6 +707,7 @@ where
             default_api_timeout_ms: components.default_api_timeout_ms,
             closed: Arc::new(AtomicBool::new(false)),
             close_progress: CloseProgress::NotStarted,
+            close_first_error: None,
             in_flight_poll: None,
             wakeup_trigger: components.wakeup_trigger,
             should_send_share_fetch_event: false,
@@ -1477,8 +1482,9 @@ where
     /// does, and a later `close` resumes it: it awaits the acknowledge-on-close
     /// the dropped call sent instead of sending another, sends the leave again,
     /// and only joins the background task when the dropped call had already
-    /// told it to stop. The later `close` stops the task; like any `close`, it
-    /// returns the first failure of its steps.
+    /// told it to stop. The later `close` stops the task and returns the first
+    /// failure of the close, the dropped call's steps included. It waits for
+    /// the dropped call's acknowledge-on-close only up to its own timeout.
     ///
     /// # Errors
     ///
@@ -1499,7 +1505,7 @@ where
     /// Java's `close(Duration, boolean swallowException)`.
     async fn close_internal(&mut self, timeout: Duration, swallow_error: bool) -> Result<(), Error> {
         trace!("Closing the Kafka consumer");
-        let mut first_error: Option<Error> = None;
+        // The first error, `self.close_first_error`, outlives a dropped call.
 
         // We are already closing with a timeout, don't allow wake-ups from here on.
         self.wakeup_trigger.disable();
@@ -1510,19 +1516,20 @@ where
         // (`CloseProgress`).
         if !matches!(self.close_progress, CloseProgress::Signalled | CloseProgress::Joined) {
             // Prepare shutting down the network thread
-            if let Err(e) = self
-                .send_acknowledgements_and_leave_group(close_deadline_ms, &mut first_error)
-                .await
-            {
-                Self::swallow("Failed to release assignment before closing consumer", e, &mut first_error);
+            if let Err(e) = self.send_acknowledgements_and_leave_group(close_deadline_ms).await {
+                Self::swallow(
+                    "Failed to release assignment before closing consumer",
+                    e,
+                    &mut self.close_first_error,
+                );
             }
             if let Err(e) = self.stop_find_coordinator_on_close() {
-                Self::swallow("Failed to stop finding coordinator", e, &mut first_error);
+                Self::swallow("Failed to stop finding coordinator", e, &mut self.close_first_error);
             }
             // Java swallows a failure of the callback here; the handler catches it.
             self.handle_completed_acknowledgements().await;
             if let Err(e) = self.process_background_events_on_close() {
-                Self::swallow("Failed processing background events", e, &mut first_error);
+                Self::swallow("Failed processing background events", e, &mut self.close_first_error);
             }
             // Java's `applicationEventHandler.close(Duration.ofMillis(closeTimer.remainingMs()))`.
             let remaining_ms = close_deadline_ms.saturating_sub(self.time.milliseconds()).max(0);
@@ -1533,7 +1540,7 @@ where
         }
         if matches!(self.close_progress, CloseProgress::Signalled) {
             if let Err(e) = self.network_thread_close.await_join().await {
-                Self::close_quietly_failed("Failed shutting down network thread", e, &mut first_error);
+                Self::close_quietly_failed("Failed shutting down network thread", e, &mut self.close_first_error);
             }
             self.close_progress = CloseProgress::Joined;
         }
@@ -1551,13 +1558,13 @@ where
         self.share_fetch_metrics_manager.close();
         self.metrics.close();
         if let Err(e) = self.fetch_collector.close_deserializers().await {
-            Self::close_quietly_failed("consumer deserializers", e, &mut first_error);
+            Self::close_quietly_failed("consumer deserializers", e, &mut self.close_first_error);
         }
 
         debug!("Kafka share consumer has been closed");
         // Java's `InterruptException` pass-through has no counterpart: no
         // close step can record one.
-        match first_error {
+        match self.close_first_error.take() {
             Some(error) if !swallow_error => {
                 Err(Error::kafka_message_source("Failed to close Kafka share consumer", error))
             },
@@ -1597,12 +1604,11 @@ where
     /// 1. commit pending acknowledgements and close any share sessions
     /// 2. leave the group
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#sendAcknowledgementsAndLeaveGroup")]
-    async fn send_acknowledgements_and_leave_group(
-        &mut self,
-        deadline_ms: i64,
-        first_error: &mut Option<Error>,
-    ) -> Result<(), Error> {
+    async fn send_acknowledgements_and_leave_group(&mut self, deadline_ms: i64) -> Result<(), Error> {
         let timeout_ms = deadline_ms.saturating_sub(self.time.milliseconds()).max(0);
+        // A `close` resuming a dropped one waits for the event that one sent
+        // only up to its own deadline.
+        let resumed = !matches!(self.close_progress, CloseProgress::NotStarted);
         // Java's `applicationEventHandler.addAndGet(new ShareAcknowledgeOnCloseEvent(..))`,
         // made once: a `close` retried after a dropped one awaits the event the
         // dropped one sent (`CloseProgress`).
@@ -1617,23 +1623,36 @@ where
                     Self::complete_quietly(
                         Err(e),
                         &format!("Failed to send pending acknowledgements with a timeout(ms)={timeout_ms}"),
-                        first_error,
+                        &mut self.close_first_error,
                     );
                 },
             }
         }
         if let CloseProgress::AcknowledgingOnClose(receiver) = &mut self.close_progress {
-            let acknowledged = match receiver.await {
-                Ok(result) => result.map_err(Self::result_error),
-                Err(_) => Err(Error::local_illegal_state(
+            let completion = if resumed {
+                tokio::time::timeout(Duration::from_millis(u64::try_from(timeout_ms).unwrap_or(0)), receiver)
+                    .await
+                    .ok()
+            } else {
+                // Java's `addAndGet` waits until the background task completes
+                // the event, by its deadline at the latest.
+                Some(receiver.await)
+            };
+            let acknowledged = match completion {
+                Some(Ok(result)) => result.map_err(Self::result_error),
+                Some(Err(_)) => Err(Error::local_illegal_state(
                     "Background task dropped the completion sender for ShareAcknowledgeOnClose without completing it",
                 )),
+                // The resumed wait reached its deadline: Java's quiet timeout. The
+                // background task still completes or reaps the event, and the
+                // acknowledgements report through their events.
+                None => Err(Error::timeout("The acknowledge-on-close of a cancelled close did not complete")),
             };
             self.close_progress = CloseProgress::AcknowledgedOnClose;
             Self::complete_quietly(
                 acknowledged,
                 &format!("Failed to send pending acknowledgements with a timeout(ms)={timeout_ms}"),
-                first_error,
+                &mut self.close_first_error,
             );
         }
 
@@ -4071,6 +4090,69 @@ mod tests {
         f.close().await.expect("the retried close succeeds");
         assert_eq!([1, 1, 1], counts(&f.responder), "no event step runs again");
         assert!(!signalled.load(Ordering::SeqCst), "the task is not told to stop again");
+    }
+
+    /// A failure recorded by a `close` dropped at the join (a background
+    /// error `close` does not ignore) is returned by the `close` that resumes
+    /// it, as one undropped `close` returns it.
+    #[tokio::test]
+    async fn dropped_close_keeps_its_first_failure_for_the_retry() {
+        let mut f = new_consumer();
+        f.complete_close_events();
+        f.responder.on_share_unsubscribe = Some(queue_background_error(&f, || {
+            Some(Error::kafka_message("not ignored on close"))
+        }));
+        let signalled = Arc::new(AtomicBool::new(false));
+        let signalled_in_fn = Arc::clone(&signalled);
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        f.consumer.network_thread_close = NetworkThreadCloseHandle::new(
+            Box::new(move |_| signalled_in_fn.store(true, Ordering::SeqCst)),
+            Box::new(|| {}),
+            tokio::spawn(async move {
+                let _ = stop_rx.await;
+            }),
+        );
+
+        {
+            let mut close = std::pin::pin!(f.consumer.close());
+            while !signalled.load(Ordering::SeqCst) {
+                assert!(futures_util::poll!(close.as_mut()).is_pending());
+                f.responder.drain();
+            }
+        }
+        stop_tx.send(()).expect("the task waits");
+
+        let e = f.close().await.expect_err("the dropped call's failure");
+        assert!(e.is_kafka_error(), "{e:?}");
+        assert_eq!("Failed to close Kafka share consumer", e.message());
+        assert_eq!("not ignored on close", source_of(&e).message());
+    }
+
+    /// A `close` resuming a dropped one waits for the acknowledge-on-close
+    /// that one sent only up to its own timeout: with a zero timeout it
+    /// returns at once, though the event is still in flight.
+    #[tokio::test]
+    async fn resumed_close_waits_for_the_acknowledge_on_close_within_its_timeout() {
+        let mut f = new_consumer();
+        f.complete_close_events();
+        f.responder.hold_share_acknowledge_on_close = true;
+        {
+            let mut close = std::pin::pin!(f.consumer.close_with_timeout(Duration::from_secs(30)));
+            while f.responder.held_share_acknowledge_on_close.is_none() {
+                assert!(futures_util::poll!(close.as_mut()).is_pending());
+                f.responder.drain();
+            }
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            drive(&mut f.responder, f.consumer.close_with_timeout(Duration::ZERO)),
+        )
+        .await
+        .expect("the retry is bounded by its own timeout");
+        result.expect("a timed-out acknowledge-on-close is not a close failure");
+        assert!(f.responder.held_share_acknowledge_on_close.is_some(), "still in flight");
+        assert_eq!(1, f.responder.count("ShareAcknowledgeOnClose"));
     }
 
     /// A callback's partition, sorted offsets and error message.
