@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use log::{debug, trace, warn};
 
 use crate::common::Error;
+use crate::common::TopicIdPartition;
 use crate::common::protocol::Errors;
 use crate::consumer::internals::ConsumerShareFetchError;
 use crate::consumer::internals::Deserializers;
@@ -33,6 +34,7 @@ use crate::consumer::internals::ShareConsumerMetadata;
 use crate::consumer::internals::ShareFetch;
 use crate::consumer::internals::ShareFetchBuffer;
 use crate::consumer::internals::ShareFetchConfig;
+use crate::consumer::internals::ShareInFlightBatch;
 use crate::consumer::internals::SubscriptionState;
 
 /// What [`ShareFetchCollector::collect`] returns: the outer `Err` is any
@@ -111,11 +113,42 @@ where
     /// Dropping the future while a deserializer is pending puts the fetch being
     /// read back as the next in line; the records decoded so far in the dropped
     /// call are lost with it. They were acquired, so the broker releases them
-    /// when their acquisition lock times out.
+    /// when their acquisition lock times out. A caller that must keep them
+    /// collects with a state it owns ([`Self::collect_with_state`]).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchCollector#collect")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the share consumer collects with its own state (collect_with_state)"
+        )
+    )]
     pub(crate) async fn collect(&self, fetch_buffer: &ShareFetchBuffer) -> ShareFetchCollectResult<K, V> {
-        let mut fetch = ShareFetch::empty();
-        match self.collect_into(fetch_buffer, &mut fetch).await {
+        self.collect_with_state(fetch_buffer, &mut ShareFetchCollectState::new()).await
+    }
+
+    /// [`Self::collect`], gathering the records in `state`, which the caller
+    /// keeps from one call to the next.
+    ///
+    /// Rust-only (Java has no cancellation): a call dropped while a
+    /// deserializer is pending leaves every record it decoded in `state`, the
+    /// partitions it finished and the one it was decoding, and the next call
+    /// with the same state goes on from there: it decodes on from the record
+    /// that was pending and returns them all. No acquired record is lost, so
+    /// none waits for its acquisition lock to time out and uses up a delivery
+    /// attempt. A call that completes leaves `state` empty.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::collect`].
+    pub(crate) async fn collect_with_state(
+        &self,
+        fetch_buffer: &ShareFetchBuffer,
+        state: &mut ShareFetchCollectState<K, V>,
+    ) -> ShareFetchCollectResult<K, V> {
+        let result = self.collect_into(fetch_buffer, state).await;
+        let mut fetch = std::mem::replace(&mut state.fetch, ShareFetch::empty());
+        match result {
             Ok(None) => Ok(Ok(fetch)),
             // Records already collected from other partitions must be returned rather than lost, otherwise
             // they can never be acknowledged and the completed fetches which delivered them will never be drained.
@@ -133,13 +166,16 @@ where
     }
 
     /// The body of Java's `try` block in `collect`: `Ok(Some(cause))` where
-    /// Java throws `new ShareFetchException(fetch, cause)`.
+    /// Java throws `new ShareFetchException(fetch, cause)`. Collects into
+    /// `state.fetch`.
     async fn collect_into(
         &self,
         fetch_buffer: &ShareFetchBuffer,
-        fetch: &mut ShareFetch<K, V>,
+        state: &mut ShareFetchCollectState<K, V>,
     ) -> Result<Option<Error>, Error> {
-        let mut records_remaining = self.share_fetch_config.max_poll_records;
+        // A call dropped earlier may have collected records already.
+        let collected = i32::try_from(state.fetch.num_records()).unwrap_or(i32::MAX);
+        let mut records_remaining = self.share_fetch_config.max_poll_records.saturating_sub(collected);
         while records_remaining > 0 {
             let next_in_line_ready = fetch_buffer.next_in_line_fetch(|cf| cf.is_some_and(|cf| !cf.is_consumed()));
             if !next_in_line_ready {
@@ -154,7 +190,7 @@ where
                         Ok(false) => fetch_buffer.set_next_in_line_fetch(None),
                         Err(e) => {
                             // Java polls the failing fetch off the queue only when nothing was collected.
-                            if fetch.is_empty() {
+                            if state.fetch.is_empty() {
                                 fetch_buffer.clear_checked_out();
                             } else {
                                 fetch_buffer.push_front(completed_fetch);
@@ -171,9 +207,31 @@ where
                     break;
                 };
                 let tp = completed_fetch.partition.clone();
-                let batch = completed_fetch
-                    .fetch_records(&self.deserializers, records_remaining, self.share_fetch_config.check_crcs)
-                    .await?;
+                // The batch a dropped call was decoding goes on from where it
+                // stopped, as long as its fetch is the one next in line again
+                // (it always is: only this collector moves the next-in-line
+                // fetch, and a closed buffer is never collected again). Should
+                // it not be, it is handed out with the records it holds.
+                if state.in_progress.as_ref().is_some_and(|(partition, _)| *partition != tp)
+                    && let Some((partition, batch)) = state.in_progress.take()
+                {
+                    state.fetch.add(partition, batch);
+                }
+                let (_, in_progress) = state
+                    .in_progress
+                    .get_or_insert_with(|| (tp.clone(), completed_fetch.new_in_flight_batch()));
+                let result = completed_fetch
+                    .fetch_records_into(
+                        &self.deserializers,
+                        records_remaining,
+                        self.share_fetch_config.check_crcs,
+                        in_progress,
+                    )
+                    .await;
+                let Some((_, batch)) = state.in_progress.take() else {
+                    break;
+                };
+                result?;
                 if batch.is_empty() {
                     completed_fetch.drain();
                 }
@@ -182,7 +240,7 @@ where
                 records_remaining -= i32::try_from(batch.num_records()).unwrap_or(i32::MAX);
                 let error = batch.error().map(|error| error.cause().clone());
                 let has_cached_error = batch.has_cached_error();
-                fetch.add(tp, batch);
+                state.fetch.add(tp, batch);
 
                 if let Some(cause) = error {
                     return Ok(Some(cause));
@@ -294,6 +352,46 @@ where
         force: impl Fn(&ShareCompletedFetch) -> Option<Error> + Send + Sync + 'static,
     ) {
         self.force_initialize_error = Some(Box::new(force));
+    }
+}
+
+/// What [`ShareFetchCollector::collect_with_state`] has collected and not yet
+/// returned: the batches of the partitions it finished, and the batch of the
+/// partition it was decoding, with that partition.
+///
+/// Rust-only (DoD #7): Java's `collect` cannot be abandoned half-way, so its
+/// `ShareFetch` is a local. A dropped share `poll` must not lose the records
+/// it had decoded, so the share consumer keeps one of these from one `poll` to
+/// the next (`ShareConsumerImpl`).
+pub(crate) struct ShareFetchCollectState<K, V> {
+    fetch: ShareFetch<K, V>,
+    in_progress: Option<(TopicIdPartition, ShareInFlightBatch<K, V>)>,
+}
+
+impl<K, V> ShareFetchCollectState<K, V>
+where
+    K: Send + 'static,
+    V: Send + 'static,
+{
+    /// Nothing collected.
+    pub(crate) fn new() -> Self {
+        Self { fetch: ShareFetch::empty(), in_progress: None }
+    }
+
+    /// Whether a dropped call left records here.
+    #[cfg(test)]
+    pub(crate) fn has_records(&mut self) -> bool {
+        !self.fetch.is_empty() || self.in_progress.as_ref().is_some_and(|(_, batch)| batch.num_records() > 0)
+    }
+}
+
+impl<K, V> Default for ShareFetchCollectState<K, V>
+where
+    K: Send + 'static,
+    V: Send + 'static,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -983,5 +1081,81 @@ mod tests {
         let records = fetch.records().remove(f.topic_a_partition0.topic_partition()).expect("records");
         assert_eq!(vec![0, 1, 2], records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
         assert!(fetch.take_acknowledged_records().is_empty(), "no gap acknowledgements");
+    }
+
+    /// Rust-only (Milestone 18 P7): a collect with a state, dropped while a
+    /// deserializer is pending, leaves the records it decoded in the state;
+    /// the next collect with the state returns them all, the interrupted one
+    /// included, and leaves the state empty. Without the state they would be
+    /// lost (`test_collect_dropped_mid_deserialize_puts_the_fetch_back` shows
+    /// the records before the interrupted one of the same fetch are).
+    #[test]
+    fn test_collect_with_state_dropped_mid_deserialize_keeps_the_records_decoded() {
+        use crate::consumer::internals::share_completed_fetch::tests::PendOnceDeserializer;
+
+        let mut f = Fixture::new();
+        f.subscribe_and_assign(&f.topic_a_partition0);
+        f.subscriptions
+            .lock()
+            .unwrap()
+            .assign_from_subscribed(&[
+                f.topic_a_partition0.topic_partition().clone(),
+                f.topic_a_partition1.topic_partition().clone(),
+            ])
+            .unwrap();
+        let metadata = Arc::new(ShareConsumerMetadata::new(
+            0,
+            1000,
+            10000,
+            false,
+            Arc::clone(&f.subscriptions),
+            ClusterResourceListeners::new(),
+        ));
+        let value = PendOnceDeserializer::default();
+        // Partition 0 delivers 3 records; the call is dropped on the second
+        // record of partition 1.
+        value.pend_on.store(5, std::sync::atomic::Ordering::SeqCst);
+        f.fetch_collector = ShareFetchCollector::new(
+            metadata,
+            Arc::clone(&f.subscriptions),
+            f.fetch_collector.share_fetch_config.clone(),
+            Arc::new(Deserializers::new(
+                Box::new(crate::common::serialization::StringDeserializer::new()),
+                Box::new(value),
+            )),
+        );
+        f.fetch_buffer.add([f.build(f.builder().record_count(3))]);
+        let partition1 = f.topic_a_partition1.clone();
+        f.fetch_buffer
+            .add([f.build(f.builder().record_count(3).partition(partition1.clone()))]);
+
+        let mut state = ShareFetchCollectState::new();
+        assert!(
+            f.fetch_collector
+                .collect_with_state(&f.fetch_buffer, &mut state)
+                .now_or_never()
+                .is_none()
+        );
+        assert!(state.has_records(), "the dropped call left its records in the state");
+
+        let mut fetch = f
+            .fetch_collector
+            .collect_with_state(&f.fetch_buffer, &mut state)
+            .now_or_never()
+            .expect("ready")
+            .expect("no error")
+            .expect("no batch error");
+        let mut records = fetch.records();
+        let offsets = |records: Option<Vec<ConsumerRecord<String, String>>>| {
+            records
+                .unwrap_or_default()
+                .iter()
+                .map(ConsumerRecord::offset)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(vec![0, 1, 2], offsets(records.remove(f.topic_a_partition0.topic_partition())));
+        assert_eq!(vec![0, 1, 2], offsets(records.remove(partition1.topic_partition())));
+        assert!(fetch.take_acknowledged_records().is_empty(), "no gap or release");
+        assert!(!state.has_records(), "a completed collect leaves the state empty");
     }
 }

@@ -230,6 +230,13 @@ where
     /// Acknowledge all records in the current batch. If any records in the batch already have
     /// been acknowledged, those acknowledgements are not overwritten.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetch#acknowledgeAll")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the share consumer acknowledges the records handed out only (acknowledge_all_handed_out)"
+        )
+    )]
     pub(crate) fn acknowledge_all(&mut self, r#type: AcknowledgeType) {
         for batch in self.batches.values_mut().flatten() {
             batch.acknowledge_all(r#type);
@@ -239,11 +246,46 @@ where
     /// Checks whether all in-flight records have been acknowledged. This is
     /// required for explicit acknowledgement mode.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetch#checkAllInFlightAreAcknowledged")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the share consumer checks the records handed out only (check_all_handed_out_are_acknowledged)"
+        )
+    )]
     pub(crate) fn check_all_in_flight_are_acknowledged(&self) -> bool {
         self.batches
             .values()
             .flatten()
             .all(ShareInFlightBatch::check_all_in_flight_are_acknowledged)
+    }
+
+    /// [`Self::acknowledge_all`] for the records [`Self::records`] handed out
+    /// only (see [`ShareInFlightBatch::acknowledge_all_handed_out`]).
+    pub(crate) fn acknowledge_all_handed_out(&mut self, r#type: AcknowledgeType) {
+        for batch in self.batches.values_mut().flatten() {
+            batch.acknowledge_all_handed_out(r#type);
+        }
+    }
+
+    /// [`Self::check_all_in_flight_are_acknowledged`] for the records
+    /// [`Self::records`] handed out only (see
+    /// [`ShareInFlightBatch::check_all_handed_out_are_acknowledged`]).
+    pub(crate) fn check_all_handed_out_are_acknowledged(&self) -> bool {
+        self.batches
+            .values()
+            .flatten()
+            .all(ShareInFlightBatch::check_all_handed_out_are_acknowledged)
+    }
+
+    /// Whether some in-flight record has not been handed out by
+    /// [`Self::records`] yet: a `poll` was dropped before it returned them.
+    #[cfg(test)]
+    pub(crate) fn has_records_not_handed_out(&self) -> bool {
+        self.batches
+            .values()
+            .flatten()
+            .any(ShareInFlightBatch::has_records_not_handed_out)
     }
 
     /// Removes all acknowledged records from the in-flight records and returns
@@ -620,5 +662,32 @@ mod tests {
         assert!(!fetch_.has_renewals());
         assert_eq!(1, released(&mut fetch_));
         take(&mut fetch_).expect("nothing left");
+    }
+
+    /// Rust-only (Milestone 18 P7): the fetch-level handed-out variants skip
+    /// the records [`ShareFetch::records`] has not handed out yet, in every
+    /// batch, and report whether any is left.
+    #[test]
+    fn test_acknowledge_all_handed_out_skips_records_not_handed_out() {
+        let (partition0, partition1) = partitions();
+        let mut fetch = ShareFetch::empty();
+        fetch.add(partition0.clone(), batch_with_records(&partition0, 0, 2));
+        assert!(fetch.has_records_not_handed_out());
+        assert!(fetch.check_all_handed_out_are_acknowledged());
+        fetch.acknowledge_all_handed_out(AcknowledgeType::Accept);
+        assert!(
+            fetch.take_acknowledged_records().is_empty(),
+            "nothing handed out, nothing accepted"
+        );
+
+        assert_eq!(vec![0, 1], offsets(fetch.records().get(partition0.topic_partition())));
+        assert!(!fetch.has_records_not_handed_out());
+        fetch.add(partition1.clone(), batch_with_records(&partition1, 10, 1));
+        assert!(!fetch.check_all_handed_out_are_acknowledged(), "0 and 1 are handed out");
+        fetch.acknowledge_all_handed_out(AcknowledgeType::Accept);
+        assert!(fetch.check_all_handed_out_are_acknowledged());
+        let acknowledged = fetch.take_acknowledged_records();
+        assert_eq!(vec![partition0.clone()], acknowledged.keys().cloned().collect::<Vec<_>>());
+        assert!(fetch.has_records_not_handed_out(), "offset 10 is still to hand out");
     }
 }

@@ -253,6 +253,56 @@ where
         self.in_flight_records.len() == self.acknowledged_records.len()
     }
 
+    /// [`Self::acknowledge_all`] for the in-flight records handed out by
+    /// [`Self::in_flight_records`] only.
+    ///
+    /// Rust-only. At every point the share consumer acknowledges implicitly,
+    /// every in-flight record has been handed out, so this is Java's
+    /// `acknowledgeAll`, unless a `poll` was dropped after it had taken records
+    /// and before it returned them: those records were never seen by the
+    /// application, so they must not be accepted. They are handed out by the
+    /// next `poll` instead (`ShareConsumerImpl`).
+    pub(crate) fn acknowledge_all_handed_out(&mut self, r#type: AcknowledgeType) {
+        if self.undelivered_records.is_empty() {
+            self.acknowledge_all(r#type);
+            return;
+        }
+        for &offset in self.in_flight_records.keys() {
+            if !self.is_undelivered(offset) && self.acknowledgements.add_if_absent(offset, r#type) {
+                self.acknowledged_records.insert(offset);
+            }
+        }
+        if r#type == AcknowledgeType::Renew {
+            self.check_for_renew_acknowledgements = true;
+        }
+    }
+
+    /// [`Self::check_all_in_flight_are_acknowledged`] for the in-flight records
+    /// handed out by [`Self::in_flight_records`] only: the application cannot
+    /// acknowledge a record it was not given. Rust-only, Java's check unless a
+    /// `poll` was dropped (see [`Self::acknowledge_all_handed_out`]).
+    pub(crate) fn check_all_handed_out_are_acknowledged(&self) -> bool {
+        if self.undelivered_records.is_empty() {
+            return self.check_all_in_flight_are_acknowledged();
+        }
+        self.in_flight_records
+            .keys()
+            .all(|&offset| self.is_undelivered(offset) || self.acknowledged_records.contains(&offset))
+    }
+
+    /// Whether the in-flight record at `offset` has not been handed out yet.
+    fn is_undelivered(&self, offset: i64) -> bool {
+        self.undelivered_records
+            .binary_search_by_key(&offset, ConsumerRecord::offset)
+            .is_ok()
+    }
+
+    /// Whether some in-flight record has not been handed out yet.
+    #[cfg(test)]
+    pub(crate) fn has_records_not_handed_out(&self) -> bool {
+        !self.undelivered_records.is_empty()
+    }
+
     /// Adds a decoded record to the in-flight set, to be handed out by
     /// [`Self::in_flight_records`].
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareInFlightBatch#addRecord")]
@@ -802,6 +852,60 @@ mod tests {
         let mut acknowledgements = batch.take_acknowledged_records();
         acknowledgements.complete(None);
         batch.renew(&acknowledgements).expect("the acknowledgements are completed")
+    }
+
+    /// Rust-only (Milestone 18 P7): implicit acknowledgement and the
+    /// explicit-mode check consider only the records handed out; a record
+    /// still waiting to be handed out is neither accepted nor required to be
+    /// acknowledged, and is handed out afterwards.
+    #[test]
+    fn test_acknowledge_all_handed_out_skips_records_not_handed_out() {
+        let mut batch = ShareInFlightBatch::<String, String>::new(0, tip(), None);
+        batch.add_record(record(0));
+        batch.add_record(record(1));
+        assert!(batch.has_records_not_handed_out());
+        assert!(batch.check_all_handed_out_are_acknowledged(), "nothing handed out yet");
+        batch.acknowledge_all_handed_out(AcknowledgeType::Accept);
+        assert!(batch.take_acknowledged_records().is_empty(), "nothing accepted");
+        assert_eq!(2, batch.num_records());
+
+        let delivered = batch.in_flight_records();
+        assert_eq!(vec![0, 1], delivered.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
+        assert!(!batch.check_all_handed_out_are_acknowledged());
+        batch.add_record(record(2));
+        batch.acknowledge_all_handed_out(AcknowledgeType::Accept);
+        assert!(batch.check_all_handed_out_are_acknowledged());
+        let acknowledgements = batch.take_acknowledged_records();
+        assert_eq!(
+            vec![(0, Some(AcknowledgeType::Accept)), (1, Some(AcknowledgeType::Accept))],
+            acknowledgements
+                .acknowledgements_type_map()
+                .iter()
+                .map(|(&offset, &r#type)| (offset, r#type))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(1, batch.num_records(), "offset 2 is still in flight");
+        assert_eq!(
+            vec![2],
+            batch.in_flight_records().iter().map(ConsumerRecord::offset).collect::<Vec<_>>()
+        );
+    }
+
+    /// Rust-only: with every record handed out, the two methods are Java's
+    /// `acknowledgeAll` and `checkAllInFlightAreAcknowledged`.
+    #[test]
+    fn test_acknowledge_all_handed_out_is_acknowledge_all_once_all_are_handed_out() {
+        let mut batch = ShareInFlightBatch::<String, String>::new(0, tip(), None);
+        batch.add_record(record(0));
+        batch.add_record(record(1));
+        let delivered = batch.in_flight_records();
+        batch.acknowledge(&delivered[0], AcknowledgeType::Release).expect("in flight");
+        assert!(!batch.check_all_handed_out_are_acknowledged());
+        batch.acknowledge_all_handed_out(AcknowledgeType::Accept);
+        assert!(batch.check_all_handed_out_are_acknowledged());
+        let acknowledgements = batch.take_acknowledged_records();
+        assert_eq!(Some(AcknowledgeType::Release), acknowledgements.get(0), "not overwritten");
+        assert_eq!(Some(AcknowledgeType::Accept), acknowledgements.get(1));
     }
 
     #[test]

@@ -329,11 +329,18 @@ impl ShareCompletedFetch {
     /// Dropping the future while a deserializer is pending leaves the fetch on
     /// the record being decoded, and the next call decodes it again: it is
     /// neither skipped nor acknowledged as a gap. The records decoded before it
-    /// in the dropped call are lost with its batch: they stay acquired until
-    /// their lock times out, and their redelivery uses up a delivery attempt.
+    /// in the dropped call are lost with its batch; a caller that must keep
+    /// them decodes into a batch it owns ([`Self::fetch_records_into`]).
     /// The batch is tracked for `has_pending_acknowledgements` only once it is
     /// handed out, so a dropped batch never keeps the fetch pending.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareCompletedFetch#fetchRecords")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the collector decodes into the batch it keeps (fetch_records_into)"
+        )
+    )]
     pub(crate) async fn fetch_records<K, V>(
         &mut self,
         deserializers: &Deserializers<K, V>,
@@ -344,18 +351,58 @@ impl ShareCompletedFetch {
         K: Send + 'static,
         V: Send + 'static,
     {
-        // Creating an empty ShareInFlightBatch. Java tracks it as the delivered
-        // batch here; it is tracked as it is handed out instead
-        // (`Self::hand_out`), as nothing reads it in between and a dropped call
-        // must not leave a batch nobody holds tracked.
-        let mut in_flight_batch =
-            ShareInFlightBatch::new(self.node_id, self.partition.clone(), self.acquisition_lock_timeout_ms);
+        let mut in_flight_batch = self.new_in_flight_batch();
+        self.fetch_records_into(deserializers, max_records, check_crcs, &mut in_flight_batch)
+            .await?;
+        Ok(in_flight_batch)
+    }
 
+    /// An empty [`ShareInFlightBatch`] for this fetch's partition and node, the
+    /// one [`Self::fetch_records`] decodes into.
+    pub(crate) fn new_in_flight_batch<K, V>(&self) -> ShareInFlightBatch<K, V>
+    where
+        K: Send + 'static,
+        V: Send + 'static,
+    {
+        ShareInFlightBatch::new(self.node_id, self.partition.clone(), self.acquisition_lock_timeout_ms)
+    }
+
+    /// [`Self::fetch_records`] decoding into `in_flight_batch`, a batch the
+    /// caller owns, and counting the records already in it against
+    /// `max_records`.
+    ///
+    /// Rust-only (Java has no cancellation): a call dropped while a
+    /// deserializer is pending leaves the records it decoded in
+    /// `in_flight_batch`, and a later call given the same batch decodes on into
+    /// it from the record that was pending, so none of them is lost. The batch
+    /// is a batch of this fetch ([`Self::new_in_flight_batch`]); between the
+    /// calls nothing else reads this fetch.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::fetch_records`]; the batch is then incomplete and the caller
+    /// drops it, as Java drops the batch of a failed `fetchRecords`.
+    pub(crate) async fn fetch_records_into<K, V>(
+        &mut self,
+        deserializers: &Deserializers<K, V>,
+        max_records: i32,
+        check_crcs: bool,
+        in_flight_batch: &mut ShareInFlightBatch<K, V>,
+    ) -> Result<(), Error>
+    where
+        K: Send + 'static,
+        V: Send + 'static,
+    {
+        // Java tracks the batch as the delivered batch here; it is tracked as it
+        // is handed out instead (`Self::hand_out`), as nothing reads it in
+        // between and a dropped call must not leave a batch nobody holds
+        // tracked.
         if let Some(cached_batch_error) = self.cached_batch_error.take() {
             // In the event that a CRC check fails, reject the entire record batch because it is corrupt.
-            let offsets = self.reject_record_batch(&mut in_flight_batch);
+            let offsets = self.reject_record_batch(in_flight_batch);
             in_flight_batch.set_error(ConsumerShareInFlightBatchError::new(cached_batch_error, offsets));
-            return Ok(self.hand_out(in_flight_batch));
+            self.hand_out(in_flight_batch);
+            return Ok(());
         }
 
         if let Some(cached_record_error) = self.cached_record_error.take() {
@@ -366,11 +413,13 @@ impl ShareCompletedFetch {
                     HashSet::from([last_record]),
                 ));
             }
-            return Ok(self.hand_out(in_flight_batch));
+            self.hand_out(in_flight_batch);
+            return Ok(());
         }
 
         if self.is_consumed {
-            return Ok(self.hand_out(in_flight_batch));
+            self.hand_out(in_flight_batch);
+            return Ok(());
         }
 
         self.initialize_next_acquired();
@@ -379,7 +428,7 @@ impl ShareCompletedFetch {
         // no copy.
         let record_batches = self.cursor.as_ref().map(|cursor| cursor.buffer_bytes().clone());
         match self
-            .fetch_records_loop(deserializers, max_records, check_crcs, &mut in_flight_batch)
+            .fetch_records_loop(deserializers, max_records, check_crcs, in_flight_batch)
             .await
         {
             Ok(()) => {},
@@ -402,7 +451,7 @@ impl ShareCompletedFetch {
                 self.skip_current_batch();
                 if in_flight_batch.is_empty() {
                     // In the event that a CRC check fails, reject the entire record batch because it is corrupt.
-                    let offsets = self.reject_record_batch(&mut in_flight_batch);
+                    let offsets = self.reject_record_batch(in_flight_batch);
                     in_flight_batch.set_error(ConsumerShareInFlightBatchError::new(e, offsets));
                 } else {
                     self.cached_batch_error = Some(e);
@@ -418,18 +467,18 @@ impl ShareCompletedFetch {
         {
             in_flight_batch.set_record_batches(record_batches);
         }
-        Ok(self.hand_out(in_flight_batch))
+        self.hand_out(in_flight_batch);
+        Ok(())
     }
 
     /// Tracks `in_flight_batch` as the delivered batch (Java's
-    /// `trackDeliveredBatch`, at the start of `fetchRecords`) and returns it.
-    fn hand_out<K, V>(&mut self, in_flight_batch: ShareInFlightBatch<K, V>) -> ShareInFlightBatch<K, V>
+    /// `trackDeliveredBatch`, at the start of `fetchRecords`).
+    fn hand_out<K, V>(&mut self, in_flight_batch: &ShareInFlightBatch<K, V>)
     where
         K: Send + 'static,
         V: Send + 'static,
     {
         self.track_delivered_batch(in_flight_batch.status());
-        in_flight_batch
     }
 
     /// The body of Java's `try` block in `fetchRecords`.
@@ -444,7 +493,8 @@ impl ShareCompletedFetch {
         K: Send + 'static,
         V: Send + 'static,
     {
-        let mut records_in_batch = 0;
+        // A batch a dropped call decoded into already holds its records.
+        let mut records_in_batch = i32::try_from(in_flight_batch.num_records()).unwrap_or(i32::MAX);
         let mut current_batch_has_more_records = false;
 
         // A call dropped mid-parse left the cursor on its record.
@@ -1790,6 +1840,69 @@ pub(crate) mod tests {
         batch.acknowledge_all(AcknowledgeType::Accept);
         batch.take_acknowledged_records();
         assert!(!completed_fetch.has_pending_acknowledgements());
+    }
+
+    /// Rust-only (Milestone 18 P7): a call dropped while the deserializer is
+    /// pending leaves the records it decoded in the batch the caller keeps, and
+    /// the next call with that batch decodes on from the pending record, so
+    /// nothing is lost and `max_records` counts the records already there.
+    #[test]
+    fn test_dropped_fetch_records_into_keeps_the_records_decoded() {
+        let tip = tip();
+        let data = partition_data(Some(new_records(0, 3)), acquired_records(0, 3));
+        let mut completed_fetch = new_share_completed_fetch(&tip, data);
+        let value = PendOnceDeserializer::default();
+        let deserializers = Deserializers::new(Box::new(StringDeserializer::new()), Box::new(value.clone()));
+        let mut batch = completed_fetch.new_in_flight_batch::<String, String>();
+
+        pend_on(&value, 2);
+        assert!(
+            completed_fetch
+                .fetch_records_into(&deserializers, 10, true, &mut batch)
+                .now_or_never()
+                .is_none(),
+            "dropped on offset 1"
+        );
+        assert_eq!(1, batch.num_records(), "offset 0 stays in the batch");
+        assert!(
+            !completed_fetch.has_pending_acknowledgements(),
+            "the batch is tracked only once it is handed out"
+        );
+
+        completed_fetch
+            .fetch_records_into(&deserializers, 10, true, &mut batch)
+            .now_or_never()
+            .expect("ready")
+            .expect("no error");
+        assert_eq!(vec![0, 1, 2], offsets(&batch.in_flight_records()));
+        assert_eq!(0, batch.acknowledgements().size(), "no gap, no release");
+        assert!(completed_fetch.has_pending_acknowledgements());
+    }
+
+    /// Rust-only: `max_records` counts the records a dropped call left in the
+    /// batch.
+    #[test]
+    fn test_fetch_records_into_counts_the_records_already_in_the_batch() {
+        let tip = tip();
+        let data = partition_data(Some(new_records_batches(0, 1, 4)), acquired_records(0, 4));
+        let mut completed_fetch = new_share_completed_fetch(&tip, data);
+        let value = PendOnceDeserializer::default();
+        let deserializers = Deserializers::new(Box::new(StringDeserializer::new()), Box::new(value.clone()));
+        let mut batch = completed_fetch.new_in_flight_batch::<String, String>();
+
+        pend_on(&value, 2);
+        assert!(
+            completed_fetch
+                .fetch_records_into(&deserializers, 2, true, &mut batch)
+                .now_or_never()
+                .is_none()
+        );
+        completed_fetch
+            .fetch_records_into(&deserializers, 2, true, &mut batch)
+            .now_or_never()
+            .expect("ready")
+            .expect("no error");
+        assert_eq!(vec![0, 1], offsets(&batch.in_flight_records()), "two records in all");
     }
 
     /// Critic 251 Issue 4 (probe E): a batch declaring fewer records than it
