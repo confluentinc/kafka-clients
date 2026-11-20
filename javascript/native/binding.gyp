@@ -44,6 +44,8 @@
       "target_name": "confluent-kafka-javascript",
       "sources": [
         "addon.c",
+        "admin.c",
+        "admin_values.c",
         "callback_queue.c",
         "error.c",
         "error_payload.c",
