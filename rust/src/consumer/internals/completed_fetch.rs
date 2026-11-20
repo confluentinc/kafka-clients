@@ -1036,20 +1036,16 @@ impl CompletedFetch {
                 let Some(source_bytes) = self.current_record_source_bytes() else {
                     return Err(premature_eof_error(&self.partition));
                 };
-                // The only owned copy of record payload on the happy path:
-                // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
-                // owned headers on the emitted `ConsumerRecord`).
-                // By the cause's message, not its class-prefixed `Display`, as in
-                // `peek_current_record`.
-                let headers_vec = record.headers().map_err(|e| {
-                    Error::InvalidRecord(InvalidRecordError::new(format!(
-                        "Record for partition {} at offset {} has invalid headers, cause: {}",
-                        self.partition,
-                        record.offset(),
-                        e.message()
-                    )))
-                })?;
-                headers_owned = RecordHeaders::with_header_iter(headers_vec);
+                // §27: the headers are a slice of the same buffer, the record's
+                // header section as it was fetched. Nothing is read or copied
+                // here; they are read when a deserializer or the application
+                // first accesses them, as slices of that section. A record
+                // without headers takes no slice, so it holds no buffer.
+                headers_owned = if record.num_headers() == 0 {
+                    RecordHeaders::new()
+                } else {
+                    RecordHeaders::from_wire(source_bytes.slice_ref(record.headers_bytes()), record.num_headers())
+                };
                 key_bytes = record.key().map(|key| source_bytes.slice_ref(key));
                 value_bytes = record.value().map(|value| source_bytes.slice_ref(value));
                 leader_epoch = maybe_leader_epoch(batch_meta.partition_leader_epoch);
@@ -3401,6 +3397,182 @@ mod tests {
                 .collect();
             assert_eq!(keys, ["by-key", "by-value"], "offset {}", record.offset());
         }
+    }
+
+    // ── Headers are read on demand, in place (§27) ──────────────────────────
+
+    /// Records `0..count` at offsets `0..count`, each with the key `"key"`, the
+    /// value `"value-{i}"` and two headers: `"h1"` with the value
+    /// `"header-{i}"` and `"h2"` with no value.
+    fn new_records_with_headers(count: i32, compression: Compression) -> Vec<u8> {
+        use crate::common::header::RecordHeader;
+        use crate::common::record::internal::SimpleRecordOptionsBuilder;
+
+        let simple_records: Vec<SimpleRecord> = (0..count)
+            .map(|i| {
+                SimpleRecord::with_options(
+                    SimpleRecordOptionsBuilder::new()
+                        .set_timestamp(0)
+                        .set_key(Some(b"key".to_vec()))
+                        .set_value(Some(format!("value-{i}").into_bytes()))
+                        .set_headers(vec![
+                            RecordHeader::new("h1".to_string(), Some(format!("header-{i}").into_bytes())),
+                            RecordHeader::new("h2".to_string(), None),
+                        ])
+                        .build()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            2,
+            0,
+            compression,
+            TimestampType::CreateTime,
+            &simple_records,
+        );
+        records.buffer().to_vec()
+    }
+
+    /// Asserts that each record of `records`, built by
+    /// [`new_records_with_headers`] and read with the `BytesDeserializer`,
+    /// has its two headers, and that they are slices of the buffer the
+    /// record's value is a slice of: a record lays its headers out right
+    /// after its value (`Value`, `HeadersCount`, `HeaderKeyLength`,
+    /// `HeaderKey`, `HeaderValueLength`, `HeaderValue`, each length here one
+    /// byte), so a header read in place starts a fixed distance past it.
+    fn assert_headers_read_in_place(records: &[ConsumerRecord<bytes::Bytes, bytes::Bytes>]) {
+        use crate::common::header::{Header, Headers};
+
+        for (i, record) in records.iter().enumerate() {
+            let value = record.value().expect("a value");
+            assert_eq!(&value[..], format!("value-{i}").as_bytes());
+            let headers = record.headers().to_array();
+            assert_eq!(headers.len(), 2, "offset {}", record.offset());
+
+            assert_eq!(headers[0].key(), "h1");
+            let h1_value = headers[0].value().expect("a header value");
+            assert_eq!(h1_value, format!("header-{i}").as_bytes());
+            assert_eq!(headers[1].key(), "h2");
+            assert_eq!(headers[1].value(), None);
+
+            let h1_key = value.as_ptr().wrapping_add(value.len() + 2);
+            assert_eq!(headers[0].key().as_ptr(), h1_key, "h1's key is not read in place");
+            assert_eq!(h1_value.as_ptr(), h1_key.wrapping_add(2 + 1), "h1's value is not read in place");
+            let h2_key = h1_value.as_ptr().wrapping_add(h1_value.len() + 1);
+            assert_eq!(headers[1].key().as_ptr(), h2_key, "h2's key is not read in place");
+        }
+    }
+
+    /// The headers of a fetched record are slices of the fetch buffer: no
+    /// header key or value is copied, as Java's `DefaultRecord.readHeaders`
+    /// keeps `ByteBuffer` slices.
+    #[test]
+    fn test_headers_are_slices_of_the_fetch_buffer() {
+        use crate::common::header::{Header, Headers};
+        use crate::common::serialization::BytesDeserializer;
+
+        let bytes = new_records_with_headers(3, Compression::none().build());
+        let fetch_buffer = bytes.as_ptr_range();
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let records = cf
+            .fetch_records_now::<bytes::Bytes, bytes::Bytes>(&fetch_config, &BytesDeserializer, &BytesDeserializer, 10)
+            .unwrap();
+
+        assert_eq!(records.len(), 3);
+        assert_headers_read_in_place(&records);
+        for record in &records {
+            for header in record.headers().to_array() {
+                let key = header.key().as_bytes().as_ptr_range();
+                assert!(fetch_buffer.start <= key.start && key.end <= fetch_buffer.end);
+            }
+        }
+    }
+
+    /// The headers of a record of a compressed batch are slices of the buffer
+    /// the record was decompressed into, which the record's key and value are
+    /// slices of too.
+    #[cfg(feature = "gzip")]
+    #[test]
+    fn test_headers_of_a_compressed_record_are_slices_of_its_buffer() {
+        use crate::common::serialization::BytesDeserializer;
+
+        let bytes = new_records_with_headers(3, Compression::gzip().build());
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let records = cf
+            .fetch_records_now::<bytes::Bytes, bytes::Bytes>(&fetch_config, &BytesDeserializer, &BytesDeserializer, 10)
+            .unwrap();
+
+        assert_eq!(records.len(), 3);
+        assert_headers_read_in_place(&records);
+    }
+
+    /// A header key that is not valid UTF-8 does not fail the record: the key
+    /// is decoded when it is read, with U+FFFD for the malformed bytes, as
+    /// Java's `RecordHeader.key()` decodes it (`Utils.utf8`).
+    #[test]
+    fn test_header_key_that_is_not_utf8_is_decoded_lossily() {
+        use crate::common::header::{Header, Headers};
+
+        let mut bytes = new_records_with_headers(1, Compression::none().build());
+        let h1 = bytes.windows(2).position(|window| window == b"h1").expect("the h1 key");
+        bytes[h1] = 0xff;
+        let mut cf = new_completed_fetch(0, bytes);
+        // The batch's CRC no longer matches its bytes.
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let records = cf
+            .fetch_records_now::<String, String>(&fetch_config, &StringDeserializer, &StringDeserializer, 10)
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        let headers = records[0].headers().to_array();
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0].key(), "\u{fffd}1");
+        assert_eq!(headers[0].value(), Some(b"header-0".as_slice()));
+        assert_eq!(headers[1].key(), "h2");
+    }
+
+    /// The allocations `fetch_records` makes for `bytes`, a batch of `count`
+    /// records, read with a deserializer that allocates nothing and reads no
+    /// header.
+    fn count_fetch_allocations(bytes: Vec<u8>, count: i32) -> usize {
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        // Outside the tracking window, as in
+        // `test_per_record_loop_is_pure_counter_no_sensor_record`.
+        cf.ensure_cursor();
+
+        let _guard = crate::AllocTrackingGuard::new();
+        crate::AllocTrackingGuard::reset();
+        let records = cf
+            .fetch_records_now::<usize, usize>(&fetch_config, &LenDeserializer, &LenDeserializer, count)
+            .unwrap();
+        let allocations = crate::AllocTrackingGuard::count();
+        assert_eq!(records.len(), count as usize);
+        allocations
+    }
+
+    /// Headers nobody reads cost no allocation: a batch whose records carry
+    /// two headers each is fetched with the allocations of the same batch
+    /// without headers. The record keeps a slice of its header section and
+    /// builds the header list only when it is first read.
+    #[test]
+    fn test_unread_headers_cost_no_allocation() {
+        const RECORD_COUNT: i32 = 200;
+
+        let without_headers = count_fetch_allocations(new_records(0, RECORD_COUNT, 0), RECORD_COUNT);
+        let with_headers = count_fetch_allocations(
+            new_records_with_headers(RECORD_COUNT, Compression::none().build()),
+            RECORD_COUNT,
+        );
+
+        assert!(
+            with_headers <= without_headers,
+            "{with_headers} allocations for {RECORD_COUNT} records with unread headers, \
+             {without_headers} for the same records without headers"
+        );
     }
 
     // ── Decode hardening: every batch header is validated ───────────────────

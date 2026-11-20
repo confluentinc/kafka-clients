@@ -17,19 +17,48 @@
 //! Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeader`.
 
 use crate::common::header::Header;
+use bytes::Bytes;
+use std::borrow::Cow;
+use std::sync::OnceLock;
 
 /// A concrete record header consisting of a key-value pair.
 ///
-/// In Java, `RecordHeader` supports lazy deserialization from `ByteBuffer`.
-/// In Rust, we always store the deserialized `String` key and `Option<Vec<u8>>`
-/// value directly, since there is no equivalent lazy pattern needed.
-#[derive(Clone, Debug)]
+/// A header read from a fetched record holds, as in Java, slices of the
+/// buffer the record was read from: the value is handed out as a view of that
+/// buffer, and the key is decoded the first time it is read. A header built
+/// with [`RecordHeader::new`] owns the key and value it was given.
+#[derive(Clone)]
 #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeader")]
 // the only `Header` implementation; users build one to attach headers to a ProducerRecord, as Java users do despite the internals package
 #[doc(alias = "public-in-rust")]
 pub struct RecordHeader {
-    key: String,
-    value: Option<Vec<u8>>,
+    key: HeaderKey,
+    value: Option<HeaderValue>,
+}
+
+/// Java's `keyBuffer` / `key` pair.
+#[derive(Clone)]
+enum HeaderKey {
+    /// Java's `key`: the key the header was built with.
+    Decoded(String),
+    /// Java's `keyBuffer`: the key's bytes as read, a slice of the record's
+    /// buffer. `lossy` is set on the first read of the key: `None` when the
+    /// bytes are valid UTF-8, so they are the key and nothing is copied, or
+    /// the key decoded with U+FFFD for each malformed sequence, as Java's
+    /// `Utils.utf8` decodes it.
+    Buffer {
+        bytes: Bytes,
+        lossy: OnceLock<Option<String>>,
+    },
+}
+
+/// Java's `valueBuffer` / `value` pair.
+#[derive(Clone)]
+enum HeaderValue {
+    /// Java's `value`: the value the header was built with.
+    Owned(Vec<u8>),
+    /// Java's `valueBuffer`: a slice of the record's buffer, read in place.
+    Buffer(Bytes),
 }
 
 impl RecordHeader {
@@ -41,23 +70,63 @@ impl RecordHeader {
     /// - `value` - the header's value, `None` for no value
     #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader")]
     pub fn new(key: String, value: Option<Vec<u8>>) -> Self {
-        Self { key, value }
+        Self { key: HeaderKey::Decoded(key), value: value.map(HeaderValue::Owned) }
+    }
+
+    /// Create a `RecordHeader` over the key and value bytes of a record, both
+    /// slices of the buffer the record was read from. Nothing is copied: the
+    /// key is decoded the first time it is read, and the value is read in
+    /// place.
+    #[doc(alias = "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader(ByteBuffer,ByteBuffer)")]
+    pub(crate) fn with_key_buffer_value_buffer(key_buffer: Bytes, value_buffer: Option<Bytes>) -> Self {
+        Self {
+            key: HeaderKey::Buffer { bytes: key_buffer, lossy: OnceLock::new() },
+            value: value_buffer.map(HeaderValue::Buffer),
+        }
     }
 }
 
 impl Header for RecordHeader {
     fn key(&self) -> &str {
-        &self.key
+        match &self.key {
+            HeaderKey::Decoded(key) => key,
+            HeaderKey::Buffer { bytes, lossy } => {
+                let lossy = lossy.get_or_init(|| match String::from_utf8_lossy(bytes) {
+                    Cow::Borrowed(_) => None,
+                    Cow::Owned(decoded) => Some(decoded),
+                });
+                match lossy {
+                    Some(decoded) => decoded,
+                    // SAFETY: `lossy` is `None` only when `String::from_utf8_lossy` returned
+                    // `bytes` borrowed, which it does only for valid UTF-8; `bytes` is
+                    // immutable, so it is still the valid UTF-8 that was checked.
+                    None => unsafe { std::str::from_utf8_unchecked(bytes) },
+                }
+            },
+        }
     }
 
     fn value(&self) -> Option<&[u8]> {
-        self.value.as_deref()
+        match &self.value {
+            None => None,
+            Some(HeaderValue::Owned(value)) => Some(value),
+            Some(HeaderValue::Buffer(value)) => Some(value),
+        }
+    }
+}
+
+impl std::fmt::Debug for RecordHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordHeader")
+            .field("key", &self.key())
+            .field("value", &self.value())
+            .finish()
     }
 }
 
 impl PartialEq for RecordHeader {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key && self.value == other.value
+        self.key() == other.key() && self.value() == other.value()
     }
 }
 
@@ -65,14 +134,14 @@ impl Eq for RecordHeader {}
 
 impl std::hash::Hash for RecordHeader {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.key.hash(state);
-        self.value.hash(state);
+        self.key().hash(state);
+        self.value().hash(state);
     }
 }
 
 impl std::fmt::Display for RecordHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RecordHeader(key = {}, value = {:?})", self.key, self.value)
+        write!(f, "RecordHeader(key = {}, value = {:?})", self.key(), self.value())
     }
 }
 
@@ -140,46 +209,117 @@ mod tests {
         assert!(display.contains("RecordHeader"));
     }
 
-    /// Corresponds to Java's testRecordHeaderIsReadThreadSafe.
-    /// In Rust, RecordHeader fields are not lazily initialized, so thread
-    /// safety is guaranteed by the type system. We verify concurrent reads
-    /// work correctly nonetheless.
-    #[test]
-    fn test_record_header_is_read_thread_safe() {
-        use std::sync::Arc;
+    /// The assertion of Java's `RecordHeadersTest#assertRecordHeaderReadThreadSafe`:
+    /// 16 tasks read the key and the value of a header nobody has read yet.
+    fn assert_record_header_read_thread_safe(header: RecordHeader, key: &str, value: Option<&[u8]>) {
+        use std::sync::{Arc, Barrier};
 
-        let header = Arc::new(RecordHeader::new("key".to_string(), Some(b"value".to_vec())));
-
-        let mut handles = Vec::new();
-        for _ in 0..16 {
-            let h = Arc::clone(&header);
-            handles.push(std::thread::spawn(move || {
-                assert_eq!(h.key(), "key");
-                assert_eq!(h.value(), Some(b"value".as_slice()));
-            }));
-        }
+        let thread_count = 16;
+        let header = Arc::new(header);
+        let start = Arc::new(Barrier::new(thread_count));
+        let handles: Vec<_> = (0..thread_count)
+            .map(|_| {
+                let header = Arc::clone(&header);
+                let start = Arc::clone(&start);
+                let key = key.to_string();
+                let value = value.map(<[u8]>::to_vec);
+                std::thread::spawn(move || {
+                    start.wait();
+                    assert_eq!(header.key(), key);
+                    assert_eq!(header.value(), value.as_deref());
+                })
+            })
+            .collect();
         for handle in handles {
             handle.join().unwrap();
         }
     }
 
-    /// Corresponds to Java's testRecordHeaderWithNullValueIsReadThreadSafe.
+    /// Java's `RecordHeadersTest#testRecordHeaderIsReadThreadSafe`, a
+    /// `@RepeatedTest(100)`.
+    #[test]
+    fn test_record_header_is_read_thread_safe() {
+        for _ in 0..100 {
+            let header = RecordHeader::with_key_buffer_value_buffer(
+                Bytes::from_static(b"key"),
+                Some(Bytes::from_static(b"value")),
+            );
+            assert_record_header_read_thread_safe(header, "key", Some(b"value"));
+        }
+    }
+
+    /// Java's `RecordHeadersTest#testRecordHeaderWithNullValueIsReadThreadSafe`,
+    /// a `@RepeatedTest(100)`.
     #[test]
     fn test_record_header_with_null_value_is_read_thread_safe() {
-        use std::sync::Arc;
-
-        let header = Arc::new(RecordHeader::new("key".to_string(), None));
-
-        let mut handles = Vec::new();
-        for _ in 0..16 {
-            let h = Arc::clone(&header);
-            handles.push(std::thread::spawn(move || {
-                assert_eq!(h.key(), "key");
-                assert_eq!(h.value(), None);
-            }));
+        for _ in 0..100 {
+            let header = RecordHeader::with_key_buffer_value_buffer(Bytes::from_static(b"key"), None);
+            assert_record_header_read_thread_safe(header, "key", None);
         }
-        for handle in handles {
-            handle.join().unwrap();
-        }
+    }
+
+    /// Whether `inner` lies inside `outer`.
+    fn is_within(inner: &[u8], outer: &[u8]) -> bool {
+        let outer = outer.as_ptr_range();
+        let inner = inner.as_ptr_range();
+        outer.start <= inner.start && inner.end <= outer.end
+    }
+
+    /// A header over a buffer hands out views of that buffer: neither the key
+    /// nor the value is copied.
+    #[test]
+    fn test_buffer_header_reads_the_buffer_in_place() {
+        let buffer = Bytes::from_static(b"keyvalue");
+        let header = RecordHeader::with_key_buffer_value_buffer(buffer.slice(0..3), Some(buffer.slice(3..)));
+
+        assert_eq!(header.key(), "key");
+        assert_eq!(header.value(), Some(b"value".as_slice()));
+        assert!(is_within(header.key().as_bytes(), &buffer));
+        assert!(is_within(header.value().unwrap(), &buffer));
+        // Read again: the same view.
+        assert!(is_within(header.key().as_bytes(), &buffer));
+    }
+
+    /// A key that is not valid UTF-8 is decoded as Java's `Utils.utf8`
+    /// decodes it, with U+FFFD for the malformed bytes, and only then copied.
+    #[test]
+    fn test_buffer_header_decodes_an_invalid_key_lossily() {
+        let buffer = Bytes::from_static(b"k\xffy");
+        let header = RecordHeader::with_key_buffer_value_buffer(buffer.clone(), None);
+
+        assert_eq!(header.key(), "k\u{fffd}y");
+        assert!(!is_within(header.key().as_bytes(), &buffer));
+        assert_eq!(header.value(), None);
+    }
+
+    /// Equality, hash, `Display` and `Debug` read the key and value, whatever
+    /// holds them.
+    #[test]
+    fn test_buffer_header_equals_the_same_header_built_from_owned_parts() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let owned = RecordHeader::new("key".to_string(), Some(b"value".to_vec()));
+        let buffer =
+            RecordHeader::with_key_buffer_value_buffer(Bytes::from_static(b"key"), Some(Bytes::from_static(b"value")));
+
+        assert_eq!(owned, buffer);
+        assert_eq!(buffer.clone(), owned);
+        let hash = |header: &RecordHeader| {
+            let mut hasher = DefaultHasher::new();
+            header.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(&owned), hash(&buffer));
+        assert_eq!(owned.to_string(), buffer.to_string());
+        assert_eq!(format!("{owned:?}"), format!("{buffer:?}"));
+        assert_eq!(
+            format!("{buffer:?}"),
+            "RecordHeader { key: \"key\", value: Some([118, 97, 108, 117, 101]) }"
+        );
+        assert_eq!(
+            buffer.to_string(),
+            "RecordHeader(key = key, value = Some([118, 97, 108, 117, 101]))"
+        );
     }
 }
