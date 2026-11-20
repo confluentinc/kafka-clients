@@ -30,6 +30,22 @@
 //! runs once on the defaults and the `_assignment_interval_0` /
 //! `_assignment_interval_1000` arms skip themselves; from 4.3 on the two arms
 //! run Java's configurations and the plain-named test skips itself.
+//!
+//! # Not translated
+//!
+//! - `testPollThrowsInterruptExceptionIfInterrupted`: it interrupts the test
+//!   thread and expects `poll` to throw `InterruptException`. Rust has no thread
+//!   interrupts; a blocking call is abandoned by dropping its future (see the
+//!   translation notes of `KafkaShareConsumer`), so there is no
+//!   `InterruptException` path to test.
+//!
+//! # Broker-version gates
+//!
+//! - `testAddedPartitionsOfKnownTopicStartAtOffsetZero` tests the 4.4.0 broker
+//!   fix KAFKA-20742 (a partition added to a topic the share group already knows
+//!   starts at offset 0); on an older broker it skips itself
+//!   ([`ADDED_PARTITIONS_START_AT_ZERO_RELEASE`]). Measured on 4.2.0: the new
+//!   partition starts at its log end and none of the ten records arrive.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -60,6 +76,14 @@ use confluent_kafka::producer::ProducerRecord;
 use confluent_kafka::producer::RecordMetadata;
 
 use super::share_consumer_test_base::*;
+use crate::common::test_utils;
+use confluent_kafka::admin::Admin;
+use confluent_kafka::admin::NewPartitions;
+use confluent_kafka::admin::RecordsToDelete;
+use confluent_kafka::common::TopicIdPartition;
+use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::serialization::StringDeserializer;
+use confluent_kafka::common::serialization::StringSerializer;
 use confluent_kafka::consumer::AcknowledgementCommitCallback;
 use confluent_kafka::consumer::acknowledgement_commit_callback;
 use std::sync::atomic::AtomicBool;
@@ -2123,5 +2147,881 @@ async fn test_acquisition_lock_timeout_on_consumer() {
     assert_eq!(0, consumer_records.count());
     base.verify_share_group_state_topic_records_produced().await;
     close_producer(producer).await;
+    close_share_consumer(share_consumer).await;
+}
+
+// testPollThrowsInterruptExceptionIfInterrupted is not translated: Rust has no
+// thread interrupts (see the module docs).
+
+/// Java's `testSubscribeOnInvalidTopicThrowsInvalidTopicException`: the
+/// error depends upon a metadata response which arrives asynchronously, so the
+/// poll waits long enough for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscribe_on_invalid_topic_throws_invalid_topic_exception() {
+    let base = ShareConsumerTestBase::setup(default_share_cluster_config()).await;
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let mut share_consumer = base.create_share_consumer(&group1);
+
+    share_consumer
+        .subscribe(vec!["topic abc".to_string()])
+        .await
+        .expect("subscribe");
+
+    // The exception depends upon a metadata response which arrives asynchronously. If the delay is
+    // too short, the poll might return before the error is known.
+    let error = share_consumer
+        .poll(Duration::from_millis(10000))
+        .await
+        .expect_err("poll of an invalid topic");
+    assert!(error.is_invalid_topic_error(), "{error:?}");
+    assert_eq!("Invalid topics: [topic abc]", error.message());
+    close_share_consumer(share_consumer).await;
+}
+
+/// Java's `testWakeupWithFetchedRecordsAvailable`: a wakeup when records are
+/// buffered doesn't prevent the records being returned on the next poll.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_wakeup_with_fetched_records_available() {
+    let base = ShareConsumerTestBase::setup(default_share_cluster_config()).await;
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let producer = base.create_producer().await;
+    let mut share_consumer = base.create_share_consumer(&group1);
+
+    send_record(&producer, key_value_record(&base)).await.expect("send");
+    producer.flush().await.expect("flush");
+
+    share_consumer
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+
+    share_consumer.wakeup();
+    let error = share_consumer.poll(Duration::ZERO).await.expect_err("poll after wakeup");
+    assert!(error.is_wakeup_error(), "{error:?}");
+    // Java's `WakeupException` has no message.
+    assert_eq!("", error.message());
+
+    let records = base.waited_poll(&mut share_consumer, 2500, 1).await;
+    assert_eq!(1, records.count());
+    base.verify_share_group_state_topic_records_produced().await;
+    close_producer(producer).await;
+    close_share_consumer(share_consumer).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscription_followed_by_topic_creation() {
+    if skip_from(SHARE_ASSIGNMENT_INTERVAL_RELEASE, "testSubscriptionFollowedByTopicCreation") {
+        return;
+    }
+    subscription_followed_by_topic_creation(default_share_cluster_config()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscription_followed_by_topic_creation_assignment_interval_0() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testSubscriptionFollowedByTopicCreation (interval 0)",
+    ) {
+        return;
+    }
+    subscription_followed_by_topic_creation(assignment_interval_config("0")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscription_followed_by_topic_creation_assignment_interval_1000() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testSubscriptionFollowedByTopicCreation (interval 1000)",
+    ) {
+        return;
+    }
+    subscription_followed_by_topic_creation(assignment_interval_config("1000")).await;
+}
+
+/// Java's `testSubscriptionFollowedByTopicCreation`.
+async fn subscription_followed_by_topic_creation(config: crate::common::cluster_config::ClusterConfig) {
+    let mut base = ShareConsumerTestBase::setup(config).await;
+    let topic = base.topic("foo");
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let producer = base.create_producer().await;
+    let mut share_consumer = base.create_share_consumer(&group1);
+
+    share_consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+
+    // Topic is created post creation of share consumer and subscription
+    base.create_topic(&topic).await;
+
+    let record = || producer_record(topic.clone(), Some(0), Some(b"key".to_vec()), Some(b"value".to_vec()));
+    send_record(&producer, record()).await.expect("send");
+    producer.flush().await.expect("flush");
+
+    let mut deadline = WaitDeadline::new(
+        DEFAULT_MAX_WAIT_MS,
+        100,
+        "Failed to consume records for share consumer, metadata sync failed",
+    );
+    while share_consumer.poll(Duration::from_millis(2000)).await.expect("poll").count() != 1 {
+        deadline.fail_or_pause().await;
+    }
+
+    send_record(&producer, record()).await.expect("send");
+    let records = share_consumer.poll(Duration::from_millis(5000)).await.expect("poll");
+    assert_eq!(1, records.count());
+    send_record(&producer, record()).await.expect("send");
+    let records = share_consumer.poll(Duration::from_millis(5000)).await.expect("poll");
+    assert_eq!(1, records.count());
+    base.verify_share_group_state_topic_records_produced().await;
+    close_producer(producer).await;
+    close_share_consumer(share_consumer).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscription_and_poll_followed_by_topic_deletion() {
+    if skip_from(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testSubscriptionAndPollFollowedByTopicDeletion",
+    ) {
+        return;
+    }
+    subscription_and_poll_followed_by_topic_deletion(default_share_cluster_config()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscription_and_poll_followed_by_topic_deletion_assignment_interval_0() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testSubscriptionAndPollFollowedByTopicDeletion (interval 0)",
+    ) {
+        return;
+    }
+    subscription_and_poll_followed_by_topic_deletion(assignment_interval_config("0")).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscription_and_poll_followed_by_topic_deletion_assignment_interval_1000() {
+    if skip_below(
+        SHARE_ASSIGNMENT_INTERVAL_RELEASE,
+        "testSubscriptionAndPollFollowedByTopicDeletion (interval 1000)",
+    ) {
+        return;
+    }
+    subscription_and_poll_followed_by_topic_deletion(assignment_interval_config("1000")).await;
+}
+
+/// Polls (2 s each, every 100 ms) until one poll returns exactly one record,
+/// Java's `TestUtils.waitForCondition(() -> shareConsumer.poll(Duration.ofMillis(2000)).count() == 1,
+/// DEFAULT_MAX_WAIT_MS, 100L, () -> details)`.
+async fn wait_for_one_record(share_consumer: &mut BytesShareConsumer, details: &str) {
+    let mut deadline = WaitDeadline::new(DEFAULT_MAX_WAIT_MS, 100, details);
+    while share_consumer.poll(Duration::from_millis(2000)).await.expect("poll").count() != 1 {
+        deadline.fail_or_pause().await;
+    }
+}
+
+/// Java's `testSubscriptionAndPollFollowedByTopicDeletion`.
+async fn subscription_and_poll_followed_by_topic_deletion(config: crate::common::cluster_config::ClusterConfig) {
+    let mut base = ShareConsumerTestBase::setup(config).await;
+    let topic1 = base.topic("bar");
+    let topic2 = base.topic("baz");
+    base.create_topic(&topic1).await;
+    base.create_topic(&topic2).await;
+
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let producer = base.create_producer().await;
+    let mut share_consumer = base.create_share_consumer(&group1);
+
+    let record_topic1 = || producer_record(topic1.clone(), Some(0), Some(b"key".to_vec()), Some(b"value".to_vec()));
+    let record_topic2 = || producer_record(topic2.clone(), Some(0), Some(b"key".to_vec()), Some(b"value".to_vec()));
+
+    // Consumer subscribes to the topics -> bar and baz.
+    share_consumer
+        .subscribe(vec![topic1.clone(), topic2.clone()])
+        .await
+        .expect("subscribe");
+
+    send_record(&producer, record_topic1())
+        .await
+        .expect("send")
+        .get()
+        .await
+        .expect("sent");
+    wait_for_one_record(&mut share_consumer, "incorrect number of records").await;
+
+    send_record(&producer, record_topic2())
+        .await
+        .expect("send")
+        .get()
+        .await
+        .expect("sent");
+    wait_for_one_record(&mut share_consumer, "incorrect number of records").await;
+
+    // Topic bar is deleted, hence poll should not give any results.
+    base.delete_topic(&topic1).await;
+    let records = share_consumer.poll(Duration::from_millis(500)).await.expect("poll");
+    assert_eq!(0, records.count());
+
+    send_record(&producer, record_topic2())
+        .await
+        .expect("send")
+        .get()
+        .await
+        .expect("sent");
+    // Poll should give the record from the non-deleted topic baz.
+    wait_for_one_record(&mut share_consumer, "incorrect number of records").await;
+
+    send_record(&producer, record_topic2())
+        .await
+        .expect("send")
+        .get()
+        .await
+        .expect("sent");
+    wait_for_one_record(&mut share_consumer, "incorrect number of records").await;
+    base.verify_share_group_state_topic_records_produced().await;
+    close_producer(producer).await;
+    close_share_consumer(share_consumer).await;
+}
+
+/// `adminClient.deleteRecords(Map.of(tp, RecordsToDelete.beforeOffset(offset))).all().get()`.
+async fn delete_records_before(admin: &dyn Admin, tp: &TopicPartition, offset: i64) {
+    admin
+        .delete_records(&HashMap::from([(tp.clone(), RecordsToDelete::with_offset(offset))]))
+        .all()
+        .get()
+        .await
+        .unwrap_or_else(|e| panic!("Failed to delete records: {e}"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_lso_movement_by_records_deletion() {
+    let base = ShareConsumerTestBase::setup(default_share_cluster_config()).await;
+    let group_id = base.group("group1");
+
+    base.alter_share_auto_offset_reset(&group_id, "earliest").await;
+    let producer = base.create_producer().await;
+    let admin_client = base.create_admin_client();
+
+    let record = || {
+        producer_record(
+            base.tp.topic().to_string(),
+            Some(0),
+            Some(b"key".to_vec()),
+            Some(b"value".to_vec()),
+        )
+    };
+
+    // We write 10 records to the topic, so they would be written from offsets 0-9 on the topic.
+    for _ in 0..10 {
+        send_record(&producer, record())
+            .await
+            .expect("Failed to send records")
+            .get()
+            .await
+            .expect("Failed to send records");
+    }
+
+    // We delete records before offset 5, so the LSO should move to 5.
+    delete_records_before(admin_client.as_ref(), &base.tp, 5).await;
+
+    let message_count = base.consume_messages(&AtomicUsize::new(0), 5, &group_id, 1, 10, true).await;
+    // The records returned belong to offsets 5-9.
+    assert_eq!(5, message_count);
+
+    // We write 5 records to the topic, so they would be written from offsets 10-14 on the topic.
+    for _ in 0..5 {
+        send_record(&producer, record())
+            .await
+            .expect("Failed to send records")
+            .get()
+            .await
+            .expect("Failed to send records");
+    }
+
+    // We delete records before offset 14, so the LSO should move to 14.
+    delete_records_before(admin_client.as_ref(), &base.tp, 14).await;
+
+    let consume_messages_count = base.consume_messages(&AtomicUsize::new(0), 1, &group_id, 1, 10, true).await;
+    // The record returned belong to offset 14.
+    assert_eq!(1, consume_messages_count);
+
+    // We delete records before offset 15, so the LSO should move to 15 and now no records should be returned.
+    delete_records_before(admin_client.as_ref(), &base.tp, 15).await;
+
+    let message_count = base.consume_messages(&AtomicUsize::new(0), 0, &group_id, 1, 5, true).await;
+    assert_eq!(0, message_count);
+    base.verify_share_group_state_topic_records_produced().await;
+    close_producer(producer).await;
+    close_admin(admin_client).await;
+}
+
+/// The `@ClusterTest(brokers = 3, serverProperties = ...)` of
+/// `testShareConsumerAfterCoordinatorMovement` and `testComplexShareConsumer`,
+/// merged with the class defaults as `ClusterTestExtensions` merges them (the
+/// method's value wins for a key both set).
+fn three_broker_config() -> crate::common::cluster_config::ClusterConfig {
+    let mut config = share_cluster_config_with(&[
+        ("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "false"),
+        ("KAFKA_GROUP_SHARE_MAX_PARTITION_MAX_RECORD_LOCKS", "10000"),
+        ("KAFKA_GROUP_SHARE_PARTITION_MAX_RECORD_LOCKS", "10000"),
+        ("KAFKA_GROUP_SHARE_RECORD_LOCK_DURATION_MS", "15000"),
+        ("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS", "3"),
+        ("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "3"),
+        ("KAFKA_SHARE_COORDINATOR_STATE_TOPIC_NUM_PARTITIONS", "3"),
+        ("KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR", "3"),
+    ]);
+    config.brokers = 3;
+    config
+}
+
+/// `java.lang.String#hashCode`: `s[0]*31^(n-1) + ... + s[n-1]` over the UTF-16
+/// code units, with `int` overflow.
+fn java_string_hash_code(s: &str) -> i32 {
+    s.encode_utf16()
+        .fold(0i32, |hash, unit| hash.wrapping_mul(31).wrapping_add(i32::from(unit)))
+}
+
+/// `org.apache.kafka.common.utils.Utils#abs`: `0` for `Integer.MIN_VALUE`.
+fn java_utils_abs(n: i32) -> i32 {
+    if n == i32::MIN { 0 } else { n.abs() }
+}
+
+/// The producer of `testShareConsumerAfterCoordinatorMovement`: string keys and
+/// values (Java's `StringSerializer` configs).
+fn create_string_producer(base: &ShareConsumerTestBase) -> KafkaProducer<String, String> {
+    let mut props = HashMap::new();
+    base.ctx().configure(&mut props);
+    KafkaProducer::new(
+        ProducerConfig::new(&props).expect("valid producer config"),
+        StringSerializer::new(),
+        StringSerializer::new(),
+    )
+    .expect("KafkaProducer::new")
+}
+
+/// Waits up to Java's 5 s `awaitTermination` for each task of a
+/// `shutdownExecutorService`, aborting the rest (`shutdownNow`). A task that
+/// panicked fails the test.
+async fn shutdown_tasks(tasks: Vec<tokio::task::JoinHandle<()>>) {
+    for task in tasks {
+        let abort = task.abort_handle();
+        match tokio::time::timeout(Duration::from_secs(5), task).await {
+            Ok(Ok(())) => {},
+            Ok(Err(e)) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Ok(Err(_)) => {},
+            Err(_) => abort.abort(),
+        }
+    }
+}
+
+/// Java's `testShareConsumerAfterCoordinatorMovement` (`@Timeout(90)`): the
+/// share coordinator of the group's partition is shut down while a producer
+/// and a share consumer run, and every produced record is still consumed.
+///
+/// Java runs the producer, the consumer and the shutdown on a scheduled
+/// executor and never reads their futures, so an assertion failing on the
+/// shutdown task is lost there; here a panicking task fails the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_share_consumer_after_coordinator_movement() {
+    let mut config = three_broker_config();
+    config.dedicated = true;
+    let mut base = ShareConsumerTestBase::setup(config).await;
+    let topic_name = base.topic("multipart");
+    let group_id = base.group("multipartGrp");
+    let base = Arc::new(base);
+    test_utils::with_timeout("testShareConsumerAfterCoordinatorMovement", Duration::from_secs(90), async {
+        let topic_id = base.create_topic_with_partitions_replication_factor(&topic_name, 3, 3).await;
+        base.alter_share_auto_offset_reset(&group_id, "earliest").await;
+
+        let tp_multi = TopicPartition::new(topic_name.clone(), 0);
+
+        // produce some messages
+        let prod_state = Arc::new(ClientState::default());
+        let produced: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let producer_task = tokio::spawn({
+            let base = Arc::clone(&base);
+            let prod_state = Arc::clone(&prod_state);
+            let produced = Arc::clone(&produced);
+            let tp_multi = tp_multi.clone();
+            async move {
+                let mut i = 0;
+                let producer = create_string_producer(&base);
+                while !prod_state.done().load(Ordering::SeqCst) {
+                    let key = format!("key-{i}");
+                    i += 1;
+                    let record = ProducerRecord::with_partition_key(
+                        tp_multi.topic().to_string(),
+                        Some(tp_multi.partition()),
+                        Some(key.clone()),
+                        Some("value".to_string()),
+                    )
+                    .expect("a valid record");
+                    let sent: Result<(), Error> = async {
+                        <KafkaProducer<String, String> as Producer<String, String>>::send(&producer, record).await?;
+                        producer.flush().await
+                    }
+                    .await;
+                    if sent.is_ok() {
+                        // count only correctly produced records
+                        prod_state.count().fetch_add(1, Ordering::SeqCst);
+                        produced.lock().expect("produced lock").insert(key);
+                    }
+                }
+                tokio::time::timeout(Duration::from_secs(60), producer.close())
+                    .await
+                    .expect("producer close did not return in time")
+                    .expect("producer close");
+            }
+        });
+
+        // consume messages - start after small delay
+        let cons_state = Arc::new(ClientState::default());
+        // using map here if we want to debug specific keys
+        let consumed: Arc<Mutex<HashMap<String, usize>>> = Arc::new(Mutex::new(HashMap::new()));
+        let consumer_task = tokio::spawn({
+            let base = Arc::clone(&base);
+            let prod_state = Arc::clone(&prod_state);
+            let cons_state = Arc::clone(&cons_state);
+            let consumed = Arc::clone(&consumed);
+            let group_id = group_id.clone();
+            let topic_name = topic_name.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let mut share_consumer = base.create_share_consumer_with_deserializers(
+                    &group_id,
+                    &HashMap::new(),
+                    StringDeserializer::new(),
+                    StringDeserializer::new(),
+                );
+                share_consumer.subscribe(vec![topic_name]).await.expect("subscribe");
+                while !cons_state.done().load(Ordering::SeqCst) {
+                    let records = share_consumer.poll(Duration::from_millis(2000)).await.expect("poll");
+                    cons_state.count().fetch_add(records.count(), Ordering::SeqCst);
+                    let mut consumed = consumed.lock().expect("consumed lock");
+                    for record in &records {
+                        *consumed.entry(record.key().cloned().unwrap_or_default()).or_insert(0) += 1;
+                    }
+                    drop(consumed);
+                    if prod_state.done().load(Ordering::SeqCst) && records.count() == 0 {
+                        cons_state.done().store(true, Ordering::SeqCst);
+                    }
+                }
+                close_share_consumer(share_consumer).await;
+            }
+        });
+
+        // To be closer to real world scenarios, we will execute after
+        // some time has elapsed since the producer and consumer started
+        // working.
+        let shutdown_task = tokio::spawn({
+            let base = Arc::clone(&base);
+            let group_id = group_id.clone();
+            let tp_multi = tp_multi.clone();
+            async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                // Get the current node hosting the __share_group_state partition
+                // on which tpMulti is hosted. Then shut down this node and wait
+                // for it to be gracefully shutdown. Then fetch the coordinator again
+                // and verify that it has moved to some other broker.
+                let admin = base.create_admin_client();
+                let key = format!("{group_id}:{topic_id}:{}", tp_multi.partition());
+                let share_group_state_tp = java_utils_abs(java_string_hash_code(&key)) % 3;
+                let cur_share_coord_node_id = base
+                    .topic_partition_leader(admin.as_ref(), SHARE_GROUP_STATE_TOPIC_NAME, share_group_state_tp)
+                    .await
+                    .expect("topicPartitionLeader");
+                assert_eq!(1, cur_share_coord_node_id.len());
+
+                // shutdown the coordinator, and wait for it to be completely shutdown
+                base.ctx().cluster().shutdown_broker(cur_share_coord_node_id[0]).await;
+
+                let new_share_coord_node_id = base
+                    .topic_partition_leader(admin.as_ref(), SHARE_GROUP_STATE_TOPIC_NAME, share_group_state_tp)
+                    .await
+                    .expect("topicPartitionLeader");
+
+                assert_eq!(1, new_share_coord_node_id.len());
+                assert_ne!(cur_share_coord_node_id[0], new_share_coord_node_id[0]);
+                close_admin(admin).await;
+            }
+        });
+
+        // stop the producer after some time (but after coordinator shutdown)
+        let stop_task = tokio::spawn({
+            let prod_state = Arc::clone(&prod_state);
+            async move {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                prod_state.done().store(true, Ordering::SeqCst);
+            }
+        });
+
+        // wait for both producer and consumer to finish
+        wait_for_condition_with_pause(
+            || {
+                let done = prod_state.done().load(Ordering::SeqCst) && cons_state.done().load(Ordering::SeqCst);
+                async move { done }
+            },
+            45_000,
+            500,
+            "prod/cons not done yet",
+        )
+        .await;
+
+        // Make sure we consumed all records. Consumed records could be higher
+        // due to re-delivery but that is expected since we are only guaranteeing
+        // at least once semantics.
+        assert!(prod_state.count().load(Ordering::SeqCst) <= cons_state.count().load(Ordering::SeqCst));
+        let consumed_keys: HashSet<String> = consumed.lock().expect("consumed lock").keys().cloned().collect();
+        let produced = produced.lock().expect("produced lock").clone();
+        assert!(produced.is_superset(&consumed_keys) && consumed_keys.is_superset(&produced));
+
+        shutdown_tasks(vec![producer_task, consumer_task, shutdown_task, stop_task]).await;
+
+        base.verify_share_group_state_topic_records_produced().await;
+    })
+    .await;
+}
+
+/// Java's `testComplexShareConsumer` (`@Timeout(150)`).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_complex_share_consumer() {
+    let mut base = ShareConsumerTestBase::setup(three_broker_config()).await;
+    let topic_name = base.topic("multipart");
+    let group_id = base.group("multipartGrp");
+    let base = Arc::new(base);
+    test_utils::with_timeout("testComplexShareConsumer", Duration::from_secs(150), async {
+        base.create_topic_with_partitions_replication_factor(&topic_name, 3, 3).await;
+        let multi_tp = TopicPartition::new(topic_name.clone(), 0);
+
+        let prod_state = Arc::new(ClientState::default());
+
+        // Produce a fixed number of messages for deterministic testing.
+        let target_record_count = 2000;
+        let producer_task = tokio::spawn({
+            let base = Arc::clone(&base);
+            let prod_state = Arc::clone(&prod_state);
+            async move {
+                let producer = base.create_producer().await;
+                loop {
+                    let record = producer_record(
+                        multi_tp.topic().to_string(),
+                        Some(multi_tp.partition()),
+                        Some(b"key".to_vec()),
+                        Some(b"value".to_vec()),
+                    );
+                    send_record(&producer, record).await.expect("send");
+                    producer.flush().await.expect("flush");
+                    if prod_state.count().fetch_add(1, Ordering::SeqCst) + 1 >= target_record_count {
+                        break;
+                    }
+                }
+                prod_state.done().store(true, Ordering::SeqCst);
+                close_producer(producer).await;
+            }
+        });
+
+        // Init a complex share consumer. Java passes only the bootstrap servers;
+        // the security keys of this run's listener go with them.
+        let mut properties = HashMap::from([("share.acknowledgement.mode".to_string(), EXPLICIT.to_string())]);
+        base.ctx().apply_security(&mut properties);
+        let complex_cons1 = Arc::new(ComplexShareConsumer::new(
+            &base.bootstrap_servers(),
+            &topic_name,
+            &group_id,
+            &properties,
+        ));
+        base.register_group(&group_id);
+        base.alter_share_auto_offset_reset(&group_id, "earliest").await;
+
+        let consumer_task = tokio::spawn({
+            let complex_cons1 = Arc::clone(&complex_cons1);
+            async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                complex_cons1.run().await;
+            }
+        });
+
+        // All messages which can be read are read, some would be redelivered (roughly 2 times the records produced).
+        wait_for_condition_with_pause(
+            || {
+                let done = complex_cons1.is_done();
+                async move { done }
+            },
+            45_000,
+            DEFAULT_POLL_INTERVAL_MS,
+            "did not close!",
+        )
+        .await;
+        let produced = prod_state.count().load(Ordering::SeqCst);
+        // 2 times with margin of error (5%).
+        let delta = complex_cons1.records_read() as i64 - (produced as f64 * 2.0 * 0.95) as i64;
+
+        assert!(
+            delta > 0,
+            "Producer ({}) and share consumer ({}) record count mismatch.",
+            produced,
+            complex_cons1.records_read()
+        );
+
+        shutdown_tasks(vec![producer_task, consumer_task]).await;
+
+        base.verify_share_group_state_topic_records_produced().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_share_group_max_size_config_exceeded() {
+    // Setting max group size to 3
+    let base = ShareConsumerTestBase::setup(share_cluster_config_with(&[("KAFKA_GROUP_SHARE_MAX_SIZE", "3")])).await;
+    let group1 = base.group("group1");
+    // creating 3 consumers in the group1
+    let mut share_consumer1 = base.create_share_consumer(&group1);
+    let mut share_consumer2 = base.create_share_consumer(&group1);
+    let mut share_consumer3 = base.create_share_consumer(&group1);
+
+    let topics = vec![base.tp.topic().to_string()];
+    share_consumer1.subscribe(topics.clone()).await.expect("subscribe");
+    share_consumer2.subscribe(topics.clone()).await.expect("subscribe");
+    share_consumer3.subscribe(topics.clone()).await.expect("subscribe");
+
+    share_consumer1.poll(Duration::from_millis(5000)).await.expect("poll");
+    share_consumer2.poll(Duration::from_millis(5000)).await.expect("poll");
+    share_consumer3.poll(Duration::from_millis(5000)).await.expect("poll");
+
+    let mut share_consumer4 = base.create_share_consumer(&group1);
+    share_consumer4.subscribe(topics).await.expect("subscribe");
+
+    let mut deadline = WaitDeadline::new(30000, 200, "The 4th consumer was not kicked out of the group");
+    loop {
+        match share_consumer4.poll(Duration::from_millis(5000)).await {
+            Err(e) if e.is_group_max_size_reached_error() => {
+                assert_eq!("The share group has reached its maximum capacity of 3 members.", e.message());
+                break;
+            },
+            _ => deadline.fail_or_pause().await,
+        }
+    }
+
+    close_share_consumer(share_consumer1).await;
+    close_share_consumer(share_consumer2).await;
+    close_share_consumer(share_consumer3).await;
+    close_share_consumer(share_consumer4).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_share_group_share_session_cache_is_full() {
+    let base = ShareConsumerTestBase::setup(share_cluster_config_with(&[
+        // Setting max group size to 1
+        ("KAFKA_GROUP_SHARE_MAX_SIZE", "1"),
+        // Setting max share sessions value to 1
+        ("KAFKA_GROUP_SHARE_MAX_SHARE_SESSIONS", "1"),
+    ]))
+    .await;
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let producer = base.create_producer().await;
+    let mut share_consumer1 = base.create_share_consumer(&group1);
+    let mut share_consumer2 = base.create_share_consumer(&base.group("group2"));
+
+    send_record(&producer, key_value_record(&base)).await.expect("send");
+    producer.flush().await.expect("flush");
+    share_consumer1
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+    share_consumer2
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+
+    let records = base.waited_poll(&mut share_consumer1, 2500, 1).await;
+    assert_eq!(1, records.count());
+
+    send_record(&producer, key_value_record(&base)).await.expect("send");
+    producer.flush().await.expect("flush");
+
+    // The second share consumer should not throw any exception, but should not receive any records as well.
+    let records = share_consumer2.poll(Duration::from_millis(1000)).await.expect("poll");
+
+    assert_eq!(0, records.count());
+
+    close_share_consumer(share_consumer1).await;
+    close_share_consumer(share_consumer2).await;
+    close_producer(producer).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_commit_sync_fails_for_deleted_topic() {
+    let mut base = ShareConsumerTestBase::setup(default_share_cluster_config()).await;
+    let baz = base.topic("baz");
+    let topic_id = base.create_topic_with_partitions_replication_factor(&baz, 1, 1).await;
+    let group1 = base.group("group1");
+    base.alter_share_auto_offset_reset(&group1, "earliest").await;
+    let producer = base.create_producer().await;
+    let mut share_consumer = base.create_share_consumer_with_properties(
+        &group1,
+        &HashMap::from([("share.acknowledgement.mode".to_string(), EXPLICIT.to_string())]),
+    );
+    for i in 0..10 {
+        let record = producer_record(
+            baz.clone(),
+            Some(0),
+            Some(b"key".to_vec()),
+            Some(format!("Message {i}").into_bytes()),
+        );
+        send_record(&producer, record).await.expect("send");
+    }
+    producer.flush().await.expect("flush");
+
+    share_consumer.subscribe(vec![baz.clone()]).await.expect("subscribe");
+    let records = base.waited_poll(&mut share_consumer, 2500, 10).await;
+    assert_eq!(10, records.count());
+
+    for record in &records {
+        share_consumer.acknowledge_with_record(record).expect("acknowledge");
+    }
+
+    // Topic deletion does not necessarily become apparent across the cluster immediately, so sleep a short while
+    base.delete_topic(&baz).await;
+    tokio::time::sleep(Duration::from_millis(5000)).await;
+
+    let commit_result = share_consumer.commit_sync().await.expect("commitSync");
+    assert_eq!(1, commit_result.len());
+    let error = commit_result
+        .get(&TopicIdPartition::new(topic_id, TopicPartition::new(baz.clone(), 0)))
+        .expect("baz-0 in the commit result")
+        .as_ref()
+        .expect("baz-0 failed");
+    assert!(error.is_unknown_topic_id_error(), "{error:?}");
+    assert_eq!("This server does not host this topic ID.", error.message());
+    close_producer(producer).await;
+    close_share_consumer(share_consumer).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_describe_share_group_offsets_for_empty_share_partition() {
+    let base = ShareConsumerTestBase::setup(default_share_cluster_config()).await;
+    let group_id = base.group("group1");
+    let mut share_consumer = base.create_share_consumer(&group_id);
+    let admin_client = base.create_admin_client();
+    share_consumer
+        .subscribe(vec![base.tp.topic().to_string()])
+        .await
+        .expect("subscribe");
+    // Polling share consumer to make sure the share partition is created.
+    share_consumer.poll(Duration::from_millis(2000)).await.expect("poll");
+    let share_partition_offset_info = base
+        .share_partition_offset_info(admin_client.as_ref(), &group_id, &base.tp)
+        .await
+        .expect("listShareGroupOffsets");
+    // Since the partition is empty, and no records have been consumed, the share partition startOffset will be
+    // -1. Thus, there will be no description for the share partition.
+    assert!(share_partition_offset_info.is_none(), "{share_partition_offset_info:?}");
+    close_share_consumer(share_consumer).await;
+    close_admin(admin_client).await;
+}
+
+/// The broker release whose group coordinator initializes a partition added to
+/// a topic the share group already knows at offset 0 rather than by
+/// `share.auto.offset.reset` (KAFKA-20742, `GroupMetadataManager`'s
+/// `InitializeShareGroupStateParameters`, 4.4.0). An older broker resolves the
+/// new partition with the group's `latest` reset and skips the records produced
+/// before it initializes it, which is what the test asserts does not happen.
+const ADDED_PARTITIONS_START_AT_ZERO_RELEASE: (u32, u32) = (4, 4);
+
+/// Java's `testAddedPartitionsOfKnownTopicStartAtOffsetZero`, gated on
+/// [`ADDED_PARTITIONS_START_AT_ZERO_RELEASE`]: it tests a broker fix.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_added_partitions_of_known_topic_start_at_offset_zero() {
+    if skip_below(
+        ADDED_PARTITIONS_START_AT_ZERO_RELEASE,
+        "testAddedPartitionsOfKnownTopicStartAtOffsetZero",
+    ) {
+        return;
+    }
+    let mut base = ShareConsumerTestBase::setup(default_share_cluster_config()).await;
+    let group_id = base.group("expand-group");
+    let topic = base.topic("expand-topic");
+    base.create_topic_with_partitions_replication_factor(&topic, 1, 1).await;
+
+    base.alter_share_auto_offset_reset(&group_id, "latest").await;
+
+    let producer = base.create_producer().await;
+    let admin = base.create_admin_client();
+    let mut share_consumer = base.create_share_consumer(&group_id);
+
+    // Produce 10 records to partition 0 before anyone subscribes.
+    for i in 0..10 {
+        let record = producer_record(
+            topic.clone(),
+            Some(0),
+            Some(format!("p0-key-{i}").into_bytes()),
+            Some(format!("p0-value-{i}").into_bytes()),
+        );
+        send_record(&producer, record).await.expect("send");
+    }
+    producer.flush().await.expect("flush");
+
+    // The consumer joins and polls: with "latest" it starts partition 0 at the log end, so it receives
+    // none of the pre-existing records. This also makes the group aware of (initializes) the topic.
+    share_consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    let mut received = 0;
+    let deadline = std::time::Instant::now() + Duration::from_millis(10000);
+    while std::time::Instant::now() < deadline {
+        received += share_consumer.poll(Duration::from_millis(1000)).await.expect("poll").count();
+    }
+    assert_eq!(
+        0, received,
+        "latest reset should skip records produced before the topic was known"
+    );
+
+    // Expand the topic and produce 10 records to the brand-new partition 1, each with a distinct,
+    // known value so we can assert all of them are delivered (none skipped by the latest reset).
+    admin
+        .create_partitions(&HashMap::from([(topic.clone(), NewPartitions::increase_to(2))]))
+        .all()
+        .get()
+        .await
+        .expect("createPartitions");
+    test_utils::wait_for_all_partitions_metadata(admin.as_ref(), &topic, 2).await;
+
+    let mut expected_values = Vec::new();
+    for i in 0..10 {
+        let value = format!("p1-value-{i}");
+        expected_values.push(value.clone());
+        let record = producer_record(
+            topic.clone(),
+            Some(1),
+            Some(format!("p1-key-{i}").into_bytes()),
+            Some(value.into_bytes()),
+        );
+        send_record(&producer, record).await.expect("send");
+    }
+    producer.flush().await.expect("flush");
+
+    // Partition 1 belongs to an already-known topic, so it must be initialized at offset 0 and deliver
+    // every record produced above — even though it was created under a "latest" reset. Share consumers
+    // deliver at-least-once, so records may be redelivered; track distinct values in a set so
+    // duplicates don't cause spurious failures, then assert the count of distinct records.
+    let mut received_values = HashSet::new();
+    let mut deadline = WaitDeadline::new(30000, 500, "did not receive all records from the newly added partition");
+    loop {
+        let records = share_consumer.poll(Duration::from_millis(1000)).await.expect("poll");
+        for record in &records {
+            if record.partition() == 1 {
+                received_values.insert(String::from_utf8(record.value().cloned().unwrap_or_default()).expect("utf-8"));
+            }
+        }
+        if received_values.len() >= expected_values.len() {
+            break;
+        }
+        deadline.fail_or_pause().await;
+    }
+    assert_eq!(expected_values.len(), received_values.len());
+    close_producer(producer).await;
+    close_admin(admin).await;
     close_share_consumer(share_consumer).await;
 }
