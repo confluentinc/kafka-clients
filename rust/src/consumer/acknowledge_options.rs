@@ -28,8 +28,9 @@ use crate::consumer::AcknowledgeType;
 /// built with [`AcknowledgeOptionsBuilder`]: the topic, partition and offset of
 /// the record to acknowledge, and the acknowledge type. All four are mandatory.
 // Java's `acknowledge(String topic, int partition, long offset,
-// AcknowledgeType type)`. Read only by the consumers, so the fields are
-// crate-private, as `ConsumerRecordOptions`'s are.
+// AcknowledgeType type)`. The getters let an implementation of the public
+// `ShareConsumer` trait read what Java passes as parameters, as
+// `CloseOptions`' getters do for `Consumer::close_with_options`.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 // the options of ShareConsumer's four-parameter acknowledge overload (CLAUDE.md §2)
@@ -44,6 +45,31 @@ pub struct AcknowledgeOptions {
     // The acknowledge type which indicates whether it was processed
     // successfully. Java's `type`.
     pub(crate) acknowledge_type: AcknowledgeType,
+}
+
+impl AcknowledgeOptions {
+    /// Returns the topic of the record to acknowledge.
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    /// Returns the partition of the record to acknowledge.
+    pub fn partition(&self) -> i32 {
+        self.partition
+    }
+
+    /// Returns the offset of the record to acknowledge.
+    pub fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    /// Returns the acknowledge type which indicates whether the record was
+    /// processed successfully.
+    // The getter of `AcknowledgeOptionsBuilder::set_type` (CLAUDE.md §2), as
+    // `ScramMechanism::r#type`.
+    pub fn r#type(&self) -> AcknowledgeType {
+        self.acknowledge_type
+    }
 }
 
 /// Fluent builder for [`AcknowledgeOptions`]: every parameter has a setter,
@@ -171,10 +197,10 @@ mod tests {
     #[test]
     fn build_with_every_parameter() {
         let options = complete().build().expect("every parameter is set");
-        assert_eq!("topic", options.topic);
-        assert_eq!(3, options.partition);
-        assert_eq!(42, options.offset);
-        assert_eq!(AcknowledgeType::Reject, options.acknowledge_type);
+        assert_eq!("topic", options.topic());
+        assert_eq!(3, options.partition());
+        assert_eq!(42, options.offset());
+        assert_eq!(AcknowledgeType::Reject, options.r#type());
     }
 
     /// R8 O2: `build` names the first mandatory parameter left unset.
