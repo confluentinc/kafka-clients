@@ -575,7 +575,7 @@ public sealed class AsyncConsumerDeserializationTests
         internal List<MemoryHandle> Pins { get; } = new List<MemoryHandle>();
 
         public async ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             if (Kept.Count == 0)
             {
@@ -609,6 +609,10 @@ public sealed class AsyncConsumerDeserializationTests
 
         internal int Calls { get; private set; }
 
+        public ValueTask<ReadOnlyMemory<byte>?> Deserialize(
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("the consumer called the form without headers");
+
         public async ValueTask<ReadOnlyMemory<byte>?> Deserialize(
             string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
@@ -635,7 +639,7 @@ public sealed class AsyncConsumerDeserializationTests
         }
 
         public async ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             string text = Text(data);
             lock (_calls)
@@ -672,7 +676,7 @@ public sealed class AsyncConsumerDeserializationTests
         internal List<string> Seen { get; } = new List<string>();
 
         public async ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             string text = Text(data);
             lock (Seen)
@@ -709,7 +713,7 @@ public sealed class AsyncConsumerDeserializationTests
         internal List<Exception> Thrown { get; } = new List<Exception>();
 
         public ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             string text = Text(data);
             Seen.Add(text);
@@ -758,7 +762,7 @@ public sealed class AsyncConsumerDeserializationTests
         internal List<CancellationToken> Tokens { get; } = new List<CancellationToken>();
 
         public async ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             string text = Text(data);
             if (Cancels)
@@ -796,7 +800,7 @@ public sealed class AsyncConsumerDeserializationTests
         internal int Calls { get; private set; }
 
         public async ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             Calls++;
             if (Calls == 1 && _closes)
@@ -862,7 +866,7 @@ public sealed class AsyncConsumerDeserializationTests
         internal List<ReadOnlyMemory<byte>> Lent { get; } = new List<ReadOnlyMemory<byte>>();
 
         public async ValueTask<ReadOnlyMemory<byte>?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             Lent.Add(data);
             await Task.Yield();

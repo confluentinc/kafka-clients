@@ -24,8 +24,9 @@ namespace Confluent.Kafka.Common.Serialization;
 /// <summary>
 /// <see cref="ReadOnlyMemoryDeserializer"/> for an asynchronous consumer: it calls that class, so the value is the
 /// same. It never waits: the <see cref="ValueTask{TResult}"/> it returns is already completed, the token is not read,
-/// and what <see cref="ReadOnlyMemoryDeserializer"/> throws is thrown by the call itself. It returns the memory as
-/// given, without a copy, which <see cref="IAsyncDeserializerWithRetention{T}"/> lets it do.
+/// and what <see cref="ReadOnlyMemoryDeserializer"/> throws is thrown by the call itself. Its headers form, which a
+/// consumer calls, returns the memory as given, without a copy, which <see cref="IAsyncDeserializerWithRetention{T}"/>
+/// lets it do; its form without headers copies the bytes, as the span form of that class does.
 /// </summary>
 public sealed class AsyncReadOnlyMemoryDeserializer
     : IAsyncDeserializerWithRetention<ReadOnlyMemory<byte>?>, IAsyncBuiltInDeserializer<ReadOnlyMemory<byte>?>
@@ -33,6 +34,16 @@ public sealed class AsyncReadOnlyMemoryDeserializer
     private readonly ReadOnlyMemoryDeserializer _inner = new ReadOnlyMemoryDeserializer();
 
     IDeserializer<ReadOnlyMemory<byte>?> IAsyncBuiltInDeserializer<ReadOnlyMemory<byte>?>.Inner => _inner;
+
+    /// <summary>
+    /// Decodes <paramref name="data"/> as <see cref="ReadOnlyMemoryDeserializer"/>'s form without headers does, by
+    /// calling it: the value is a copy of the bytes. A consumer calls the headers form of this class, never this one.
+    /// </summary>
+    /// <inheritdoc cref="IAsyncDeserializer{T}.Deserialize(string, ReadOnlyMemory{byte}, CancellationToken)" path="/param"/>
+    /// <returns>A completed task of a copy of the bytes, in a new array, an empty one included.</returns>
+    public ValueTask<ReadOnlyMemory<byte>?> Deserialize(
+        string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
+        new ValueTask<ReadOnlyMemory<byte>?>(_inner.Deserialize(topic, data.Span));
 
     /// <inheritdoc/>
     public ValueTask<ReadOnlyMemory<byte>?> Deserialize(

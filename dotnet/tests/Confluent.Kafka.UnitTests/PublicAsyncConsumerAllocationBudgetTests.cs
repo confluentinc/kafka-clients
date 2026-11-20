@@ -17,7 +17,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
-using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.UnitTests.Interop;
@@ -218,7 +217,7 @@ public sealed class PublicAsyncConsumerAllocationBudgetTests
         internal int LastThread { get; private set; }
 
         public ValueTask<object?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             Last = GC.GetAllocatedBytesForCurrentThread();
             LastThread = Environment.CurrentManagedThreadId;

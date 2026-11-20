@@ -314,6 +314,10 @@ public sealed class ZeroCopyRetentionBrokerTests
     /// <summary>A deserializer that keeps the bytes as given, after it has yielded, so the consumer awaits it.</summary>
     private sealed class YieldingRetainingDeserializer : IAsyncDeserializerWithRetention<ReadOnlyMemory<byte>?>
     {
+        public ValueTask<ReadOnlyMemory<byte>?> Deserialize(
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("the consumer called the form without headers");
+
         public async ValueTask<ReadOnlyMemory<byte>?> Deserialize(
             string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
@@ -339,7 +343,7 @@ public sealed class ZeroCopyRetentionBrokerTests
         internal List<SafeHandle> Batches { get; } = new List<SafeHandle>();
 
         public async ValueTask<int> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             await Task.Yield();
             if (Pins.Count < _pinned)

@@ -33,7 +33,9 @@ namespace Confluent.Kafka.UnitTests;
 /// without <see cref="IAsyncDisposable"/>, the one interface it disposes through; one that does not dispose them
 /// takes every shape, and a <c>Configure</c> without its interface is taken, as on the synchronous interfaces. A
 /// producer refuses a serializer with a public headers form of <c>Serialize</c> without
-/// <see cref="IAsyncSerializerWithHeaders{T}"/>, which it would never call. The asynchronous consumers and producers
+/// <see cref="IAsyncSerializerWithHeaders{T}"/>, and a consumer a deserializer with a public headers form of
+/// <c>Deserialize</c> without <see cref="IAsyncDeserializerWithHeaders{T}"/>, which they would never call. The
+/// asynchronous consumers and producers
 /// make the check when they are built: the real ones dispose their serdes, the mocks do not.
 /// </summary>
 public sealed class AsyncSerdeGuardTests
@@ -258,6 +260,49 @@ public sealed class AsyncSerdeGuardTests
         SerdeGuard.Check((IAsyncSerializer<string>)serde, DefaultMethodGuard.Producer, disposes: true);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AnAsyncConsumer_RefusesAHeadersFormItWouldNeverCall(bool mock)
+    {
+        foreach (bool asKey in new[] { true, false })
+        {
+            StrayHeadersDeserialize serde = new StrayHeadersDeserialize();
+            Plain other = new Plain();
+            IAsyncDeserializer<string> key = asKey ? serde : other;
+            IAsyncDeserializer<string> value = asKey ? other : serde;
+
+            IllegalArgumentException e = await Assert.ThrowsAsync<IllegalArgumentException>(async () =>
+            {
+                IAsyncDisposable consumer = mock
+                    ? new AsyncMockConsumer<string, string>(key, value)
+                    : await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), key, value);
+                await TestTimeout.DisposeAsync(consumer);
+            });
+
+            Assert.Equal(
+                Prefix + "StrayHeadersDeserialize declares Deserialize(string, Headers, ReadOnlyMemory<byte>, "
+                    + "CancellationToken) but does not implement IAsyncDeserializerWithHeaders<string>, so the consumer "
+                    + "would never call it.",
+                e.Message);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AnAsyncConsumer_TakesAHeadersFormThroughIAsyncDeserializerWithHeaders(bool mock)
+    {
+        HeadersDeserialize serde = new HeadersDeserialize();
+
+        IAsyncDisposable consumer = mock
+            ? new AsyncMockConsumer<string, string>(serde, serde)
+            : await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), serde, serde);
+        await TestTimeout.DisposeAsync(consumer);
+
+        SerdeGuard.Check((IAsyncDeserializer<string>)serde, DefaultMethodGuard.Consumer, disposes: true);
+    }
+
     private static string NeverCalled(string method) =>
         " declares " + method + " but does not implement IAsyncDisposable, so the {0} would never call it.";
 
@@ -286,7 +331,7 @@ public sealed class AsyncSerdeGuardTests
             string topic, string? data, CancellationToken cancellationToken) => default;
 
         public ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
     }
 
     /// <summary>A serde with no close.</summary>
@@ -306,6 +351,20 @@ public sealed class AsyncSerdeGuardTests
     {
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
             string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+    }
+
+    /// <summary>A serde with a public headers form of Deserialize but not IAsyncDeserializerWithHeaders.</summary>
+    private sealed class StrayHeadersDeserialize : Serde
+    {
+        public ValueTask<string?> Deserialize(
+            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
+    }
+
+    /// <summary>A serde whose headers form of Deserialize is IAsyncDeserializerWithHeaders's.</summary>
+    private sealed class HeadersDeserialize : Serde, IAsyncDeserializerWithHeaders<string>
+    {
+        public ValueTask<string?> Deserialize(
+            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
     }
 
     /// <summary>A serde with a public DisposeAsync() but not IAsyncDisposable.</summary>

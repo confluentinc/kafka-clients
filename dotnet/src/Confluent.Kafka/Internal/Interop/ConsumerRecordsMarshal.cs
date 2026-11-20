@@ -571,17 +571,17 @@ internal static class ConsumerRecordsMarshal
         int length = Math.Max(view->Length, 0);
         if (call.Retains)
         {
-            return call.Deserializer.Deserialize(topic, headers, batch.HandOut(view->Data, length), cancellationToken);
+            return call.DeserializeAwaited(topic, headers, batch.HandOut(view->Data, length), cancellationToken);
         }
 
         BytesMemoryManager? lent = batch.Lend(view->Data, length);
         return lent is null
-            ? call.Deserializer.Deserialize(topic, headers, ReadOnlyMemory<byte>.Empty, cancellationToken)
-            : DeserializeThenRevoke(call.Deserializer, lent, topic, headers, cancellationToken);
+            ? call.DeserializeAwaited(topic, headers, ReadOnlyMemory<byte>.Empty, cancellationToken)
+            : DeserializeThenRevoke(call, lent, topic, headers, cancellationToken);
     }
 
     private static async ValueTask<T?> DeserializeThenRevoke<T>(
-        IAsyncDeserializer<T> deserializer,
+        AsyncDeserializerCall<T> call,
         BytesMemoryManager lent,
         string topic,
         Headers headers,
@@ -589,7 +589,7 @@ internal static class ConsumerRecordsMarshal
     {
         try
         {
-            return await deserializer.Deserialize(topic, headers, lent.ReadOnlyMemory, cancellationToken)
+            return await call.DeserializeAwaited(topic, headers, lent.ReadOnlyMemory, cancellationToken)
                 .ConfigureAwait(false);
         }
         finally

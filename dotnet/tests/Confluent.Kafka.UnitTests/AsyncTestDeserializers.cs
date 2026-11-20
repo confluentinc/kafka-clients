@@ -21,11 +21,12 @@ using Confluent.Kafka.Common.Serialization;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Gives a test's synchronous deserializer to an asynchronous consumer: it calls the headers form when the
-/// deserializer has one, returns a completed <see cref="ValueTask{TResult}"/>, throws what the deserializer throws
-/// from the call itself, and disposes a disposable one.
+/// Gives a test's synchronous deserializer to an asynchronous consumer: it has both forms, as
+/// <see cref="IAsyncDeserializerWithHeaders{T}"/>, and its headers form calls the deserializer's when it has one. It
+/// returns a completed <see cref="ValueTask{TResult}"/>, throws what the deserializer throws from the call itself, and
+/// disposes a disposable one.
 /// </summary>
-internal sealed class AsyncDeserializerOver<T> : IAsyncDeserializer<T>, IAsyncDisposable
+internal sealed class AsyncDeserializerOver<T> : IAsyncDeserializerWithHeaders<T>, IAsyncDisposable
 {
     private readonly IDeserializer<T> _inner;
     private readonly IDeserializerWithHeaders<T>? _withHeaders;
@@ -35,6 +36,9 @@ internal sealed class AsyncDeserializerOver<T> : IAsyncDeserializer<T>, IAsyncDi
         _inner = inner;
         _withHeaders = inner as IDeserializerWithHeaders<T>;
     }
+
+    public ValueTask<T?> Deserialize(string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        new ValueTask<T?>(_inner.Deserialize(topic, data.Span));
 
     public ValueTask<T?> Deserialize(
         string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>

@@ -288,7 +288,7 @@ public sealed class SerdeHeadersBrokerTests
     /// A string deserializer whose headers form appends the value of a header (the schema id unless another is named)
     /// and records the headers it was given, or throws after recording them. The async form does the same.
     /// </summary>
-    private sealed class HeaderReadingDeserializer : IDeserializerWithHeaders<string>, IAsyncDeserializer<string>
+    private sealed class HeaderReadingDeserializer : IDeserializerWithHeaders<string>, IAsyncDeserializerWithHeaders<string>
     {
         private readonly string _header;
 
@@ -317,6 +317,10 @@ public sealed class SerdeHeadersBrokerTests
             byte[]? id = headers.LastHeader(_header)?.Value();
             return text + "|" + (id is null ? "none" : Encoding.UTF8.GetString(id));
         }
+
+        public ValueTask<string?> Deserialize(
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("the consumer called the form without headers");
 
         public ValueTask<string?> Deserialize(
             string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>

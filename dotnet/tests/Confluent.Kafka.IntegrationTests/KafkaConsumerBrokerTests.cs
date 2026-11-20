@@ -20,7 +20,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
-using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Performance.Tests;
@@ -205,7 +204,7 @@ public sealed class KafkaConsumerBrokerTests
         internal bool WaitDisposed(TimeSpan timeout) => _disposed.Wait(timeout);
 
         public ValueTask<byte[]?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             byte[] copy = data.ToArray();
             _ = Interlocked.Increment(ref _inside);

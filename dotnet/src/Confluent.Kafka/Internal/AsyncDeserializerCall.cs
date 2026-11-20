@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 
 namespace Confluent.Kafka.Internal;
@@ -19,8 +24,10 @@ namespace Confluent.Kafka.Internal;
 /// <summary>
 /// How an asynchronous consumer calls one of its two deserializers, decided once when the consumer is built. A
 /// built-in is called through its synchronous class, with no awaiting: over a span, or over a memory it may keep
-/// when that class has the memory form. Any other class is awaited, with a memory it may keep when it is an
-/// <see cref="IAsyncDeserializerWithRetention{T}"/> and with one revoked when its call completes otherwise.
+/// when that class has the memory form. Any other class is awaited, in its headers form when it is an
+/// <see cref="IAsyncDeserializerWithHeaders{T}"/> and in the form without headers otherwise, with a memory it may keep
+/// when it is an <see cref="IAsyncDeserializerWithRetention{T}"/> and with one revoked when its call completes
+/// otherwise.
 /// </summary>
 /// <typeparam name="T">The type the bytes are decoded to.</typeparam>
 internal sealed class AsyncDeserializerCall<T>
@@ -36,6 +43,7 @@ internal sealed class AsyncDeserializerCall<T>
         }
         else
         {
+            WithHeaders = deserializer as IAsyncDeserializerWithHeaders<T>;
             Retains = deserializer is IAsyncDeserializerWithRetention<T>;
         }
     }
@@ -49,6 +57,16 @@ internal sealed class AsyncDeserializerCall<T>
 
     internal IDeserializerWithReadOnlyMemory<T>? InnerWithMemory { get; }
 
-    // Whether an awaited deserializer may keep the memory it is given.
+    // The headers form of an awaited deserializer, null when it has only the form without headers or is a built-in.
+    internal IAsyncDeserializerWithHeaders<T>? WithHeaders { get; }
+
+    // Whether an awaited deserializer may keep the memory it is given. Such a deserializer has the headers form.
     internal bool Retains { get; }
+
+    // Calls an awaited deserializer in the form chosen when the consumer was built.
+    internal ValueTask<T?> DeserializeAwaited(
+        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        WithHeaders is null
+            ? Deserializer.Deserialize(topic, data, cancellationToken)
+            : WithHeaders.Deserialize(topic, headers, data, cancellationToken);
 }

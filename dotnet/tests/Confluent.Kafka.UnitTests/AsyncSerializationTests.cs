@@ -503,7 +503,7 @@ public sealed class AsyncSerializationTests
             string topic, string? data, CancellationToken cancellationToken) => default;
 
         public ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
     }
 
     /// <summary>An asynchronous serializer and deserializer with a public Configure but not the interfaces.</summary>
@@ -517,6 +517,6 @@ public sealed class AsyncSerializationTests
             string topic, string? data, CancellationToken cancellationToken) => default;
 
         public ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
     }
 }

@@ -369,6 +369,7 @@ public sealed class PublicNamespaceLayoutTests
         ("FloatSerializer", "org.apache.kafka.common.serialization.FloatSerializer"),
         ("IAsyncDeserializer`1", "=IDeserializer`1"),
         ("IAsyncDeserializerWithConfigure`1", "=IAsyncDeserializer`1"),
+        ("IAsyncDeserializerWithHeaders`1", "=IAsyncDeserializer`1"),
         ("IAsyncDeserializerWithRetention`1", "=IAsyncDeserializer`1"),
         ("IAsyncSerializer`1", "=ISerializer`1"),
         ("IAsyncSerializerWithConfigure`1", "=IAsyncSerializer`1"),

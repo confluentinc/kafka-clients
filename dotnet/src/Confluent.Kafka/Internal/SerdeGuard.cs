@@ -84,8 +84,26 @@ internal static class SerdeGuard
         CheckAsyncClose(serializer, client, disposes);
     }
 
-    internal static void Check<T>(IAsyncDeserializer<T> deserializer, string client, bool disposes) =>
+    internal static void Check<T>(IAsyncDeserializer<T> deserializer, string client, bool disposes)
+    {
+        if (deserializer is not IAsyncDeserializerWithHeaders<T>
+            && DefaultMethodGuard.Declares(
+                deserializer,
+                "Deserialize",
+                typeof(string),
+                typeof(Headers),
+                typeof(ReadOnlyMemory<byte>),
+                typeof(CancellationToken)))
+        {
+            throw DefaultMethodGuard.NeverCalled(
+                deserializer,
+                "Deserialize(string, Headers, ReadOnlyMemory<byte>, CancellationToken)",
+                "IAsyncDeserializerWithHeaders<" + DefaultMethodGuard.TypeText(typeof(T)) + ">",
+                client);
+        }
+
         CheckAsyncClose(deserializer, client, disposes);
+    }
 
     // An asynchronous client disposes a serde only through IAsyncDisposable. One that is also IDisposable is taken, as
     // .NET pairs the two, and only its DisposeAsync() is called. One that is IDisposable alone would never be disposed,

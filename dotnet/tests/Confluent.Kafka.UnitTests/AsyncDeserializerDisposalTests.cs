@@ -19,7 +19,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
-using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 
@@ -187,7 +186,7 @@ public sealed class AsyncDeserializerDisposalTests
         internal int AsyncDisposals { get; private set; }
 
         public ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
+            string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
 
         private protected void Disposed()
         {
