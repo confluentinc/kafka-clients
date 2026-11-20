@@ -307,8 +307,11 @@ internal sealed partial class NativeConsumer
     {
         RefuseInsideACallback();
         return Finish(
-            Submit(cancellationToken, s_void, (_, opaque) =>
-                NativeMethods.ConsumerUnsubscribeCb(_handle, ConsumerCompletion.Void, opaque)),
+            Submit(
+                cancellationToken,
+                s_void,
+                (_, opaque) => NativeMethods.ConsumerUnsubscribeCb(_handle, ConsumerCompletion.Void, opaque),
+                exceptionOf: ListenerCallException),
             AsyncOperation.Unsubscribe,
             cancellationToken);
     }
@@ -567,7 +570,8 @@ internal sealed partial class NativeConsumer
             cancellationToken,
             s_records,
             (_, opaque) => NativeMethods.ConsumerPollCb(_handle, timeoutMs, ConsumerCompletion.Pointer, opaque),
-            atPoll: true);
+            atPoll: true,
+            exceptionOf: ListenerCallException);
         return CompletePoll(completion, key, value, cancellationToken);
     }
 
@@ -1155,7 +1159,8 @@ internal sealed partial class NativeConsumer
         UseKind kind = UseKind.Owned,
         bool refusesOtherThreads = false,
         bool atPoll = false,
-        bool subscribes = false)
+        bool subscribes = false,
+        Func<IntPtr, Exception>? exceptionOf = null)
     {
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
@@ -1175,7 +1180,7 @@ internal sealed partial class NativeConsumer
                 settle = EndingTheSubscribe(settle, subscribing);
             }
 
-            ConsumerCompletion<T> completion = Start(convert, submit, settle);
+            ConsumerCompletion<T> completion = Start(convert, submit, settle, exceptionOf);
             completion.UseOwner = owner;
             completion.RefusesOtherThreads = refusesOtherThreads;
             return completion;
@@ -1222,11 +1227,12 @@ internal sealed partial class NativeConsumer
     private static ConsumerCompletion<T> Start<T>(
         Func<IntPtr, long, T> convert,
         Action<NativeCallArguments, IntPtr> submit,
-        Action<IntPtr>? settle)
+        Action<IntPtr>? settle,
+        Func<IntPtr, Exception>? exceptionOf = null)
     {
-        ConsumerCompletion<T> completion = new ConsumerCompletion<T>(convert, settle)
+        ConsumerCompletion<T> completion = new ConsumerCompletion<T>(convert, settle, exceptionOf)
         {
-            Again = () => Start(convert, submit, settle),
+            Again = () => Start(convert, submit, settle, exceptionOf),
         };
         IntPtr opaque = completion.Root();
         try
@@ -1352,10 +1358,10 @@ internal sealed partial class NativeConsumer
 
                     return result;
                 }
-                catch (Exception exception)
+                catch (Exception)
                 {
                     bool ending = cancellationToken.IsCancellationRequested;
-                    bool woken = exception is KafkaException { Code: WakeupCode };
+                    bool woken = completion.ErrorCode == WakeupCode;
                     if (!wakeable || !OwnWakeOutcome(completion.OwnWakeMark, woken, ending))
                     {
                         if (ending)
