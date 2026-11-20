@@ -7295,6 +7295,10 @@ mod tests {
 
         f.subscribe_to_share_group(&[TOPIC_NAME]);
         f.assign(&[f.tp0.clone(), f.tp1.clone()]);
+        // Java's `SubscriptionState#assignFromSubscribed` keeps the assignment
+        // order (a `LinkedHashMap`), so tp0 is fetched first; the Rust one
+        // collects into a `HashMap` (PLAN §8), so the order is pinned here.
+        lock(&f.subscriptions).move_partition_to_end(&f.tp1);
 
         f.update_metadata(&Fixture::metadata_update_with_ids(
             2,
