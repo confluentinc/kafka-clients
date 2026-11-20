@@ -35,6 +35,7 @@ use crate::common::requests::OffsetsForLeaderEpochResponse;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
+use indexmap::IndexMap;
 use log::{debug, info};
 use regex::Regex;
 
@@ -852,7 +853,9 @@ impl SubscriptionState {
             ));
         }
 
-        let mut assigned_partition_states: HashMap<TopicPartition, TopicPartitionState> = HashMap::new();
+        // Java's `LinkedHashMap`: `PartitionStates#set` keeps the caller's
+        // order (translation-checklist R5).
+        let mut assigned_partition_states: IndexMap<TopicPartition, TopicPartitionState> = IndexMap::new();
         for tp in assignments {
             // Mirror Java: reuse existing state for retained partitions,
             // construct fresh for new. Critical for tests that re-assign a
@@ -2262,6 +2265,29 @@ mod tests {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0(), tp_test_1()])).unwrap();
         assert_assigned_partition_is_fetchable(&mut state);
+    }
+
+    /// Rust-only: `assign_from_subscribed` keeps the caller's order, as Java's
+    /// `SubscriptionState#assignFromSubscribed` does with its `LinkedHashMap`
+    /// (grouped by topic, `PartitionStates#set`). The assignment is redone on
+    /// fresh states so that a randomly ordered map would show.
+    #[test]
+    fn test_assign_from_subscribed_keeps_the_assignment_order() {
+        let tp = |topic: &str, partition: i32| TopicPartition::new(topic.to_string(), partition);
+        let assignment = [tp(TOPIC, 2), tp("other", 1), tp(TOPIC, 0), tp(TOPIC, 1), tp("other", 0)];
+        let expected = vec![tp(TOPIC, 2), tp(TOPIC, 0), tp(TOPIC, 1), tp("other", 1), tp("other", 0)];
+        for _ in 0..20 {
+            let mut state = new_state();
+            state
+                .subscribe_with_topics(HashSet::from([TOPIC.to_string(), "other".to_string()]), listener())
+                .unwrap();
+            state.assign_from_subscribed(&assignment).unwrap();
+            assert_eq!(expected, state.assigned_partitions_list());
+            for partition in &assignment {
+                state.seek(partition, 0).unwrap();
+            }
+            assert_eq!(expected, state.fetchable_partitions(|_| true));
+        }
     }
 
     /// Translated from `testIsFetchableOnAutoAssignment`.

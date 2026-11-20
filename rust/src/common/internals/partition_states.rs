@@ -16,8 +16,6 @@
 //!
 //! Translated from `org.apache.kafka.common.internals.PartitionStates`.
 
-use std::collections::HashMap;
-
 use indexmap::IndexMap;
 use rustc_hash::FxBuildHasher;
 
@@ -64,28 +62,31 @@ impl<S> PartitionStates<S> {
     /// appears once), then inserted into the underlying ordered map in that
     /// batched order. The grouping yields a layout like
     /// `a0, a1, b1, b0, c0, c1` where `a*`, `b*`, `c*` are contiguous.
+    ///
+    /// Java takes any `Map` and follows its iteration order, which is the
+    /// caller's insertion order for the `LinkedHashMap` that
+    /// `SubscriptionState#assignFromSubscribed` passes. The entries are taken
+    /// in the order the iterator yields them, so an ordered input (an
+    /// `IndexMap`) keeps that order and a `HashMap` keeps its own, as in Java.
     #[doc(alias = "org.apache.kafka.common.internals.PartitionStates#set")]
-    pub(crate) fn set(&mut self, partition_to_state: HashMap<TopicPartition, S>) {
+    pub(crate) fn set(&mut self, partition_to_state: impl IntoIterator<Item = (TopicPartition, S)>) {
         self.map.clear();
         self.update_internal(partition_to_state);
     }
 
-    fn update_internal(&mut self, partition_to_state: HashMap<TopicPartition, S>) {
+    /// Java's private `update(Map)`.
+    fn update_internal(&mut self, partition_to_state: impl IntoIterator<Item = (TopicPartition, S)>) {
         // Java uses a `LinkedHashMap<String, List<TopicPartition>>` keyed by
         // topic to preserve insertion order. In Rust, `IndexMap` provides the
-        // same ordered behavior.
-        let mut topic_to_partitions: IndexMap<String, Vec<TopicPartition>> = IndexMap::new();
-        for tp in partition_to_state.keys() {
-            topic_to_partitions.entry(tp.topic().to_string()).or_default().push(tp.clone());
+        // same ordered behavior. The states move with their partitions (no
+        // clone).
+        let mut topic_to_partitions: IndexMap<String, Vec<(TopicPartition, S)>> = IndexMap::new();
+        for (tp, state) in partition_to_state {
+            topic_to_partitions.entry(tp.topic().to_string()).or_default().push((tp, state));
         }
-        // Consume `partition_to_state` by removing each entry so we move (not
-        // clone) the state value into the destination map.
-        let mut partition_to_state = partition_to_state;
-        for (_, tps) in topic_to_partitions {
-            for tp in tps {
-                if let Some(state) = partition_to_state.remove(&tp) {
-                    self.map.insert(tp, state);
-                }
+        for (_, entries) in topic_to_partitions {
+            for (tp, state) in entries {
+                self.map.insert(tp, state);
             }
         }
     }
@@ -208,38 +209,29 @@ mod tests {
     //! `PartitionStates` is `pub(crate)` so tests live inline (the integration
     //! test crate cannot name the type).
 
+    use std::collections::HashMap;
+
     use super::*;
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic.to_string(), partition)
     }
 
+    /// Java's `createMap()`, a `LinkedHashMap` in `put` order.
+    fn create_linked_map() -> IndexMap<TopicPartition, String> {
+        IndexMap::from([
+            (tp("foo", 2), "foo 2".to_string()),
+            (tp("blah", 2), "blah 2".to_string()),
+            (tp("blah", 1), "blah 1".to_string()),
+            (tp("baz", 2), "baz 2".to_string()),
+            (tp("foo", 0), "foo 0".to_string()),
+            (tp("baz", 3), "baz 3".to_string()),
+        ])
+    }
+
+    /// The entries of Java's `createMap()` in a `HashMap`, for the tests that
+    /// only check that each topic's partitions stay contiguous (`check_grouped`).
     fn create_map() -> HashMap<TopicPartition, String> {
-        // Java uses a `LinkedHashMap` for the input, but `PartitionStates::set`
-        // re-batches by topic and only relies on the *topic-name* iteration
-        // order of the input. The Rust translation uses a `HashMap` because
-        // (a) Java's iteration order over the input map is not part of the
-        // contract for `set` and (b) the test only checks that partitions for
-        // the *same* topic stay contiguous and in the order they appear in
-        // the input — which we guarantee here by recording the topic-name
-        // order using `IndexMap` internally in `set`.
-        //
-        // To match the Java test exactly (where the input is `LinkedHashMap`
-        // built with `put` order: foo-2, blah-2, blah-1, baz-2, foo-0,
-        // baz-3, and the expected output is foo-2, foo-0, blah-2, blah-1,
-        // baz-2, baz-3), we build the input as an `IndexMap` and then
-        // convert to a `HashMap`. The `HashMap` will lose ordering — to
-        // preserve it for these tests we use a helper that goes through
-        // `set` via a typed `HashMap`-equivalent that re-creates the
-        // expected behavior. The cleanest fix is for `set` to accept any
-        // iterator pair with stable order — but the Java signature is `Map`,
-        // and the test inputs all have *unique* topic names per insertion,
-        // so the `HashMap` re-randomization will not cause flakiness as
-        // long as we group by topic stably (which `IndexMap` ensures).
-        //
-        // Below we mirror the Java input order; the expected ordering
-        // assertions below tolerate any topic ordering that groups same-
-        // topic entries contiguously.
         let mut map = HashMap::new();
         map.insert(tp("foo", 2), "foo 2".to_string());
         map.insert(tp("blah", 2), "blah 2".to_string());
@@ -284,10 +276,19 @@ mod tests {
     #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testSet")]
     fn test_set() {
         let mut states: PartitionStates<String> = PartitionStates::new();
-        let map = create_map();
-        let expected = map.clone();
+        let map = create_linked_map();
         states.set(map);
-        check_grouped(&states, &expected);
+        // Java's `expected`: grouped by topic, in the input order.
+        let expected = [
+            (tp("foo", 2), "foo 2"),
+            (tp("foo", 0), "foo 0"),
+            (tp("blah", 2), "blah 2"),
+            (tp("blah", 1), "blah 1"),
+            (tp("baz", 2), "baz 2"),
+            (tp("baz", 3), "baz 3"),
+        ];
+        let actual: Vec<(TopicPartition, &str)> = states.iter().map(|(tp, s)| (tp.clone(), s.as_str())).collect();
+        assert_eq!(expected.to_vec(), actual);
 
         // Empty input clears the map.
         states.set(HashMap::new());
