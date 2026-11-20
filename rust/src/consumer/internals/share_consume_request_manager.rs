@@ -7545,13 +7545,22 @@ mod tests {
         assert_eq!(1, f.send_fetches());
     }
 
-    /// Rust-only: an application event that reaches the manager after a
-    /// response has arrived sees the state that response leaves, as in Java,
-    /// where the response is handled inside the network poll that precedes the
-    /// event. Here the `ShareFetch` response frees the node before
-    /// `commit_async` runs, and the commit is sent in the next poll.
+    /// The network poll completes the requests sent so far, but nothing has
+    /// handled their responses yet: Java's `networkClientDelegate.poll` with the
+    /// `whenComplete` callbacks not yet run.
+    async fn network_poll_without_handling(f: &mut Fixture) {
+        let now = f.now();
+        f.network_client_delegate.poll(0, now, false).await;
+    }
+
+    /// Rust-only: `fetch` handles the responses that arrived before it, as Java
+    /// does inside the network poll that precedes the `ShareFetchEvent`. A
+    /// `ShareFetch` response with acquired records clears "fetch more records"
+    /// and the `fetch` that follows sets it again, so the next poll fetches.
+    /// Handled after `fetch`, the response would clear it and no fetch would
+    /// be sent until the next `ShareFetchEvent`.
     #[tokio::test(flavor = "current_thread")]
-    async fn test_entry_points_handle_completed_responses_first() {
+    async fn test_fetch_handles_completed_responses_first() {
         let mut f = Fixture::new();
         f.assign_from_subscribed(&[f.tp0.clone()]);
 
@@ -7564,21 +7573,93 @@ mod tests {
             Errors::None,
             Errors::None,
         ));
-        // The network poll completes the request; nothing has handled the response yet.
-        let now = f.now();
-        f.network_client_delegate.poll(0, now, false).await;
+        network_poll_without_handling(&mut f).await;
         assert!(!f.manager.has_completed_fetches());
         assert!(!f.manager.is_node_free(0));
+
+        f.manager.fetch(HashMap::new());
+
+        assert!(f.manager.has_completed_fetches());
+        // A poll alone (no further `fetch`) sends the next ShareFetch.
+        assert_eq!(1, f.send_acknowledgements());
+    }
+
+    /// Rust-only: `commit_async` handles the responses that arrived before it.
+    /// The FINAL_EPOCH `ShareFetch` that closes the empty share session removes
+    /// the node's session handler when its response is handled, so the commit
+    /// that follows finds no session handler and fails its acknowledgements at
+    /// once, as in Java. Handled after `commit_async`, the response would leave
+    /// an acknowledge request state built on the closed session.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_commit_async_handles_completed_responses_first() {
+        let mut f = Fixture::new();
+        f.assign_from_subscribed(&[f.tp0.clone()]);
+
+        // Establish the share session, then remove tip0 from it.
+        f.send_fetch_and_verify_response(
+            f.records.clone(),
+            f.empty_acquired_records.clone(),
+            Errors::None,
+            Errors::None,
+        )
+        .await;
+        f.fetch_records().await;
+        f.assign(&[]);
+        assert_eq!(1, f.send_fetches());
+        f.prepare_fetch_response(empty_fetch_response());
+        f.network_poll().await;
+
+        // The next poll closes the now-empty session; its response arrives but is not handled yet.
+        let close_result = f.send_fetches_return_poll_result();
+        assert_eq!(
+            ShareRequestMetadata::FINAL_EPOCH,
+            close_result[0].share_fetch().share_session_epoch
+        );
+        f.prepare_fetch_response(empty_fetch_response());
+        network_poll_without_handling(&mut f).await;
+        assert!(f.manager.session_handler(0).is_some());
 
         let acknowledgements = single_acknowledgement(1, AcknowledgeType::Accept);
         let deadline = f.deadline(DEFAULT_API_TIMEOUT_MS);
         f.manager.commit_async(node_acks(&f.tip0, 0, &acknowledgements), deadline);
 
+        assert!(f.manager.session_handler(0).is_none());
+        assert!(f.request_states(0).is_none());
+        let tip0 = f.tip0.clone();
+        assert_same_acknowledgements(&[(&tip0, &acknowledgements)], &f.completed_acknowledgements()[0]);
+        assert_acknowledge_error(&f.completed_acknowledgements()[0][&tip0], Errors::NetworkError);
+    }
+
+    /// Rust-only: `set_acknowledgement_commit_callback_registered` handles the
+    /// responses that arrived before it under the old setting, as Java does in
+    /// the network poll that precedes the registration event: piggy-backed
+    /// acknowledgements completed while no callback was registered emit no
+    /// event.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_callback_registration_handles_completed_responses_first() {
+        let mut f = Fixture::new();
+        f.assign_from_subscribed(&[f.tp0.clone()]);
+        f.send_fetch_and_verify_response(f.records.clone(), f.acquired_records.clone(), Errors::None, Errors::None)
+            .await;
+        f.fetch_records().await;
+
+        let acknowledgements = single_acknowledgement(1, AcknowledgeType::Accept);
+        f.manager.fetch(node_acks(&f.tip0, 0, &acknowledgements));
+        assert_eq!(1, f.send_fetches());
+        let tip0 = f.tip0.clone();
+        f.prepare_fetch_response(full_fetch_response(
+            &tip0,
+            Some(f.records.clone()),
+            f.acquired_records.clone(),
+            Errors::None,
+            Errors::None,
+        ));
+        network_poll_without_handling(&mut f).await;
+
+        f.manager.set_acknowledgement_commit_callback_registered(true);
+
         assert!(f.manager.has_completed_fetches());
-        assert!(f.manager.is_node_free(0));
-        let poll_result = f.send_acknowledgements_return_poll_result();
-        assert_eq!(1, poll_result.len());
-        assert_eq!(1, poll_result[0].share_acknowledge().topics.len());
+        assert!(f.completed_acknowledgements().is_empty());
     }
 
     /// Rust-only: Java has no test of a second `acknowledgeOnClose` while the
@@ -7622,7 +7703,8 @@ mod tests {
 
     /// Rust-only: the share membership manager reaches the manager through
     /// `Arc<dyn MemberStateListener>`; the member id it reports is the one the
-    /// share sessions are created for, and a malformed one is ignored.
+    /// share sessions are created for, and a malformed one that follows it is
+    /// ignored rather than clearing it.
     #[tokio::test(flavor = "current_thread")]
     async fn test_member_state_listener_sets_the_member_id() {
         let f = Fixture::with_member_id(None, ShareAcquireMode::BatchOptimized);
@@ -7645,14 +7727,11 @@ mod tests {
         )));
         let listener: Arc<dyn MemberStateListener> = Arc::clone(&manager) as Arc<dyn MemberStateListener>;
 
-        // A malformed member id is ignored: no member, no request.
-        listener.on_member_epoch_updated(Some(1), "not-a-uuid");
-        lock(&manager).fetch(HashMap::new());
-        let now = f.now();
-        assert!(RequestManager::poll(&mut *lock(&manager), now).unsent_requests.is_empty());
-
         let member_id = Uuid::random_uuid();
         listener.on_member_epoch_updated(Some(1), &member_id.to_string());
+        // A malformed member id is ignored: the valid one stays.
+        listener.on_member_epoch_updated(Some(2), "not-a-uuid");
+        lock(&manager).fetch(HashMap::new());
         let now = f.now();
         let mut poll_result = RequestManager::poll(&mut *lock(&manager), now);
         assert_eq!(1, poll_result.unsent_requests.len());
