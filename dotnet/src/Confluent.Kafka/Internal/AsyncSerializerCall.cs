@@ -18,7 +18,8 @@ namespace Confluent.Kafka.Internal;
 
 /// <summary>
 /// How an asynchronous producer calls one of its two serializers, decided once when the producer is built. A built-in
-/// is called through its synchronous class, with no awaiting. Any other class is awaited.
+/// is called through its synchronous class, with no awaiting. Any other class is awaited, in its headers form when it
+/// implements <see cref="IAsyncSerializerWithHeaders{T}"/> and in the form without headers otherwise.
 /// </summary>
 /// <typeparam name="T">The type encoded.</typeparam>
 internal sealed class AsyncSerializerCall<T>
@@ -31,6 +32,10 @@ internal sealed class AsyncSerializerCall<T>
             Inner = builtIn.Inner;
             InnerWithHeaders = Inner as ISerializerWithHeaders<T>;
         }
+        else
+        {
+            WithHeaders = serializer as IAsyncSerializerWithHeaders<T>;
+        }
     }
 
     internal IAsyncSerializer<T> Serializer { get; }
@@ -39,4 +44,7 @@ internal sealed class AsyncSerializerCall<T>
     internal ISerializer<T>? Inner { get; }
 
     internal ISerializerWithHeaders<T>? InnerWithHeaders { get; }
+
+    // The headers form of an awaited serializer, null when it has only the form without headers or is a built-in.
+    internal IAsyncSerializerWithHeaders<T>? WithHeaders { get; }
 }

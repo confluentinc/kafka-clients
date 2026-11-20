@@ -97,7 +97,7 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>, IAsyncSeri
 
     // The async producer's form: the record is encoded before the call returns.
     public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-        string topic, Headers headers, SoakRecord? data, CancellationToken cancellationToken) =>
+        string topic, SoakRecord? data, CancellationToken cancellationToken) =>
         new ValueTask<ReadOnlyMemory<byte>?>(Serialize(topic, data));
 
     public ReadOnlyMemory<byte>? Serialize(string topic, SoakRecord? data)

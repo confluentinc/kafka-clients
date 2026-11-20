@@ -500,7 +500,7 @@ public sealed class AsyncSerializationTests
         }
 
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+            string topic, string? data, CancellationToken cancellationToken) => default;
 
         public ValueTask<string?> Deserialize(
             string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
@@ -514,7 +514,7 @@ public sealed class AsyncSerializationTests
         public void Configure(IReadOnlyDictionary<string, object?> configs, bool isKey) => Calls++;
 
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+            string topic, string? data, CancellationToken cancellationToken) => default;
 
         public ValueTask<string?> Deserialize(
             string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;

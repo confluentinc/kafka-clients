@@ -21,7 +21,6 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
-using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
@@ -172,7 +171,7 @@ public sealed class ConsumeThenProduceZeroCopyTests
         internal string? ReadAfterTheWait { get; private set; }
 
         public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, ReadOnlyMemory<byte>? data, CancellationToken cancellationToken)
+            string topic, ReadOnlyMemory<byte>? data, CancellationToken cancellationToken)
         {
             GivenTheBatchsMemory = MemoryMarshal.TryGetMemoryManager<byte, BytesMemoryManager>(data!.Value, out _);
             await _later.Task.ConfigureAwait(false);

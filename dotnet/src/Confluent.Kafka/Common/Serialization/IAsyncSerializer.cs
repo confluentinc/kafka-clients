@@ -24,8 +24,9 @@ namespace Confluent.Kafka.Common.Serialization;
 /// <summary>
 /// Converts a <typeparamref name="T"/> to the bytes of a record key or value without blocking a thread: the form of
 /// Java's <c>Serializer&lt;T&gt;</c> that an asynchronous producer takes, for a serializer that waits, as one that
-/// reads a schema registry does. It has one method, Java's <c>serialize(String, Headers, T)</c>, so the headers are
-/// always passed. Java's <c>configure</c> is
+/// reads a schema registry does. Its headers overload is
+/// <see cref="AsyncSerializerExtensions.Serialize{T}(IAsyncSerializer{T}, string, Headers, T, CancellationToken)"/>, which a
+/// serializer replaces by implementing <see cref="IAsyncSerializerWithHeaders{T}"/>, and its <c>configure</c> is
 /// <see cref="AsyncSerializerExtensions.Configure{T}(IAsyncSerializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// which a serializer replaces by implementing <see cref="IAsyncSerializerWithConfigure{T}"/>. Java's <c>close</c> is
 /// <see cref="IAsyncDisposable"/> and nothing else: a producer disposes a serializer, given or built from its
@@ -56,10 +57,6 @@ public interface IAsyncSerializer<T>
     /// <see langword="null"/> data to <see langword="null"/>.
     /// </summary>
     /// <param name="topic">The topic the record is sent to.</param>
-    /// <param name="headers">The record's headers, which may be empty but are never <see langword="null"/>. The
-    /// serializer may change them as a side effect of serializing; it is best practice to only add headers, and not to
-    /// remove or change existing ones. A mock producer passes a new, empty <see cref="Headers"/> that it then drops,
-    /// as Java's <c>MockProducer</c> does.</param>
     /// <param name="data">The value to encode; may be <see langword="null"/>, which the producer passes for a record
     /// with no key or no value.</param>
     /// <param name="cancellationToken">Cancels the call: the token the producer's <c>Send</c> was given. An
@@ -70,7 +67,43 @@ public interface IAsyncSerializer<T>
     /// <see langword="null"/> itself. The bytes stay unchanged for as long as
     /// <see cref="ISerializer{T}.Serialize(string, T)"/> says.
     /// </returns>
-    ValueTask<ReadOnlyMemory<byte>?> Serialize(string topic, Headers headers, T? data, CancellationToken cancellationToken = default);
+    ValueTask<ReadOnlyMemory<byte>?> Serialize(string topic, T? data, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// An asynchronous serializer that reads or adds the record's headers: it replaces Java's default
+/// <c>Serializer.serialize(String, Headers, T)</c>, which calls the form without headers. A producer calls this form
+/// for a serializer that implements this interface, and
+/// <see cref="IAsyncSerializer{T}.Serialize(string, T, CancellationToken)"/> otherwise. It is the asynchronous form of
+/// <see cref="ISerializerWithHeaders{T}"/>.
+/// </summary>
+/// <remarks>
+/// An asynchronous producer refuses, when it is built, a serializer that declares a public
+/// <c>Serialize(string, Headers, T, CancellationToken)</c> but does not implement this interface, since it would never
+/// call that method. The check reads the type's metadata, so under trimming or Native AOT, which can remove a method
+/// nothing calls, it is best effort.
+/// </remarks>
+/// <typeparam name="T">The type encoded.</typeparam>
+public interface IAsyncSerializerWithHeaders<T> : IAsyncSerializer<T>
+{
+    /// <summary>
+    /// Encodes <paramref name="data"/>, which may be <see langword="null"/>. It is recommended to serialize
+    /// <see langword="null"/> data to <see langword="null"/>.
+    /// </summary>
+    /// <param name="topic">The topic the record is sent to.</param>
+    /// <param name="headers">The record's headers, which may be empty but are never <see langword="null"/>. The
+    /// serializer may change them as a side effect of serializing; it is best practice to only add headers, and not to
+    /// remove or change existing ones. <c>AsyncKafkaProducer</c> passes the record's own headers, the same object to
+    /// the key's and the value's serializer, which the record carries when it is sent and which it makes read-only
+    /// once the serializers ran. <c>AsyncMockProducer</c> passes a new, empty headers object to each call and then
+    /// drops it, as Java's <c>MockProducer</c> does, so what a serializer adds there does not reach the record.</param>
+    /// <param name="data">The value to encode; may be <see langword="null"/>.</param>
+    /// <param name="cancellationToken">Cancels the call, as for
+    /// <see cref="IAsyncSerializer{T}.Serialize(string, T, CancellationToken)"/>.</param>
+    /// <returns>The bytes, or <see langword="null"/>, as
+    /// <see cref="IAsyncSerializer{T}.Serialize(string, T, CancellationToken)"/> returns them.</returns>
+    ValueTask<ReadOnlyMemory<byte>?> Serialize(
+        string topic, Headers headers, T? data, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -104,6 +137,37 @@ public interface IAsyncSerializerWithConfigure<T> : IAsyncSerializer<T>
 /// </summary>
 public static class AsyncSerializerExtensions
 {
+    /// <summary>
+    /// Encodes <paramref name="data"/> with the record's headers, Java's <c>Serializer.serialize(String, Headers, T)</c>:
+    /// <see cref="IAsyncSerializerWithHeaders{T}.Serialize(string, Headers, T, CancellationToken)"/> when
+    /// <paramref name="serializer"/> implements it, and otherwise
+    /// <see cref="IAsyncSerializer{T}.Serialize(string, T, CancellationToken)"/>, the headers unused.
+    /// </summary>
+    /// <typeparam name="T">The type encoded.</typeparam>
+    /// <param name="serializer">The serializer.</param>
+    /// <param name="topic">The topic the record is sent to.</param>
+    /// <param name="headers">The record's headers, which may be empty but are never <see langword="null"/>.</param>
+    /// <param name="data">The value to encode; may be <see langword="null"/>.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The bytes, or <see langword="null"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="serializer"/> is null.</exception>
+    public static ValueTask<ReadOnlyMemory<byte>?> Serialize<T>(
+        this IAsyncSerializer<T> serializer,
+        string topic,
+        Headers headers,
+        T? data,
+        CancellationToken cancellationToken = default)
+    {
+        if (serializer is null)
+        {
+            throw new ArgumentNullException(nameof(serializer));
+        }
+
+        return serializer is IAsyncSerializerWithHeaders<T> withHeaders
+            ? withHeaders.Serialize(topic, headers, data, cancellationToken)
+            : serializer.Serialize(topic, data, cancellationToken);
+    }
+
     /// <summary>
     /// Configures <paramref name="serializer"/>, Java's <c>Serializer.configure(Map, boolean)</c>:
     /// <see cref="IAsyncSerializerWithConfigure{T}.Configure(IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>

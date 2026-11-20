@@ -1299,7 +1299,7 @@ public sealed class PublicClientCreateTests
         }
 
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+            string topic, string? data, CancellationToken cancellationToken) => default;
     }
 
     private sealed class AsyncDeserializerProbe : AsyncProbe, IAsyncDeserializerWithConfigure<string>, IAsyncDisposable
@@ -1372,7 +1372,7 @@ public sealed class PublicClientCreateTests
     private sealed class PlainAsyncSerializer : IAsyncSerializer<string>
     {
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+            string topic, string? data, CancellationToken cancellationToken) => default;
     }
 
     private sealed class PlainAsyncDeserializer : IAsyncDeserializer<string>
@@ -1384,7 +1384,7 @@ public sealed class PublicClientCreateTests
     private sealed class DisposableOnlyAsyncSerializer : IAsyncSerializer<string>, IDisposable
     {
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+            string topic, string? data, CancellationToken cancellationToken) => default;
 
         public void Dispose()
         {

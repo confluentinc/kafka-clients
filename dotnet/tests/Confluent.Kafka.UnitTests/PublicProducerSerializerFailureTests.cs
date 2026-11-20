@@ -18,7 +18,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
-using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -546,7 +545,7 @@ public sealed class PublicProducerSerializerFailureTests
         internal Exception? LastThrown { get; private set; }
 
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) =>
+            string topic, string? data, CancellationToken cancellationToken) =>
             new ValueTask<ReadOnlyMemory<byte>?>(Serialize(topic, data));
 
         public ReadOnlyMemory<byte>? Serialize(string topic, string? data)

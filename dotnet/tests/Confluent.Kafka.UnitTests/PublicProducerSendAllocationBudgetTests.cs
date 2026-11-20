@@ -325,7 +325,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
     private sealed class CompletedSerializer : IAsyncSerializer<byte[]>
     {
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, byte[]? data, CancellationToken cancellationToken) =>
+            string topic, byte[]? data, CancellationToken cancellationToken) =>
             new ValueTask<ReadOnlyMemory<byte>?>(data is null ? (ReadOnlyMemory<byte>?)null : data);
     }
 

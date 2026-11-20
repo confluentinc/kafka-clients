@@ -16,7 +16,6 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 
-using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Common.Serialization;
@@ -35,6 +34,6 @@ public sealed class AsyncReadOnlyMemorySerializer
 
     /// <inheritdoc/>
     public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-        string topic, Headers headers, ReadOnlyMemory<byte>? data, CancellationToken cancellationToken = default) =>
-        new ValueTask<ReadOnlyMemory<byte>?>(_inner.Serialize(topic, headers, data));
+        string topic, ReadOnlyMemory<byte>? data, CancellationToken cancellationToken = default) =>
+        new ValueTask<ReadOnlyMemory<byte>?>(_inner.Serialize(topic, data));
 }

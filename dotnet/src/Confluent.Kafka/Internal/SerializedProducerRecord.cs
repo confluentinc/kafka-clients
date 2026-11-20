@@ -86,8 +86,8 @@ internal readonly struct SerializedProducerRecord
     }
 
     // The asynchronous producers' form when a serializer is awaited: the key, then the value. A built-in side is
-    // called through its synchronous class. mock is as on Serialize; an awaited serializer always has the headers
-    // form, so on a mock it always gets a new, empty Headers.
+    // called through its synchronous class. mock is as on Serialize: an awaited serializer's headers form gets a new,
+    // empty Headers on a mock and the record's own on a client, and its form without headers gets none.
     internal static async ValueTask<SerializedProducerRecord> SerializeAsync<TKey, TValue>(
         ProducerRecord<TKey, TValue> record,
         AsyncSerializerCall<TKey> key,
@@ -128,13 +128,18 @@ internal readonly struct SerializedProducerRecord
                 : SerializeField(inner, call.InnerWithHeaders, topic, headers, data, isKey));
         }
 
-        return mock
-            ? call.Serializer.Serialize(topic, new Headers(), data, cancellationToken)
-            : AwaitField(call.Serializer, topic, headers, data, isKey, cancellationToken);
+        if (mock)
+        {
+            return call.WithHeaders is null
+                ? call.Serializer.Serialize(topic, data, cancellationToken)
+                : call.WithHeaders.Serialize(topic, new Headers(), data, cancellationToken);
+        }
+
+        return AwaitField(call, topic, headers, data, isKey, cancellationToken);
     }
 
     private static async ValueTask<ReadOnlyMemory<byte>?> AwaitField<T>(
-        IAsyncSerializer<T> serializer,
+        AsyncSerializerCall<T> call,
         string topic,
         Headers headers,
         T? data,
@@ -143,11 +148,14 @@ internal readonly struct SerializedProducerRecord
     {
         try
         {
-            return await serializer.Serialize(topic, headers, data, cancellationToken).ConfigureAwait(false);
+            return await (call.WithHeaders is null
+                    ? call.Serializer.Serialize(topic, data, cancellationToken)
+                    : call.WithHeaders.Serialize(topic, headers, data, cancellationToken))
+                .ConfigureAwait(false);
         }
         catch (InvalidCastException exception)
         {
-            throw CannotConvert(serializer, data, isKey, exception);
+            throw CannotConvert(call.Serializer, data, isKey, exception);
         }
     }
 

@@ -21,11 +21,12 @@ using Confluent.Kafka.Common.Serialization;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Gives a test's synchronous serializer to an asynchronous producer: it calls the headers form when the serializer
-/// has one, returns a completed <see cref="ValueTask{TResult}"/>, throws what the serializer throws from the call
-/// itself, and disposes a disposable one.
+/// Gives a test's synchronous serializer to an asynchronous producer: each of its forms calls the same form of the
+/// serializer, the headers form calling the form without headers when the serializer has no headers form. It returns
+/// a completed <see cref="ValueTask{TResult}"/>, throws what the serializer throws from the call itself, and disposes
+/// a disposable one.
 /// </summary>
-internal sealed class AsyncSerializerOver<T> : IAsyncSerializer<T>, IAsyncDisposable
+internal sealed class AsyncSerializerOver<T> : IAsyncSerializerWithHeaders<T>, IAsyncDisposable
 {
     private readonly ISerializer<T> _inner;
     private readonly ISerializerWithHeaders<T>? _withHeaders;
@@ -35,6 +36,9 @@ internal sealed class AsyncSerializerOver<T> : IAsyncSerializer<T>, IAsyncDispos
         _inner = inner;
         _withHeaders = inner as ISerializerWithHeaders<T>;
     }
+
+    public ValueTask<ReadOnlyMemory<byte>?> Serialize(string topic, T? data, CancellationToken cancellationToken) =>
+        new ValueTask<ReadOnlyMemory<byte>?>(_inner.Serialize(topic, data));
 
     public ValueTask<ReadOnlyMemory<byte>?> Serialize(
         string topic, Headers headers, T? data, CancellationToken cancellationToken) =>

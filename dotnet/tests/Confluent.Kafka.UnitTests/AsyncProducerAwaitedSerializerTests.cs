@@ -369,6 +369,29 @@ public sealed class AsyncProducerAwaitedSerializerTests
         }
     }
 
+    [Theory]
+    [InlineData(Real)]
+    [InlineData(Mock)]
+    public async Task ASerializerWithoutTheHeadersForm_IsCalledWithoutHeaders_ForTheKeyThenTheValue(string flavor)
+    {
+        WithoutHeaders serializer = new WithoutHeaders();
+        IAsyncProducer<string, string> producer = await Create(flavor, serializer, serializer);
+        await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
+
+        AsyncKafkaFuture<RecordMetadata> future =
+            await TestTimeout.Run(() => producer.Send(Record("value")).AsTask(), s_deadline);
+
+        Assert.Equal(new[] { (Topic, (string?)"key"), (Topic, (string?)"value") }, serializer.Calls());
+        if (flavor == Mock)
+        {
+            Assert.Equal(0, (await TestTimeout.Run(() => future.Get(), s_deadline)).Offset());
+        }
+        else
+        {
+            await AssertMetadataTimeout(future);
+        }
+    }
+
     [Fact]
     public async Task OnTheKafkaProducer_AHeaderAnAwaitedSerializerAdds_IsOnTheRecord_WhoseHeadersThenTurnReadOnly()
     {
@@ -631,7 +654,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     /// <summary>
     /// A UTF-8 serializer that records each call and waits, for the thread pool or until the test completes it.
     /// </summary>
-    private sealed class Awaiting : IAsyncSerializer<string>
+    private sealed class Awaiting : IAsyncSerializerWithHeaders<string>
     {
         private readonly bool _yields;
         private readonly TaskCompletionSource<bool> _later =
@@ -640,6 +663,11 @@ public sealed class AsyncProducerAwaitedSerializerTests
         private readonly List<Headers> _headers = new List<Headers>();
 
         internal Awaiting(bool yields) => _yields = yields;
+
+        // The producer calls the headers form of a serializer that has it, never this one.
+        public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, string? data, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("the producer called the form without headers");
 
         public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
             string topic, Headers headers, string? data, CancellationToken cancellationToken)
@@ -681,6 +709,32 @@ public sealed class AsyncProducerAwaitedSerializerTests
         }
     }
 
+    /// <summary>A UTF-8 serializer with only the form without headers, which records each call after a yield.</summary>
+    private sealed class WithoutHeaders : IAsyncSerializer<string>
+    {
+        private readonly List<(string Topic, string? Data)> _calls = new List<(string Topic, string? Data)>();
+
+        public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, string? data, CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            lock (_calls)
+            {
+                _calls.Add((topic, data));
+            }
+
+            return Encoded(data);
+        }
+
+        internal (string Topic, string? Data)[] Calls()
+        {
+            lock (_calls)
+            {
+                return _calls.ToArray();
+            }
+        }
+    }
+
     /// <summary>A UTF-8 serializer whose call for a datum waits until the test releases that datum.</summary>
     private sealed class Gated : IAsyncSerializer<string>
     {
@@ -688,7 +742,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
             new ConcurrentDictionary<string, TaskCompletionSource<bool>>();
 
         public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken)
+            string topic, string? data, CancellationToken cancellationToken)
         {
             await Gate(data!).Task.ConfigureAwait(false);
             return Encoded(data);
@@ -722,7 +776,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         }
 
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) =>
+            string topic, string? data, CancellationToken cancellationToken) =>
             _how switch
             {
                 Thrown => throw _failure,
@@ -757,7 +811,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         internal CancellationToken Token { get; private set; }
 
         public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken)
+            string topic, string? data, CancellationToken cancellationToken)
         {
             Token = cancellationToken;
             _entered.TrySetResult(true);
@@ -767,10 +821,15 @@ public sealed class AsyncProducerAwaitedSerializerTests
     }
 
     /// <summary>A UTF-8 serializer that waits for the test and then adds a header to the headers it was given.</summary>
-    private sealed class HeaderAdding : IAsyncSerializer<string>
+    private sealed class HeaderAdding : IAsyncSerializerWithHeaders<string>
     {
         private readonly TaskCompletionSource<bool> _later =
             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // The producer calls the headers form of a serializer that has it, never this one.
+        public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, string? data, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("the producer called the form without headers");
 
         public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
             string topic, Headers headers, string? data, CancellationToken cancellationToken)
@@ -791,7 +850,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         internal int CallCount => Volatile.Read(ref _callCount);
 
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, Guid? data, CancellationToken cancellationToken)
+            string topic, Guid? data, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref _callCount);
             return new ValueTask<ReadOnlyMemory<byte>?>(data?.ToByteArray());
@@ -809,7 +868,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         internal int Disposals => Volatile.Read(ref _disposals);
 
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) =>
+            string topic, string? data, CancellationToken cancellationToken) =>
             new ValueTask<ReadOnlyMemory<byte>?>(Encoded(data));
 
         public async ValueTask DisposeAsync()
@@ -829,7 +888,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         internal int Disposals => Volatile.Read(ref _disposals);
 
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) =>
+            string topic, string? data, CancellationToken cancellationToken) =>
             new ValueTask<ReadOnlyMemory<byte>?>(Encoded(data));
 
         public void Dispose() => Interlocked.Increment(ref _disposals);

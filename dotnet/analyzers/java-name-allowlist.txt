@@ -332,20 +332,18 @@ missing T:Confluent.Kafka.Common.Serialization.VoidDeserializer org.apache.kafka
 missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#close()
 missing T:Confluent.Kafka.Common.Serialization.ISerializer`1 org.apache.kafka.common.serialization.Serializer#close()
 
-# The asynchronous serde interfaces (M23/P7, ledger 536, 538) have one method each: Java's serialize(String, Headers, T)
-# and deserialize(String, Headers, ByteBuffer), with an optional CancellationToken (M23/P10, ledger 584) and a ValueTask result, the bytes a
-# ReadOnlyMemory<byte>. Java's forms without headers and its byte[] forms have no asynchronous counterpart. Java's
-# close() is an optional IAsyncDisposable and nothing else (M23/P8), as it is an optional IDisposable on the
-# synchronous interfaces above.
+# The asynchronous serde interfaces (M23/P7, ledger 536, 538) take an optional CancellationToken (M23/P10, ledger 584)
+# and return a ValueTask, the bytes a ReadOnlyMemory<byte>. IAsyncSerializer has Java's serialize(String, T), and
+# IAsyncSerializerWithHeaders adds serialize(String, Headers, T) (M23/P10, ledger 585), as ISerializerWithHeaders does.
+# IAsyncDeserializer has one method, Java's deserialize(String, Headers, ByteBuffer); Java's byte[] forms have no
+# asynchronous counterpart. Java's close() is an optional IAsyncDisposable and nothing else (M23/P8), as it is an
+# optional IDisposable on the synchronous interfaces above.
 missing T:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1 org.apache.kafka.common.serialization.Serializer#close()
-missing T:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1 org.apache.kafka.common.serialization.Serializer#serialize(String,T)
 missing T:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1 org.apache.kafka.common.serialization.Deserializer#close()
 missing T:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,byte[])
-# Until the headers forms move to IAsyncSerializerWithHeaders and IAsyncDeserializerWithHeaders (M23/P10, ledgers 585,
-# 586), the one method of each interface is Java's default serialize(String, Headers, T) and
-# deserialize(String, Headers, ByteBuffer).
-default M:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,`0,System.Threading.CancellationToken)
+# Until the headers form moves to IAsyncDeserializerWithHeaders (M23/P10, ledger 586), the one method of the interface
+# is Java's default deserialize(String, Headers, ByteBuffer).
 default M:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
 
 # IAsyncDeserializerWithRetention is a marker with no methods and no Java counterpart (M23/P7, ledger 536): an
@@ -358,42 +356,31 @@ unmatched T:Confluent.Kafka.Common.Serialization.IAsyncDeserializerWithRetention
 unmatched T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemoryDeserializer
 unmatched T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemorySerializer
 
-# The asynchronous built-in serializers and deserializers (M23/P7, ledger 538): each has the one method of its
-# asynchronous interface and calls its synchronous class, so Java's serialize(String, T), deserialize(String, byte[])
-# and deserialize(String, Headers, ByteBuffer) overrides are that one method, with the headers and an optional
-# CancellationToken.
+# The asynchronous built-in deserializers (M23/P7, ledger 538): each has the one method of its asynchronous interface
+# and calls its synchronous class, so Java's deserialize(String, byte[]) and deserialize(String, Headers, ByteBuffer)
+# overrides are that one method, with the headers and an optional CancellationToken. The built-in serializers have
+# Java's serialize(String, T), as their synchronous classes do (M23/P10, ledger 585).
 missing T:Confluent.Kafka.Common.Serialization.AsyncBooleanDeserializer org.apache.kafka.common.serialization.BooleanDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncBooleanDeserializer org.apache.kafka.common.serialization.BooleanDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncBooleanSerializer org.apache.kafka.common.serialization.BooleanSerializer#serialize(String,Boolean)
 missing T:Confluent.Kafka.Common.Serialization.AsyncByteArrayDeserializer org.apache.kafka.common.serialization.ByteArrayDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncByteArraySerializer org.apache.kafka.common.serialization.ByteArraySerializer#serialize(String,byte[])
 missing T:Confluent.Kafka.Common.Serialization.AsyncDoubleDeserializer org.apache.kafka.common.serialization.DoubleDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncDoubleDeserializer org.apache.kafka.common.serialization.DoubleDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncDoubleSerializer org.apache.kafka.common.serialization.DoubleSerializer#serialize(String,Double)
 missing T:Confluent.Kafka.Common.Serialization.AsyncFloatDeserializer org.apache.kafka.common.serialization.FloatDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncFloatDeserializer org.apache.kafka.common.serialization.FloatDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncFloatSerializer org.apache.kafka.common.serialization.FloatSerializer#serialize(String,Float)
 missing T:Confluent.Kafka.Common.Serialization.AsyncIntegerDeserializer org.apache.kafka.common.serialization.IntegerDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncIntegerDeserializer org.apache.kafka.common.serialization.IntegerDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncIntegerSerializer org.apache.kafka.common.serialization.IntegerSerializer#serialize(String,Integer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncLongDeserializer org.apache.kafka.common.serialization.LongDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncLongDeserializer org.apache.kafka.common.serialization.LongDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncLongSerializer org.apache.kafka.common.serialization.LongSerializer#serialize(String,Long)
 missing T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemoryDeserializer org.apache.kafka.common.serialization.ByteBufferDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemoryDeserializer org.apache.kafka.common.serialization.ByteBufferDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemorySerializer org.apache.kafka.common.serialization.ByteBufferSerializer#serialize(String,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncShortDeserializer org.apache.kafka.common.serialization.ShortDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncShortDeserializer org.apache.kafka.common.serialization.ShortDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncShortSerializer org.apache.kafka.common.serialization.ShortSerializer#serialize(String,Short)
 missing T:Confluent.Kafka.Common.Serialization.AsyncStringDeserializer org.apache.kafka.common.serialization.StringDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncStringDeserializer org.apache.kafka.common.serialization.StringDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncStringSerializer org.apache.kafka.common.serialization.StringSerializer#serialize(String,String)
 missing T:Confluent.Kafka.Common.Serialization.AsyncUUIDDeserializer org.apache.kafka.common.serialization.UUIDDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncUUIDDeserializer org.apache.kafka.common.serialization.UUIDDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncUUIDSerializer org.apache.kafka.common.serialization.UUIDSerializer#serialize(String,UUID)
 missing T:Confluent.Kafka.Common.Serialization.AsyncVoidDeserializer org.apache.kafka.common.serialization.VoidDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncVoidDeserializer org.apache.kafka.common.serialization.VoidDeserializer#deserialize(String,byte[])
-missing T:Confluent.Kafka.Common.Serialization.AsyncVoidSerializer org.apache.kafka.common.serialization.VoidSerializer#serialize(String,Void)
 
 # Java's close() on Serde and WrapperSerde is Dispose (dotnet/CLAUDE.md §3 rule 7): ISerde<T> is IDisposable, and its
 # Dispose closes the two halves as Java's close() does (row 461). The clients keep Close() beside Dispose, with another

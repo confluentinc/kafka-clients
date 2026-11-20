@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Threading;
 
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
@@ -22,10 +23,10 @@ namespace Confluent.Kafka.Internal;
 /// <summary>
 /// Refuses, when a client is built, a serializer or deserializer with a public method the client would never call: a
 /// headers form or a memory form without the interface that makes the client call it, or a <c>Close()</c> without
-/// <see cref="IDisposable"/>. For an asynchronous serializer or deserializer, whose one method a client always calls,
-/// it is a serde that is <see cref="IDisposable"/>, or has a public <c>DisposeAsync()</c>, <c>Dispose()</c> or
-/// <c>Close()</c>, without <see cref="IAsyncDisposable"/>, the one interface an asynchronous client disposes it
-/// through.
+/// <see cref="IDisposable"/>. For an asynchronous serializer or deserializer it is a headers form without the
+/// interface that makes the client call it, or a serde that is <see cref="IDisposable"/>, or has a public
+/// <c>DisposeAsync()</c>, <c>Dispose()</c> or <c>Close()</c>, without <see cref="IAsyncDisposable"/>, the one interface
+/// an asynchronous client disposes it through.
 /// </summary>
 internal static class SerdeGuard
 {
@@ -66,8 +67,22 @@ internal static class SerdeGuard
         CheckClose(deserializer, client, disposes);
     }
 
-    internal static void Check<T>(IAsyncSerializer<T> serializer, string client, bool disposes) =>
+    internal static void Check<T>(IAsyncSerializer<T> serializer, string client, bool disposes)
+    {
+        if (serializer is not IAsyncSerializerWithHeaders<T>
+            && DefaultMethodGuard.Declares(
+                serializer, "Serialize", typeof(string), typeof(Headers), typeof(T), typeof(CancellationToken)))
+        {
+            string type = DefaultMethodGuard.TypeText(typeof(T));
+            throw DefaultMethodGuard.NeverCalled(
+                serializer,
+                "Serialize(string, Headers, " + type + ", CancellationToken)",
+                "IAsyncSerializerWithHeaders<" + type + ">",
+                client);
+        }
+
         CheckAsyncClose(serializer, client, disposes);
+    }
 
     internal static void Check<T>(IAsyncDeserializer<T> deserializer, string client, bool disposes) =>
         CheckAsyncClose(deserializer, client, disposes);
