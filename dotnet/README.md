@@ -126,9 +126,12 @@ built, as it disposes the given ones.
 
 The synchronous clients (`KafkaProducer`, `KafkaConsumer` and their mocks) take `ISerializer<T>` and
 `IDeserializer<T>`. The asynchronous clients (`AsyncKafkaProducer`, `AsyncKafkaConsumer` and their
-mocks) take only `IAsyncSerializer<T>` and `IAsyncDeserializer<T>`, whose one method returns a
-`ValueTask`, always receives the headers, and receives the `CancellationToken` of the `Send` or
-`Poll` it serves. Each built-in has an asynchronous class, `Async` and its name
+mocks) take only `IAsyncSerializer<T>` and `IAsyncDeserializer<T>`, whose method returns a
+`ValueTask` and receives the `CancellationToken` of the `Send` or `Poll` it serves. As with the
+synchronous interfaces, a serializer or deserializer that reads the record's headers implements
+`IAsyncSerializerWithHeaders<T>` or `IAsyncDeserializerWithHeaders<T>`, and the client then calls
+its headers form; a class that declares a headers form without that interface is refused when the
+client is built, since the client would never call it. Each built-in has an asynchronous class, `Async` and its name
 (`AsyncStringSerializer`, `AsyncLongDeserializer`); a client given two of them serializes or
 deserializes inside the call and awaits nothing.
 
@@ -155,13 +158,12 @@ adapter for it:
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 
 public sealed class AsyncOrderSerializer(ISerializer<Order> inner) : IAsyncSerializer<Order>
 {
     public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-        string topic, Headers headers, Order? data, CancellationToken cancellationToken) =>
+        string topic, Order? data, CancellationToken cancellationToken = default) =>
         new ValueTask<ReadOnlyMemory<byte>?>(inner.Serialize(topic, data));
 }
 ```
@@ -223,8 +225,8 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
 On an asynchronous consumer, the memory an `IAsyncDeserializer<T>` is given is valid until the
 `ValueTask` it returns completes, so across its awaits; reading it after that throws
 `ObjectDisposedException`. A deserializer that implements `IAsyncDeserializerWithRetention<T>`, an
-interface with no member of its own, may keep or return the memory, as
-`AsyncReadOnlyMemoryDeserializer` does.
+interface with no member of its own that extends `IAsyncDeserializerWithHeaders<T>`, may keep or
+return the memory given to either form, as `AsyncReadOnlyMemoryDeserializer` does.
 
 What to know about a memory that was kept:
 
@@ -265,7 +267,9 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
   an asynchronous client. The mocks keep their constructors.
 - The asynchronous clients take `IAsyncSerializer<T>` and `IAsyncDeserializer<T>` where they took
   `ISerializer<T>` and `IDeserializer<T>`: pass the `Async` class of a built-in, or an asynchronous
-  class of your own.
+  class of your own. Its plain method is `Serialize(topic, data, cancellationToken)` /
+  `Deserialize(topic, data, cancellationToken)`; one that reads the headers also implements
+  `IAsyncSerializerWithHeaders<T>` / `IAsyncDeserializerWithHeaders<T>`.
 
 ## Examples
 

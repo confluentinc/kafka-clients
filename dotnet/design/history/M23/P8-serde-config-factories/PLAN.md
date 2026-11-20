@@ -493,7 +493,13 @@ P7's plan file is not edited; these rows are the record.
 | 546 | "public `AsyncSerializerExtensions.Configure` / `AsyncDeserializerExtensions.Configure`, the shape of the sync ones" | row 571: they return a `ValueTask` and take a `CancellationToken` (572). The rest of 546 stands: a class implementing a synchronous and an asynchronous interface must qualify the call |
 | 548 | "`IAsyncDisposable` first, else `IDisposable`, once, on every path; a synchronous `Dispose()` and a failed constructor wait on the calling thread" | row 575, in part: no `IDisposable` fallback, and a failed `Create` awaits. The rest of 548 stands |
 
-## Draft rule text (not applied)
+## Draft rule text (applied 2026-11-20)
+
+**Applied 2026-11-20 in M23/P10 S4 (commit PENDING_S4).** R1–R7, R9, R10, R13 and R14 are applied as written.
+R8 is applied with the asynchronous serde interfaces it names, and the `AsyncMockProducer` / `AsyncMockConsumer`
+constructors of the same sketches now show them too. R11 is applied inside P7's R2, adjusted to M23/P10 decision
+1: `Configure`'s token is optional on the interface method as on the extension method. R12: `dotnet/README.md`
+now also describes the async headers interfaces (M23/P10 decisions 2–3). The drafts below are kept as written.
 
 No rule file was edited. Each section gives the file and line, the sentence that becomes stale, and its
 replacement. The line numbers are those of `dotnet/CLAUDE.md` at this branch's head. P7's own drafts R1–R5 (its

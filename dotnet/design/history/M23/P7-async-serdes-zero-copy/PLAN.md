@@ -308,7 +308,16 @@ Decisions taken during execution and review. None is confirmed by the owner yet;
 | 551 | Critic C Q1 | PerfV3's async consumer arm | it runs the awaited path (`ByteCountDeserializer` is a user class), so the A/B of the async built-in path has no consumer arm; A/B against master not run | Open |
 | 552 | Critic C Q2 | net462 | the library and the unit tests build for net462; no test of this phase ran on it on the development host | Open |
 
-## Draft rule text (not applied)
+## Draft rule text (applied 2026-11-20)
+
+**Applied 2026-11-20 in M23/P10 S4 (commit PENDING_S4).** R1, R3, R4 and R5 are applied as written. R2 is applied
+adjusted to the owner's decisions of 2026-11-20 on PR #351 (M23/P10 decisions 1–3): each async interface has
+Java's two forms (`IAsyncSerializer<T>` / `IAsyncSerializerWithHeaders<T>`, `IAsyncDeserializer<T>` /
+`IAsyncDeserializerWithHeaders<T>`, the marker `IAsyncDeserializerWithRetention<T>` extending the headers one), the
+token is `CancellationToken cancellationToken = default`, and the clients choose the form once; P8's R11 is added
+to it. Also brought in line with R1: the `byte[]` row of §3's Java-names table, the **Key/value type** row of §4,
+and the `ConsumerRecords_t` row of `ffi-marshalling.md`, which still called keep-alive deferred. The drafts below
+are kept as written.
 
 Each draft replaces the named text. Until it is applied, this plan wins where the two disagree.
 
