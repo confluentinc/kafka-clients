@@ -92,15 +92,7 @@ pub(crate) mod share_acquire_mode;
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
 )]
 mod share_completed_fetch;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
-)]
 mod share_consume_request_manager;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
-)]
 mod share_consumer_metadata;
 #[cfg_attr(
     not(test),
@@ -119,30 +111,14 @@ mod share_fetch_buffer;
 mod share_fetch_collector;
 mod share_fetch_config;
 mod share_fetch_metrics_aggregator;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
-)]
 mod share_fetch_metrics_manager;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
-)]
 mod share_fetch_metrics_registry;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
-)]
 mod share_heartbeat_request_manager;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
 )]
 pub(crate) mod share_in_flight_batch;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
-)]
 mod share_membership_manager;
 mod share_session_handler;
 pub(crate) mod subscription_state;

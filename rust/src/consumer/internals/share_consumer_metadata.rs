@@ -120,6 +120,10 @@ impl ShareConsumerMetadata {
     /// `retry.backoff.max.ms`, `metadata.max.age.ms` and
     /// `allow.auto.create.topics`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerMetadata#ShareConsumerMetadata")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "ShareConsumerImpl uses it from Milestone 18 P7 on")
+    )]
     pub(crate) fn with_config(
         config: &ConsumerConfig,
         subscriptions: Arc<Mutex<SubscriptionState>>,
@@ -137,6 +141,7 @@ impl ShareConsumerMetadata {
 
     /// Java: `allowAutoTopicCreation()`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerMetadata#allowAutoTopicCreation")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn allow_auto_topic_creation(&self) -> bool {
         self.allow_auto_topic_creation
     }

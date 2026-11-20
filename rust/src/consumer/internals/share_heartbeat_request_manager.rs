@@ -217,6 +217,10 @@ impl ShareHeartbeatRequestManager {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.ShareHeartbeatRequestManager#ShareHeartbeatRequestManager"
     )]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Java's visible-for-testing constructor: only the tests call it")
+    )]
     pub(crate) fn with_state(
         current_time_ms: i64,
         config: &ConsumerConfig,
@@ -250,11 +254,13 @@ impl ShareHeartbeatRequestManager {
     }
 
     /// The composed base state.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read the base directly"))]
     pub(crate) fn inner(&self) -> &AbstractHeartbeatRequestManager<ShareGroupHeartbeatResponse> {
         &self.inner
     }
 
     /// Mutable access to the composed base state.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read the base directly"))]
     pub(crate) fn inner_mut(&mut self) -> &mut AbstractHeartbeatRequestManager<ShareGroupHeartbeatResponse> {
         &mut self.inner
     }

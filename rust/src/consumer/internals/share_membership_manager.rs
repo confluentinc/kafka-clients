@@ -188,16 +188,37 @@ impl ShareMembershipManager {
     }
 
     /// Java: `currentAssignment()` (inherited).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "production code reaches it through AbstractMembershipManager; only the tests call the subclass forwarder"
+        )
+    )]
     pub(crate) fn current_assignment(&self) -> LocalAssignment {
         self.abstract_mm.current_assignment()
     }
 
     /// Java: `onHeartbeatSuccess(ShareGroupHeartbeatResponse)` (inherited).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "production code reaches it through AbstractMembershipManager; only the tests call the subclass forwarder"
+        )
+    )]
     pub(crate) fn on_heartbeat_success(&self, response: &ShareGroupHeartbeatResponse) -> Result<(), Error> {
         self.abstract_mm.on_heartbeat_success::<Self>(response)
     }
 
     /// Java: `onHeartbeatFailure(boolean retriable)` (inherited).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "production code reaches it through AbstractMembershipManager; only the tests call the subclass forwarder"
+        )
+    )]
     pub(crate) fn on_heartbeat_failure(&self, retriable: bool) {
         self.abstract_mm.on_heartbeat_failure(retriable);
     }
@@ -206,17 +227,38 @@ impl ShareMembershipManager {
     /// as for the consumer, the stale-member release Java runs inside it is
     /// started by the heartbeat manager (`AbstractHeartbeatRequestManager`
     /// calls `transition_to_stale` right after).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "production code reaches it through AbstractMembershipManager; only the tests call the subclass forwarder"
+        )
+    )]
     pub(crate) fn on_heartbeat_request_generated(&self) -> Result<(), Error> {
         self.abstract_mm.on_heartbeat_request_generated()
     }
 
     /// Java: `transitionToJoining()` (inherited).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "production code reaches it through AbstractMembershipManager; only the tests call the subclass forwarder"
+        )
+    )]
     pub(crate) fn transition_to_joining(&self) -> Result<(), Error> {
         self.abstract_mm.transition_to_joining(self.join_group_epoch())
     }
 
     /// Java: `transitionToSendingLeaveGroup(boolean dueToExpiredPollTimer)`
     /// (inherited).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "production code reaches it through AbstractMembershipManager; only the tests call the subclass forwarder"
+        )
+    )]
     pub(crate) fn transition_to_sending_leave_group(&self, due_to_expired_poll_timer: bool) -> Result<(), Error> {
         self.abstract_mm
             .transition_to_sending_leave_group(self.leave_group_epoch(), due_to_expired_poll_timer)
@@ -228,11 +270,25 @@ impl ShareMembershipManager {
     }
 
     /// Java: `transitionToFenced()` (inherited).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "production code reaches it through AbstractMembershipManager; only the tests call the subclass forwarder"
+        )
+    )]
     pub(crate) fn transition_to_fenced(&self, current_time_ms: i64) -> Result<(), Error> {
         self.abstract_mm.transition_to_fenced(self, current_time_ms)
     }
 
     /// Java: `transitionToStale()` (inherited).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "production code reaches it through AbstractMembershipManager; only the tests call the subclass forwarder"
+        )
+    )]
     pub(crate) fn transition_to_stale(&self, current_time_ms: i64) -> Result<(), Error> {
         self.abstract_mm.transition_to_stale(self, current_time_ms)
     }
@@ -255,6 +311,11 @@ impl ShareMembershipManager {
     /// Java: `leaveGroup()` (inherited).
     pub(crate) fn leave_group(&self, current_time_ms: i64) -> Result<KafkaFutureImpl<()>, Error> {
         self.abstract_mm.leave_group(self, current_time_ms)
+    }
+
+    /// Java: `maybeReconcile(boolean canCommit)` (inherited).
+    pub(crate) fn maybe_reconcile(&self, current_time_ms: i64, can_commit: bool) -> Result<(), Error> {
+        self.abstract_mm.maybe_reconcile(self, current_time_ms, can_commit)
     }
 
     /// Java: `registerStateListener(MemberStateListener)` (inherited).

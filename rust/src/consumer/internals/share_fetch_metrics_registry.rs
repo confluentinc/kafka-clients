@@ -69,6 +69,7 @@ impl ShareFetchMetricsRegistry {
     /// Java's `ShareFetchMetricsRegistry()`, which delegates to
     /// `this(new HashSet<>(), "")`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchMetricsRegistry#ShareFetchMetricsRegistry")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn new() -> Self {
         Self::with_tags_metric_grp_prefix(IndexSet::new(), "")
     }
@@ -77,6 +78,7 @@ impl ShareFetchMetricsRegistry {
     /// Java's `ShareFetchMetricsRegistry(String metricGrpPrefix)`, which
     /// delegates to `this(new HashSet<>(), metricGrpPrefix)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchMetricsRegistry#ShareFetchMetricsRegistry")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn with_metric_grp_prefix(metric_grp_prefix: &str) -> Self {
         Self::with_tags_metric_grp_prefix(IndexSet::new(), metric_grp_prefix)
     }

@@ -45,9 +45,11 @@ pub(crate) struct ShareRebalanceMetricsManager {
     inner: AbstractConsumerMetricsManager,
     rebalance_sensor: Arc<Sensor>,
     /// Java: `public final MetricName rebalanceTotal` (read by its tests only).
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) rebalance_total: MetricName,
     /// Java: `public final MetricName rebalanceRatePerHour` (read by its tests
     /// only).
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) rebalance_rate_per_hour: MetricName,
     /// Java: `private long lastRebalanceEndMs = -1L`.
     last_rebalance_end_ms: AtomicI64,
@@ -112,6 +114,7 @@ impl ShareRebalanceMetricsManager {
     ///
     /// No production caller, as in Java: `ShareConsumerImpl#close` does not
     /// close the membership manager's metrics manager.
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn close(&self) {
         self.inner.close();
     }

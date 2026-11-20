@@ -30,10 +30,6 @@ mod offset_commit_metrics_manager;
 mod rebalance_callback_metrics_manager;
 mod rebalance_metrics_manager;
 mod sensor_builder;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
-)]
 mod share_rebalance_metrics_manager;
 
 pub(crate) use abstract_consumer_metrics_manager::AbstractConsumerMetricsManager;

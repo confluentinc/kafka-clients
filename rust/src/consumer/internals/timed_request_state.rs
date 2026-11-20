@@ -17,13 +17,6 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.TimedRequestState`.
 
-// Items here are consumed by Phase 7-9 managers (`CommitRequestManager`,
-// `OffsetsRequestManager`, etc.). Suppress dead-code warnings for items
-// that aren't yet referenced inside the workspace: the rest are used by the
-// share consume request manager, which is wired from Milestone 18 P6 on (its
-// tests use them all already).
-#![cfg_attr(not(test), expect(dead_code))]
-
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
@@ -144,6 +137,10 @@ impl TimedRequestState {
 
     /// Renders the inner state followed by `, remainingMs=...`, matching
     /// Java's `toStringBase()` override.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "no Rust log line renders a request state; the tests do")
+    )]
     fn to_string_with(&self, current_time_ms: i64) -> String {
         format!(
             "{}, remainingMs={}",

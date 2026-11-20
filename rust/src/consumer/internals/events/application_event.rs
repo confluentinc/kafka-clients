@@ -22,24 +22,27 @@
 //! **Scope** (per `design/history/Milestone-8/Phase-5/PLAN.md` "Out of
 //! scope"):
 //!
-//!   * Share-consumer (`KIP-932`) variants are NOT translated.
-//!   * Streams (`Streams*Event`) variants are NOT translated.
-//!
-//! See [`consumer-threading.md` §20](../../../../../../.claude/rules/consumer-threading.md)
-//! for the full scope decision.
+//!   * Streams (`Streams*Event`) variants are NOT translated (see
+//!     [`consumer-threading.md` §20](../../../../../../.claude/rules/consumer-threading.md)).
+//!   * The eight share-consumer (KIP-932) `Share*Event` application events
+//!     are translated (Milestone 18 P6, `share-consumer.md` §5).
+//!     `ShareAcknowledgementEvent` is not an `ApplicationEvent` in Java and
+//!     travels on its own queue (`ShareAcknowledgementEventHandler`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use indexmap::IndexMap;
 use regex::Regex;
 use tokio::sync::{Notify, oneshot};
 
-use crate::common::{Error, IsolationLevel, PartitionInfo, TopicPartition};
+use crate::common::{Error, IsolationLevel, PartitionInfo, TopicIdPartition, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
 use crate::consumer::internals::OffsetAndTimestampInternal;
+use crate::consumer::internals::{Acknowledgements, NodeAcknowledgements};
 use crate::consumer::{GroupMembershipOperation, OffsetAndMetadata, SubscriptionPattern};
 
 use super::CompletableEventHandle;
@@ -268,6 +271,77 @@ pub(crate) enum ApplicationEvent {
         /// fetching / position init happens for them while the callback runs.
         added_partitions: Vec<TopicPartition>,
     },
+
+    // ─── Share consumer (KIP-932), `share-consumer.md` §5 ───
+    //
+    // The acknowledgement maps are `IndexMap`s: the share consumer builds
+    // them with `ShareFetch::take_acknowledged_records`, whose Java
+    // counterpart returns a `LinkedHashMap`, and the event keeps that order.
+    /// `SharePollEvent` — the share consumer's `poll()` pumping the share
+    /// membership manager. Bare (`extends ApplicationEvent`, not
+    /// `CompletableApplicationEvent`), like [`Self::AsyncPoll`]: Java keeps
+    /// its own `volatile boolean isComplete`, which the background task sets
+    /// (`completeSuccessfully()`) and the application thread reads between
+    /// polls (`isComplete()`). `is_complete` is that flag, shared with the
+    /// application side, which keeps its own copy of `deadline_ms` for
+    /// Java's `isExpired(Time)` since the event itself moves to the
+    /// background task.
+    SharePoll {
+        /// Time at which the event must be completed, from the timeout
+        /// passed to the share consumer's `poll`.
+        deadline_ms: i64,
+        /// Time at which the event was created.
+        poll_time_ms: i64,
+        /// Java's `volatile boolean isComplete`.
+        is_complete: Arc<AtomicBool>,
+    },
+    /// `ShareFetchEvent` — tells the share consume request manager to fetch
+    /// more records, piggy-backing `acknowledgements_map` on the fetches.
+    /// Bare.
+    ShareFetch {
+        acknowledgements_map: IndexMap<TopicIdPartition, NodeAcknowledgements>,
+    },
+    /// `ShareAcknowledgeAsyncEvent` — the share consumer acknowledged
+    /// delivery of records asynchronously. Bare: `deadline_ms` bounds the
+    /// retries of the acknowledge requests, nothing waits on the event.
+    ShareAcknowledgeAsync {
+        acknowledgements_map: IndexMap<TopicIdPartition, NodeAcknowledgements>,
+        deadline_ms: i64,
+    },
+    /// `ShareAcknowledgementCommitCallbackRegistrationEvent` — whether the
+    /// user registered an acknowledgement commit callback. Bare.
+    ShareAcknowledgementCommitCallbackRegistration {
+        /// Java's `isCallbackRegistered`.
+        is_callback_registered: bool,
+    },
+    /// `ShareAcknowledgeSyncEvent` — the share consumer acknowledged
+    /// delivery of records synchronously. Completable with the completed
+    /// acknowledgements by partition (Java's
+    /// `CompletableApplicationEvent<Map<TopicIdPartition, Acknowledgements>>`);
+    /// the deadline is the handle's.
+    ShareAcknowledgeSync {
+        handle: CompletableEventHandle<HashMap<TopicIdPartition, Acknowledgements>>,
+        acknowledgements_map: IndexMap<TopicIdPartition, NodeAcknowledgements>,
+    },
+    /// `ShareAcknowledgeOnCloseEvent` — the share consumer is closing and
+    /// sends its last acknowledgements. Completable (`Void`) once they have
+    /// responses; the deadline is the handle's.
+    ShareAcknowledgeOnClose {
+        handle: CompletableEventHandle<()>,
+        acknowledgements_map: IndexMap<TopicIdPartition, NodeAcknowledgements>,
+    },
+    /// `ShareSubscriptionChangeEvent` — the subscription of a share group
+    /// changed. Completable (`Void`); Java fixes its deadline at
+    /// `Long.MAX_VALUE`, so the handle is created with `i64::MAX`.
+    ShareSubscriptionChange {
+        handle: CompletableEventHandle<()>,
+        /// Java's `Set.copyOf(topics)`.
+        topics: HashSet<String>,
+    },
+    /// `ShareUnsubscribeEvent` — the share consumer unsubscribed from all
+    /// topics. Completable (`Void`) once the leave heartbeat is sent; the
+    /// deadline is the handle's.
+    ShareUnsubscribe { handle: CompletableEventHandle<()> },
 }
 
 impl ApplicationEvent {
@@ -301,6 +375,16 @@ impl ApplicationEvent {
             Self::CurrentLag { .. } => "CurrentLag",
             Self::SeekUnvalidated { .. } => "SeekUnvalidated",
             Self::ApplyAssignment { .. } => "ApplyAssignment",
+            Self::SharePoll { .. } => "SharePoll",
+            Self::ShareFetch { .. } => "ShareFetch",
+            Self::ShareAcknowledgeAsync { .. } => "ShareAcknowledgeAsync",
+            Self::ShareAcknowledgementCommitCallbackRegistration { .. } => {
+                "ShareAcknowledgementCommitCallbackRegistration"
+            },
+            Self::ShareAcknowledgeSync { .. } => "ShareAcknowledgeSync",
+            Self::ShareAcknowledgeOnClose { .. } => "ShareAcknowledgeOnClose",
+            Self::ShareSubscriptionChange { .. } => "ShareSubscriptionChange",
+            Self::ShareUnsubscribe { .. } => "ShareUnsubscribe",
         }
     }
 
@@ -400,12 +484,20 @@ impl ApplicationEvent {
             Self::CurrentLag { handle, .. } => Some(handle.erased()),
             Self::SeekUnvalidated { handle, .. } => Some(handle.erased()),
             Self::ApplyAssignment { handle, .. } => Some(handle.erased()),
+            Self::ShareAcknowledgeSync { handle, .. } => Some(handle.erased()),
+            Self::ShareAcknowledgeOnClose { handle, .. } => Some(handle.erased()),
+            Self::ShareSubscriptionChange { handle, .. } => Some(handle.erased()),
+            Self::ShareUnsubscribe { handle } => Some(handle.erased()),
             // Non-completable variants — Java: not `instanceof CompletableEvent`.
             Self::CommitOnClose
             | Self::StopFindCoordinatorOnClose
             | Self::NewTopicsMetadataUpdate
             | Self::ConsumerRebalanceListenerCallbackCompleted { .. }
-            | Self::AsyncPoll { .. } => None,
+            | Self::AsyncPoll { .. }
+            | Self::SharePoll { .. }
+            | Self::ShareFetch { .. }
+            | Self::ShareAcknowledgeAsync { .. }
+            | Self::ShareAcknowledgementCommitCallbackRegistration { .. } => None,
         }
     }
 
@@ -937,6 +1029,88 @@ mod tests {
         } else {
             panic!("unexpected variant");
         }
+    }
+
+    /// The share events (`share-consumer.md` §5): one test per Java class's
+    /// `extends`. Rust-only (Java's event classes have no tests): the four
+    /// `CompletableApplicationEvent` subclasses carry a handle the reaper
+    /// tracks; the four bare `ApplicationEvent`s do not. None implements
+    /// `MetadataErrorNotifiableEvent`.
+    #[test]
+    fn share_events_are_completable_exactly_where_java_extends_completable_application_event() {
+        let (sync, _rx, _e) =
+            CompletableEvent::make_completable_event::<HashMap<TopicIdPartition, Acknowledgements>>(10);
+        let (on_close, _rx2, _e2) = CompletableEvent::make_completable_event::<()>(20);
+        let (subscribe, _rx3, _e3) = CompletableEvent::make_completable_event::<()>(i64::MAX);
+        let (unsubscribe, _rx4, _e4) = CompletableEvent::make_completable_event::<()>(30);
+        let completable = [
+            ApplicationEvent::ShareAcknowledgeSync { handle: sync, acknowledgements_map: IndexMap::new() },
+            ApplicationEvent::ShareAcknowledgeOnClose { handle: on_close, acknowledgements_map: IndexMap::new() },
+            ApplicationEvent::ShareSubscriptionChange { handle: subscribe, topics: HashSet::from(["t".to_string()]) },
+            ApplicationEvent::ShareUnsubscribe { handle: unsubscribe },
+        ];
+        let names: Vec<&str> = completable.iter().map(ApplicationEvent::type_name).collect();
+        assert_eq!(
+            names,
+            [
+                "ShareAcknowledgeSync",
+                "ShareAcknowledgeOnClose",
+                "ShareSubscriptionChange",
+                "ShareUnsubscribe"
+            ]
+        );
+        let deadlines: Vec<i64> = completable
+            .iter()
+            .map(|event| event.erased_handle().expect("completable").deadline_ms())
+            .collect();
+        assert_eq!(deadlines, [10, 20, i64::MAX, 30], "the handle carries the event's deadline");
+
+        let bare = [
+            ApplicationEvent::SharePoll {
+                deadline_ms: 2,
+                poll_time_ms: 1,
+                is_complete: Arc::new(AtomicBool::new(false)),
+            },
+            ApplicationEvent::ShareFetch { acknowledgements_map: IndexMap::new() },
+            ApplicationEvent::ShareAcknowledgeAsync { acknowledgements_map: IndexMap::new(), deadline_ms: 3 },
+            ApplicationEvent::ShareAcknowledgementCommitCallbackRegistration { is_callback_registered: true },
+        ];
+        let names: Vec<&str> = bare.iter().map(ApplicationEvent::type_name).collect();
+        assert_eq!(
+            names,
+            [
+                "SharePoll",
+                "ShareFetch",
+                "ShareAcknowledgeAsync",
+                "ShareAcknowledgementCommitCallbackRegistration"
+            ]
+        );
+        for event in &bare {
+            assert!(event.erased_handle().is_none(), "{} is bare", event.type_name());
+        }
+        for event in bare.iter().chain(completable.iter()) {
+            assert!(!event.is_metadata_error_notifiable(), "{}", event.type_name());
+            assert!(event.metadata_error_notifiable_handle().is_none(), "{}", event.type_name());
+            assert!(!event.on_metadata_error(Error::timeout("md")), "{}", event.type_name());
+        }
+    }
+
+    /// `SharePollEvent`'s `isComplete` flag is shared: the application side
+    /// keeps a clone and sees the background task's `completeSuccessfully()`.
+    #[test]
+    fn share_poll_shares_its_completion_flag() {
+        let is_complete = Arc::new(AtomicBool::new(false));
+        let event = ApplicationEvent::SharePoll {
+            deadline_ms: 12346,
+            poll_time_ms: 12345,
+            is_complete: Arc::clone(&is_complete),
+        };
+        let ApplicationEvent::SharePoll { deadline_ms, poll_time_ms, is_complete: shared } = event else {
+            panic!("unexpected variant");
+        };
+        assert_eq!((deadline_ms, poll_time_ms), (12346, 12345));
+        shared.store(true, Ordering::Release);
+        assert!(is_complete.load(Ordering::Acquire));
     }
 
     #[test]

@@ -19,6 +19,8 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.RequestManager`.
 
+#![cfg_attr(not(test), expect(dead_code))]
+
 use super::PollResult;
 
 /// The common interface for consumer request managers. Implementations

@@ -31,13 +31,17 @@
 //! - **Responses.** Java registers `whenComplete` callbacks on each
 //!   `UnsentRequest`; they run inside the network poll. The manager keeps the
 //!   response receiver of each request it builds and runs the same handlers in
-//!   [`ShareConsumeRequestManager::handle_completed_requests`], at the start
-//!   of [`RequestManager::poll`] and of every entry point an application event
+//!   [`ShareConsumeRequestManager::handle_completed_requests`]. The background
+//!   task calls it right after every network poll, before it reaps the
+//!   expired events (`RequestManager::handle_completed_requests`, from
+//!   `ConsumerNetworkThread::run_once` and `cleanup`), which is where Java
+//!   runs them: a `commitSync` future completes in the loop iteration its
+//!   response arrives in. The manager also calls it at the start of
+//!   [`RequestManager::poll`] and of every entry point an application event
 //!   reaches (`fetch`, `commit_sync`, `commit_async`, `acknowledge_on_close`,
 //!   `set_acknowledgement_commit_callback_registered`), so an event sees the
-//!   state the responses that arrived before it left, as in Java. No task is
-//!   spawned per request: the network poll returns when a response arrives,
-//!   and the background loop polls the managers again right after. A
+//!   state the responses that arrived before it left, as in Java, whoever
+//!   drives the manager. No task is spawned per request. A
 //!   request that fails because its node disconnected completes with
 //!   `DisconnectError`, Java's `DisconnectException`, although the Rust
 //!   `NetworkClientDelegate` reports a `NetworkError`. Responses
@@ -1814,6 +1818,13 @@ impl ShareConsumeRequestManager {
         lock(&self.subscriptions).fetchable_partitions(|_| true)
     }
 
+    /// Test-only stand-in for Mockito's
+    /// `verify(manager).setAcknowledgementCommitCallbackRegistered(b)`.
+    #[cfg(test)]
+    pub(crate) fn is_acknowledgement_commit_callback_registered_for_test(&self) -> bool {
+        self.is_acknowledgement_commit_callback_registered
+    }
+
     /// The share session handler of `node`, if there is one.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManager#sessionHandler")]
     pub(crate) fn session_handler(&self, node: i32) -> Option<SharedSessionHandler> {
@@ -1821,6 +1832,10 @@ impl ShareConsumeRequestManager {
     }
 
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManager#hasCompletedFetches")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "Java uses it only in ShareConsumeRequestManagerTest")
+    )]
     pub(crate) fn has_completed_fetches(&self) -> bool {
         !self.share_fetch_buffer.is_empty()
     }
@@ -2106,9 +2121,8 @@ impl RequestManager for Arc<Mutex<ShareConsumeRequestManager>> {
         lock(self).maximum_time_to_wait(current_time_ms)
     }
 
-    fn signal_close(&mut self) {
-        lock(self).signal_close();
-    }
+    // `signal_close` keeps the trait default, as the manager does: Java
+    // signals only the coordinator and commit managers on close.
 
     fn handle_completed_requests(&mut self) {
         lock(self).handle_completed_requests();
