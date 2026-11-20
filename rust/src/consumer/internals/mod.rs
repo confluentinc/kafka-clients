@@ -51,6 +51,7 @@ mod consumer_rebalance_listener_method_name;
     not(test),
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
 )]
+mod consumer_share_fetch_error;
 mod consumer_share_in_flight_batch_error;
 mod consumer_utils;
 mod coordinator_request_manager;
@@ -104,6 +105,21 @@ mod share_completed_fetch;
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
 )]
 mod share_consumer_metadata;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
+)]
+mod share_fetch;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
+)]
+mod share_fetch_buffer;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
+)]
+mod share_fetch_collector;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3b on")
@@ -172,6 +188,7 @@ pub(crate) use consumer_metadata::ConsumerMetadata;
 pub(crate) use consumer_network_thread::ConsumerNetworkThread;
 pub(crate) use consumer_rebalance_listener_invoker::ConsumerRebalanceListenerInvoker;
 pub(crate) use consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+pub(crate) use consumer_share_fetch_error::ConsumerShareFetchError;
 pub(crate) use consumer_share_in_flight_batch_error::ConsumerShareInFlightBatchError;
 pub(crate) use consumer_utils::ConsumerUtils;
 pub(crate) use coordinator_request_manager::CoordinatorRequestManager;
@@ -191,7 +208,6 @@ pub(crate) use heartbeat_request_state::HeartbeatRequestState;
 pub(crate) use member_state::MemberState;
 pub(crate) use member_state_listener::MemberStateListener;
 pub(crate) use network_client_delegate::{NetworkClientDelegate, PollResult, UnsentRequest};
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P5a on")]
 pub(crate) use node_acknowledgements::NodeAcknowledgements;
 pub(crate) use offset_and_timestamp_internal::OffsetAndTimestampInternal;
 pub(crate) use offset_commit_callback_invoker::{
@@ -207,10 +223,12 @@ pub(crate) use request_state::RequestState;
 #[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")]
 pub(crate) use share_acknowledgement_mode::ShareAcknowledgementMode;
 pub(crate) use share_acquire_mode::ShareAcquireMode;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3b on")]
 pub(crate) use share_completed_fetch::ShareCompletedFetch;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P6 on")]
 pub(crate) use share_consumer_metadata::ShareConsumerMetadata;
+pub(crate) use share_fetch::ShareFetch;
+pub(crate) use share_fetch_buffer::ShareFetchBuffer;
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")]
+pub(crate) use share_fetch_collector::ShareFetchCollector;
 pub(crate) use share_fetch_config::ShareFetchConfig;
 pub(crate) use share_fetch_metrics_aggregator::ShareFetchMetricsAggregator;
 pub(crate) use share_fetch_metrics_manager::ShareFetchMetricsManager;
