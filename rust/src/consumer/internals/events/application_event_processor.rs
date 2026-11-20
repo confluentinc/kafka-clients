@@ -5248,7 +5248,7 @@ mod tests {
                 time,
                 topic_id: Uuid::random_uuid(),
             };
-            fx.update_metadata();
+            fx.update_metadata(1);
             fx
         }
 
@@ -5264,15 +5264,15 @@ mod tests {
                 self.time.milliseconds()
             }
 
-            /// One node leading the topic's single partition. The metadata keeps
-            /// only the subscribed topics, so a test that subscribes updates it
-            /// again.
-            fn update_metadata(&self) {
+            /// One node leading the topic's `partitions` partitions. The metadata
+            /// keeps only the subscribed topics, so a test that subscribes
+            /// updates it again.
+            fn update_metadata(&self, partitions: i32) {
                 let response = RequestTestUtils::metadata_update_with_ids(
                     "kafka-cluster",
                     1,
                     &HashMap::new(),
-                    &HashMap::from([(TOPIC.to_string(), 1)]),
+                    &HashMap::from([(TOPIC.to_string(), partitions)]),
                     &|_| Some(0),
                     &HashMap::from([(TOPIC.to_string(), self.topic_id)]),
                 );
@@ -5298,16 +5298,17 @@ mod tests {
                 is_complete.load(Ordering::Acquire)
             }
 
-            /// A heartbeat response assigning partition 0 of the topic.
-            fn receive_assignment(&self) {
+            /// A heartbeat response assigning `partitions` of the topic at
+            /// `member_epoch`.
+            fn receive_assignment(&self, partitions: Vec<i32>, member_epoch: i32) {
                 let mut topic_partitions = TopicPartitions::new();
-                topic_partitions.set_topic_id(self.topic_id).set_partitions(vec![0]);
+                topic_partitions.set_topic_id(self.topic_id).set_partitions(partitions);
                 let mut assignment = Assignment::new();
                 assignment.set_topic_partitions(vec![topic_partitions]);
                 let mut data = ShareGroupHeartbeatResponseData::new();
                 data.set_error_code(Errors::None.code())
                     .set_member_id(Some(self.membership.member_id()))
-                    .set_member_epoch(1)
+                    .set_member_epoch(member_epoch)
                     .set_assignment(Some(assignment));
                 self.membership
                     .abstract_mm
@@ -5352,7 +5353,10 @@ mod tests {
         /// moves a member whose subscription was updated from UNSUBSCRIBED to
         /// JOINING; `resetPollTimer` arms the poll timer for
         /// `max.poll.interval.ms`; `maybeReconcile(true)` applies an assignment
-        /// the member received (the second poll).
+        /// the member received. The last step revokes a partition, which only
+        /// `maybeReconcile(true)` reconciles (`AbstractMembershipManager#maybeReconcile`
+        /// returns early for `canCommit == false` when partitions are revoked),
+        /// so the test fails if the arm passes `false`.
         #[test]
         #[doc(
             alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessorTest#testSharePollEventCallsShareManagers"
@@ -5372,7 +5376,7 @@ mod tests {
             assert_eq!(MemberState::Joining, fx.membership.state(), "onConsumerPoll joins the group");
             assert_eq!(MAX_POLL_INTERVAL_MS, fx.poll_timer_remaining_ms(), "resetPollTimer(pollTimeMs)");
 
-            fx.receive_assignment();
+            fx.receive_assignment(vec![0], 1);
             assert_eq!(MemberState::Reconciling, fx.membership.state());
             assert!(fx.subscriptions.lock().unwrap().assigned_partitions().is_empty());
 
@@ -5383,6 +5387,46 @@ mod tests {
                 "maybeReconcile(true) applies the assignment"
             );
             assert_eq!(MemberState::Acknowledging, fx.membership.state());
+
+            // A new assignment that revokes partition 0.
+            fx.update_metadata(2);
+            fx.membership.on_heartbeat_request_generated().expect("acknowledged");
+            assert_eq!(MemberState::Stable, fx.membership.state());
+            fx.receive_assignment(vec![1], 2);
+            assert!(fx.share_poll(fx.now()));
+            assert_eq!(
+                HashSet::from([TopicPartition::new(TOPIC.to_string(), 1)]),
+                fx.subscriptions.lock().unwrap().assigned_partitions(),
+                "maybeReconcile(true) also reconciles a revocation"
+            );
+        }
+
+        /// Java's share `RequestManagers#entries()` order, share heartbeat →
+        /// share membership → share consume, is what lets a reconciled
+        /// assignment be fetched in the same `ConsumerNetworkThread#runOnce`:
+        /// the membership manager's `poll` (`maybeReconcile(true)`) assigns the
+        /// partition, then the share consume manager's `poll` builds its
+        /// `ShareFetch`. One walk of `entries()`, as `run_once` makes it, sends
+        /// exactly one `ShareFetch`; with membership and consume swapped it
+        /// would send none.
+        #[test]
+        fn one_entries_walk_fetches_the_partition_the_membership_poll_just_assigned() {
+            let mut fx = setup_share_processor();
+            fx.subscribe();
+            fx.update_metadata(1);
+            assert!(fx.share_poll(fx.now()));
+            assert_eq!(MemberState::Joining, fx.membership.state());
+            fx.processor
+                .process(ApplicationEvent::ShareFetch { acknowledgements_map: IndexMap::new() });
+            fx.receive_assignment(vec![0], 1);
+            assert_eq!(MemberState::Reconciling, fx.membership.state());
+
+            let now = fx.now();
+            let mut sent = 0;
+            for rm in fx.request_managers.lock().unwrap().entries() {
+                sent += rm.poll(now).unsent_requests.len();
+            }
+            assert_eq!(1, sent, "the ShareFetch for the partition the membership poll just assigned");
         }
 
         /// `process(ShareSubscriptionChangeEvent)`: `subscribeToShareGroup`,
@@ -5448,7 +5492,7 @@ mod tests {
             let mut fx = setup_share_processor();
             fx.subscribe();
             assert!(fx.share_poll(fx.now()));
-            fx.receive_assignment();
+            fx.receive_assignment(vec![0], 1);
             assert!(fx.share_poll(fx.now()));
             assert_eq!(MemberState::Acknowledging, fx.membership.state());
 
@@ -5477,7 +5521,7 @@ mod tests {
         fn share_fetch_tells_the_share_consume_request_manager_to_fetch() {
             let mut fx = setup_share_processor();
             fx.subscribe();
-            fx.update_metadata();
+            fx.update_metadata(1);
             fx.subscriptions
                 .lock()
                 .unwrap()
