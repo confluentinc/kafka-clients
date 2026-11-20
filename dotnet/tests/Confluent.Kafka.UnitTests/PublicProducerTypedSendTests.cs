@@ -17,6 +17,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
@@ -26,9 +27,9 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The typed send on both producer mocks: a typed round-trip, the serializer invoked on a null key or value as
-/// Java's is, a nullable value type's tombstone, and a serializer throw leaving <c>Send</c> synchronously as it is,
-/// with nothing sent. The mock exposes only a history count, so the
-/// serialized bytes are not read back.
+/// Java's is, a nullable value type's tombstone, and a serializer throw leaving <c>Send</c> as it is, synchronously
+/// on the sync mock and ending the first stage on the async mock, whose serializer is awaited, with nothing sent.
+/// The mock exposes only a history count, so the serialized bytes are not read back.
 /// </summary>
 public sealed class PublicProducerTypedSendTests
 {
@@ -58,7 +59,7 @@ public sealed class PublicProducerTypedSendTests
     public async Task Async_TypedRoundTrip_StringLong_Succeeds()
     {
         AsyncMockProducer<string, long?> producer =
-            new AsyncMockProducer<string, long?>(Serdes.String().Serializer(), Serdes.Long().Serializer());
+            new AsyncMockProducer<string, long?>(new AsyncStringSerializer(), new AsyncLongSerializer());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
 
         RecordMetadata metadata = null!;
@@ -117,7 +118,7 @@ public sealed class PublicProducerTypedSendTests
     {
         RecordingSerializer<string> valueSer = new RecordingSerializer<string>(Serdes.String().Serializer());
         AsyncMockProducer<string, string> producer =
-            new AsyncMockProducer<string, string>(Serdes.String().Serializer(), valueSer);
+            new AsyncMockProducer<string, string>(new AsyncStringSerializer(), valueSer.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
 
         await TestTimeout.Run(
@@ -200,19 +201,18 @@ public sealed class PublicProducerTypedSendTests
     }
 
     [Fact]
-    public void Async_ValueSerializerThrows_ThrowsSynchronouslyBeforeReturningTask()
+    public async Task Async_ValueSerializerThrows_EndsTheFirstStage()
     {
         ThrowingSerializer<string> valueSer = new ThrowingSerializer<string>();
         AsyncMockProducer<string, string> producer =
-            new AsyncMockProducer<string, string>(Serdes.String().Serializer(), valueSer);
+            new AsyncMockProducer<string, string>(new AsyncStringSerializer(), valueSer.AsAsync());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
-        // The async Send serializes before it returns, so the throw leaves the call (Assert.Throws, not
-        // ThrowsAsync); the statement lambda binds Action, not the obsolete Func<Task>.
-        ThrowingSerializer<string>.BoomException ex = Assert.Throws<ThrowingSerializer<string>.BoomException>(() =>
-        {
-            _ = producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"));
-        });
+        // The serializer is not a built-in, so the async Send awaits it and its throw ends the first stage.
+        ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage =
+            producer.Send(new ProducerRecord<string, string>(Topic, value: "v", key: "k"));
+        ThrowingSerializer<string>.BoomException ex =
+            await Assert.ThrowsAsync<ThrowingSerializer<string>.BoomException>(async () => await firstStage);
 
         Assert.Same(valueSer.LastThrown, ex);
 

@@ -28,7 +28,7 @@ namespace Confluent.Kafka.Producer;
 
 /// <summary>
 /// The real asynchronous Kafka producer, Java's <c>org.apache.kafka.clients.producer.KafkaProducer&lt;K, V&gt;</c>:
-/// it serializes the key and value on the caller's thread and forwards the bytes to the native producer.
+/// it serializes the key and value, awaiting a serializer that waits, and forwards the bytes to the native producer.
 /// </summary>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
 /// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
@@ -41,70 +41,150 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     public const string PRODUCER_METRIC_GROUP_NAME = "producer-metrics";
 
     private readonly NativeProducer _native;
-    private readonly ISerializer<TKey> _keySerializer;
-    private readonly ISerializer<TValue> _valueSerializer;
-    private readonly ISerializerWithHeaders<TKey>? _keyWithHeaders;
-    private readonly ISerializerWithHeaders<TValue>? _valueWithHeaders;
+    private readonly AsyncSerializerCall<TKey> _key;
+    private readonly AsyncSerializerCall<TValue> _value;
+    private readonly bool _awaits;
+
+    private AsyncKafkaProducer(
+        NativeProducer native, IAsyncSerializer<TKey> keySerializer, IAsyncSerializer<TValue> valueSerializer)
+    {
+        _native = native;
+        _key = new AsyncSerializerCall<TKey>(keySerializer);
+        _value = new AsyncSerializerCall<TValue>(valueSerializer);
+        _awaits = _key.Inner is null || _value.Inner is null;
+    }
+
+    /// <summary>
+    /// Creates a producer from a configuration map of Java's dotted keys that also holds the key and value
+    /// serializers (Java <c>KafkaProducer(Map)</c>): the same as
+    /// <see cref="Create(IReadOnlyDictionary{string, object}, IAsyncSerializer{TKey}, IAsyncSerializer{TValue}, CancellationToken)"/>
+    /// with two null serializers.
+    /// </summary>
+    /// <param name="configs">
+    /// The producer configuration, in which <c>key.serializer</c> and <c>value.serializer</c> are required: each
+    /// holds a function that returns the serializer, such as <c>() =&gt; new AsyncStringSerializer()</c>.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// Cancels the creation while the serializers are built and configured, as the other overload says.
+    /// </param>
+    /// <returns>A task that completes with the producer once its serializers are configured.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
+    /// <exception cref="ConfigException">
+    /// <c>key.serializer</c> or <c>value.serializer</c> is missing, <c>null</c> or not a function that returns the
+    /// serializer; or the configuration is refused as the other overload refuses it.
+    /// </exception>
+    /// <exception cref="KafkaException">
+    /// "Failed to construct kafka producer": a serializer could not be built, or the core could not build the
+    /// producer.
+    /// </exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
+    public static Task<AsyncKafkaProducer<TKey, TValue>> Create(
+        IReadOnlyDictionary<string, object?> configs, CancellationToken cancellationToken = default) =>
+        Create(configs, null, null, cancellationToken);
 
     /// <summary>
     /// Creates a producer from a configuration map of Java's dotted keys and the key and value serializers
-    /// (Java <c>KafkaProducer(Map, Serializer&lt;K&gt;, Serializer&lt;V&gt;)</c>).
+    /// (Java <c>KafkaProducer(Map, Serializer&lt;K&gt;, Serializer&lt;V&gt;)</c>), awaiting the <c>Configure</c> of
+    /// a serializer it builds. <c>Send</c> awaits the serializers unless both are built-in ones
+    /// (<see cref="AsyncStringSerializer"/>, ...), which never wait; the remarks of
+    /// <see cref="IAsyncProducer{TKey, TValue}"/> describe both cases.
     /// </summary>
     /// <param name="configs">
     /// The producer configuration, keyed by Java's dotted names: each value of the type Java's <c>ConfigDef</c>
     /// accepts for its key, or the string Java would parse. A <c>null</c> value leaves its key unset, unless the
-    /// key's validator refuses <c>null</c>. The serializer keys (<c>key.serializer</c>, <c>value.serializer</c>,
-    /// <c>serializer.encoding</c>, <c>key.serializer.encoding</c>, <c>value.serializer.encoding</c>) are ignored: the
-    /// serializers are the arguments, which the producer never configures, as Java never configures a serializer it is
-    /// given.
+    /// key's validator refuses <c>null</c>. <c>key.serializer</c> and <c>value.serializer</c> are read only for a
+    /// null serializer argument: each then holds a function that returns the serializer, a
+    /// <c>Func&lt;IAsyncSerializer&lt;TKey&gt;&gt;</c> or <c>Func&lt;IAsyncSerializer&lt;TValue&gt;&gt;</c> (a
+    /// function declared to return a class that implements the interface is one), where Java's holds a class. The
+    /// other serializer keys (<c>serializer.encoding</c>, <c>key.serializer.encoding</c>,
+    /// <c>value.serializer.encoding</c>) are for the serializers the producer configures. None of the five reaches
+    /// the client.
     /// </param>
-    /// <param name="keySerializer">The serializer for record keys.</param>
-    /// <param name="valueSerializer">The serializer for record values.</param>
+    /// <param name="keySerializer">
+    /// The serializer for record keys, which the producer never configures, as Java never configures a serializer it
+    /// is given; or <c>null</c> to have the producer call the function under <c>key.serializer</c> once and then
+    /// await <c>Configure(configs, true, cancellationToken)</c> on a serializer that implements
+    /// <see cref="IAsyncSerializerWithConfigure{T}"/>, as Java configures a serializer it builds.
+    /// </param>
+    /// <param name="valueSerializer">
+    /// The serializer for record values; or <c>null</c> for the one the function under <c>value.serializer</c>
+    /// returns, built once the key's is configured and configured with
+    /// <c>Configure(configs, false, cancellationToken)</c>.
+    /// </param>
+    /// <param name="cancellationToken">
+    /// Cancels the creation until the core builds the producer: it is read before each serializer is built, passed
+    /// to each <c>Configure</c>, and read once more when both are configured. A cancelled creation disposes the
+    /// serializers it built and leaves the given ones to the caller.
+    /// </param>
+    /// <returns>
+    /// A task that completes with the producer once its serializers are configured. The checks of the arguments and
+    /// of the configuration throw from the call, before any function runs; the task carries what happens from the
+    /// first function on.
+    /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="configs"/> is null.</exception>
     /// <exception cref="ConfigException">
-    /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null: Java then reads the
-    /// <c>key.serializer</c> / <c>value.serializer</c> config, which .NET config cannot set.
+    /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null and <c>key.serializer</c> or
+    /// <c>value.serializer</c> is missing or <c>null</c> (Java's "Invalid value null for configuration
+    /// key.serializer: must be non-null.", the key's before the value's), or holds anything but a function that
+    /// returns the serializer.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
-    /// <see cref="ISerializerWithHeaders{T}"/>, or a public <c>Close()</c> but is not <see cref="IDisposable"/>: the
-    /// producer would never call that method.
+    /// A given serializer is <see cref="IDisposable"/>, or declares a public <c>DisposeAsync()</c>,
+    /// <c>Dispose()</c> or <c>Close()</c>, but is not <see cref="IAsyncDisposable"/>: the producer would never
+    /// dispose it.
     /// </exception>
     /// <exception cref="ConfigException">
     /// A value is not of a type its key accepts, a <c>null</c> value is one its key's validator refuses, a key is
-    /// <c>null</c>, or the client refuses a value.
+    /// <c>null</c>, or the client refuses a value. No serializer function has run then.
     /// </exception>
-    /// <exception cref="KafkaException">The core rejected the configuration.</exception>
+    /// <exception cref="KafkaException">
+    /// "Failed to construct kafka producer": the core could not build the producer; or a serializer function
+    /// returned <c>null</c> or threw, or the serializer it returned was refused as a given one is or its
+    /// <c>Configure</c> failed, with that failure as the <see cref="Exception.InnerException"/>.
+    /// </exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled.</exception>
     /// <remarks>
-    /// Each serializer that is <see cref="IDisposable"/> is disposed once, key then value, when the producer is closed
-    /// or disposed, or when the core fails to build it with the <see cref="KafkaException"/> "Failed to construct kafka
-    /// producer", but not for a configuration the core refuses with another error, nor when this constructor throws
-    /// <see cref="ArgumentNullException"/> or refuses a serializer, a value's type or a <c>null</c> with
-    /// <see cref="ConfigException"/> or a serializer with <see cref="IllegalArgumentException"/>. So a serializer
-    /// shared with another client, or used after the close, sees it
-    /// disposed. A <c>Dispose</c> that throws is written to <see cref="System.Diagnostics.Trace"/> and not rethrown.
-    /// A serializer that is only <see cref="IAsyncDisposable"/> is not disposed.
+    /// Each serializer that is <see cref="IAsyncDisposable"/>, given or built, is disposed once, key then value,
+    /// through its <c>DisposeAsync()</c> and never through <see cref="IDisposable"/>, when the producer is closed or
+    /// disposed, or when this method fails with the <see cref="KafkaException"/> "Failed to construct kafka
+    /// producer" after taking it, but a given one not for a configuration the core refuses with another error, nor
+    /// for a cancellation, nor when this method throws <see cref="ArgumentNullException"/> or refuses a serializer,
+    /// a value's type or a <c>null</c> with <see cref="ConfigException"/> or a serializer with
+    /// <see cref="IllegalArgumentException"/>. So a serializer shared with another client, or used after the close,
+    /// sees it disposed. This method, a close and a <c>DisposeAsync()</c> of the producer await a serializer's
+    /// <c>DisposeAsync()</c>; a <c>Dispose()</c> of the producer waits for it on the calling thread, so
+    /// <c>await using</c> or <c>DisposeAsync()</c> is the form to prefer. A serializer's <c>DisposeAsync()</c> is
+    /// always called with no synchronization context and with the default task scheduler current, so an
+    /// <c>await</c> in it never needs the thread that waits. A serializer's <c>DisposeAsync</c> that throws is
+    /// written to <see cref="System.Diagnostics.Trace"/> and not rethrown. A function and the <c>Configure</c> of
+    /// the serializer it returns start on the flow that reaches them: the key's on the caller's, with its
+    /// synchronization context, and the value's wherever the key's <c>Configure</c> completed. This method copies
+    /// <paramref name="configs"/> once, before it reads it and before it returns, and uses only that copy, so a
+    /// later change to <paramref name="configs"/>, while the returned task is pending or by a function, changes
+    /// nothing. The <c>configs</c> a built serializer's <c>Configure</c> receives is its own copy of that one; it
+    /// does not have the <c>client.id</c> the producer chooses when none is set, which Java's has.
     /// </remarks>
-    public AsyncKafkaProducer(
+    public static Task<AsyncKafkaProducer<TKey, TValue>> Create(
         IReadOnlyDictionary<string, object?> configs,
-        ISerializer<TKey> keySerializer,
-        ISerializer<TValue> valueSerializer)
+        IAsyncSerializer<TKey>? keySerializer,
+        IAsyncSerializer<TValue>? valueSerializer,
+        CancellationToken cancellationToken = default)
     {
-        // Java copies the config map first, so a null one fails before a missing serializer.
-        if (configs is null)
-        {
-            throw new ArgumentNullException(nameof(configs));
-        }
+        ConfiguredSerdes<IAsyncSerializer<TKey>, IAsyncSerializer<TValue>> serializers =
+            ConfiguredSerdes.AsyncSerializers(configs, keySerializer, valueSerializer);
+        cancellationToken.ThrowIfCancellationRequested();
 
-        _keySerializer = NativeProducer.RequireSerializer(keySerializer, "key.serializer");
-        _valueSerializer = NativeProducer.RequireSerializer(valueSerializer, "value.serializer");
-        SerdeGuard.Check(_keySerializer, DefaultMethodGuard.Producer, disposes: true);
-        SerdeGuard.Check(_valueSerializer, DefaultMethodGuard.Producer, disposes: true);
-        _keyWithHeaders = _keySerializer as ISerializerWithHeaders<TKey>;
-        _valueWithHeaders = _valueSerializer as ISerializerWithHeaders<TValue>;
-        _native = NativeProducer.Create(
-            configs, NativeProducer.PumpThreadName, new SerdeDisposal(keySerializer, valueSerializer));
+        // The copy of configs the call took: the checks, the core and each Configure read the same entries, whatever
+        // the caller does to its dictionary while the returned task is pending.
+        return Created(
+            NativeProducer.CreateAwaited(
+                serializers.Configs, NativeProducer.PumpThreadName, serializers, cancellationToken),
+            serializers);
     }
+
+    private static async Task<AsyncKafkaProducer<TKey, TValue>> Created(
+        Task<NativeProducer> native, ConfiguredSerdes<IAsyncSerializer<TKey>, IAsyncSerializer<TValue>> serializers) =>
+        new AsyncKafkaProducer<TKey, TValue>(await native.ConfigureAwait(false), serializers.Key, serializers.Value);
 
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
@@ -162,18 +242,23 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         return SendValidated(record, null, cancellationToken, callback);
     }
 
-    // Not async, so a serializer throw stays synchronous.
+    // Not async, so with two built-in serializers a serializer throw stays synchronous and no state machine runs.
     private ValueTask<AsyncKafkaFuture<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
         ICallback? callback,
         CancellationToken cancellationToken,
         IAsyncCallback? asyncCallback = null)
     {
+        if (_awaits)
+        {
+            return SendAwaited(record, callback, cancellationToken, asyncCallback);
+        }
+
         SerializedProducerRecord serialized;
         try
         {
             serialized = SerializedProducerRecord.Serialize(
-                record, _keySerializer, _keyWithHeaders, _valueSerializer, _valueWithHeaders, mock: false);
+                record, _key.Inner!, _key.InnerWithHeaders, _value.Inner!, _value.InnerWithHeaders, mock: false);
         }
         catch (ApiException error)
         {
@@ -186,6 +271,32 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         record.Headers().SetReadOnly();
 
         return _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback);
+    }
+
+    // The record enters the producer when its serialization completes, so two sends in flight enter in that order.
+    private async ValueTask<AsyncKafkaFuture<RecordMetadata>> SendAwaited(
+        ProducerRecord<TKey, TValue> record,
+        ICallback? callback,
+        CancellationToken cancellationToken,
+        IAsyncCallback? asyncCallback)
+    {
+        SerializedProducerRecord serialized;
+        try
+        {
+            serialized = await SerializedProducerRecord.SerializeAsync(record, _key, _value, mock: false, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (ApiException error)
+        {
+            return await FutureFailure.SendAsync(
+                    record.Topic(), record.Partition(), error, callback, asyncCallback, cancellationToken,
+                    _native.FailureCallbacks)
+                .ConfigureAwait(false);
+        }
+
+        record.Headers().SetReadOnly();
+
+        return await _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
@@ -231,6 +342,12 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         _native.CloseWithCallback(timeout, cancellationToken);
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// Prefer <c>await using</c> or <see cref="DisposeAsync"/>: this call blocks its thread until the producer is
+    /// closed and its serializers are disposed. A serializer that is <see cref="IAsyncDisposable"/> is disposed
+    /// through its <c>DisposeAsync()</c>, called with no synchronization context and with the default task scheduler
+    /// current, which this call then waits for.
+    /// </remarks>
     public void Dispose() => _native.Dispose();
 
     /// <inheritdoc/>

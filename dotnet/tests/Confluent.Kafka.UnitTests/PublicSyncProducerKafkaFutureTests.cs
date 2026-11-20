@@ -168,7 +168,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
             ["max.block.ms"] = "200",
         };
 
-        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(config, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
         try
         {

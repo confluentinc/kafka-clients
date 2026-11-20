@@ -517,7 +517,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
     private static async Task<AsyncKafkaConsumer<byte[], byte[]>> NewAsyncKafkaConsumer()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(KafkaConfig(), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            await AsyncKafkaConsumer<byte[], byte[]>.Create(KafkaConfig(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         return consumer;
     }
@@ -525,7 +525,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
     private static async Task<AsyncMockConsumer<byte[], byte[]>> NewAsyncMockConsumer()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
+            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), "earliest");
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         consumer.UpdateBeginningOffset(Topic, 0, 0);
         return consumer;

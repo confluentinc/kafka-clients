@@ -130,7 +130,7 @@ public sealed class SerdeHeadersTests
     {
         PlainSerializer key = new PlainSerializer();
         HeaderAddingSerializer value = new HeaderAddingSerializer();
-        KafkaProducer<string, string> producer = new KafkaProducer<string, string>(Unreachable(), key, value);
+        KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(Unreachable(), key, value);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -146,7 +146,7 @@ public sealed class SerdeHeadersTests
     {
         PlainSerializer key = new PlainSerializer();
         HeaderAddingSerializer value = new HeaderAddingSerializer();
-        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(Unreachable(), key, value);
+        AsyncKafkaProducer<string, string> producer = await AsyncKafkaProducer<string, string>.Create(Unreachable(), key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -165,7 +165,7 @@ public sealed class SerdeHeadersTests
     {
         HeaderAddingSerializer key = new HeaderAddingSerializer(KeyId);
         HeaderAddingSerializer value = new HeaderAddingSerializer();
-        KafkaProducer<string, string> producer = new KafkaProducer<string, string>(Unreachable(), key, value);
+        KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(Unreachable(), key, value);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -181,7 +181,7 @@ public sealed class SerdeHeadersTests
     {
         HeaderAddingSerializer key = new HeaderAddingSerializer(KeyId);
         HeaderAddingSerializer value = new HeaderAddingSerializer();
-        AsyncKafkaProducer<string, string> producer = new AsyncKafkaProducer<string, string>(Unreachable(), key, value);
+        AsyncKafkaProducer<string, string> producer = await AsyncKafkaProducer<string, string>.Create(Unreachable(), key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -215,7 +215,7 @@ public sealed class SerdeHeadersTests
     {
         PlainSerializer key = new PlainSerializer();
         HeaderAddingSerializer value = new HeaderAddingSerializer();
-        AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(key, value);
+        AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -244,7 +244,7 @@ public sealed class SerdeHeadersTests
     {
         HeaderAddingSerializer key = new HeaderAddingSerializer(KeyId);
         HeaderAddingSerializer value = new HeaderAddingSerializer();
-        AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(key, value);
+        AsyncMockProducer<string, string> producer = new AsyncMockProducer<string, string>(key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
         ProducerRecord<string, string> record = Record();
 
@@ -276,7 +276,7 @@ public sealed class SerdeHeadersTests
         PlainDeserializer key = new PlainDeserializer();
         HeaderReadingDeserializer value = new HeaderReadingDeserializer();
         await using RecordBlocks blocks = new RecordBlocks();
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(key, value);
+        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await TestTimeout.Run(() => consumer.Assign(new[] { s_partition }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(s_partition, 0), s_deadline);
@@ -310,7 +310,7 @@ public sealed class SerdeHeadersTests
         HeaderReadingDeserializer key = new HeaderReadingDeserializer();
         HeaderReadingDeserializer value = new HeaderReadingDeserializer();
         await using RecordBlocks blocks = new RecordBlocks();
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(key, value);
+        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await TestTimeout.Run(() => consumer.Assign(new[] { s_partition }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(s_partition, 0), s_deadline);
@@ -342,7 +342,7 @@ public sealed class SerdeHeadersTests
     {
         HeaderReadingDeserializer value = new HeaderReadingDeserializer(fail: true);
         await using RecordBlocks blocks = new RecordBlocks();
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(new PlainDeserializer(), value);
+        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(new PlainDeserializer().AsAsync(), value.AsAsync());
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await TestTimeout.Run(() => consumer.Assign(new[] { s_partition }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(s_partition, 0), s_deadline);

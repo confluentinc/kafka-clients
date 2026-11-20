@@ -14,8 +14,10 @@
 
 using System;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -28,7 +30,8 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The send-path allocation audit for the async <c>Send</c>: a large value costs the same as a small one (the key
 /// and value are pinned, never copied onto the heap), and the absolute per-send caller-thread cost stays within
-/// its budget. Measured with the per-thread allocation counter around the synchronous part of Send, best of N.
+/// its budget, with two built-in serializers and with serializers that are awaited and complete at once. Measured
+/// with the per-thread allocation counter around the synchronous part of Send, best of N.
 /// </summary>
 public sealed class PublicProducerSendAllocationBudgetTests
 {
@@ -52,6 +55,15 @@ public sealed class PublicProducerSendAllocationBudgetTests
     // the record's Headers) plus 8 B, less than one more object.
     private const long FastPathPerSendBudgetBytes = 480;
 
+    // The same send through two serializers that are not built-ins and complete at once, so the awaited path runs with
+    // no wait: the measured 536 B (net8.0, net10.0; the fast path's 472 B and the mock's new Headers for each of the
+    // two awaited serializers) plus 8 B.
+    private const long AwaitedPathPerSendBudgetBytes = 544;
+
+    // The same on an unoptimized (Debug) library, where each async method's state machine is a heap object although
+    // the serializers complete at once: the measured 1224 B (net8.0, net10.0) plus 8 B.
+    private const long AwaitedPathPerSendUnoptimizedBudgetBytes = 1232;
+
     // More attempts than the marginal test, as an absolute figure has no matched pair to cancel a one-off allocation.
     private const int AbsoluteMeasurementAttempts = 8;
 
@@ -62,7 +74,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         byte[] smallValue = MakeBytes(SmallValueSize, 0xCD);
         byte[] largeValue = MakeBytes(LargeValueSize, 0xCD);
 
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // Warm up so the measured runs are steady-state.
@@ -109,7 +121,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         byte[] key = MakeBytes(16, 0xAB);
         byte[] value = MakeBytes(SmallValueSize, 0xCD);
 
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         for (int i = 0; i < 3; i++)
@@ -136,6 +148,85 @@ public sealed class PublicProducerSendAllocationBudgetTests
     }
 
     [Fact]
+    public async Task Send_AwaitedPath_CompletedSerializers_PerRecordAllocation_StaysWithinItsMeasuredBudget()
+    {
+        // Serializers that are awaited but complete at once box no state machine and copy nothing. Measured as the
+        // fast path is.
+        byte[] key = MakeBytes(16, 0xAB);
+        byte[] value = MakeBytes(SmallValueSize, 0xCD);
+
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new CompletedSerializer(), new CompletedSerializer());
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        for (int i = 0; i < 3; i++)
+        {
+            _ = FireAndMeasure(producer, value, key, out Task<RecordMetadata>[] warmup);
+            await AwaitAll(warmup);
+        }
+
+        long bytes = long.MaxValue;
+        for (int attempt = 0; attempt < AbsoluteMeasurementAttempts; attempt++)
+        {
+            long measured = FireAndMeasure(producer, value, key, out Task<RecordMetadata>[] sends);
+            await AwaitAll(sends);
+            bytes = Math.Min(bytes, measured);
+        }
+
+        long budget = LibraryBuild.IsOptimized
+            ? AwaitedPathPerSendBudgetBytes
+            : AwaitedPathPerSendUnoptimizedBudgetBytes;
+        long perSend = bytes / SendCount;
+        Assert.True(
+            perSend <= budget,
+            $"Awaited-path Send per-send caller-thread allocation {perSend} B exceeded the budget " +
+            $"{budget} B ({bytes} B over {SendCount} sends, optimized library: {LibraryBuild.IsOptimized}) — " +
+            "serializers that complete at once must not cost a boxed state machine or a copy.");
+    }
+
+    [Fact]
+    public async Task Send_AwaitedPath_PerRecordAllocation_HasNoValueSizedCopy()
+    {
+        // The bytes an awaited serializer returns are pinned, not copied: a large value costs what a small one does.
+        byte[] key = MakeBytes(16, 0xAB);
+        byte[] small = MakeBytes(SmallValueSize, 0xCD);
+        byte[] large = MakeBytes(LargeValueSize, 0xEF);
+
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new CompletedSerializer(), new CompletedSerializer());
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        for (int i = 0; i < 3; i++)
+        {
+            _ = FireAndMeasure(producer, small, key, out Task<RecordMetadata>[] warmup);
+            await AwaitAll(warmup);
+        }
+
+        long smallBytes = 0;
+        long largeBytes = 0;
+        long perSendMarginal = long.MaxValue;
+        for (int attempt = 0; attempt < MeasurementAttempts; attempt++)
+        {
+            long measuredSmall = FireAndMeasure(producer, small, key, out Task<RecordMetadata>[] smallSends);
+            await AwaitAll(smallSends);
+            long measuredLarge = FireAndMeasure(producer, large, key, out Task<RecordMetadata>[] largeSends);
+            await AwaitAll(largeSends);
+
+            long marginal = (measuredLarge - measuredSmall) / SendCount;
+            if (marginal < perSendMarginal)
+            {
+                perSendMarginal = marginal;
+                smallBytes = measuredSmall;
+                largeBytes = measuredLarge;
+            }
+        }
+
+        Assert.True(
+            perSendMarginal <= PerSendBudgetBytes,
+            $"Awaited-path Send per-send marginal allocation {perSendMarginal} B exceeded the budget " +
+            $"{PerSendBudgetBytes} B (small={smallBytes} B, large={largeBytes} B over {SendCount} sends) — " +
+            "the bytes a serializer returns must be pinned, not copied.");
+    }
+
+    [Fact]
     public async Task Send_NativeMemoryValue_PerRecordAllocation_HasNoValueSizedCopy()
     {
         byte[] key = MakeBytes(16, 0xAB);
@@ -143,7 +234,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         using NativeMemoryManager largeValue = new NativeMemoryManager(LargeValueSize);
 
         AsyncMockProducer<byte[], ReadOnlyMemory<byte>?> producer =
-            new AsyncMockProducer<byte[], ReadOnlyMemory<byte>?>(Serdes.ByteArray().Serializer(), MemorySerializer.Instance);
+            new AsyncMockProducer<byte[], ReadOnlyMemory<byte>?>(new AsyncByteArraySerializer(), new AsyncReadOnlyMemorySerializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         for (int i = 0; i < 3; i++)
@@ -229,6 +320,14 @@ public sealed class PublicProducerSendAllocationBudgetTests
 
     private static async Task AwaitAll(Task<RecordMetadata>[] sends) =>
         await TestTimeout.Run(() => Task.WhenAll(sends), s_deadline);
+
+    /// <summary>A byte-array serializer that is not a built-in, so it is awaited, and that completes at once.</summary>
+    private sealed class CompletedSerializer : IAsyncSerializer<byte[]>
+    {
+        public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, Headers headers, byte[]? data, CancellationToken cancellationToken) =>
+            new ValueTask<ReadOnlyMemory<byte>?>(data is null ? (ReadOnlyMemory<byte>?)null : data);
+    }
 
     private static byte[] MakeBytes(int size, byte fill)
     {

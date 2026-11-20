@@ -251,7 +251,7 @@ public sealed class KafkaProducerTransactionTests
 
         // Java mocks a ConsumerGroupMetadata whose groupId() is "test-group"; the binding takes a consumer's, which
         // needs no broker before it joins.
-        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
+        KafkaConsumer<byte[], byte[]> consumer = KafkaConsumer<byte[], byte[]>.Create(
             new Dictionary<string, object?>
             {
                 ["bootstrap.servers"] = "localhost:1",
@@ -267,7 +267,7 @@ public sealed class KafkaProducerTransactionTests
         if (flavor == UnreachableProducers.SyncFlavor)
         {
             KafkaProducer<byte[], byte[]> producer =
-                new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                KafkaProducer<byte[], byte[]>.Create(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             for (int call = 0; call < 2; call++)
             {
@@ -284,7 +284,7 @@ public sealed class KafkaProducerTransactionTests
         else
         {
             AsyncKafkaProducer<byte[], byte[]> producer =
-                new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                await AsyncKafkaProducer<byte[], byte[]>.Create(configs, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             for (int call = 0; call < 2; call++)
             {
@@ -333,6 +333,6 @@ public sealed class KafkaProducerTransactionTests
     private static KafkaProducer<byte[], byte[]> Producer(Dictionary<string, object?> configs)
     {
         configs["bootstrap.servers"] = "localhost:1";
-        return new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        return KafkaProducer<byte[], byte[]>.Create(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
     }
 }

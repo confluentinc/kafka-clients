@@ -81,7 +81,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             }
             else
             {
-                consumer = new KafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+                consumer = KafkaConsumer<byte[], byte[]>.Create(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
             }
         }
         catch (Exception ex) when (Translate.IsBindingError(ex))

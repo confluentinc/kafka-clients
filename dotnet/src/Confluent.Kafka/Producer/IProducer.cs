@@ -55,8 +55,8 @@ namespace Confluent.Kafka.Producer;
 /// <para>
 /// <see cref="Close()"/> surfaces a close failure; <see cref="IDisposable.Dispose"/> swallows it. Both are
 /// idempotent. What a delivery callback may call on its own producer is in <see cref="ICallback"/>.
-/// A <see cref="KafkaProducer{TKey, TValue}"/> disposes the serializers it was given when it closes, as its
-/// constructor says; a <see cref="MockProducer{TKey, TValue}"/> does not.
+/// A <see cref="KafkaProducer{TKey, TValue}"/> disposes its serializers, given or built from its configuration, when
+/// it closes, as its <c>Create</c> says; a <see cref="MockProducer{TKey, TValue}"/> does not.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The key type serialized on the send path.</typeparam>

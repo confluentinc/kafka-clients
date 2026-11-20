@@ -224,7 +224,7 @@ public sealed class PublicRecordMetadataTests
     private static async Task<RecordMetadata> SendOnAsyncMockProducer(RecordingCallback callback, bool fail)
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: !fail);
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: !fail);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         RecordMetadata metadata = null!;
         await TestTimeout.Run(

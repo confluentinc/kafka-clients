@@ -27,12 +27,15 @@ internal sealed class V2SyncConsumerBackend : IConsumerBackend
     private readonly IConsumer<byte[], byte[]> _consumer;
     private readonly TimeSpan _timeout;
     private readonly int _batch;
+    private readonly PolledRecordVerifier? _verifier;
 
-    internal V2SyncConsumerBackend(IReadOnlyDictionary<string, string> config, int pollTimeoutMs, int batchSize)
+    internal V2SyncConsumerBackend(
+        IReadOnlyDictionary<string, string> config, int pollTimeoutMs, int batchSize, PolledRecordVerifier? verifier)
     {
         _consumer = new ConsumerBuilder<byte[], byte[]>(config).Build();
         _timeout = TimeSpan.FromMilliseconds(pollTimeoutMs);
         _batch = batchSize;
+        _verifier = verifier;
     }
 
     public void Subscribe(string topic) => _consumer.Subscribe(topic);
@@ -77,9 +80,7 @@ internal sealed class V2SyncConsumerBackend : IConsumerBackend
                 break;
             }
 
-            Message<byte[], byte[]> message = result.Message;
-            int nbytes = (message.Value?.Length ?? 0) + (message.Key?.Length ?? 0);
-            list.Add(new PolledRecord(message.Timestamp.UnixTimestampMs, nbytes));
+            list.Add(Read(result));
         }
 
         return list;
@@ -103,9 +104,16 @@ internal sealed class V2SyncConsumerBackend : IConsumerBackend
             return Array.Empty<PolledRecord>();
         }
 
+        return new[] { Read(result) };
+    }
+
+    // DO_VERIFY=True reads the key and the value (the client's byte[] copies) and checks the partition.
+    private PolledRecord Read(ConsumeResult<byte[], byte[]> result)
+    {
         Message<byte[], byte[]> message = result.Message;
+        _verifier?.Verify(result.Partition.Value, message.Key, message.Value);
         int nbytes = (message.Value?.Length ?? 0) + (message.Key?.Length ?? 0);
-        return new[] { new PolledRecord(message.Timestamp.UnixTimestampMs, nbytes) };
+        return new PolledRecord(message.Timestamp.UnixTimestampMs, nbytes);
     }
 
     public void Close() => _consumer.Close();
@@ -121,9 +129,10 @@ internal sealed class V2AsyncConsumerBackend : IAsyncConsumerBackend
 {
     private readonly V2SyncConsumerBackend _inner;
 
-    internal V2AsyncConsumerBackend(IReadOnlyDictionary<string, string> config, int pollTimeoutMs, int batchSize)
+    internal V2AsyncConsumerBackend(
+        IReadOnlyDictionary<string, string> config, int pollTimeoutMs, int batchSize, PolledRecordVerifier? verifier)
     {
-        _inner = new V2SyncConsumerBackend(config, pollTimeoutMs, batchSize);
+        _inner = new V2SyncConsumerBackend(config, pollTimeoutMs, batchSize, verifier);
     }
 
     public Task Subscribe(string topic)

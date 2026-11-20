@@ -20,6 +20,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Performance.Tests;
@@ -62,7 +63,7 @@ public sealed class KafkaConsumerBrokerTests
         await _broker.EnsureStartedAsync(_output);
         string topic = "dotnet-consumer-" + Guid.NewGuid().ToString("N").Substring(0, 12);
         await _broker.CreateTopicAsync(topic, partitions: 2);
-        using (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+        using (KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = _broker.ExternalBootstrap! },
             Serdes.ByteArray().Serializer(),
             Serdes.ByteArray().Serializer()))
@@ -77,8 +78,8 @@ public sealed class KafkaConsumerBrokerTests
 
         string group = "dotnet-dispose-in-listener-" + Guid.NewGuid().ToString("N").Substring(0, 12);
         SlowDeserializer value = new SlowDeserializer(s_deserializeDelay);
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(
-            GroupConfigs(group), Serdes.ByteArray().Deserializer(), value);
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(
+            GroupConfigs(group), new AsyncByteArrayDeserializer(), value);
         DisposingListener listener = new DisposingListener(consumer);
         using CancellationTokenSource stopOther = new CancellationTokenSource();
         Task? other = null;
@@ -138,7 +139,7 @@ public sealed class KafkaConsumerBrokerTests
     private void PollAsAnotherMember(string topic, string group, CancellationToken stop)
     {
         using KafkaConsumer<byte[], byte[]> member =
-            new KafkaConsumer<byte[], byte[]>(GroupConfigs(group), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            KafkaConsumer<byte[], byte[]>.Create(GroupConfigs(group), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         member.Subscribe(new[] { topic });
         while (!stop.IsCancellationRequested)
         {
@@ -184,7 +185,7 @@ public sealed class KafkaConsumerBrokerTests
     /// A deserializer that takes a while for each record and records whether it was disposed while one was still
     /// being deserialized.
     /// </summary>
-    private sealed class SlowDeserializer : IDeserializer<byte[]>, IDisposable
+    private sealed class SlowDeserializer : IAsyncDeserializer<byte[]>, IAsyncDisposable
     {
         private readonly TimeSpan _delay;
         private readonly ManualResetEventSlim _disposed = new ManualResetEventSlim(false);
@@ -203,7 +204,8 @@ public sealed class KafkaConsumerBrokerTests
 
         internal bool WaitDisposed(TimeSpan timeout) => _disposed.Wait(timeout);
 
-        public byte[] Deserialize(string topic, ReadOnlySpan<byte> data)
+        public ValueTask<byte[]?> Deserialize(
+            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             byte[] copy = data.ToArray();
             _ = Interlocked.Increment(ref _inside);
@@ -221,10 +223,10 @@ public sealed class KafkaConsumerBrokerTests
                 _ = Interlocked.Increment(ref _calls);
             }
 
-            return copy;
+            return new ValueTask<byte[]?>(copy);
         }
 
-        public void Dispose()
+        public ValueTask DisposeAsync()
         {
             if (Volatile.Read(ref _inside) > 0)
             {
@@ -233,6 +235,7 @@ public sealed class KafkaConsumerBrokerTests
 
             _ = Interlocked.Increment(ref _disposals);
             _disposed.Set();
+            return default;
         }
     }
 }
