@@ -99,7 +99,9 @@ impl DeleteShareGroupOffsetsHandler {
         group_ids: &HashSet<CoordinatorKey>,
     ) -> delete_share_group_offsets_request::Builder {
         // Java throws `IllegalArgumentException` from `validateKeys` here. The keys
-        // come from `new_future` for this handler's group, so this cannot fire;
+        // come from `new_future` for this handler's group, so this cannot fire unless
+        // a broker's FindCoordinator response names a group the client did not
+        // request;
         // `build_request` has no error channel, as in the sibling
         // `DeleteConsumerGroupOffsetsHandler::build_batched_request`.
         if let Err(error) = self.validate_keys(group_ids) {

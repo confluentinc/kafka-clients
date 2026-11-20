@@ -107,7 +107,9 @@ impl ListShareGroupOffsetsHandler {
         keys: &HashSet<CoordinatorKey>,
     ) -> describe_share_group_offsets_request::Builder {
         // Java throws `IllegalArgumentException` from `validateKeys` here. The keys
-        // come from `new_future` over this handler's own specs, so this cannot fire;
+        // come from `new_future` over this handler's own specs, so this cannot fire
+        // unless a broker's FindCoordinator response names a group the client did not
+        // request;
         // `build_request` has no error channel, as in the sibling
         // `AlterConsumerGroupOffsetsHandler::build_batched_request`.
         if let Err(error) = self.validate_keys(keys) {
