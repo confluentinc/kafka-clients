@@ -117,29 +117,29 @@ The `events/` directory holds 8 `Share*Event` classes that are application event
 
 | Java file | Lines | Phase | PR | Rust target | Visibility | Status |
 |---|---|---|---|---|---|---|
-| `admin/DescribeShareGroupsOptions.java` | 38 | P9 | C | `admin/options/describe_share_groups_options.rs` | pub | todo |
-| `admin/DescribeShareGroupsResult.java` | 66 | P9 | C | `admin/describe_share_groups_result.rs` | pub | todo |
-| `admin/AlterShareGroupOffsetsOptions.java` | 29 | P9 | C | `admin/options/alter_share_group_offsets_options.rs` | pub | todo |
-| `admin/AlterShareGroupOffsetsResult.java` | 94 | P9 | C | `admin/alter_share_group_offsets_result.rs` | pub | todo |
-| `admin/ListShareGroupOffsetsOptions.java` | 29 | P9 | C | `admin/options/list_share_group_offsets_options.rs` | pub | todo |
-| `admin/ListShareGroupOffsetsResult.java` | 75 | P9 | C | `admin/list_share_group_offsets_result.rs` | pub | todo |
-| `admin/ListShareGroupOffsetsSpec.java` | 76 | P9 | C | `admin/list_share_group_offsets_spec.rs` | pub | todo |
-| `admin/DeleteShareGroupOffsetsOptions.java` | 29 | P9 | C | `admin/options/delete_share_group_offsets_options.rs` | pub | todo |
-| `admin/DeleteShareGroupOffsetsResult.java` | 99 | P9 | C | `admin/delete_share_group_offsets_result.rs` | pub | todo |
-| `admin/DeleteShareGroupsOptions.java` | 29 | P9 | C | `admin/options/delete_share_groups_options.rs` | pub | todo |
-| `admin/DeleteShareGroupsResult.java` | 54 | P9 | C | `admin/delete_share_groups_result.rs` | pub | todo |
-| `admin/ShareGroupDescription.java` | 149 | P9 | C | `admin/share_group_description.rs` | pub | todo |
-| `admin/ShareMemberDescription.java` | 125 | P9 | C | `admin/share_member_description.rs` | pub | todo |
-| `admin/ShareMemberAssignment.java` | 70 | P9 | C | `admin/share_member_assignment.rs` | pub | todo |
-| `admin/SharePartitionOffsetInfo.java` | 100 | P9 | C | `admin/share_partition_offset_info.rs` | pub | todo |
-| `admin/internals/DescribeShareGroupsHandler.java` | 196 | P9 | C | `admin/internals/describe_share_groups_handler.rs` | crate | todo (`AdminApiHandler.Batched`) |
-| `admin/internals/AlterShareGroupOffsetsHandler.java` | 180 | P9 | C | `admin/internals/alter_share_group_offsets_handler.rs` | crate | todo (`AdminApiHandler.Batched`) |
-| `admin/internals/ListShareGroupOffsetsHandler.java` | 203 | P9 | C | `admin/internals/list_share_group_offsets_handler.rs` | crate | todo (`AdminApiHandler.Batched`) |
-| `admin/internals/DeleteShareGroupOffsetsHandler.java` | 174 | P9 | C | `admin/internals/delete_share_group_offsets_handler.rs` | crate | todo (`AdminApiHandler.Batched`) |
-| `admin/internals/DeleteShareGroupsHandler.java` | 38 | P9 | C | `admin/internals/delete_share_groups_handler.rs` | crate | todo. Java `extends DeleteGroupsHandler`; the Rust `DeleteGroupsHandler::new(api_name, display_name, log_context)` is already parameterised and `delete_consumer_groups_handler.rs` composes it the same way, so this is a thin wrapper |
-| `Admin` trait: `describeShareGroups`, `alterShareGroupOffsets`, `listShareGroupOffsets`, `deleteShareGroupOffsets`, `deleteShareGroups` (5 RPCs, each a default no-options form + options form → 10 Rust methods per `admin-client.md` §1) | edits | P9 | C | `admin/mod.rs` | pub | todo |
-| `KafkaAdminClient`: the 5 `*_with_options` implementations | edits | P9 | C | `admin/kafka_admin_client.rs` | pub | todo |
-| `MockAdminClient` (testFixtures): all 5 share methods `throw new UnsupportedOperationException("Not implemented yet")` in Java (`MockAdminClient#describeShareGroups`, `#alterShareGroupOffsets`, `#listShareGroupOffsets`, `#deleteShareGroupOffsets`, `#deleteShareGroups`) | edits | P9 | C | `admin/mock_admin_client.rs` | pub | todo — return `Error::unsupported_version("Not implemented yet")`, citing each Java method, per `admin-client.md` §9 |
+| `admin/DescribeShareGroupsOptions.java` | 38 | P9 | C | `admin/options/describe_share_groups_options.rs` | pub | done |
+| `admin/DescribeShareGroupsResult.java` | 66 | P9 | C | `admin/describe_share_groups_result.rs` | pub | done |
+| `admin/AlterShareGroupOffsetsOptions.java` | 29 | P9 | C | `admin/options/alter_share_group_offsets_options.rs` | pub | done |
+| `admin/AlterShareGroupOffsetsResult.java` | 94 | P9 | C | `admin/alter_share_group_offsets_result.rs` | pub | done |
+| `admin/ListShareGroupOffsetsOptions.java` | 29 | P9 | C | `admin/options/list_share_group_offsets_options.rs` | pub | done |
+| `admin/ListShareGroupOffsetsResult.java` | 75 | P9 | C | `admin/list_share_group_offsets_result.rs` | pub | done |
+| `admin/ListShareGroupOffsetsSpec.java` | 76 | P9 | C | `admin/list_share_group_offsets_spec.rs` | pub | done |
+| `admin/DeleteShareGroupOffsetsOptions.java` | 29 | P9 | C | `admin/options/delete_share_group_offsets_options.rs` | pub | done |
+| `admin/DeleteShareGroupOffsetsResult.java` | 99 | P9 | C | `admin/delete_share_group_offsets_result.rs` | pub | done |
+| `admin/DeleteShareGroupsOptions.java` | 29 | P9 | C | `admin/options/delete_share_groups_options.rs` | pub | done |
+| `admin/DeleteShareGroupsResult.java` | 54 | P9 | C | `admin/delete_share_groups_result.rs` | pub | done |
+| `admin/ShareGroupDescription.java` | 149 | P9 | C | `admin/share_group_description.rs` | pub | done |
+| `admin/ShareMemberDescription.java` | 125 | P9 | C | `admin/share_member_description.rs` | pub | done |
+| `admin/ShareMemberAssignment.java` | 70 | P9 | C | `admin/share_member_assignment.rs` | pub | done |
+| `admin/SharePartitionOffsetInfo.java` | 100 | P9 | C | `admin/share_partition_offset_info.rs` | pub | done |
+| `admin/internals/DescribeShareGroupsHandler.java` | 196 | P9 | C | `admin/internals/describe_share_groups_handler.rs` | crate | done (`AdminApiHandler.Batched`; Rust-only unit tests for the error branches, Java has no handler test) |
+| `admin/internals/AlterShareGroupOffsetsHandler.java` | 180 | P9 | C | `admin/internals/alter_share_group_offsets_handler.rs` | crate | done (`AdminApiHandler.Batched`; Rust-only unit tests for the error branches, Java has no handler test) |
+| `admin/internals/ListShareGroupOffsetsHandler.java` | 203 | P9 | C | `admin/internals/list_share_group_offsets_handler.rs` | crate | done (`AdminApiHandler.Batched`; Rust-only unit tests for the error branches, Java has no handler test) |
+| `admin/internals/DeleteShareGroupOffsetsHandler.java` | 174 | P9 | C | `admin/internals/delete_share_group_offsets_handler.rs` | crate | done (`AdminApiHandler.Batched`; Rust-only unit tests for the error branches, Java has no handler test) |
+| `admin/internals/DeleteShareGroupsHandler.java` | 38 | P9 | C | `admin/internals/delete_share_groups_handler.rs` | crate | done. Java `extends DeleteGroupsHandler`; the Rust `DeleteGroupsHandler::new(api_name, display_name, log_context)` is already parameterised and `delete_consumer_groups_handler.rs` composes it the same way, so this is a thin wrapper |
+| `Admin` trait: `describeShareGroups`, `alterShareGroupOffsets`, `listShareGroupOffsets`, `deleteShareGroupOffsets`, `deleteShareGroups` (5 RPCs, each a default no-options form + options form → 10 Rust methods per `admin-client.md` §1) | edits | P9 | C | `admin/mod.rs` | pub | done |
+| `KafkaAdminClient`: the 5 `*_with_options` implementations | edits | P9 | C | `admin/kafka_admin_client.rs` | pub | done |
+| `MockAdminClient` (testFixtures): all 5 share methods `throw new UnsupportedOperationException("Not implemented yet")` in Java (`MockAdminClient#describeShareGroups`, `#alterShareGroupOffsets`, `#listShareGroupOffsets`, `#deleteShareGroupOffsets`, `#deleteShareGroups`) | edits | P9 | C | `admin/mock_admin_client.rs` | pub | done — returns `Error::local_unsupported_operation("Not implemented yet")` (the error every existing "Not implemented yet" mock method returns; `unsupported_version` would answer `is_api_error()`, which Java's `UnsupportedOperationException` does not), citing each Java method; pinned by `test_mock_share_group_methods_are_unsupported` |
 | `ForwardingAdmin` share forwards | — | — | — | — | — | skipped: `ForwardingAdmin` is not translated (no `forwarding_admin.rs` in `admin/`) |
 | Already on master: `ListGroupsOptions#forShareGroups`, `GroupType::Share`, `CoordinatorType::Share` | — | — | — | `admin/options/list_groups_options.rs`, `common/group_type.rs`, `admin/internals/coordinator_key.rs` | pub | exists |
 
@@ -199,8 +199,8 @@ test file uses `@RepeatedTest`, `@Disabled` or `@Flaky`.
 
 | Java test file | Lines | `@Test` | Phase | PR | Rust location | Status |
 |---|---|---|---|---|---|---|
-| `admin/KafkaAdminClientShareGroupTest.java` | 987 | 22 | P9 | C | `admin/kafka_admin_client.rs` tests (or a sibling test module) | todo. Of the 22, 4 (`testListShareGroups`, `…MetadataFailure`, `…WithStates`, `…WithStatesOlderBrokerVersion`) exercise `listGroups`, which exists; check at P9 whether they are already covered by `test_list_groups_with_types*` and mark them |
-| `admin/internals/DeleteShareGroupsHandlerTest.java` | 26 | 0 own; inherits 5 from `DeleteGroupsHandlerTest` | P9 | C | `delete_share_groups_handler.rs` | todo — run the 5 inherited cases against the share handler |
+| `admin/KafkaAdminClientShareGroupTest.java` | 987 | 22 | P9 | C | `admin/kafka_admin_client.rs` `tests::share_group` | done: all 22 translated. The 4 `testListShareGroups*` tests were checked against `test_list_groups_with_types*` / `test_list_consumer_groups*`: those cover the same `listGroups` machinery with consumer filters, and a `SHARE` types filter only on the older-broker path, so none lists share groups end to end; the 4 are translated, not mapped. `testListShareGroupsWithStatesOlderBrokerVersion` models `setNodeApiVersions(ListGroups v4)` with `prepare_unsupported_version_response`, as the existing `test_list_groups_with_types_older_broker_version` does (the Rust `MockClient` does not negotiate versions), plus a v4 build of the request that fails. Two Rust-only additions: `test_delete_share_groups` (Java has no client-level `deleteShareGroups` test) and `test_mock_share_group_methods_are_unsupported` |
+| `admin/internals/DeleteShareGroupsHandlerTest.java` | 26 | 0 own; inherits 5 from `DeleteGroupsHandlerTest` | P9 | C | `delete_share_groups_handler.rs` | done — the 5 inherited cases (`testBuildRequest`, `testSuccessfulHandleResponse`, `testUnmappedHandleResponse`, `testRetriableHandleResponse`, `testFailedHandleResponse`) run against the share handler, plus the Rust-only `test_display_name` |
 | `KafkaAdminClientTest`, `MockAdminClientTest` | no share cases (0 `ShareGroup` refs) | — | — | n/a |
 
 No dedicated Java tests exist for the admin share options/results/value types or for
@@ -275,3 +275,4 @@ share code gets a row. A phase cannot close with an unowned row.
 | `expect(dead_code)` / `expect(unused_imports)` on the P2 crate-private modules and re-exports (`Acknowledgements`, `AcknowledgementBatch`, `NodeAcknowledgements`, `AcknowledgementCommitCallbackHandler`, `ShareAcknowledgementMode`, `ShareAcquireMode`, `ShareConsumerConfig`) | `rust/src/consumer/internals/mod.rs`, `rust/src/consumer/mod.rs` | the first phase that calls each from production: P3a (`Acknowledgements`, `AcknowledgementBatch`), P5a (`NodeAcknowledgements`, `ShareAcquireMode`), P7 (`AcknowledgementCommitCallbackHandler`, `ShareAcknowledgementMode`, `ShareConsumerConfig`); remove the attribute there (`expect` fails once the item is used) | P2 translates value types ahead of their callers; nothing is stubbed |
 | `expect(dead_code)` / `expect(unused_imports)` on the P4b crate-private modules and re-exports (`ShareMembershipManager`, `ShareHeartbeatRequestManager`, `ShareConsumerMetadata`, `ShareRebalanceMetricsManager`) | `rust/src/consumer/internals/mod.rs`, `rust/src/consumer/internals/metrics/mod.rs` | P6 (`RequestManagers` share supplier builds all four); remove the attributes there | P4b translates the managers ahead of the supplier that constructs them; nothing is stubbed |
 | C FFI for `AcknowledgeType` | `rust/xtask/ffi-baseline.txt` (`prefix:kafka_consumer_AcknowledgeType`) | the share-consumer FFI milestone (after M18) | M18 is Rust-only; the C bindings for share types come in that milestone (PLAN §1) |
+| C FFI for the P9 admin share types and `Admin` methods: the 15 public types (`ShareGroupDescription`, `ShareMemberDescription`, `ShareMemberAssignment`, `SharePartitionOffsetInfo`, `ListShareGroupOffsetsSpec`, the 5 `*Options`, the 5 `*Result`) and the 10 `Admin` share methods | `rust/xtask/ffi-baseline.txt` (one `prefix:kafka_admin_<Type>` per type, one `prefix:kafka_admin_Admin_<rpc>` per RPC pair) | the share-consumer FFI milestone (after M18) | M18 is Rust-only (PLAN §1); same treatment as `AcknowledgeType` |

@@ -181,3 +181,141 @@ Rust-only: `metadata_arc` and `Deref<Target = Metadata>` stand in for Java's
 | `ShareConsumerMetadata` | 5 | 5 | 0 |
 
 No unmapped method.
+
+## P9
+
+Admin share-group RPCs (`org.apache.kafka.clients.admin`). Paths are under
+`rust/src/admin/`. Every options class inherits `AbstractOptions#timeoutMs(Integer)`
+/ `#timeoutMs()`, mapped once below to each class's `set_timeout_ms` / `timeout_ms`.
+`equals` / `hashCode` map to `#[derive(PartialEq, Eq, Hash)]` (or a manual `Hash`
+where Java hashes a set), `toString` to `Display`.
+
+### Options (`options/*_share_group*_options.rs`)
+
+| Java method | Rust |
+|---|---|
+| `DescribeShareGroupsOptions()` (implicit) | `DescribeShareGroupsOptions::new` (+ `Default`) |
+| `DescribeShareGroupsOptions#includeAuthorizedOperations(boolean)` | `DescribeShareGroupsOptions::set_include_authorized_operations` |
+| `DescribeShareGroupsOptions#includeAuthorizedOperations()` | `DescribeShareGroupsOptions::include_authorized_operations` |
+| `AlterShareGroupOffsetsOptions()` (implicit) | `AlterShareGroupOffsetsOptions::new` |
+| `ListShareGroupOffsetsOptions()` (implicit) | `ListShareGroupOffsetsOptions::new` |
+| `DeleteShareGroupOffsetsOptions()` (implicit) | `DeleteShareGroupOffsetsOptions::new` |
+| `DeleteShareGroupsOptions()` (implicit) | `DeleteShareGroupsOptions::new` |
+| `AbstractOptions#timeoutMs(Integer)` (each of the 5) | `set_timeout_ms` on each |
+| `AbstractOptions#timeoutMs()` (each of the 5) | `timeout_ms` on each |
+
+### Results
+
+| Java method | Rust |
+|---|---|
+| `DescribeShareGroupsResult(Map)` (public) | `DescribeShareGroupsResult::new` (`pub`) |
+| `DescribeShareGroupsResult#describedGroups()` | `DescribeShareGroupsResult::described_groups` |
+| `DescribeShareGroupsResult#all()` | `DescribeShareGroupsResult::all` |
+| `AlterShareGroupOffsetsResult(KafkaFuture)` (package-private) | `AlterShareGroupOffsetsResult::new` (`pub(crate)`) |
+| `AlterShareGroupOffsetsResult#partitionResult(TopicPartition)` | `AlterShareGroupOffsetsResult::partition_result` |
+| `AlterShareGroupOffsetsResult#all()` | `AlterShareGroupOffsetsResult::all` |
+| `ListShareGroupOffsetsResult(Map)` (package-private) | `ListShareGroupOffsetsResult::new` (`pub(crate)`; takes the map already keyed by group id, as `ListConsumerGroupOffsetsResult::new`) |
+| `ListShareGroupOffsetsResult#all()` | `ListShareGroupOffsetsResult::all` |
+| `ListShareGroupOffsetsResult#partitionsToOffsetInfo(String)` | `ListShareGroupOffsetsResult::partitions_to_offset_info` (`Result`, for Java's `IllegalArgumentException`) |
+| `DeleteShareGroupOffsetsResult(KafkaFuture, Set)` (package-private) | `DeleteShareGroupOffsetsResult::new` (`pub(crate)`) |
+| `DeleteShareGroupOffsetsResult#all()` | `DeleteShareGroupOffsetsResult::all` |
+| `DeleteShareGroupOffsetsResult#topicResult(String)` | `DeleteShareGroupOffsetsResult::topic_result` (`Result`, for Java's `IllegalArgumentException`) |
+| `DeleteShareGroupOffsetsResult#maybeCompleteExceptionally(Map, String, KafkaFutureImpl)` (private) | free fn `maybe_complete_with_error`, returning the `Err` its callers complete with |
+| `DeleteShareGroupsResult(Map)` (package-private) | `DeleteShareGroupsResult::new` (`pub(crate)`) |
+| `DeleteShareGroupsResult#deletedGroups()` | `DeleteShareGroupsResult::deleted_groups` |
+| `DeleteShareGroupsResult#all()` | `DeleteShareGroupsResult::all` |
+
+### Value types
+
+| Java method | Rust |
+|---|---|
+| `ShareGroupDescription(String, Collection, GroupState, Node, int, int)` | `ShareGroupDescription::new` |
+| `ShareGroupDescription(String, Collection, GroupState, Node, int, int, Set)` | `ShareGroupDescription::with_authorized_operations` |
+| `ShareGroupDescription#groupId()` / `#members()` / `#groupState()` / `#coordinator()` / `#authorizedOperations()` / `#groupEpoch()` / `#targetAssignmentEpoch()` | the getters of the same snake_case names |
+| `ShareGroupDescription#equals` / `#hashCode` / `#toString` | derives / `Display` |
+| `ShareMemberDescription(String, Optional, String, String, ShareMemberAssignment, int)` | `ShareMemberDescription::new` |
+| `ShareMemberDescription#consumerId()` / `#rackId()` / `#clientId()` / `#host()` / `#assignment()` / `#memberEpoch()` | the getters of the same snake_case names |
+| `ShareMemberDescription#equals` / `#hashCode` / `#toString` | derives / `Display` |
+| `ShareMemberAssignment(Set)` | `ShareMemberAssignment::new` |
+| `ShareMemberAssignment#topicPartitions()` | `ShareMemberAssignment::topic_partitions` |
+| `ShareMemberAssignment#equals` / `#hashCode` / `#toString` | derive `PartialEq`, manual order-independent `Hash`, `Display` |
+| `SharePartitionOffsetInfo(long, Optional, Optional)` | `SharePartitionOffsetInfo::new` |
+| `SharePartitionOffsetInfo#startOffset()` / `#leaderEpoch()` / `#lag()` | the getters of the same snake_case names |
+| `SharePartitionOffsetInfo#equals` / `#hashCode` / `#toString` | derives / `Display` |
+| `ListShareGroupOffsetsSpec()` (implicit) | `ListShareGroupOffsetsSpec::new` (+ `Default`) |
+| `ListShareGroupOffsetsSpec#topicPartitions(Collection)` | `ListShareGroupOffsetsSpec::set_topic_partitions` (CLAUDE.md §2: setter beside the getter) |
+| `ListShareGroupOffsetsSpec#topicPartitions()` | `ListShareGroupOffsetsSpec::topic_partitions` |
+| `ListShareGroupOffsetsSpec#equals` / `#hashCode` / `#toString` | derives / `Display` |
+
+### Handlers (`internals/`)
+
+| Java method | Rust |
+|---|---|
+| `DescribeShareGroupsHandler(boolean, LogContext)` | `DescribeShareGroupsHandler::new` |
+| `DescribeShareGroupsHandler#buildKeySet(Collection)` (private static) | `DescribeShareGroupsHandler::build_key_set` |
+| `DescribeShareGroupsHandler#newFuture(Collection)` | `DescribeShareGroupsHandler::new_future` |
+| `DescribeShareGroupsHandler#apiName()` | `AdminApiHandler::api_name` impl |
+| `DescribeShareGroupsHandler#lookupStrategy()` | `AdminApiHandler::lookup_strategy` impl |
+| `DescribeShareGroupsHandler#buildBatchedRequest(int, Set)` | `DescribeShareGroupsHandler::build_batched_request` (called by `AdminApiHandler::build_request`, Java's `Batched#buildRequest`) |
+| `DescribeShareGroupsHandler#handleResponse(Node, Set, AbstractResponse)` | `AdminApiHandler::handle_response` impl |
+| `DescribeShareGroupsHandler#convertAssignment(Assignment)` (private) | `DescribeShareGroupsHandler::convert_assignment` |
+| `DescribeShareGroupsHandler#handleError(...)` (private) | `DescribeShareGroupsHandler::handle_error` |
+| `AlterShareGroupOffsetsHandler(String, Map, LogContext)` | `AlterShareGroupOffsetsHandler::new` |
+| `AlterShareGroupOffsetsHandler#newFuture(String)` | `AlterShareGroupOffsetsHandler::new_future` |
+| `AlterShareGroupOffsetsHandler#validateKeys(Set)` (private) | `AlterShareGroupOffsetsHandler::validate_keys` (`Result`; an `Err` fails every key, as Java's throw from `handleResponse` does) |
+| `AlterShareGroupOffsetsHandler#buildBatchedRequest(int, Set)` | `AlterShareGroupOffsetsHandler::build_batched_request` |
+| `AlterShareGroupOffsetsHandler#apiName()` | `AdminApiHandler::api_name` impl |
+| `AlterShareGroupOffsetsHandler#handleResponse(Node, Set, AbstractResponse)` | `AdminApiHandler::handle_response` impl |
+| `AlterShareGroupOffsetsHandler#handleError(...)` (private) | `AlterShareGroupOffsetsHandler::handle_error` (the `groupId` parameter is always the handler's own, so it reads `self.group_id`) |
+| `AlterShareGroupOffsetsHandler#lookupStrategy()` | `AdminApiHandler::lookup_strategy` impl |
+| `ListShareGroupOffsetsHandler(Map, LogContext)` | `ListShareGroupOffsetsHandler::new` |
+| `ListShareGroupOffsetsHandler#newFuture(Collection)` | `ListShareGroupOffsetsHandler::new_future` |
+| `ListShareGroupOffsetsHandler#apiName()` | `AdminApiHandler::api_name` impl |
+| `ListShareGroupOffsetsHandler#lookupStrategy()` | `AdminApiHandler::lookup_strategy` impl |
+| `ListShareGroupOffsetsHandler#buildBatchedRequest(int, Set)` | `ListShareGroupOffsetsHandler::build_batched_request` |
+| `ListShareGroupOffsetsHandler#handleResponse(Node, Set, AbstractResponse)` | `AdminApiHandler::handle_response` impl |
+| `ListShareGroupOffsetsHandler#coordinatorKeys(Collection)` (private static) | `ListShareGroupOffsetsHandler::coordinator_keys` |
+| `ListShareGroupOffsetsHandler#validateKeys(Set)` (private) | `ListShareGroupOffsetsHandler::validate_keys` (`Result`, as above) |
+| `ListShareGroupOffsetsHandler#handleGroupError(...)` (private) | `ListShareGroupOffsetsHandler::handle_group_error` |
+| `DeleteShareGroupOffsetsHandler(String, Set, LogContext)` | `DeleteShareGroupOffsetsHandler::new` |
+| `DeleteShareGroupOffsetsHandler#apiName()` | `AdminApiHandler::api_name` impl |
+| `DeleteShareGroupOffsetsHandler#lookupStrategy()` | `AdminApiHandler::lookup_strategy` impl |
+| `DeleteShareGroupOffsetsHandler#newFuture(String)` | `DeleteShareGroupOffsetsHandler::new_future` |
+| `DeleteShareGroupOffsetsHandler#validateKeys(Set)` (private) | `DeleteShareGroupOffsetsHandler::validate_keys` (`Result`, as above) |
+| `DeleteShareGroupOffsetsHandler#buildBatchedRequest(int, Set)` | `DeleteShareGroupOffsetsHandler::build_batched_request` |
+| `DeleteShareGroupOffsetsHandler#handleResponse(Node, Set, AbstractResponse)` | `AdminApiHandler::handle_response` impl |
+| `DeleteShareGroupOffsetsHandler#handleGroupError(...)` (private) | `DeleteShareGroupOffsetsHandler::handle_group_error` (the `groupId` parameter is always the handler's own, so it reads `self.group_id`) |
+| `DeleteShareGroupsHandler(LogContext)` | `DeleteShareGroupsHandler::new`, returning the base `DeleteGroupsHandler` configured with the subclass names (as `DeleteConsumerGroupsHandler::new`) |
+| `DeleteShareGroupsHandler#apiName()` | `DeleteGroupsHandler::api_name` (returns `"deleteShareGroups"`) |
+| `DeleteShareGroupsHandler#displayName()` | `DeleteGroupsHandler::display_name` (returns `"DeleteShareGroups"`) |
+
+### `Admin` / `KafkaAdminClient` / `MockAdminClient`
+
+| Java method | Rust |
+|---|---|
+| `Admin#describeShareGroups(Collection)` (default) | `Admin::describe_share_groups` (default) |
+| `Admin#describeShareGroups(Collection, DescribeShareGroupsOptions)` | `Admin::describe_share_groups_with_options` |
+| `Admin#alterShareGroupOffsets(String, Map)` (default) | `Admin::alter_share_group_offsets` (default) |
+| `Admin#alterShareGroupOffsets(String, Map, AlterShareGroupOffsetsOptions)` | `Admin::alter_share_group_offsets_with_options` |
+| `Admin#listShareGroupOffsets(Map)` (default) | `Admin::list_share_group_offsets` (default) |
+| `Admin#listShareGroupOffsets(Map, ListShareGroupOffsetsOptions)` | `Admin::list_share_group_offsets_with_options` |
+| `Admin#deleteShareGroupOffsets(String, Set)` (default) | `Admin::delete_share_group_offsets` (default) |
+| `Admin#deleteShareGroupOffsets(String, Set, DeleteShareGroupOffsetsOptions)` | `Admin::delete_share_group_offsets_with_options` |
+| `Admin#deleteShareGroups(Collection)` (default) | `Admin::delete_share_groups` (default) |
+| `Admin#deleteShareGroups(Collection, DeleteShareGroupsOptions)` | `Admin::delete_share_groups_with_options` |
+| `KafkaAdminClient#describeShareGroups` / `#alterShareGroupOffsets` / `#listShareGroupOffsets` / `#deleteShareGroupOffsets` / `#deleteShareGroups` | the five `*_with_options` in `impl Admin for KafkaAdminClient` |
+| `MockAdminClient#describeShareGroups` / `#alterShareGroupOffsets` / `#listShareGroupOffsets` / `#deleteShareGroupOffsets` / `#deleteShareGroups` | the five `*_with_options` in `impl Admin for MockAdminClient`, failing every future with `local_unsupported_operation("Not implemented yet")` |
+| `ForwardingAdmin` share overrides | not translated: `ForwardingAdmin` has no Rust counterpart (out of the admin translation) |
+
+### Summary
+
+| Class | Java methods | Mapped to a Rust function | No Rust function, with reason |
+|---|---|---|---|
+| 5 options classes | 15 (3 + 4 × 1 constructors and setters, plus `timeoutMs` ×2 inherited) | 15 | 0 |
+| 5 result classes | 16 | 16 | 0 |
+| 5 value types | 39 (incl. `equals` / `hashCode` / `toString`) | 39 | 0 |
+| 5 handlers | 37 | 37 | 0 |
+| `Admin` / `KafkaAdminClient` / `MockAdminClient` | 20 | 20 | 0 |
+
+No unmapped method. `ForwardingAdmin`'s five overrides are outside the
+translated surface (no `ForwardingAdmin` in Rust).
