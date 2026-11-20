@@ -732,7 +732,7 @@ follow CLAUDE.md §2 provisionally; P8 fixes the public ones
 | `metrics()` | `metrics` |
 | `registerMetricForSubscription(KafkaMetric)`, `unregisterMetricFromSubscription(KafkaMetric)` | none: decision D2 (P8 deferral row) |
 | `close()` | `close` |
-| `close(Duration)` | `close_with_timeout` (`closed` is set once `close_internal` has run, as Java's `finally` runs after every step; a dropped `close` leaves the consumer open and the next one finishes it; a `Duration` cannot be negative) |
+| `close(Duration)` | `close_with_timeout` (`closed` is set once `close_internal` has run, as Java's `finally` runs after every step; a dropped `close` leaves the consumer open and the next one resumes it through `CloseProgress`, never sending the acknowledge-on-close or the stop signal twice; a `Duration` cannot be negative) |
 | `close(Duration, boolean)` (private) | `close_internal` |
 | `stopFindCoordinatorOnClose()` | `stop_find_coordinator_on_close` |
 | `createTimerForCloseRequests(Duration)` | `create_timer_for_close_requests` (returns the deadline) |
@@ -758,7 +758,7 @@ follow CLAUDE.md §2 provisionally; P8 fixes the public ones
 | `asyncConsumerMetrics()` (visible for testing) | `async_consumer_metrics` (`#[cfg(test)]`) |
 | `kafkaShareConsumerMetrics()` | `kafka_share_consumer_metrics` |
 | `NO_CURRENT_THREAD`, `currentThread`, `refCount` | none: `acquire` / `release` state |
-| *(Rust-only)* | `ShareConsumerImplComponents`; `InFlightPoll` (the kept `SharePollEvent` deadline and flag); `Collected`, `PollError`; the drop guards `PendingAcknowledgements` and `RecordPollEnd`; `network_thread_joined` (a retried `close` skips the steps that need the stopped task); `start_background_task` and the `BackgroundTask` it returns (Java's `ApplicationEventHandler` constructor starting the network thread, and the handler owning it); `has_records`, `is_not_empty`, `pending_acknowledgements`, `result_error` (`ConsumerUtils#getResult`'s mapping), `swallow` / `close_quietly_failed` (`Utils#swallow` / `#closeQuietly`), `lock_subscriptions`, `maybe_trigger_wakeup`, `is_closed`; `Debug` |
+| *(Rust-only)* | `ShareConsumerImplComponents`; `InFlightPoll` (the kept `SharePollEvent` deadline and flag); `Collected`, `PollError`; the drop guards `PendingAcknowledgements` and `RecordPollEnd`; `CloseProgress` (how far a dropped `close` got: a retry awaits the acknowledge-on-close it sent, and only joins once the task was told to stop); `start_background_task` and the `BackgroundTask` it returns (Java's `ApplicationEventHandler` constructor starting the network thread, and the handler owning it); `has_records`, `is_not_empty`, `pending_acknowledgements`, `result_error` (`ConsumerUtils#getResult`'s mapping), `swallow` / `close_quietly_failed` (`Utils#swallow` / `#closeQuietly`), `lock_subscriptions`, `maybe_trigger_wakeup`, `is_closed`; `Debug` |
 
 ### `KafkaShareConsumerMetrics`
 
