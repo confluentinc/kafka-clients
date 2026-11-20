@@ -42,7 +42,10 @@
 //! 4. **Poll the network client** — wrapped in `tokio::select!` against
 //!    the current wakeup token and the shutdown signal. This is the
 //!    only `.await` point in `run_once` that must be cancellation-safe
-//!    against the wakeup primitive (`consumer-threading.md` §11).
+//!    against the wakeup primitive (`consumer-threading.md` §11). Right
+//!    after it (Phase 4.5), `RequestManagers::handle_completed_requests`
+//!    runs the `whenComplete` callbacks Java's `NetworkClientDelegate#poll`
+//!    runs inside the poll (`cleanup` does the same after each close poll).
 //! 5. **Refresh `maximumTimeToWait`** — fold each manager's
 //!    `maximum_time_to_wait(now)` into a min; store into the cached
 //!    `AtomicI64` so the app side can read it without locking the
@@ -645,6 +648,18 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // three primitives is what produced several silent-latency bugs.
         delegate_guard.poll_default(poll_wait_time_ms, current_time_ms).await;
 
+        // ──── Phase 4.5: handle the responses of that poll ────
+        //
+        // Java's `NetworkClientDelegate#poll` runs the `whenComplete`
+        // callbacks of the requests it completes inside the poll, so an event
+        // future chained on a response (a share `commitSync`) completes before
+        // `maximumTimeToWait` is computed and before the reaper runs in
+        // Phase 6. A manager that keeps its response receivers runs those
+        // callback bodies in `RequestManager::handle_completed_requests`,
+        // reached here through `RequestManagers::handle_completed_requests`
+        // under the lock Phase 5 takes anyway. No manager lock is held across
+        // the poll above.
+        //
         // ──── Phase 5: refresh cached maximumTimeToWait ────
         //
         // Java takes the minimum over `requestManagers.entries()`, which
@@ -664,6 +679,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            rm_guard.handle_completed_requests();
             if let Some(coordinator) = rm_guard.coordinator_handle() {
                 max_time_to_wait_ms = max_time_to_wait_ms
                     .min(RequestManager::maximum_time_to_wait(coordinator.as_ref(), current_time_ms));
@@ -1097,6 +1113,15 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 {
                     let mut delegate_guard = self.network_client_delegate.lock().await;
                     delegate_guard.poll_on_close(remaining, now).await;
+                }
+                // The `whenComplete` callbacks Java runs inside each close
+                // poll (see `run_once`, Phase 4.5).
+                {
+                    let mut rm_guard = match self.request_managers.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    rm_guard.handle_completed_requests();
                 }
                 // `while (timer.notExpired() && hasAnyPendingRequests())` —
                 // short-circuits, so pending is not read once expired.
@@ -2124,6 +2149,98 @@ mod tests {
         .expect("bg receiver alive");
         thread.run_once().await;
         rx.try_recv().expect("processed").expect("succeeds");
+    }
+
+    /// A manager overriding [`RequestManager::handle_completed_requests`]:
+    /// records, per call, how many network polls the client had made, and
+    /// completes `handle` (an event already past its deadline) on the first
+    /// call, as a response callback completing an event future would.
+    struct CompletedRequestsRecorder {
+        client_polls: Arc<std::sync::OnceLock<Arc<AtomicUsize>>>,
+        seen_polls: Arc<Mutex<Vec<usize>>>,
+        handle: Option<super::super::events::CompletableEventHandle<()>>,
+    }
+
+    impl RequestManager for CompletedRequestsRecorder {
+        fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+            PollResult::empty()
+        }
+
+        fn handle_completed_requests(&mut self) {
+            let polls = self.client_polls.get().map_or(0, |polls| polls.load(Ordering::SeqCst));
+            self.seen_polls.lock().unwrap().push(polls);
+            if let Some(handle) = self.handle.take() {
+                handle.complete(());
+            }
+        }
+    }
+
+    /// Rust-only (the hook has no Java method): `run_once` runs
+    /// `handle_completed_requests` once, right after the network poll and
+    /// before the reaper, where Java's `NetworkClientDelegate#poll` runs the
+    /// `whenComplete` callbacks. The event the hook completes is already past
+    /// its deadline, so it is `Ok` only if the hook runs before Phase 6 reaps
+    /// it, and the poll count it sees is 1 only if it runs after the poll.
+    #[tokio::test]
+    async fn run_once_handles_completed_requests_after_the_network_poll_and_before_the_reaper() {
+        let client_polls = Arc::new(std::sync::OnceLock::new());
+        let seen_polls = Arc::new(Mutex::new(Vec::new()));
+        let (handle, mut rx, erased) = CompletableEvent::make_completable_event::<()>(0);
+        let recorder = CompletedRequestsRecorder {
+            client_polls: Arc::clone(&client_polls),
+            seen_polls: Arc::clone(&seen_polls),
+            handle: Some(handle),
+        };
+        let (mut fixture, poll_call_count, _poll_timeouts, _has_in_flight_script) =
+            make_thread_with_dyn_managers(vec![Box::new(recorder)]);
+        client_polls.set(Arc::clone(&poll_call_count)).expect("set once");
+        // The clock is at 1_000, past the event's deadline of 0.
+        fixture.reaper.lock().unwrap().add(erased);
+
+        fixture.thread.run_once().await;
+
+        assert_eq!(
+            *seen_polls.lock().unwrap(),
+            vec![1],
+            "one call per run_once, after the network poll"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(Ok(()))),
+            "the hook completes the event before the reaper expires it"
+        );
+
+        fixture.thread.run_once().await;
+        assert_eq!(
+            *seen_polls.lock().unwrap(),
+            vec![1, 2],
+            "every run_once runs the hook after its poll"
+        );
+    }
+
+    /// Rust-only: `cleanup` runs `handle_completed_requests` after each of
+    /// its close polls, as Java's `NetworkClientDelegate#poll` runs the
+    /// callbacks inside each poll of `ConsumerNetworkThread#sendUnsentRequests`.
+    /// The script makes the close loop poll twice (see
+    /// `test_send_unsent_requests`).
+    #[tokio::test]
+    async fn cleanup_handles_completed_requests_after_each_close_poll() {
+        let client_polls = Arc::new(std::sync::OnceLock::new());
+        let seen_polls = Arc::new(Mutex::new(Vec::new()));
+        let recorder = CompletedRequestsRecorder {
+            client_polls: Arc::clone(&client_polls),
+            seen_polls: Arc::clone(&seen_polls),
+            handle: None,
+        };
+        let (mut fixture, poll_call_count, _poll_timeouts, has_in_flight_script) =
+            make_thread_with_dyn_managers(vec![Box::new(recorder)]);
+        client_polls.set(Arc::clone(&poll_call_count)).expect("set once");
+        has_in_flight_script.lock().unwrap().extend([true, true, false, false]);
+
+        fixture.thread.set_close_timeout_ms(30_000);
+        fixture.thread.cleanup().await;
+
+        assert_eq!(poll_call_count.load(Ordering::SeqCst), 2);
+        assert_eq!(*seen_polls.lock().unwrap(), vec![1, 2], "one call after each close poll");
     }
 
     /// Java `testRunOnceInvokesReaper`. Verifies `runOnce` invokes

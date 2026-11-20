@@ -227,6 +227,14 @@ impl RequestManagers {
     /// [nomicon-borrow-splitting]: https://doc.rust-lang.org/nomicon/borrow-splitting.html
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#entries")]
     pub(crate) fn entries(&mut self) -> Vec<&mut dyn RequestManager> {
+        let mut list: Vec<&mut dyn RequestManager> = Vec::new();
+        self.for_each_entry(|rm| list.push(rm));
+        list
+    }
+
+    /// Visits the managers of [`Self::entries`], in the same order, without
+    /// collecting them into a `Vec`.
+    fn for_each_entry<'a>(&'a mut self, mut visit: impl FnMut(&'a mut dyn RequestManager)) {
         // Destructure so each `Option` is borrowed independently —
         // borrow-splitting per <https://doc.rust-lang.org/nomicon/borrow-splitting.html>.
         let Self {
@@ -240,25 +248,34 @@ impl RequestManagers {
             dyn_managers,
             closed: _,
         } = self;
-        let mut list: Vec<&mut dyn RequestManager> = Vec::new();
         // Order matches Java (the `RequestManagers` constructor) minus the
         // three Arc-shared slots and the fetch slot: (coordinator skipped)
         // → (commit skipped) → heartbeat → (membership skipped) → offsets
         // → topic_metadata → (fetch, polled by the bg task with the
         // delegate).
         if let Some(h) = consumer_heartbeat.as_mut() {
-            list.push(h as &mut dyn RequestManager);
+            visit(h);
         }
         if let Some(o) = offsets.as_mut() {
-            list.push(o as &mut dyn RequestManager);
+            visit(o);
         }
         if let Some(t) = topic_metadata.as_mut() {
-            list.push(t as &mut dyn RequestManager);
+            visit(t);
         }
         for m in dyn_managers.iter_mut() {
-            list.push(m.as_mut());
+            visit(m.as_mut());
         }
-        list
+    }
+
+    /// Runs [`RequestManager::handle_completed_requests`] on every manager of
+    /// [`Self::entries`], in that order. The background task calls it right
+    /// after each network poll, where Java's `NetworkClientDelegate#poll`
+    /// runs the requests' `whenComplete` callbacks.
+    ///
+    /// Rust-only (DoD §7): it routes the hook so that `run_once` needs no
+    /// change when another manager adopts it. The walk allocates nothing.
+    pub(crate) fn handle_completed_requests(&mut self) {
+        self.for_each_entry(|rm| rm.handle_completed_requests());
     }
 
     /// Returns a clone of the `Arc<CoordinatorRequestManager>` handle,
