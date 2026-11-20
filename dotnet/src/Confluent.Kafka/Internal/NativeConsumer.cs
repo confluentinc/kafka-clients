@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -511,7 +512,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             IntPtr polled = NativeMethods.ConsumerPoll(_handle, timeoutMs, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfListenerCallFailed(ref outErr);
             HoldRecords();
             return polled;
         });
@@ -890,7 +891,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerUnsubscribe(_handle, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfListenerCallFailed(ref outErr);
         });
     }
 
@@ -2853,6 +2854,59 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             NativeMethods.ErrorDestroy(error);
             error = IntPtr.Zero;
         }
+    }
+
+    private static void ThrowIfListenerCallFailed(ref IntPtr outErr)
+    {
+        IntPtr error = outErr;
+        outErr = IntPtr.Zero;
+        if (error != IntPtr.Zero)
+        {
+            ExceptionDispatchInfo.Capture(ListenerCallException(error)).Throw();
+        }
+    }
+
+    // Poll and Unsubscribe run the rebalance listener, whose exception the core wraps in "User rebalance callback
+    // throws an error". Java's maybeWrapAsKafkaException leaves a KafkaException unwrapped, so a KafkaException a
+    // callback threw, carried in the error's cause chain, is thrown as the same instance. Close keeps the wrapper.
+    private static Exception ListenerCallException(IntPtr error)
+    {
+        Exception? carried;
+        try
+        {
+            carried = CarriedInTheChain(error);
+        }
+        catch
+        {
+            NativeMethods.ErrorDestroy(error);
+            throw;
+        }
+
+        if (carried is KafkaException)
+        {
+            NativeMethods.ErrorDestroy(error);
+            return carried;
+        }
+
+        return KafkaException.FromFfiError(error, owned: true)!;
+    }
+
+    private static Exception? CarriedInTheChain(IntPtr error)
+    {
+        for (IntPtr current = error; current != IntPtr.Zero;)
+        {
+            Exception? carried = ManagedExceptionCarrier.Carried(current);
+            if (carried is not null)
+            {
+                return carried;
+            }
+
+            IntPtr outErr = IntPtr.Zero;
+            current = NativeMethods.ErrorSource(current, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+
+        return null;
     }
 
     private void ThrowIfClosed()
