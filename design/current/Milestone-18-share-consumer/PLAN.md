@@ -180,7 +180,7 @@ holds `&mut self` and the consumer is `!Sync`; `share_consumer_handle.rs`):
 
 | # | Behaviour | Test |
 |---|---|---|
-| O1 | `build` with the four parameters set returns options carrying them | `build_with_every_parameter` |
+| O1 | `build` with the four parameters set returns options carrying them, read through the public getters `topic`, `partition`, `offset`, `r#type` | `build_with_every_parameter` |
 | O2 | `build` names the first unset mandatory parameter (`topic`, `partition`, `offset`, `type`) in a `LocalIllegalArgumentError`, exact message asserted | `build_names_the_first_unset_parameter` |
 | O3 | `acknowledge_with_options` keeps Java's misuse errors: implicit mode → "Implicit acknowledgement of delivery is being used.", explicit mode with no failed batch → "The record cannot be acknowledged.", closed → "This consumer has already been closed." | `acknowledge_with_options_reports_java_misuse_errors` (`kafka_share_consumer.rs`) |
 | O4 | `Send + Sync` | `api_promises.rs` |
