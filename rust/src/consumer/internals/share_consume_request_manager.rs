@@ -2782,12 +2782,16 @@ mod tests {
     use crate::common::serialization::ByteArrayDeserializer;
     use crate::common::utils::MockTime;
     use crate::common::{Metric, MetricNameTemplate};
-    use crate::consumer::internals::events::BackgroundEventHandler;
+    use crate::consumer::internals::events::{
+        ApplicationEvent, ApplicationEventEnvelope, ApplicationEventProcessor, BackgroundEventHandler,
+        CompletableEventHandle, CompletableEventReaper,
+    };
     use crate::consumer::internals::share_completed_fetch::tests::acquired_records;
     use crate::consumer::internals::{
         AutoOffsetResetStrategy, ConsumerUtils, Deserializers, NetworkClientDelegate, ShareFetch, ShareFetchCollector,
         ShareFetchMetricsRegistry,
     };
+    use crate::consumer::internals::{ConsumerNetworkThread, RequestManagers, WakeupTrigger};
     use crate::consumer::{AcknowledgeType, ConsumerConfig, ConsumerRecord};
     use crate::share_acknowledge_response_data::{
         LeaderIdAndEpoch as AckLeaderIdAndEpoch, PartitionData as AckPartitionData,
@@ -2796,6 +2800,8 @@ mod tests {
         AcquiredRecords, LeaderIdAndEpoch as FetchLeaderIdAndEpoch, PartitionData as FetchPartitionData,
     };
     use crate::{ShareAcknowledgeRequestData, ShareFetchRequestData};
+    use indexmap::IndexMap;
+    use std::sync::atomic::AtomicI64;
 
     const TOPIC_NAME: &str = "test";
     const TOPIC_NAME2: &str = "test-2";
@@ -7795,5 +7801,221 @@ mod tests {
         assert_eq!("commit_async", AcknowledgeRequestType::CommitAsync.to_string());
         assert_eq!("commit_sync", AcknowledgeRequestType::CommitSync.to_string());
         assert_eq!("close", AcknowledgeRequestType::Close.to_string());
+    }
+
+    // ─── The manager under `ConsumerNetworkThread::run_once` (Milestone 18 P6) ───
+
+    /// A background loop over the fixture's manager and network client: Java's
+    /// share `RequestManagers` with only the share consume request manager
+    /// (the coordinator and the share heartbeat and membership managers are
+    /// absent), the processor over it, and the loop that drives both.
+    struct LoopFixture {
+        thread: ConsumerNetworkThread<MockClient>,
+        application_event_tx: mpsc::UnboundedSender<ApplicationEventEnvelope>,
+        network_client_delegate: Arc<tokio::sync::Mutex<NetworkClientDelegate<MockClient>>>,
+        acknowledgement_event_handler: Arc<ShareAcknowledgementEventHandler>,
+        time: Arc<MockTime>,
+    }
+
+    impl LoopFixture {
+        fn new(mut f: Fixture) -> Self {
+            let time = Arc::clone(&f.time);
+            let subscriptions = Arc::clone(&f.subscriptions);
+            let metadata = Arc::clone(&f.metadata);
+            let acknowledgement_event_handler = Arc::clone(&f.acknowledgement_event_handler);
+            // The fixture closes its manager when dropped (Java's `teardown`), so
+            // the loop takes the manager and the network client delegate and
+            // leaves unused ones behind.
+            let manager = std::mem::replace(
+                &mut f.manager,
+                ShareConsumeRequestManager::new(
+                    Arc::clone(&time) as Arc<dyn Time>,
+                    GROUP_ID,
+                    Arc::clone(&metadata),
+                    Arc::clone(&subscriptions),
+                    ShareFetchConfig::new(
+                        1,
+                        i32::MAX,
+                        0,
+                        1000,
+                        i32::MAX,
+                        true,
+                        "",
+                        crate::common::IsolationLevel::ReadUncommitted,
+                        ShareAcquireMode::BatchOptimized,
+                    ),
+                    Arc::new(ShareFetchBuffer::new()),
+                    Arc::new(ShareAcknowledgementEventHandler::new()),
+                    Arc::new(ShareFetchMetricsManager::new(
+                        Arc::clone(&f.metrics),
+                        &ShareFetchMetricsRegistry::new(),
+                    )),
+                    RETRY_BACKOFF_MS,
+                    1000,
+                ),
+            );
+            let (background_event_tx, _background_event_rx) = mpsc::unbounded_channel();
+            let network_client_delegate = std::mem::replace(
+                &mut f.network_client_delegate,
+                NetworkClientDelegate::new(
+                    &ConsumerConfig {
+                        bootstrap_servers: vec!["localhost:9092".to_string()],
+                        ..ConsumerConfig::defaults()
+                    },
+                    MockClient::new(Arc::clone(&time) as Arc<dyn Time>),
+                    metadata.metadata_arc(),
+                    Arc::new(BackgroundEventHandler::new(background_event_tx)),
+                    false,
+                ),
+            );
+            drop(f);
+            let request_managers = Arc::new(Mutex::new(RequestManagers::with_share_consume_request_manager(
+                Arc::new(Mutex::new(manager)),
+                None,
+                None,
+                None,
+            )));
+            let reaper = Arc::new(Mutex::new(CompletableEventReaper::new()));
+            let processor = ApplicationEventProcessor::new(
+                Arc::clone(&request_managers),
+                metadata.metadata_arc(),
+                subscriptions,
+                Arc::clone(&reaper),
+                Arc::clone(&time) as Arc<dyn Time>,
+            );
+            let (application_event_tx, application_event_rx) = mpsc::unbounded_channel();
+            let network_client_delegate = Arc::new(tokio::sync::Mutex::new(network_client_delegate));
+            let thread = ConsumerNetworkThread::new(
+                Arc::clone(&time) as Arc<dyn Time>,
+                application_event_rx,
+                reaper,
+                processor,
+                Arc::clone(&network_client_delegate),
+                request_managers,
+                None,
+                WakeupTrigger::new(),
+                Arc::new(AtomicI64::new(0)),
+            );
+            Self {
+                thread,
+                application_event_tx,
+                network_client_delegate,
+                acknowledgement_event_handler,
+                time,
+            }
+        }
+
+        /// `applicationEventHandler.add(event)`.
+        fn add(&self, event: ApplicationEvent) {
+            let enqueued_ms = self.time.milliseconds();
+            self.application_event_tx
+                .send(ApplicationEventEnvelope { event, enqueued_ms })
+                .expect("the loop owns the receiver");
+        }
+
+        async fn prepare_acknowledge_response(&self, response: ShareAcknowledgeResponse) {
+            self.network_client_delegate
+                .lock()
+                .await
+                .client_for_test_mut()
+                .prepare_response(ConcreteResponse::ShareAcknowledge(response));
+        }
+    }
+
+    /// A share session with node 0 that fetched offsets 1-3 of `tip0`, the
+    /// acknowledgements of those offsets, and the loop over that manager, with
+    /// the acknowledgement commit callback registered through its event (so a
+    /// completed acknowledgement is also emitted as a `ShareAcknowledgementEvent`).
+    async fn loop_with_fetched_records() -> (LoopFixture, TopicIdPartition, Acknowledgements) {
+        let mut f = Fixture::new();
+        f.assign_from_subscribed(&[f.tp0.clone()]);
+        f.send_fetch_and_verify_response(f.records.clone(), f.acquired_records.clone(), Errors::None, Errors::None)
+            .await;
+        let tip0 = f.tip0.clone();
+        let acknowledgements = get_acknowledgements(
+            1,
+            &[
+                AcknowledgeType::Accept,
+                AcknowledgeType::Accept,
+                AcknowledgeType::Reject,
+            ],
+        );
+        let l = LoopFixture::new(f);
+        l.add(ApplicationEvent::ShareAcknowledgementCommitCallbackRegistration { is_callback_registered: true });
+        (l, tip0, acknowledgements)
+    }
+
+    /// Rust-only (Java has no `runOnce` test over this manager): a
+    /// `ShareAcknowledgeSyncEvent`'s future completes in the same `run_once`
+    /// iteration as its response, as in Java, where `NetworkClientDelegate#poll`
+    /// runs the response's `whenComplete` before `runOnce` returns. One
+    /// iteration processes the event (`commitSync`), builds and sends the
+    /// `ShareAcknowledge`, receives its response, and completes the event. If
+    /// the response were handled before the network poll, or only by the
+    /// manager's next `poll`, the future would complete one iteration later.
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_once_completes_a_commit_sync_in_the_iteration_its_response_arrives() {
+        let (mut l, tip0, acknowledgements) = loop_with_fetched_records().await;
+        let deadline_ms = l.time.milliseconds() + 2000;
+        let (handle, mut rx) = CompletableEventHandle::new(deadline_ms);
+        l.add(ApplicationEvent::ShareAcknowledgeSync {
+            handle,
+            acknowledgements_map: IndexMap::from([(
+                tip0.clone(),
+                NodeAcknowledgements::new(0, acknowledgements.clone()),
+            )]),
+        });
+        l.prepare_acknowledge_response(full_acknowledge_response(&tip0, Errors::None))
+            .await;
+
+        l.thread.run_once().await;
+
+        let completed = rx
+            .try_recv()
+            .expect("the commitSync future completes in the iteration its response arrives")
+            .expect("the acknowledgements succeeded");
+        assert_same_acknowledgements(&[(&tip0, &acknowledgements)], &completed);
+        assert_eq!(None, completed[&tip0].acknowledge_error().map(Error::message));
+        let events = l.acknowledgement_event_handler.drain_events();
+        assert_eq!(1, events.len(), "the registered callback gets the completed acknowledgements");
+        assert_same_acknowledgements(&[(&tip0, &acknowledgements)], events[0].acknowledgements_map());
+    }
+
+    /// Rust-only: the acknowledgements of a `ShareAcknowledgeOnCloseEvent` are
+    /// completed (and emitted to the registered callback) in the `run_once`
+    /// iteration their response arrives in, as Java's `whenComplete` completes
+    /// them inside that iteration's network poll. The event itself completes in
+    /// the next iteration, as in Java, where `closeFuture` is completed by the
+    /// manager's next `poll` once no acknowledgement is in flight
+    /// (`ShareConsumeRequestManagerTest#testAcknowledgeOnClose`: "Polling once
+    /// more to complete the closeFuture").
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_once_completes_close_acknowledgements_in_the_iteration_their_response_arrives() {
+        let (mut l, tip0, acknowledgements) = loop_with_fetched_records().await;
+        let deadline_ms = l.time.milliseconds() + 2000;
+        let (handle, mut rx) = CompletableEventHandle::new(deadline_ms);
+        l.add(ApplicationEvent::ShareAcknowledgeOnClose {
+            handle,
+            acknowledgements_map: IndexMap::from([(
+                tip0.clone(),
+                NodeAcknowledgements::new(0, acknowledgements.clone()),
+            )]),
+        });
+        l.prepare_acknowledge_response(full_acknowledge_response(&tip0, Errors::None))
+            .await;
+
+        l.thread.run_once().await;
+
+        let events = l.acknowledgement_event_handler.drain_events();
+        assert_eq!(
+            1,
+            events.len(),
+            "the close acknowledgements complete in the iteration of their response"
+        );
+        assert_same_acknowledgements(&[(&tip0, &acknowledgements)], events[0].acknowledgements_map());
+        assert!(rx.try_recv().is_err(), "closeFuture completes on the manager's next poll");
+
+        l.thread.run_once().await;
+        assert!(matches!(rx.try_recv(), Ok(Ok(()))));
     }
 }
