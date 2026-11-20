@@ -209,8 +209,6 @@ mod tests {
     //! `PartitionStates` is `pub(crate)` so tests live inline (the integration
     //! test crate cannot name the type).
 
-    use std::collections::HashMap;
-
     use super::*;
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
@@ -218,7 +216,7 @@ mod tests {
     }
 
     /// Java's `createMap()`, a `LinkedHashMap` in `put` order.
-    fn create_linked_map() -> IndexMap<TopicPartition, String> {
+    fn create_map() -> IndexMap<TopicPartition, String> {
         IndexMap::from([
             (tp("foo", 2), "foo 2".to_string()),
             (tp("blah", 2), "blah 2".to_string()),
@@ -229,46 +227,15 @@ mod tests {
         ])
     }
 
-    /// The entries of Java's `createMap()` in a `HashMap`, for the tests that
-    /// only check that each topic's partitions stay contiguous (`check_grouped`).
-    fn create_map() -> HashMap<TopicPartition, String> {
-        let mut map = HashMap::new();
-        map.insert(tp("foo", 2), "foo 2".to_string());
-        map.insert(tp("blah", 2), "blah 2".to_string());
-        map.insert(tp("blah", 1), "blah 1".to_string());
-        map.insert(tp("baz", 2), "baz 2".to_string());
-        map.insert(tp("foo", 0), "foo 0".to_string());
-        map.insert(tp("baz", 3), "baz 3".to_string());
-        map
-    }
-
-    /// Assert that partitions belonging to the same topic appear contiguously
-    /// in the iteration order, and the keys/values match the expected set.
-    fn check_grouped(states: &PartitionStates<String>, expected: &HashMap<TopicPartition, String>) {
+    /// Java's `checkState`: the partitions, the size and the
+    /// `partitionStateMap()` (an ordered map) equal `expected`, in order.
+    fn check_state(states: &PartitionStates<String>, expected: &[(TopicPartition, &str)]) {
+        let expected_keys: Vec<TopicPartition> = expected.iter().map(|(tp, _)| tp.clone()).collect();
         let actual_keys: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        let expected_keys: std::collections::HashSet<TopicPartition> = expected.keys().cloned().collect();
-        let actual_keys_set: std::collections::HashSet<TopicPartition> = actual_keys.iter().cloned().collect();
-        assert_eq!(actual_keys_set, expected_keys);
-        assert_eq!(states.size(), expected.len());
-
-        // Verify contiguity: every topic's partitions form a single run.
-        let mut seen_topics = std::collections::HashSet::<String>::new();
-        let mut last_topic: Option<String> = None;
-        for tp in &actual_keys {
-            if Some(tp.topic().to_string()) == last_topic {
-                continue; // same topic continuation
-            }
-            // new topic
-            let topic = tp.topic().to_string();
-            assert!(!seen_topics.contains(&topic), "Topic '{topic}' is not contiguous");
-            seen_topics.insert(topic.clone());
-            last_topic = Some(topic);
-        }
-
-        // Verify values
-        for (tp, s) in expected {
-            assert_eq!(states.state_value(tp), Some(s));
-        }
+        assert_eq!(expected_keys, actual_keys);
+        assert_eq!(expected.len(), states.size());
+        let actual: Vec<(TopicPartition, &str)> = states.iter().map(|(tp, s)| (tp.clone(), s.as_str())).collect();
+        assert_eq!(expected.to_vec(), actual);
     }
 
     /// Translated from `PartitionStatesTest.testSet`.
@@ -276,9 +243,8 @@ mod tests {
     #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testSet")]
     fn test_set() {
         let mut states: PartitionStates<String> = PartitionStates::new();
-        let map = create_linked_map();
+        let map = create_map();
         states.set(map);
-        // Java's `expected`: grouped by topic, in the input order.
         let expected = [
             (tp("foo", 2), "foo 2"),
             (tp("foo", 0), "foo 0"),
@@ -287,22 +253,13 @@ mod tests {
             (tp("baz", 2), "baz 2"),
             (tp("baz", 3), "baz 3"),
         ];
-        let actual: Vec<(TopicPartition, &str)> = states.iter().map(|(tp, s)| (tp.clone(), s.as_str())).collect();
-        assert_eq!(expected.to_vec(), actual);
+        check_state(&states, &expected);
 
-        // Empty input clears the map.
-        states.set(HashMap::new());
-        assert_eq!(states.size(), 0);
-        assert_eq!(states.partition_set().count(), 0);
+        states.set(IndexMap::new());
+        check_state(&states, &[]);
     }
 
     /// Translated from `PartitionStatesTest.testMoveToEnd`.
-    ///
-    /// Java's input is a `LinkedHashMap` which gives a deterministic insertion
-    /// order; Rust's `HashMap` does not, so we can't assert the exact post-set
-    /// ordering. Instead we verify that the moved partition is at the tail
-    /// and same-topic groupings remain contiguous (the only behaviors that
-    /// matter for fetch-serialization fairness).
     #[test]
     #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testMoveToEnd")]
     fn test_move_to_end() {
@@ -310,32 +267,39 @@ mod tests {
         let map = create_map();
         states.set(map);
 
-        let tp_baz_2 = tp("baz", 2);
-        states.move_to_end(&tp_baz_2);
-        let keys: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        assert_eq!(keys.last(), Some(&tp_baz_2));
-        assert_eq!(states.size(), 6);
+        states.move_to_end(&tp("baz", 2));
+        let expected = [
+            (tp("foo", 2), "foo 2"),
+            (tp("foo", 0), "foo 0"),
+            (tp("blah", 2), "blah 2"),
+            (tp("blah", 1), "blah 1"),
+            (tp("baz", 3), "baz 3"),
+            (tp("baz", 2), "baz 2"),
+        ];
+        check_state(&states, &expected);
 
-        let tp_foo_2 = tp("foo", 2);
-        states.move_to_end(&tp_foo_2);
-        let keys: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        assert_eq!(keys.last(), Some(&tp_foo_2));
+        states.move_to_end(&tp("foo", 2));
+        let expected = [
+            (tp("foo", 0), "foo 0"),
+            (tp("blah", 2), "blah 2"),
+            (tp("blah", 1), "blah 1"),
+            (tp("baz", 3), "baz 3"),
+            (tp("baz", 2), "baz 2"),
+            (tp("foo", 2), "foo 2"),
+        ];
+        check_state(&states, &expected);
 
-        // No-op on the last entry
-        let before: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        states.move_to_end(&tp_foo_2);
-        let after: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        assert_eq!(before, after);
+        // no-op
+        states.move_to_end(&tp("foo", 2));
+        check_state(&states, &expected);
 
-        // Partition doesn't exist — no-op
+        // partition doesn't exist
         states.move_to_end(&tp("baz", 5));
-        let unchanged: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        assert_eq!(after, unchanged);
+        check_state(&states, &expected);
 
-        // Topic doesn't exist — no-op
+        // topic doesn't exist
         states.move_to_end(&tp("aaa", 2));
-        let unchanged: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        assert_eq!(after, unchanged);
+        check_state(&states, &expected);
     }
 
     /// Translated from `PartitionStatesTest.testUpdateAndMoveToEnd`.
@@ -343,35 +307,57 @@ mod tests {
     #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testUpdateAndMoveToEnd")]
     fn test_update_and_move_to_end() {
         let mut states: PartitionStates<String> = PartitionStates::new();
-        states.set(create_map());
+        let map = create_map();
+        states.set(map);
 
-        // Update existing entry — moves to end, state changes.
-        let tp_foo_0 = tp("foo", 0);
-        states.update_and_move_to_end(tp_foo_0.clone(), "foo 0 updated".to_string());
-        let keys: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        assert_eq!(keys.last(), Some(&tp_foo_0));
-        assert_eq!(states.state_value(&tp_foo_0), Some(&"foo 0 updated".to_string()));
+        states.update_and_move_to_end(tp("foo", 0), "foo 0 updated".to_string());
+        let expected = [
+            (tp("foo", 2), "foo 2"),
+            (tp("blah", 2), "blah 2"),
+            (tp("blah", 1), "blah 1"),
+            (tp("baz", 2), "baz 2"),
+            (tp("baz", 3), "baz 3"),
+            (tp("foo", 0), "foo 0 updated"),
+        ];
+        check_state(&states, &expected);
 
-        // Update another existing entry.
-        let tp_baz_2 = tp("baz", 2);
-        states.update_and_move_to_end(tp_baz_2.clone(), "baz 2 updated".to_string());
-        let keys: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        assert_eq!(keys.last(), Some(&tp_baz_2));
-        assert_eq!(states.state_value(&tp_baz_2), Some(&"baz 2 updated".to_string()));
+        states.update_and_move_to_end(tp("baz", 2), "baz 2 updated".to_string());
+        let expected = [
+            (tp("foo", 2), "foo 2"),
+            (tp("blah", 2), "blah 2"),
+            (tp("blah", 1), "blah 1"),
+            (tp("baz", 3), "baz 3"),
+            (tp("foo", 0), "foo 0 updated"),
+            (tp("baz", 2), "baz 2 updated"),
+        ];
+        check_state(&states, &expected);
 
-        // New partition for an existing topic — appended at tail.
-        let tp_baz_5 = tp("baz", 5);
-        states.update_and_move_to_end(tp_baz_5.clone(), "baz 5 new".to_string());
-        let keys: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        assert_eq!(keys.last(), Some(&tp_baz_5));
-        assert_eq!(states.size(), 7);
+        // partition doesn't exist
+        states.update_and_move_to_end(tp("baz", 5), "baz 5 new".to_string());
+        let expected = [
+            (tp("foo", 2), "foo 2"),
+            (tp("blah", 2), "blah 2"),
+            (tp("blah", 1), "blah 1"),
+            (tp("baz", 3), "baz 3"),
+            (tp("foo", 0), "foo 0 updated"),
+            (tp("baz", 2), "baz 2 updated"),
+            (tp("baz", 5), "baz 5 new"),
+        ];
+        check_state(&states, &expected);
 
-        // New partition for a new topic.
-        let tp_aaa_2 = tp("aaa", 2);
-        states.update_and_move_to_end(tp_aaa_2.clone(), "aaa 2 new".to_string());
-        let keys: Vec<TopicPartition> = states.partition_set().cloned().collect();
-        assert_eq!(keys.last(), Some(&tp_aaa_2));
-        assert_eq!(states.size(), 8);
+        // topic doesn't exist
+        states.update_and_move_to_end(tp("aaa", 2), "aaa 2 new".to_string());
+        let expected = [
+            (tp("foo", 2), "foo 2"),
+            (tp("blah", 2), "blah 2"),
+            (tp("blah", 1), "blah 1"),
+            (tp("baz", 3), "baz 3"),
+            (tp("foo", 0), "foo 0 updated"),
+            (tp("baz", 2), "baz 2 updated"),
+            (tp("baz", 5), "baz 5 new"),
+            (tp("aaa", 2), "aaa 2 new"),
+        ];
+        check_state(&states, &expected);
     }
 
     /// Translated from `PartitionStatesTest.testPartitionValues`.
@@ -379,25 +365,11 @@ mod tests {
     #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testPartitionValues")]
     fn test_partition_values() {
         let mut states: PartitionStates<String> = PartitionStates::new();
-        states.set(create_map());
-
-        // Java asserts an exact `LinkedHashMap` iteration order. The Rust
-        // input is a `HashMap` whose key-iteration is non-deterministic, so we
-        // assert the multiset of values instead. The contiguity invariant is
-        // checked separately by `test_set`.
-        let mut values: Vec<&String> = states.partition_state_values();
-        values.sort();
-        let mut expected = vec![
-            "foo 2".to_string(),
-            "foo 0".to_string(),
-            "blah 2".to_string(),
-            "blah 1".to_string(),
-            "baz 2".to_string(),
-            "baz 3".to_string(),
-        ];
-        expected.sort();
-        let actual: Vec<String> = values.into_iter().cloned().collect();
-        assert_eq!(actual, expected);
+        let map = create_map();
+        states.set(map);
+        let expected = vec!["foo 2", "foo 0", "blah 2", "blah 1", "baz 2", "baz 3"];
+        let actual: Vec<&str> = states.partition_state_values().into_iter().map(String::as_str).collect();
+        assert_eq!(expected, actual);
     }
 
     /// Translated from `PartitionStatesTest.testClear`.
@@ -405,10 +377,10 @@ mod tests {
     #[doc(alias = "org.apache.kafka.common.internals.PartitionStatesTest#testClear")]
     fn test_clear() {
         let mut states: PartitionStates<String> = PartitionStates::new();
-        states.set(create_map());
+        let map = create_map();
+        states.set(map);
         states.clear();
-        assert_eq!(states.size(), 0);
-        assert_eq!(states.partition_set().count(), 0);
+        check_state(&states, &[]);
     }
 
     /// Translated from `PartitionStatesTest.testRemove`.
@@ -417,24 +389,34 @@ mod tests {
     fn test_remove() {
         let mut states: PartitionStates<String> = PartitionStates::new();
         let map = create_map();
-        let mut expected = map.clone();
         states.set(map);
 
-        // Remove existing entries
-        let tp_foo_2 = tp("foo", 2);
-        states.remove(&tp_foo_2);
-        expected.remove(&tp_foo_2);
-        check_grouped(&states, &expected);
+        states.remove(&tp("foo", 2));
+        let expected = [
+            (tp("foo", 0), "foo 0"),
+            (tp("blah", 2), "blah 2"),
+            (tp("blah", 1), "blah 1"),
+            (tp("baz", 2), "baz 2"),
+            (tp("baz", 3), "baz 3"),
+        ];
+        check_state(&states, &expected);
 
-        let tp_blah_1 = tp("blah", 1);
-        states.remove(&tp_blah_1);
-        expected.remove(&tp_blah_1);
-        check_grouped(&states, &expected);
+        states.remove(&tp("blah", 1));
+        let expected = [
+            (tp("foo", 0), "foo 0"),
+            (tp("blah", 2), "blah 2"),
+            (tp("baz", 2), "baz 2"),
+            (tp("baz", 3), "baz 3"),
+        ];
+        check_state(&states, &expected);
 
-        let tp_baz_3 = tp("baz", 3);
-        states.remove(&tp_baz_3);
-        expected.remove(&tp_baz_3);
-        check_grouped(&states, &expected);
+        states.remove(&tp("baz", 3));
+        let expected = [
+            (tp("foo", 0), "foo 0"),
+            (tp("blah", 2), "blah 2"),
+            (tp("baz", 2), "baz 2"),
+        ];
+        check_state(&states, &expected);
     }
 
     /// Sanity: iteration order is stable across calls and consistent across
