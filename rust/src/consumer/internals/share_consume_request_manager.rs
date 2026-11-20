@@ -37,7 +37,10 @@
 //!   `set_acknowledgement_commit_callback_registered`), so an event sees the
 //!   state the responses that arrived before it left, as in Java. No task is
 //!   spawned per request: the network poll returns when a response arrives,
-//!   and the background loop polls the managers again right after. Responses
+//!   and the background loop polls the managers again right after. A
+//!   request that fails because its node disconnected completes with
+//!   `DisconnectError`, Java's `DisconnectException`, although the Rust
+//!   `NetworkClientDelegate` reports a `NetworkError`. Responses
 //!   that arrive in the same network poll are handled in the order their
 //!   requests were built, where Java handles them in the order the network
 //!   client completes them; the two orders only differ across nodes.
@@ -68,7 +71,7 @@ use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
 
 use crate::ClientResponse;
-use crate::common::errors::InvalidRecordStateError;
+use crate::common::errors::{DisconnectError, InvalidRecordStateError};
 use crate::common::internals::KafkaFutureImpl;
 use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
@@ -263,7 +266,7 @@ impl ShareConsumeRequestManager {
     /// Rust-only: Java runs these handlers in the `whenComplete` callbacks of
     /// its `UnsentRequest`s, inside the network poll (module docs,
     /// "Responses"). A request dropped by the network client without a
-    /// response is handled as a failure with a `NetworkError`.
+    /// response is handled as a failure with a `DisconnectError`.
     pub(crate) fn handle_completed_requests(&mut self) {
         if self.pending_requests.is_empty() {
             return;
@@ -272,9 +275,9 @@ impl ShareConsumeRequestManager {
         let pending = std::mem::take(&mut self.pending_requests);
         for mut request in pending {
             match request.response_rx().try_recv() {
-                Ok(result) => completed.push((request, result)),
+                Ok(result) => completed.push((request, result.map_err(Self::disconnect_if_network_error))),
                 Err(TryRecvError::Empty) => self.pending_requests.push(request),
-                Err(TryRecvError::Closed) => completed.push((request, Err(Error::new(Errors::NetworkError)))),
+                Err(TryRecvError::Closed) => completed.push((request, Err(Self::disconnect()))),
             }
         }
         for (request, result) in completed {
@@ -303,6 +306,27 @@ impl ShareConsumeRequestManager {
                     }
                 },
             }
+        }
+    }
+
+    /// Java's `DisconnectException.INSTANCE`.
+    fn disconnect() -> Error {
+        Error::Disconnect(DisconnectError::with_default_message())
+    }
+
+    /// The error a request to a node failed with, as Java's
+    /// `NetworkClientDelegate.FutureCompletionHandler#onComplete` / `#onFailure`
+    /// report it: `DisconnectException` for a disconnected response or a
+    /// failed connection with no authentication error, where the Rust
+    /// `NetworkClientDelegate` reports a `NetworkError` (PLAN §8, a consumer
+    /// follow-up). Every share request names its node, so a `NetworkError`
+    /// from the delegate is one of those two cases; Java's own `NetworkException`
+    /// there is the node-less close path, which no share request takes.
+    fn disconnect_if_network_error(error: Error) -> Error {
+        if error.error() == Errors::NetworkError {
+            Self::disconnect()
+        } else {
+            error
         }
     }
 
@@ -3554,13 +3578,6 @@ mod tests {
         assert_same_acknowledgements(&[(&tip0, &acknowledgements)], &f.completed_acknowledgements()[0]);
     }
 
-    /// Deviation (consumer infrastructure, reported to the Manager): Java's
-    /// `NetworkClientDelegate.FutureCompletionHandler#onComplete` fails a
-    /// disconnected request with `DisconnectException`, which
-    /// `Errors.forException` maps to `UNKNOWN_SERVER_ERROR` (the class is not in
-    /// its map), so Java asserts `UnknownServerException`. The Rust delegate
-    /// (`FutureCompletionHandler::on_complete`) substitutes a `NetworkError`, so
-    /// the acknowledgements complete with `NETWORK_EXCEPTION` here.
     #[tokio::test(flavor = "current_thread")]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManagerTest#testServerDisconnectedOnShareAcknowledge"
@@ -3594,7 +3611,7 @@ mod tests {
 
         let tip0 = f.tip0.clone();
         assert_same_acknowledgements(&[(&tip0, &acknowledgements)], &f.completed_acknowledgements()[0]);
-        assert_acknowledge_error(&f.completed_acknowledgements()[0][&tip0], Errors::NetworkError);
+        assert_acknowledge_error(&f.completed_acknowledgements()[0][&tip0], Errors::UnknownServerError);
         f.clear_completed_acknowledgements();
 
         assert_eq!(1, f.async_request(0).acknowledgements_to_send_count(&tip0));
@@ -6814,13 +6831,6 @@ mod tests {
         assert_eq!(node_id0.id(), f.manager.share_session_node_id(&tip0));
     }
 
-    /// Deviation (consumer infrastructure, reported to the Manager): Java's
-    /// `NetworkClientDelegate.FutureCompletionHandler#onComplete` fails a
-    /// disconnected request with `DisconnectException`, which
-    /// `ShareConsumeRequestManager#handleShareFetchFailure` hands to the
-    /// acknowledgements unchanged, so Java asserts `DisconnectException`. The
-    /// Rust delegate substitutes a `NetworkError`, which is what the
-    /// acknowledgements complete with here.
     #[tokio::test(flavor = "current_thread")]
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManagerTest#testWhenLeadershipChangedAfterDisconnected"
@@ -6880,7 +6890,11 @@ mod tests {
         assert!(f.manager.has_completed_fetches());
 
         // The node was disconnected, so the acknowledgements for tp0 failed
-        assert_acknowledge_error(&f.completed_acknowledgements()[0][&tip0], Errors::NetworkError);
+        let error = f.completed_acknowledgements()[0][&tip0]
+            .acknowledge_error()
+            .expect("an error")
+            .clone();
+        assert!(error.is_disconnect_error(), "{error:?}");
         f.clear_completed_acknowledgements();
 
         let partition_records = f.fetch_records().await;
@@ -7494,12 +7508,13 @@ mod tests {
         assert_eq!(6.0, f.metric_value(&f.share_fetch_metrics_registry.acknowledgement_send_total));
     }
 
-    /// Rust-only: a request the network client drops without completing it
-    /// (`NetworkClient::close` with the request in flight) is handled as a
-    /// failure with a `NetworkError`: the piggy-backed acknowledgements fail
-    /// and the node takes requests again.
+    /// Rust-only: a request whose completion handler is dropped without
+    /// completing it is handled as a failure with a `DisconnectError`: the
+    /// piggy-backed acknowledgements fail with it and the node takes requests
+    /// again. The test drops the unsent request; a network client dropping an
+    /// in-flight one (`NetworkClient::close`) closes the receiver the same way.
     #[tokio::test(flavor = "current_thread")]
-    async fn test_dropped_request_is_handled_as_network_error() {
+    async fn test_dropped_request_is_handled_as_disconnect() {
         let mut f = Fixture::new();
         f.manager.set_acknowledgement_commit_callback_registered(true);
 
@@ -7521,7 +7536,11 @@ mod tests {
 
         let tip0 = f.tip0.clone();
         assert_same_acknowledgements(&[(&tip0, &acknowledgements)], &f.completed_acknowledgements()[0]);
-        assert_acknowledge_error(&f.completed_acknowledgements()[0][&tip0], Errors::NetworkError);
+        let error = f.completed_acknowledgements()[0][&tip0]
+            .acknowledge_error()
+            .expect("an error")
+            .clone();
+        assert!(error.is_disconnect_error(), "{error:?}");
         assert!(f.manager.is_node_free(0));
         assert_eq!(1, f.send_fetches());
     }
