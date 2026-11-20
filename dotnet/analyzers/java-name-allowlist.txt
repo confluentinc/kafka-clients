@@ -332,11 +332,11 @@ missing T:Confluent.Kafka.Common.Serialization.VoidDeserializer org.apache.kafka
 missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.common.serialization.Deserializer#close()
 missing T:Confluent.Kafka.Common.Serialization.ISerializer`1 org.apache.kafka.common.serialization.Serializer#close()
 
-# The asynchronous serde interfaces (M23/P7, ledger 536, 538) take an optional CancellationToken (M23/P10, ledger 584)
+# The asynchronous serde interfaces (M23/P7, ledger 536, 538) take an optional CancellationToken (M23/P10, ledger 591)
 # and return a ValueTask, the bytes a ReadOnlyMemory<byte>. IAsyncSerializer has Java's serialize(String, T), and
-# IAsyncSerializerWithHeaders adds serialize(String, Headers, T) (M23/P10, ledger 585), as ISerializerWithHeaders does.
+# IAsyncSerializerWithHeaders adds serialize(String, Headers, T) (M23/P10, ledger 592), as ISerializerWithHeaders does.
 # IAsyncDeserializer has Java's deserialize(String, byte[]) over a ReadOnlyMemory<byte>, and
-# IAsyncDeserializerWithHeaders adds deserialize(String, Headers, ByteBuffer) (M23/P10, ledger 586), as
+# IAsyncDeserializerWithHeaders adds deserialize(String, Headers, ByteBuffer) (M23/P10, ledger 593), as
 # IDeserializerWithHeaders does. Java's deserialize(String, Headers, byte[]) has no asynchronous counterpart: the
 # headers form takes the memory that stands for the ByteBuffer. Java's close() is an optional IAsyncDisposable and nothing else (M23/P8), as it is an
 # optional IDisposable on the synchronous interfaces above.
@@ -355,10 +355,10 @@ unmatched T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemoryDeserializer
 unmatched T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemorySerializer
 
 # The asynchronous built-in deserializers (M23/P7, ledger 538) call their synchronous classes and implement the forms
-# those implement (M23/P10, ledger 586): Java's deserialize(String, byte[]), over a ReadOnlyMemory<byte>, and, for
+# those implement (M23/P10, ledger 593): Java's deserialize(String, byte[]), over a ReadOnlyMemory<byte>, and, for
 # AsyncReadOnlyMemoryDeserializer alone, the headers form. Java's deserialize(String, Headers, ByteBuffer) overrides of
 # the others have no asynchronous counterpart, as their synchronous classes have none. The built-in serializers have
-# Java's serialize(String, T), as their synchronous classes do (M23/P10, ledger 585).
+# Java's serialize(String, T), as their synchronous classes do (M23/P10, ledger 592).
 missing T:Confluent.Kafka.Common.Serialization.AsyncBooleanDeserializer org.apache.kafka.common.serialization.BooleanDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncDoubleDeserializer org.apache.kafka.common.serialization.DoubleDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncFloatDeserializer org.apache.kafka.common.serialization.FloatDeserializer#deserialize(String,Headers,ByteBuffer)
