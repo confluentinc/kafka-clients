@@ -777,7 +777,7 @@ its C# realization, and where the enforcing rule lives.
 | a member .NET forces to be a property | none: a property a .NET interface requires is implemented explicitly beside Java's method (`ConsumerRecords.Count()`, Java's `count()`, and an explicit `IReadOnlyCollection<T>.Count`); the inherited `Exception` ones stay; `PublicJavaMemberShapeTests` and `GeneratedErrorClassesTests` fail on any public property. A name C# forces apart is moved, not renamed: `FeatureUpdate.UpgradeType` (Java's nested enum) sits beside the class as `Confluent.Kafka.Admin.UpgradeType` (CS0102 with Java's `upgradeType()`), as `GroupMembershipOperation` does (ledger 109) | ledger 368 |
 | a .NET-only getter or property | none, except where Java's type has no C# form: `ClientQuotaFilterComponent.MatchType()` tells Java's three `match()` states (`ofEntity`, `ofDefaultEntity`, `ofEntityType`) apart, since C# has no `Optional` that can itself be `null` *(deviation)* | ledger 369 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
-| `Headers` / `Header` (record headers) | `Headers : IEnumerable<Header>` with Java's `Add` / `Remove` / `LastHeader` / `ToArray` and `GetHeaders(key)` for Java's `headers(String)` (CS0542); read-only once a `KafkaProducer` sends the record (`IllegalStateException("RecordHeaders has been closed.")`, Java's class), never on the mocks; a fetched record's are its own and writable | send: the header values are copied by the ABI, which has no borrowed form, a recorded deviation from root `CLAUDE.md` §14 (ledger 301) — ffi §A4 |
+| `Headers` / `Header` (record headers) | `Headers : IEnumerable<Header>` with Java's `Add` / `Remove` / `LastHeader` / `ToArray` and `GetHeaders(key)` for Java's `headers(String)` (CS0542); read-only once a `KafkaProducer` sends the record (`IllegalStateException("RecordHeaders has been closed.")`, Java's class), never on the mocks; a fetched record's are its own and writable. The serializers run and the headers turn read-only before the core's metadata wait, so a send that then fails on that wait has run its serializers and leaves the headers read-only (a retry of the same record through a serializer that adds a header throws that `IllegalStateException`), and a serializer's error comes from `Send` in place of the metadata timeout *(recorded deviation, as Python's: Java waits for the metadata first, so a send that times out on it calls no serializer and leaves the headers writable. Why: the core waits for metadata only after it receives the serialized record. Goes when: the core can wait for a topic's metadata before the record is serialized)* | send: the header values are copied by the ABI, which has no borrowed form, a recorded deviation from root `CLAUDE.md` §14 (ledger 301) — ffi §A4 |
 | opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §A2/§B2 |
 | `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
 | `Map<String, Object>` / `Properties` (a client's configuration) | one `IReadOnlyDictionary<string, object?> configs` per `Kafka*` constructor; a value of the C# type Java's `parseType` accepts for the key, or Java's text; a `null` meets the key's validator or is not set | §4 **Config**; ffi §0.1, §A5 |
@@ -1056,7 +1056,7 @@ do; ledger 105), `Wakeup()`, `Metrics()`
 `metrics()`; on `KafkaConsumer` and `AsyncKafkaConsumer` it makes no owner check, as Java's
 takes no `acquire()`, and holds only the use that keeps the handle alive; the core answers it
 while an op holds its flag, BH:30592-30606 at `3f8a5bc6`; the mocks wait, as Java's
-`synchronized` mock; after close it throws, the call-site list below §3's idiom map), `Register`/`UnregisterMetricForSubscription`, and
+`synchronized` mock; after close it throws, the call-site list below §3's idiom map), and
 `EnforceRebalance(string? reason
 = null)` (a no-op that only logs under KIP-848; one method collapses Java's two overloads). It
 makes no owner check and, once the consumer is closed, returns without calling the core, as Java's
@@ -1068,10 +1068,17 @@ M19/P1: Java's `clientId()` is package-private and Python has no `client_id()` (
 producer:** `Metrics` (**shipped M11/P8** — `IReadOnlyDictionary<MetricName, IMetric> Metrics()`,
 Java `metrics()`, on **both** `IProducer` and `IAsyncProducer`; it maps **no**
 concurrent-access null — the producer ABI documents none, it takes the core `Mutex` and blocks —
-so its defensive null guard carries a producer-accurate message, decision D-5) and the two
-metric-subscription methods. `BeginTransaction` is not on this list: it waits while the core drains
+so its defensive null guard carries a producer-accurate message, decision D-5; it holds the core's
+producer metrics only, none of Java's network-client metrics: no connection, request, I/O or
+authentication metrics, no per-node metrics and no `app-info` *(recorded gap; Python's binding
+returns the same set. Why: the core registers none of them. Goes when: the core does)*).
+`BeginTransaction` is not on this list: it waits while the core drains
 the queued sends, so it is a `Task` on `IAsyncProducer` (§4 **Producer transactions**).
-Everything else is async.
+Everything else is async. Java's three KIP-714 members, `clientInstanceId(Duration)`,
+`registerMetricForSubscription(KafkaMetric)` and `unregisterMetricFromSubscription(KafkaMetric)`,
+are on neither the producer nor the consumer, sync or async *(recorded gap, as Python's, whose
+producer module lists the three as not generated. Why: the C ABI has no entry point for them. Goes
+when: it has)*.
 
 ⚠ **`Seek` / `CurrentLag` (M19/P1, decision 22, ledger 103).** Both block in Java (an
 `addAndGet` event round-trip). `IAsyncConsumer.Seek` returns a `Task` over `seek_*_cb`, as
@@ -1203,9 +1210,18 @@ decision 10). The parts, each decided against the Java source:
   the core delivers it (offset -1, `rust/src/ffi/producer/callback.rs:29-30` at `0035d9ff`).
   Python's `on_delivery` receives `None` on failure, so this is stricter than Python.
 - **Which outcomes fire it.** Every record the core accepted fires it exactly once, success or
-  failure. A record rejected before the append fires nothing: the sync `Send` throws, and the
-  async `Send`'s first stage faults. The one exception is a serializer's `ApiException` on
-  `KafkaProducer` / `AsyncKafkaProducer`, which fires it once inside `Send` (**Thread**, above). When the send reports an error, the callback may still
+  failure. A record the core refuses before the append with an `ApiException` (the metadata wait
+  timing out, `RecordTooLargeException`) fires it once too and fails its future, as Java's
+  `doSend` does, but through the callback queue, on the completion thread: when `Send` returns, or
+  the async `Send`'s first stage completes, the callback may not have run yet and the future may
+  not be done, and a running callback delays both *(recorded deviation, as Python's: Java's
+  `doSend` runs the callback inside `send`, on the caller's thread, and returns a future already
+  done. Why: the core reports a record's callback only through the producer's callback queue,
+  which the completion thread runs. Goes when: the core runs the callback of a record it refuses
+  inside the send call)*. A serializer's `ApiException` on `KafkaProducer` /
+  `AsyncKafkaProducer` fires it once inside `Send` instead (**Thread**, above). Any other refusal
+  before the append fires nothing: the sync `Send` throws, and the async `Send`'s first stage
+  faults. When the send reports an error, the callback may still
   fire later, once, if the record reached the accumulator (Java's `doSend` appends the record
   with its callback before `maybeAddPartition` fails; BH:38221-38227, BH:38251-38254). So an
   error from `Send` does not prove the callback will not fire. A record that `Close` fails while
@@ -1249,7 +1265,10 @@ without waiting for their reports, as Java's and Python's mock `flush()` do
 (`ffi-marshalling.md` §A7); and a commit or an abort ends with the same `TimeoutException`, a
 recorded deviation. A callback that awaits
 `Get()` of its own record, or of any later record of the producer, never ends. A `null`
-callback throws `ArgumentNullException`, and `Send(record, null)` does not compile.
+callback, of either form and on all four producers, means no callback: the record is sent as
+`Send(record)` sends it, as Java's `send(record, null)` and Python's `callback=None` do. On
+`IAsyncProducer` a bare `Send(record, null)` does not compile, since it matches both callback
+overloads, so a caller casts the `null`.
 
 ⚠ **§4 reentrancy row — the core's handle is host scaffolding that restores a Java
 behavior, not new API surface (M9/P8; DoD #7).** The core's `ConsumerHandle` has

@@ -222,6 +222,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         ThrowIfClosed();
+        AdminStrings.Validate(topic, AdminStrings.InvalidTopicMessage, nameof(topic));
         cancellationToken.ThrowIfCancellationRequested();
         if (IsMock && _completion.IsCurrentThread)
         {
@@ -363,6 +364,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         ThrowIfClosed();
+        AdminStrings.Validate(topic, AdminStrings.InvalidTopicMessage, nameof(topic));
         if (IsMock && _completion.IsCurrentThread)
         {
             return PartitionsForBlocking(topic);
@@ -687,6 +689,15 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 
     private static Exception FlushInCallback()
     {
+        try
+        {
+            Trace.TraceError(FlushInCallbackMessage);
+        }
+        catch (Exception)
+        {
+            // A throwing TraceListener must not replace the refusal.
+        }
+
         using Utf8Marshal.PinnedUtf8String message = Utf8Marshal.Pin(FlushInCallbackMessage);
         IntPtr outErr = IntPtr.Zero;
         IntPtr error = NativeMethods.ErrorKafkaMessage(message.Pointer, ref outErr);
