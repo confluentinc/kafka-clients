@@ -21,11 +21,12 @@
 //!
 //! Per-record allocation budget (expected, asserted in Phase 7b's
 //! `FetchCollector` allocation test): only the user-supplied
-//! `Deserializer<T>` allocations for the key and value `T`, plus the
-//! `RecordHeaders` clone (which §27 explicitly allows in Milestone-8), plus,
-//! for a compressed batch, the buffer each record is decompressed into, the
-//! one Java allocates per record, which §27 does not allow ([`RecordStream`]
-//! says why it is taken).
+//! `Deserializer<T>` allocations for the key and value `T`, plus, for a
+//! compressed batch, the buffer each record is decompressed into, the one
+//! Java allocates per record, which §27 does not allow ([`RecordStream`]
+//! says why it is taken). Headers that are never read add nothing in an
+//! uncompressed batch; in a compressed one a record with headers keeps its
+//! buffer, so the next record gets a new one (§27).
 //! Specifically preserved here:
 //!
 //! - `partition_data.records: Option<Vec<u8>>` arrives owning the fetch
@@ -43,9 +44,10 @@
 //!   decompressed into). We never copy key/value bytes out of the buffer;
 //!   the only deep copy of record payload is whatever the user's
 //!   `Deserializer<T>` does internally.
-//! - Headers are owned per the milestone-8 §27 ruling (`RecordHeaders` built
-//!   from `DefaultRecordRef::headers()`, the single owned-copy point); a
-//!   future revisit may borrow.
+//! - Headers are read on demand (§27): a record keeps one slice of its
+//!   encoded header section (`RecordHeaders::from_wire`), nothing is built or
+//!   copied for them while the record is fetched, and the headers read later
+//!   are slices of the same buffer.
 //! - No per-record `tokio::spawn`. The whole struct is sync.
 //! - Iteration is lazy via a `BatchCursor`: records are decoded one at a
 //!   time, on demand, by walking the current batch's record bytes with a
@@ -468,8 +470,9 @@ impl RecordStream {
     /// [`Self::read_record`] to read the next record into when nothing else
     /// holds it any more; a bigger one is let go of once all of it is
     /// consumed, so a big record is not held while the next is read. A record
-    /// a deserializer sliced keeps the buffer alive through its own reference,
-    /// and the next record then gets a buffer of its own. Java keeps the record
+    /// a deserializer sliced, or one with headers, which the fetched record
+    /// keeps as a slice (§27), keeps the buffer alive through its own
+    /// reference, and the next record then gets a buffer of its own. Java keeps the record
     /// in `CompletedFetch#lastRecord` until the next one is read;
     /// nothing a caller sees depends on that.
     fn consume(&mut self, consumed: usize) {
@@ -589,9 +592,10 @@ impl RecordStream {
     /// it is this stream's alone again. Reusing it keeps a compressed record
     /// at one allocation, the reference count the first slice of it adds,
     /// rather than two, a buffer and its reference count. A buffer still held
-    /// elsewhere (a deserializer kept a slice of it) is left to its holder, and
-    /// the next record gets a new one, so no record shares a buffer with the
-    /// records around it.
+    /// elsewhere (a deserializer kept a slice of it, or the record has headers,
+    /// which the fetched record keeps as a slice of it, read or not) is left
+    /// to its holder, and the next record gets a new one, so no record shares
+    /// a buffer with the records around it.
     fn take_spare_buffer(&mut self) -> Vec<u8> {
         match std::mem::take(&mut self.record).try_into_mut() {
             Ok(spare) => {
@@ -3575,6 +3579,52 @@ mod tests {
         );
     }
 
+    /// In a compressed batch a record with headers costs its buffer, read or
+    /// not: the fetched record keeps a slice of the buffer it was decompressed
+    /// into, so the stream cannot read the next record into that buffer and
+    /// allocates one per record, with the reference count the slice needs, as
+    /// Java's `DefaultRecord.readFrom(InputStream, ...)` allocates a buffer
+    /// per record. That is two allocations per record beyond the same batch
+    /// uncompressed, one more than a compressed record without headers
+    /// ([`test_compressed_per_record_allocation_budget`]), and nothing per
+    /// header: no list, no key and no value is built.
+    #[test]
+    fn test_unread_headers_of_a_compressed_record_cost_its_buffer() {
+        const RECORD_COUNT: i32 = 200;
+        /// As in [`test_compressed_per_record_allocation_budget`].
+        const STREAM_BUDGET: usize = 64;
+
+        let plain = count_fetch_allocations(
+            new_records_with_headers(RECORD_COUNT, Compression::none().build()),
+            RECORD_COUNT,
+        );
+        let per_record_buffers = 2 * RECORD_COUNT as usize;
+        let budget = plain + per_record_buffers + STREAM_BUDGET;
+        for compression in codecs() {
+            let compressed =
+                count_fetch_allocations(new_records_with_headers(RECORD_COUNT, compression.clone()), RECORD_COUNT);
+
+            assert!(
+                compressed <= budget,
+                "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records with unread headers, \
+                 {plain} for them uncompressed (budget {budget}: a buffer and its reference count per record and \
+                 {STREAM_BUDGET} for the stream). Something is built per record or per header."
+            );
+            // The documented cost (§27): were the buffer reused, as it is for
+            // records without headers, this would be one per record.
+            assert!(
+                compressed >= plain + per_record_buffers,
+                "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records with unread headers, \
+                 {plain} for them uncompressed: fewer than a buffer and its reference count per record, so §27 and \
+                 the comments of `RecordStream` no longer describe this path"
+            );
+            eprintln!(
+                "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records with unread \
+                 headers, {plain} for them uncompressed (budget {budget})"
+            );
+        }
+    }
+
     // ── Decode hardening: every batch header is validated ───────────────────
     //
     // Java walks a fetch with `ByteBufferLogInputStream.nextBatch()`, which runs
@@ -5321,7 +5371,10 @@ mod tests {
         }
     }
 
-    /// Per-record allocation budget for a compressed batch: one allocation per
+    /// Per-record allocation budget for a compressed batch of records without
+    /// headers
+    /// ([`test_unread_headers_of_a_compressed_record_cost_its_buffer`] has the
+    /// budget of records with headers): one allocation per
     /// record beyond an uncompressed batch's, the buffer the record is read
     /// into, as Java allocates one per record
     /// (`DefaultRecord.readFrom(InputStream, ...)`), and nothing else per
@@ -5364,7 +5417,7 @@ mod tests {
                 compressed <= budget,
                 "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records, {plain} for them \
                  uncompressed (budget {budget}: one per record and {STREAM_BUDGET} for the stream). A second \
-                 per-record allocation entered the compressed read path."
+                 per-record allocation entered the compressed read path of records without headers."
             );
             eprintln!(
                 "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records, {plain} for them \

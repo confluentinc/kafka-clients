@@ -48,6 +48,7 @@ use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::DefaultRecordBatch;
 use crate::common::record::internal::RecordBatch;
+use crate::common::utils::Utils;
 use crate::common::utils::internals::ByteUtils;
 
 /// The default (v2) record format for Kafka.
@@ -786,7 +787,7 @@ impl<'a> DefaultRecordRef<'a> {
         let mut pos = 0;
         for _ in 0..self.num_headers {
             let (header_key, header_value) = DefaultRecord::parse_one_header(self.headers_bytes, &mut pos)?;
-            let header_key = String::from_utf8_lossy(header_key).into_owned();
+            let header_key = Utils::utf8(header_key).into_owned();
             headers.push(RecordHeader::new(header_key, header_value.map(|v| v.to_vec())));
         }
         Ok(headers)
@@ -1443,6 +1444,21 @@ mod tests {
         assert_eq!(owned, slices);
         let (owned_record, _) = DefaultRecord::read_from_buffer(&buffer, 0, 0, 0, None).unwrap();
         assert_eq!(owned_record.headers()[0].key(), "\u{fffd}ey1");
+
+        // A surrogate code point written in three bytes is one malformed
+        // sequence, as it is for Java, where `String::from_utf8_lossy` counts
+        // three: "key1" becomes ED A0 80 and "1".
+        let mut out = record_with_two_headers();
+        out[key1..key1 + 3].copy_from_slice(b"\xED\xA0\x80");
+        let buffer = bytes::Bytes::from(out);
+
+        let (record, _) = DefaultRecord::read_ref_from_buffer(&buffer, 0, 0, 0, None).unwrap();
+        let owned = record.headers().unwrap();
+        let slices =
+            DefaultRecord::read_headers(&buffer.slice_ref(record.headers_bytes()), record.num_headers()).unwrap();
+
+        assert_eq!(owned[0].key(), "\u{fffd}1");
+        assert_eq!(slices[0].key(), "\u{fffd}1");
     }
 
     #[test]

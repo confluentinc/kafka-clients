@@ -17,8 +17,8 @@
 //! Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeader`.
 
 use crate::common::header::Header;
+use crate::common::utils::Utils;
 use bytes::Bytes;
-use std::borrow::Cow;
 use std::sync::OnceLock;
 
 /// A concrete record header consisting of a key-value pair.
@@ -45,7 +45,7 @@ enum HeaderKey {
     /// buffer. `lossy` is set on the first read of the key: `None` when the
     /// bytes are valid UTF-8, so they are the key and nothing is copied, or
     /// the key decoded with U+FFFD for each malformed sequence, as Java's
-    /// `Utils.utf8` decodes it.
+    /// `Utils.utf8` decodes it ([`Utils::utf8`]).
     Buffer {
         bytes: Bytes,
         lossy: OnceLock<Option<String>>,
@@ -91,15 +91,15 @@ impl Header for RecordHeader {
         match &self.key {
             HeaderKey::Decoded(key) => key,
             HeaderKey::Buffer { bytes, lossy } => {
-                let lossy = lossy.get_or_init(|| match String::from_utf8_lossy(bytes) {
-                    Cow::Borrowed(_) => None,
-                    Cow::Owned(decoded) => Some(decoded),
+                let lossy = lossy.get_or_init(|| match std::str::from_utf8(bytes) {
+                    Ok(_) => None,
+                    Err(_) => Some(Utils::utf8(bytes).into_owned()),
                 });
                 match lossy {
                     Some(decoded) => decoded,
-                    // SAFETY: `lossy` is `None` only when `String::from_utf8_lossy` returned
-                    // `bytes` borrowed, which it does only for valid UTF-8; `bytes` is
-                    // immutable, so it is still the valid UTF-8 that was checked.
+                    // SAFETY: `lossy` is `None` only when `std::str::from_utf8` accepted
+                    // `bytes`; `bytes` is immutable, so it is still the valid UTF-8 that
+                    // was checked.
                     None => unsafe { std::str::from_utf8_unchecked(bytes) },
                 }
             },
@@ -290,6 +290,20 @@ mod tests {
         assert_eq!(header.key(), "k\u{fffd}y");
         assert!(!is_within(header.key().as_bytes(), &buffer));
         assert_eq!(header.value(), None);
+
+        // A surrogate code point written in three bytes is one malformed
+        // sequence for Java and three for `String::from_utf8_lossy`: the
+        // expected keys are Java's (`Utils::utf8`'s tests have the full list).
+        let cases: &[(&[u8], &str)] = &[
+            (b"\xED\xA0\x80", "\u{fffd}"),
+            (b"\xED\xA0\xBD\xED\xB8\x80", "\u{fffd}\u{fffd}"),
+            (b"\xED\xB0\x80", "\u{fffd}"),
+            (b"\xED\xA0", "\u{fffd}"),
+        ];
+        for (key, expected) in cases {
+            let header = RecordHeader::with_key_buffer_value_buffer(Bytes::from_static(key), None);
+            assert_eq!(*expected, header.key(), "decoding {key:02X?}");
+        }
     }
 
     /// Equality, hash, `Display` and `Debug` read the key and value, whatever
