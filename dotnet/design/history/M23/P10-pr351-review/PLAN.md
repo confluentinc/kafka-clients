@@ -46,13 +46,16 @@ Pranav Shah reviewed PR #351 (M23/P7 asynchronous serdes and zero-copy deseriali
 
 ## Ledger rows
 
+Rows start at 591: 583 is the highest row before this phase on this branch, and the parked M23/P9 (N=132, on
+`esabellico/dotnet_consumer_records_and_headers_wrapped`, not an ancestor of this branch) holds 584–590.
+
 | # | Source | Topic | Decision | Status |
 |---|---|---|---|---|
-| 584 | Owner 2026-11-20 | Token default on the asynchronous serdes | every public asynchronous serde interface method (`Serialize`, `Deserialize`, `Configure`) and every public `Async*Serializer` / `Async*Deserializer` class method takes `CancellationToken cancellationToken = default`. Supersedes ledger 572's "required on the interface method" | Agreed |
-| 585 | Owner 2026-11-20 | `IAsyncSerializerWithHeaders<T>` | `IAsyncSerializer<T>.Serialize(topic, data, token)` is Java's `serialize(String, T)`; `IAsyncSerializerWithHeaders<T> : IAsyncSerializer<T>` adds the headers form, Java's default `serialize(String, Headers, T)`; the producers choose once, at construction; mirrors `ISerializer<T>` / `ISerializerWithHeaders<T>`. Supersedes, for serializers, P7's "one method each … the `Headers` always passed" (its draft R2, the shape behind ledger 539) | Agreed |
-| 586 | Owner 2026-11-20 | `IAsyncDeserializerWithHeaders<T>` | `IAsyncDeserializer<T>.Deserialize(topic, data, token)`; `IAsyncDeserializerWithHeaders<T> : IAsyncDeserializer<T>` adds the headers form; the consumers choose once; mirrors `IDeserializer<T>` / `IDeserializerWithHeaders<T>`. Supersedes the same text for deserializers | Agreed |
-| 587 | Owner 2026-11-20 | Retention | `IAsyncDeserializerWithRetention<T>` extends `IAsyncDeserializerWithHeaders<T>`, has no member, and its permission applies to the `data` of the headers form | Agreed |
-| 588 | Owner 2026-11-20 | Rule text | P7's drafts R1–R5 and P8's R1–R14 are applied to `dotnet/CLAUDE.md`, `dotnet/.claude/rules/ffi-marshalling.md` and `dotnet/README.md`, the asynchronous serde shape written as rows 584–587 make it | Agreed |
+| 591 | Owner 2026-11-20 | Token default on the asynchronous serdes | every public asynchronous serde interface method (`Serialize`, `Deserialize`, `Configure`) and every public `Async*Serializer` / `Async*Deserializer` class method takes `CancellationToken cancellationToken = default`. Supersedes ledger 572's "required on the interface method" | Agreed |
+| 592 | Owner 2026-11-20 | `IAsyncSerializerWithHeaders<T>` | `IAsyncSerializer<T>.Serialize(topic, data, token)` is Java's `serialize(String, T)`; `IAsyncSerializerWithHeaders<T> : IAsyncSerializer<T>` adds the headers form, Java's default `serialize(String, Headers, T)`; the producers choose once, at construction; mirrors `ISerializer<T>` / `ISerializerWithHeaders<T>`. Supersedes, for serializers, P7's "one method each … the `Headers` always passed" (its draft R2, the shape behind ledger 539) | Agreed |
+| 593 | Owner 2026-11-20 | `IAsyncDeserializerWithHeaders<T>` | `IAsyncDeserializer<T>.Deserialize(topic, data, token)`; `IAsyncDeserializerWithHeaders<T> : IAsyncDeserializer<T>` adds the headers form; the consumers choose once; mirrors `IDeserializer<T>` / `IDeserializerWithHeaders<T>`. Supersedes the same text for deserializers | Agreed |
+| 594 | Owner 2026-11-20 | Retention | `IAsyncDeserializerWithRetention<T>` extends `IAsyncDeserializerWithHeaders<T>`, has no member, and its permission applies to the `data` of the headers form | Agreed |
+| 595 | Owner 2026-11-20 | Rule text | P7's drafts R1–R5 and P8's R1–R14 are applied to `dotnet/CLAUDE.md`, `dotnet/.claude/rules/ffi-marshalling.md` and `dotnet/README.md`, the asynchronous serde shape written as rows 591–594 make it | Agreed |
 
 ## Steps (one commit each, `git commit --no-verify`)
 
