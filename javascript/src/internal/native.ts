@@ -316,7 +316,7 @@ interface Native {
   adminResultFuture(handle: AdminHandle, box: AdminResultBox, name: string, key: unknown): number;
   // The futures of a map accessor, as [key, slot] pairs, each key as the
   // addon reads it.
-  adminResultFutures(handle: AdminHandle, box: AdminResultBox, name: string): Array<[unknown, number]>;
+  adminResultFutures(handle: AdminHandle, box: AdminResultBox, name: string): Array<[unknown, number]> | null;
   // The untimed wait on a future, through get_cb, once: `done` gets its
   // value, converted to plain values, or its error.
   adminFutureWait(handle: AdminHandle, slot: number, done: (value: unknown, error: Error | null) => void): void;
@@ -328,12 +328,38 @@ interface Native {
   // Java's null, which the FFI reports.
   adminDescribeCluster(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
   adminListTopics(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.createTopics: each NewTopic as its fields (NewTopic.internalToNative).
+  adminCreateTopics(handle: AdminHandle, newTopics: unknown[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.deleteTopics and describeTopics: form 0 for names (Java's
+  // Collection<String> form), 1 for a TopicNameCollection, 2 for a
+  // TopicIdCollection, the ids as [mostSigBits, leastSigBits].
+  adminDeleteTopics(handle: AdminHandle, form: number, items: unknown[], options: AdminOptionsSetters): AdminResultBox;
+  adminDescribeTopics(handle: AdminHandle, form: number, items: unknown[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.createPartitions: [topic, NewPartitions fields] pairs.
+  adminCreatePartitions(handle: AdminHandle, newPartitions: Array<[string, unknown]>, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.deleteRecords: [[topic, partition], beforeOffset] pairs.
+  adminDeleteRecords(
+    handle: AdminHandle,
+    recordsToDelete: Array<[[string | null, number], bigint]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
   // Java's MockAdminClient() (no argument) or MockAdminClient(brokers,
   // controller).
   mockAdminCreate(...args: [] | [brokers: NodeFields[] | null, controller: NodeFields | null]): AdminHandle;
   // Java's MockAdminClient.controller(Node) and timeoutNextRequest(int).
   mockAdminController(handle: AdminHandle, node: NodeFields | null): void;
   mockAdminTimeoutNextRequest(handle: AdminHandle, numberOfRequests: number): void;
+  // Java's MockAdminClient.addTopic(internal, name, partitions, configs),
+  // markTopicForDeletion(name) and setFetchesRemainingUntilVisible(topicName, n).
+  mockAdminAddTopic(
+    handle: AdminHandle,
+    internal: boolean,
+    name: string | null,
+    partitions: unknown[],
+    configs: Array<[string, string | null]> | null,
+  ): void;
+  mockAdminMarkTopicForDeletion(handle: AdminHandle, name: string | null): void;
+  mockAdminSetFetchesRemainingUntilVisible(handle: AdminHandle, topicName: string | null, fetchesRemainingUntilVisible: number): void;
   // Java's new MockAdminClient.Builder(), its setters, run at once, and build().
   mockAdminBuilderNew(): MockAdminBuilderHandle;
   mockAdminBuilderSet(builder: MockAdminBuilderHandle, setter: string, value: unknown): void;

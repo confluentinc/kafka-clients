@@ -220,6 +220,31 @@ export class PartitionInfo {
 }
 
 // @public
+export abstract class TopicCollection {
+    protected constructor(token: unknown);
+    static ofTopicIds(topics: Iterable<Uuid>): TopicCollection.TopicIdCollection;
+    static ofTopicIds(options: {
+        topics: Iterable<Uuid>;
+    }): TopicCollection.TopicIdCollection;
+    static ofTopicNames(topics: Iterable<string>): TopicCollection.TopicNameCollection;
+    static ofTopicNames(options: {
+        topics: Iterable<string>;
+    }): TopicCollection.TopicNameCollection;
+}
+
+// @public (undocumented)
+export namespace TopicCollection {
+    export class TopicIdCollection extends TopicCollection {
+        toJSON(): Record<string, unknown>;
+        topicIds(): Uuid[];
+    }
+    export class TopicNameCollection extends TopicCollection {
+        toJSON(): Record<string, unknown>;
+        topicNames(): string[];
+    }
+}
+
+// @public
 export class TopicPartition {
     constructor(options: {
         topic: string | null;
@@ -236,6 +261,36 @@ export class TopicPartition {
         partition: number;
     };
     readonly topic: string | null;
+    toString(): string;
+}
+
+// @public
+export class TopicPartitionInfo {
+    constructor(options: {
+        partition: number;
+        leader: Node | null;
+        replicas: Iterable<Node>;
+        isr: Iterable<Node>;
+        elr: Iterable<Node>;
+        lastKnownElr: Iterable<Node>;
+    });
+    constructor(options: {
+        partition: number;
+        leader: Node | null;
+        replicas: Iterable<Node>;
+        isr: Iterable<Node>;
+        elr?: never;
+        lastKnownElr?: never;
+    });
+    elr(): Node[] | null;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    isr(): Node[];
+    lastKnownElr(): Node[] | null;
+    leader(): Node | null;
+    partition(): number;
+    replicas(): Node[];
+    toJSON(): Record<string, unknown>;
     toString(): string;
 }
 
@@ -320,9 +375,9 @@ export class Uuid {
     static readonly ONE_UUID: Uuid;
     static randomUuid(): Uuid;
     static readonly RESERVED: ReadonlySet<Uuid>;
-    static toArray(list: ReadonlyArray<Uuid> | null): Uuid[] | null;
+    static toArray(list: Iterable<Uuid> | null): Uuid[] | null;
     static toArray(options: {
-        list: ReadonlyArray<Uuid> | null;
+        list: Iterable<Uuid> | null;
     }): Uuid[] | null;
     toJSON(): string;
     static toList(array: ReadonlyArray<Uuid> | null): Uuid[] | null;
@@ -331,6 +386,37 @@ export class Uuid {
     }): Uuid[] | null;
     toString(): string;
     static readonly ZERO_UUID: Uuid;
+}
+
+// @public
+export class UuidMap<V> implements Iterable<[Uuid, V]> {
+    [Symbol.iterator](): IterableIterator<[Uuid, V]>;
+    constructor();
+    constructor(options: {
+        entries: Iterable<readonly [Uuid | null, V]>;
+    });
+    constructor(entries: Iterable<readonly [Uuid | null, V]>);
+    clear(): void;
+    delete(options: {
+        key: Uuid | null;
+    }): boolean;
+    delete(key: Uuid | null): boolean;
+    entries(): IterableIterator<[Uuid, V]>;
+    forEach(callback: (value: V, key: Uuid, map: UuidMap<V>) => void): void;
+    get(options: {
+        key: Uuid | null;
+    }): V | null;
+    get(key: Uuid | null): V | null;
+    has(options: {
+        key: Uuid | null;
+    }): boolean;
+    has(key: Uuid | null): boolean;
+    keys(): IterableIterator<Uuid>;
+    set(key: Uuid | null, value: V): this;
+    size(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    values(): IterableIterator<V>;
 }
 
 ```

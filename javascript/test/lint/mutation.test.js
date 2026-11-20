@@ -1302,8 +1302,8 @@ MUTATIONS.push(
       edit(
         root,
         'native/admin.c',
-        '    Admin* a = unwrap_mock(env, argv[0]);\n    if (a == NULL) return NULL;\n    kafka_common_Error_t* ffi_err = NULL;\n    kafka_common_Error_t* err = FFI_ERR(kafka_admin_MockAdminClient_timeout_next_request_err',
-        '    Admin* a = unwrap_mock(env, argv[0]);\n    if (a == NULL) return NULL;\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_admin_Admin__execute_callbacks_err(a->view, &ffi_err));\n    kafka_common_Error_t* err = FFI_ERR(kafka_admin_MockAdminClient_timeout_next_request_err',
+        '    Admin* a = admin_mock_unwrap(env, argv[0]);\n    if (a == NULL) return NULL;\n    kafka_common_Error_t* ffi_err = NULL;\n    kafka_common_Error_t* err = FFI_ERR(kafka_admin_MockAdminClient_timeout_next_request_err',
+        '    Admin* a = admin_mock_unwrap(env, argv[0]);\n    if (a == NULL) return NULL;\n    kafka_common_Error_t* ffi_err = NULL;\n    FFI_DISCARD(kafka_admin_Admin__execute_callbacks_err(a->view, &ffi_err));\n    kafka_common_Error_t* err = FFI_ERR(kafka_admin_MockAdminClient_timeout_next_request_err',
       ),
   },
   {

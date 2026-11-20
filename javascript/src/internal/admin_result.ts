@@ -80,7 +80,7 @@ export function adminFuture<T>(handle: AdminHandle, box: ResultBox, name: string
  * @param name - the C accessor's name (`values`)
  * @param keyOf - builds a key from the addon's plain key
  * @param post - builds a value from the addon's plain value
- * @returns the futures, by key
+ * @returns the futures, by key, or null when the accessor answers no map
  */
 export function adminFutures<K, T>(
   handle: AdminHandle,
@@ -88,6 +88,6 @@ export function adminFutures<K, T>(
   name: string,
   keyOf: (raw: unknown) => K,
   post: (raw: unknown) => T,
-): Array<[K, KafkaFuture<T>]> {
-  return native.adminResultFutures(handle, box, name).map(([key, slot]) => [keyOf(key), waiting(handle, slot, post)]);
+): Array<[K, KafkaFuture<T>]> | null {
+  return native.adminResultFutures(handle, box, name)?.map(([key, slot]) => [keyOf(key), waiting(handle, slot, post)]) ?? null;
 }
