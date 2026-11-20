@@ -15,9 +15,9 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Numerics;
-using System.Reflection;
 using System.Text;
 
 namespace Confluent.Kafka.Internal;
@@ -178,11 +178,23 @@ internal static class JavaText
         _ => null,
     };
 
+    // A map that is only a generic IDictionary<,> or IReadOnlyDictionary<,> prints as the list of its pairs
+    // ([[a, 1]]), not Java's {a=1}, unless its keys are strings and its values objects (ExpandoObject): reading other
+    // keys and values would need their type arguments at run time, which Native AOT cannot provide.
+    [UnconditionalSuppressMessage(
+        "ReflectionAnalysis",
+        "IL2075",
+        Justification = "Display text only: an interface the trimmer removed leaves the collection printed by its ToString.")]
     private static string? CollectionText(object value, Func<object?, string> element)
     {
         if (value is IDictionary dictionary)
         {
             return MapText(dictionary, element);
+        }
+
+        if (value is IDictionary<string, object?> or IReadOnlyDictionary<string, object?>)
+        {
+            return PairsText((IEnumerable<KeyValuePair<string, object?>>)value, element);
         }
 
         if (value is not IEnumerable sequence)
@@ -200,15 +212,6 @@ internal static class JavaText
             }
 
             Type definition = contract.GetGenericTypeDefinition();
-            if (definition == typeof(IDictionary<,>) || definition == typeof(IReadOnlyDictionary<,>))
-            {
-                var pairsText = (Func<IEnumerable, Func<object?, string>, string>)typeof(JavaText)
-                    .GetMethod(nameof(PairsText), BindingFlags.NonPublic | BindingFlags.Static)!
-                    .MakeGenericMethod(contract.GetGenericArguments())
-                    .CreateDelegate(typeof(Func<IEnumerable, Func<object?, string>, string>));
-                return pairsText(sequence, element);
-            }
-
             collection |= definition == typeof(ICollection<>) || definition == typeof(IReadOnlyCollection<>);
         }
 
@@ -286,11 +289,11 @@ internal static class JavaText
         return text.Append('}').ToString();
     }
 
-    private static string PairsText<TKey, TValue>(IEnumerable pairs, Func<object?, string> element)
+    private static string PairsText(IEnumerable<KeyValuePair<string, object?>> pairs, Func<object?, string> element)
     {
         var text = new StringBuilder("{");
         string separator = string.Empty;
-        foreach (KeyValuePair<TKey, TValue> pair in (IEnumerable<KeyValuePair<TKey, TValue>>)pairs)
+        foreach (KeyValuePair<string, object?> pair in pairs)
         {
             text.Append(separator).Append(Element(pair.Key, pairs, element)).Append('=').Append(Element(pair.Value, pairs, element));
             separator = ", ";
