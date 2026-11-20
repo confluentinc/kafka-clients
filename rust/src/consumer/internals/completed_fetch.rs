@@ -19,6 +19,9 @@
 //!
 //! **THIS IS THE ZERO-COPY HOT PATH** per `consumer-threading.md` §27.
 //!
+//! The batch walk and the per-record parse are in [`batch_cursor`](super::batch_cursor),
+//! shared with `ShareCompletedFetch`; what follows describes both.
+//!
 //! Per-record allocation budget (expected, asserted in Phase 7b's
 //! `FetchCollector` allocation test): only the user-supplied
 //! `Deserializer<T>` allocations for the key and value `T`, plus the
@@ -94,11 +97,9 @@
 //! without checking what the client actually does.
 
 use std::collections::BinaryHeap;
-use std::io::{self, BufRead, Read};
 use std::sync::{Arc, Mutex};
 
-use bytes::Buf;
-use log::{debug, error};
+use log::debug;
 use rustc_hash::FxHashSet;
 
 use crate::common::Error;
@@ -106,40 +107,19 @@ use crate::common::InvalidRecordError;
 use crate::common::IsolationLevel;
 use crate::common::KafkaError;
 use crate::common::TopicPartition;
-use crate::common::compress::{Compression, DecompressingReader};
-use crate::common::errors::DeserializationErrorOrigin;
-use crate::common::errors::RecordDeserializationError;
-use crate::common::header::RecordHeaders;
 use crate::common::protocol::Errors;
-use crate::common::record::TimestampType;
-use crate::common::record::internal::{
-    AbstractRecords, ByteBufferLogInputStream, CompressionType, ControlRecordType, DefaultRecord, DefaultRecordBatch,
-    DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords, RecordBatch, RecordVersion,
-};
+use crate::common::record::internal::{ControlRecordType, DefaultRecordBatch, DefaultRecordRef};
 use crate::common::serialization::DynDeserializer;
 use crate::common::utils::internals::BufferSupplier;
-use crate::common::utils::internals::ByteUtils;
-use crate::common::utils::internals::ChunkedBytesStream;
+use crate::consumer::ConsumerRecord;
 use crate::consumer::internals::FetchConfig;
 use crate::consumer::internals::FetchMetricsAggregator;
 use crate::consumer::internals::SubscriptionState;
-use crate::consumer::{ConsumerRecord, ConsumerRecordOptionsBuilder};
+use crate::consumer::internals::batch_cursor::{
+    BatchCursor, BatchMetadata, PendingRecordSource, RecordStream, maybe_leader_epoch, parse_record,
+    premature_eof_error, read_record, record_size_is_premature_eof, records_remaining_error,
+};
 use crate::fetch_response_data::{AbortedTransaction, PartitionData};
-
-/// Sentinel value: a partition leader epoch that is unknown / unset.
-const NO_PARTITION_LEADER_EPOCH: i32 = -1;
-
-/// The most room a compressed record is given before its bytes have arrived
-/// ([`RecordStream::read_record`]). Java allocates a record's declared size at
-/// once (`ByteBuffer.allocate(sizeOfBodyInBytes)`, `DefaultRecord#readFrom(InputStream,long,long,int,Long,int)`),
-/// trusting the size up to `maxRecordBodySize`; a record declared bigger than
-/// this grows as its bytes are decompressed instead, so a forged size costs no
-/// more than the bytes behind it, and in Rust a failed allocation aborts the
-/// process where Java throws `OutOfMemoryError`.
-const MAX_RECORD_PREALLOCATION: usize = 64 * 1024;
-
-/// The most bytes a record's size field takes: a varint holding an `i32`.
-const MAX_RECORD_SIZE_LENGTH: usize = 5;
 
 /// A min-heap wrapper that orders `AbortedTransaction`s by `first_offset`
 /// ascending — matches Java's `PriorityQueue` with `Comparator.comparingLong`.
@@ -162,28 +142,6 @@ impl PartialOrd for AbortedTxnByFirstOffset {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
-}
-
-/// Snapshot of the metadata of the current batch the cursor is on. Captures
-/// the fields the per-record path needs after the iter_records borrow is
-/// dropped.
-#[derive(Clone, Debug)]
-struct BatchMetadata {
-    base_offset: i64,
-    base_timestamp: i64,
-    base_sequence: i32,
-    /// The batch's log-append timestamp (max timestamp), used when
-    /// `timestamp_type == LogAppendTime` to override per-record timestamps.
-    last_offset_timestamp: i64,
-    last_offset: i64,
-    next_offset: i64,
-    timestamp_type: TimestampType,
-    partition_leader_epoch: i32,
-    is_control_batch: bool,
-    is_transactional: bool,
-    has_producer_id: bool,
-    producer_id: i64,
-    magic: i8,
 }
 
 /// A batch of records returned for a single partition by a fetch request.
@@ -273,365 +231,6 @@ pub(crate) struct CompletedFetch {
     /// `FetchCollector::initialize`, to measure the bg-receipt -> app-delivery
     /// handoff (FetchBuffer drain depth). `None` when `fetch_diag` is disabled.
     pub(crate) created_at: Option<std::time::Instant>,
-}
-
-/// Cursor through the batches and records inside a [`CompletedFetch`].
-///
-/// Owns the `MemoryRecords` *moved* out of the partition's `records` buffer —
-/// there is no copy of the fetch payload (§27 "one buffer"). That buffer is
-/// the single canonical owner of the record bytes; individual records are
-/// parsed as borrowing [`DefaultRecordRef`]s pointing into it, and batch
-/// headers are parsed in place via [`DefaultRecordBatchRef`] — no per-record
-/// and no per-batch copy.
-#[derive(Debug)]
-struct BatchCursor {
-    /// Records buffer moved out of `partition_data.records` exactly once
-    /// per `CompletedFetch` (no clone).
-    memory_records: MemoryRecords,
-    /// Absolute byte offset of the next batch header in
-    /// `memory_records.buffer()`. Advanced incrementally as each batch is
-    /// consumed (NOT recomputed from 0), so locating the next batch is O(1).
-    /// `None` means iteration has terminated.
-    next_batch_start: Option<usize>,
-    /// Metadata of the batch we're currently iterating; `None` before the
-    /// first batch is loaded.
-    current_batch: Option<BatchMetadata>,
-    /// Where the current batch's record bytes live, and how to decode the
-    /// next record. The key/value/header bytes of each record are borrowed
-    /// from this source — never copied.
-    record_source: RecordSource,
-    /// Byte offset of the next record to decode, relative to the start of
-    /// the current batch's record section. Unused for a compressed batch,
-    /// whose stream holds the current record in a buffer of its own instead.
-    record_byte_offset: usize,
-    /// Number of records left to decode in the current batch.
-    records_remaining: i32,
-}
-
-/// Where the current batch's record bytes come from. Uncompressed batches
-/// borrow their bytes directly from the cursor's `MemoryRecords` buffer (we
-/// remember the byte range so we don't re-walk the batch iterator per
-/// record). Compressed batches are decompressed one record at a time.
-#[derive(Debug)]
-enum RecordSource {
-    /// No record bytes held: no batch loaded yet, the current batch was
-    /// exhausted and released by [`CompletedFetch::maybe_close_record_stream`],
-    /// or iteration finished.
-    None,
-    /// Uncompressed: record bytes are `memory_records.buffer()[range]`.
-    Borrowed(std::ops::Range<usize>),
-    /// Compressed: records are decompressed as the cursor reaches them, each
-    /// into a refcounted buffer of its own, so per-record key/value slices can
-    /// be handed out zero-copy via [`bytes::Bytes::slice_ref`] (§27). Boxed, as the
-    /// decompressor is large next to the other variants.
-    Stream(Box<RecordStream>),
-}
-
-/// Where a batch's record bytes live *before* the batch is installed: the
-/// descriptor [`CompletedFetch::load_next_batch`] carries through the
-/// READ_COMMITTED skip and the record-count check, and turns into a
-/// [`RecordSource`] only once both have passed. So a compressed batch is not
-/// inflated for its count to be refused, nor when it is skipped as aborted —
-/// Java's cost too: `compressedIterator` wraps the records in a decompression
-/// stream but reads nothing through it until `RecordIterator`'s constructor
-/// has accepted the count (`DefaultRecordBatch#compressedIterator` and the
-/// `DefaultRecordBatch.RecordIterator` constructor), and a skipped batch never
-/// gets an iterator (`CompletedFetch#nextFetchedRecord`).
-#[derive(Debug)]
-enum PendingRecordSource {
-    /// Uncompressed: the records section is `memory_records.buffer()[range]`,
-    /// borrowed as-is once installed.
-    Borrowed(std::ops::Range<usize>),
-    /// Compressed: the batch's records section, still to be decompressed, and
-    /// its codec. The records share the fetch buffer; nothing is copied.
-    Compressed {
-        records: bytes::Bytes,
-        compression_type: CompressionType,
-    },
-}
-
-/// A compressed batch's records, decompressed one at a time as the cursor
-/// reaches them, the way Java's `streamingIterator` reads them.
-///
-/// This is the state of Java's `DefaultRecordBatch.StreamRecordIterator` —
-/// the decompression stream over the batch's records
-/// (`DefaultRecordBatch#compressedIterator`) — held by the cursor, which
-/// does the counting `RecordIterator` does (DoD #7). Each record is read into
-/// a buffer of its own, as Java reads it
-/// (`DefaultRecord#readFrom(InputStream,long,long,int,Long,int)`): its size field, then as many bytes as
-/// it declares, in one allocation. The record is handed out as a slice of that
-/// buffer (§27), which lives for as long as the user holds any of it, so what
-/// a batch's records pin once handed out is their own size and nothing more.
-/// Single-record batches are common, from producers that send at a low rate
-/// per partition and from compacted topics, and a poll can return hundreds of
-/// them.
-///
-/// The stream is read through the codec's [`ChunkedBytesStream`], as Java
-/// reads it, with the buffer size Java gives it
-/// ([`Compression::decompression_output_size`]): a record's size field is read
-/// a byte at a time, and a small record a few bytes at a time, and each such
-/// read would otherwise go to the codec. The buffer comes from the fetch's
-/// pool and goes back to it when the batch is done, so the batches of a fetch
-/// share one buffer, as they do in Java (`CompletedFetch#nextFetchedRecord`).
-///
-/// So a compressed batch takes the codec's own state, the read buffer and one
-/// record, whatever its decompressed size. The whole batch is never
-/// decompressed at once: a few kilobytes of compressed data can expand to
-/// gigabytes, and in Rust a failed allocation aborts the process where Java
-/// throws `OutOfMemoryError`. For the same reason a record is given room for
-/// its declared size up front only up to [`MAX_RECORD_PREALLOCATION`]; a
-/// bigger one grows as its bytes arrive ([`Self::read_record`]).
-///
-/// This costs one allocation per record beyond the deserializer's output, and
-/// so deviates from `consumer-threading.md` §27, which budgets none for a
-/// record's bytes and has a compressed batch decompressed into one buffer.
-/// That one buffer is what the paragraph above rules out, and records read
-/// into a buffer shared with the records around them would keep all of it
-/// alive for as long as any one of them is held. A buffer per record avoids
-/// both, at the cost Java pays.
-struct RecordStream {
-    /// The decompression stream over the batch's records section, read
-    /// through a buffer of the codec's size taken from the fetch's pool, which
-    /// gets it back when the stream is dropped.
-    reader: ChunkedBytesStream<DecompressingReader<io::Cursor<bytes::Bytes>>>,
-    /// The record last read, its size field first, less what
-    /// [`Self::consume`] dropped: the whole record, or as much of it as the
-    /// stream held.
-    record: bytes::Bytes,
-    /// Whether `reader` has reached the end of the stream.
-    eof: bool,
-    /// The error `reader` failed with, kept so that every later read reports
-    /// it rather than reading on.
-    error: Option<io::Error>,
-}
-
-impl RecordStream {
-    /// Opens the decompression stream over a batch's `records` section, its
-    /// read buffer taken from `buffer_supplier`. Reads nothing yet, except
-    /// what the codec reads to set itself up (a gzip header).
-    fn open(
-        records: bytes::Bytes,
-        compression_type: CompressionType,
-        magic: i8,
-        buffer_supplier: Arc<BufferSupplier>,
-    ) -> io::Result<Self> {
-        let compression = Compression::of(compression_type).build();
-        // Defined for every codec; an uncompressed batch's records are borrowed
-        // in place and never reach here.
-        let buffer_size = compression.decompression_output_size().map_err(io::Error::other)?;
-        let reader = compression.wrap_for_input(io::Cursor::new(records), magic)?;
-        // Java's `wrapForInput` returns the codec's stream already wrapped
-        // (`org.apache.kafka.common.compress.GzipCompression#wrapForInput`,
-        // `org.apache.kafka.common.compress.SnappyCompression#wrapForInput`,
-        // `org.apache.kafka.common.compress.ZstdCompression#wrapForInput`,
-        // `org.apache.kafka.common.compress.Lz4Compression#wrapForInput`), lz4 alone
-        // skipping through its own stream. `wrap_for_input` is public and
-        // `ChunkedBytesStream` crate-private, so the stream is wrapped here.
-        let delegate_skip_to_source_stream = compression_type == CompressionType::Lz4;
-        Ok(Self {
-            reader: ChunkedBytesStream::new(reader, buffer_supplier, buffer_size, delegate_skip_to_source_stream),
-            record: bytes::Bytes::new(),
-            eof: false,
-            error: None,
-        })
-    }
-
-    /// The buffer the current record was read into, once [`Self::next_record`]
-    /// has read it: the record's bytes and nothing else.
-    fn record(&self) -> &bytes::Bytes {
-        &self.record
-    }
-
-    /// Reads the next record, once the one before it has been consumed, and
-    /// returns its bytes: the whole record; as much of it as the stream holds,
-    /// for the record parser to reject; or nothing, once the stream has ended.
-    /// A record is kept until it is consumed, so reading it again, after a
-    /// deserializer failed on it, reads nothing more.
-    ///
-    /// # Errors
-    ///
-    /// The stream failed before the record was whole. Java's
-    /// `StreamRecordIterator.readNext` reports any `IOException` this way
-    /// (`DefaultRecordBatch.StreamRecordIterator#readNext`).
-    fn next_record(&mut self) -> Result<&[u8], InvalidRecordError> {
-        if self.record.is_empty() && !self.eof && self.error.is_none() {
-            self.read_record();
-        }
-        if let Some(e) = &self.error {
-            return Err(DefaultRecordBatch::decompression_error(e));
-        }
-        Ok(&self.record)
-    }
-
-    /// Drops the record just read, its first `consumed` bytes. A buffer of up
-    /// to [`MAX_RECORD_PREALLOCATION`] bytes is kept, for
-    /// [`Self::read_record`] to read the next record into when nothing else
-    /// holds it any more; a bigger one is let go of once all of it is
-    /// consumed, so a big record is not held while the next is read. A record
-    /// a deserializer sliced keeps the buffer alive through its own reference,
-    /// and the next record then gets a buffer of its own. Java keeps the record
-    /// in `CompletedFetch#lastRecord` until the next one is read;
-    /// nothing a caller sees depends on that.
-    fn consume(&mut self, consumed: usize) {
-        let size = self.record.len();
-        self.record.advance(consumed.min(size));
-        if self.record.is_empty() && size > MAX_RECORD_PREALLOCATION {
-            self.record = bytes::Bytes::new();
-        }
-    }
-
-    /// Whether any bytes follow the record last read, consumed or not: Java's
-    /// `ensureNoneRemaining`, which reads one more byte to find out
-    /// (`DefaultRecordBatch.StreamRecordIterator#ensureNoneRemaining`). Reaching the end of the stream
-    /// also makes the codec verify its trailing checksum, where it has one.
-    ///
-    /// # Errors
-    ///
-    /// The stream failed before its end, with Java's text for that.
-    fn has_remaining(&mut self) -> Result<bool, InvalidRecordError> {
-        if !self.eof && self.error.is_none() {
-            match self.reader.fill_buf() {
-                Ok([]) => self.eof = true,
-                Ok(_) => return Ok(true),
-                Err(e) => self.error = Some(e),
-            }
-        }
-        match &self.error {
-            Some(e) => Err(InvalidRecordError::new(format!(
-                "Error checking for remaining bytes after reading batch: {e}"
-            ))),
-            None => Ok(false),
-        }
-    }
-
-    /// Reads the next record into a buffer of its own, as Java's
-    /// `DefaultRecord.readFrom(InputStream, ...)` does
-    /// (`DefaultRecord#readFrom(InputStream,long,long,int,Long,int)`): the size field a byte at a time, then
-    /// the body. The size field is kept in front of the body, so the record is
-    /// parsed as an uncompressed batch's records are. A size that is
-    /// malformed, negative or above Java's maximum is kept without its body,
-    /// for the record's reader to refuse with Java's text for each
-    /// ([`record_size_is_premature_eof`], [`read_record`]); no more of the
-    /// stream would change what it makes of them.
-    ///
-    /// The buffer is allocated once, at the record's size, up to
-    /// [`MAX_RECORD_PREALLOCATION`]; a bigger record's buffer grows only as its
-    /// bytes arrive, doubling each time it fills, and the last step stops at
-    /// the record's size, so the record ends up in a buffer of exactly its
-    /// size. Allocating is fallible (`try_reserve_exact`), so an allocation
-    /// that cannot be met fails the stream instead of aborting the process. A
-    /// record the stream ends or fails inside of is kept as far as it was
-    /// read, for the parser to reject.
-    fn read_record(&mut self) {
-        let mut size_bytes = [0u8; MAX_RECORD_SIZE_LENGTH];
-        let mut size_length = 0;
-        while size_length < MAX_RECORD_SIZE_LENGTH {
-            let Some(byte) = self.read_byte() else {
-                self.record = bytes::Bytes::copy_from_slice(&size_bytes[..size_length]);
-                return;
-            };
-            size_bytes[size_length] = byte;
-            size_length += 1;
-            if byte & 0x80 == 0 {
-                break;
-            }
-        }
-        let size_bytes = &size_bytes[..size_length];
-        let size = ByteUtils::read_varint(size_bytes)
-            .ok()
-            .filter(|&(size, _)| {
-                DefaultRecord::check_record_body_size(size, AbstractRecords::SOFT_MAX_ARRAY_LENGTH).is_ok()
-            })
-            .and_then(|(size, _)| usize::try_from(size).ok());
-        let Some(size) = size else {
-            self.record = bytes::Bytes::copy_from_slice(size_bytes);
-            return;
-        };
-        let total = size_length + size;
-        let mut record = self.take_spare_buffer();
-        if let Err(e) = record.try_reserve_exact(total.min(MAX_RECORD_PREALLOCATION)) {
-            self.error = Some(e.into());
-            return;
-        }
-        record.extend_from_slice(size_bytes);
-        while record.len() < total {
-            if record.len() == record.capacity() {
-                let step = record.len().min(total - record.len());
-                if let Err(e) = record.try_reserve_exact(step) {
-                    self.error = Some(e.into());
-                    break;
-                }
-            }
-            // `take` stops the read at the room there is: `read_to_end` grows a
-            // buffer only past what it was given room for, and keeps the bytes
-            // read before a failure.
-            // A reused buffer may hold more than this record: read no further.
-            let wanted = record.capacity().min(total) - record.len();
-            match (&mut self.reader).take(wanted as u64).read_to_end(&mut record) {
-                Ok(read) if read < wanted => {
-                    self.eof = true;
-                    break;
-                },
-                Ok(_) => {},
-                Err(e) => {
-                    self.error = Some(e);
-                    break;
-                },
-            }
-        }
-        // Adopts the allocation; nothing is copied.
-        self.record = bytes::Bytes::from(record);
-    }
-
-    /// The buffer of the record read last, emptied, for the next record to be
-    /// read into, when nothing else holds it: the key and value handed to the
-    /// deserializers share it (`Bytes::slice_ref`), and once they are dropped
-    /// it is this stream's alone again. Reusing it keeps a compressed record
-    /// at one allocation, the reference count the first slice of it adds,
-    /// rather than two, a buffer and its reference count. A buffer still held
-    /// elsewhere (a deserializer kept a slice of it) is left to its holder, and
-    /// the next record gets a new one, so no record shares a buffer with the
-    /// records around it.
-    fn take_spare_buffer(&mut self) -> Vec<u8> {
-        match std::mem::take(&mut self.record).try_into_mut() {
-            Ok(spare) => {
-                let mut spare = Vec::from(spare);
-                spare.clear();
-                spare
-            },
-            Err(_) => Vec::new(),
-        }
-    }
-
-    /// The next byte of the stream, or nothing once it has ended or failed,
-    /// the failure kept in `error`.
-    fn read_byte(&mut self) -> Option<u8> {
-        if self.eof || self.error.is_some() {
-            return None;
-        }
-        match self.reader.read() {
-            Ok(Some(byte)) => Some(byte),
-            Ok(None) => {
-                self.eof = true;
-                None
-            },
-            Err(e) => {
-                self.error = Some(e);
-                None
-            },
-        }
-    }
-}
-
-impl std::fmt::Debug for RecordStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The decompressor has no `Debug` of its own.
-        f.debug_struct("RecordStream")
-            .field("record_len", &self.record.len())
-            .field("eof", &self.eof)
-            .field("error", &self.error)
-            .finish_non_exhaustive()
-    }
 }
 
 impl CompletedFetch {
@@ -816,15 +415,7 @@ impl CompletedFetch {
         // sliced from the FetchResponse payload (BytesReader, §27); moving it
         // into `MemoryRecords` is an O(1) refcount move, no copy.
         let records_buffer = self.partition_data.records.take().unwrap_or_default();
-        let memory_records = MemoryRecords::new(records_buffer);
-        self.cursor = Some(BatchCursor {
-            memory_records,
-            next_batch_start: Some(0),
-            current_batch: None,
-            record_source: RecordSource::None,
-            record_byte_offset: 0,
-            records_remaining: 0,
-        });
+        self.cursor = Some(BatchCursor::new(records_buffer, invalid_batch_error));
     }
 
     /// Pulls up to `max_records` records out of the fetch, decoding each
@@ -1003,177 +594,25 @@ impl CompletedFetch {
                 break;
             }
 
-            // §27: read the record as a borrowing `DefaultRecordRef` — the
-            // key/value bytes are slices into the fetch (or decompression)
-            // buffer, never copied. They are handed to the deserializers as
-            // `Bytes` sharing that buffer (`slice_ref`: a reference count, no
-            // copy), so the borrow of `self` ends before the deserializers are
-            // awaited.
-            let key_bytes: Option<bytes::Bytes>;
-            let value_bytes: Option<bytes::Bytes>;
-            let leader_epoch;
-            let timestamp_type;
-            let key_size;
-            let value_size;
-            let offset;
-            let timestamp;
-            let record_size_in_bytes;
-            let record_bytes_consumed;
-            let mut headers_owned;
-            {
-                // Verified non-empty: `advance_to_next_fetched_record` returned
-                // `true` (or a cached exception positioned us here and the
-                // `peek` above returned `Some`). The `?` propagates a
-                // malformed-record-body error; a `None` here would mean the
-                // record went missing between positioning and reading, which
-                // is the premature-EOF (declared count > actual) state — surface
-                // it as a recoverable error rather than panicking.
-                let Some((record, batch_meta)) = self.peek_current_record()? else {
-                    return Err(premature_eof_error(&self.partition));
-                };
-                // §27: the refcounted buffer that owns this record's key/value
-                // bytes, which the key and value are sliced from.
-                let Some(source_bytes) = self.current_record_source_bytes() else {
-                    return Err(premature_eof_error(&self.partition));
-                };
-                // The only owned copy of record payload on the happy path:
-                // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
-                // owned headers on the emitted `ConsumerRecord`).
-                // By the cause's message, not its class-prefixed `Display`, as in
-                // `peek_current_record`.
-                let headers_vec = record.headers().map_err(|e| {
-                    Error::InvalidRecord(InvalidRecordError::new(format!(
-                        "Record for partition {} at offset {} has invalid headers, cause: {}",
-                        self.partition,
-                        record.offset(),
-                        e.message()
-                    )))
-                })?;
-                headers_owned = RecordHeaders::with_header_iter(headers_vec);
-                key_bytes = record.key().map(|key| source_bytes.slice_ref(key));
-                value_bytes = record.value().map(|value| source_bytes.slice_ref(value));
-                leader_epoch = maybe_leader_epoch(batch_meta.partition_leader_epoch);
-                timestamp_type = batch_meta.timestamp_type;
-                key_size = record.key_size();
-                value_size = record.value_size();
-                offset = record.offset();
-                timestamp = record.timestamp();
-                record_size_in_bytes = record.size_in_bytes();
-                record_bytes_consumed = record.size_in_bytes() as usize;
-            }
-
-            // Java's `org.apache.kafka.clients.consumer.internals.CompletedFetch#parseRecord` hands each
-            // deserializer the record's own buffer, `record.key()` /
-            // `record.value()`; `deserialize_with_headers_bytes` is that call,
-            // its default forwarding the borrowed bytes. Nothing has moved yet:
-            // a call dropped here decodes this record again (see
+            // §27: the record's key and value are handed to the deserializers as
+            // slices of the fetch (or decompression) buffer, never copied
+            // (`batch_cursor::parse_record`). Nothing has moved yet: a call dropped
+            // while a deserializer is pending decodes this record again (see
             // `fetch_records`).
-            let topic_str: &str = &self.topic_arc;
-            let key_result = match &key_bytes {
-                None => Ok(None),
-                Some(key) => DynDeserializer::deserialize_with_headers_bytes(
-                    key_deserializer,
-                    topic_str,
-                    &mut headers_owned,
-                    key,
-                )
-                .await
-                .map(Some),
+            let Some(cursor) = self.cursor.as_ref() else {
+                return Err(premature_eof_error(&self.partition));
             };
-            // Java's `org.apache.kafka.clients.consumer.internals.CompletedFetch#parseRecord` is
-            // two sequential `try` blocks and the first one's catch *throws*, so the value
-            // deserializer is never invoked for a record whose key failed. Running
-            // it anyway is observable: a user deserializer may count, cache or log,
-            // and it would do so for a record Java never hands it. The key error is
-            // returned below before this value is read, so `Ok(None)` here is inert.
-            let value_result = if key_result.is_err() {
-                Ok(None)
-            } else {
-                match &value_bytes {
-                    None => Ok(None),
-                    Some(value) => DynDeserializer::deserialize_with_headers_bytes(
-                        value_deserializer,
-                        topic_str,
-                        &mut headers_owned,
-                        value,
-                    )
-                    .await
-                    .map(Some),
-                }
-            };
-            // Java's `newRecordDeserializationException` carries the offending
-            // record's RAW key and value buffers (`record.key()` /
-            // `record.value()`) so a consumer error handler can inspect them,
-            // BOTH regardless of which side failed. They are copied out ONLY
-            // when a deserializer actually failed, so on the happy path §27's
-            // "no per-record payload copy" guarantee holds.
-            let (mut error_key_bytes, mut error_value_bytes) = if key_result.is_err() || value_result.is_err() {
-                (
-                    key_bytes.as_deref().map(<[u8]>::to_vec),
-                    value_bytes.as_deref().map(<[u8]>::to_vec),
-                )
-            } else {
-                (None, None)
-            };
-
-            let key = match key_result {
-                Ok(k) => k,
-                Err(e) => {
-                    let err = wrap_deserialization_error(
-                        DeserializationOrigin::Key,
-                        &self.partition,
-                        offset,
-                        timestamp,
-                        timestamp_type,
-                        error_key_bytes.take(),
-                        error_value_bytes.take(),
-                        Some(headers_owned.clone()),
-                        e,
-                    );
-                    // Java's `catch (SerializationException se)` in the caller
-                    // caches this and decides propagate-vs-swallow from
-                    // `records.isEmpty()`. Java logs the failing deserializer
-                    // inside `parseRecord` before throwing.
-                    error!("Key deserialization failed for {} at offset {}", self.partition, offset);
-                    return Err(err);
-                },
-            };
-            let value = match value_result {
-                Ok(v) => v,
-                Err(e) => {
-                    let err = wrap_deserialization_error(
-                        DeserializationOrigin::Value,
-                        &self.partition,
-                        offset,
-                        timestamp,
-                        timestamp_type,
-                        error_key_bytes.take(),
-                        error_value_bytes.take(),
-                        Some(headers_owned.clone()),
-                        e,
-                    );
-                    error!("Value deserialization failed for {} at offset {}", self.partition, offset);
-                    return Err(err);
-                },
-            };
-
-            // §27: cheap Arc clone — atomic pointer bump, no UTF-8 copy.
-            let topic_arc = Arc::clone(&self.topic_arc);
-            let consumer_record = ConsumerRecord::with_options(
-                ConsumerRecordOptionsBuilder::new()
-                    .set_topic(topic_arc)
-                    .set_partition(self.partition.partition())
-                    .set_offset(offset)
-                    .set_key(key)
-                    .set_value(value)
-                    .set_timestamp(timestamp)
-                    .set_timestamp_type(timestamp_type)
-                    .set_serialized_key_size(key_size)
-                    .set_serialized_value_size(value_size)
-                    .set_headers(headers_owned)
-                    .set_leader_epoch(leader_epoch)
-                    .build()?,
-            );
+            let (consumer_record, record_size_in_bytes, record_bytes_consumed) = parse_record(
+                cursor,
+                &self.partition,
+                &self.topic_arc,
+                key_deserializer,
+                value_deserializer,
+                None,
+                "If needed, please seek past the record to continue consumption.",
+            )
+            .await?;
+            let offset = consumer_record.offset();
             self.records_read += 1;
             self.bytes_read += record_size_in_bytes;
             self.next_fetch_offset = offset + 1;
@@ -1202,7 +641,7 @@ impl CompletedFetch {
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#maybeCloseRecordStream")]
     fn maybe_close_record_stream(&mut self) {
         if let Some(cursor) = self.cursor.as_mut() {
-            cursor.record_source = RecordSource::None;
+            cursor.close_record_stream();
         }
     }
 
@@ -1304,176 +743,33 @@ impl CompletedFetch {
     /// bytes and decrements the remaining-records count.
     fn advance_record_cursor(&mut self, record_bytes_consumed: usize) {
         if let Some(cursor) = &mut self.cursor {
-            match &mut cursor.record_source {
-                RecordSource::Stream(stream) => stream.consume(record_bytes_consumed),
-                _ => cursor.record_byte_offset += record_bytes_consumed,
-            }
-            cursor.records_remaining -= 1;
+            cursor.advance_record_cursor(record_bytes_consumed);
         }
     }
 
-    /// Reads the current record of a compressed batch out of its stream, for
-    /// [`Self::peek_current_record`] to parse. An uncompressed batch's records
-    /// are in place already, so for one this does nothing.
-    ///
-    /// # Errors
-    ///
-    /// The stream failed before the record was whole, reported the way
-    /// `maybeEnsureValid` reports a bad batch ([`invalid_batch_error`]).
+    /// [`BatchCursor::read_current_record`] on the cursor, if there is one.
     fn read_current_record(&mut self) -> Result<(), Error> {
-        let Some(cursor) = self.cursor.as_mut() else {
-            return Ok(());
-        };
-        let (RecordSource::Stream(stream), Some(batch)) = (&mut cursor.record_source, &cursor.current_batch) else {
-            return Ok(());
-        };
-        match stream.next_record() {
-            Ok(_) => Ok(()),
-            Err(e) => Err(invalid_batch_error(&self.partition, batch.base_offset, e.message())),
+        match self.cursor.as_mut() {
+            Some(cursor) => cursor.read_current_record(&self.partition),
+            None => Ok(()),
         }
     }
 
-    /// Validates, when the current record is the last its batch declares, that
-    /// no record bytes follow it. `record_size` is the current record's length.
-    ///
-    /// This is Java's `ensureNoneRemaining()`, which
-    /// `DefaultRecordBatch.RecordIterator.next()` runs as it reads a batch's
-    /// last declared record, throwing `InvalidRecordException` ("Incorrect
-    /// declared batch size, records still remaining") instead of returning
-    /// that record when the declared count is *fewer* than the records
-    /// actually present (`DefaultRecordBatch.RecordIterator#next`). So the record is
-    /// withheld and the position stays on it: the records before it are
-    /// returned and the error comes on the next call, as Java's `fetchRecords`
-    /// returns the records it has (`CompletedFetch#fetchRecords`), and seeking
-    /// past the record lands on the batch's next offset. Java runs the check
-    /// whether the record is then skipped or returned, independently of CRC,
-    /// so it must fire even under `check.crcs=false`; and never for a batch
-    /// declaring no records, whose iterator reads nothing. Without it the
-    /// cursor would silently drop the trailing records.
-    ///
-    /// For an uncompressed batch this is O(1): it compares where the record
-    /// ends against the (already-known) length of the batch's record section —
-    /// no re-walk and no copy. A compressed batch's stream is read one byte
-    /// further, as Java's `StreamRecordIterator` reads it, which also lets the
-    /// codec verify the stream's trailing checksum.
-    ///
-    /// # Errors
-    ///
-    /// Records remain, or the compressed stream failed while looking for them
-    /// (Java's `KafkaException("Error checking for remaining bytes after
-    /// reading batch", e)`, `DefaultRecordBatch.StreamRecordIterator#ensureNoneRemaining`).
+    /// [`BatchCursor::ensure_none_remaining`] on the cursor, if there is one.
     fn ensure_none_remaining(&mut self, record_size: usize) -> Result<(), Error> {
-        let Some(cursor) = self.cursor.as_mut() else {
-            return Ok(());
-        };
-        let Some(batch) = cursor.current_batch.as_ref() else {
-            return Ok(());
-        };
-        if cursor.records_remaining != 1 {
-            return Ok(());
-        }
-        let records_remain = match &mut cursor.record_source {
-            RecordSource::None => false,
-            RecordSource::Borrowed(range) => cursor.record_byte_offset + record_size < range.len(),
-            RecordSource::Stream(stream) => stream
-                .has_remaining()
-                .map_err(|e| invalid_batch_error(&self.partition, batch.base_offset, e.message()))?,
-        };
-        if records_remain {
-            return Err(records_remaining_error(&self.partition));
-        }
-        Ok(())
-    }
-
-    /// Returns the refcounted buffer that owns the current batch's record
-    /// bytes, so per-record key/value slices can be handed to the deserializer
-    /// as zero-copy `Bytes` via [`bytes::Bytes::slice_ref`] (§27).
-    ///
-    /// For an uncompressed batch this is the whole `MemoryRecords` buffer (the
-    /// borrowed record slice is a subslice of it); for a compressed batch it is
-    /// the buffer the current record was decompressed into. Returns `None` when
-    /// no batch's record bytes are held.
-    fn current_record_source_bytes(&self) -> Option<&bytes::Bytes> {
-        let cursor = self.cursor.as_ref()?;
-        match &cursor.record_source {
-            RecordSource::None => None,
-            RecordSource::Borrowed(_) => Some(cursor.memory_records.buffer_bytes()),
-            RecordSource::Stream(stream) => Some(stream.record()),
+        match self.cursor.as_mut() {
+            Some(cursor) => cursor.ensure_none_remaining(&self.partition, record_size),
+            None => Ok(()),
         }
     }
 
-    /// Parses the current record (the one at `cursor.record_byte_offset`)
-    /// into a borrowing [`DefaultRecordRef`] and returns it together with its
-    /// enclosing batch metadata, both borrowing from `self`.
-    ///
-    /// A compressed batch's current record must have been read out of its
-    /// stream first, by [`Self::read_current_record`].
-    ///
-    /// Returns:
-    ///   - `Ok(None)` when no record is positioned at the cursor — either the
-    ///     declared record count is exhausted (`records_remaining <= 0`) or the
-    ///     batch's record bytes are exhausted (`record_byte_offset` past end,
-    ///     a compressed stream ended, or the bytes end inside the next
-    ///     record's size).
-    ///   - `Ok(Some(..))` when a record is parsed.
-    ///   - `Err(..)` when the record body is individually malformed (e.g. a bad
-    ///     varint). This is a recoverable [`Error`] — the receive path no
-    ///     longer walks/validates the batch's records on load (the O(N²) walk was
-    ///     removed in the §27/O(1) batch-loading change), so a malformed record
-    ///     body is genuine bad input that must surface to the caller, not be
-    ///     swallowed. Mirrors Java `DefaultRecordBatch.RecordIterator` reading
-    ///     past EOF / failing to decode a record.
-    ///
-    /// §27 zero-copy note: the returned `DefaultRecordRef` borrows the
-    /// record's key/value/header bytes directly from the cursor's record
-    /// source — no copy. The per-record parse is varint decoding only; the
-    /// payload bytes are never touched.
+    /// [`BatchCursor::peek_current_record`] on the cursor; `Ok(None)` when
+    /// there is none.
     fn peek_current_record(&self) -> Result<Option<(DefaultRecordRef<'_>, &BatchMetadata)>, Error> {
-        let Some(cursor) = self.cursor.as_ref() else {
-            return Ok(None);
-        };
-        if cursor.records_remaining <= 0 {
-            return Ok(None);
+        match self.cursor.as_ref() {
+            Some(cursor) => cursor.peek_current_record(&self.partition),
+            None => Ok(None),
         }
-        let Some(batch_meta) = cursor.current_batch.as_ref() else {
-            return Ok(None);
-        };
-        let records_bytes = match &cursor.record_source {
-            RecordSource::None => return Ok(None),
-            RecordSource::Borrowed(range) => &cursor.memory_records.buffer()[range.clone()],
-            // The current record is in a buffer of its own, and
-            // `record_byte_offset` stays 0.
-            RecordSource::Stream(stream) => &stream.record()[..],
-        };
-        let from_stream = matches!(cursor.record_source, RecordSource::Stream(_));
-        if cursor.record_byte_offset >= records_bytes.len()
-            || record_size_is_premature_eof(&records_bytes[cursor.record_byte_offset..], from_stream)
-        {
-            return Ok(None);
-        }
-        // A parse failure here is bad input (the record body is malformed),
-        // not a logic bug: the receive path no longer re-walks the batch's
-        // records on load, so this is the first time the record body is
-        // decoded. Surface it as a recoverable error rather than panicking
-        // or silently dropping the rest of the batch — matching Java
-        // `DefaultRecordBatch.RecordIterator`, which throws
-        // `InvalidRecordException` (CRC-independent).
-        //
-        // The cause is appended by its message, not its `Display`, which
-        // prefixes the class name (`InvalidRecordError: `) that Java's
-        // `getMessage()` does not carry. Java propagates this exception
-        // unwrapped; the wrapper that names the partition and offset is this
-        // client's.
-        let (record, _consumed) = read_record(batch_meta, &records_bytes[cursor.record_byte_offset..], from_stream)
-            .map_err(|e| {
-                Error::InvalidRecord(InvalidRecordError::new(format!(
-                    "Record batch for partition {} at offset {} is invalid, cause: {}",
-                    self.partition,
-                    batch_meta.base_offset,
-                    e.message()
-                )))
-            })?;
-        Ok(Some((record, batch_meta)))
     }
 
     /// Whether `batch` is a control batch whose first record is an ABORT marker.
@@ -1637,136 +933,16 @@ impl CompletedFetch {
     /// batches remain.
     fn load_next_batch(&mut self, config: &FetchConfig) -> Result<bool, Error> {
         loop {
-            // Phase 1: pull batch metadata + record-source descriptor out of
-            // the cursor in a tight scope that drops the &mut self.cursor
-            // borrow before touching the other self fields.
-            //
-            // §27 + O(1) batch loading: the next batch's absolute byte offset
-            // is tracked incrementally in `cursor.next_batch_start` and parsed
-            // in place via a borrowing `DefaultRecordBatchRef` — we do NOT
-            // re-walk `memory_records.batches()` from the start (which was
-            // O(N²) over a fetch and copied every batch into an owned `Vec`).
-            // For uncompressed batches we record the byte *range* of the
-            // batch's records section and borrow it lazily per record (no
-            // copy). For compressed batches we take the records section as a
-            // shared slice of the fetch buffer and, once the checks below have
-            // passed, open a stream that decompresses it one record at a time.
-            let (batch_meta, source, records_count) = {
-                let cursor = match &mut self.cursor {
-                    Some(c) => c,
-                    None => return Ok(false),
-                };
-                let Some(batch_start) = cursor.next_batch_start else {
-                    return Ok(false);
-                };
-
-                let buffer = cursor.memory_records.buffer();
-                // Java walks a fetch's batches with
-                // `org.apache.kafka.common.record.internal.ByteBufferLogInputStream#nextBatch`:
-                // every header goes through `nextBatchSize()` — sign, minimum size, magic — before the batch is
-                // handed out as a slice limited to exactly its declared size. The header
-                // is never trusted for where the next batch starts until it has passed.
-                // The stream borrows the cursor's buffer, so it is rebuilt over the unread
-                // tail per batch rather than stored in the cursor; it is a slice, a
-                // position and a limit on the stack, and allocates nothing.
-                let unread = buffer.get(batch_start..).unwrap_or_default();
-                // A corrupt size or magic propagates as the stream's `CORRUPT_MESSAGE`
-                // error, unwrapped, as Java's `batches.hasNext()` throws it (in
-                // `org.apache.kafka.clients.consumer.internals.CompletedFetch#nextFetchedRecord`)
-                // — it is not "no batch".
-                let batch_size = match ByteBufferLogInputStream::new(unread, i32::MAX).next_batch_size()? {
-                    Some(batch_size) if batch_size <= unread.len() => batch_size,
-                    // `batchSize == null || remaining < batchSize` → no batch
-                    // (`org.apache.kafka.common.record.internal.ByteBufferLogInputStream#nextBatch`):
-                    // a partial trailing batch, as a broker cutting the response at
-                    // `max.partition.fetch.bytes` leaves, ends iteration without an error.
-                    _ => {
-                        cursor.next_batch_start = None;
-                        return Ok(false);
-                    },
-                };
-                let batch_bytes = &unread[..batch_size];
-
-                // D7: message formats v0 and v1 are refused by their
-                // magic before anything reads the header as a v2 one. In bounds:
-                // `next_batch_size` returns a size only once the magic byte is present.
-                let magic = batch_bytes[RecordBatch::MAGIC_OFFSET] as i8;
-                if magic < RecordBatch::MAGIC_VALUE_V2 {
-                    return Err(invalid_batch_error(
-                        &self.partition,
-                        raw_base_offset(batch_bytes),
-                        ByteBufferLogInputStream::unsupported_magic_error(magic).message(),
-                    ));
-                }
-
-                // D2: the size half of Java's `ensureValid()`
-                // (`org.apache.kafka.common.record.internal.DefaultRecordBatch#ensureValid`),
-                // reported the way `CompletedFetch#maybeEnsureValid(FetchConfig,RecordBatch)`
-                // reports it but run
-                // unconditionally, where Java runs it only under `check.crcs`. Without
-                // `check.crcs` Java reads the header of a batch shorter than 61 bytes
-                // anyway and its absolute reads throw `IndexOutOfBoundsException`; in
-                // Rust those reads would be slice panics, which inside the C and Python
-                // bindings abort the process. The view is only built over a batch that passes, so no
-                // header accessor below can read past it.
-                let batch = DefaultRecordBatchRef::new(batch_bytes)
-                    .map_err(|e| invalid_batch_error(&self.partition, raw_base_offset(batch_bytes), e.message()))?;
-
-                // The checksum half of Java's `maybeEnsureValid(batch)`, still gated
-                // on `check.crcs` as in Java.
-                if config.check_crcs
-                    && batch.magic() >= RecordVersion::V2.value()
-                    && let Err(e) = batch.ensure_valid()
-                {
-                    return Err(invalid_batch_error(&self.partition, batch.base_offset(), e.message()));
-                }
-
-                let meta = BatchMetadata {
-                    base_offset: batch.base_offset(),
-                    base_timestamp: batch.base_timestamp(),
-                    base_sequence: batch.base_sequence(),
-                    last_offset_timestamp: batch.max_timestamp(),
-                    last_offset: batch.last_offset(),
-                    next_offset: batch.last_offset() + 1,
-                    timestamp_type: batch.timestamp_type(),
-                    partition_leader_epoch: batch.partition_leader_epoch(),
-                    is_control_batch: batch.is_control_batch(),
-                    is_transactional: batch.is_transactional(),
-                    has_producer_id: batch.producer_id() >= 0,
-                    producer_id: batch.producer_id(),
-                    magic: batch.magic(),
-                };
-
-                // Describe where this batch's records live; they are materialized
-                // below, after the READ_COMMITTED skip and the count check.
-                // `try_compression_type`, not `compression_type`: this batch came
-                // off the wire, and an unknown codec id must fail as Java's
-                // `CompressionType.forId` does rather than be read as
-                // uncompressed (which would parse compressed bytes as records).
-                //
-                // `batch_size` includes AbstractRecords::LOG_OVERHEAD, so the
-                // records section is
-                // [batch_start + RECORD_BATCH_OVERHEAD, batch_start + size).
-                let records_start = batch_start + RecordBatch::RECORD_BATCH_OVERHEAD;
-                let records_end = batch_start + batch_size;
-                let source = match batch.try_compression_type()? {
-                    // Borrow the records section directly from the canonical
-                    // buffer.
-                    CompressionType::None => PendingRecordSource::Borrowed(records_start..records_end),
-                    // Decompressed one record at a time once the batch is
-                    // installed. The slice shares the fetch buffer (a refcount
-                    // bump), so the stream can own its input.
-                    compression_type => PendingRecordSource::Compressed {
-                        records: cursor.memory_records.buffer_bytes().slice(records_start..records_end),
-                        compression_type,
-                    },
-                };
-
-                let records_count = batch.records_count();
-                // Advance the cursor's next-batch pointer by this batch's validated
-                // size (O(1)) so both the skip path and the load path move forward.
-                cursor.next_batch_start = Some(batch_start + batch_size);
-                (meta, source, records_count)
+            // Phase 1: read the next batch's header ([`BatchCursor::next_batch`]):
+            // §27 + O(1) batch loading, the next batch's absolute byte offset is
+            // tracked incrementally and parsed in place; we do NOT re-walk
+            // `memory_records.batches()` from the start.
+            let Some(cursor) = self.cursor.as_mut() else {
+                return Ok(false);
+            };
+            let Some((batch_meta, source, records_count)) = cursor.next_batch(&self.partition, config.check_crcs)?
+            else {
+                return Ok(false);
             };
 
             // Phase 2: now that the cursor borrow is dropped, we can
@@ -1806,53 +982,19 @@ impl CompletedFetch {
                 }
             }
 
-            // D3: Java's `RecordIterator` constructor rejects a
-            // negative record count
-            // (`org.apache.kafka.common.record.internal.DefaultRecordBatch.RecordIterator`) when
-            // `currentBatch.streamingIterator(...)` builds it
-            // (`org.apache.kafka.clients.consumer.internals.CompletedFetch#nextFetchedRecord`),
-            // unwrapped and after the READ_COMMITTED skip — so an aborted batch is
-            // dropped without its count being looked at. Installing it instead would
-            // treat the batch as empty. It also comes before the records are
-            // materialized, so a compressed batch with a bad count is refused for
-            // the price of reading its header: Java's `compressedIterator` has
-            // built the decompression stream by then but read nothing through it.
-            if records_count < 0 {
-                return Err(Error::InvalidRecord(DefaultRecordBatch::invalid_record_count_error(
-                    records_count,
-                    batch_meta.magic,
-                )));
-            }
-
-            // Materialize the records: borrow them in place, or open the
-            // stream a compressed batch's records are read through, one at a
-            // time, as the cursor reaches them (§27).
-            let source = match source {
-                PendingRecordSource::Borrowed(range) => RecordSource::Borrowed(range),
-                PendingRecordSource::Compressed { records, compression_type } => {
-                    let buffer_supplier = Arc::clone(&self.decompression_buffer_supplier);
-                    let stream = RecordStream::open(records, compression_type, batch_meta.magic, buffer_supplier)
-                        .map_err(|e| {
-                            invalid_batch_error(
-                                &self.partition,
-                                batch_meta.base_offset,
-                                DefaultRecordBatch::decompression_error(&e).message(),
-                            )
-                        })?;
-                    RecordSource::Stream(Box::new(stream))
-                },
-            };
+            // D3: the negative record count is refused after the READ_COMMITTED
+            // skip, so an aborted batch is dropped without its count being
+            // looked at (`BatchCursor::install_batch`).
             let Some(cursor) = self.cursor.as_mut() else {
                 return Ok(false);
             };
-
-            // Install the batch as the current one. We use the batch
-            // header's declared record count (not the offset span, which can
-            // exceed the record count after log compaction).
-            cursor.record_source = source;
-            cursor.record_byte_offset = 0;
-            cursor.records_remaining = records_count;
-            cursor.current_batch = Some(batch_meta);
+            cursor.install_batch(
+                &self.partition,
+                batch_meta,
+                source,
+                records_count,
+                &self.decompression_buffer_supplier,
+            )?;
             return Ok(true);
         }
     }
@@ -1872,80 +1014,6 @@ impl CompletedFetch {
     }
 }
 
-/// Categorizes which side of the deserialization (key vs value) failed.
-/// Mirrors Java's
-/// `RecordDeserializationException.DeserializationExceptionOrigin`.
-#[derive(Clone, Copy, Debug)]
-enum DeserializationOrigin {
-    Key,
-    Value,
-}
-
-impl DeserializationOrigin {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Key => "KEY",
-            Self::Value => "VALUE",
-        }
-    }
-}
-
-impl From<DeserializationOrigin> for DeserializationErrorOrigin {
-    fn from(origin: DeserializationOrigin) -> Self {
-        match origin {
-            DeserializationOrigin::Key => Self::Key,
-            DeserializationOrigin::Value => Self::Value,
-        }
-    }
-}
-
-/// Build Java's `RecordDeserializationException` for a failed key/value decode.
-///
-/// Mirrors `CompletedFetch#newRecordDeserializationException`,
-/// which passes the full record context — origin, partition, offset, timestamp,
-/// timestamp type, raw key and value buffers, and headers — alongside the
-/// message, with the deserializer's exception as the **cause**. Those eight
-/// fields are the ones consumer error handlers read to decide whether to skip
-/// the record, so a plain `SerializationException` carrying only the message
-/// would drop the information the type exists to convey.
-///
-/// The message itself carries no "Cause: ..." suffix; the cause is a separate
-/// field reachable through [`Error::source`].
-#[expect(clippy::too_many_arguments)]
-fn wrap_deserialization_error(
-    origin: DeserializationOrigin,
-    partition: &TopicPartition,
-    offset: i64,
-    timestamp: i64,
-    timestamp_type: TimestampType,
-    key_buffer: Option<Vec<u8>>,
-    value_buffer: Option<Vec<u8>>,
-    headers: Option<RecordHeaders>,
-    source: Error,
-) -> Error {
-    let message = format!(
-        "Error deserializing {} for partition {} at offset {}. \
-         If needed, please seek past the record to continue consumption.",
-        origin.as_str(),
-        partition,
-        offset,
-    );
-    Error::RecordDeserialization(Box::new(
-        RecordDeserializationError::new(
-            origin.into(),
-            partition.clone(),
-            offset,
-            timestamp,
-            timestamp_type,
-            key_buffer,
-            value_buffer,
-            headers,
-            message,
-        )
-        .with_source(source),
-    ))
-}
-
 /// Java's `maybeEnsureValid(batch)` wrapper (`CompletedFetch#maybeEnsureValid(FetchConfig,RecordBatch)`):
 /// `new KafkaException("Record batch for partition " + partition + " at offset " +
 /// batch.baseOffset() + " is invalid, cause: " + e.getMessage())`, a bare
@@ -1959,111 +1027,6 @@ fn invalid_batch_error(partition: &TopicPartition, base_offset: i64, cause: &str
     Error::kafka_message(format!(
         "Record batch for partition {partition} at offset {base_offset} is invalid, cause: {cause}"
     ))
-}
-
-/// The batch declares more records than it holds: Java's
-/// `InvalidRecordException("Incorrect declared batch size, premature EOF
-/// reached")` (`DefaultRecordBatch#uncompressedIterator`, `DefaultRecordBatch.StreamRecordIterator#readNext`),
-/// naming the partition.
-fn premature_eof_error(partition: &TopicPartition) -> Error {
-    Error::InvalidRecord(InvalidRecordError::new(format!(
-        "Incorrect declared batch size for partition {partition}, premature EOF reached \
-         (declared record count exceeds the records present in the batch)"
-    )))
-}
-
-/// Whether the size of the record at the front of `records` does not end
-/// where Java's reader needs it to, which Java reports as a premature EOF.
-/// `records` may end inside it, so the buffer reader runs out of bytes
-/// (`BufferUnderflowException`, `DefaultRecordBatch#uncompressedIterator`). Or, for a
-/// record read off a compressed stream (`from_stream`), its fifth byte may not
-/// be its last: the stream reader takes the end of the stream for a
-/// continuation byte, so it cannot tell a size the stream ends inside from
-/// one too long, and fails on a fifth continuation byte either way
-/// (`IllegalArgumentException`, `DefaultRecordBatch.StreamRecordIterator#readNext`). An uncompressed record's size too
-/// long is left to the parser, as Java's buffer reader lets that
-/// `IllegalArgumentException` through. A stream that fails rather than ends
-/// inside the size is reported by [`RecordStream::next_record`] first.
-fn record_size_is_premature_eof(records: &[u8], from_stream: bool) -> bool {
-    let size = &records[..records.len().min(MAX_RECORD_SIZE_LENGTH)];
-    (from_stream || size.len() < MAX_RECORD_SIZE_LENGTH) && size.iter().all(|b| b & 0x80 != 0)
-}
-
-/// Parses the record at the front of `records`, the rest of `batch`'s record
-/// bytes, returning it and its length.
-///
-/// A record whose body is cut off fails with the text of the Java reader that
-/// reads it: the buffer reader's for an uncompressed batch
-/// (`DefaultRecord#readFrom(ByteBuffer,int,long,long,int,Long)`), the stream reader's when `from_stream`
-/// (`DefaultRecord#readFrom(InputStream,long,long,int,Long,int)`). A stream's records end early only where the
-/// stream does, as [`RecordStream::next_record`] reads each record whole first.
-/// Java's stream reader also refuses a size above
-/// [`AbstractRecords::SOFT_MAX_ARRAY_LENGTH`] before reading the body
-/// (`DefaultRecord#readFrom(InputStream,long,long,int,Long,int)`). [`RecordStream::next_record`] leaves such a
-/// record's body unread, and it fails here with Java's text.
-fn read_record<'a>(
-    batch: &BatchMetadata,
-    records: &'a [u8],
-    from_stream: bool,
-) -> Result<(DefaultRecordRef<'a>, usize), InvalidRecordError> {
-    let log_append_time = (batch.timestamp_type == TimestampType::LogAppendTime).then_some(batch.last_offset_timestamp);
-    DefaultRecord::read_ref_from_buffer(
-        records,
-        batch.base_offset,
-        batch.base_timestamp,
-        batch.base_sequence,
-        log_append_time,
-    )
-    .map_err(|e| {
-        // Checked only once parsing has failed, so a record read whole costs
-        // nothing more.
-        match ByteUtils::read_varint(records) {
-            Ok((size, size_length)) if from_stream => {
-                match DefaultRecord::check_record_body_size(size, AbstractRecords::SOFT_MAX_ARRAY_LENGTH) {
-                    Err(too_big) => too_big,
-                    Ok(()) if usize::try_from(size).is_ok_and(|size| records.len() - size_length < size) => {
-                        InvalidRecordError::new(format!(
-                            "Invalid record size: expected {size} bytes in record payload, but the record payload reached EOF."
-                        ))
-                    },
-                    Ok(()) => e,
-                }
-            },
-            _ => e,
-        }
-    })
-}
-
-/// The batch holds more records than it declares: Java's
-/// `InvalidRecordException("Incorrect declared batch size, records still
-/// remaining in file")` (`DefaultRecordBatch.RecordIterator#next`), naming the
-/// partition.
-fn records_remaining_error(partition: &TopicPartition) -> Error {
-    Error::InvalidRecord(InvalidRecordError::new(format!(
-        "Incorrect declared batch size for partition {partition}, records still remaining in batch \
-         (declared record count is fewer than the records present)"
-    )))
-}
-
-/// The `BaseOffset` field — a batch's first eight bytes — read before its
-/// [`DefaultRecordBatchRef`] exists, so a batch refused by the magic or the size
-/// check is still reported at its offset, as Java's `batch.baseOffset()` reports
-/// it. The slice always has them: it passed `next_batch_size`, so it is at least
-/// `LOG_OVERHEAD + 14` bytes long, and the `-1` fallback would only mark that
-/// invariant broken in the message rather than panic.
-fn raw_base_offset(batch_bytes: &[u8]) -> i64 {
-    batch_bytes
-        .first_chunk::<{ RecordBatch::BASE_OFFSET_LENGTH }>()
-        .map_or(-1, |base_offset| i64::from_be_bytes(*base_offset))
-}
-
-#[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#maybeLeaderEpoch")]
-fn maybe_leader_epoch(epoch: i32) -> Option<i32> {
-    if epoch == NO_PARTITION_LEADER_EPOCH {
-        None
-    } else {
-        Some(epoch)
-    }
 }
 
 impl std::fmt::Debug for CompletedFetch {
@@ -2094,13 +1057,20 @@ fn build_aborted_transactions(partition_data: &PartitionData) -> BinaryHeap<Abor
 mod tests {
     use super::*;
     use crate::common::compress::Compression;
+    use crate::common::errors::DeserializationErrorOrigin;
+    use crate::common::header::RecordHeaders;
+    use crate::common::record::TimestampType;
     use crate::common::record::internal::AbstractRecords;
     use crate::common::record::internal::CompressionType;
+    use crate::common::record::internal::{DefaultRecord, RecordBatch};
     use crate::common::record::internal::{MemoryRecords, MemoryRecordsBuilderOptionsBuilder, SimpleRecord};
     use crate::common::serialization::Deserializer;
+    use crate::common::utils::internals::ByteUtils;
     use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::FetchMetricsManager;
+    use crate::consumer::internals::batch_cursor::{MAX_RECORD_PREALLOCATION, RecordSource};
     use crate::fetch_response_data::PartitionData;
+    use std::io::Read;
     use std::sync::{Arc, Mutex};
 
     impl CompletedFetch {

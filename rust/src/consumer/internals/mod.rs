@@ -39,7 +39,8 @@ mod async_kafka_consumer;
 pub(crate) mod auto_offset_reset_strategy;
 #[cfg(test)]
 mod auto_offset_reset_strategy_test;
-pub(crate) mod commit_request_manager;
+pub(crate) mod batch_cursor;
+mod commit_request_manager;
 mod completed_fetch;
 mod consumer_heartbeat_request_manager;
 mod consumer_interceptors;
