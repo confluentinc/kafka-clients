@@ -298,4 +298,39 @@ export class TopicPartitionSet implements Iterable<TopicPartition> {
     values(): IterableIterator<TopicPartition>;
 }
 
+// @public
+export class Uuid {
+    constructor(options: {
+        mostSigBits: bigint | number;
+        leastSigBits: bigint | number;
+    });
+    compareTo(other: Uuid): number;
+    compareTo(options: {
+        other: Uuid;
+    }): number;
+    equals(obj: unknown): boolean;
+    static fromString(str: string): Uuid;
+    static fromString(options: {
+        str: string;
+    }): Uuid;
+    getLeastSignificantBits(): bigint;
+    getMostSignificantBits(): bigint;
+    hashCode(): number;
+    static readonly METADATA_TOPIC_ID: Uuid;
+    static readonly ONE_UUID: Uuid;
+    static randomUuid(): Uuid;
+    static readonly RESERVED: ReadonlySet<Uuid>;
+    static toArray(list: ReadonlyArray<Uuid> | null): Uuid[] | null;
+    static toArray(options: {
+        list: ReadonlyArray<Uuid> | null;
+    }): Uuid[] | null;
+    toJSON(): string;
+    static toList(array: ReadonlyArray<Uuid> | null): Uuid[] | null;
+    static toList(options: {
+        array: ReadonlyArray<Uuid> | null;
+    }): Uuid[] | null;
+    toString(): string;
+    static readonly ZERO_UUID: Uuid;
+}
+
 ```

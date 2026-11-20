@@ -130,7 +130,7 @@ export interface JavaFormsOptions {
  * @param value - the value to test
  * @returns whether it is a plain object
  */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object') return false;
   const proto: unknown = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;

@@ -102,6 +102,15 @@ const ALLOWED = [
     reason: "the entries of Java's Map<TopicPartition, V> the caller builds or a call returns, not a store of records",
   },
   { key: 'TopicPartitionSet.#members', reason: "the members of Java's Set<TopicPartition> a call returns, not a store of records" },
+  { key: 'MockAdminClient.DEFAULT_LOG_DIRS', reason: "Java's constant List MockAdminClient#DEFAULT_LOG_DIRS, not a store of records" },
+  {
+    key: 'AbstractOptions.#setters',
+    reason: 'the setters an admin options object ran, which the client runs again on the native options, not a store of records',
+  },
+  {
+    key: 'src/admin/mock_admin_client.ts:MAX_SUPPORTED_FEATURE_LEVELS',
+    reason: "the forms of Java's MockAdminClient.Builder#maxSupportedFeatureLevels setter, a feature level, not a cap on records",
+  },
   {
     key: 'MockProducer.#pending',
     reason:

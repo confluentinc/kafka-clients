@@ -152,6 +152,43 @@ interface SpiedRecord {
   headers: [string, Buffer | null][];
 }
 
+/** A native admin client handle (native/admin.c), opaque to JavaScript. */
+type AdminHandle = object;
+
+/** The box over an admin RPC's native result (native/admin.c), opaque to JavaScript. */
+type AdminResultBox = object;
+
+/** A native MockAdminClient.Builder handle (native/admin.c), opaque to JavaScript. */
+type MockAdminBuilderHandle = object;
+
+/** A node's fields as the addon takes them (native/admin.c, admin_node_from_js). */
+interface NodeFields {
+  id: number;
+  host: string | null;
+  port: number;
+  rack: string | null;
+  isFenced: boolean;
+}
+
+/** The counts of native/admin.c, for the lifetime tests. */
+interface AdminStats {
+  adminsMade: number;
+  adminsFreed: number;
+  resultsMade: number;
+  resultsFreed: number;
+  futuresMade: number;
+  futuresFreed: number;
+  waitsStarted: number;
+  waitsCompleted: number;
+}
+
+/**
+ * The setters an admin options object ran, in the order they last ran, as
+ * `[setter, value]` pairs, or null for Java's null options (the FFI reports
+ * it).
+ */
+type AdminOptionsSetters = Array<[string, unknown]> | null;
+
 /** The functions the addon registers (native/addon.c). */
 interface Native {
   probe(): boolean;
@@ -276,6 +313,41 @@ interface Native {
   headerValue(header: HeaderHandle): Buffer | null;
   // The counts of native/headers.c. Test-only.
   headerStats(): HeaderStats;
+  // Admin.create(configs): the configuration's [key, value] pairs,
+  // encodeLikeJava's bytes of each.
+  adminCreate(entries: Array<[Uint8Array, Uint8Array]>): AdminHandle;
+  // Admin.close() for a timeoutMs of null, else close(Duration), through the
+  // `_cb` twins; closedNow: this close closed the client.
+  adminClose(handle: AdminHandle, timeoutMs: number | bigint | null, onComplete: (closedNow: boolean) => void): void;
+  // The future accessor `name` of a result hands out (its key null, or a
+  // string), as its slot in the client's table.
+  adminResultFuture(handle: AdminHandle, box: AdminResultBox, name: string, key: unknown): number;
+  // The futures of a map accessor, as [key, slot] pairs, each key as the
+  // addon reads it.
+  adminResultFutures(handle: AdminHandle, box: AdminResultBox, name: string): Array<[unknown, number]>;
+  // The untimed wait on a future, through get_cb, once: `done` gets its
+  // value, converted to plain values, or its error.
+  adminFutureWait(handle: AdminHandle, slot: number, done: (value: unknown, error: Error | null) => void): void;
+  // A timed wait through get_with_timeout_cb: timedOut when the wait timed
+  // out, the error the core's TimeoutError; the outcome comes from the
+  // untimed wait.
+  adminFutureGet(handle: AdminHandle, slot: number, timeoutMs: number, done: (error: Error | null, timedOut: boolean) => void): void;
+  // The RPCs: each returns its result's box at once; a null options is
+  // Java's null, which the FFI reports.
+  adminDescribeCluster(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  adminListTopics(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Java's MockAdminClient() (no argument) or MockAdminClient(brokers,
+  // controller).
+  mockAdminCreate(...args: [] | [brokers: NodeFields[] | null, controller: NodeFields | null]): AdminHandle;
+  // Java's MockAdminClient.controller(Node) and timeoutNextRequest(int).
+  mockAdminController(handle: AdminHandle, node: NodeFields | null): void;
+  mockAdminTimeoutNextRequest(handle: AdminHandle, numberOfRequests: number): void;
+  // Java's new MockAdminClient.Builder(), its setters, run at once, and build().
+  mockAdminBuilderNew(): MockAdminBuilderHandle;
+  mockAdminBuilderSet(builder: MockAdminBuilderHandle, setter: string, value: unknown): void;
+  mockAdminBuilderBuild(builder: MockAdminBuilderHandle): AdminHandle;
+  // The counts of native/admin.c. Test-only.
+  adminStats(): AdminStats;
   // The counts of native/producer.c. Test-only.
   producerStats(): ProducerStats;
   // The counts of native/error.c. Test-only.
