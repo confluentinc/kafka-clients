@@ -43,6 +43,16 @@ impl NodeAcknowledgements {
     pub(crate) fn acknowledgements(&self) -> &Acknowledgements {
         &self.acknowledgements
     }
+
+    /// The acknowledgements, taken out of the value.
+    ///
+    /// Rust-only: Java hands the same object on; the share consume request
+    /// manager takes ownership of the acknowledgements it is given (they move
+    /// from the application task to the background task,
+    /// `share-consumer.md` §6).
+    pub(crate) fn into_acknowledgements(self) -> Acknowledgements {
+        self.acknowledgements
+    }
 }
 
 #[cfg(test)]

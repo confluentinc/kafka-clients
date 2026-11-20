@@ -19,8 +19,10 @@
 
 // Items here are consumed by Phase 7-9 managers (`CommitRequestManager`,
 // `OffsetsRequestManager`, etc.). Suppress dead-code warnings for items
-// that aren't yet referenced inside the workspace.
-#![expect(dead_code)]
+// that aren't yet referenced inside the workspace: the rest are used by the
+// share consume request manager, which is wired from Milestone 18 P6 on (its
+// tests use them all already).
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};

@@ -81,6 +81,10 @@ impl ShareSessionHandler {
     }
 
     /// All the partitions in the share session, in the order they joined it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "in Java only the broker and the tests call it")
+    )]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareSessionHandler#sessionPartitionMap")]
     pub(crate) fn session_partition_map(&self) -> &IndexMap<TopicPartition, TopicIdPartition> {
         &self.session_partitions

@@ -96,6 +96,10 @@ impl ShareAcquireMode {
     ///
     /// `Error::LocalIllegalArgument` with `"Unknown share acquire mode id: <id>"`
     /// if the identifier is not recognized.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "in Java only the broker's ShareFetch and the tests call it")
+    )]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareAcquireMode#forId")]
     pub(crate) fn for_id(id: i8) -> Result<Self, Error> {
         match id {

@@ -71,10 +71,6 @@ mod member_state;
 mod member_state_listener;
 pub(crate) mod metrics;
 pub(crate) mod network_client_delegate;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P5a on")
-)]
 mod node_acknowledgements;
 mod offset_and_timestamp_internal;
 mod offset_commit_callback_invoker;
@@ -90,16 +86,17 @@ mod request_state;
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
 )]
 pub(crate) mod share_acknowledgement_mode;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P5a on")
-)]
 pub(crate) mod share_acquire_mode;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
 )]
 mod share_completed_fetch;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
+)]
+mod share_consume_request_manager;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
@@ -120,15 +117,7 @@ mod share_fetch_buffer;
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
 )]
 mod share_fetch_collector;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P5a on")
-)]
 mod share_fetch_config;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P5a on")
-)]
 mod share_fetch_metrics_aggregator;
 #[cfg_attr(
     not(test),
@@ -155,10 +144,6 @@ pub(crate) mod share_in_flight_batch;
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
 )]
 mod share_membership_manager;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P5a on")
-)]
 mod share_session_handler;
 pub(crate) mod subscription_state;
 mod timed_request_state;
@@ -227,7 +212,10 @@ pub(crate) use share_completed_fetch::ShareCompletedFetch;
 pub(crate) use share_consumer_metadata::ShareConsumerMetadata;
 pub(crate) use share_fetch::ShareFetch;
 pub(crate) use share_fetch_buffer::ShareFetchBuffer;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")]
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")
+)]
 pub(crate) use share_fetch_collector::ShareFetchCollector;
 pub(crate) use share_fetch_config::ShareFetchConfig;
 pub(crate) use share_fetch_metrics_aggregator::ShareFetchMetricsAggregator;
@@ -237,7 +225,6 @@ pub(crate) use share_fetch_metrics_registry::ShareFetchMetricsRegistry;
 pub(crate) use share_heartbeat_request_manager::ShareHeartbeatRequestManager;
 pub(crate) use share_in_flight_batch::ShareInFlightBatch;
 pub(crate) use share_membership_manager::ShareMembershipManager;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P5a on")]
 pub(crate) use share_session_handler::ShareSessionHandler;
 pub(crate) use subscription_state::{FetchPosition, LogTruncation, SubscriptionState};
 pub(crate) use timed_request_state::TimedRequestState;
