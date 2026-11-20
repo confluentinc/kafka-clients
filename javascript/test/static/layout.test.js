@@ -215,6 +215,10 @@ test('the generated modules carry the license and the GENERATED, DO NOT EDIT hea
     'common/config/sasl_configs.ts',
     'common/config/ssl_configs.ts',
     'common/config/security_config.ts',
+    'admin/admin_client_config.ts',
+    'admin/admin_client_configs.ts',
+    'common/config/topic_config.ts',
+    'common/config/log_level_config.ts',
   ];
   for (const rel of generated) {
     assert.ok(libFiles.includes(rel), `src/${rel} is missing`);

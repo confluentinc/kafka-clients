@@ -26,6 +26,18 @@ export class ConfigError extends KafkaError {
 }
 
 // @public
+export class LogLevelConfig {
+    constructor();
+    static readonly DEBUG_LOG_LEVEL: string;
+    static readonly ERROR_LOG_LEVEL: string;
+    static readonly FATAL_LOG_LEVEL: string;
+    static readonly INFO_LOG_LEVEL: string;
+    static readonly TRACE_LOG_LEVEL: string;
+    static readonly VALID_LOG_LEVELS: ReadonlySet<string>;
+    static readonly WARN_LOG_LEVEL: string;
+}
+
+// @public
 export class SaslConfigs {
     constructor();
     static readonly DEFAULT_KERBEROS_KINIT_CMD: string;
@@ -230,6 +242,83 @@ export class SslConfigs {
     static readonly SSL_TRUSTSTORE_PASSWORD_DOC: string;
     static readonly SSL_TRUSTSTORE_TYPE_CONFIG: string;
     static readonly SSL_TRUSTSTORE_TYPE_DOC: string;
+}
+
+// @public
+export class TopicConfig {
+    constructor();
+    static readonly CLEANUP_POLICY_COMPACT: string;
+    static readonly CLEANUP_POLICY_CONFIG: string;
+    static readonly CLEANUP_POLICY_DELETE: string;
+    static readonly CLEANUP_POLICY_DOC: string;
+    static readonly COMPRESSION_GZIP_LEVEL_CONFIG: string;
+    static readonly COMPRESSION_GZIP_LEVEL_DOC: string;
+    static readonly COMPRESSION_LZ4_LEVEL_CONFIG: string;
+    static readonly COMPRESSION_LZ4_LEVEL_DOC: string;
+    static readonly COMPRESSION_TYPE_CONFIG: string;
+    static readonly COMPRESSION_TYPE_DOC: string;
+    static readonly COMPRESSION_ZSTD_LEVEL_CONFIG: string;
+    static readonly COMPRESSION_ZSTD_LEVEL_DOC: string;
+    static readonly DELETE_RETENTION_MS_CONFIG: string;
+    static readonly DELETE_RETENTION_MS_DOC: string;
+    static readonly ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_CONFIG: string;
+    static readonly ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_DOC: string;
+    static readonly FILE_DELETE_DELAY_MS_CONFIG: string;
+    static readonly FILE_DELETE_DELAY_MS_DOC: string;
+    static readonly FLUSH_MESSAGES_INTERVAL_CONFIG: string;
+    static readonly FLUSH_MESSAGES_INTERVAL_DOC: string;
+    static readonly FLUSH_MS_CONFIG: string;
+    static readonly FLUSH_MS_DOC: string;
+    static readonly INDEX_INTERVAL_BYTES_CONFIG: string;
+    static readonly INDEX_INTERVAL_BYTES_DOC: string;
+    static readonly LOCAL_LOG_RETENTION_BYTES_CONFIG: string;
+    static readonly LOCAL_LOG_RETENTION_BYTES_DOC: string;
+    static readonly LOCAL_LOG_RETENTION_MS_CONFIG: string;
+    static readonly LOCAL_LOG_RETENTION_MS_DOC: string;
+    static readonly MAX_COMPACTION_LAG_MS_CONFIG: string;
+    static readonly MAX_COMPACTION_LAG_MS_DOC: string;
+    static readonly MAX_DECOMPRESSED_MESSAGE_BYTES_CONFIG: string;
+    static readonly MAX_DECOMPRESSED_MESSAGE_BYTES_DOC: string;
+    static readonly MAX_MESSAGE_BYTES_CONFIG: string;
+    static readonly MAX_MESSAGE_BYTES_DOC: string;
+    static readonly MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG: string;
+    static readonly MESSAGE_TIMESTAMP_AFTER_MAX_MS_DOC: string;
+    static readonly MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG: string;
+    static readonly MESSAGE_TIMESTAMP_BEFORE_MAX_MS_DOC: string;
+    static readonly MESSAGE_TIMESTAMP_TYPE_CONFIG: string;
+    static readonly MESSAGE_TIMESTAMP_TYPE_DOC: string;
+    static readonly MIN_CLEANABLE_DIRTY_RATIO_CONFIG: string;
+    static readonly MIN_CLEANABLE_DIRTY_RATIO_DOC: string;
+    static readonly MIN_COMPACTION_LAG_MS_CONFIG: string;
+    static readonly MIN_COMPACTION_LAG_MS_DOC: string;
+    static readonly MIN_IN_SYNC_REPLICAS_CONFIG: string;
+    static readonly MIN_IN_SYNC_REPLICAS_DOC: string;
+    static readonly PREALLOCATE_CONFIG: string;
+    static readonly PREALLOCATE_DOC: string;
+    static readonly REMOTE_COPY_LAG_BYTES_CONFIG: string;
+    static readonly REMOTE_COPY_LAG_BYTES_DOC: string;
+    static readonly REMOTE_COPY_LAG_MS_CONFIG: string;
+    static readonly REMOTE_COPY_LAG_MS_DOC: string;
+    static readonly REMOTE_LOG_COPY_DISABLE_CONFIG: string;
+    static readonly REMOTE_LOG_COPY_DISABLE_DOC: string;
+    static readonly REMOTE_LOG_DELETE_ON_DISABLE_CONFIG: string;
+    static readonly REMOTE_LOG_DELETE_ON_DISABLE_DOC: string;
+    static readonly REMOTE_LOG_STORAGE_ENABLE_CONFIG: string;
+    static readonly REMOTE_LOG_STORAGE_ENABLE_DOC: string;
+    static readonly RETENTION_BYTES_CONFIG: string;
+    static readonly RETENTION_BYTES_DOC: string;
+    static readonly RETENTION_MS_CONFIG: string;
+    static readonly RETENTION_MS_DOC: string;
+    static readonly SEGMENT_BYTES_CONFIG: string;
+    static readonly SEGMENT_BYTES_DOC: string;
+    static readonly SEGMENT_INDEX_BYTES_CONFIG: string;
+    static readonly SEGMENT_INDEX_BYTES_DOC: string;
+    static readonly SEGMENT_JITTER_MS_CONFIG: string;
+    static readonly SEGMENT_JITTER_MS_DOC: string;
+    static readonly SEGMENT_MS_CONFIG: string;
+    static readonly SEGMENT_MS_DOC: string;
+    static readonly UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG: string;
+    static readonly UNCLEAN_LEADER_ELECTION_ENABLE_DOC: string;
 }
 
 // (No @packageDocumentation comment for this package)
