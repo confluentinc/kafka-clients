@@ -73,10 +73,6 @@ pub(crate) mod share_acknowledgement_mode;
 pub(crate) mod share_acquire_mode;
 mod share_completed_fetch;
 mod share_consume_request_manager;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "KafkaShareConsumer uses it from Milestone 18 P8 on")
-)]
 mod share_consumer_impl;
 mod share_consumer_metadata;
 #[cfg_attr(
@@ -158,6 +154,7 @@ pub(crate) use share_acknowledgement_mode::ShareAcknowledgementMode;
 pub(crate) use share_acquire_mode::ShareAcquireMode;
 pub(crate) use share_completed_fetch::ShareCompletedFetch;
 pub(crate) use share_consume_request_manager::ShareConsumeRequestManager;
+pub(crate) use share_consumer_impl::ShareConsumerImpl;
 pub(crate) use share_consumer_metadata::ShareConsumerMetadata;
 #[cfg_attr(
     not(test),

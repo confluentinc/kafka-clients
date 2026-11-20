@@ -7,6 +7,12 @@ missing kafka_consumer_MockConsumer_schedule_poll_task
 unmapped kafka_consumer_MockConsumer_schedule_poll_task
 # M18 share consumer is Rust-only; C FFI for share types comes in the share-consumer FFI milestone (PLAN §1).
 prefix:kafka_consumer_AcknowledgeType
+prefix:kafka_consumer_AcknowledgementCommitCallback
+prefix:kafka_consumer_AcknowledgeOptions
+prefix:kafka_consumer_KafkaShareConsumer
+prefix:kafka_consumer_MockShareConsumer
+prefix:kafka_consumer_ShareConsumer_
+prefix:kafka_consumer_ShareConsumerHandle
 prefix:kafka_admin_ListShareGroupOffsetsSpec
 prefix:kafka_admin_ShareGroupDescription
 prefix:kafka_admin_ShareMemberAssignment

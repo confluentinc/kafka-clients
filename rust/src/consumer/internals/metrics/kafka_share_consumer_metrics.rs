@@ -166,7 +166,8 @@ mod tests {
     //! The same Java tests through `ShareConsumerImpl` (a real `poll`, a real
     //! `close`) are in `share_consumer_impl.rs`. The KIP-714 rows
     //! (`registerMetricForSubscription` / `unregisterMetricFromSubscription`)
-    //! belong with those methods (Milestone 18 decision D2, P8).
+    //! are not translated: KIP-714 is left out of the share consumer as it is
+    //! left out of the consumer (Milestone 18 decision D2).
 
     use super::*;
     use crate::common::Metric;

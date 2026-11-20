@@ -72,7 +72,9 @@
 //! - `ClientTelemetryReporter`, `AppInfoParser` and the metric reporters, as
 //!   for the consumer (`async_kafka_consumer.rs`, ledger G16).
 //!   `registerMetricForSubscription` / `unregisterMetricFromSubscription`
-//!   follow decision D2 (Milestone 18 P8).
+//!   are not translated either, and `clientInstanceId` is not on the public
+//!   `ShareConsumer` trait: KIP-714 is left out as the `Consumer` trait leaves
+//!   it out (Milestone 18 decision D2, 2026-11-20).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -90,11 +92,13 @@ use crate::common::serialization::DynDeserializer;
 use crate::common::utils::internals::LogContext;
 use crate::common::utils::{Time, Utils};
 use crate::common::{Error, TopicIdPartition, Uuid};
+use crate::consumer::AcknowledgeOptions;
 use crate::consumer::AcknowledgeType;
 use crate::consumer::AcknowledgementCommitCallback;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::ConsumerRecords;
+use crate::consumer::ShareConsumerHandle;
 use crate::consumer::internals::AcknowledgementCommitCallbackHandler;
 use crate::consumer::internals::Acknowledgements;
 use crate::consumer::internals::ConsumerNetworkThread;
@@ -1252,8 +1256,11 @@ where
         self.current_fetch.acknowledge_with_record(record, r#type)
     }
 
-    /// Acknowledges, with `type`, the record at `offset` of `topic`
-    /// `partition` whose delivery failed (explicit acknowledgement mode).
+    /// Acknowledges, with the options' type, the record at the options' offset
+    /// of their topic partition whose delivery failed (explicit acknowledgement
+    /// mode). Java's `acknowledge(String, int, long, AcknowledgeType)`: its four
+    /// parameters are the fields of [`AcknowledgeOptions`], named as the public
+    /// `ShareConsumer::acknowledge_with_options` (CLAUDE.md §2).
     ///
     /// # Errors
     ///
@@ -1262,17 +1269,12 @@ where
     /// when no batch failed to deliver that record, or the closed message
     /// (decision D7).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#acknowledge")]
-    pub(crate) fn acknowledge_with_topic_partition_offset_type(
-        &mut self,
-        topic: &str,
-        partition: i32,
-        offset: i64,
-        r#type: AcknowledgeType,
-    ) -> Result<(), Error> {
+    pub(crate) fn acknowledge_with_options(&mut self, options: AcknowledgeOptions) -> Result<(), Error> {
         self.acquire_and_ensure_open()?;
         self.ensure_explicit_acknowledgement()?;
+        let AcknowledgeOptions { topic, partition, offset, acknowledge_type } = options;
         self.current_fetch
-            .acknowledge_with_topic_partition_offset(topic, partition, offset, r#type)
+            .acknowledge_with_topic_partition_offset(&topic, partition, offset, acknowledge_type)
     }
 
     /// [`Self::commit_sync_with_timeout`] with `default.api.timeout.ms`.
@@ -1422,8 +1424,15 @@ where
     /// Always `LocalIllegalStateError` with ``"Telemetry is not enabled. Set
     /// config `enable.metrics.push` to `true`."``: Java's answer when the
     /// consumer has no telemetry reporter, which a Rust consumer never has
-    /// (ledger G16; the public method is decision D2).
+    /// (ledger G16; decision D2 keeps it off the public trait).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#clientInstanceId")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "KIP-714: not on the ShareConsumer trait (Milestone 18 decision D2)"
+        )
+    )]
     pub(crate) fn client_instance_id(&self, _timeout: Duration) -> Result<Uuid, Error> {
         // Java names `ConsumerConfig.ENABLE_METRICS_PUSH_CONFIG`, which the
         // Rust configuration does not define (KIP-714 is not translated).
@@ -1689,6 +1698,13 @@ where
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#wakeup")]
     pub(crate) fn wakeup(&self) {
         self.wakeup_trigger.wakeup();
+    }
+
+    /// Returns the handle that wakes this consumer up from another task: it
+    /// fires the same wakeup trigger as [`Self::wakeup`] (Milestone 18
+    /// decision D6).
+    pub(crate) fn handle(&self) -> ShareConsumerHandle {
+        ShareConsumerHandle::with_wakeup_trigger(self.wakeup_trigger.clone())
     }
 
     /// Java's `acquireAndEnsureOpen()`: the closed check, then
@@ -2035,12 +2051,14 @@ where
 
     /// The client id.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#clientId")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn client_id(&self) -> &str {
         &self.client_id
     }
 
     /// The metrics registry.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#metricsRegistry")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn metrics_registry(&self) -> &Arc<Metrics> {
         &self.metrics
     }
@@ -2054,6 +2072,7 @@ where
 
     /// The share-consumer poll metrics.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#kafkaShareConsumerMetrics")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn kafka_share_consumer_metrics(&self) -> &KafkaShareConsumerMetrics {
         &self.kafka_share_consumer_metrics
     }
@@ -3566,7 +3585,7 @@ mod tests {
         assert!(matches!(e, Error::LocalIllegalState(_)), "{e:?}");
         assert_eq!("Implicit acknowledgement of delivery is being used.", e.message());
         let e = consumer
-            .acknowledge_with_topic_partition_offset_type("topic-a", 0, 0, AcknowledgeType::Release)
+            .acknowledge_with_options(acknowledge_options("topic-a", 0, 0, AcknowledgeType::Release))
             .expect_err("implicit mode");
         assert_eq!("Implicit acknowledgement of delivery is being used.", e.message());
         consumer.close_with_timeout(Duration::ZERO).await.expect("closed");
@@ -3574,12 +3593,22 @@ mod tests {
 
     // ── Rust-only: the methods without a Java test ─────────────────────────
 
+    fn acknowledge_options(topic: &str, partition: i32, offset: i64, r#type: AcknowledgeType) -> AcknowledgeOptions {
+        crate::consumer::AcknowledgeOptionsBuilder::new()
+            .set_topic(topic)
+            .set_partition(partition)
+            .set_offset(offset)
+            .set_type(r#type)
+            .build()
+            .expect("every parameter is set")
+    }
+
     #[tokio::test]
     async fn acknowledge_by_offset_needs_a_failed_delivery() {
         let mut f = new_consumer_mode("explicit");
         let e = f
             .consumer
-            .acknowledge_with_topic_partition_offset_type("t", 0, 5, AcknowledgeType::Reject)
+            .acknowledge_with_options(acknowledge_options("t", 0, 5, AcknowledgeType::Reject))
             .expect_err("no batch failed");
         assert_eq!("The record cannot be acknowledged.", e.message());
     }

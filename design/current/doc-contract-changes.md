@@ -400,3 +400,8 @@ Entry format (a numbered list; the four sub-items are required, in this order):
    - Contract change: a `NULL` `topic` panics with `LocalNullPointerError` (`<param> must not be null`), where Java stores the partitions under a `null` topic.
    - Why: Java's mock reads the map only through `partitionsFor(topic)` and the subscribed topics, and Rust's `partitions_for` takes a `&str` while `subscribe` rejects a `null` topic, so partitions stored under a `null` topic could never be read back; reading `NULL` as empty would hide the caller's bug, and CLAUDE.md §4 makes a `NULL` mandatory parameter panic.
    - Accepted: 2026-11-03 Emanuele Sabellico
+1. `crate::consumer::ShareConsumer::poll`
+   - Java member: `org.apache.kafka.clients.consumer.ShareConsumer#poll(Duration)`
+   - Contract change: a `timeout` greater than `i64::MAX` milliseconds counts as `i64::MAX` milliseconds, where Java's `Duration.toMillis()` throws `ArithmeticException`; `poll(Duration::MAX)` waits without limit.
+   - Why: as `crate::consumer::Consumer::poll`, whose accepted entry this mirrors for the share consumer (Milestone 18 P8).
+   - Accepted:
