@@ -20,10 +20,6 @@
 mod abstract_fetch;
 mod abstract_heartbeat_request_manager;
 pub(crate) mod abstract_membership_manager;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3a on")
-)]
 mod acknowledgement_batch;
 #[cfg_attr(
     not(test),
@@ -128,6 +124,11 @@ mod share_heartbeat_request_manager;
     expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
 )]
 mod share_membership_manager;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P5a on")
+)]
+mod share_session_handler;
 pub(crate) mod subscription_state;
 mod timed_request_state;
 pub(crate) mod topic_metadata_request_manager;
@@ -192,7 +193,6 @@ pub(crate) use share_acknowledgement_mode::ShareAcknowledgementMode;
 pub(crate) use share_acquire_mode::ShareAcquireMode;
 #[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P6 on")]
 pub(crate) use share_consumer_metadata::ShareConsumerMetadata;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3b on")]
 pub(crate) use share_fetch_config::ShareFetchConfig;
 #[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P3a on")]
 pub(crate) use share_fetch_metrics_aggregator::ShareFetchMetricsAggregator;
@@ -201,6 +201,8 @@ pub(crate) use share_fetch_metrics_registry::ShareFetchMetricsRegistry;
 #[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P6 on")]
 pub(crate) use share_heartbeat_request_manager::ShareHeartbeatRequestManager;
 pub(crate) use share_membership_manager::ShareMembershipManager;
+#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P5a on")]
+pub(crate) use share_session_handler::ShareSessionHandler;
 pub(crate) use subscription_state::{FetchPosition, LogTruncation, SubscriptionState};
 pub(crate) use timed_request_state::TimedRequestState;
 pub(crate) use topic_metadata_request_manager::TopicMetadataRequestManager;
