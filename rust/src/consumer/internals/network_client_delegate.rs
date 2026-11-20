@@ -534,9 +534,11 @@ impl NetworkClientDelegate<crate::NetworkClient<crate::common::network::Selector
     ///
     /// # Errors
     ///
-    /// `Error::Config` when the channel builder cannot be created from the
-    /// security settings, or when `bootstrap.servers` holds a malformed URL
-    /// with asynchronous bootstrap resolution enabled.
+    /// A `KafkaError` with `"Failed to create new NetworkClient"` (Java's
+    /// `ClientUtils#createNetworkClient` wrap), whose source is the
+    /// `Error::Config` of a channel builder the security settings cannot make,
+    /// or of a malformed URL in `bootstrap.servers` with asynchronous bootstrap
+    /// resolution enabled.
     #[expect(clippy::too_many_arguments, reason = "the Java supplier's parameters")]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#supplier")]
     pub(crate) fn supplier(
@@ -557,54 +559,60 @@ impl NetworkClientDelegate<crate::NetworkClient<crate::common::network::Selector
         use crate::common::network::{ChannelBuilders, Selector};
         use crate::consumer::internals::ConsumerUtils;
 
-        // `ClientUtils#createChannelBuilder(config, time, logContext)`; as in
-        // `AsyncKafkaConsumer::new`, a failure is a `ConfigException`.
-        let channel_builder = ChannelBuilders::client_channel_builder(
-            config.security_protocol,
-            Some(&config.ssl_config),
-            Some(&config.sasl_config),
-            None,
-            config.client_id(),
-            log_context.clone(),
-        )
-        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
-        let mut selector = Selector::with_defaults_and_log_context(
-            config.connections_max_idle_ms,
-            channel_builder,
-            log_context.clone(),
-        );
-        selector.set_time(Arc::clone(&time));
-        let mut network_client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
-            selector,
-            Arc::clone(&metadata),
-            config.client_id(),
-            ConsumerUtils::CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION as usize,
-            config.reconnect_backoff_ms,
-            config.reconnect_backoff_max_ms,
-            config.send_buffer_bytes,
-            config.receive_buffer_bytes,
-            config.request_timeout_ms,
-            config.socket_connection_setup_timeout_ms,
-            config.socket_connection_setup_timeout_max_ms,
-            true,
-            api_versions,
-            DefaultHostResolver::new(),
-            config.metadata_recovery_rebootstrap_trigger_ms,
-            MetadataRecoveryStrategy::for_name(config.metadata_recovery_strategy())
-                .map_err(Error::local_illegal_argument)?,
-            log_context,
-        );
-        network_client.set_time(time);
-        network_client.set_metadata_cluster_check_enable(config.metadata_cluster_check_enable);
-        if let Some(throttle_time_sensor) = throttle_time_sensor {
-            network_client.set_throttle_time_sensor(throttle_time_sensor);
-        }
-        network_client.set_bootstrap_configuration(ClientUtils::bootstrap_configuration(
-            config.bootstrap_resolve_timeout_ms(),
-            config.client_dns_lookup(),
-            config.retry_backoff_ms(),
-            config.bootstrap_servers(),
-        )?);
+        // Java's `ClientUtils#createNetworkClient` wraps any failure of these
+        // steps as "Failed to create new NetworkClient".
+        let network_client = (|| -> Result<_, Error> {
+            // `ClientUtils#createChannelBuilder(config, time, logContext)`; as in
+            // `AsyncKafkaConsumer::new`, a failure is a `ConfigException`.
+            let channel_builder = ChannelBuilders::client_channel_builder(
+                config.security_protocol,
+                Some(&config.ssl_config),
+                Some(&config.sasl_config),
+                None,
+                config.client_id(),
+                log_context.clone(),
+            )
+            .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
+            let mut selector = Selector::with_defaults_and_log_context(
+                config.connections_max_idle_ms,
+                channel_builder,
+                log_context.clone(),
+            );
+            selector.set_time(Arc::clone(&time));
+            let mut network_client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
+                selector,
+                Arc::clone(&metadata),
+                config.client_id(),
+                ConsumerUtils::CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION as usize,
+                config.reconnect_backoff_ms,
+                config.reconnect_backoff_max_ms,
+                config.send_buffer_bytes,
+                config.receive_buffer_bytes,
+                config.request_timeout_ms,
+                config.socket_connection_setup_timeout_ms,
+                config.socket_connection_setup_timeout_max_ms,
+                true,
+                api_versions,
+                DefaultHostResolver::new(),
+                config.metadata_recovery_rebootstrap_trigger_ms,
+                MetadataRecoveryStrategy::for_name(config.metadata_recovery_strategy())
+                    .map_err(Error::local_illegal_argument)?,
+                log_context,
+            );
+            network_client.set_time(time);
+            network_client.set_metadata_cluster_check_enable(config.metadata_cluster_check_enable);
+            if let Some(throttle_time_sensor) = throttle_time_sensor {
+                network_client.set_throttle_time_sensor(throttle_time_sensor);
+            }
+            network_client.set_bootstrap_configuration(ClientUtils::bootstrap_configuration(
+                config.bootstrap_resolve_timeout_ms(),
+                config.client_dns_lookup(),
+                config.retry_backoff_ms(),
+                config.bootstrap_servers(),
+            )?);
+            Ok(network_client)
+        })()
+        .map_err(|e| Error::kafka_message_source("Failed to create new NetworkClient", e))?;
         let mut delegate = NetworkClientDelegate::new(
             config,
             network_client,
