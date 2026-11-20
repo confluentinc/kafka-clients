@@ -513,6 +513,7 @@ where
 
     /// The acknowledgements given so far.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareInFlightBatch#getAcknowledgements")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn acknowledgements(&self) -> &Acknowledgements {
         &self.acknowledgements
     }

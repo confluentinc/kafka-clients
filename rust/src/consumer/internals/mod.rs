@@ -21,15 +21,7 @@ mod abstract_fetch;
 mod abstract_heartbeat_request_manager;
 pub(crate) mod abstract_membership_manager;
 mod acknowledgement_batch;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
-)]
 mod acknowledgement_commit_callback_handler;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
-)]
 mod acknowledgements;
 mod async_kafka_consumer;
 pub(crate) mod auto_offset_reset_strategy;
@@ -47,10 +39,6 @@ mod consumer_protocol;
 pub(crate) use consumer_protocol::ConsumerProtocol;
 mod consumer_rebalance_listener_invoker;
 mod consumer_rebalance_listener_method_name;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
-)]
 mod consumer_share_fetch_error;
 mod consumer_share_in_flight_batch_error;
 mod consumer_utils;
@@ -81,43 +69,29 @@ mod positions_validator;
 mod request_manager;
 mod request_managers;
 mod request_state;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
-)]
 pub(crate) mod share_acknowledgement_mode;
 pub(crate) mod share_acquire_mode;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
-)]
 mod share_completed_fetch;
 mod share_consume_request_manager;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "KafkaShareConsumer uses it from Milestone 18 P8 on")
+)]
+mod share_consumer_impl;
 mod share_consumer_metadata;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
+    expect(dead_code, reason = "in Java only the visible-for-testing constructor uses it")
 )]
+mod share_consumer_metrics;
 mod share_fetch;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
-)]
 mod share_fetch_buffer;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
-)]
 mod share_fetch_collector;
 mod share_fetch_config;
 mod share_fetch_metrics_aggregator;
 mod share_fetch_metrics_manager;
 mod share_fetch_metrics_registry;
 mod share_heartbeat_request_manager;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
-)]
 pub(crate) mod share_in_flight_batch;
 mod share_membership_manager;
 mod share_session_handler;
@@ -132,7 +106,6 @@ pub(crate) use abstract_heartbeat_request_manager::{
 };
 pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment, MembershipManagerHooks};
 pub(crate) use acknowledgement_batch::AcknowledgementBatch;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")]
 pub(crate) use acknowledgement_commit_callback_handler::AcknowledgementCommitCallbackHandler;
 pub(crate) use acknowledgements::Acknowledgements;
 pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;
@@ -181,18 +154,18 @@ pub(crate) use positions_validator::PositionsValidator;
 pub(crate) use request_manager::RequestManager;
 pub(crate) use request_managers::RequestManagers;
 pub(crate) use request_state::RequestState;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")]
 pub(crate) use share_acknowledgement_mode::ShareAcknowledgementMode;
 pub(crate) use share_acquire_mode::ShareAcquireMode;
 pub(crate) use share_completed_fetch::ShareCompletedFetch;
 pub(crate) use share_consume_request_manager::ShareConsumeRequestManager;
 pub(crate) use share_consumer_metadata::ShareConsumerMetadata;
-pub(crate) use share_fetch::ShareFetch;
-pub(crate) use share_fetch_buffer::ShareFetchBuffer;
 #[cfg_attr(
     not(test),
-    expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P7 on")
+    expect(unused_imports, reason = "in Java only the visible-for-testing constructor uses it")
 )]
+pub(crate) use share_consumer_metrics::ShareConsumerMetrics;
+pub(crate) use share_fetch::ShareFetch;
+pub(crate) use share_fetch_buffer::ShareFetchBuffer;
 pub(crate) use share_fetch_collector::ShareFetchCollector;
 pub(crate) use share_fetch_config::ShareFetchConfig;
 pub(crate) use share_fetch_metrics_aggregator::ShareFetchMetricsAggregator;

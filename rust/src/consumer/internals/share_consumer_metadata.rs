@@ -120,10 +120,6 @@ impl ShareConsumerMetadata {
     /// `retry.backoff.max.ms`, `metadata.max.age.ms` and
     /// `allow.auto.create.topics`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerMetadata#ShareConsumerMetadata")]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "ShareConsumerImpl uses it from Milestone 18 P7 on")
-    )]
     pub(crate) fn with_config(
         config: &ConsumerConfig,
         subscriptions: Arc<Mutex<SubscriptionState>>,

@@ -93,6 +93,7 @@ impl Acknowledgements {
     /// Gets the acknowledgement type for an offset: `None` if no
     /// acknowledgement is present, or if the offset is a gap.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.Acknowledgements#get")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn get(&self, offset: i64) -> Option<AcknowledgeType> {
         self.acknowledgements.get(&offset).copied().flatten()
     }

@@ -99,6 +99,7 @@ pub(crate) struct ShareCompletedFetch {
     /// is copied.
     pub(crate) partition_data: PartitionData,
     pub(crate) acquisition_lock_timeout_ms: Option<i32>,
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java sets the field and reads it nowhere"))]
     pub(crate) request_version: i16,
 
     /// The size of the partition's records, for the collector's log line

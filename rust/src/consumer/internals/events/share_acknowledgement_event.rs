@@ -65,6 +65,13 @@ impl ShareAcknowledgementEvent {
         &self.acknowledgements_map
     }
 
+    /// The completed acknowledgements, by partition, taken out of the event
+    /// (the application task keeps them for the acknowledgement commit
+    /// callback, as Java keeps the event's map).
+    pub(crate) fn into_acknowledgements_map(self) -> HashMap<TopicIdPartition, Acknowledgements> {
+        self.acknowledgements_map
+    }
+
     /// Whether the application task checks the acknowledgements for `RENEW`s
     /// and renews the records they name.
     #[doc(

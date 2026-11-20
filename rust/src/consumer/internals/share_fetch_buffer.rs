@@ -139,12 +139,26 @@ impl ShareFetchBuffer {
     /// Calls `f` with the head of the queue without removing it: Java's
     /// `peek()`. The buffer's lock is held during the call.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchBuffer#peek")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the collector checks the fetch out (poll_checked_out) where Java peeks"
+        )
+    )]
     pub(crate) fn peek<R>(&self, f: impl FnOnce(Option<&ShareCompletedFetch>) -> R) -> R {
         f(self.lock().completed_fetches.front())
     }
 
     /// Removes and returns the head of the queue.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchBuffer#poll")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the collector checks the fetch out (poll_checked_out) where Java polls"
+        )
+    )]
     pub(crate) fn poll(&self) -> Option<ShareCompletedFetch> {
         self.lock().completed_fetches.pop_front()
     }
@@ -206,6 +220,13 @@ impl ShareFetchBuffer {
 
     /// Ends a wait in [`Self::await_not_empty`].
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchBuffer#wakeup")]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Java calls it from WakeupTrigger; the share poll ends its wait on the wakeup token (ledger G7)"
+        )
+    )]
     pub(crate) fn wakeup(&self) {
         self.woken_up.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
@@ -214,6 +235,7 @@ impl ShareFetchBuffer {
     /// Return the set of partitions for which we have data in the buffer or
     /// pending acknowledgements.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchBuffer#bufferedPartitions")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn buffered_partitions(&self) -> HashSet<TopicIdPartition> {
         let mut inner = self.lock();
         let mut partitions = HashSet::new();

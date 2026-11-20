@@ -94,6 +94,7 @@ impl ShareAcknowledgementMode {
 
     /// Returns the name of the acknowledgement mode.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareAcknowledgementMode#name")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "Java uses it only in its tests"))]
     pub(crate) fn name(&self) -> &'static str {
         self.acknowledgement_mode.as_str()
     }

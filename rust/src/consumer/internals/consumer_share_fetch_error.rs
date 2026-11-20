@@ -46,12 +46,20 @@ impl<K, V> ConsumerShareFetchError<K, V> {
 
     /// The fetch built so far.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchException#shareFetch")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the poll catch site takes the parts with into_parts")
+    )]
     pub(crate) fn share_fetch(&self) -> &ShareFetch<K, V> {
         &self.share_fetch
     }
 
     /// The failure that ended the collection.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchException#cause")]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the poll catch site takes the parts with into_parts")
+    )]
     pub(crate) fn cause(&self) -> &Error {
         &self.cause
     }

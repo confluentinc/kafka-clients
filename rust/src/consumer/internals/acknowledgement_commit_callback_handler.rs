@@ -55,6 +55,13 @@ impl AcknowledgementCommitCallbackHandler {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.AcknowledgementCommitCallbackHandler#hasEnteredCallback"
     )]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Java reads it in ShareConsumerImpl#acquire; Rust checks at compile time (decision D6)"
+        )
+    )]
     pub(crate) fn has_entered_callback(&self) -> bool {
         self.entered_callback
     }

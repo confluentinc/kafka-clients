@@ -134,10 +134,6 @@ impl ShareFetchMetricsManager {
     /// record the broker's `throttle_time_ms` into (Java `throttleTimeSensor()`,
     /// which `ShareConsumerImpl` passes to the network client).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchMetricsManager#throttleTimeSensor")]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "ShareConsumerImpl uses it from Milestone 18 P7 on")
-    )]
     pub(crate) fn throttle_time_sensor(&self) -> Arc<Sensor> {
         Arc::clone(&self.throttle_time)
     }

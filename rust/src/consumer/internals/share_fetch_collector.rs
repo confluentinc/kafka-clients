@@ -91,6 +91,29 @@ where
         }
     }
 
+    /// The deserializers the collector decodes with, shared with the share
+    /// consumer (Java's `ShareConsumerImpl` and its collector hold the same
+    /// `Deserializers`).
+    pub(crate) fn deserializers(&self) -> &Deserializers<K, V> {
+        &self.deserializers
+    }
+
+    /// Closes the deserializers (Java's `ShareConsumerImpl#close` closes them
+    /// through its own reference to the shared object).
+    ///
+    /// # Errors
+    ///
+    /// The error of [`Deserializers::close`], or an illegal-state error when
+    /// the deserializers are still shared and so cannot be closed.
+    pub(crate) async fn close_deserializers(&mut self) -> Result<(), Error> {
+        match Arc::get_mut(&mut self.deserializers) {
+            Some(deserializers) => deserializers.close().await,
+            None => Err(Error::local_illegal_state(
+                "Cannot close the consumer deserializers: they are still shared",
+            )),
+        }
+    }
+
     /// Return the fetched records.
     ///
     /// Reads up to `max.poll.records` records from the buffer's fetches. When a
