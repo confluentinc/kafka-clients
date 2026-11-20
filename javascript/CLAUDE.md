@@ -626,12 +626,17 @@ binding:
   finalizes an open producer, even once the `KafkaProducer` object is
   collected; after the close the reference is weak, and the finalizer
   destroys the closed producer (rule 10).
-- The never-closed warning (`src/internal/lifecycle.ts`, `process`
-  `'beforeExit'`, code `CONFLUENT_KAFKA_PRODUCER_NOT_CLOSED`) is still in
-  the code, but it can no longer fire: an open producer keeps the event loop
-  from emptying, so `'beforeExit'` never comes while one is open. When and
-  how the warning is logged is not decided yet in the JS conventions, so
-  the code stays as it is until it is.
+- A producer never closed gets no warning. The code once counted the open
+  producers and warned at `process` `'beforeExit'`, but an open producer
+  keeps the event loop from emptying, so `'beforeExit'` never comes while
+  one is open and the warning could never print. A review comment on Q21 says the case "should not happen, because
+  producer is alive", so the dead code was removed (`DECISIONS.md`, entry
+  35), and the admin client gets none either. **(conventions conflict)** The JS
+  conventions' Lifetime rule says "A client that's never closed runs until
+  the process exits, with a warning", and their "Not decided yet" table has
+  a row on when and how that warning is logged; both describe a case the
+  comment says can't happen, so the binding logs nothing. The wording
+  proposed to the rules' owner drops "with a warning" and the row.
 - Clients in worker threads are not supported in the preview (JS
   conventions, Threads and callbacks); the binding keeps no check for one. A
   worker ended with its producer open (`worker.terminate()`,
@@ -1697,10 +1702,8 @@ modules), a member named by a well-known symbol keyed
 `<Class>.[Symbol.<name>]` (`KafkaProducer.[Symbol.asyncDispose]`,
 `Headers.[Symbol.iterator]`), each with its reason, and `javaTargets`, the Java class or member of
 an item the naming convention does not find; the other invented names are
-`NODE_DEBUG=confluent_kafka`, the warning code
-`CONFLUENT_KAFKA_PRODUCER_NOT_CLOSED` (of the warning for a producer never
-closed, whose form is not decided yet in the JS conventions), and the
-platform package names.
+`NODE_DEBUG=confluent_kafka` and the platform package names (the
+never-closed warning and its code are gone: "Threads and liveness").
 
 The rules, each named in its finding:
 
