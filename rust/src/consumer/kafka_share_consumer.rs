@@ -488,7 +488,8 @@ use crate::consumer::{
 /// thread interrupts: drop the future instead, for example with `tokio::time::timeout`.
 ///
 /// A record acknowledged with [`AcknowledgeType::Renew`] is returned again as a new
-/// `ConsumerRecord`, its key and value deserialized again, where Java returns the same object.
+/// `ConsumerRecord`, its key and value deserialized again once per redelivery, where Java
+/// returns the same object; see the warning on [`AcknowledgeType::Renew`].
 ///
 /// The consumer cannot be shared between threads:
 ///
