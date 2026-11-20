@@ -127,7 +127,8 @@ const JAVA_NAMES = new Map([
     'exception',
     {
       reason:
-        "the parameter of Java's Callback#onCompletion, a named parameter of the send callback's one object " +
+        "the parameter of Java's Callback#onCompletion, a named parameter of the send callback's one object, and of " +
+        "Java's CreateTopicsResult.TopicMetadataAndConfig constructor, a key of its options object " +
         '(javascript/CLAUDE.md "Java shape, JS idiom": parameters are named as Java names them, as the Python client\'s are), ' +
         'as a property name only',
       where: isPropertyName,

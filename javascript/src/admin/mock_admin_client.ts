@@ -24,8 +24,9 @@
 // Left out, for want of an FFI entry point (the admin package's
 // documentation lists them): brokers(), broker(int), injectTimeoutException,
 // handleDescribeTopicsUsingIds, setMockMetrics, addedMetrics,
-// disableTelemetry, setClientInstanceId, advanceTimeOnClientInstanceId and
-// addStreamsGroupDescription.
+// disableTelemetry, setClientInstanceId, advanceTimeOnClientInstanceId,
+// addStreamsGroupDescription, and the five-parameter form of addTopic,
+// addTopic(internal, name, partitions, configs, usesTopicId).
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
 import native = require('../internal/native');
@@ -35,8 +36,24 @@ import type { AdminHandle } from '../internal/admin_result';
 import { checkInt } from '../internal/java_number';
 import { applyOptionKeys, checkBoolean, Setter } from '../internal/options';
 import { Node } from '../common/node';
+import { TopicPartitionInfo } from '../common/topic_partition_info';
 import type { Duration } from '../duration';
 import type { Admin } from './admin';
+import type { CreatePartitionsOptions } from './create_partitions_options';
+import type { CreatePartitionsResult } from './create_partitions_result';
+import type { CreateTopicsOptions } from './create_topics_options';
+import type { CreateTopicsResult } from './create_topics_result';
+import type { DeleteRecordsOptions } from './delete_records_options';
+import type { DeleteRecordsResult } from './delete_records_result';
+import type { DeleteTopicsOptions } from './delete_topics_options';
+import type { DeleteTopicsResult } from './delete_topics_result';
+import type { DescribeTopicsOptions } from './describe_topics_options';
+import type { DescribeTopicsResult } from './describe_topics_result';
+import type { NewPartitions } from './new_partitions';
+import type { NewTopic } from './new_topic';
+import type { RecordsToDelete } from './records_to_delete';
+import type { TopicCollection } from '../common/topic_collection';
+import type { TopicPartitionMap } from '../common/topic_partition_map';
 import type { DescribeClusterOptions } from './describe_cluster_options';
 import type { DescribeClusterResult } from './describe_cluster_result';
 import type { CloseArgs } from './kafka_admin_client';
@@ -48,6 +65,13 @@ const CREATE_FORMS = new JavaForms('create', [[]]);
 const CONTROLLER_FORMS = new JavaForms('controller', [['controller']], {
   bareTypes: { controller: (value) => value === null || value instanceof Node },
 });
+const ADD_TOPIC_FORMS = new JavaForms('addTopic', [['internal', 'name', 'partitions', 'configs']]);
+const MARK_TOPIC_FOR_DELETION_FORMS = new JavaForms('markTopicForDeletion', [['name']], {
+  bareTypes: { name: (value) => value === null || typeof value === 'string' },
+});
+const SET_FETCHES_REMAINING_UNTIL_VISIBLE_FORMS = new JavaForms('setFetchesRemainingUntilVisible', [
+  ['topicName', 'fetchesRemainingUntilVisible'],
+]);
 const TIMEOUT_NEXT_REQUEST_FORMS = new JavaForms('timeoutNextRequest', [['numberOfRequest']], {
   bareTypes: { numberOfRequest: (value) => typeof value === 'number' },
 });
@@ -97,6 +121,18 @@ let adopting: AdminHandle | null = null;
  * futures complete through the same native path as a `KafkaAdminClient`'s.
  * Java ships it in its test fixtures; it is public here, as in the Rust core.
  * It emits no preview warning.
+ *
+ * *(deviation)* Java's mock completes a call's futures before it returns;
+ * here, right after a call, a future's `isDone()`, `isCompletedExceptionally()`
+ * and `getNow()` don't yet show the outcome, and a `thenApply` or
+ * `whenComplete` registered then runs on a later turn, not inside the call.
+ * They show it, and it runs, on a later turn of the event loop, once the
+ * core's task answers; `await get()` is unaffected. Why: the core's
+ * `kafka_common_KafkaFuture_get_cb` answers even a completed future from a
+ * task it spawns, and the binding calls no blocking C function. Goes when: the
+ * core queues a completed future's answer before `get_cb` returns; the binding
+ * then answers its queued callbacks once at the end of each call, as
+ * `MockProducer` does.
  */
 export class MockAdminClient implements Admin {
   /** The cluster id of a mock a Builder builds unless it sets one. */
@@ -205,6 +241,66 @@ export class MockAdminClient implements Admin {
   controller(controller: unknown): void {
     CONTROLLER_FORMS.match(controller, arguments.length);
     native.mockAdminController(this.#handle, nodeFieldsOrNull(CONTROLLER_FORMS.value(controller, 'controller'), 'controller'));
+  }
+
+  /**
+   * Adds a topic to the mock's cluster, as if it had been created, with the
+   * given partitions and configuration.
+   *
+   * @param options - whether the topic is internal, its name, its partitions
+   *   and its configuration (null for none)
+   * @throws `IllegalArgumentError` when the topic was already added ("Topic
+   *   <name> was already added.")
+   * @throws `TypeError` for a value of the wrong type
+   */
+  addTopic(options: {
+    /** Whether the topic is internal. */
+    internal: boolean;
+    /** The topic's name. */
+    name: string;
+    /** The topic's partitions. */
+    partitions: Iterable<TopicPartitionInfo>;
+    /** The topic's configuration, or null. */
+    configs: ReadonlyMap<string, string | null> | Readonly<Record<string, string | null>> | null;
+  }): void {
+    ADD_TOPIC_FORMS.match(options, arguments.length);
+    const internal = ADD_TOPIC_FORMS.value(options, 'internal');
+    if (typeof internal !== 'boolean') throw new TypeError(`internal must be a boolean, not ${kind(internal)}`);
+    const name = ADD_TOPIC_FORMS.value(options, 'name');
+    if (name !== null && typeof name !== 'string') throw new TypeError(`name must be a string, not ${kind(name)}`);
+    const partitions = ADD_TOPIC_FORMS.value(options, 'partitions');
+    if (partitions === null) throw new TypeError('partitions must not be null');
+    if (typeof partitions !== 'object' || typeof (partitions as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function') {
+      throw new TypeError(`partitions must be an iterable of TopicPartitionInfo, not ${kind(partitions)}`);
+    }
+    const infos = [];
+    for (const p of partitions as Iterable<unknown>) {
+      if (p === null) throw new TypeError('partitions must not contain null');
+      if (!(p instanceof TopicPartitionInfo)) throw new TypeError(`partitions must contain only TopicPartitionInfo, not ${kind(p)}`);
+      infos.push(calls.topicPartitionInfoFields(p));
+    }
+    const configs = ADD_TOPIC_FORMS.value(options, 'configs');
+    native.mockAdminAddTopic(this.#handle, internal, name, infos, configs === null ? null : calls.stringMapPairs(configs, 'configs'));
+  }
+
+  /**
+   * Marks a topic for deletion: the mock's describeTopics leaves it out from
+   * then on.
+   *
+   * @param name - the topic's name, on its own or as `{ name }`
+   * @throws `IllegalArgumentError` when the topic does not exist ("Topic
+   *   <name> did not exist.")
+   */
+  markTopicForDeletion(name: string): void;
+  markTopicForDeletion(options: {
+    /** The topic's name. */
+    name: string;
+  }): void;
+  markTopicForDeletion(name: unknown): void {
+    MARK_TOPIC_FOR_DELETION_FORMS.match(name, arguments.length);
+    const topic = MARK_TOPIC_FOR_DELETION_FORMS.value(name, 'name');
+    if (topic !== null && typeof topic !== 'string') throw new TypeError(`name must be a string, not ${kind(topic)}`);
+    native.mockAdminMarkTopicForDeletion(this.#handle, topic);
   }
 
   /**
@@ -347,6 +443,316 @@ export class MockAdminClient implements Admin {
   describeCluster(options?: unknown): DescribeClusterResult {
     return calls.describeCluster(this.#handle, options, arguments.length);
   }
+
+  /**
+   * Create a batch of new topics.
+   *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others. It may take several seconds after the result
+   * returns successfully for all the brokers to become aware that the topics
+   * have been created; during this time, `listTopics()` and `describeTopics()`
+   * may not return information about the new topics. This operation is
+   * supported by brokers with version 0.10.1.0 or higher. The validateOnly
+   * option is supported from version 0.10.2.0.
+   *
+   * @param newTopics - The new topics to create.
+   * @returns The CreateTopicsResult.
+   */
+  createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
+  /**
+   * The same as `createTopics(newTopics)`, the newTopics given by name.
+   *
+   * @param args - the newTopics
+   * @returns The CreateTopicsResult.
+   */
+  createTopics(args: {
+    /** The new topics to create. */
+    newTopics: Iterable<NewTopic>;
+    options?: never;
+  }): CreateTopicsResult;
+  /**
+   * Create a batch of new topics.
+   *
+   * @param args - the newTopics, and the options to use
+   * @returns The CreateTopicsResult.
+   */
+  createTopics(args: {
+    /** The new topics to create. */
+    newTopics: Iterable<NewTopic>;
+    /** The options to use when creating the new topics. */
+    options: CreateTopicsOptions;
+  }): CreateTopicsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  createTopics(args: unknown): CreateTopicsResult {
+    return calls.createTopics(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Delete a batch of topics.
+   *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others. It may take several seconds after the result
+   * returns successfully for all the brokers to become aware that the topics
+   * are gone; during this time, `listTopics()` and `describeTopics()` may
+   * continue to return information about the deleted topics. If
+   * delete.topic.enable is false on the brokers, deleteTopics will mark the
+   * topics for deletion, but not actually delete them; the futures will return
+   * successfully in this case. When using topic IDs, this operation is
+   * supported by brokers with inter-broker protocol 2.8 or higher; when using
+   * topic names, by brokers with version 0.10.1.0 or higher.
+   *
+   * @param topics - The topic names, or the topics, to delete.
+   * @returns The DeleteTopicsResult.
+   */
+  deleteTopics(topics: Iterable<string> | TopicCollection): DeleteTopicsResult;
+  /**
+   * The same as `deleteTopics(topics)`, the topics given by name.
+   *
+   * @param args - the topics
+   * @returns The DeleteTopicsResult.
+   */
+  deleteTopics(args: {
+    /** The topic names, or the topics, to delete. */
+    topics: Iterable<string> | TopicCollection;
+    options?: never;
+  }): DeleteTopicsResult;
+  /**
+   * Delete a batch of topics.
+   *
+   * @param args - the topics, and the options to use
+   * @returns The DeleteTopicsResult.
+   */
+  deleteTopics(args: {
+    /** The topic names, or the topics, to delete. */
+    topics: Iterable<string> | TopicCollection;
+    /** The options to use when deleting the topics. */
+    options: DeleteTopicsOptions;
+  }): DeleteTopicsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  deleteTopics(args: unknown): DeleteTopicsResult {
+    return calls.deleteTopics(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Describe some topics in the cluster.
+   *
+   * When using topic IDs, this operation is supported by brokers with version
+   * 3.1.0 or higher.
+   *
+   * @param topicNames - The names of the topics to describe.
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
+  /**
+   * The same as `describeTopics(topicNames)`, the topicNames given by name.
+   *
+   * @param args - the topicNames
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(args: {
+    /** The names of the topics to describe. */
+    topicNames: Iterable<string>;
+    topics?: never;
+    options?: never;
+  }): DescribeTopicsResult;
+  /**
+   * Describe some topics in the cluster.
+   *
+   * @param args - the topicNames, and the options to use
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(args: {
+    /** The names of the topics to describe. */
+    topicNames: Iterable<string>;
+    /** The options to use when describing the topics. */
+    options: DescribeTopicsOptions;
+    topics?: never;
+  }): DescribeTopicsResult;
+  /**
+   * Describe some topics in the cluster.
+   *
+   * When using topic IDs, this operation is supported by brokers with version
+   * 3.1.0 or higher.
+   *
+   * @param topics - The topics to describe.
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(topics: TopicCollection): DescribeTopicsResult;
+  /**
+   * The same as `describeTopics(topics)`, the topics given by name.
+   *
+   * @param args - the topics
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(args: {
+    /** The topics to describe. */
+    topics: TopicCollection;
+    topicNames?: never;
+    options?: never;
+  }): DescribeTopicsResult;
+  /**
+   * Describe some topics in the cluster.
+   *
+   * @param args - the topics, and the options to use
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(args: {
+    /** The topics to describe. */
+    topics: TopicCollection;
+    /** The options to use when describing the topics. */
+    options: DescribeTopicsOptions;
+    topicNames?: never;
+  }): DescribeTopicsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  describeTopics(args: unknown): DescribeTopicsResult {
+    return calls.describeTopics(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Increase the number of partitions of the topics given as the keys of
+   * `newPartitions` according to the corresponding values. **If partitions are
+   * increased for a topic that has a key, the partition logic or ordering of
+   * the messages will be affected.**
+   *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others. It may take several seconds after this method
+   * returns success for all the brokers to become aware that the partitions
+   * have been created. This operation is supported by brokers with version
+   * 1.0.0 or higher.
+   *
+   * @param newPartitions - The topics which should have new partitions created, and corresponding parameters for the created partitions.
+   * @returns The CreatePartitionsResult.
+   */
+  createPartitions(newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>): CreatePartitionsResult;
+  /**
+   * The same as `createPartitions(newPartitions)`, the newPartitions given by name.
+   *
+   * @param args - the newPartitions
+   * @returns The CreatePartitionsResult.
+   */
+  createPartitions(args: {
+    /** The topics which should have new partitions created, and corresponding parameters for the created partitions. */
+    newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
+    options?: never;
+  }): CreatePartitionsResult;
+  /**
+   * Increase the number of partitions of the topics given as the keys of
+   * `newPartitions` according to the corresponding values. **If partitions are
+   * increased for a topic that has a key, the partition logic or ordering of
+   * the messages will be affected.**
+   *
+   * @param args - the newPartitions, and the options to use
+   * @returns The CreatePartitionsResult.
+   */
+  createPartitions(args: {
+    /** The topics which should have new partitions created, and corresponding parameters for the created partitions. */
+    newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
+    /** The options to use when creating the new partitions. */
+    options: CreatePartitionsOptions;
+  }): CreatePartitionsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  createPartitions(args: unknown): CreatePartitionsResult {
+    return calls.createPartitions(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Delete records whose offset is smaller than the given offset of the
+   * corresponding partition.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
+   *
+   * @param recordsToDelete - The topic partitions and related offsets from which records deletion starts.
+   * @returns The DeleteRecordsResult.
+   */
+  deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
+  /**
+   * The same as `deleteRecords(recordsToDelete)`, the recordsToDelete given by name.
+   *
+   * @param args - the recordsToDelete
+   * @returns The DeleteRecordsResult.
+   */
+  deleteRecords(args: {
+    /** The topic partitions and related offsets from which records deletion starts. */
+    recordsToDelete: TopicPartitionMap<RecordsToDelete>;
+    options?: never;
+  }): DeleteRecordsResult;
+  /**
+   * Delete records whose offset is smaller than the given offset of the
+   * corresponding partition.
+   *
+   * @param args - the recordsToDelete, and the options to use
+   * @returns The DeleteRecordsResult.
+   */
+  deleteRecords(args: {
+    /** The topic partitions and related offsets from which records deletion starts. */
+    recordsToDelete: TopicPartitionMap<RecordsToDelete>;
+    /** The options to use when deleting records. */
+    options: DeleteRecordsOptions;
+  }): DeleteRecordsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  deleteRecords(args: unknown): DeleteRecordsResult {
+    return calls.deleteRecords(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Makes a topic visible to `describeTopics` only after the given number of
+   * describe calls.
+   *
+   * @param options - the topic's name and the number of describe calls
+   * @throws `IllegalArgumentError` when there is no such topic ("No such
+   *   topic as <topicName>")
+   * @throws `TypeError` or `RangeError` for a value of the wrong type
+   */
+  setFetchesRemainingUntilVisible(options: {
+    /** The topic's name. */
+    topicName: string;
+    /** The number of describe calls before the topic is visible. */
+    fetchesRemainingUntilVisible: number;
+  }): void {
+    SET_FETCHES_REMAINING_UNTIL_VISIBLE_FORMS.match(options, arguments.length);
+    const topicName = SET_FETCHES_REMAINING_UNTIL_VISIBLE_FORMS.value(options, 'topicName');
+    if (topicName !== null && typeof topicName !== 'string') throw new TypeError(`topicName must be a string, not ${kind(topicName)}`);
+    const count = checkInt(
+      SET_FETCHES_REMAINING_UNTIL_VISIBLE_FORMS.value(options, 'fetchesRemainingUntilVisible'),
+      'fetchesRemainingUntilVisible',
+    );
+    native.mockAdminSetFetchesRemainingUntilVisible(this.#handle, topicName, count);
+  }
 }
 
 const isInt = (value: unknown): boolean => typeof value === 'number';
@@ -355,7 +761,7 @@ const NUM_BROKERS = new Setter('numBrokers', null, isInt);
 const BROKERS = new Setter('brokers', null, (value) => value === null || (typeof value === 'object' && Symbol.iterator in value));
 const CONTROLLER = new Setter('controller', null, isInt, 'index');
 const CLUSTER_ID = new Setter('clusterId', null, (value) => value === null || typeof value === 'string');
-const BROKER_LOG_DIRS = new Setter('brokerLogDirs', null, (value) => value === null || Array.isArray(value));
+const BROKER_LOG_DIRS = new Setter('brokerLogDirs', null, (value) => value === null || isIterable(value));
 const DEFAULT_REPLICATION_FACTOR = new Setter('defaultReplicationFactor', null, isInt);
 const USING_RAFT_CONTROLLER = new Setter('usingRaftController', null, (value) => typeof value === 'boolean');
 const DEFAULT_PARTITIONS = new Setter('defaultPartitions', null, isInt, 'numPartitions');
@@ -387,16 +793,27 @@ function stringMapPairs<V>(value: unknown, name: string, check: (v: unknown) => 
 }
 
 /**
- * A Java `short` feature level.
+ * A Java `short` argument named `what`.
+ *
+ * @param value - the value given
+ * @param what - the parameter's name, for the error
+ * @returns the value
+ * @throws `TypeError` when it is not a whole number
+ * @throws `RangeError` when it is beyond Java's `short`
+ */
+function checkShort(value: unknown, what: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError(`${what} must be an integer`);
+  if (value < -32768 || value > 32767) throw new RangeError(`${what} must be from -32768 to 32767`);
+  return value;
+}
+
+/**
+ * A feature level, a Java `short`.
  *
  * @param value - the value given
  * @returns the level
  */
-function checkShort(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError('a feature level must be an integer');
-  if (value < -32768 || value > 32767) throw new RangeError('a feature level must be from -32768 to 32767');
-  return value;
-}
+const featureLevel = (value: unknown): number => checkShort(value, 'a feature level');
 
 /**
  * A config value of `defaultGroupConfigs`.
@@ -417,13 +834,27 @@ function checkString(value: unknown): string {
  */
 function logDirs(value: unknown): string[][] | null {
   if (value === null) return null;
-  if (!Array.isArray(value)) throw new TypeError(`brokerLogDirs must be an array of arrays of strings, not ${kind(value)}`);
-  return value.map((dirs: unknown) => {
-    if (!Array.isArray(dirs) || dirs.some((d) => typeof d !== 'string')) {
-      throw new TypeError('brokerLogDirs must be an array of arrays of strings');
-    }
-    return [...(dirs as string[])];
+  // Java's List<List<String>>: any iterable of iterables of strings, never a
+  // string (root CLAUDE.md, JavaScript Binding Conventions, Class family).
+  const what = 'brokerLogDirs must be an iterable of iterables of strings';
+  if (!isIterable(value)) throw new TypeError(`${what}, not ${kind(value)}`);
+  return [...(value as Iterable<unknown>)].map((dirs) => {
+    if (!isIterable(dirs)) throw new TypeError(`${what}, not one holding ${kind(dirs)}`);
+    const list = [...(dirs as Iterable<unknown>)];
+    for (const d of list) if (typeof d !== 'string') throw new TypeError(`${what}, not one holding ${kind(d)}`);
+    return list as string[];
   });
+}
+
+/**
+ * Whether `value` is an iterable a Java collection is taken as: an object
+ * with an iterator, never a string.
+ *
+ * @param value - the value given
+ * @returns whether it is such an iterable
+ */
+function isIterable(value: unknown): boolean {
+  return value !== null && typeof value === 'object' && typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] === 'function';
 }
 
 // eslint-disable-next-line @typescript-eslint/no-namespace -- Java's nested class MockAdminClient.Builder, reached through the class name as in Java
@@ -628,25 +1059,25 @@ export namespace MockAdminClient {
      * Sets the log dirs of each broker; their count is not checked against
      * the broker count.
      *
-     * @param brokerLogDirs - an array of arrays of log dirs, on its own or as `{ brokerLogDirs }`
+     * @param brokerLogDirs - the log dirs of each broker, any iterable of iterables, on its own or as `{ brokerLogDirs }`
      * @returns this builder
      */
-    brokerLogDirs(brokerLogDirs: ReadonlyArray<ReadonlyArray<string>>): this;
+    brokerLogDirs(brokerLogDirs: Iterable<Iterable<string>>): this;
     /**
      * The same as `brokerLogDirs(brokerLogDirs)`, the parameter given by name.
      *
-     * @param options - an array of arrays of log dirs
+     * @param options - the log dirs of each broker
      * @returns this builder
      */
     brokerLogDirs(options: {
-      /** An array of arrays of log dirs. */
-      brokerLogDirs: ReadonlyArray<ReadonlyArray<string>>;
+      /** The log dirs of each broker, any iterable of iterables. */
+      brokerLogDirs: Iterable<Iterable<string>>;
     }): this;
     /**
      * Sets the log dirs of each broker; their count is not checked against
      * the broker count.
      *
-     * @param brokerLogDirs - on its own or as `{ brokerLogDirs }`: an array of arrays of log dirs
+     * @param brokerLogDirs - on its own or as `{ brokerLogDirs }`: the log dirs of each broker
      * @returns this builder
      */
     brokerLogDirs(brokerLogDirs: unknown): this {
@@ -736,7 +1167,11 @@ export namespace MockAdminClient {
      * @returns this builder
      */
     defaultPartitions(numPartitions: unknown): this {
-      native.mockAdminBuilderSet(this.#native, 'defaultPartitions', checkShort(DEFAULT_PARTITIONS.value(numPartitions, arguments.length)));
+      native.mockAdminBuilderSet(
+        this.#native,
+        'defaultPartitions',
+        checkShort(DEFAULT_PARTITIONS.value(numPartitions, arguments.length), 'numPartitions'),
+      );
       return this;
     }
 
@@ -765,7 +1200,7 @@ export namespace MockAdminClient {
      */
     featureLevels(featureLevels: unknown): this {
       const value = FEATURE_LEVELS.value(featureLevels, arguments.length);
-      native.mockAdminBuilderSet(this.#native, 'featureLevels', stringMapPairs(value, 'featureLevels', checkShort));
+      native.mockAdminBuilderSet(this.#native, 'featureLevels', stringMapPairs(value, 'featureLevels', featureLevel));
       return this;
     }
 
@@ -794,7 +1229,11 @@ export namespace MockAdminClient {
      */
     minSupportedFeatureLevels(minSupportedFeatureLevels: unknown): this {
       const value = MIN_SUPPORTED_FEATURE_LEVELS.value(minSupportedFeatureLevels, arguments.length);
-      native.mockAdminBuilderSet(this.#native, 'minSupportedFeatureLevels', stringMapPairs(value, 'minSupportedFeatureLevels', checkShort));
+      native.mockAdminBuilderSet(
+        this.#native,
+        'minSupportedFeatureLevels',
+        stringMapPairs(value, 'minSupportedFeatureLevels', featureLevel),
+      );
       return this;
     }
 
@@ -823,7 +1262,11 @@ export namespace MockAdminClient {
      */
     maxSupportedFeatureLevels(maxSupportedFeatureLevels: unknown): this {
       const value = MAX_SUPPORTED_FEATURE_LEVELS.value(maxSupportedFeatureLevels, arguments.length);
-      native.mockAdminBuilderSet(this.#native, 'maxSupportedFeatureLevels', stringMapPairs(value, 'maxSupportedFeatureLevels', checkShort));
+      native.mockAdminBuilderSet(
+        this.#native,
+        'maxSupportedFeatureLevels',
+        stringMapPairs(value, 'maxSupportedFeatureLevels', featureLevel),
+      );
       return this;
     }
 
