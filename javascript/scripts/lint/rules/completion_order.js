@@ -37,8 +37,8 @@
 //     recording site is counted once however many calls reach it: a callback
 //     that returns a Promise records the delivery at the same site once the
 //     Promise settled, a function both paths call (`completeRecord`). The
-//     completion of a wait on a record's future (`WAITS`) runs no user
-//     callback and is not a delivery.
+//     completion of a wait on a record's future or an admin future (`WAITS`)
+//     runs no user callback and is not a delivery.
 // The completion functions are listed with what they run; an entry that
 // matches nothing is a finding.
 
@@ -79,7 +79,7 @@ function guarded(code, from, to, at) {
 const COMPLETIONS = [{ key: 'send_on_completion', reason: "the record's Callback_t on_completion (kafka_producer_Callback_new_err)" }];
 
 /** The native functions whose function argument completes a wait on a record's future, not a delivery. */
-const WAITS = new Set(['recordFutureGet']);
+const WAITS = new Set(['recordFutureGet', 'adminFutureWait', 'adminFutureGet']);
 
 module.exports = {
   name: 'check-completion-order',

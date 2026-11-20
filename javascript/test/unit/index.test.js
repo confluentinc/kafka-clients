@@ -53,6 +53,12 @@ test('the root exports only the Java built-in errors, and no index a namespace',
   for (const subpath of Object.keys(pkg.exports)) {
     const specifier = subpath === '.' ? pkg.name : `${pkg.name}/${subpath.slice(2)}`;
     for (const [name, value] of Object.entries(require(specifier))) {
+      // The runtime object of a client interface holds its statics (root
+      // conventions, Names, Q10: `Admin.create`).
+      if (`${specifier}:${name}` === `${pkg.name}/admin:Admin`) {
+        assert.deepEqual(Object.keys(value), ['create'], `${specifier}: ${name}`);
+        continue;
+      }
       assert.equal(typeof value, 'function', `${specifier}: ${name} is a class, not a namespace`);
     }
   }
