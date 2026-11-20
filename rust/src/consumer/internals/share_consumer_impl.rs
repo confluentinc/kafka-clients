@@ -3333,7 +3333,9 @@ mod tests {
     /// login module that does not exist. The outer two levels of the chain are
     /// Java's; beneath them Java has the `LoginException` of the missing module,
     /// the Rust client (which reads no login module) the channel builder's
-    /// `ConfigError` for the missing PLAIN username.
+    /// `ConfigError` for the missing PLAIN username. Built as Java builds it,
+    /// with the public `KafkaShareConsumer` constructor (`ShareConsumerConfig`
+    /// first, then this class).
     #[tokio::test(flavor = "multi_thread")]
     async fn test_constructor_fails_on_network_client_constructor_failure() {
         let mut props = required_consumer_properties();
@@ -3347,7 +3349,12 @@ mod tests {
             "sasl.jaas.config".to_string(),
             "org.example.InvalidLoginModule required ;".to_string(),
         );
-        let e = new_consumer_from_config(&props).expect_err("the network client cannot be created");
+        let e = crate::consumer::KafkaShareConsumer::<String, String>::new(
+            &props,
+            StringDeserializer::new(),
+            StringDeserializer::new(),
+        )
+        .expect_err("the network client cannot be created");
         assert!(matches!(e, Error::KafkaError(_)), "{e:?}");
         assert_eq!("Failed to construct Kafka share consumer", e.message());
 
