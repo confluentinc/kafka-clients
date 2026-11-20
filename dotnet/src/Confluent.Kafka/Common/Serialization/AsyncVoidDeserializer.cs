@@ -34,6 +34,6 @@ public sealed class AsyncVoidDeserializer : IAsyncDeserializer<object?>, IAsyncB
 
     /// <inheritdoc/>
     public ValueTask<object?> Deserialize(
-        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
         new ValueTask<object?>(_inner.Deserialize(topic, headers, data.Span));
 }

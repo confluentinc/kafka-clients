@@ -34,6 +34,6 @@ public sealed class AsyncDoubleDeserializer : IAsyncDeserializer<double?>, IAsyn
 
     /// <inheritdoc/>
     public ValueTask<double?> Deserialize(
-        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
         new ValueTask<double?>(_inner.Deserialize(topic, headers, data.Span));
 }

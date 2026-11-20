@@ -34,6 +34,6 @@ public sealed class AsyncLongSerializer : IAsyncSerializer<long?>, IAsyncBuiltIn
 
     /// <inheritdoc/>
     public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-        string topic, Headers headers, long? data, CancellationToken cancellationToken) =>
+        string topic, Headers headers, long? data, CancellationToken cancellationToken = default) =>
         new ValueTask<ReadOnlyMemory<byte>?>(_inner.Serialize(topic, headers, data));
 }

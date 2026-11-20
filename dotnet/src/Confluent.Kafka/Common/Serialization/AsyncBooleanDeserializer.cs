@@ -34,6 +34,6 @@ public sealed class AsyncBooleanDeserializer : IAsyncDeserializer<bool?>, IAsync
 
     /// <inheritdoc/>
     public ValueTask<bool?> Deserialize(
-        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
         new ValueTask<bool?>(_inner.Deserialize(topic, headers, data.Span));
 }

@@ -70,7 +70,7 @@ public interface IAsyncSerializer<T>
     /// <see langword="null"/> itself. The bytes stay unchanged for as long as
     /// <see cref="ISerializer{T}.Serialize(string, T)"/> says.
     /// </returns>
-    ValueTask<ReadOnlyMemory<byte>?> Serialize(string topic, Headers headers, T? data, CancellationToken cancellationToken);
+    ValueTask<ReadOnlyMemory<byte>?> Serialize(string topic, Headers headers, T? data, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -95,7 +95,7 @@ public interface IAsyncSerializerWithConfigure<T> : IAsyncSerializer<T>
     /// <param name="isKey">Whether the serializer is used for the key or the value.</param>
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>A task that completes when the serializer is configured.</returns>
-    ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken);
+    ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

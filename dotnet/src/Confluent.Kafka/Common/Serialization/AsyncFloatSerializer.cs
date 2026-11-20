@@ -34,6 +34,6 @@ public sealed class AsyncFloatSerializer : IAsyncSerializer<float?>, IAsyncBuilt
 
     /// <inheritdoc/>
     public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-        string topic, Headers headers, float? data, CancellationToken cancellationToken) =>
+        string topic, Headers headers, float? data, CancellationToken cancellationToken = default) =>
         new ValueTask<ReadOnlyMemory<byte>?>(_inner.Serialize(topic, headers, data));
 }

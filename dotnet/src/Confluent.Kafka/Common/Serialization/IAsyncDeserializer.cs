@@ -61,7 +61,7 @@ public interface IAsyncDeserializer<T>
     /// absent key or value: the record's field is then <see langword="default"/>.</returns>
     /// <exception cref="SerializationException">The bytes are not a valid <typeparamref name="T"/>. It is thrown by
     /// the call or carried by the returned <see cref="ValueTask{TResult}"/>.</exception>
-    ValueTask<T?> Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken);
+    ValueTask<T?> Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -102,7 +102,7 @@ public interface IAsyncDeserializerWithConfigure<T> : IAsyncDeserializer<T>
     /// <param name="isKey">Whether the deserializer is used for the key or the value.</param>
     /// <param name="cancellationToken">Cancels the call.</param>
     /// <returns>A task that completes when the deserializer is configured.</returns>
-    ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken);
+    ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

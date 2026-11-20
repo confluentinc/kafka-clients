@@ -36,6 +36,6 @@ public sealed class AsyncReadOnlyMemoryDeserializer
 
     /// <inheritdoc/>
     public ValueTask<ReadOnlyMemory<byte>?> Deserialize(
-        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
         new ValueTask<ReadOnlyMemory<byte>?>(_inner.Deserialize(topic, headers, data));
 }

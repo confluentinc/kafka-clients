@@ -34,6 +34,6 @@ public sealed class AsyncDoubleSerializer : IAsyncSerializer<double?>, IAsyncBui
 
     /// <inheritdoc/>
     public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-        string topic, Headers headers, double? data, CancellationToken cancellationToken) =>
+        string topic, Headers headers, double? data, CancellationToken cancellationToken = default) =>
         new ValueTask<ReadOnlyMemory<byte>?>(_inner.Serialize(topic, headers, data));
 }

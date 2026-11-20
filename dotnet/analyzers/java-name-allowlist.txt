@@ -333,19 +333,20 @@ missing T:Confluent.Kafka.Common.Serialization.IDeserializer`1 org.apache.kafka.
 missing T:Confluent.Kafka.Common.Serialization.ISerializer`1 org.apache.kafka.common.serialization.Serializer#close()
 
 # The asynchronous serde interfaces (M23/P7, ledger 536, 538) have one method each: Java's serialize(String, Headers, T)
-# and deserialize(String, Headers, ByteBuffer), with a required CancellationToken and a ValueTask result, the bytes a
+# and deserialize(String, Headers, ByteBuffer), with an optional CancellationToken (M23/P10, ledger 584) and a ValueTask result, the bytes a
 # ReadOnlyMemory<byte>. Java's forms without headers and its byte[] forms have no asynchronous counterpart. Java's
 # close() is an optional IAsyncDisposable and nothing else (M23/P8), as it is an optional IDisposable on the
 # synchronous interfaces above.
 missing T:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1 org.apache.kafka.common.serialization.Serializer#close()
-missing T:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1 org.apache.kafka.common.serialization.Serializer#serialize(String,Headers,T)
 missing T:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1 org.apache.kafka.common.serialization.Serializer#serialize(String,T)
-overload M:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,`0,System.Threading.CancellationToken)
 missing T:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1 org.apache.kafka.common.serialization.Deserializer#close()
 missing T:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,ByteBuffer)
-missing T:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,Headers,byte[])
 missing T:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1 org.apache.kafka.common.serialization.Deserializer#deserialize(String,byte[])
-overload M:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
+# Until the headers forms move to IAsyncSerializerWithHeaders and IAsyncDeserializerWithHeaders (M23/P10, ledgers 585,
+# 586), the one method of each interface is Java's default serialize(String, Headers, T) and
+# deserialize(String, Headers, ByteBuffer).
+default M:Confluent.Kafka.Common.Serialization.IAsyncSerializer`1.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,`0,System.Threading.CancellationToken)
+default M:Confluent.Kafka.Common.Serialization.IAsyncDeserializer`1.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
 
 # IAsyncDeserializerWithRetention is a marker with no methods and no Java counterpart (M23/P7, ledger 536): an
 # asynchronous deserializer that has it may keep, or return, the memory it is given; any other has that memory only
@@ -359,7 +360,7 @@ unmatched T:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemorySerializer
 
 # The asynchronous built-in serializers and deserializers (M23/P7, ledger 538): each has the one method of its
 # asynchronous interface and calls its synchronous class, so Java's serialize(String, T), deserialize(String, byte[])
-# and deserialize(String, Headers, ByteBuffer) overrides are that one method, with the headers and a required
+# and deserialize(String, Headers, ByteBuffer) overrides are that one method, with the headers and an optional
 # CancellationToken.
 missing T:Confluent.Kafka.Common.Serialization.AsyncBooleanDeserializer org.apache.kafka.common.serialization.BooleanDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncBooleanDeserializer org.apache.kafka.common.serialization.BooleanDeserializer#deserialize(String,byte[])
@@ -393,41 +394,6 @@ missing T:Confluent.Kafka.Common.Serialization.AsyncUUIDSerializer org.apache.ka
 missing T:Confluent.Kafka.Common.Serialization.AsyncVoidDeserializer org.apache.kafka.common.serialization.VoidDeserializer#deserialize(String,Headers,ByteBuffer)
 missing T:Confluent.Kafka.Common.Serialization.AsyncVoidDeserializer org.apache.kafka.common.serialization.VoidDeserializer#deserialize(String,byte[])
 missing T:Confluent.Kafka.Common.Serialization.AsyncVoidSerializer org.apache.kafka.common.serialization.VoidSerializer#serialize(String,Void)
-overload M:Confluent.Kafka.Common.Serialization.AsyncBooleanDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncBooleanSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.Boolean},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncByteArrayDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncByteArraySerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Byte[],System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncDoubleDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncDoubleSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.Double},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncFloatDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncFloatSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.Single},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncIntegerDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncIntegerSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.Int32},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncLongDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncLongSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.Int64},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemoryDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncReadOnlyMemorySerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.ReadOnlyMemory{System.Byte}},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncShortDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncShortSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.Int16},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncStringDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncStringSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.String,System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncUUIDDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncUUIDSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Nullable{System.Guid},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncVoidDeserializer.Deserialize(System.String,Confluent.Kafka.Common.Header.Headers,System.ReadOnlyMemory{System.Byte},System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncVoidSerializer.Serialize(System.String,Confluent.Kafka.Common.Header.Headers,System.Object,System.Threading.CancellationToken)
-
-# Configure on the asynchronous serde interfaces (M23/P8, ledgers 571, 572) is Java's configure(Map, boolean) with a
-# ValueTask result and a required CancellationToken, as Serialize and Deserialize above: a serde may wait in it.
-overload M:Confluent.Kafka.Common.Serialization.IAsyncDeserializerWithConfigure`1.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.IAsyncSerializerWithConfigure`1.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
-missing T:Confluent.Kafka.Common.Serialization.AsyncStringDeserializer org.apache.kafka.common.serialization.StringDeserializer#configure(Map,boolean)
-missing T:Confluent.Kafka.Common.Serialization.AsyncStringSerializer org.apache.kafka.common.serialization.StringSerializer#configure(Map,boolean)
-missing T:Confluent.Kafka.Common.Serialization.AsyncUUIDDeserializer org.apache.kafka.common.serialization.UUIDDeserializer#configure(Map,boolean)
-missing T:Confluent.Kafka.Common.Serialization.AsyncUUIDSerializer org.apache.kafka.common.serialization.UUIDSerializer#configure(Map,boolean)
-overload M:Confluent.Kafka.Common.Serialization.AsyncStringDeserializer.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncStringSerializer.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncUUIDDeserializer.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
-overload M:Confluent.Kafka.Common.Serialization.AsyncUUIDSerializer.Configure(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Boolean,System.Threading.CancellationToken)
 
 # Java's close() on Serde and WrapperSerde is Dispose (dotnet/CLAUDE.md §3 rule 7): ISerde<T> is IDisposable, and its
 # Dispose closes the two halves as Java's close() does (row 461). The clients keep Close() beside Dispose, with another

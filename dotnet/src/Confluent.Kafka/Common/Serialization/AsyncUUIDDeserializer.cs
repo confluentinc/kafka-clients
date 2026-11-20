@@ -40,7 +40,7 @@ public sealed class AsyncUUIDDeserializer : IAsyncDeserializerWithConfigure<Guid
     /// </summary>
     /// <inheritdoc cref="IAsyncDeserializerWithConfigure{T}.Configure(IReadOnlyDictionary{string, object}, bool, CancellationToken)" path="/param"/>
     /// <returns>A completed task.</returns>
-    public ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken)
+    public ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken = default)
     {
         _inner.Configure(configs, isKey);
         return default;
@@ -48,6 +48,6 @@ public sealed class AsyncUUIDDeserializer : IAsyncDeserializerWithConfigure<Guid
 
     /// <inheritdoc/>
     public ValueTask<Guid?> Deserialize(
-        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
         new ValueTask<Guid?>(_inner.Deserialize(topic, headers, data.Span));
 }

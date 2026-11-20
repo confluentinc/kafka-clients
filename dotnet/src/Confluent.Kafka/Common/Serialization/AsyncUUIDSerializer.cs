@@ -40,7 +40,7 @@ public sealed class AsyncUUIDSerializer : IAsyncSerializerWithConfigure<Guid?>, 
     /// </summary>
     /// <inheritdoc cref="IAsyncSerializerWithConfigure{T}.Configure(IReadOnlyDictionary{string, object}, bool, CancellationToken)" path="/param"/>
     /// <returns>A completed task.</returns>
-    public ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken)
+    public ValueTask Configure(IReadOnlyDictionary<string, object?> configs, bool isKey, CancellationToken cancellationToken = default)
     {
         _inner.Configure(configs, isKey);
         return default;
@@ -48,6 +48,6 @@ public sealed class AsyncUUIDSerializer : IAsyncSerializerWithConfigure<Guid?>, 
 
     /// <inheritdoc/>
     public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-        string topic, Headers headers, Guid? data, CancellationToken cancellationToken) =>
+        string topic, Headers headers, Guid? data, CancellationToken cancellationToken = default) =>
         new ValueTask<ReadOnlyMemory<byte>?>(_inner.Serialize(topic, headers, data));
 }
