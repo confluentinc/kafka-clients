@@ -653,16 +653,9 @@ fn is_port_allocation_error(err: &str) -> bool {
 /// nature (a fresh container on the same ports normally succeeds), so it is
 /// worth spending a bounded retry on, unlike the subnet-exhaustion class the
 /// no-retry rule below protects against.
-///
-/// A broker that is still starting when [`CONTAINER_STARTUP_TIMEOUT`] runs out
-/// (`container startup timeout`) is the same class: on a loaded host (other
-/// clusters running, a cold Docker VM) a healthy broker was measured taking
-/// just over 90 s to log "Kafka Server started", and failing outright then
-/// failed the test although a second attempt starts in seconds.
 fn is_transient_broker_startup_error(err: &str) -> bool {
     err.contains("End of stream reached before finding message")
         || err.contains("unable to register with the controller quorum")
-        || err.contains("container startup timeout")
 }
 
 /// Docker's default address pool is exhausted. Never retried: every attempt
@@ -1833,17 +1826,6 @@ mod tests {
         ));
         assert!(is_retryable_start_error(
             "Failed to start Kafka container kafka-controller-3000-abc: failed to create a container: Timeout error"
-        ));
-    }
-
-    /// A broker that did not log "Kafka Server started" within
-    /// `CONTAINER_STARTUP_TIMEOUT`, as testcontainers reports it (seen on a
-    /// loaded macOS host while P10's share suites started many clusters).
-    #[test]
-    fn retries_container_startup_timeouts() {
-        assert!(is_retryable_start_error(
-            "Failed to start Kafka container kafka-broker-0-50fc7e49c5ebb46b: container is not ready: container \
-             startup timeout"
         ));
     }
 
