@@ -41,8 +41,13 @@ pub enum AcknowledgeType {
     /// A renewed record is returned again by a later
     /// [`ShareConsumer::poll`](crate::consumer::ShareConsumer::poll) as a new
     /// `ConsumerRecord`: its key and value are deserialized again from the
-    /// fetched bytes, so the deserializers run once more for it. Java returns
-    /// the same record object.
+    /// fetched bytes, once per redelivery.
+    ///
+    /// WARNING: the key and value deserializers run again each time a renewed
+    /// record is returned again, where Java returns the same record object
+    /// without deserializing it. If that deserialization fails, the record is
+    /// released and `poll` returns the deserialization error, as for a first
+    /// delivery that fails, instead of the record being returned again.
     // Milestone 18 decision D5, option (c): the renewed record is re-decoded
     // inside `ShareInFlightBatch` rather than kept, because `ConsumerRecords`
     // owns its records and hands them out by value.

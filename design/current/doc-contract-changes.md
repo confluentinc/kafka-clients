@@ -405,3 +405,8 @@ Entry format (a numbered list; the four sub-items are required, in this order):
    - Contract change: a `timeout` greater than `i64::MAX` milliseconds counts as `i64::MAX` milliseconds, where Java's `Duration.toMillis()` throws `ArithmeticException`; `poll(Duration::MAX)` waits without limit.
    - Why: as `crate::consumer::Consumer::poll`, whose accepted entry this mirrors for the share consumer (Milestone 18 P8).
    - Accepted:
+1. `crate::consumer::AcknowledgeType::Renew`
+   - Java member: `org.apache.kafka.clients.consumer.AcknowledgeType#RENEW`
+   - Contract change: a renewed record is returned again by `poll` as a new `ConsumerRecord`, its key and value deserialized again once per redelivery, where Java returns the same record object without running the deserializers again; if that deserialization fails, the record is released and `poll` returns the deserialization error, where Java's class doc says a successfully renewed record "is returned again by the poll call".
+   - Why: Milestone 18 decision D5, option (c): `ConsumerRecords` owns its records and hands them out by value, so the consumer cannot keep the delivered object; it keeps a refcounted handle on the fetched bytes and decodes the renewed record again, which costs nothing when no record is renewed.
+   - Accepted:

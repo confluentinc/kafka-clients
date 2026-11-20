@@ -4,4 +4,5 @@
 # `cargo xtask doc-baseline`; see everything with
 # `cargo xtask lint-custom check-api-docs --no-baseline`.
 errors crate::consumer::ShareConsumer::poll
+warning crate::consumer::AcknowledgeType::Renew
 warning crate::consumer::ShareConsumer::poll
