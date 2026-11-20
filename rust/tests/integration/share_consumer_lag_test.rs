@@ -73,16 +73,15 @@ fn explicit() -> HashMap<String, String> {
 /// The `@ClusterTest(brokers = 3, serverProperties = ...)` of the two
 /// coordinator-movement tests, on a dedicated cluster since they stop a broker.
 fn coordinator_movement_config() -> ClusterConfig {
-    ClusterConfig {
+    lifecycle_cluster(ClusterConfig {
         brokers: 3,
-        dedicated: true,
         ..share_cluster_config_with(&[
             ("KAFKA_OFFSETS_TOPIC_NUM_PARTITIONS", "1"),
             ("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "3"),
             ("KAFKA_SHARE_COORDINATOR_STATE_TOPIC_NUM_PARTITIONS", "1"),
             ("KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR", "3"),
         ])
-    }
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]

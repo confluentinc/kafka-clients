@@ -127,16 +127,32 @@ pub const SHARE_CLUSTER_DEFAULTS: &[(&str, &str)] = &[
     ("KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR", "1"),
 ];
 
-/// A pooled cluster with Java's `@ClusterTestDefaults(types = KRAFT)` shape (one
-/// broker, one isolated controller) and the given server properties.
+/// A pooled one-broker cluster with the given server properties.
+///
+/// **Deviation:** Java's suites run `@ClusterTestDefaults(types = KRAFT)`, one
+/// broker plus one isolated controller. A pooled cluster here is
+/// [`Type::CoKraft`] (one combined broker+controller node), as every other
+/// pooled suite's: the share suites need about a dozen distinct cluster
+/// configurations at once, and with an isolated controller each (~150 MiB per
+/// controller container) they exhausted the Docker VM's memory, whose kernel
+/// OOM killer then killed the pooled default broker mid-run. The topology is
+/// invisible to a test that never stops a broker; the tests that do run on
+/// [`lifecycle_cluster`], Java's `KRAFT` shape.
 pub fn share_cluster_config(properties: &[(&str, &str)]) -> ClusterConfig {
     ClusterConfig {
         brokers: 1,
-        cluster_type: Type::Kraft,
-        controllers: 1,
+        cluster_type: Type::CoKraft,
         server_properties: to_server_properties(properties),
         ..ClusterConfig::default()
     }
+}
+
+/// `config` as a dedicated [`Type::Kraft`] cluster with one isolated
+/// controller, Java's `@ClusterTest(types = KRAFT)` shape: what the tests that
+/// stop or restart brokers need (`KafkaCluster::shutdown_broker` /
+/// `start_broker`).
+pub fn lifecycle_cluster(config: ClusterConfig) -> ClusterConfig {
+    ClusterConfig { cluster_type: Type::Kraft, controllers: 1, dedicated: true, ..config }
 }
 
 /// [`share_cluster_config`] over [`SHARE_CLUSTER_DEFAULTS`], with `overrides`

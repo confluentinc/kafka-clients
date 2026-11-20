@@ -1388,9 +1388,7 @@ async fn join_all_within<T: Send + 'static>(
 /// A dedicated cluster with the class defaults, for the tests that stop the
 /// broker (Java starts a fresh cluster per test).
 fn dedicated_share_cluster_config() -> crate::common::cluster_config::ClusterConfig {
-    let mut config = default_share_cluster_config();
-    config.dedicated = true;
-    config
+    lifecycle_cluster(default_share_cluster_config())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2525,9 +2523,7 @@ async fn shutdown_tasks(tasks: Vec<tokio::task::JoinHandle<()>>) {
 /// shutdown task is lost there; here a panicking task fails the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_share_consumer_after_coordinator_movement() {
-    let mut config = three_broker_config();
-    config.dedicated = true;
-    let mut base = ShareConsumerTestBase::setup(config).await;
+    let mut base = ShareConsumerTestBase::setup(lifecycle_cluster(three_broker_config())).await;
     let topic_name = base.topic("multipart");
     let group_id = base.group("multipartGrp");
     let base = Arc::new(base);
