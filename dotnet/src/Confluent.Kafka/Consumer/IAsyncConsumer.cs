@@ -58,6 +58,10 @@ namespace Confluent.Kafka.Consumer;
 /// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> disposes the deserializers it was given when it closes, as its
 /// constructor says; an <see cref="AsyncMockConsumer{TKey, TValue}"/> does not.
 /// </para>
+/// <para>
+/// Java's <c>clientInstanceId(Duration)</c>, <c>registerMetricForSubscription(KafkaMetric)</c> and
+/// <c>unregisterMetricFromSubscription(KafkaMetric)</c> are not offered: the native core has no entry point for them yet.
+/// </para>
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
 /// <typeparam name="TValue">The deserialized value type.</typeparam>

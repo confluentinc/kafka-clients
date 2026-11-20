@@ -103,13 +103,21 @@ internal sealed class ConsumerCompletion<T> : ConsumerCompletion
 
     private readonly Action<IntPtr>? _settle;
 
-    internal ConsumerCompletion(Func<IntPtr, long, T> convert, Action<IntPtr>? settle = null)
+    private readonly Func<IntPtr, Exception> _exceptionOf;
+
+    internal ConsumerCompletion(
+        Func<IntPtr, long, T> convert,
+        Action<IntPtr>? settle = null,
+        Func<IntPtr, Exception>? exceptionOf = null)
     {
         _convert = convert;
         _settle = settle;
+        _exceptionOf = exceptionOf ?? (error => KafkaException.FromFfiError(error, owned: true)!);
     }
 
     internal Task<T> Result => _result.Task;
+
+    internal int ErrorCode { get; private set; }
 
     internal Func<ConsumerCompletion<T>>? Again { get; set; }
 
@@ -129,7 +137,18 @@ internal sealed class ConsumerCompletion<T> : ConsumerCompletion
     {
         if (error != IntPtr.Zero)
         {
-            _result.TrySetException(KafkaException.FromFfiError(error, owned: true)!);
+            try
+            {
+                ErrorCode = NativeMethods.Code(error);
+            }
+            catch (Exception failure)
+            {
+                NativeMethods.ErrorDestroy(error);
+                _result.TrySetException(failure);
+                return;
+            }
+
+            _result.TrySetException(_exceptionOf(error));
             return;
         }
 
