@@ -768,6 +768,41 @@ static void test_is_async_is_zero_for_built_in_serdes(void) {
     kafka_common_serialization_StringDeserializer_destroy(string_deserializer);
 }
 
+// A header's key as C reads it: NUL-terminated through `Header_key`, a copy the
+// first call makes, or as a pointer and a length through `Header__key_bytes`,
+// which is the header's own key and copies nothing.
+static void test_header_key_view_is_the_key_itself(void) {
+    kafka_common_header_internals_RecordHeaders_t *headers = kafka_common_header_internals_RecordHeaders_new();
+    kafka_common_header_Headers_t *view = kafka_common_header_internals_RecordHeaders__as_Headers(headers);
+    kafka_common_Error_t *error = NULL;
+    kafka_common_header_Headers_add_with_key_value(view, "trace", bytes_of("v"), &error);
+    TEST_ASSERT_NULL(error);
+    kafka_common_header_Headers_add_with_key_value(view, "", bytes_of("v"), &error);
+    TEST_ASSERT_NULL(error);
+
+    const kafka_common_header_Header_t *header =
+        kafka_common_header_internals_RecordHeader__as_Header(kafka_common_header_Headers_last_header(view, "trace"));
+    kafka_Bytes_t key = kafka_common_header_Header__key_bytes(header);
+    TEST_ASSERT_EQUAL_INT32(5, key.len);
+    TEST_ASSERT_EQUAL_MEMORY("trace", key.data, 5);
+    const char *key_c = kafka_common_header_Header_key(header);
+    TEST_ASSERT_EQUAL_STRING("trace", key_c);
+    // The NUL-terminated key is a copy, made once; the view is not one.
+    TEST_ASSERT_TRUE((const uint8_t *)key_c != key.data);
+    TEST_ASSERT_EQUAL_PTR(key_c, kafka_common_header_Header_key(header));
+    TEST_ASSERT_EQUAL_PTR(key.data, kafka_common_header_Header__key_bytes(header).data);
+
+    // An empty key is a view of no bytes, not a NULL one.
+    const kafka_common_header_Header_t *empty =
+        kafka_common_header_internals_RecordHeader__as_Header(kafka_common_header_Headers_last_header(view, ""));
+    key = kafka_common_header_Header__key_bytes(empty);
+    TEST_ASSERT_NOT_NULL(key.data);
+    TEST_ASSERT_EQUAL_INT32(0, key.len);
+    TEST_ASSERT_EQUAL_STRING("", kafka_common_header_Header_key(empty));
+
+    kafka_common_header_internals_RecordHeaders_destroy(headers);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_string_serde_round_trip_through_the_views);
@@ -780,5 +815,6 @@ int main(void) {
     RUN_TEST(test_configure_or_close_error_a_c_serializer_reports_reaches_the_caller);
     RUN_TEST(test_configure_or_close_error_a_c_deserializer_reports_reaches_the_caller);
     RUN_TEST(test_is_async_is_zero_for_built_in_serdes);
+    RUN_TEST(test_header_key_view_is_the_key_itself);
     return UNITY_END();
 }

@@ -38,12 +38,12 @@
 
 pub(crate) mod internals;
 
-use crate::ffi::precondition::{fail, require_mut, require_ref, require_str_or};
+use crate::ffi::precondition::{fail, require_mut, require_ref, require_str_or, require_str_ref_or};
 use std::ffi::{CString, c_char, c_void};
 use std::ptr;
 use std::sync::OnceLock;
 
-use crate::common::header::{Header, Headers};
+use crate::common::header::{Header, Headers, RecordHeader};
 use crate::common::{Error, LocalIllegalStateError};
 use crate::ffi::common::deliver_unit;
 use crate::ffi::common::header::internals::record_header::{
@@ -68,7 +68,10 @@ pub struct kafka_common_header_Header_t {
 /// NUL-terminated copy of its key the string getter borrows out.
 pub(crate) struct HeaderInner {
     header: *const (dyn Header + Send + Sync),
-    key_c: CString,
+    /// Made by the first `kafka_common_header_Header_key` call: a view whose
+    /// key is never read as a C string (only its value is read, or its key
+    /// through `kafka_common_header_Header__key_bytes`) copies nothing.
+    key_c: OnceLock<CString>,
 }
 
 impl HeaderInner {
@@ -79,10 +82,7 @@ impl HeaderInner {
     /// `header` must point at a live implementation that outlives the view
     /// and is not mutated while the view exists.
     pub(crate) unsafe fn new(header: *const (dyn Header + Send + Sync)) -> Self {
-        // SAFETY: Per this function's `# Safety`, `header` points at a live implementation; the
-        // reference is used only to copy its key.
-        let key_c = owned_c_string(unsafe { &*header }.key());
-        Self { header, key_c }
+        Self { header, key_c: OnceLock::new() }
     }
 
     fn header(&self) -> &dyn Header {
@@ -90,6 +90,11 @@ impl HeaderInner {
         // view, and per that function's `# Safety` the implementation outlives the view and is not
         // mutated while it exists, so the shared reference, bounded by `&self`, is sound.
         unsafe { &*self.header }
+    }
+
+    /// The NUL-terminated copy of the key, made on the first request.
+    fn key_c(&self) -> &CString {
+        self.key_c.get_or_init(|| owned_c_string(self.header().key()))
     }
 
     /// A borrowed handle on `self`, valid as long as `self`.
@@ -100,12 +105,12 @@ impl HeaderInner {
 
 // SAFETY: `header` points at a `dyn Header + Send + Sync` that, per `HeaderInner::new`'s
 // `# Safety`, outlives the view and is not mutated while it exists, so sending the view to
-// another thread is as sound as sending a shared reference to it; `key_c` is a `CString`, which
-// is `Send`.
+// another thread is as sound as sending a shared reference to it; `key_c` is a
+// `OnceLock<CString>`, which is `Send`.
 unsafe impl Send for HeaderInner {}
 // SAFETY: As for `Send`: the pointee is `Sync` and outlives the view, so sharing the view shares
-// only a shared reference to it, and `key_c` is a `CString`, which is `Sync`; the view has no
-// interior mutability.
+// only a shared reference to it, and `key_c` is a `OnceLock<CString>`, which is `Sync`: the
+// view's only interior mutability, filled once whichever thread asks first.
 unsafe impl Sync for HeaderInner {}
 
 /// `key()`.
@@ -118,16 +123,59 @@ unsafe impl Sync for HeaderInner {}
 ///
 /// `self_` must be a valid header handle.
 ///
-/// The returned string is borrowed from `self_`, valid as long as it is.
+/// The returned string is borrowed from `self_`, valid as long as it is. It
+/// is a NUL-terminated copy of the key, made by the first call, that ends at
+/// the key's first NUL byte if the key has one;
+/// `kafka_common_header_Header__key_bytes` returns the key itself, whole and
+/// without a copy.
 #[ffi_guard]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_header_Header_key(self_: *const kafka_common_header_Header_t) -> *const c_char {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid header handle, so it points at a
     // live `HeaderInner`: the view `RecordHeaderInner::as_header_ptr` caches in a record-header
-    // handle, the only place one is built, which lives as long as that handle. No code mutates a
-    // `HeaderInner` once it is built, so the shared reference is sound; the key returned is the
-    // view's own C string, so it lives as long as the handle, as the rustdoc states.
-    unsafe { require_ref::<_, HeaderInner>(self_, "self_") }.key_c.as_ptr()
+    // handle, the only place one is built, which lives as long as that handle. A `HeaderInner` is
+    // changed only through its `key_c` `OnceLock`, which this call may fill, so the shared
+    // reference is sound; the key returned is the view's own C string, set once and never
+    // replaced, so it lives as long as the handle, as the rustdoc states.
+    unsafe { require_ref::<_, HeaderInner>(self_, "self_") }.key_c().as_ptr()
+}
+
+/// Returns the header's key as a view of its UTF-8 bytes, without the copy
+/// `kafka_common_header_Header_key` makes: `len` bytes, not NUL-terminated,
+/// and whole when the key holds a NUL byte.
+///
+/// What the view points at depends on where the header comes from:
+///
+/// - a header of a fetched record: the fetched data itself, or, for a record
+///   of a compressed batch, the buffer the record was decompressed into;
+/// - a header of a fetched record whose key is not valid UTF-8: the decoded
+///   key, with U+FFFD for the malformed bytes as Java decodes it, a copy made
+///   the first time the key is read;
+/// - a header the caller built: the header's own copy of the key.
+///
+/// # Returns
+///
+/// the header's key; `data` is never `NULL`, and `len` is 0 for an empty key.
+///
+/// # Safety
+///
+/// `self_` must be a valid header handle. The key is a view over the
+/// header's bytes, valid as long as the handle.
+#[ffi_guard]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_header_Header__key_bytes(
+    self_: *const kafka_common_header_Header_t,
+) -> kafka_Bytes_t {
+    // SAFETY: Per this function's `# Safety`, `self_` is a valid header handle, so it points at a
+    // live `HeaderInner` (see `kafka_common_header_Header_key`), which this call only reads; the
+    // bytes returned are the key of the `RecordHeader` the view points at, so they live as long
+    // as the handle, as the rustdoc states.
+    kafka_Bytes_t::from_slice(
+        unsafe { require_ref::<_, HeaderInner>(self_, "self_") }
+            .header()
+            .key()
+            .as_bytes(),
+    )
 }
 
 /// Returns the header's value.
@@ -145,10 +193,10 @@ pub unsafe extern "C" fn kafka_common_header_Header_key(self_: *const kafka_comm
 pub unsafe extern "C" fn kafka_common_header_Header_value(self_: *const kafka_common_header_Header_t) -> kafka_Bytes_t {
     // SAFETY: Per this function's `# Safety`, `self_` is a valid header handle, so it points at a
     // live `HeaderInner`: the view `RecordHeaderInner::as_header_ptr` caches in a record-header
-    // handle, the only place one is built, which lives as long as that handle. No code mutates a
-    // `HeaderInner` once it is built, so the shared reference is sound; the bytes returned are the
-    // value of the `RecordHeader` the view points at, so they live as long as the handle, as the
-    // rustdoc states.
+    // handle, the only place one is built, which lives as long as that handle. This call only
+    // reads it, so the shared reference is sound; the bytes returned are the value of the
+    // `RecordHeader` the view points at, so they live as long as the handle, as the rustdoc
+    // states.
     kafka_Bytes_t::from_option(unsafe { require_ref::<_, HeaderInner>(self_, "self_") }.header().value())
 }
 
@@ -370,12 +418,16 @@ pub unsafe extern "C" fn kafka_common_header_Headers_add_with_key_value(
     // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
     // this call.
     let key = unsafe { require_str_or(key, "key", || Error::local_null_pointer("Null header keys are not permitted")) };
+    // Java's `add(String, byte[])` is `add(new RecordHeader(key, value))`: built here, the header
+    // takes the key copied above, where `add_with_key_value` would copy it once more.
+    // SAFETY: Per this function's `# Safety`, `value` is null or a valid buffer, so `value.data`
+    // is null or valid for `value.len` bytes, as `kafka_Bytes_t::as_slice` requires; the bytes
+    // are copied into an owned `Vec`, so nothing borrows them after this statement.
+    let header = RecordHeader::new(key, unsafe { value.as_slice() }.map(<[u8]>::to_vec));
     // SAFETY: Per this function's `# Safety`, `self_` is a valid headers handle whose headers may
-    // be mutated and that no other call uses at the same time, as `headers_mut` requires, and
-    // `value` is null or a valid buffer, so `value.data` is null or valid for `value.len` bytes, as
-    // `kafka_Bytes_t::as_slice` requires; both borrows are used only within this call, and the
-    // implementation copies the bytes.
-    let added = unsafe { headers_mut(self_, "self_") }.add_with_key_value(&key, unsafe { value.as_slice() });
+    // be mutated and that no other call uses at the same time, as `headers_mut` requires; the
+    // reference is used only within this call.
+    let added = unsafe { headers_mut(self_, "self_") }.add_with_header(header);
     // SAFETY: Per this function's `# Safety`, `out_err` is as `result` requires.
     unsafe { result(added, out_err) }
 }
@@ -411,9 +463,9 @@ pub unsafe extern "C" fn kafka_common_header_Headers_remove(
     out_err: *mut *mut kafka_common_Error_t,
 ) {
     // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
-    // this call.
-    let key = unsafe { require_str_or(key, "key", || Error::local_illegal_argument("key cannot be null.")) };
+    // `require_str_ref_or` requires; the borrow is used only within this call, which only
+    // compares the key.
+    let key = unsafe { require_str_ref_or(key, || Error::local_illegal_argument("key cannot be null.")) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid headers handle whose headers may
     // be mutated and that no other call uses at the same time, as `headers_mut` requires; the
     // reference is used only within this call.
@@ -449,9 +501,9 @@ pub unsafe extern "C" fn kafka_common_header_Headers_last_header(
     key: *const c_char,
 ) -> *const kafka_common_header_internals_RecordHeader_t {
     // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
-    // this call.
-    let key = unsafe { require_str_or(key, "key", || Error::local_illegal_argument("key cannot be null.")) };
+    // `require_str_ref_or` requires; the borrow is used only within this call, which only
+    // compares the key.
+    let key = unsafe { require_str_ref_or(key, || Error::local_illegal_argument("key cannot be null.")) };
     // SAFETY: Per this function's `# Safety`, `self_` is a valid headers handle, as `headers_ref`
     // requires; it is not mutated during this call, because the mutating `Headers_*` functions
     // require that no other call use the handle at the same time. The handle returned is an element
@@ -494,9 +546,9 @@ pub unsafe extern "C" fn kafka_common_header_Headers_headers(
     key: *const c_char,
 ) -> *mut kafka_List_t {
     // SAFETY: Per this function's `# Safety`, `key` is a valid NUL-terminated string, as
-    // `require_str` requires; it is copied into an owned `String`, so nothing borrows it after
-    // this call.
-    let key = unsafe { require_str_or(key, "key", || Error::local_illegal_argument("key cannot be null.")) };
+    // `require_str_ref_or` requires; the borrow is used only within this call, which only
+    // compares the key.
+    let key = unsafe { require_str_ref_or(key, || Error::local_illegal_argument("key cannot be null.")) };
     view_list(
         // SAFETY: Per this function's `# Safety`, `self_` is a valid headers handle, as
         // `headers_ref` requires; it is not mutated during this call, because the mutating
@@ -674,6 +726,137 @@ mod tests {
             kafka_common_Error_destroy(err);
             assert_eq!(record_headers_ref(class, "class").to_array().len(), 2);
 
+            kafka_common_header_internals_RecordHeaders_destroy(class);
+        }
+    }
+
+    /// The `Header` view of a header read from a buffer copies nothing until
+    /// its key is asked for as a C string: the value and the key view are the
+    /// buffer's own bytes, and the NUL-terminated key is made by the first
+    /// `kafka_common_header_Header_key` call, once.
+    #[test]
+    fn key_c_string_is_made_by_the_first_key_call() {
+        let buffer = bytes::Bytes::from_static(b"keyvalue");
+        let handle = RecordHeaderInner::boxed(RecordHeader::with_key_buffer_value_buffer(
+            buffer.slice(..3),
+            Some(buffer.slice(3..)),
+        ));
+        // SAFETY: Test code: `handle` is boxed, so it does not move, and outlives `view`, its
+        // cached `Header` view, and every pointer read from it.
+        unsafe {
+            let view = handle.as_header_ptr();
+            let inner = require_ref::<_, HeaderInner>(view, "view");
+
+            let value = kafka_common_header_Header_value(view);
+            assert_eq!((value.data, value.len), (buffer[3..].as_ptr(), 5));
+            let key = kafka_common_header_Header__key_bytes(view);
+            assert_eq!((key.data, key.len), (buffer.as_ptr(), 3));
+            assert!(inner.key_c.get().is_none(), "the key was copied before it was asked for");
+
+            let key_c = kafka_common_header_Header_key(view);
+            assert_eq!(CStr::from_ptr(key_c).to_str().unwrap(), "key");
+            assert_ne!(key_c as *const u8, buffer.as_ptr());
+            assert_eq!(key_c, kafka_common_header_Header_key(view), "the copy is made once");
+            // The view still is the buffer's bytes.
+            assert_eq!(kafka_common_header_Header__key_bytes(view).data, buffer.as_ptr());
+        }
+    }
+
+    /// The key view of a header the caller built is the header's own key,
+    /// whole: a key holding a NUL byte is cut at it only by the C string.
+    #[test]
+    fn key_view_of_a_built_header_is_its_own_key() {
+        let handle = RecordHeaderInner::boxed(RecordHeader::new("a\0b".to_string(), None));
+        // SAFETY: Test code: `handle` is boxed, so it does not move, and outlives `view`, its
+        // cached `Header` view, and every pointer read from it.
+        unsafe {
+            let view = handle.as_header_ptr();
+            let key = kafka_common_header_Header__key_bytes(view);
+            assert_eq!(key.data, handle.header().key().as_ptr());
+            assert_eq!(key.as_slice(), Some(&b"a\0b"[..]));
+            assert_eq!(CStr::from_ptr(kafka_common_header_Header_key(view)).to_bytes(), b"a");
+            assert!(kafka_common_header_Header_value(view).data.is_null());
+        }
+
+        let empty = RecordHeaderInner::boxed(RecordHeader::new(String::new(), None));
+        // SAFETY: Test code: as above, for `empty`.
+        unsafe {
+            let key = kafka_common_header_Header__key_bytes(empty.as_header_ptr());
+            assert!(!key.data.is_null());
+            assert_eq!(key.len, 0);
+        }
+    }
+
+    /// A key that is not valid UTF-8 is decoded once, with U+FFFD as Java
+    /// decodes it; the key view and the C string are that same decoded key.
+    #[test]
+    fn key_view_of_a_key_that_is_not_utf8_is_the_decoded_key() {
+        let buffer = bytes::Bytes::from_static(b"\xffk");
+        let handle = RecordHeaderInner::boxed(RecordHeader::with_key_buffer_value_buffer(buffer.clone(), None));
+        // SAFETY: Test code: `handle` is boxed, so it does not move, and outlives `view`, its
+        // cached `Header` view, and every pointer read from it.
+        unsafe {
+            let view = handle.as_header_ptr();
+            let key = kafka_common_header_Header__key_bytes(view);
+            assert_eq!(key.as_slice(), Some("\u{fffd}k".as_bytes()));
+            assert_ne!(key.data, buffer.as_ptr());
+            assert_eq!(key.data, kafka_common_header_Header__key_bytes(view).data, "decoded once");
+            assert_eq!(
+                CStr::from_ptr(kafka_common_header_Header_key(view)).to_str().unwrap(),
+                "\u{fffd}k"
+            );
+        }
+    }
+
+    #[test]
+    fn key_view_of_a_null_header_is_a_null_pointer_error() {
+        let mut err = ptr::null_mut();
+        // SAFETY: Test code: `self_` is `NULL`, the precondition under test, and `err` a valid
+        // slot pointing at null, whose error `stored` frees.
+        unsafe {
+            let key = kafka_common_header_Header__key_bytes_err(ptr::null(), &mut err);
+            assert!(key.data.is_null());
+            let error = crate::ffi::precondition::stored(err);
+            assert!(error.is_local_null_pointer_error(), "{error:?}");
+            assert_eq!(error.message(), "self_ must not be null");
+        }
+    }
+
+    /// The lookups compare the caller's key without copying it, and a header
+    /// added by key and value holds them.
+    #[test]
+    fn lookups_and_add_by_key() {
+        let key = CString::new("k").unwrap();
+        let class = box_record_headers(RecordHeaders::new());
+        // SAFETY: Test code: `class` comes from `box_record_headers` and is destroyed once, at the
+        // end; `view` is its cached `Headers` view, used only while it lives; `key` outlives the
+        // calls reading it; `err` is a valid slot pointing at null, left null (asserted); each
+        // list is owned and destroyed once by `keys`.
+        unsafe {
+            let view = kafka_common_header_internals_RecordHeaders__as_Headers(class);
+            let mut err = ptr::null_mut();
+            kafka_common_header_Headers_add_with_key_value(
+                view,
+                key.as_ptr(),
+                kafka_Bytes_t::from_slice(&[7]),
+                &mut err,
+            );
+            assert!(err.is_null());
+            kafka_common_header_Headers_add_with_key_value(view, key.as_ptr(), kafka_Bytes_t::NULL, &mut err);
+            assert!(err.is_null());
+            assert_eq!(
+                record_headers_ref(class, "class"),
+                &RecordHeaders::with_header_iter([
+                    RecordHeader::new("k".to_string(), Some(vec![7])),
+                    RecordHeader::new("k".to_string(), None),
+                ])
+            );
+            assert_eq!(keys(kafka_common_header_Headers_headers(view, key.as_ptr())), ["k", "k"]);
+            let last = kafka_common_header_Headers_last_header(view, key.as_ptr());
+            assert_eq!(record_header_ref(last, "last").value(), None);
+            kafka_common_header_Headers_remove(view, key.as_ptr(), &mut err);
+            assert!(err.is_null());
+            assert_eq!(keys(kafka_common_header_Headers_to_array(view)), Vec::<String>::new());
             kafka_common_header_internals_RecordHeaders_destroy(class);
         }
     }
