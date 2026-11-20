@@ -60,6 +60,14 @@ use crate::common::utils::internals::ByteUtils;
 use crate::common::utils::internals::ChunkedBytesStream;
 use crate::consumer::{ConsumerRecord, ConsumerRecordOptionsBuilder};
 
+/// A batch [`BatchCursor::next_batch`] read: its metadata, where its records
+/// are, and its declared record count.
+pub(crate) type NextBatch = (BatchMetadata, PendingRecordSource, i32);
+
+/// A batch [`BatchCursor::next_batch_moving_past_refused`] refused: the error
+/// and, when the batch's size was usable, its `(base offset, last offset)`.
+pub(crate) type RefusedBatch = (Error, Option<(i64, i64)>);
+
 /// Builds the error a cursor reports a bad batch with, from the partition, the
 /// batch's base offset and the cause's message.
 pub(crate) type BatchErrorFn = fn(&TopicPartition, i64, &str) -> Error;
@@ -139,6 +147,11 @@ pub(crate) struct BatchCursor {
     /// Builds the error a bad batch is reported with: the owner's
     /// `maybeEnsureValid` exception type.
     pub(crate) batch_error: BatchErrorFn,
+    /// Builds the error a compressed batch's failing stream is reported with:
+    /// the consumer's `maybeEnsureValid` text, or, for a share fetch, the bare
+    /// `KafkaException` Java's stream throws
+    /// (`DefaultRecordBatch.StreamRecordIterator#readNext`).
+    pub(crate) stream_error: BatchErrorFn,
 }
 
 /// Where the current batch's record bytes come from. Uncompressed batches
@@ -470,11 +483,12 @@ impl std::fmt::Debug for RecordStream {
 impl BatchCursor {
     /// A cursor over `records`, a fetch's record batches, positioned before
     /// the first batch. `batch_error` builds the error a bad batch is reported
+    /// with, `stream_error` the error a compressed batch's failing stream is
     /// with.
     ///
     /// §27 zero-copy: `records` is moved into the cursor's `MemoryRecords`, an
     /// O(1) refcount move; nothing is copied.
-    pub(crate) fn new(records: bytes::Bytes, batch_error: BatchErrorFn) -> Self {
+    pub(crate) fn new(records: bytes::Bytes, batch_error: BatchErrorFn, stream_error: BatchErrorFn) -> Self {
         Self {
             memory_records: MemoryRecords::new(records),
             next_batch_start: Some(0),
@@ -483,6 +497,7 @@ impl BatchCursor {
             record_byte_offset: 0,
             records_remaining: 0,
             batch_error,
+            stream_error,
         }
     }
 
@@ -529,6 +544,41 @@ impl BatchCursor {
         partition: &TopicPartition,
         check_crcs: bool,
     ) -> Result<Option<(BatchMetadata, PendingRecordSource, i32)>, Error> {
+        self.read_next_batch(partition, check_crcs, false).map_err(|(error, _)| error)
+    }
+
+    /// [`Self::next_batch`] for a share fetch: a batch refused after its size
+    /// was read (its magic, its minimum size, its checksum, its codec) is moved
+    /// past, and comes back with the error and its offset range, so the fetch
+    /// can reject that batch's own records and read on. Java's
+    /// `ShareCompletedFetch#nextFetchedRecord` sets `currentBatch` before
+    /// `maybeEnsureValid` and `streamingIterator` can fail, and the next call
+    /// takes the next batch. A batch whose size field is unusable comes back
+    /// without a range and is not moved past: Java's batch iterator fails on it
+    /// for good too.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::next_batch`], with the refused batch's `(base offset, last
+    /// offset)` when it has one. For a v0/v1 batch (refused by its magic, D7)
+    /// both are the offset field, which is the last offset of a legacy
+    /// wrapper; v2 reads its last offset delta when the batch holds it.
+    pub(crate) fn next_batch_moving_past_refused(
+        &mut self,
+        partition: &TopicPartition,
+        check_crcs: bool,
+    ) -> Result<Option<NextBatch>, RefusedBatch> {
+        self.read_next_batch(partition, check_crcs, true)
+    }
+
+    /// The body of [`Self::next_batch`]; `move_past_refused` is
+    /// [`Self::next_batch_moving_past_refused`]'s.
+    fn read_next_batch(
+        &mut self,
+        partition: &TopicPartition,
+        check_crcs: bool,
+        move_past_refused: bool,
+    ) -> Result<Option<NextBatch>, RefusedBatch> {
         let Some(batch_start) = self.next_batch_start else {
             return Ok(None);
         };
@@ -547,7 +597,10 @@ impl BatchCursor {
         // error, unwrapped, as Java's `batches.hasNext()` throws it (in
         // `org.apache.kafka.clients.consumer.internals.CompletedFetch#nextFetchedRecord`)
         // — it is not "no batch".
-        let batch_size = match ByteBufferLogInputStream::new(unread, i32::MAX).next_batch_size()? {
+        let batch_size = match ByteBufferLogInputStream::new(unread, i32::MAX)
+            .next_batch_size()
+            .map_err(|e| (e, None))?
+        {
             Some(batch_size) if batch_size <= unread.len() => batch_size,
             // `batchSize == null || remaining < batchSize` → no batch
             // (`org.apache.kafka.common.record.internal.ByteBufferLogInputStream#nextBatch`):
@@ -559,17 +612,25 @@ impl BatchCursor {
             },
         };
         let batch_bytes = &unread[..batch_size];
+        let refused_range = refused_batch_range(batch_bytes);
+        let refused = |this: &mut Self, error: Error| {
+            if move_past_refused {
+                this.next_batch_start = Some(batch_start + batch_size);
+            }
+            (error, Some(refused_range))
+        };
 
         // D7: message formats v0 and v1 are refused by their
         // magic before anything reads the header as a v2 one. In bounds:
         // `next_batch_size` returns a size only once the magic byte is present.
         let magic = batch_bytes[RecordBatch::MAGIC_OFFSET] as i8;
         if magic < RecordBatch::MAGIC_VALUE_V2 {
-            return Err((self.batch_error)(
+            let error = (self.batch_error)(
                 partition,
                 raw_base_offset(batch_bytes),
                 ByteBufferLogInputStream::unsupported_magic_error(magic).message(),
-            ));
+            );
+            return Err(refused(self, error));
         }
 
         // D2: the size half of Java's `ensureValid()`
@@ -582,8 +643,13 @@ impl BatchCursor {
         // Rust those reads would be slice panics, which inside the C and Python
         // bindings abort the process. The view is only built over a batch that passes, so no
         // header accessor below can read past it.
-        let batch = DefaultRecordBatchRef::new(batch_bytes)
-            .map_err(|e| (self.batch_error)(partition, raw_base_offset(batch_bytes), e.message()))?;
+        let batch = match DefaultRecordBatchRef::new(batch_bytes) {
+            Ok(batch) => batch,
+            Err(e) => {
+                let error = (self.batch_error)(partition, raw_base_offset(batch_bytes), e.message());
+                return Err(refused(self, error));
+            },
+        };
 
         // The checksum half of Java's `maybeEnsureValid(batch)`, still gated
         // on `check.crcs` as in Java.
@@ -591,7 +657,8 @@ impl BatchCursor {
             && batch.magic() >= RecordVersion::V2.value()
             && let Err(e) = batch.ensure_valid()
         {
-            return Err((self.batch_error)(partition, batch.base_offset(), e.message()));
+            let error = (self.batch_error)(partition, batch.base_offset(), e.message());
+            return Err(refused(self, error));
         }
 
         let meta = BatchMetadata {
@@ -624,7 +691,11 @@ impl BatchCursor {
         // [batch_start + RECORD_BATCH_OVERHEAD, batch_start + size).
         let records_start = batch_start + RecordBatch::RECORD_BATCH_OVERHEAD;
         let records_end = batch_start + batch_size;
-        let source = match batch.try_compression_type()? {
+        let compression_type = match batch.try_compression_type() {
+            Ok(compression_type) => compression_type,
+            Err(e) => return Err(refused(self, e)),
+        };
+        let source = match compression_type {
             // Borrow the records section directly from the canonical
             // buffer.
             CompressionType::None => PendingRecordSource::Borrowed(records_start..records_end),
@@ -681,7 +752,7 @@ impl BatchCursor {
                 let stream =
                     RecordStream::open(records, compression_type, batch_meta.magic, Arc::clone(buffer_supplier))
                         .map_err(|e| {
-                            (self.batch_error)(
+                            (self.stream_error)(
                                 partition,
                                 batch_meta.base_offset,
                                 DefaultRecordBatch::decompression_error(&e).message(),
@@ -732,7 +803,7 @@ impl BatchCursor {
         };
         match stream.next_record() {
             Ok(_) => Ok(()),
-            Err(e) => Err((self.batch_error)(partition, batch.base_offset, e.message())),
+            Err(e) => Err((self.stream_error)(partition, batch.base_offset, e.message())),
         }
     }
 
@@ -781,7 +852,7 @@ impl BatchCursor {
             RecordSource::Borrowed(range) => self.record_byte_offset + record_size < range.len(),
             RecordSource::Stream(stream) => stream
                 .has_remaining()
-                .map_err(|e| (self.batch_error)(partition, batch.base_offset, e.message()))?,
+                .map_err(|e| (self.stream_error)(partition, batch.base_offset, e.message()))?,
         };
         if records_remain {
             return Err(records_remaining_error(partition));
@@ -1249,6 +1320,23 @@ pub(crate) fn raw_base_offset(batch_bytes: &[u8]) -> i64 {
     batch_bytes
         .first_chunk::<{ RecordBatch::BASE_OFFSET_LENGTH }>()
         .map_or(-1, |base_offset| i64::from_be_bytes(*base_offset))
+}
+
+/// The offsets a batch refused before its view was built covers, for the
+/// share fetch to reject: its base offset, and its last offset where the v2
+/// header holds the delta, else the base offset again (a v0/v1 batch's offset
+/// field, the last offset of a legacy wrapper).
+fn refused_batch_range(batch_bytes: &[u8]) -> (i64, i64) {
+    let base_offset = raw_base_offset(batch_bytes);
+    let magic = batch_bytes.get(RecordBatch::MAGIC_OFFSET).map_or(0, |&m| m as i8);
+    let delta_end = RecordBatch::LAST_OFFSET_DELTA_OFFSET + RecordBatch::LAST_OFFSET_DELTA_LENGTH;
+    let last_offset = match batch_bytes.get(RecordBatch::LAST_OFFSET_DELTA_OFFSET..delta_end) {
+        Some(delta) if magic >= RecordBatch::MAGIC_VALUE_V2 => {
+            base_offset.saturating_add(i64::from(i32::from_be_bytes([delta[0], delta[1], delta[2], delta[3]])))
+        },
+        _ => base_offset,
+    };
+    (base_offset, last_offset)
 }
 
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.CompletedFetch#maybeLeaderEpoch")]

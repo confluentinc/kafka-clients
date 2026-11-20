@@ -30,14 +30,26 @@
 //! Java's `CloseableIterator<Record>` over the current batch (ledger gap G15)
 //! is the cursor's record source, as in `CompletedFetch`.
 //!
-//! Deviations, both from the shared decoder: the decoder refuses message
-//! formats v0 and v1 by their magic (the consumer's decision D7), and it
-//! reports a compressed batch whose stream fails through its batch error,
-//! which is `CorruptRecordError` here (Java's `maybeEnsureValid` text), so that
-//! batch's acquired records are rejected. Java's stream throws a bare
-//! `KafkaException` from `DefaultRecordBatch.StreamRecordIterator#readNext`,
-//! which escapes `ShareCompletedFetch#fetchRecords` and fails every later call
-//! on the same fetch until the broker's acquisition lock releases the records.
+//! Failures follow Java's iterators (`ShareCompletedFetch#nextFetchedRecord`,
+//! `DefaultRecordBatch.RecordIterator#next`): a record that fails to be read
+//! still counts as read, and a batch that fails its checks is the current
+//! batch and is moved past, so the next call reads on. A compressed batch
+//! whose stream fails surfaces a bare `KafkaError` (Java's `KafkaException`
+//! from `DefaultRecordBatch.StreamRecordIterator#readNext` or the codec's
+//! `wrapForInput`), which escapes `fetch_records`; the batch's acquired offsets
+//! end as gaps once the fetch reads past them. A stream that fails before the
+//! batch's first record ends the batch at once, as Java's codecs read their
+//! header as the stream is opened; one that fails later fails once per record
+//! the batch still declares, as Java's iterator does. The message is the decoder's
+//! (`Failed to decompress record stream: ...`), where Java's codec wrapper may
+//! carry the underlying `IOException`'s text instead.
+//!
+//! Deviations, both from the shared decoder: it refuses message formats v0
+//! and v1 by their magic (the consumer's decision D7), so such a batch is
+//! rejected as corrupt where Java reads it; and it checks a v2 batch's minimum
+//! size whether or not `check.crcs` is set (D2), where Java without
+//! `check.crcs` reads past the short header and fails with an
+//! `IndexOutOfBoundsException`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -54,7 +66,7 @@ use crate::consumer::internals::ShareFetchMetricsAggregator;
 use crate::consumer::internals::ShareInFlightBatch;
 use crate::consumer::internals::batch_cursor::{BatchCursor, BatchMetadata, parse_record};
 use crate::consumer::internals::share_in_flight_batch::{
-    RECORD_RELEASED, ShareInFlightBatchStatus, corrupt_batch_error,
+    RECORD_RELEASED, ShareInFlightBatchStatus, corrupt_batch_error, share_stream_error,
 };
 use crate::share_fetch_response_data::{AcquiredRecords, PartitionData};
 
@@ -88,13 +100,22 @@ pub(crate) struct ShareCompletedFetch {
     decompression_buffer_supplier: Arc<BufferSupplier>,
     /// Java's `batches`, `currentBatch` and `records`; `None` once drained.
     cursor: Option<BatchCursor>,
-    /// The size of the record the cursor is on, once it has been read: Java's
+    /// The size of the record the cursor is on and has read: Java's
     /// `records.next()` has consumed it, so the next
     /// [`Self::next_fetched_record`] moves past it.
     consumed_record_size: Option<usize>,
-    /// Java's `currentBatch`: the batch whose acquired offsets a corrupt batch
-    /// rejects.
-    current_batch: Option<BatchMetadata>,
+    /// Whether a call was dropped while it was deserializing the record the
+    /// cursor is on: the next call parses that record again instead of moving
+    /// past it (Rust-only; Java has no cancellation).
+    parse_pending: bool,
+    /// Whether a record of the current batch has been read. A compressed
+    /// batch's stream that fails before its first record is treated as Java's
+    /// stream failing as it is opened (`streamingIterator`): see
+    /// [`Self::next_fetched_record`].
+    batch_record_read: bool,
+    /// Java's `currentBatch`, as the offset range a corrupt batch rejects:
+    /// `(base offset, last offset)`.
+    current_batch: Option<(i64, i64)>,
     records_read: i32,
     bytes_read: i32,
     /// Java's `lastRecord`: the offset of the record last read.
@@ -144,8 +165,10 @@ impl ShareCompletedFetch {
             records_size,
             topic,
             decompression_buffer_supplier,
-            cursor: Some(BatchCursor::new(records, corrupt_batch_error)),
+            cursor: Some(BatchCursor::new(records, corrupt_batch_error, share_stream_error)),
             consumed_record_size: None,
+            parse_pending: false,
+            batch_record_read: false,
             current_batch: None,
             records_read: 0,
             bytes_read: 0,
@@ -262,6 +285,7 @@ impl ShareCompletedFetch {
             self.maybe_close_record_stream();
             self.cursor = None;
             self.consumed_record_size = None;
+            self.parse_pending = false;
             self.cached_record_error = None;
             self.cached_batch_error = None;
             self.is_consumed = true;
@@ -294,10 +318,12 @@ impl ShareCompletedFetch {
     /// # Cancellation
     ///
     /// Dropping the future while a deserializer is pending leaves the fetch on
-    /// the record being decoded, and the next call decodes it again; the
-    /// records decoded before it in the dropped call are lost with its batch.
-    /// They were acquired, so the broker releases them when their acquisition
-    /// lock times out.
+    /// the record being decoded, and the next call decodes it again: it is
+    /// neither skipped nor acknowledged as a gap. The records decoded before it
+    /// in the dropped call are lost with its batch: they stay acquired until
+    /// their lock times out, and their redelivery uses up a delivery attempt.
+    /// The batch is tracked for `has_pending_acknowledgements` only once it is
+    /// handed out, so a dropped batch never keeps the fetch pending.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareCompletedFetch#fetchRecords")]
     pub(crate) async fn fetch_records<K, V>(
         &mut self,
@@ -309,16 +335,18 @@ impl ShareCompletedFetch {
         K: Send + 'static,
         V: Send + 'static,
     {
-        // Creating an empty ShareInFlightBatch
+        // Creating an empty ShareInFlightBatch. Java tracks it as the delivered
+        // batch here; it is tracked as it is handed out instead
+        // (`Self::hand_out`), as nothing reads it in between and a dropped call
+        // must not leave a batch nobody holds tracked.
         let mut in_flight_batch =
             ShareInFlightBatch::new(self.node_id, self.partition.clone(), self.acquisition_lock_timeout_ms);
-        self.track_delivered_batch(in_flight_batch.status());
 
         if let Some(cached_batch_error) = self.cached_batch_error.take() {
             // In the event that a CRC check fails, reject the entire record batch because it is corrupt.
             let offsets = self.reject_record_batch(&mut in_flight_batch);
             in_flight_batch.set_error(ConsumerShareInFlightBatchError::new(cached_batch_error, offsets));
-            return Ok(in_flight_batch);
+            return Ok(self.hand_out(in_flight_batch));
         }
 
         if let Some(cached_record_error) = self.cached_record_error.take() {
@@ -329,11 +357,11 @@ impl ShareCompletedFetch {
                     HashSet::from([last_record]),
                 ));
             }
-            return Ok(in_flight_batch);
+            return Ok(self.hand_out(in_flight_batch));
         }
 
         if self.is_consumed {
-            return Ok(in_flight_batch);
+            return Ok(self.hand_out(in_flight_batch));
         }
 
         self.initialize_next_acquired();
@@ -381,7 +409,18 @@ impl ShareCompletedFetch {
         {
             in_flight_batch.set_record_batches(record_batches);
         }
-        Ok(in_flight_batch)
+        Ok(self.hand_out(in_flight_batch))
+    }
+
+    /// Tracks `in_flight_batch` as the delivered batch (Java's
+    /// `trackDeliveredBatch`, at the start of `fetchRecords`) and returns it.
+    fn hand_out<K, V>(&mut self, in_flight_batch: ShareInFlightBatch<K, V>) -> ShareInFlightBatch<K, V>
+    where
+        K: Send + 'static,
+        V: Send + 'static,
+    {
+        self.track_delivered_batch(in_flight_batch.status());
+        in_flight_batch
     }
 
     /// The body of Java's `try` block in `fetchRecords`.
@@ -399,8 +438,15 @@ impl ShareCompletedFetch {
         let mut records_in_batch = 0;
         let mut current_batch_has_more_records = false;
 
+        // A call dropped mid-parse left the cursor on its record.
+        let mut resume_parse = self.parse_pending;
         while records_in_batch < max_records || current_batch_has_more_records {
-            current_batch_has_more_records = self.next_fetched_record(check_crcs)?;
+            current_batch_has_more_records = if resume_parse {
+                resume_parse = false;
+                self.cursor.as_ref().is_some_and(|cursor| cursor.records_remaining > 1)
+            } else {
+                self.next_fetched_record(check_crcs)?
+            };
             let Some(last_record) = self.last_record else {
                 // Any remaining acquired records are gaps
                 while let Some((offset, _)) = self.next_acquired {
@@ -416,6 +462,7 @@ impl ShareCompletedFetch {
                     let Some(cursor) = self.cursor.as_ref() else {
                         break;
                     };
+                    self.parse_pending = true;
                     let parsed = parse_record(
                         cursor,
                         self.partition.topic_partition(),
@@ -429,6 +476,7 @@ impl ShareCompletedFetch {
                     // Java's `records.next()` consumed the record before it was
                     // parsed; here it is consumed once the parse has returned, so
                     // a parse dropped mid-way decodes it again.
+                    self.parse_pending = false;
                     self.consume_current_record();
                     let (record, size_in_bytes, _) = parsed?;
                     in_flight_batch.add_record(record);
@@ -487,8 +535,7 @@ impl ShareCompletedFetch {
 
         let mut acquired = self.next_acquired_record();
         let mut offsets = HashSet::new();
-        let Some((base_offset, last_offset)) = self.current_batch.as_ref().map(|b| (b.base_offset, b.last_offset))
-        else {
+        let Some((base_offset, last_offset)) = self.current_batch else {
             self.next_acquired = acquired;
             return offsets;
         };
@@ -539,20 +586,33 @@ impl ShareCompletedFetch {
                 let partition = self.partition.topic_partition();
                 let next_batch = match self.cursor.as_mut() {
                     // The checksum is checked below, once the batch is the
-                    // current one, so a corrupt batch is the one rejected.
-                    Some(cursor) => cursor.next_batch(partition, false)?,
-                    None => None,
+                    // current one, so a corrupt batch is the one rejected. A
+                    // batch refused here is the current one too, and is moved
+                    // past, as Java's `currentBatch = batches.next()` precedes
+                    // `maybeEnsureValid`.
+                    Some(cursor) => cursor.next_batch_moving_past_refused(partition, false),
+                    None => Ok(None),
                 };
-                let Some((meta, source, records_count)) = next_batch else {
-                    self.drain();
-                    self.last_record = None;
-                    break;
+                let (meta, source, records_count) = match next_batch {
+                    Ok(Some(batch)) => batch,
+                    Ok(None) => {
+                        self.drain();
+                        self.last_record = None;
+                        break;
+                    },
+                    Err((error, refused_range)) => {
+                        self.current_batch = refused_range;
+                        return Err(error);
+                    },
                 };
 
-                self.current_batch = Some(meta.clone());
+                self.current_batch = Some((meta.base_offset, meta.last_offset));
                 self.maybe_ensure_valid(&meta, check_crcs)?;
 
+                self.batch_record_read = false;
                 if let Some(cursor) = self.cursor.as_mut() {
+                    // A failure here leaves the batch uninstalled, so the next
+                    // call takes the next batch, as Java's `records` stays null.
                     cursor.install_batch(
                         partition,
                         meta,
@@ -566,17 +626,47 @@ impl ShareCompletedFetch {
                     break;
                 };
                 let partition = self.partition.topic_partition();
-                cursor.read_current_record(partition)?;
-                let Some((record, batch)) = cursor.peek_current_record(partition)? else {
-                    return Err(crate::consumer::internals::batch_cursor::premature_eof_error(partition));
+                // `RecordIterator#next` counts the record as read before reading
+                // it (`readRecords++`), so a record that fails is consumed: the
+                // next call reads on. A record whose size is unknown is consumed
+                // without moving through the bytes, so each later read fails
+                // the same way until the batch's declared count is used up, as
+                // Java's does.
+                //
+                // A compressed batch's stream that fails before its first record
+                // ends the batch instead: the Rust codecs read their header
+                // with the first record, where Java's read it as the stream is
+                // opened (`GzipCompression#wrapForInput` and the other codecs'),
+                // so Java's `streamingIterator` throws, `records` stays null, and
+                // the next call takes the next batch.
+                if let Err(error) = cursor.read_current_record(partition) {
+                    if self.batch_record_read {
+                        self.consumed_record_size = Some(0);
+                    } else {
+                        cursor.close_record_stream();
+                        cursor.records_remaining = 0;
+                    }
+                    return Err(error);
+                }
+                self.batch_record_read = true;
+                let (offset, size, is_control_batch) = match cursor.peek_current_record(partition) {
+                    Ok(Some((record, batch))) => {
+                        (record.offset(), record.size_in_bytes() as usize, batch.is_control_batch)
+                    },
+                    Ok(None) => {
+                        self.consumed_record_size = Some(0);
+                        return Err(crate::consumer::internals::batch_cursor::premature_eof_error(partition));
+                    },
+                    Err(error) => {
+                        self.consumed_record_size = Some(0);
+                        return Err(error);
+                    },
                 };
-                let (offset, size, is_control_batch) =
-                    (record.offset(), record.size_in_bytes() as usize, batch.is_control_batch);
+                // v2 records carry no checksum of their own (`DefaultRecord#ensureValid`).
+                self.consumed_record_size = Some(size);
                 // `RecordIterator#next` checks that nothing follows a batch's
                 // last declared record as it reads it.
                 cursor.ensure_none_remaining(partition, size)?;
-                // v2 records carry no checksum of their own (`DefaultRecord#ensureValid`).
-                self.consumed_record_size = Some(size);
 
                 // control records are not returned to the user
                 if !is_control_batch {
@@ -1606,5 +1696,219 @@ pub(crate) mod tests {
             completed_fetch.partition_data.records.is_none(),
             "the records moved into the cursor"
         );
+    }
+
+    /// Deserializes UTF-8 and stays pending, once, on its `pend_on`-th call
+    /// (1-based; 0 never): a deserializer a dropped `poll` interrupts.
+    #[derive(Clone, Default)]
+    pub(crate) struct PendOnceDeserializer {
+        pub(crate) calls: Arc<std::sync::atomic::AtomicUsize>,
+        pub(crate) pend_on: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Deserializer<String> for PendOnceDeserializer {
+        async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            use std::sync::atomic::Ordering;
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.pend_on.load(Ordering::SeqCst) == call {
+                self.pend_on.store(0, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            }
+            Ok(String::from_utf8_lossy(data).into_owned())
+        }
+    }
+
+    fn pend_on(deserializer: &PendOnceDeserializer, call: usize) {
+        deserializer.pend_on.store(call, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Critic 251 Issue 1 (R4 item 8): a call dropped while the deserializer is
+    /// pending on a record leaves the fetch on that record, and the next call
+    /// decodes it again; it is neither skipped nor acknowledged as a gap.
+    #[test]
+    fn test_dropped_fetch_records_decodes_the_pending_record_again() {
+        let tip = tip();
+        let data = partition_data(Some(new_records(0, 3)), acquired_records(0, 3));
+        let mut completed_fetch = new_share_completed_fetch(&tip, data);
+        let value = PendOnceDeserializer::default();
+        let deserializers = Deserializers::new(Box::new(StringDeserializer::new()), Box::new(value.clone()));
+
+        pend_on(&value, 1);
+        assert!(
+            completed_fetch.fetch_records(&deserializers, 10, true).now_or_never().is_none(),
+            "dropped on offset 0"
+        );
+
+        let mut batch = fetch(&mut completed_fetch, &deserializers, 10, true);
+        assert_eq!(vec![0, 1, 2], offsets(&batch.in_flight_records()));
+        assert_eq!(
+            0,
+            batch.acknowledgements().size(),
+            "no gap for the record the dropped call was decoding"
+        );
+        assert!(batch.error().is_none());
+    }
+
+    /// Critic 251 Issue 3: a dropped call's batch is never tracked, so once the
+    /// records handed out are acknowledged and taken, nothing stays pending.
+    /// The record the dropped call had decoded (offset 0) is lost with its
+    /// batch (ledger deferral row); the pending one (offset 1) is decoded again.
+    #[test]
+    fn test_dropped_fetch_records_leaves_no_pending_acknowledgements_behind() {
+        let tip = tip();
+        let data = partition_data(Some(new_records(0, 3)), acquired_records(0, 3));
+        let mut completed_fetch = new_share_completed_fetch(&tip, data);
+        let value = PendOnceDeserializer::default();
+        let deserializers = Deserializers::new(Box::new(StringDeserializer::new()), Box::new(value.clone()));
+
+        pend_on(&value, 2);
+        assert!(
+            completed_fetch.fetch_records(&deserializers, 10, true).now_or_never().is_none(),
+            "dropped on offset 1"
+        );
+        assert!(
+            !completed_fetch.has_pending_acknowledgements(),
+            "the dropped batch is not tracked"
+        );
+
+        let mut batch = fetch(&mut completed_fetch, &deserializers, 10, true);
+        assert_eq!(vec![1, 2], offsets(&batch.in_flight_records()));
+        assert_eq!(0, batch.acknowledgements().size(), "offset 1 is not a gap");
+        assert!(completed_fetch.has_pending_acknowledgements());
+        batch.acknowledge_all(AcknowledgeType::Accept);
+        batch.take_acknowledged_records();
+        assert!(!completed_fetch.has_pending_acknowledgements());
+    }
+
+    /// Critic 251 Issue 4 (probe E): a batch declaring fewer records than it
+    /// holds fails on its last declared record, which Java's iterator counts
+    /// as read (`DefaultRecordBatch.RecordIterator#next`), so the next call
+    /// reads on: it drains the fetch and acknowledges the rest as gaps.
+    #[test]
+    fn test_record_failure_is_moved_past_on_the_next_call() {
+        let mut records = new_records(0, 3).to_vec();
+        records[RecordBatch::RECORDS_COUNT_OFFSET..RecordBatch::RECORDS_COUNT_OFFSET + 4]
+            .copy_from_slice(&2i32.to_be_bytes());
+        let tip = tip();
+        let data = partition_data(Some(bytes::Bytes::from(records)), acquired_records(0, 3));
+        let mut completed_fetch = new_share_completed_fetch(&tip, data);
+        let deserializers = new_string_deserializers();
+
+        let error = completed_fetch
+            .fetch_records(&deserializers, 10, false)
+            .now_or_never()
+            .expect("ready")
+            .expect_err("the batch holds more records than it declares");
+        assert!(matches!(error, Error::InvalidRecord(_)), "{error:?}");
+        assert!(
+            error
+                .message()
+                .starts_with("Incorrect declared batch size for partition test-0, records still remaining in batch"),
+            "{error:?}"
+        );
+
+        let batch = fetch(&mut completed_fetch, &deserializers, 10, false);
+        assert!(completed_fetch.is_consumed());
+        assert!(batch.error().is_none());
+        assert_eq!(2, batch.acknowledgements().size());
+        assert!(batch.acknowledgements().acknowledgements_type_map().contains_key(&1));
+        assert!(batch.acknowledgements().acknowledgements_type_map().contains_key(&2));
+        assert_eq!(None, batch.acknowledgements().get(1), "offset 1 is a gap");
+        assert_eq!(None, batch.acknowledgements().get(2), "offset 2 is a gap");
+    }
+
+    /// A message-format v1 record, as its own legacy batch: Java's
+    /// `LegacyRecord` layout (offset, size, crc, magic, attributes, timestamp,
+    /// key, value).
+    fn legacy_v1_record(offset: i64, value: &[u8]) -> Vec<u8> {
+        let mut body = vec![0u8; 4]; // crc, not checked here
+        body.push(1); // magic
+        body.push(0); // attributes
+        body.extend_from_slice(&0i64.to_be_bytes()); // timestamp
+        body.extend_from_slice(&(-1i32).to_be_bytes()); // null key
+        body.extend_from_slice(&(value.len() as i32).to_be_bytes());
+        body.extend_from_slice(value);
+        let mut record = offset.to_be_bytes().to_vec();
+        record.extend_from_slice(&(body.len() as i32).to_be_bytes());
+        record.extend_from_slice(&body);
+        record
+    }
+
+    /// Critic 251 Issue 4 (probe F): a batch refused by its magic (the
+    /// consumer's D7) is the current batch: its own acquired offsets are
+    /// rejected, never the batch delivered before it, and the next call moves
+    /// on to the next batch.
+    #[test]
+    fn test_refused_batch_rejects_its_own_offsets_and_is_moved_past() {
+        let mut records = new_records(0, 3).to_vec();
+        for offset in 3..6 {
+            records.extend_from_slice(&legacy_v1_record(offset, b"legacy"));
+        }
+        let tip = tip();
+        let data = partition_data(Some(bytes::Bytes::from(records)), acquired_records(0, 6));
+        let mut completed_fetch = new_share_completed_fetch(&tip, data);
+        let deserializers = new_string_deserializers();
+
+        let mut batch = fetch(&mut completed_fetch, &deserializers, 3, false);
+        assert_eq!(vec![0, 1, 2], offsets(&batch.in_flight_records()));
+
+        for offset in 3..6 {
+            let batch = fetch(&mut completed_fetch, &deserializers, 3, false);
+            assert_corrupt(&batch);
+            assert_eq!(
+                Some(format!(
+                    "Record batch for partition test-0 at offset {offset} is invalid, cause: Record batch magic v1 is \
+                     not supported: this client reads only magic v2 record batches (message formats v0 and v1 were \
+                     removed in Kafka 4.0 by KIP-724)"
+                )),
+                batch.error().map(|e| e.cause().message().to_string())
+            );
+            assert_eq!(
+                Some(&HashSet::from([offset])),
+                batch.error().map(ConsumerShareInFlightBatchError::offsets)
+            );
+            assert_eq!(1, batch.acknowledgements().size(), "only the refused batch's own offset");
+            assert_eq!(Some(AcknowledgeType::Reject), batch.acknowledgements().get(offset));
+        }
+
+        let mut batch = fetch(&mut completed_fetch, &deserializers, 3, false);
+        assert!(batch.in_flight_records().is_empty());
+        assert_eq!(0, batch.acknowledgements().size());
+        assert!(completed_fetch.is_consumed());
+    }
+
+    /// Critic 251 Issue 5: a compressed batch whose stream fails surfaces a
+    /// bare `KafkaError` that escapes `fetch_records`, as Java's
+    /// `KafkaException` escapes `ShareCompletedFetch#fetchRecords`; nothing is
+    /// rejected, and the next call moves on, acknowledging the batch's
+    /// acquired offsets as gaps.
+    #[test]
+    fn test_failing_compressed_stream_surfaces_a_kafka_error_and_ends_as_gaps() {
+        let mut records = new_records_compressed(0, 3, Compression::gzip().build()).to_vec();
+        // Garble the gzip header at the start of the records section.
+        records[RecordBatch::RECORD_BATCH_OVERHEAD] = 0;
+        records[RecordBatch::RECORD_BATCH_OVERHEAD + 1] = 0;
+        let tip = tip();
+        let data = partition_data(Some(bytes::Bytes::from(records)), acquired_records(0, 3));
+        let mut completed_fetch = new_share_completed_fetch(&tip, data);
+        let deserializers = new_string_deserializers();
+
+        let error = completed_fetch
+            .fetch_records(&deserializers, 10, false)
+            .now_or_never()
+            .expect("ready")
+            .expect_err("the stream fails");
+        assert!(matches!(error, Error::KafkaError(_)), "a bare KafkaError: {error:?}");
+        assert!(!error.is_corrupt_record_error(), "{error:?}");
+        assert!(error.message().starts_with("Failed to decompress record stream: "), "{error:?}");
+
+        let batch = fetch(&mut completed_fetch, &deserializers, 10, false);
+        assert!(batch.error().is_none());
+        assert!(completed_fetch.is_consumed());
+        assert_eq!(3, batch.acknowledgements().size());
+        for offset in 0..3 {
+            assert!(batch.acknowledgements().acknowledgements_type_map().contains_key(&offset));
+            assert_eq!(None, batch.acknowledgements().get(offset), "offset {offset} is a gap");
+        }
     }
 }

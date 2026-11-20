@@ -23,9 +23,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::common::Error;
-use crate::common::TopicIdPartition;
 use crate::common::errors::CorruptRecordError;
 use crate::common::utils::internals::BufferSupplier;
+use crate::common::{TopicIdPartition, TopicPartition};
 use crate::consumer::AcknowledgeType;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::internals::Acknowledgements;
@@ -63,7 +63,7 @@ pub(crate) const RECORD_RELEASED: &str = "The record has been released.";
 ///   deserializers again.
 ///
 /// **That whole scheme lives behind one seam,
-/// [`Self::redeliver_record`].** Nothing outside this type — `ShareFetch`, the
+/// [`Self::redelivery_walk`].** Nothing outside this type — `ShareFetch`, the
 /// request manager, `poll` — knows how a redelivered record is produced, so
 /// the scheme can change by touching only this type and its tests.
 ///
@@ -130,6 +130,10 @@ pub(crate) struct ShareInFlightBatch<K, V> {
     /// What [`ShareCompletedFetch`](super::ShareCompletedFetch) reads about
     /// this batch, from the background task as well.
     status: Arc<ShareInFlightBatchStatus>,
+    /// How many record batches redelivery has decoded, for the test that a
+    /// batch is walked once however many of its records are renewed.
+    #[cfg(test)]
+    redelivery_batches_installed: usize,
 }
 
 /// What a [`ShareCompletedFetch`](super::ShareCompletedFetch) needs to know
@@ -186,11 +190,13 @@ where
             record_batches_owned: false,
             cached_redelivery_error: None,
             status: Arc::new(ShareInFlightBatchStatus::default()),
+            #[cfg(test)]
+            redelivery_batches_installed: 0,
         }
     }
 
     /// Gives the batch the raw record batches its records are decoded from, so
-    /// that a renewed record can be delivered again ([`Self::redeliver_record`]).
+    /// that a renewed record can be delivered again ([`Self::redelivery_walk`]).
     /// `ShareCompletedFetch` calls it with the partition's records; nothing is
     /// copied.
     ///
@@ -388,7 +394,8 @@ where
     }
 
     /// Moves the renewed records back into the in-flight set, decoding each
-    /// again for delivery ([`Self::redeliver_record`]), in offset order.
+    /// again for delivery ([`Self::redelivery_walk`]), in offset order, in one
+    /// pass over the record batches.
     ///
     /// Java moves the record objects (`inFlightRecords.putAll(renewedRecords)`).
     /// A record whose redelivery fails takes the path a record whose first
@@ -412,17 +419,24 @@ where
             self.publish_status();
             return Some(cause);
         }
-        let renewed = self.renewed_records.as_mut()?;
+        let renewed = self.renewed_records.as_ref()?;
         if renewed.is_empty() {
             return None;
         }
-        let mut offsets: Vec<(i64, Option<i16>)> = renewed.drain().collect();
+        // A snapshot: each offset leaves `renewed` only once its redelivery has
+        // resolved, so a call dropped mid-way leaves every record it did not
+        // redeliver still renewed for the next call.
+        let mut offsets: Vec<(i64, Option<i16>)> = renewed.iter().map(|(&offset, &count)| (offset, count)).collect();
         offsets.sort_unstable_by_key(|&(offset, _)| offset);
+        let mut walk = self.redelivery_walk();
         let mut redelivered = 0;
         let mut released = None;
-        let mut pending = offsets.into_iter();
-        for (offset, delivery_count) in pending.by_ref() {
-            match self.redeliver_record(offset, delivery_count, deserializers).await {
+        for (offset, delivery_count) in offsets {
+            let result = walk.redeliver_record(offset, delivery_count, deserializers).await;
+            if let Some(renewed) = self.renewed_records.as_mut() {
+                renewed.remove(&offset);
+            }
+            match result {
                 Ok(record) => {
                     self.add_record(record);
                     redelivered += 1;
@@ -439,9 +453,9 @@ where
                 },
             }
         }
-        // The records after a failure wait for the next call.
-        if let Some(renewed) = self.renewed_records.as_mut() {
-            renewed.extend(pending);
+        #[cfg(test)]
+        {
+            self.redelivery_batches_installed += walk.batches_installed;
         }
         self.publish_status();
         released
@@ -509,81 +523,31 @@ where
         self.set_error(ConsumerShareInFlightBatchError::new(cause, HashSet::from([offset])));
     }
 
-    /// **The redelivery seam** (decision D5): hands back the in-flight record
-    /// at `offset` for delivery again, as a new value decoded from the batch's
-    /// raw record batches and deserialized again, with the delivery count it
-    /// was first delivered with. A compressed record batch is decompressed up to
-    /// the record.
+    /// **The redelivery seam** (decision D5): a walk over the batch's raw
+    /// record batches that hands back in-flight records for delivery again, as
+    /// new values decoded from those bytes and deserialized again, with the
+    /// delivery count they were first delivered with
+    /// ([`RedeliveryWalk::redeliver_record`]). The offsets are taken in
+    /// ascending order, so each record batch is read once, and a compressed one
+    /// decompressed once up to its last renewed record, however many of its
+    /// records are renewed.
     ///
-    /// Everything about how a renewed record is kept and produced is here and
-    /// in [`Self::retain_record_batches_for_redelivery`]; see the type's doc.
-    ///
-    /// # Errors
-    ///
-    /// The deserializers' failure, as Java's
-    /// `RecordDeserializationException` ("... The record has been
-    /// released."), or a decoding failure. The record batches were checked
-    /// when the record was first delivered, so their checksum is not checked
-    /// again.
-    async fn redeliver_record(
-        &self,
-        offset: i64,
-        delivery_count: Option<i16>,
-        deserializers: &Deserializers<K, V>,
-    ) -> Result<ConsumerRecord<K, V>, Error> {
-        let partition = self.partition.topic_partition();
-        let not_found = || {
-            Error::local_illegal_state(format!(
-                "The renewed record at offset {offset} of partition {partition} is no longer held for redelivery"
-            ))
-        };
-        let Some(record_batches) = self.record_batches.clone() else {
-            return Err(not_found());
-        };
-        let mut cursor = BatchCursor::new(record_batches, corrupt_batch_error);
-        // Find the record batch holding the record.
-        loop {
-            let Some((meta, source, records_count)) = cursor.next_batch(partition, false)? else {
-                return Err(not_found());
-            };
-            if meta.last_offset < offset || meta.is_control_batch {
-                continue;
-            }
-            if meta.base_offset > offset {
-                return Err(not_found());
-            }
-            // A buffer of the codec's size for the stream, returned when it is dropped.
-            let buffer_supplier = Arc::new(BufferSupplier::no_caching());
-            cursor.install_batch(partition, meta, source, records_count, &buffer_supplier)?;
-            break;
+    /// Everything about how a renewed record is kept and produced is here, in
+    /// [`RedeliveryWalk`] and in [`Self::retain_record_batches_for_redelivery`];
+    /// see the type's doc.
+    fn redelivery_walk(&self) -> RedeliveryWalk {
+        RedeliveryWalk {
+            cursor: self
+                .record_batches
+                .clone()
+                .map(|record_batches| BatchCursor::new(record_batches, corrupt_batch_error, share_stream_error)),
+            partition: self.partition.topic_partition().clone(),
+            topic: Arc::from(self.partition.topic()),
+            // A buffer of the codec's size per stream, returned when it is dropped.
+            buffer_supplier: Arc::new(BufferSupplier::no_caching()),
+            #[cfg(test)]
+            batches_installed: 0,
         }
-        // Step to the record.
-        loop {
-            cursor.read_current_record(partition)?;
-            let (record_offset, size) = match cursor.peek_current_record(partition)? {
-                Some((record, _)) => (record.offset(), record.size_in_bytes() as usize),
-                None => return Err(not_found()),
-            };
-            if record_offset == offset {
-                break;
-            }
-            if record_offset > offset {
-                return Err(not_found());
-            }
-            cursor.advance_record_cursor(size);
-        }
-        let topic: Arc<str> = Arc::from(self.partition.topic());
-        let (record, _, _) = parse_record(
-            &cursor,
-            partition,
-            &topic,
-            deserializers.key_deserializer(),
-            deserializers.value_deserializer(),
-            delivery_count,
-            RECORD_RELEASED,
-        )
-        .await?;
-        Ok(record)
     }
 
     /// Applies the memory policy for the raw record batches (see the type's
@@ -616,7 +580,7 @@ where
         // The span of the record batches holding `first` to `last`. The bytes were
         // checked when the records were first delivered.
         let partition = self.partition.topic_partition();
-        let mut cursor = BatchCursor::new(record_batches.clone(), corrupt_batch_error);
+        let mut cursor = BatchCursor::new(record_batches.clone(), corrupt_batch_error, share_stream_error);
         let mut span: Option<(usize, usize)> = None;
         while let Ok(Some((meta, _, _))) = cursor.next_batch(partition, false) {
             if meta.last_offset >= first && meta.base_offset <= last {
@@ -649,10 +613,119 @@ impl<K, V> std::fmt::Debug for ShareInFlightBatch<K, V> {
     }
 }
 
+/// One pass over an in-flight batch's raw record batches, delivering renewed
+/// records again in ascending offset order (the D5 seam, see
+/// [`ShareInFlightBatch::redelivery_walk`]). A private helper of the seam.
+struct RedeliveryWalk {
+    /// `None` when the batch holds no record batches any more.
+    cursor: Option<BatchCursor>,
+    partition: TopicPartition,
+    topic: Arc<str>,
+    buffer_supplier: Arc<BufferSupplier>,
+    #[cfg(test)]
+    batches_installed: usize,
+}
+
+impl RedeliveryWalk {
+    /// Decodes the record at `offset`, which must follow the one this walk
+    /// decoded before, and runs the deserializers over it.
+    ///
+    /// # Errors
+    ///
+    /// The deserializers' failure, as Java's `RecordDeserializationException`
+    /// ("... The record has been released."), a decoding failure, or an
+    /// illegal-state error when the record is not in the bytes. The record
+    /// batches were checked when the record was first delivered, so their
+    /// checksum is not checked again.
+    async fn redeliver_record<K, V>(
+        &mut self,
+        offset: i64,
+        delivery_count: Option<i16>,
+        deserializers: &Deserializers<K, V>,
+    ) -> Result<ConsumerRecord<K, V>, Error>
+    where
+        K: Send + 'static,
+        V: Send + 'static,
+    {
+        self.step_to(offset)?;
+        let Some(cursor) = self.cursor.as_ref() else {
+            return Err(self.not_found(offset));
+        };
+        let (record, _, _) = parse_record(
+            cursor,
+            &self.partition,
+            &self.topic,
+            deserializers.key_deserializer(),
+            deserializers.value_deserializer(),
+            delivery_count,
+            RECORD_RELEASED,
+        )
+        .await?;
+        Ok(record)
+    }
+
+    /// Moves the cursor onto the record at `offset`, reading on from where it
+    /// is: within the installed record batch, or through the batches after it.
+    fn step_to(&mut self, offset: i64) -> Result<(), Error> {
+        let Some(cursor) = self.cursor.as_mut() else {
+            return Err(self.not_found(offset));
+        };
+        loop {
+            let in_current_batch = cursor.records_remaining > 0
+                && cursor.current_batch.as_ref().is_some_and(|batch| batch.last_offset >= offset);
+            if in_current_batch {
+                cursor.read_current_record(&self.partition)?;
+                let (record_offset, size) = match cursor.peek_current_record(&self.partition)? {
+                    Some((record, _)) => (record.offset(), record.size_in_bytes() as usize),
+                    None => break,
+                };
+                if record_offset == offset {
+                    return Ok(());
+                }
+                if record_offset > offset {
+                    break;
+                }
+                cursor.advance_record_cursor(size);
+                continue;
+            }
+            cursor.close_record_stream();
+            cursor.records_remaining = 0;
+            let Some((meta, source, records_count)) = cursor.next_batch(&self.partition, false)? else {
+                break;
+            };
+            if meta.last_offset < offset || meta.is_control_batch {
+                continue;
+            }
+            // Installed even when it starts past `offset`, for the offsets after it.
+            cursor.install_batch(&self.partition, meta, source, records_count, &self.buffer_supplier)?;
+            #[cfg(test)]
+            {
+                self.batches_installed += 1;
+            }
+        }
+        Err(self.not_found(offset))
+    }
+
+    fn not_found(&self, offset: i64) -> Error {
+        Error::local_illegal_state(format!(
+            "The renewed record at offset {offset} of partition {} is no longer held for redelivery",
+            self.partition
+        ))
+    }
+}
+
+/// A compressed batch's failing stream in a share fetch: the bare
+/// `KafkaException` Java's stream throws
+/// (`DefaultRecordBatch.StreamRecordIterator#readNext`), which escapes
+/// `ShareCompletedFetch#fetchRecords`.
+pub(crate) fn share_stream_error(_partition: &TopicPartition, _base_offset: i64, cause: &str) -> Error {
+    Error::kafka_message(cause)
+}
+
 /// Java's `ShareCompletedFetch#maybeEnsureValid(RecordBatch, boolean)`:
 /// `new CorruptRecordException("Record batch for partition " + partition +
 /// " at offset " + batch.baseOffset() + " is invalid, cause: " + e.getMessage())`.
-pub(crate) fn corrupt_batch_error(partition: &crate::common::TopicPartition, base_offset: i64, cause: &str) -> Error {
+pub(crate) fn corrupt_batch_error(partition: &TopicPartition, base_offset: i64, cause: &str) -> Error {
     Error::CorruptRecord(CorruptRecordError::new(format!(
         "Record batch for partition {partition} at offset {base_offset} is invalid, cause: {cause}"
     )))
@@ -1043,5 +1116,65 @@ mod tests {
             "{alloc_count} allocations for {RECORD_COUNT} records: the share receive path must not allocate per \
              record beyond the deserializers' output (CLAUDE.md §13 / §27)"
         );
+    }
+
+    /// Critic 251 Issue 2 (R4 item 8): a `take_renewals` dropped while a
+    /// redelivery is pending leaves every renewal it did not redeliver pending,
+    /// and the next call redelivers them.
+    #[test]
+    fn test_dropped_take_renewals_keeps_the_renewals_pending() {
+        use crate::consumer::internals::share_completed_fetch::tests::PendOnceDeserializer;
+
+        for pend_on_redelivery in 1..=3 {
+            let tip = tip();
+            let data = partition_data(Some(records_with_distinct_values(3)), acquired_records(0, 3));
+            let mut completed_fetch = new_share_completed_fetch(&tip, data);
+            let value = PendOnceDeserializer::default();
+            let deserializers = Deserializers::new(Box::new(StringDeserializer::new()), Box::new(value.clone()));
+            let mut batch = fetch(&mut completed_fetch, &deserializers, 10, true);
+            let delivered = batch.in_flight_records();
+            assert_eq!(3, renew(&mut batch, &delivered, &[0, 1, 2]));
+
+            // The first delivery made 3 calls.
+            value.pend_on.store(3 + pend_on_redelivery, Ordering::SeqCst);
+            assert!(
+                batch.take_renewals(&deserializers).now_or_never().is_none(),
+                "dropped mid-redelivery"
+            );
+            let redelivered_before_drop = pend_on_redelivery - 1;
+            assert_eq!(redelivered_before_drop, batch.num_records());
+            assert!(batch.has_renewals(), "the rest are still renewed");
+            assert!(completed_fetch.has_pending_acknowledgements());
+
+            assert!(take_renewals_now(&mut batch, &deserializers).is_none());
+            assert!(!batch.has_renewals());
+            assert_eq!(3, batch.num_records());
+            assert_eq!(
+                vec![0, 1, 2],
+                batch.in_flight_records().iter().map(ConsumerRecord::offset).collect::<Vec<_>>(),
+                "pending on redelivery {pend_on_redelivery}"
+            );
+            assert_eq!(0, batch.acknowledgements().size());
+        }
+    }
+
+    /// Critic 251 Issue 6: renewed records of one compressed batch are
+    /// redelivered in one walk, decoding the batch once.
+    #[test]
+    fn test_renewed_records_of_a_batch_are_redelivered_in_one_walk() {
+        let tip = tip();
+        let records = new_records_compressed(0, 5, Compression::lz4().build());
+        let mut completed_fetch =
+            new_share_completed_fetch(&tip, partition_data(Some(records), acquired_records(0, 5)));
+        let deserializers = new_string_deserializers();
+        let mut batch = fetch(&mut completed_fetch, &deserializers, 10, true);
+        let delivered = batch.in_flight_records();
+        assert_eq!(4, renew(&mut batch, &delivered, &[0, 2, 3, 4]));
+        assert!(take_renewals_now(&mut batch, &deserializers).is_none());
+        assert_eq!(
+            vec![0, 2, 3, 4],
+            batch.in_flight_records().iter().map(ConsumerRecord::offset).collect::<Vec<_>>()
+        );
+        assert_eq!(1, batch.redelivery_batches_installed, "the batch is walked once");
     }
 }

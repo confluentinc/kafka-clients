@@ -415,7 +415,7 @@ impl CompletedFetch {
         // sliced from the FetchResponse payload (BytesReader, §27); moving it
         // into `MemoryRecords` is an O(1) refcount move, no copy.
         let records_buffer = self.partition_data.records.take().unwrap_or_default();
-        self.cursor = Some(BatchCursor::new(records_buffer, invalid_batch_error));
+        self.cursor = Some(BatchCursor::new(records_buffer, invalid_batch_error, invalid_batch_error));
     }
 
     /// Pulls up to `max_records` records out of the fetch, decoding each
