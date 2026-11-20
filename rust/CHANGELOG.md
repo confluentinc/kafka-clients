@@ -4,8 +4,31 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 
 ## [Unreleased]
 
+### Consumer
+
+- The headers of a fetched record are read on demand, as Java reads them. A
+  record keeps a slice of its encoded header section and builds the header
+  list the first time it is asked for; each header's key and value are then
+  views of the fetched data, not copies. A record whose headers are never read
+  costs no allocation for them. A record with headers that is kept holds its
+  fetch buffer alive, as a `Bytes` value from `BytesDeserializer` does.
+- A header key that is not valid UTF-8 no longer fails `poll()` with "has
+  invalid headers": the key is decoded with U+FFFD for the malformed bytes, as
+  Java's `RecordHeader.key()` decodes it.
+
 ### C FFI
 
+- `kafka_common_header_Header_key` makes its NUL-terminated copy of the key on
+  the first call, not when the header view is created, so reading only a
+  header's value copies nothing.
+- New `kafka_common_header_Header__key_bytes`: the key as a pointer and a
+  length (`kafka_Bytes_t`), with no copy and whole when the key holds a NUL
+  byte. For a fetched record it points into the fetched data.
+- `kafka_common_header_Headers_add_with_key_value` copies the key once instead
+  of twice, `Headers_remove`, `Headers_last_header` and `Headers_headers`
+  compare the given key without copying it, and
+  `kafka_common_header_internals_RecordHeaders_with_header_slice` copies each
+  header once.
 - A NULL mandatory argument (a handle, a string, a list, a map, an element, a
   function pointer) is checked at every export and reported with the error Java
   throws there: `kafka_common_Error_LOCAL_NULL_POINTER` (the new
