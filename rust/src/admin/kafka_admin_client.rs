@@ -18854,4 +18854,1065 @@ mod tests {
             now + MAX_CLOSE_WAIT_TIME_MS
         );
     }
+
+    /// Translated from `org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest`.
+    ///
+    /// The Java tests run against `AdminClientUnitTestEnv`; here the same
+    /// prepared responses drive the test-only `KafkaAdminClient::create_for_test`
+    /// environment by pumping `AdminClientRunnable::run_once`. Java's environment
+    /// keeps the default `retries` (`Integer.MAX_VALUE`); the tests that retry use
+    /// `offsets_env`, which restores it (the shared `env` caps it at 2).
+    mod share_group {
+        use super::*;
+        use crate::ShareGroupDescribeResponseData;
+        use crate::admin::{
+            AlterShareGroupOffsetsResult, DeleteShareGroupOffsetsOptions, DeleteShareGroupOffsetsResult,
+            ListShareGroupOffsetsOptions, ListShareGroupOffsetsSpec, ShareGroupDescription, ShareMemberAssignment,
+            ShareMemberDescription, SharePartitionOffsetInfo,
+        };
+        use crate::alter_share_group_offsets_response_data::{
+            AlterShareGroupOffsetsResponsePartition, AlterShareGroupOffsetsResponseTopic,
+        };
+        use crate::common::requests::{
+            AbstractRequest, AlterShareGroupOffsetsResponse, DeleteShareGroupOffsetsResponse,
+            DescribeShareGroupOffsetsResponse, MetadataResponse, ShareGroupDescribeResponse,
+        };
+        use crate::delete_share_group_offsets_response_data::DeleteShareGroupOffsetsResponseTopic;
+        use crate::describe_share_group_offsets_response_data::{
+            DescribeShareGroupOffsetsResponseGroup, DescribeShareGroupOffsetsResponsePartition,
+            DescribeShareGroupOffsetsResponseTopic,
+        };
+        use crate::share_group_describe_response_data::{Assignment, DescribedGroup, Member, TopicPartitions};
+        use crate::{AlterShareGroupOffsetsResponseData, DeleteShareGroupOffsetsResponseData};
+        use crate::{DescribeShareGroupOffsetsResponseData, ListGroupsResponseData};
+
+        /// `KafkaAdminClientTestBase#GROUP_ID`.
+        const GROUP_ID: &str = "group-0";
+
+        fn share_group_describe(groups: Vec<DescribedGroup>) -> ConcreteResponse {
+            let mut data = ShareGroupDescribeResponseData::new();
+            data.set_groups(groups);
+            ConcreteResponse::ShareGroupDescribe(ShareGroupDescribeResponse::new(data))
+        }
+
+        fn described_group_error(group_id: &str, error: Errors) -> DescribedGroup {
+            let mut group = DescribedGroup::new();
+            group.set_group_id(group_id.to_string()).set_error_code(error.code());
+            group
+        }
+
+        /// `my_topic` partitions 0, 1 and 2, the assignment every Java member gets.
+        fn member_assignment() -> Assignment {
+            let mut topic_partitions = TopicPartitions::new();
+            topic_partitions
+                .set_topic_name("my_topic".to_string())
+                .set_partitions(vec![0, 1, 2]);
+            let mut assignment = Assignment::new();
+            assignment.set_topic_partitions(vec![topic_partitions]);
+            assignment
+        }
+
+        fn member(member_id: &str, client_id: &str) -> Member {
+            let mut member = Member::new();
+            member
+                .set_member_id(member_id.to_string())
+                .set_client_id(client_id.to_string())
+                .set_client_host("clientHost".to_string())
+                .set_assignment(member_assignment());
+            member
+        }
+
+        fn stable_group(group_id: &str) -> DescribedGroup {
+            let mut group = DescribedGroup::new();
+            group
+                .set_group_id(group_id.to_string())
+                .set_group_state(GroupState::Stable.to_string())
+                .set_members(vec![member("0", "clientId0"), member("1", "clientId1")]);
+            group
+        }
+
+        /// Java's `convertToShareMemberDescriptions`.
+        fn convert_to_share_member_descriptions(
+            member: &Member,
+            assignment: ShareMemberAssignment,
+        ) -> ShareMemberDescription {
+            ShareMemberDescription::new(
+                member.member_id.clone(),
+                member.rack_id.clone(),
+                member.client_id.clone(),
+                member.client_host.clone(),
+                assignment,
+                member.member_epoch,
+            )
+        }
+
+        fn list_groups(error: Errors, groups: &[(&str, &str, &str, &str)]) -> ConcreteResponse {
+            use crate::list_groups_response_data::ListedGroup;
+            let listed = groups
+                .iter()
+                .map(|(id, group_type, protocol_type, state)| {
+                    let mut group = ListedGroup::new();
+                    group
+                        .set_group_id((*id).to_string())
+                        .set_group_type((*group_type).to_string())
+                        .set_protocol_type((*protocol_type).to_string())
+                        .set_group_state((*state).to_string());
+                    group
+                })
+                .collect();
+            let mut data = ListGroupsResponseData::new();
+            data.set_error_code(error.code()).set_groups(listed);
+            ConcreteResponse::ListGroups(crate::common::requests::ListGroupsResponse::new(data))
+        }
+
+        fn offsets_partition(
+            index: i32,
+            start_offset: i64,
+            leader_epoch: i32,
+        ) -> DescribeShareGroupOffsetsResponsePartition {
+            let mut partition = DescribeShareGroupOffsetsResponsePartition::new();
+            partition
+                .set_partition_index(index)
+                .set_start_offset(start_offset)
+                .set_leader_epoch(leader_epoch);
+            partition
+        }
+
+        fn offsets_topic(
+            name: &str,
+            partitions: Vec<DescribeShareGroupOffsetsResponsePartition>,
+        ) -> DescribeShareGroupOffsetsResponseTopic {
+            let mut topic = DescribeShareGroupOffsetsResponseTopic::new();
+            topic.set_topic_name(name.to_string()).set_partitions(partitions);
+            topic
+        }
+
+        fn offsets_group(
+            group_id: &str,
+            topics: Vec<DescribeShareGroupOffsetsResponseTopic>,
+        ) -> DescribeShareGroupOffsetsResponseGroup {
+            let mut group = DescribeShareGroupOffsetsResponseGroup::new();
+            group.set_group_id(group_id.to_string()).set_topics(topics);
+            group
+        }
+
+        fn describe_share_group_offsets(groups: Vec<DescribeShareGroupOffsetsResponseGroup>) -> ConcreteResponse {
+            let mut data = DescribeShareGroupOffsetsResponseData::new();
+            data.set_groups(groups);
+            ConcreteResponse::DescribeShareGroupOffsets(DescribeShareGroupOffsetsResponse::new(data))
+        }
+
+        fn info(start_offset: i64, leader_epoch: i32) -> Option<SharePartitionOffsetInfo> {
+            Some(SharePartitionOffsetInfo::new(start_offset, Some(leader_epoch), None))
+        }
+
+        fn alter_partition(index: i32, error: Option<(Errors, &str)>) -> AlterShareGroupOffsetsResponsePartition {
+            let mut partition = AlterShareGroupOffsetsResponsePartition::new();
+            partition.set_partition_index(index);
+            if let Some((error, message)) = error {
+                partition
+                    .set_error_code(error.code())
+                    .set_error_message(Some(message.to_string()));
+            }
+            partition
+        }
+
+        fn alter_topic(
+            name: &str,
+            partitions: Vec<AlterShareGroupOffsetsResponsePartition>,
+        ) -> AlterShareGroupOffsetsResponseTopic {
+            let mut topic = AlterShareGroupOffsetsResponseTopic::new();
+            topic.set_topic_name(name.to_string()).set_partitions(partitions);
+            topic
+        }
+
+        fn alter_response(data: AlterShareGroupOffsetsResponseData) -> ConcreteResponse {
+            ConcreteResponse::AlterShareGroupOffsets(AlterShareGroupOffsetsResponse::new(data))
+        }
+
+        fn delete_topic(name: &str, error: Option<Errors>) -> DeleteShareGroupOffsetsResponseTopic {
+            let mut topic = DeleteShareGroupOffsetsResponseTopic::new();
+            topic.set_topic_name(name.to_string()).set_topic_id(Uuid::random_uuid());
+            if let Some(error) = error {
+                topic
+                    .set_error_code(error.code())
+                    .set_error_message(Some(error.message().to_string()));
+            }
+            topic
+        }
+
+        fn delete_response(data: DeleteShareGroupOffsetsResponseData) -> ConcreteResponse {
+            ConcreteResponse::DeleteShareGroupOffsets(DeleteShareGroupOffsetsResponse::new(data))
+        }
+
+        fn alter_offsets() -> HashMap<TopicPartition, i64> {
+            HashMap::from([
+                (TopicPartition::new("foo", 0), 1),
+                (TopicPartition::new("foo", 1), 2),
+                (TopicPartition::new("bar", 0), 1),
+            ])
+        }
+
+        async fn alter(
+            admin: &KafkaAdminClient,
+            runnable: &mut AdminClientRunnable<MockClient>,
+            time: &MockTime,
+        ) -> AlterShareGroupOffsetsResult {
+            let result = admin.alter_share_group_offsets(GROUP_ID, &alter_offsets());
+            let all = result.all();
+            drive_until(runnable, time, 40, || all.is_done()).await;
+            result
+        }
+
+        async fn delete(
+            admin: &KafkaAdminClient,
+            runnable: &mut AdminClientRunnable<MockClient>,
+            time: &MockTime,
+            topics: &[&str],
+        ) -> DeleteShareGroupOffsetsResult {
+            let topics: HashSet<String> = topics.iter().map(|t| (*t).to_string()).collect();
+            let result = admin.delete_share_group_offsets(GROUP_ID, &topics);
+            let all = result.all();
+            drive_until(runnable, time, 40, || all.is_done()).await;
+            result
+        }
+
+        #[tokio::test]
+        #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testDescribeShareGroups")]
+        async fn test_describe_share_groups() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            let client = runnable.client_mut();
+
+            // Retriable FindCoordinatorResponse errors should be retried
+            client.prepare_response(find_coordinator_error_resp(GROUP_ID, Errors::CoordinatorNotAvailable));
+            client.prepare_response(find_coordinator_error_resp(GROUP_ID, Errors::CoordinatorLoadInProgress));
+            client.prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+            // Retriable errors should be retried
+            client.prepare_response(share_group_describe(vec![described_group_error(
+                GROUP_ID,
+                Errors::CoordinatorLoadInProgress,
+            )]));
+
+            // We need to return two responses here, one with NOT_COORDINATOR error when calling
+            // describe share group api using coordinator that has moved. This will retry whole
+            // operation. So we need to again respond with a FindCoordinatorResponse.
+            //
+            // And the same reason for COORDINATOR_NOT_AVAILABLE error response
+            client.prepare_response(share_group_describe(vec![described_group_error(
+                GROUP_ID,
+                Errors::NotCoordinator,
+            )]));
+            client.prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            client.prepare_response(share_group_describe(vec![described_group_error(
+                GROUP_ID,
+                Errors::CoordinatorNotAvailable,
+            )]));
+            client.prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+            let expected_topic_partitions: HashSet<TopicPartition> =
+                (0..3).map(|p| TopicPartition::new("my_topic", p)).collect();
+            let expected_member_descriptions = vec![
+                convert_to_share_member_descriptions(
+                    &member("0", "clientId0"),
+                    ShareMemberAssignment::new(expected_topic_partitions.clone()),
+                ),
+                convert_to_share_member_descriptions(
+                    &member("1", "clientId1"),
+                    ShareMemberAssignment::new(expected_topic_partitions),
+                ),
+            ];
+            client.prepare_response(share_group_describe(vec![stable_group(GROUP_ID)]));
+
+            let result = admin.describe_share_groups(&[GROUP_ID.to_string()]);
+            let future = result.described_groups()[GROUP_ID].clone();
+            drive_until(&mut runnable, &time, 80, || future.is_done()).await;
+            let group_description = future.get().await.unwrap();
+
+            assert_eq!(result.described_groups().len(), 1);
+            assert_eq!(group_description.group_id(), GROUP_ID);
+            assert_eq!(group_description.members().len(), 2);
+            assert_eq!(group_description.members(), expected_member_descriptions.as_slice());
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testDescribeShareGroupsGroupIdNotFound"
+        )]
+        async fn test_describe_share_groups_group_id_not_found() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0]), ("group-1", &nodes[0])]));
+            let mut not_found = described_group_error("group-1", Errors::GroupIdNotFound);
+            not_found
+                .set_group_state(GroupState::Dead.to_string())
+                .set_error_message(Some("Group group-1 not found.".to_string()));
+            runnable
+                .client_mut()
+                .prepare_response(share_group_describe(vec![stable_group(GROUP_ID), not_found]));
+
+            let groups = HashSet::from([GROUP_ID.to_string(), "group-1".to_string()]);
+            let group_ids: Vec<String> = groups.iter().cloned().collect();
+            let result = admin.describe_share_groups(&group_ids);
+            assert_eq!(result.described_groups().len(), 2);
+            assert_eq!(result.described_groups().keys().cloned().collect::<HashSet<_>>(), groups);
+            let all_future = result.all();
+            drive_until(&mut runnable, &time, 40, || all_future.is_done()).await;
+            let error = all_future.get().await.unwrap_err();
+            assert_eq!(error.error(), Errors::GroupIdNotFound);
+            assert_eq!(error.message(), "Group group-1 not found.");
+            // Java's `result.all().isCompletedExceptionally()`.
+            let all_again = result.all();
+            assert!(all_again.is_done());
+            assert!(all_again.get().await.is_err());
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testDescribeShareGroupsWithAuthorizedOperationsOmitted"
+        )]
+        async fn test_describe_share_groups_with_authorized_operations_omitted() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            let mut group = DescribedGroup::new();
+            group
+                .set_group_id(GROUP_ID.to_string())
+                .set_authorized_operations(MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED);
+            runnable.client_mut().prepare_response(share_group_describe(vec![group]));
+
+            let result = admin.describe_share_groups(&[GROUP_ID.to_string()]);
+            let future = result.described_groups()[GROUP_ID].clone();
+            drive_until(&mut runnable, &time, 40, || future.is_done()).await;
+            let group_description = future.get().await.unwrap();
+
+            assert_eq!(group_description.authorized_operations(), None);
+        }
+
+        #[tokio::test]
+        #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testDescribeMultipleShareGroups")]
+        async fn test_describe_multiple_share_groups() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0]), ("group-1", &nodes[0])]));
+            runnable
+                .client_mut()
+                .prepare_response(share_group_describe(vec![stable_group(GROUP_ID), stable_group("group-1")]));
+
+            let groups = HashSet::from([GROUP_ID.to_string(), "group-1".to_string()]);
+            let group_ids: Vec<String> = groups.iter().cloned().collect();
+            let result = admin.describe_share_groups(&group_ids);
+            assert_eq!(result.described_groups().len(), 2);
+            assert_eq!(result.described_groups().keys().cloned().collect::<HashSet<_>>(), groups);
+            let all_future = result.all();
+            drive_until(&mut runnable, &time, 40, || all_future.is_done()).await;
+            let all = all_future.get().await.expect("assertDoesNotThrow(allFuture::get)");
+            assert_eq!(all.len(), 2);
+            assert!(
+                all.values()
+                    .all(|d: &ShareGroupDescription| d.group_state() == GroupState::Stable)
+            );
+        }
+
+        /// The four `testListShareGroups*` tests exercise `listGroups` with
+        /// `ListGroupsOptions.forShareGroups()`. The existing
+        /// `test_list_consumer_groups*` / `test_list_groups_with_types*` tests
+        /// cover the same `listGroups` machinery with the consumer filters, and
+        /// a `SHARE` types filter only on the older-broker path; none lists
+        /// share groups end to end, so these are translated rather than mapped.
+        #[tokio::test]
+        #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testListShareGroups")]
+        async fn test_list_share_groups() {
+            let (admin, mut runnable, time, nodes) = env_nodes_with_props(4, &[("retries", "2")]);
+            let share = GroupType::Share.to_string();
+
+            // Empty metadata response should be retried
+            runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
+            runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+
+            runnable.client_mut().prepare_response_from(
+                list_groups(Errors::None, &[("share-group-1", &share, "", "Stable")]),
+                &nodes[0],
+            );
+            // handle retriable errors
+            runnable
+                .client_mut()
+                .prepare_response_from(list_groups(Errors::CoordinatorNotAvailable, &[]), &nodes[1]);
+            runnable
+                .client_mut()
+                .prepare_response_from(list_groups(Errors::CoordinatorLoadInProgress, &[]), &nodes[1]);
+            runnable.client_mut().prepare_response_from(
+                list_groups(
+                    Errors::None,
+                    &[
+                        ("share-group-2", &share, "", "Stable"),
+                        ("share-group-3", &share, "", "Stable"),
+                    ],
+                ),
+                &nodes[1],
+            );
+            runnable.client_mut().prepare_response_from(
+                list_groups(Errors::None, &[("share-group-4", &share, "", "Stable")]),
+                &nodes[2],
+            );
+            // fatal error
+            runnable
+                .client_mut()
+                .prepare_response_from(list_groups(Errors::UnknownServerError, &[]), &nodes[3]);
+
+            let result = admin.list_groups_with_options(ListGroupsOptions::for_share_groups());
+            for _ in 0..80 {
+                if result.all().is_done() {
+                    break;
+                }
+                runnable.run_once().await;
+                time.sleep(100);
+            }
+            assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnknownServerError);
+
+            let listings = result.valid().get().await.unwrap();
+            assert_eq!(listings.len(), 4);
+            let mut group_ids = HashSet::new();
+            for listing in &listings {
+                group_ids.insert(listing.group_id().to_string());
+                assert!(listing.group_state().is_some());
+            }
+            assert_eq!(
+                group_ids,
+                HashSet::from(["share-group-1", "share-group-2", "share-group-3", "share-group-4"].map(String::from))
+            );
+            assert_eq!(result.errors().get().await.unwrap().len(), 1);
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testListShareGroupsMetadataFailure"
+        )]
+        async fn test_list_share_groups_metadata_failure() {
+            let (admin, mut runnable, time, _nodes) = env_nodes_with_props(3, &[("retries", "0")]);
+            // Empty metadata causes the request to fail since we have no list of brokers
+            // to send the ListGroups requests to
+            runnable.client_mut().prepare_response(metadata_resp(&[], Vec::new()));
+
+            let result = admin.list_groups_with_options(ListGroupsOptions::for_share_groups());
+            for _ in 0..40 {
+                if result.all().is_done() {
+                    break;
+                }
+                runnable.run_once().await;
+                time.sleep(100);
+            }
+            let err = result.all().get().await.unwrap_err();
+            assert_eq!(err.message(), "Failed to find brokers to send ListGroups");
+            assert!(err.is_kafka_error(), "Java's assertFutureThrows(KafkaException.class): {err:?}");
+        }
+
+        #[tokio::test]
+        #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testListShareGroupsWithStates")]
+        async fn test_list_share_groups_with_states() {
+            let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
+            let share = GroupType::Share.to_string();
+            runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+            runnable.client_mut().prepare_response_from(
+                list_groups(
+                    Errors::None,
+                    &[
+                        ("share-group-1", &share, "share", "Stable"),
+                        ("share-group-2", &share, "share", "Empty"),
+                    ],
+                ),
+                &nodes[0],
+            );
+
+            let result = admin.list_groups_with_options(ListGroupsOptions::for_share_groups());
+            pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
+            let mut listings = result.valid().get().await.unwrap();
+
+            assert_eq!(listings.len(), 2);
+            // Java compares lists in broker order; the Rust result keeps the listings
+            // in a map, so both sides are put in group-id order first.
+            listings.sort_by(|a, b| a.group_id().cmp(b.group_id()));
+            let expected = vec![
+                GroupListing::new("share-group-1", Some(GroupType::Share), "share", Some(GroupState::Stable)),
+                GroupListing::new("share-group-2", Some(GroupType::Share), "share", Some(GroupState::Empty)),
+            ];
+            assert_eq!(listings, expected);
+            assert_eq!(result.errors().get().await.unwrap().len(), 0);
+        }
+
+        /// Java pins the `ListGroups` API at v4 with `setNodeApiVersions`, so
+        /// the `SHARE` types filter cannot be sent. The Rust `MockClient` does
+        /// not negotiate versions; as in
+        /// `test_list_groups_with_types_older_broker_version`, the downgrade is
+        /// modelled with `prepare_unsupported_version_response`, and the v4
+        /// request is built to show the filter cannot be carried.
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testListShareGroupsWithStatesOlderBrokerVersion"
+        )]
+        async fn test_list_share_groups_with_states_older_broker_version() {
+            let (admin, mut runnable, _time, nodes) = env_nodes_with_props(1, &[]);
+
+            // Check we should not be able to list share groups with broker having version < 5
+            runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+            runnable.client_mut().prepare_unsupported_version_response();
+            let result = admin.list_groups_with_options(ListGroupsOptions::for_share_groups());
+            pump_until(&mut runnable, 40, |_r| result.all().is_done()).await;
+            assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
+
+            // The request the client builds carries the SHARE types filter, which a v4
+            // `ListGroups` cannot express: building it at v4 fails, which is what the
+            // version negotiation above stands for.
+            runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
+            let _pending = admin.list_groups_with_options(ListGroupsOptions::for_share_groups());
+            pump_until_request_queued(&mut runnable).await;
+            let reqs = runnable.client_mut().requests_mut();
+            assert_eq!(reqs.len(), 1);
+            assert!(reqs[0].request_builder_mut().build_version(4).is_err());
+            assert!(reqs[0].request_builder_mut().build_version(5).is_ok());
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testListShareGroupOffsetsOptionsWithBatchedApi"
+        )]
+        async fn test_list_share_group_offsets_options_with_batched_api() {
+            let (admin, mut runnable, _time, nodes) = env_with_props(&[("retries", "0")]);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+            let partitions = vec![TopicPartition::new("A", 0)];
+            let options = ListShareGroupOffsetsOptions::new();
+            let group_spec = ListShareGroupOffsetsSpec::new().set_topic_partitions(Some(partitions));
+            let group_specs = HashMap::from([(GROUP_ID.to_string(), group_spec)]);
+
+            let _result = admin.list_share_group_offsets_with_options(&group_specs, options);
+
+            pump_until_request_queued(&mut runnable).await;
+            let reqs = runnable.client_mut().requests_mut();
+            let client_request = reqs.front_mut().expect("a queued request");
+            assert_eq!(
+                client_request.api_key(),
+                &crate::common::protocol::ApiKeys::DESCRIBE_SHARE_GROUP_OFFSETS
+            );
+            match client_request.request_builder_mut().build().unwrap() {
+                AbstractRequest::DescribeShareGroupOffsets(request) => {
+                    let data = request.data();
+                    assert_eq!(data.groups.len(), 1);
+                    assert_eq!(data.groups[0].group_id, GROUP_ID);
+                    let topics = data.groups[0].topics.as_ref().expect("topics");
+                    let names: Vec<&str> = topics.iter().map(|t| t.topic_name.as_str()).collect();
+                    assert_eq!(names, vec!["A"]);
+                },
+                other => panic!("expected a DescribeShareGroupOffsets request, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testListShareGroupOffsets")]
+        async fn test_list_share_group_offsets() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+            let my_topic_partition0 = TopicPartition::new("my_topic", 0);
+            let my_topic_partition1 = TopicPartition::new("my_topic", 1);
+            let my_topic_partition2 = TopicPartition::new("my_topic", 2);
+            let my_topic_partition3 = TopicPartition::new("my_topic", 3);
+            let my_topic_partition4 = TopicPartition::new("my_topic_1", 4);
+            let my_topic_partition5 = TopicPartition::new("my_topic_2", 6);
+
+            let group_specs = HashMap::from([(GROUP_ID.to_string(), ListShareGroupOffsetsSpec::new())]);
+
+            runnable
+                .client_mut()
+                .prepare_response(describe_share_group_offsets(vec![offsets_group(
+                    GROUP_ID,
+                    vec![
+                        offsets_topic(
+                            "my_topic",
+                            vec![
+                                offsets_partition(0, 10, 0),
+                                offsets_partition(1, 11, 0),
+                                offsets_partition(2, 40, 0),
+                                offsets_partition(3, 50, 1),
+                            ],
+                        ),
+                        offsets_topic("my_topic_1", vec![offsets_partition(4, 100, 2)]),
+                        offsets_topic("my_topic_2", vec![offsets_partition(6, 500, 3)]),
+                    ],
+                )]));
+
+            let result = admin.list_share_group_offsets(&group_specs);
+            let future = result.partitions_to_offset_info(GROUP_ID).unwrap();
+            drive_until(&mut runnable, &time, 40, || future.is_done()).await;
+            let partition_to_offset_info = future.get().await.unwrap();
+
+            assert_eq!(partition_to_offset_info.len(), 6);
+            assert_eq!(partition_to_offset_info[&my_topic_partition0], info(10, 0));
+            assert_eq!(partition_to_offset_info[&my_topic_partition1], info(11, 0));
+            assert_eq!(partition_to_offset_info[&my_topic_partition2], info(40, 0));
+            assert_eq!(partition_to_offset_info[&my_topic_partition3], info(50, 1));
+            assert_eq!(partition_to_offset_info[&my_topic_partition4], info(100, 2));
+            assert_eq!(partition_to_offset_info[&my_topic_partition5], info(500, 3));
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testListShareGroupOffsetsMultipleGroups"
+        )]
+        async fn test_list_share_group_offsets_multiple_groups() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0]), ("group-1", &nodes[0])]));
+
+            let my_topic_partition0 = TopicPartition::new("my_topic", 0);
+            let my_topic_partition1 = TopicPartition::new("my_topic", 1);
+            let my_topic_partition2 = TopicPartition::new("my_topic", 2);
+            let my_topic_partition3 = TopicPartition::new("my_topic", 3);
+            let my_topic_partition4 = TopicPartition::new("my_topic_1", 4);
+            let my_topic_partition5 = TopicPartition::new("my_topic_2", 6);
+
+            let group0_specs = ListShareGroupOffsetsSpec::new().set_topic_partitions(Some(vec![
+                my_topic_partition0.clone(),
+                my_topic_partition1.clone(),
+                my_topic_partition2.clone(),
+                my_topic_partition3.clone(),
+            ]));
+            let group1_specs = ListShareGroupOffsetsSpec::new()
+                .set_topic_partitions(Some(vec![my_topic_partition4.clone(), my_topic_partition5.clone()]));
+            let group_specs = HashMap::from([
+                (GROUP_ID.to_string(), group0_specs),
+                ("group-1".to_string(), group1_specs),
+            ]);
+
+            runnable.client_mut().prepare_response(describe_share_group_offsets(vec![
+                offsets_group(
+                    GROUP_ID,
+                    vec![offsets_topic(
+                        "my_topic",
+                        vec![
+                            offsets_partition(0, 10, 0),
+                            offsets_partition(1, 11, 0),
+                            offsets_partition(2, 40, 0),
+                            offsets_partition(3, 50, 1),
+                        ],
+                    )],
+                ),
+                offsets_group(
+                    "group-1",
+                    vec![
+                        offsets_topic("my_topic_1", vec![offsets_partition(4, 100, 2)]),
+                        offsets_topic("my_topic_2", vec![offsets_partition(6, 500, 2)]),
+                    ],
+                ),
+            ]));
+
+            let result = admin.list_share_group_offsets(&group_specs);
+            let all = result.all();
+            drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+            assert_eq!(all.get().await.unwrap().len(), 2);
+
+            let partition_to_offset_info_group0 =
+                result.partitions_to_offset_info(GROUP_ID).unwrap().get().await.unwrap();
+            assert_eq!(partition_to_offset_info_group0.len(), 4);
+            assert_eq!(partition_to_offset_info_group0[&my_topic_partition0], info(10, 0));
+            assert_eq!(partition_to_offset_info_group0[&my_topic_partition1], info(11, 0));
+            assert_eq!(partition_to_offset_info_group0[&my_topic_partition2], info(40, 0));
+            assert_eq!(partition_to_offset_info_group0[&my_topic_partition3], info(50, 1));
+
+            let partition_to_offset_info_group1 =
+                result.partitions_to_offset_info("group-1").unwrap().get().await.unwrap();
+            assert_eq!(partition_to_offset_info_group1.len(), 2);
+            assert_eq!(partition_to_offset_info_group1[&my_topic_partition4], info(100, 2));
+            assert_eq!(partition_to_offset_info_group1[&my_topic_partition5], info(500, 2));
+        }
+
+        #[tokio::test]
+        #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testListShareGroupOffsetsEmpty")]
+        async fn test_list_share_group_offsets_empty() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            let group_specs = HashMap::from([(GROUP_ID.to_string(), ListShareGroupOffsetsSpec::new())]);
+            runnable
+                .client_mut()
+                .prepare_response(describe_share_group_offsets(vec![offsets_group(GROUP_ID, Vec::new())]));
+
+            let result = admin.list_share_group_offsets(&group_specs);
+            let future = result.partitions_to_offset_info(GROUP_ID).unwrap();
+            drive_until(&mut runnable, &time, 40, || future.is_done()).await;
+            let partition_to_offset_info = future.get().await.unwrap();
+
+            assert_eq!(partition_to_offset_info.len(), 0);
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testListShareGroupOffsetsWithErrorInOnePartition"
+        )]
+        async fn test_list_share_group_offsets_with_error_in_one_partition() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+            let my_topic_partition0 = TopicPartition::new("my_topic", 0);
+            let my_topic_partition1 = TopicPartition::new("my_topic", 1);
+            let my_topic_partition2 = TopicPartition::new("my_topic_1", 4);
+            let my_topic_partition3 = TopicPartition::new("my_topic_2", 6);
+
+            let group_spec = ListShareGroupOffsetsSpec::new().set_topic_partitions(Some(vec![
+                my_topic_partition0.clone(),
+                my_topic_partition1.clone(),
+                my_topic_partition2.clone(),
+                my_topic_partition3.clone(),
+            ]));
+            let group_specs = HashMap::from([(GROUP_ID.to_string(), group_spec)]);
+
+            let mut failed = DescribeShareGroupOffsetsResponsePartition::new();
+            failed
+                .set_partition_index(4)
+                .set_error_code(Errors::NotCoordinator.code())
+                .set_error_message(Some("Not a Coordinator".to_string()));
+            runnable
+                .client_mut()
+                .prepare_response(describe_share_group_offsets(vec![offsets_group(
+                    GROUP_ID,
+                    vec![
+                        offsets_topic("my_topic", vec![offsets_partition(0, 10, 0), offsets_partition(1, 11, 1)]),
+                        offsets_topic("my_topic_1", vec![failed]),
+                        offsets_topic("my_topic_2", vec![offsets_partition(6, 500, 2)]),
+                    ],
+                )]));
+
+            let result = admin.list_share_group_offsets(&group_specs);
+            let future = result.partitions_to_offset_info(GROUP_ID).unwrap();
+            drive_until(&mut runnable, &time, 40, || future.is_done()).await;
+            let partition_to_offset_info = future.get().await.unwrap();
+
+            // For myTopicPartition2 we have set an error as the response. Thus, it should be skipped from the final result
+            assert_eq!(partition_to_offset_info.len(), 3);
+            assert_eq!(partition_to_offset_info[&my_topic_partition0], info(10, 0));
+            assert_eq!(partition_to_offset_info[&my_topic_partition1], info(11, 1));
+            assert_eq!(partition_to_offset_info[&my_topic_partition3], info(500, 2));
+            assert!(!partition_to_offset_info.contains_key(&my_topic_partition2));
+        }
+
+        #[tokio::test]
+        #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testAlterShareGroupOffsets")]
+        async fn test_alter_share_group_offsets() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            let mut data = AlterShareGroupOffsetsResponseData::new();
+            data.set_responses(vec![
+                alter_topic("foo", vec![alter_partition(0, None), alter_partition(1, None)]),
+                alter_topic("bar", vec![alter_partition(0, None)]),
+            ]);
+            let foo_topic_partition0 = TopicPartition::new("foo", 0);
+            let foo_topic_partition1 = TopicPartition::new("foo", 1);
+            let bar_partition0 = TopicPartition::new("bar", 0);
+            let zoo_topic_partition0 = TopicPartition::new("zoo", 0);
+
+            runnable.client_mut().prepare_response(alter_response(data));
+            let result = alter(&admin, &mut runnable, &time).await;
+
+            assert_eq!(result.all().get().await.unwrap(), ());
+            assert_eq!(result.partition_result(&foo_topic_partition0).get().await.unwrap(), ());
+            assert_eq!(result.partition_result(&foo_topic_partition1).get().await.unwrap(), ());
+            assert_eq!(result.partition_result(&bar_partition0).get().await.unwrap(), ());
+            let error = result.partition_result(&zoo_topic_partition0).get().await.unwrap_err();
+            assert!(error.is_local_illegal_argument_error(), "{error:?}");
+            assert_eq!(error.message(), "Alter offset for partition \"zoo-0\" was not attempted");
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testAlterShareGroupOffsetsWithTopLevelError"
+        )]
+        async fn test_alter_share_group_offsets_with_top_level_error() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            let mut data = AlterShareGroupOffsetsResponseData::new();
+            data.set_error_code(Errors::GroupAuthorizationFailed.code())
+                .set_error_message(Some("Group authorization failed.".to_string()));
+            let foo_topic_partition1 = TopicPartition::new("foo", 1);
+            let zoo_topic_partition0 = TopicPartition::new("zoo", 0);
+
+            runnable.client_mut().prepare_response(alter_response(data));
+            let result = alter(&admin, &mut runnable, &time).await;
+
+            let error = result.all().get().await.unwrap_err();
+            assert!(error.is_group_authorization_error(), "{error:?}");
+            assert_eq!(
+                error.message(),
+                "Group authorization failed. Failed altering group offsets for the following partitions: \
+                 [bar-0, foo-0, foo-1]"
+            );
+            let error = result.partition_result(&foo_topic_partition1).get().await.unwrap_err();
+            assert!(error.is_group_authorization_error(), "{error:?}");
+            assert_eq!(error.message(), "Group authorization failed.");
+            let error = result.partition_result(&zoo_topic_partition0).get().await.unwrap_err();
+            assert!(error.is_local_illegal_argument_error(), "{error:?}");
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testAlterShareGroupOffsetsWithErrorInOnePartition"
+        )]
+        async fn test_alter_share_group_offsets_with_error_in_one_partition() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            let mut data = AlterShareGroupOffsetsResponseData::new();
+            data.set_responses(vec![
+                alter_topic(
+                    "foo",
+                    vec![
+                        alter_partition(0, None),
+                        alter_partition(1, Some((Errors::TopicAuthorizationFailed, "Topic authorization failed."))),
+                    ],
+                ),
+                alter_topic("bar", vec![alter_partition(0, None)]),
+            ]);
+            let foo_topic_partition0 = TopicPartition::new("foo", 0);
+            let foo_topic_partition1 = TopicPartition::new("foo", 1);
+            let bar_partition0 = TopicPartition::new("bar", 0);
+
+            runnable.client_mut().prepare_response(alter_response(data));
+            let result = alter(&admin, &mut runnable, &time).await;
+
+            let error = result.all().get().await.unwrap_err();
+            assert!(error.is_topic_authorization_error(), "{error:?}");
+            assert_eq!(
+                error.message(),
+                "Topic authorization failed. Failed altering group offsets for the following partitions: [foo-1]"
+            );
+            assert_eq!(result.partition_result(&foo_topic_partition0).get().await.unwrap(), ());
+            let error = result.partition_result(&foo_topic_partition1).get().await.unwrap_err();
+            assert!(error.is_topic_authorization_error(), "{error:?}");
+            assert_eq!(result.partition_result(&bar_partition0).get().await.unwrap(), ());
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testDeleteShareGroupOffsetsOptionsWithBatchedApi"
+        )]
+        async fn test_delete_share_group_offsets_options_with_batched_api() {
+            let (admin, mut runnable, _time, nodes) = env_with_props(&[("retries", "0")]);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+
+            let topics = HashSet::from(["A".to_string()]);
+            let options = DeleteShareGroupOffsetsOptions::new();
+
+            let _result = admin.delete_share_group_offsets_with_options(GROUP_ID, &topics, options);
+
+            pump_until_request_queued(&mut runnable).await;
+            let reqs = runnable.client_mut().requests_mut();
+            let client_request = reqs.front_mut().expect("a queued request");
+            assert_eq!(
+                client_request.api_key(),
+                &crate::common::protocol::ApiKeys::DELETE_SHARE_GROUP_OFFSETS
+            );
+            match client_request.request_builder_mut().build().unwrap() {
+                AbstractRequest::DeleteShareGroupOffsets(request) => {
+                    let data = request.data();
+                    assert_eq!(data.group_id, GROUP_ID);
+                    assert_eq!(data.topics.len(), 1);
+                    let names: Vec<&str> = data.topics.iter().map(|t| t.topic_name.as_str()).collect();
+                    assert_eq!(names, vec!["A"]);
+                },
+                other => panic!("expected a DeleteShareGroupOffsets request, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testDeleteShareGroupOffsets")]
+        async fn test_delete_share_group_offsets() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            let mut data = DeleteShareGroupOffsetsResponseData::new();
+            data.set_responses(vec![delete_topic("foo", None), delete_topic("bar", None)]);
+            runnable.client_mut().prepare_response(delete_response(data));
+
+            let result = delete(&admin, &mut runnable, &time, &["foo", "bar"]).await;
+
+            assert_eq!(result.all().get().await.unwrap(), ());
+            assert_eq!(result.topic_result("foo").unwrap().get().await.unwrap(), ());
+            assert_eq!(result.topic_result("bar").unwrap().get().await.unwrap(), ());
+            let error = result.topic_result("zoo").unwrap_err();
+            assert!(error.is_local_illegal_argument_error(), "{error:?}");
+            assert_eq!(error.message(), "Topic zoo was not included in the original request");
+        }
+
+        #[tokio::test]
+        #[doc(alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testDeleteShareGroupOffsetsEmpty")]
+        async fn test_delete_share_group_offsets_empty() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            runnable
+                .client_mut()
+                .prepare_response(delete_response(DeleteShareGroupOffsetsResponseData::new()));
+
+            let result = delete(&admin, &mut runnable, &time, &[]).await;
+            assert_eq!(result.all().get().await.expect("assertDoesNotThrow"), ());
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testDeleteShareGroupOffsetsWithErrorInGroup"
+        )]
+        async fn test_delete_share_group_offsets_with_error_in_group() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            let mut data = DeleteShareGroupOffsetsResponseData::new();
+            data.set_error_code(Errors::GroupAuthorizationFailed.code())
+                .set_error_message(Some(Errors::GroupAuthorizationFailed.message().to_string()));
+            runnable.client_mut().prepare_response(delete_response(data));
+
+            let result = delete(&admin, &mut runnable, &time, &["foo", "bar"]).await;
+
+            let error = result.all().get().await.unwrap_err();
+            assert!(error.is_group_authorization_error(), "{error:?}");
+            assert_eq!(error.message(), Errors::GroupAuthorizationFailed.message());
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testDeleteShareGroupOffsetsWithErrorInOneTopic"
+        )]
+        async fn test_delete_share_group_offsets_with_error_in_one_topic() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            let mut data = DeleteShareGroupOffsetsResponseData::new();
+            data.set_responses(vec![
+                delete_topic("foo", Some(Errors::KafkaStorageError)),
+                delete_topic("bar", None),
+            ]);
+            runnable.client_mut().prepare_response(delete_response(data));
+
+            let result = delete(&admin, &mut runnable, &time, &["foo", "bar"]).await;
+
+            let error = result.all().get().await.unwrap_err();
+            assert!(error.is_kafka_storage_error(), "{error:?}");
+            assert_eq!(error.message(), Errors::KafkaStorageError.message());
+            let error = result.topic_result("foo").unwrap().get().await.unwrap_err();
+            assert!(error.is_kafka_storage_error(), "{error:?}");
+            assert_eq!(result.topic_result("bar").unwrap().get().await.unwrap(), ());
+        }
+
+        #[tokio::test]
+        #[doc(
+            alias = "org.apache.kafka.clients.admin.KafkaAdminClientShareGroupTest#testDeleteShareGroupOffsetsWithPartitionNotPresentInResult"
+        )]
+        async fn test_delete_share_group_offsets_with_partition_not_present_in_result() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+            let mut data = DeleteShareGroupOffsetsResponseData::new();
+            data.set_responses(vec![delete_topic("foo", None)]);
+            runnable.client_mut().prepare_response(delete_response(data));
+
+            let result = delete(&admin, &mut runnable, &time, &["foo"]).await;
+
+            assert_eq!(result.all().get().await.expect("assertDoesNotThrow"), ());
+            let error = result.topic_result("bar").unwrap_err();
+            assert!(error.is_local_illegal_argument_error(), "{error:?}");
+            assert_eq!(error.message(), "Topic bar was not included in the original request");
+            assert_eq!(result.topic_result("foo").unwrap().get().await.unwrap(), ());
+        }
+
+        /// Not in `KafkaAdminClientShareGroupTest`: Java's `MockAdminClient`
+        /// throws `UnsupportedOperationException("Not implemented yet")` from all
+        /// five share-group methods (`MockAdminClient#describeShareGroups`,
+        /// `#alterShareGroupOffsets`, `#listShareGroupOffsets`,
+        /// `#deleteShareGroupOffsets`, `#deleteShareGroups`); the Rust mock fails
+        /// the futures with that error instead.
+        #[tokio::test]
+        async fn test_mock_share_group_methods_are_unsupported() {
+            let mock = mock_admin_client::Builder::new()
+                .build()
+                .expect("a fresh builder has one broker");
+            let group = [GROUP_ID.to_string()];
+            let assert_unsupported = |error: Error| {
+                assert!(error.is_local_unsupported_operation_error(), "{error:?}");
+                assert_eq!(error.message(), "Not implemented yet");
+            };
+
+            assert_unsupported(
+                mock.describe_share_groups(&group).described_groups()[GROUP_ID]
+                    .get()
+                    .await
+                    .unwrap_err(),
+            );
+            assert_unsupported(mock.describe_share_groups(&group).all().get().await.unwrap_err());
+            let altered = mock.alter_share_group_offsets(GROUP_ID, &alter_offsets());
+            assert_unsupported(altered.all().get().await.unwrap_err());
+            assert_unsupported(
+                altered
+                    .partition_result(&TopicPartition::new("foo", 0))
+                    .get()
+                    .await
+                    .unwrap_err(),
+            );
+            let listed = mock
+                .list_share_group_offsets(&HashMap::from([(GROUP_ID.to_string(), ListShareGroupOffsetsSpec::new())]));
+            assert_unsupported(listed.partitions_to_offset_info(GROUP_ID).unwrap().get().await.unwrap_err());
+            assert_unsupported(listed.all().get().await.unwrap_err());
+            let deleted = mock.delete_share_group_offsets(GROUP_ID, &HashSet::from(["foo".to_string()]));
+            assert_unsupported(deleted.all().get().await.unwrap_err());
+            assert_unsupported(deleted.topic_result("foo").unwrap().get().await.unwrap_err());
+            let deleted_groups = mock.delete_share_groups(&group);
+            assert_unsupported(deleted_groups.deleted_groups()[GROUP_ID].get().await.unwrap_err());
+            assert_unsupported(deleted_groups.all().get().await.unwrap_err());
+        }
+
+        /// Not in `KafkaAdminClientShareGroupTest` (Java has no `deleteShareGroups`
+        /// client test, only `DeleteShareGroupsHandlerTest`): the client wires the
+        /// `DeleteShareGroups` handler through the driver and keys the result by
+        /// group id.
+        #[tokio::test]
+        async fn test_delete_share_groups() {
+            let (admin, mut runnable, time, nodes) = offsets_env(1);
+            runnable
+                .client_mut()
+                .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0]), ("group-1", &nodes[0])]));
+            runnable.client_mut().prepare_response(delete_groups_resp(&[
+                (GROUP_ID, Errors::None),
+                ("group-1", Errors::NonEmptyGroup),
+            ]));
+
+            let result = admin.delete_share_groups(&[GROUP_ID.to_string(), "group-1".to_string()]);
+            let all = result.all();
+            drive_until(&mut runnable, &time, 40, || all.is_done()).await;
+
+            assert_eq!(result.deleted_groups()[GROUP_ID].get().await.unwrap(), ());
+            let error = result.deleted_groups()["group-1"].get().await.unwrap_err();
+            assert_eq!(error.error(), Errors::NonEmptyGroup);
+            assert_eq!(all.get().await.unwrap_err().error(), Errors::NonEmptyGroup);
+        }
+    }
 }
