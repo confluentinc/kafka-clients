@@ -6248,7 +6248,7 @@ mod tests {
 
         if with_new_leader_information {
             // The metadata snapshot will have been updated with the new leader information
-            assert!(!Arc::ptr_eq(&starting_cluster_metadata, &f.metadata.fetch()));
+            assert_ne!(*starting_cluster_metadata, *f.metadata.fetch());
 
             // Validate metadata update is still requested even though the current leader was returned
             assert!(f.metadata.update_requested());
@@ -6262,7 +6262,7 @@ mod tests {
             let leader_nodes = vec![tp0_leader.clone(), tp1_leader];
             f.move_leadership(&f.tp1, node_id0.id(), VALID_LEADER_EPOCH + 1, &leader_nodes);
 
-            assert!(!Arc::ptr_eq(&starting_cluster_metadata, &f.metadata.fetch()));
+            assert_ne!(*starting_cluster_metadata, *f.metadata.fetch());
         }
 
         // And now the partitions are on the same leader but a fetch is still sent to the former leader to remove the partition from the share session
@@ -6390,7 +6390,7 @@ mod tests {
             // Move the leadership of tp0 onto node 1
             f.move_leadership(&f.tp0, node_id1.id(), VALID_LEADER_EPOCH + 1, &[]);
 
-            assert!(!Arc::ptr_eq(&starting_cluster_metadata, &f.metadata.fetch()));
+            assert_ne!(*starting_cluster_metadata, *f.metadata.fetch());
 
             // Even though the partitions are on the same leader, records were fetched on the previous leader.
             // Since we need to remove the partition from the previous leader, we still send those acknowledgement to the previous leader
@@ -6518,7 +6518,7 @@ mod tests {
         // Move the leadership of tp0 onto node 1.
         f.move_leadership(&f.tp0, node_id1.id(), VALID_LEADER_EPOCH + 1, &[]);
 
-        assert!(!Arc::ptr_eq(&starting_cluster_metadata, &f.metadata.fetch()));
+        assert_ne!(*starting_cluster_metadata, *f.metadata.fetch());
 
         // The acknowledgements are sent to the nodes the records were fetched from.
         if commit_sync {
@@ -6600,7 +6600,7 @@ mod tests {
         // Move the leadership of tp0 onto node 1.
         f.move_leadership(&f.tp0, node_id1.id(), VALID_LEADER_EPOCH + 1, &[]);
 
-        assert!(!Arc::ptr_eq(&starting_cluster_metadata, &f.metadata.fetch()));
+        assert_ne!(*starting_cluster_metadata, *f.metadata.fetch());
 
         // The acknowledgements are sent to the nodes the records were fetched from.
         let deadline = f.deadline(100);
@@ -6661,7 +6661,7 @@ mod tests {
         // Move the leadership of tp1 onto node 0.
         f.move_leadership(&f.tp1, node_id0.id(), VALID_LEADER_EPOCH + 1, &[]);
 
-        assert!(!Arc::ptr_eq(&starting_cluster_metadata, &f.metadata.fetch()));
+        assert_ne!(*starting_cluster_metadata, *f.metadata.fetch());
 
         // The acknowledgements are sent to the nodes the records were fetched from.
         let deadline = f.deadline(100);
@@ -6723,7 +6723,7 @@ mod tests {
         f.move_leadership(&f.tp1, node_id0.id(), VALID_LEADER_EPOCH + 1, &[]);
         f.move_leadership(&f.tp0, node_id1.id(), VALID_LEADER_EPOCH + 1, &[]);
 
-        assert!(!Arc::ptr_eq(&starting_cluster_metadata, &f.metadata.fetch()));
+        assert_ne!(*starting_cluster_metadata, *f.metadata.fetch());
 
         // The acknowledgements are sent to the nodes the records were fetched from.
         let deadline = f.deadline(100);
@@ -6799,7 +6799,7 @@ mod tests {
         // The metadata reports tp0 has moved to node 1, but the cached leader used for fetching (node 0) is unchanged.
         f.move_leadership(&f.tp0, node_id1.id(), VALID_LEADER_EPOCH + 1, &[]);
 
-        assert!(!Arc::ptr_eq(&starting_cluster_metadata, &f.metadata.fetch()));
+        assert_ne!(*starting_cluster_metadata, *f.metadata.fetch());
 
         // The acknowledgements are sent to the nodes the records were fetched from, so nothing fails synchronously.
         let deadline = f.deadline(DEFAULT_API_TIMEOUT_MS);
@@ -6906,7 +6906,7 @@ mod tests {
         // Move the leadership of tp0 onto node 1
         f.move_leadership(&f.tp0, node_id1.id(), VALID_LEADER_EPOCH + 1, &[]);
 
-        assert!(!Arc::ptr_eq(&starting_cluster_metadata, &f.metadata.fetch()));
+        assert_ne!(*starting_cluster_metadata, *f.metadata.fetch());
 
         let acknowledgements2 = single_acknowledgement(1, AcknowledgeType::Accept);
         f.manager.fetch(node_acks(&f.tip1, 1, &acknowledgements2));
