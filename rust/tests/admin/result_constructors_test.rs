@@ -16,7 +16,8 @@
 //! constructible from outside the crate.
 //!
 //! Java declares the `DeleteRecordsResult`, `DescribeConsumerGroupsResult`,
-//! `DescribeClassicGroupsResult` and `ListOffsetsResult` constructors `public`,
+//! `DescribeClassicGroupsResult`, `DescribeShareGroupsResult` and
+//! `ListOffsetsResult` constructors `public`,
 //! so a hand-written `Admin` fake can build them. This file is a separate crate,
 //! so it compiles only if each `new` is `pub`.
 //!
@@ -28,7 +29,8 @@ use std::collections::HashMap;
 
 use confluent_kafka::admin::{
     ClassicGroupDescription, ConsumerGroupDescription, DeleteRecordsResult, DeletedRecords,
-    DescribeClassicGroupsResult, DescribeConsumerGroupsResult, ListOffsetsResult, ListOffsetsResultInfo,
+    DescribeClassicGroupsResult, DescribeConsumerGroupsResult, DescribeShareGroupsResult, ListOffsetsResult,
+    ListOffsetsResultInfo, ShareGroupDescription,
 };
 use confluent_kafka::common::{ClassicGroupState, GroupState, GroupType, KafkaFuture, TopicPartition};
 
@@ -70,6 +72,17 @@ async fn describe_classic_groups_result_is_constructible_outside_the_crate() {
     let description =
         ClassicGroupDescription::new("g", "consumer", "range", Vec::new(), ClassicGroupState::Stable, None);
     let result = DescribeClassicGroupsResult::new(HashMap::from([(
+        "g".to_string(),
+        KafkaFuture::completed_future(Ok(description)),
+    )]));
+    let described = result.described_groups()["g"].get().await.expect("completed future");
+    assert_eq!(described.group_id(), "g");
+}
+
+#[tokio::test]
+async fn describe_share_groups_result_is_constructible_outside_the_crate() {
+    let description = ShareGroupDescription::new("g", Vec::new(), GroupState::Stable, None, 0, 0);
+    let result = DescribeShareGroupsResult::new(HashMap::from([(
         "g".to_string(),
         KafkaFuture::completed_future(Ok(description)),
     )]));

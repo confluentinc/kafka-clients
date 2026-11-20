@@ -583,6 +583,50 @@ fn admin_types_are_send_and_sync() {
         is_send!(ListPartitionReassignmentsResult) && is_sync!(ListPartitionReassignmentsResult),
         "ListPartitionReassignmentsResult"
     );
+    assert!(
+        is_send!(AlterShareGroupOffsetsOptions) && is_sync!(AlterShareGroupOffsetsOptions),
+        "AlterShareGroupOffsetsOptions"
+    );
+    assert!(
+        is_send!(AlterShareGroupOffsetsResult) && is_sync!(AlterShareGroupOffsetsResult),
+        "AlterShareGroupOffsetsResult"
+    );
+    assert!(
+        is_send!(DeleteShareGroupOffsetsOptions) && is_sync!(DeleteShareGroupOffsetsOptions),
+        "DeleteShareGroupOffsetsOptions"
+    );
+    assert!(
+        is_send!(DeleteShareGroupOffsetsResult) && is_sync!(DeleteShareGroupOffsetsResult),
+        "DeleteShareGroupOffsetsResult"
+    );
+    assert!(
+        is_send!(DeleteShareGroupsOptions) && is_sync!(DeleteShareGroupsOptions),
+        "DeleteShareGroupsOptions"
+    );
+    assert!(
+        is_send!(DeleteShareGroupsResult) && is_sync!(DeleteShareGroupsResult),
+        "DeleteShareGroupsResult"
+    );
+    assert!(
+        is_send!(DescribeShareGroupsOptions) && is_sync!(DescribeShareGroupsOptions),
+        "DescribeShareGroupsOptions"
+    );
+    assert!(
+        is_send!(DescribeShareGroupsResult) && is_sync!(DescribeShareGroupsResult),
+        "DescribeShareGroupsResult"
+    );
+    assert!(
+        is_send!(ListShareGroupOffsetsOptions) && is_sync!(ListShareGroupOffsetsOptions),
+        "ListShareGroupOffsetsOptions"
+    );
+    assert!(
+        is_send!(ListShareGroupOffsetsResult) && is_sync!(ListShareGroupOffsetsResult),
+        "ListShareGroupOffsetsResult"
+    );
+    assert!(
+        is_send!(ListShareGroupOffsetsSpec) && is_sync!(ListShareGroupOffsetsSpec),
+        "ListShareGroupOffsetsSpec"
+    );
     assert!(is_send!(ListTopicsOptions) && is_sync!(ListTopicsOptions), "ListTopicsOptions");
     assert!(is_send!(ListTopicsResult) && is_sync!(ListTopicsResult), "ListTopicsResult");
     assert!(
@@ -637,6 +681,22 @@ fn admin_types_are_send_and_sync() {
     assert!(
         is_send!(ScramCredentialInfo) && is_sync!(ScramCredentialInfo),
         "ScramCredentialInfo"
+    );
+    assert!(
+        is_send!(ShareGroupDescription) && is_sync!(ShareGroupDescription),
+        "ShareGroupDescription"
+    );
+    assert!(
+        is_send!(ShareMemberAssignment) && is_sync!(ShareMemberAssignment),
+        "ShareMemberAssignment"
+    );
+    assert!(
+        is_send!(ShareMemberDescription) && is_sync!(ShareMemberDescription),
+        "ShareMemberDescription"
+    );
+    assert!(
+        is_send!(SharePartitionOffsetInfo) && is_sync!(SharePartitionOffsetInfo),
+        "SharePartitionOffsetInfo"
     );
     assert!(is_send!(ScramMechanism) && is_sync!(ScramMechanism), "ScramMechanism");
     assert!(

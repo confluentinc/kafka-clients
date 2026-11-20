@@ -29,6 +29,7 @@ mod alter_configs_result;
 mod alter_consumer_group_offsets_result;
 mod alter_partition_reassignments_result;
 mod alter_replica_log_dirs_result;
+mod alter_share_group_offsets_result;
 mod alter_user_scram_credentials_result;
 mod classic_group_description;
 mod config;
@@ -42,6 +43,8 @@ pub mod delete_acls_result;
 mod delete_consumer_group_offsets_result;
 mod delete_consumer_groups_result;
 mod delete_records_result;
+mod delete_share_group_offsets_result;
+mod delete_share_groups_result;
 mod delete_topics_result;
 mod deleted_records;
 mod describe_acls_result;
@@ -55,6 +58,7 @@ mod describe_features_result;
 mod describe_log_dirs_result;
 pub mod describe_producers_result;
 pub mod describe_replica_log_dirs_result;
+mod describe_share_groups_result;
 mod describe_topics_result;
 mod describe_transactions_result;
 mod describe_user_scram_credentials_result;
@@ -73,6 +77,8 @@ mod list_consumer_group_offsets_spec;
 mod list_groups_result;
 pub mod list_offsets_result;
 mod list_partition_reassignments_result;
+mod list_share_group_offsets_result;
+mod list_share_group_offsets_spec;
 mod list_topics_result;
 mod list_transactions_result;
 mod log_dir_description;
@@ -93,6 +99,10 @@ mod renew_delegation_token_result;
 mod replica_info;
 mod scram_credential_info;
 mod scram_mechanism;
+mod share_group_description;
+mod share_member_assignment;
+mod share_member_description;
+mod share_partition_offset_info;
 mod supported_version_range;
 mod terminate_transaction_result;
 mod topic_description;
@@ -119,6 +129,7 @@ pub use alter_configs_result::AlterConfigsResult;
 pub use alter_consumer_group_offsets_result::AlterConsumerGroupOffsetsResult;
 pub use alter_partition_reassignments_result::AlterPartitionReassignmentsResult;
 pub use alter_replica_log_dirs_result::AlterReplicaLogDirsResult;
+pub use alter_share_group_offsets_result::AlterShareGroupOffsetsResult;
 pub use alter_user_scram_credentials_result::AlterUserScramCredentialsResult;
 pub use classic_group_description::ClassicGroupDescription;
 pub use config::Config;
@@ -140,6 +151,8 @@ pub use delete_acls_result::{DeleteAclsResult, FilterResult, FilterResults};
 pub use delete_consumer_group_offsets_result::DeleteConsumerGroupOffsetsResult;
 pub use delete_consumer_groups_result::DeleteConsumerGroupsResult;
 pub use delete_records_result::DeleteRecordsResult;
+pub use delete_share_group_offsets_result::DeleteShareGroupOffsetsResult;
+pub use delete_share_groups_result::DeleteShareGroupsResult;
 pub use delete_topics_result::DeleteTopicsResult;
 pub use deleted_records::DeletedRecords;
 pub use describe_acls_result::DescribeAclsResult;
@@ -153,6 +166,7 @@ pub use describe_features_result::DescribeFeaturesResult;
 pub use describe_log_dirs_result::DescribeLogDirsResult;
 pub use describe_producers_result::{DescribeProducersResult, PartitionProducerState};
 pub use describe_replica_log_dirs_result::{DescribeReplicaLogDirsResult, ReplicaLogDirInfo};
+pub use describe_share_groups_result::DescribeShareGroupsResult;
 pub use describe_topics_result::DescribeTopicsResult;
 pub use describe_transactions_result::DescribeTransactionsResult;
 pub use describe_user_scram_credentials_result::DescribeUserScramCredentialsResult;
@@ -172,6 +186,8 @@ pub use list_consumer_group_offsets_spec::ListConsumerGroupOffsetsSpec;
 pub use list_groups_result::ListGroupsResult;
 pub use list_offsets_result::{ListOffsetsResult, ListOffsetsResultInfo};
 pub use list_partition_reassignments_result::ListPartitionReassignmentsResult;
+pub use list_share_group_offsets_result::ListShareGroupOffsetsResult;
+pub use list_share_group_offsets_spec::ListShareGroupOffsetsSpec;
 pub use list_topics_result::ListTopicsResult;
 pub use list_transactions_result::ListTransactionsResult;
 pub use log_dir_description::LogDirDescription;
@@ -185,16 +201,17 @@ pub use new_topic::NewTopic;
 pub use offset_spec::OffsetSpec;
 pub use options::{
     AbortTransactionOptions, AlterClientQuotasOptions, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
-    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions,
-    CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
+    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, AlterShareGroupOffsetsOptions,
+    AlterUserScramCredentialsOptions, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
+    CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
+    DeleteRecordsOptions, DeleteShareGroupOffsetsOptions, DeleteShareGroupsOptions, DeleteTopicsOptions,
     DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions,
     DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions,
-    DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
-    DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
+    DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions, DescribeShareGroupsOptions,
+    DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
     ExpireDelegationTokenOptions, FenceProducersOptions, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, ListTopicsOptions,
-    ListTransactionsOptions, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
+    ListGroupsOptions, ListOffsetsOptions, ListPartitionReassignmentsOptions, ListShareGroupOffsetsOptions,
+    ListTopicsOptions, ListTransactionsOptions, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions,
     TerminateTransactionOptions, UnregisterControllerOptions, UpdateFeaturesOptions,
 };
 pub use partition_reassignment::PartitionReassignment;
@@ -205,6 +222,10 @@ pub use renew_delegation_token_result::RenewDelegationTokenResult;
 pub use replica_info::ReplicaInfo;
 pub use scram_credential_info::ScramCredentialInfo;
 pub use scram_mechanism::ScramMechanism;
+pub use share_group_description::ShareGroupDescription;
+pub use share_member_assignment::ShareMemberAssignment;
+pub use share_member_description::ShareMemberDescription;
+pub use share_partition_offset_info::SharePartitionOffsetInfo;
 pub use supported_version_range::SupportedVersionRange;
 pub use terminate_transaction_result::TerminateTransactionResult;
 pub use topic_description::TopicDescription;
@@ -1771,6 +1792,193 @@ pub trait Admin: Send + Sync {
         group_id: &str,
         options: RemoveMembersFromConsumerGroupOptions,
     ) -> RemoveMembersFromConsumerGroupResult;
+
+    /// Describe some share groups in the cluster, with the default options.
+    ///
+    /// This is a convenience method for `Self::describe_share_groups_with_options` with default
+    /// options. See the overload for more details.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_ids` - The IDs of the groups to describe.
+    ///
+    /// # Returns
+    ///
+    /// The DescribeShareGroupsResult.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeShareGroups")]
+    fn describe_share_groups(&self, group_ids: &[String]) -> DescribeShareGroupsResult {
+        self.describe_share_groups_with_options(group_ids, DescribeShareGroupsOptions::default())
+    }
+
+    /// Describe some share groups in the cluster.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_ids` - The IDs of the groups to describe.
+    /// - `options` - The options to use when describing the groups.
+    ///
+    /// # Returns
+    ///
+    /// The DescribeShareGroupsResult.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#describeShareGroups")]
+    fn describe_share_groups_with_options(
+        &self,
+        group_ids: &[String],
+        options: DescribeShareGroupsOptions,
+    ) -> DescribeShareGroupsResult;
+
+    /// Alters offsets for the specified group. In order to succeed, the group must be empty.
+    ///
+    /// This is a convenience method for `Self::alter_share_group_offsets_with_options` with
+    /// default options. See the overload for more details.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_id` - The group for which to alter offsets.
+    /// - `offsets` - A map of offsets by partition.
+    ///
+    /// # Returns
+    ///
+    /// The AlterShareGroupOffsetsResult.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterShareGroupOffsets")]
+    fn alter_share_group_offsets(
+        &self,
+        group_id: &str,
+        offsets: &HashMap<TopicPartition, i64>,
+    ) -> AlterShareGroupOffsetsResult {
+        self.alter_share_group_offsets_with_options(group_id, offsets, AlterShareGroupOffsetsOptions::default())
+    }
+
+    /// Alters offsets for the specified group. In order to succeed, the group must be empty.
+    ///
+    /// This operation is not transactional, so it may succeed for some partitions while fail for
+    /// others.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_id` - The group for which to alter offsets.
+    /// - `offsets` - A map of offsets by partition. Partitions not specified in the map are
+    ///   ignored.
+    /// - `options` - The options to use when altering the offsets.
+    ///
+    /// # Returns
+    ///
+    /// The AlterShareGroupOffsetsResult.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#alterShareGroupOffsets")]
+    fn alter_share_group_offsets_with_options(
+        &self,
+        group_id: &str,
+        offsets: &HashMap<TopicPartition, i64>,
+        options: AlterShareGroupOffsetsOptions,
+    ) -> AlterShareGroupOffsetsResult;
+
+    /// List the share group offsets available in the cluster for the specified share groups with
+    /// the default options.
+    ///
+    /// This is a convenience method for `Self::list_share_group_offsets_with_options` to list
+    /// offsets of all partitions for the specified share groups with default options.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_specs` - Map of share group ids to a spec that specifies the topic partitions of
+    ///   the group to list offsets for.
+    ///
+    /// # Returns
+    ///
+    /// The ListShareGroupOffsetsResult
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listShareGroupOffsets")]
+    fn list_share_group_offsets(
+        &self,
+        group_specs: &HashMap<String, ListShareGroupOffsetsSpec>,
+    ) -> ListShareGroupOffsetsResult {
+        self.list_share_group_offsets_with_options(group_specs, ListShareGroupOffsetsOptions::default())
+    }
+
+    /// List the share group offsets available in the cluster for the specified share groups.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_specs` - Map of share group ids to a spec that specifies the topic partitions of
+    ///   the group to list offsets for.
+    /// - `options` - The options to use when listing the share group offsets.
+    ///
+    /// # Returns
+    ///
+    /// The ListShareGroupOffsetsResult
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#listShareGroupOffsets")]
+    fn list_share_group_offsets_with_options(
+        &self,
+        group_specs: &HashMap<String, ListShareGroupOffsetsSpec>,
+        options: ListShareGroupOffsetsOptions,
+    ) -> ListShareGroupOffsetsResult;
+
+    /// Delete offsets for a set of topics in a share group with the default options.
+    ///
+    /// This is a convenience method for `Self::delete_share_group_offsets_with_options` with
+    /// default options. See the overload for more details.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_id` - The group for which to delete offsets.
+    /// - `topics` - The topics for which to delete offsets.
+    ///
+    /// # Returns
+    ///
+    /// The DeleteShareGroupOffsetsResult.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteShareGroupOffsets")]
+    fn delete_share_group_offsets(&self, group_id: &str, topics: &HashSet<String>) -> DeleteShareGroupOffsetsResult {
+        self.delete_share_group_offsets_with_options(group_id, topics, DeleteShareGroupOffsetsOptions::default())
+    }
+
+    /// Delete offsets for a set of topics in a share group.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_id` - The group for which to delete offsets.
+    /// - `topics` - The topics for which to delete offsets.
+    /// - `options` - The options to use when deleting offsets in a share group.
+    ///
+    /// # Returns
+    ///
+    /// The DeleteShareGroupOffsetsResult.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteShareGroupOffsets")]
+    fn delete_share_group_offsets_with_options(
+        &self,
+        group_id: &str,
+        topics: &HashSet<String>,
+        options: DeleteShareGroupOffsetsOptions,
+    ) -> DeleteShareGroupOffsetsResult;
+
+    /// Delete share groups from the cluster with the default options.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_ids` - Collection of share group ids which are to be deleted.
+    ///
+    /// # Returns
+    ///
+    /// The DeleteShareGroupsResult.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteShareGroups")]
+    fn delete_share_groups(&self, group_ids: &[String]) -> DeleteShareGroupsResult {
+        self.delete_share_groups_with_options(group_ids, DeleteShareGroupsOptions::default())
+    }
+
+    /// Delete share groups from the cluster.
+    ///
+    /// # Arguments
+    ///
+    /// - `group_ids` - Collection of share group ids which are to be deleted.
+    /// - `options` - The options to use when deleting a share group.
+    ///
+    /// # Returns
+    ///
+    /// The DeleteShareGroupsResult.
+    #[doc(alias = "org.apache.kafka.clients.admin.Admin#deleteShareGroups")]
+    fn delete_share_groups_with_options(
+        &self,
+        group_ids: &[String],
+        options: DeleteShareGroupsOptions,
+    ) -> DeleteShareGroupsResult;
 
     /// This is a convenience method for `Self::create_acls_with_options` with default options. See
     /// the overload for more details.
