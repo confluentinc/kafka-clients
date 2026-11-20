@@ -309,9 +309,10 @@ impl ShareConsumeRequestManager {
         }
     }
 
-    /// Java's `DisconnectException.INSTANCE`.
+    /// Java's `DisconnectException.INSTANCE`, built with the no-argument
+    /// `DisconnectException#DisconnectException()` constructor: no message.
     fn disconnect() -> Error {
-        Error::Disconnect(DisconnectError::with_default_message())
+        Error::Disconnect(DisconnectError::new(""))
     }
 
     /// The error a request to a node failed with, as Java's
@@ -7541,6 +7542,7 @@ mod tests {
             .expect("an error")
             .clone();
         assert!(error.is_disconnect_error(), "{error:?}");
+        assert!(error.message().is_empty(), "{error:?}");
         assert!(f.manager.is_node_free(0));
         assert_eq!(1, f.send_fetches());
     }
