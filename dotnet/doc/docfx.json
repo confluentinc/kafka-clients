@@ -1,0 +1,43 @@
+{
+  "metadata": [
+    {
+      "src": [
+        {
+          "files": [
+            "Confluent.Kafka.dll"
+          ],
+          "src": "../artifacts/docs/assembly"
+        }
+      ],
+      "dest": "../artifacts/docs/api"
+    }
+  ],
+  "build": {
+    "content": [
+      {
+        "files": [
+          "**.yml"
+        ],
+        "src": "../artifacts/docs/api",
+        "dest": "api"
+      },
+      {
+        "files": [
+          "index.md",
+          "toc.yml"
+        ]
+      }
+    ],
+    "globalMetadata": {
+      "_appTitle": "Confluent.Kafka",
+      "_appName": "Confluent.Kafka",
+      "_enableSearch": true,
+      "_disableContribution": true
+    },
+    "dest": "../artifacts/docs/_site",
+    "template": [
+      "default",
+      "modern"
+    ]
+  }
+}

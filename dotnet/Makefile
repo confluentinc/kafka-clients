@@ -57,7 +57,7 @@ selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURD
 .PHONY: grpc-image grpc-image-async grpc-native rust-lib test-integration test-integration-ssl test-integration-sasl-ssl \
 	test-integration-native build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
 	test-examples-dotnet test-verifiable-clients-dotnet test-dotnet-macos verify verify-except-grpc-arm verify-macos \
-	pack-dotnet package-check-dotnet coverage-dotnet
+	pack-dotnet package-check-dotnet coverage-dotnet docs-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -325,6 +325,33 @@ coverage-dotnet: build-dotnet
 	cat $(COVERAGE_DIR)/report/Summary.txt
 	@echo 'Without Confluent.Kafka.Common.Errors (the generated exception classes):'
 	@sed -n '2,/^$$/p' $(COVERAGE_DIR)/report-without-errors/Summary.txt
+
+# ---------------------------------------------------------------------------
+# The API reference of the Confluent.Kafka library, built with DocFX, a local tool
+# pinned in .config/dotnet-tools.json, as confluent-kafka-dotnet builds its own.
+#
+# DocFX reads the built net10.0 assembly and its XML documentation file, not the
+# project: from the project it leaves out the members of C# 14 extension blocks
+# (Admin.Create, the Java enum methods), which the compiled assembly holds as
+# static methods. doc/docfx.json reads the two files from artifacts/docs/assembly,
+# where this target copies them, so it does not depend on $(DOTNET_CONFIG).
+#
+# Writes the site to artifacts/docs/_site (open index.html); a DocFX warning fails
+# the build. CI runs it in the "docs-dotnet (Linux amd64)" job and keeps the site
+# as the workflow artifact docs/dotnet.tar.gz.
+# ---------------------------------------------------------------------------
+DOCS_DIR := $(REPO_ROOT)/dotnet/artifacts/docs
+LIBRARY := $(REPO_ROOT)/dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj
+LIBRARY_NET10_BIN := $(REPO_ROOT)/dotnet/src/Confluent.Kafka/bin/$(DOTNET_CONFIG)/net10.0
+DOCFX = $(DOTNET) tool run docfx
+
+docs-dotnet: rust-lib
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(LIBRARY)
+	rm -rf $(DOCS_DIR)
+	mkdir -p $(DOCS_DIR)/assembly
+	cp $(LIBRARY_NET10_BIN)/Confluent.Kafka.dll $(LIBRARY_NET10_BIN)/Confluent.Kafka.xml $(DOCS_DIR)/assembly/
+	$(DOTNET) tool restore
+	$(DOCFX) $(REPO_ROOT)/dotnet/doc/docfx.json --warningsAsErrors
 
 # ---------------------------------------------------------------------------
 # The verifiable clients (dotnet/tools/VerifiableClients), the producer and consumer
