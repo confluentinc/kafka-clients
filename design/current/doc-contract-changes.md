@@ -407,6 +407,6 @@ Entry format (a numbered list; the four sub-items are required, in this order):
    - Accepted:
 1. `crate::consumer::AcknowledgeType::Renew`
    - Java member: `org.apache.kafka.clients.consumer.AcknowledgeType#RENEW`
-   - Contract change: a renewed record is returned again by `poll` as a new `ConsumerRecord`, its key and value deserialized again once per redelivery, where Java returns the same record object without running the deserializers again; if that deserialization fails, the record is released and `poll` returns the deserialization error, where Java's class doc says a successfully renewed record "is returned again by the poll call".
+   - Contract change: a renewed record is returned again by `poll` as a new `ConsumerRecord`, its key and value deserialized again once per redelivery, where Java returns the same record object without running the deserializers again; if that deserialization fails, the record is released instead of being returned again, and `poll` returns the deserialization error only when it has no other record to return, as for a first delivery that fails (`ShareFetchCollector#collect`), otherwise the failure is not reported; Java's class doc says a successfully renewed record "is returned again by the poll call".
    - Why: Milestone 18 decision D5, option (c): `ConsumerRecords` owns its records and hands them out by value, so the consumer cannot keep the delivered object; it keeps a refcounted handle on the fetched bytes and decodes the renewed record again, which costs nothing when no record is renewed.
    - Accepted:

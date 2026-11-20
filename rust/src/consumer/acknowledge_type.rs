@@ -46,8 +46,9 @@ pub enum AcknowledgeType {
     /// WARNING: the key and value deserializers run again each time a renewed
     /// record is returned again, where Java returns the same record object
     /// without deserializing it. If that deserialization fails, the record is
-    /// released and `poll` returns the deserialization error, as for a first
-    /// delivery that fails, instead of the record being returned again.
+    /// released instead of being returned again, and `poll` returns the
+    /// deserialization error only when it has no other record to return, as
+    /// for a first delivery that fails; otherwise the failure is not reported.
     // Milestone 18 decision D5, option (c): the renewed record is re-decoded
     // inside `ShareInFlightBatch` rather than kept, because `ConsumerRecords`
     // owns its records and hands them out by value.
