@@ -687,6 +687,12 @@ Not offered, the C ABI having no entry point for them: Java's `clientInstanceId(
 `registerMetricForSubscription(KafkaMetric)` and `unregisterMetricFromSubscription(KafkaMetric)`
 (KIP-714), which the Rust core does not translate yet; the XML docs of `IConsumer` and
 `IAsyncConsumer` say so. Goes when the C ABI has them.
+`Metrics()` on the real consumers lacks Java's network and app-info metrics: the connection, request
+and I/O metrics Java's `Selector` adds to `consumer-metrics` (`connection-count`, `request-total`,
+...), the per-node `consumer-node-metrics` group, and the `app-info` group (`version`, `commit-id`,
+`start-time-ms`). The core's `Selector` registers no metrics yet and nothing in the core registers
+Java's `AppInfoParser` metrics, so the binding cannot report them; the XML doc of `Metrics()` says
+so. Goes when the core registers them.
 
 The **admin client** shipped in M15 as `IAdmin` (`KafkaAdminClient` /
 `MockAdminClient`), a Mode A port over the `kafka_admin_*` ABI; its decisions are in
