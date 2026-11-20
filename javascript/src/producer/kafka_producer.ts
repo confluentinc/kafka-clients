@@ -23,7 +23,7 @@ import { JavaForms } from '../internal/args';
 import { checkConfigs, configEntries } from '../internal/config';
 import { debug } from '../internal/debug';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
-import { producerClosed, producerOpened, warnPreview } from '../internal/lifecycle';
+import { warnPreview } from '../internal/lifecycle';
 import { checkSerializer, closeSerializer, configuredSerializer, isThenable, serializedBytes, serializerFailure } from '../internal/serde';
 import { ApiError } from '../common/errors/api_error';
 import { KafkaError } from '../common/kafka_error';
@@ -427,7 +427,6 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
       if (taken >= 2) closeSerializer(construction ? (valueArgument ?? valueConfigured) : valueConfigured, 'valueSerializer');
       throw error;
     }
-    producerOpened();
     warnPreview();
     debug('KafkaProducer created');
   }
@@ -1078,7 +1077,6 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
       native.producerClose(this.#handle, timeoutMs, (error, closedNow) => {
         // This close closed the producer: the core reported it closed.
         if (closedNow) {
-          producerClosed();
           // Java's close closes the serializers last, before it returns.
           this.#closeSerializers();
           debug('KafkaProducer closed');
