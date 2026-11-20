@@ -264,7 +264,16 @@ added to CLAUDE.md or the DoD:
 
 ### 7.1 Share-specific design decisions (no consumer precedent)
 
-- **D5 — Record retention for RENEW (KIP-1222).** Java's `ShareInFlightBatch` keeps the
+- **D5 — Record retention for RENEW (KIP-1222).** **Decided 2026-11-20: option (c), provisional; team review at
+  <https://claude.ai/artifact/CJQEkgXPFm9XCgno1S4yEZ>.** Implemented in P3a with these constraints: the whole scheme
+  lives behind one crate-private seam inside `ShareInFlightBatch` (nothing outside the type knows how a
+  redelivered record is produced); one refcounted `Bytes` handle per in-flight batch, offset-keyed
+  `inFlightRecords` / `renewingRecords` / `renewedRecords`; copy-on-renew-only memory policy (once a batch's only
+  remaining in-flight records are renewed ones, its raw bytes are copied into an owned buffer and the response
+  handle is dropped); a deserialization error on redelivery takes the normal per-record path; the deviations
+  (deserializer runs again, the redelivered record is a new value) are documented at the type citing
+  `ShareInFlightBatch.java:35-37,176-179`. The `AcknowledgeType::Renew` rustdoc that tells users about it is a P8
+  deferral row in `ledger.md`. Original analysis follows. Java's `ShareInFlightBatch` keeps the
   `ConsumerRecord` objects it hands to the user (`inFlightRecords`). A record acknowledged with `RENEW`
   moves `renewingRecords` → `renewedRecords` → back into `inFlightRecords` (`takeRenewals`), and the
   next `poll` returns the same object again (`ShareFetch` collects `getInFlightRecords()`). The Rust
@@ -321,7 +330,7 @@ added to CLAUDE.md or the DoD:
 | D4 (rules) | P0 | P0 applies the approved rules |
 | D8 (callback shape) | P2 | `AcknowledgementCommitCallback` is a P2 type |
 | D3 (PR shape) | — | Decided: one milestone PR |
-| **D5 (renew retention)** | **P3a** | `ShareInFlightBatch` / `ShareCompletedFetch` own the record-retention shape; P3b, P5b, P7 and `ShareConsumerRenewTest` build on it |
+| **D5 (renew retention)** — decided 2026-11-20, (c) provisional | **P3a** | `ShareInFlightBatch` / `ShareCompletedFetch` own the record-retention shape; P3b, P5b, P7 and `ShareConsumerRenewTest` build on it |
 | D1 (admin slice) | P9, P10 | |
 | D6 (wakeup handle), D7 (`Result` vs panic), D2 (KIP-714) | P7 / P8 | |
 
