@@ -38,6 +38,7 @@ use crate::common::utils::Time;
 use crate::common::{Error, TopicPartition, Uuid};
 
 use super::MemberState;
+use super::MemberStateListener;
 use super::PollResult;
 use super::RequestManager;
 use super::SubscriptionState;
@@ -255,6 +256,11 @@ impl ShareMembershipManager {
     pub(crate) fn leave_group(&self, current_time_ms: i64) -> Result<KafkaFutureImpl<()>, Error> {
         self.abstract_mm.leave_group(self, current_time_ms)
     }
+
+    /// Java: `registerStateListener(MemberStateListener)` (inherited).
+    pub(crate) fn register_state_listener(&self, listener: Arc<dyn MemberStateListener>) {
+        self.abstract_mm.register_state_listener(listener);
+    }
 }
 
 /// The `ShareMembershipManager` overrides of Java's abstract
@@ -351,6 +357,16 @@ impl MembershipManagerHooks for ShareMembershipManager {
 
 /// Java's `poll` override, reached through the request-manager list.
 impl RequestManager for ShareMembershipManager {
+    fn poll(&mut self, current_time_ms: i64) -> PollResult {
+        ShareMembershipManager::poll(self, current_time_ms)
+    }
+}
+
+/// The same `poll`, for the instance `RequestManagers` shares with the share
+/// heartbeat manager (Java holds one reference in each). Every method of
+/// [`ShareMembershipManager`] takes `&self`, so the shared instance is polled
+/// as Java's list entry is.
+impl RequestManager for Arc<ShareMembershipManager> {
     fn poll(&mut self, current_time_ms: i64) -> PollResult {
         ShareMembershipManager::poll(self, current_time_ms)
     }

@@ -1880,6 +1880,10 @@ impl ShareConsumeRequestManager {
 }
 
 impl RequestManager for ShareConsumeRequestManager {
+    fn handle_completed_requests(&mut self) {
+        ShareConsumeRequestManager::handle_completed_requests(self);
+    }
+
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManager#poll")]
     fn poll(&mut self, current_time_ms: i64) -> PollResult {
         self.handle_completed_requests();
@@ -2077,6 +2081,37 @@ impl RequestManager for ShareConsumeRequestManager {
 impl MemberStateListener for Mutex<ShareConsumeRequestManager> {
     fn on_member_epoch_updated(&self, member_epoch: Option<i32>, member_id: &str) {
         lock(self).on_member_epoch_updated(member_epoch, member_id);
+    }
+}
+
+/// The manager as `RequestManagers` holds it: behind the lock its
+/// [`MemberStateListener`] impl takes, so the background task polls it as
+/// Java's list entry is. Each method takes the lock for the call only.
+///
+/// [`RequestManager::handle_completed_requests`] is the one override of that
+/// hook: it runs Java's `whenComplete` bodies right after the network poll
+/// (module docs, "Responses"). The futures it completes (`commit_sync`'s, the
+/// `close_future`) have only event-completing actions, which never lock the
+/// manager again.
+impl RequestManager for Arc<Mutex<ShareConsumeRequestManager>> {
+    fn poll(&mut self, current_time_ms: i64) -> PollResult {
+        lock(self).poll(current_time_ms)
+    }
+
+    fn poll_on_close(&mut self, current_time_ms: i64) -> PollResult {
+        lock(self).poll_on_close(current_time_ms)
+    }
+
+    fn maximum_time_to_wait(&self, current_time_ms: i64) -> i64 {
+        lock(self).maximum_time_to_wait(current_time_ms)
+    }
+
+    fn signal_close(&mut self) {
+        lock(self).signal_close();
+    }
+
+    fn handle_completed_requests(&mut self) {
+        lock(self).handle_completed_requests();
     }
 }
 

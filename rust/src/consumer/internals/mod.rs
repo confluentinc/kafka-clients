@@ -209,6 +209,7 @@ pub(crate) use request_state::RequestState;
 pub(crate) use share_acknowledgement_mode::ShareAcknowledgementMode;
 pub(crate) use share_acquire_mode::ShareAcquireMode;
 pub(crate) use share_completed_fetch::ShareCompletedFetch;
+pub(crate) use share_consume_request_manager::ShareConsumeRequestManager;
 pub(crate) use share_consumer_metadata::ShareConsumerMetadata;
 pub(crate) use share_fetch::ShareFetch;
 pub(crate) use share_fetch_buffer::ShareFetchBuffer;
@@ -221,7 +222,6 @@ pub(crate) use share_fetch_config::ShareFetchConfig;
 pub(crate) use share_fetch_metrics_aggregator::ShareFetchMetricsAggregator;
 pub(crate) use share_fetch_metrics_manager::ShareFetchMetricsManager;
 pub(crate) use share_fetch_metrics_registry::ShareFetchMetricsRegistry;
-#[expect(unused_imports, reason = "the share consumer uses it from Milestone 18 P6 on")]
 pub(crate) use share_heartbeat_request_manager::ShareHeartbeatRequestManager;
 pub(crate) use share_in_flight_batch::ShareInFlightBatch;
 pub(crate) use share_membership_manager::ShareMembershipManager;

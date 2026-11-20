@@ -115,13 +115,6 @@ impl ShareFetchConfig {
     /// (Java's `IllegalArgumentException` from `ConsumerUtils#configuredIsolationLevel`
     /// and `ShareAcquireMode#of`). A `ConsumerConfig` built from properties has
     /// validated both already.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the RequestManagers share supplier calls it from Milestone 18 P6 on"
-        )
-    )]
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetchConfig#ShareFetchConfig")]
     pub(crate) fn with_consumer_config(config: &ConsumerConfig) -> Result<Self, Error> {
         Ok(Self {
