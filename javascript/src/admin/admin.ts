@@ -21,6 +21,21 @@
 import { JavaForms } from '../internal/args';
 import type { Duration } from '../duration';
 import type { AdminClientConfigs } from './admin_client_configs';
+import type { CreatePartitionsOptions } from './create_partitions_options';
+import type { CreatePartitionsResult } from './create_partitions_result';
+import type { CreateTopicsOptions } from './create_topics_options';
+import type { CreateTopicsResult } from './create_topics_result';
+import type { DeleteRecordsOptions } from './delete_records_options';
+import type { DeleteRecordsResult } from './delete_records_result';
+import type { DeleteTopicsOptions } from './delete_topics_options';
+import type { DeleteTopicsResult } from './delete_topics_result';
+import type { DescribeTopicsOptions } from './describe_topics_options';
+import type { DescribeTopicsResult } from './describe_topics_result';
+import type { NewPartitions } from './new_partitions';
+import type { NewTopic } from './new_topic';
+import type { RecordsToDelete } from './records_to_delete';
+import type { TopicCollection } from '../common/topic_collection';
+import type { TopicPartitionMap } from '../common/topic_partition_map';
 import type { DescribeClusterOptions } from './describe_cluster_options';
 import type { DescribeClusterResult } from './describe_cluster_result';
 import type { CloseArgs } from './kafka_admin_client';
@@ -140,6 +155,236 @@ export interface Admin {
    * @returns The DescribeClusterResult.
    */
   describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
+
+  /**
+   * Create a batch of new topics.
+   *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others. It may take several seconds after the result
+   * returns successfully for all the brokers to become aware that the topics
+   * have been created; during this time, `listTopics()` and `describeTopics()`
+   * may not return information about the new topics. This operation is
+   * supported by brokers with version 0.10.1.0 or higher. The validateOnly
+   * option is supported from version 0.10.2.0.
+   *
+   * @param newTopics - The new topics to create.
+   * @returns The CreateTopicsResult.
+   */
+  createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
+  /**
+   * The same as `createTopics(newTopics)`, the newTopics given by name.
+   *
+   * @param args - the newTopics
+   * @returns The CreateTopicsResult.
+   */
+  createTopics(args: {
+    /** The new topics to create. */
+    newTopics: Iterable<NewTopic>;
+    options?: never;
+  }): CreateTopicsResult;
+  /**
+   * Create a batch of new topics.
+   *
+   * @param args - the newTopics, and the options to use
+   * @returns The CreateTopicsResult.
+   */
+  createTopics(args: {
+    /** The new topics to create. */
+    newTopics: Iterable<NewTopic>;
+    /** The options to use when creating the new topics. */
+    options: CreateTopicsOptions;
+  }): CreateTopicsResult;
+
+  /**
+   * Delete a batch of topics.
+   *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others. It may take several seconds after the result
+   * returns successfully for all the brokers to become aware that the topics
+   * are gone; during this time, `listTopics()` and `describeTopics()` may
+   * continue to return information about the deleted topics. If
+   * delete.topic.enable is false on the brokers, deleteTopics will mark the
+   * topics for deletion, but not actually delete them; the futures will return
+   * successfully in this case. When using topic IDs, this operation is
+   * supported by brokers with inter-broker protocol 2.8 or higher; when using
+   * topic names, by brokers with version 0.10.1.0 or higher.
+   *
+   * @param topics - The topic names, or the topics, to delete.
+   * @returns The DeleteTopicsResult.
+   */
+  deleteTopics(topics: Iterable<string> | TopicCollection): DeleteTopicsResult;
+  /**
+   * The same as `deleteTopics(topics)`, the topics given by name.
+   *
+   * @param args - the topics
+   * @returns The DeleteTopicsResult.
+   */
+  deleteTopics(args: {
+    /** The topic names, or the topics, to delete. */
+    topics: Iterable<string> | TopicCollection;
+    options?: never;
+  }): DeleteTopicsResult;
+  /**
+   * Delete a batch of topics.
+   *
+   * @param args - the topics, and the options to use
+   * @returns The DeleteTopicsResult.
+   */
+  deleteTopics(args: {
+    /** The topic names, or the topics, to delete. */
+    topics: Iterable<string> | TopicCollection;
+    /** The options to use when deleting the topics. */
+    options: DeleteTopicsOptions;
+  }): DeleteTopicsResult;
+
+  /**
+   * Describe some topics in the cluster.
+   *
+   * When using topic IDs, this operation is supported by brokers with version
+   * 3.1.0 or higher.
+   *
+   * @param topicNames - The names of the topics to describe.
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
+  /**
+   * The same as `describeTopics(topicNames)`, the topicNames given by name.
+   *
+   * @param args - the topicNames
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(args: {
+    /** The names of the topics to describe. */
+    topicNames: Iterable<string>;
+    topics?: never;
+    options?: never;
+  }): DescribeTopicsResult;
+  /**
+   * Describe some topics in the cluster.
+   *
+   * @param args - the topicNames, and the options to use
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(args: {
+    /** The names of the topics to describe. */
+    topicNames: Iterable<string>;
+    /** The options to use when describing the topics. */
+    options: DescribeTopicsOptions;
+    topics?: never;
+  }): DescribeTopicsResult;
+  /**
+   * Describe some topics in the cluster.
+   *
+   * When using topic IDs, this operation is supported by brokers with version
+   * 3.1.0 or higher.
+   *
+   * @param topics - The topics to describe.
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(topics: TopicCollection): DescribeTopicsResult;
+  /**
+   * The same as `describeTopics(topics)`, the topics given by name.
+   *
+   * @param args - the topics
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(args: {
+    /** The topics to describe. */
+    topics: TopicCollection;
+    topicNames?: never;
+    options?: never;
+  }): DescribeTopicsResult;
+  /**
+   * Describe some topics in the cluster.
+   *
+   * @param args - the topics, and the options to use
+   * @returns The DescribeTopicsResult.
+   */
+  describeTopics(args: {
+    /** The topics to describe. */
+    topics: TopicCollection;
+    /** The options to use when describing the topics. */
+    options: DescribeTopicsOptions;
+    topicNames?: never;
+  }): DescribeTopicsResult;
+
+  /**
+   * Increase the number of partitions of the topics given as the keys of
+   * `newPartitions` according to the corresponding values. **If partitions are
+   * increased for a topic that has a key, the partition logic or ordering of
+   * the messages will be affected.**
+   *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others. It may take several seconds after this method
+   * returns success for all the brokers to become aware that the partitions
+   * have been created. This operation is supported by brokers with version
+   * 1.0.0 or higher.
+   *
+   * @param newPartitions - The topics which should have new partitions created, and corresponding parameters for the created partitions.
+   * @returns The CreatePartitionsResult.
+   */
+  createPartitions(newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>): CreatePartitionsResult;
+  /**
+   * The same as `createPartitions(newPartitions)`, the newPartitions given by name.
+   *
+   * @param args - the newPartitions
+   * @returns The CreatePartitionsResult.
+   */
+  createPartitions(args: {
+    /** The topics which should have new partitions created, and corresponding parameters for the created partitions. */
+    newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
+    options?: never;
+  }): CreatePartitionsResult;
+  /**
+   * Increase the number of partitions of the topics given as the keys of
+   * `newPartitions` according to the corresponding values. **If partitions are
+   * increased for a topic that has a key, the partition logic or ordering of
+   * the messages will be affected.**
+   *
+   * @param args - the newPartitions, and the options to use
+   * @returns The CreatePartitionsResult.
+   */
+  createPartitions(args: {
+    /** The topics which should have new partitions created, and corresponding parameters for the created partitions. */
+    newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
+    /** The options to use when creating the new partitions. */
+    options: CreatePartitionsOptions;
+  }): CreatePartitionsResult;
+
+  /**
+   * Delete records whose offset is smaller than the given offset of the
+   * corresponding partition.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
+   *
+   * @param recordsToDelete - The topic partitions and related offsets from which records deletion starts.
+   * @returns The DeleteRecordsResult.
+   */
+  deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
+  /**
+   * The same as `deleteRecords(recordsToDelete)`, the recordsToDelete given by name.
+   *
+   * @param args - the recordsToDelete
+   * @returns The DeleteRecordsResult.
+   */
+  deleteRecords(args: {
+    /** The topic partitions and related offsets from which records deletion starts. */
+    recordsToDelete: TopicPartitionMap<RecordsToDelete>;
+    options?: never;
+  }): DeleteRecordsResult;
+  /**
+   * Delete records whose offset is smaller than the given offset of the
+   * corresponding partition.
+   *
+   * @param args - the recordsToDelete, and the options to use
+   * @returns The DeleteRecordsResult.
+   */
+  deleteRecords(args: {
+    /** The topic partitions and related offsets from which records deletion starts. */
+    recordsToDelete: TopicPartitionMap<RecordsToDelete>;
+    /** The options to use when deleting records. */
+    options: DeleteRecordsOptions;
+  }): DeleteRecordsResult;
 }
 
 /**

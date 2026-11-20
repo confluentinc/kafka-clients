@@ -187,6 +187,43 @@ test("one signature per Java form: each names exactly its form's parameters", ()
   ]);
 });
 
+test('one-parameter forms of two names each take their bare value; forms of the same names, typed apart, are one key', () => {
+  const { javaClass } = require('./_java_fixture');
+  const index = javaIndex([
+    javaClass('clients.producer.Rec', {
+      overloads: [
+        method('find', ['Collection<String>'], { param_names: ['names'] }),
+        method('find', ['Collection<String>', 'Mode'], { param_names: ['names', 'mode'] }),
+        method('find', ['Mode'], { param_names: ['ids'] }),
+        method('find', ['Mode', 'Mode'], { param_names: ['ids', 'mode'] }),
+        method('drop', ['Collection<String>'], { param_names: ['topics'] }),
+        method('drop', ['Mode'], { param_names: ['topics'] }),
+      ],
+    }),
+  ]);
+  const root = (/** @type {string} */ body) =>
+    project({ 'tsconfig.json': TSCONFIG, 'java-index.json': index, 'src/producer/rec.ts': `export class Rec {\n${body}}\n` });
+  const r = lint(
+    root(
+      [
+        '  find(names: Iterable<string>): void;',
+        '  find(options: { names: Iterable<string>; mode?: never; ids?: never }): void;',
+        '  find(options: { names: Iterable<string>; mode: number; ids?: never }): void;',
+        '  find(ids: number): void;',
+        '  find(options: { ids: number; mode?: never; names?: never }): void;',
+        '  find(options: { ids: number; mode: number; names?: never }): void;',
+        '  find(options: unknown): void { void options; }',
+        '  drop(topics: Iterable<string> | number): void;',
+        '  drop(options: { topics: Iterable<string> | number }): void;',
+        '  drop(options: unknown): void { void options; }',
+        '',
+      ].join('\n'),
+    ),
+    [RULE],
+  );
+  assert.deepEqual(shapeFindings(r), [], r.text);
+});
+
 test('a Java form the options object does not name is its own finding, keyed by the form', () => {
   const { javaClass } = require('./_java_fixture');
   const index = javaIndex([
