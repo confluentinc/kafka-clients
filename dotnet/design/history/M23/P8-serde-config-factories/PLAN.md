@@ -495,7 +495,7 @@ P7's plan file is not edited; these rows are the record.
 
 ## Draft rule text (applied 2026-11-20)
 
-**Applied 2026-11-20 in M23/P10 S4 (commit PENDING_S4).** R1–R7, R9, R10, R13 and R14 are applied as written.
+**Applied 2026-11-20 in M23/P10 S4 (commit 15a565ed9).** R1–R7, R9, R10, R13 and R14 are applied as written.
 R8 is applied with the asynchronous serde interfaces it names, and the `AsyncMockProducer` / `AsyncMockConsumer`
 constructors of the same sketches now show them too. R11 is applied inside P7's R2, adjusted to M23/P10 decision
 1: `Configure`'s token is optional on the interface method as on the extension method. R12: `dotnet/README.md`

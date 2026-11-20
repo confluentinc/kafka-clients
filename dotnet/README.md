@@ -226,7 +226,8 @@ On an asynchronous consumer, the memory an `IAsyncDeserializer<T>` is given is v
 `ValueTask` it returns completes, so across its awaits; reading it after that throws
 `ObjectDisposedException`. A deserializer that implements `IAsyncDeserializerWithRetention<T>`, an
 interface with no member of its own that extends `IAsyncDeserializerWithHeaders<T>`, may keep or
-return the memory given to either form, as `AsyncReadOnlyMemoryDeserializer` does.
+return the memory its headers form is given (the form the consumer calls on it), as
+`AsyncReadOnlyMemoryDeserializer` does.
 
 What to know about a memory that was kept:
 

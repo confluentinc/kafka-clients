@@ -768,9 +768,9 @@ Deliberate deviations, recorded (§4 decision-point latitude; consumer-threading
   refuse one that declares a headers form without its interface. The async clients take only these; the sync
   clients only the sync interfaces. An async deserializer's `data` is valid until its `ValueTask` completes,
   unless the class also has the marker `IAsyncDeserializerWithRetention<T> : IAsyncDeserializerWithHeaders<T>`,
-  whose permission covers both forms. Each built-in has an `Async<Name>Serializer` / `Async<Name>Deserializer`
-  class that implements the forms its sync twin does and delegates to it; there is no public sync-to-async
-  adapter. A configurable one implements `IAsyncSerializerWithConfigure<T>` / `IAsyncDeserializerWithConfigure<T>`,
+  whose permission applies to the `data` of the headers form, the form the consumers call on it. Each built-in
+  has an `Async<Name>Serializer` / `Async<Name>Deserializer` class that implements the forms its sync twin does
+  and delegates to it; there is no public sync-to-async adapter. A configurable one implements `IAsyncSerializerWithConfigure<T>` / `IAsyncDeserializerWithConfigure<T>`,
   whose `Configure` returns a `ValueTask` and ends with `CancellationToken cancellationToken = default`
   (`AsyncSerializerExtensions.Configure` and `AsyncDeserializerExtensions.Configure` run Java's default; ledgers
   571, 572); the asynchronous `Create` awaits it on a serde it builds (§4 **Serializers**). An asynchronous
