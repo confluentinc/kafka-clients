@@ -77,6 +77,7 @@ mod producer_transactions_test;
 mod sasl_plain_plaintext_consumer_test;
 mod sasl_reauthentication_test;
 mod sasl_ssl_consumer_test;
+mod share_consumer_delivery_test;
 mod share_consumer_rack_aware_test;
 mod share_consumer_test;
 mod share_consumer_test_base;
