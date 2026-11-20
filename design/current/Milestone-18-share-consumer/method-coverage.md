@@ -814,7 +814,7 @@ the `ShareConsumerImpl` method of the same Rust name (P7 table).
 | Java method | Rust |
 |---|---|
 | `subscription()` | `ShareConsumer::subscription` (`&mut self`; panics on a closed consumer, CLAUDE.md §12.5) |
-| `subscribe(Collection)` | `ShareConsumer::subscribe(&[String])` (the only overload, so the plain name) |
+| `subscribe(Collection)` | `ShareConsumer::subscribe(Vec<String>)` (the only overload, so the plain name; a `Vec` because the topics are kept) |
 | `unsubscribe()` | `ShareConsumer::unsubscribe` |
 | `poll(Duration)` | `ShareConsumer::poll` |
 | `acknowledge(ConsumerRecord)` | `ShareConsumer::acknowledge_with_record` (`Result`, D7 as P7) |
