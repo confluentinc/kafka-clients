@@ -3676,4 +3676,62 @@ mod tests {
         assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
         assert!(!state.is_offset_reset_needed(&tp_test_0()).unwrap());
     }
+
+    // ── Share consumer (KIP-932) members ──
+    //
+    // Rust-only: Java's `SubscriptionStateTest` has no share case.
+
+    /// `subscribeToShareGroup`: the AUTO_TOPICS_SHARE type with no rebalance
+    /// listener, `true` only when the subscription changes, and the share
+    /// branches of `hasAutoAssignedPartitions` and `prettyString`.
+    #[test]
+    fn subscribe_to_share_group_sets_the_share_subscription() {
+        let mut state = SubscriptionState::new(AutoOffsetResetStrategy::LATEST);
+        assert!(state.subscribe_to_share_group(HashSet::from(["t".to_string()])).unwrap());
+        assert!(!state.subscribe_to_share_group(HashSet::from(["t".to_string()])).unwrap());
+        assert!(state.subscribe_to_share_group(HashSet::from(["u".to_string()])).unwrap());
+        assert_eq!(HashSet::from(["u".to_string()]), state.subscription());
+        assert!(state.rebalance_listener().is_none());
+        assert!(state.has_auto_assigned_partitions());
+        assert_eq!("Subscribe to Share Group(u)", state.pretty_string());
+    }
+
+    /// `subscribeToShareGroup` after a manual assignment throws Java's
+    /// `IllegalStateException` (`setSubscriptionType`).
+    #[test]
+    fn subscribe_to_share_group_rejects_another_subscription_type() {
+        let mut state = SubscriptionState::new(AutoOffsetResetStrategy::LATEST);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let err = state
+            .subscribe_to_share_group(HashSet::from(["t".to_string()]))
+            .expect_err("mutually exclusive");
+        assert!(matches!(err, Error::LocalIllegalState(_)), "{err:?}");
+        assert_eq!(
+            "Subscription to topics, partitions and pattern are mutually exclusive",
+            err.message()
+        );
+    }
+
+    /// `fetchablePartitions` / `hasFetchablePartitions` skip
+    /// `isFetchableAndSubscribed` for AUTO_TOPICS_SHARE: a share assignment is
+    /// fetchable without a position, where a regular subscription's is not.
+    #[test]
+    fn share_assignment_is_fetchable_without_a_position() {
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let mut share = SubscriptionState::new(AutoOffsetResetStrategy::LATEST);
+        share.subscribe_to_share_group(HashSet::from(["t".to_string()])).unwrap();
+        share.assign_from_subscribed(std::slice::from_ref(&tp)).unwrap();
+        assert_eq!(vec![tp.clone()], share.fetchable_partitions(|_| true));
+        assert!(share.has_fetchable_partitions(|_| true));
+        assert!(share.fetchable_partitions(|_| false).is_empty(), "the predicate still applies");
+
+        let mut consumer = SubscriptionState::new(AutoOffsetResetStrategy::LATEST);
+        consumer.subscribe_with_topics(HashSet::from(["t".to_string()]), None).unwrap();
+        consumer.assign_from_subscribed(std::slice::from_ref(&tp)).unwrap();
+        assert!(
+            consumer.fetchable_partitions(|_| true).is_empty(),
+            "a subscription needs a position"
+        );
+        assert!(!consumer.has_fetchable_partitions(|_| true));
+    }
 }

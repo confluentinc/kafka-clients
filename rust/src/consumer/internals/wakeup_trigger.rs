@@ -374,4 +374,41 @@ mod tests {
             .expect("rotated")
             .expect("rx ok");
     }
+
+    /// Java `testWakeupFromShareFetchAction`: after
+    /// `setShareFetchAction(fetchBuffer)`, `wakeup()` wakes the share fetch
+    /// buffer (`verify(fetchBuffer).wakeup()`) and leaves a pending
+    /// `WakeupFuture`, so the next `maybeTriggerWakeup()` throws.
+    ///
+    /// The Rust trigger has no fetch action (module docs): the share poll's
+    /// wait on `ShareFetchBuffer::await_not_empty` `select!`s on the current
+    /// token, so `wakeup()` ends that wait without touching the buffer, and the
+    /// token stays cancelled until [`WakeupTrigger::rotate`], so
+    /// `maybe_trigger_wakeup` returns the wakeup error.
+    #[tokio::test]
+    async fn wakeup_ends_a_wait_on_the_share_fetch_buffer() {
+        use crate::consumer::internals::ShareFetchBuffer;
+
+        let trigger = WakeupTrigger::new();
+        let fetch_buffer = Arc::new(ShareFetchBuffer::new());
+        let token = trigger.current_token();
+        let waiter = {
+            let fetch_buffer = Arc::clone(&fetch_buffer);
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = token.cancelled() => "woken",
+                    _ = fetch_buffer.await_not_empty(Duration::from_secs(30)) => "buffer",
+                }
+            })
+        };
+
+        trigger.wakeup();
+
+        let res = timeout(Duration::from_secs(2), waiter).await.expect("join").expect("task");
+        assert_eq!(res, "woken");
+        assert!(fetch_buffer.is_empty());
+        let err = trigger.maybe_trigger_wakeup().expect_err("the wakeup stays pending");
+        assert!(matches!(err, Error::Wakeup(_)), "{err:?}");
+        assert_eq!("", err.message(), "Java's WakeupException has no message");
+    }
 }
