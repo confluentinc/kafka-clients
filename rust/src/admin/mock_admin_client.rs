@@ -28,6 +28,7 @@ use async_trait::async_trait;
 
 use crate::DescribeUserScramCredentialsResponseData;
 use crate::admin::FilterResults;
+use crate::admin::list_share_group_offsets_result::ShareGroupOffsets;
 use crate::admin::{
     AbortTransactionOptions, AbortTransactionResult, AbortTransactionSpec, DescribeProducersOptions,
     DescribeProducersResult, DescribeTransactionsOptions, DescribeTransactionsResult, FenceProducersOptions,
@@ -59,6 +60,12 @@ use crate::admin::{
     RenewDelegationTokenResult, ReplicaInfo, ReplicaLogDirInfo, SupportedVersionRange, TopicDescription, TopicListing,
     TopicMetadataAndConfig, UnregisterControllerOptions, UnregisterControllerResult, UpdateFeaturesOptions,
     UpdateFeaturesResult, UpgradeType,
+};
+use crate::admin::{
+    AlterShareGroupOffsetsOptions, AlterShareGroupOffsetsResult, DeleteShareGroupOffsetsOptions,
+    DeleteShareGroupOffsetsResult, DeleteShareGroupsOptions, DeleteShareGroupsResult, DescribeShareGroupsOptions,
+    DescribeShareGroupsResult, ListShareGroupOffsetsOptions, ListShareGroupOffsetsResult, ListShareGroupOffsetsSpec,
+    ShareGroupDescription,
 };
 use crate::admin::{
     AlterUserScramCredentialsOptions, AlterUserScramCredentialsResult, DescribeUserScramCredentialsOptions,
@@ -2360,6 +2367,95 @@ impl Admin for MockAdminClient {
             futures.insert(group_id.clone(), handle.future());
         }
         DeleteConsumerGroupsResult::new(futures)
+    }
+
+    fn describe_share_groups_with_options(
+        &self,
+        group_ids: &[String],
+        _options: DescribeShareGroupsOptions,
+    ) -> DescribeShareGroupsResult {
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#describeShareGroups`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock fails the future of every group
+        // instead of panicking.
+        let mut futures = HashMap::new();
+        for group_id in group_ids {
+            let handle: KafkaFutureImpl<ShareGroupDescription> = KafkaFutureImpl::new();
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
+            futures.insert(group_id.clone(), handle.future());
+        }
+        DescribeShareGroupsResult::new(futures)
+    }
+
+    fn alter_share_group_offsets_with_options(
+        &self,
+        _group_id: &str,
+        _offsets: &HashMap<TopicPartition, i64>,
+        _options: AlterShareGroupOffsetsOptions,
+    ) -> AlterShareGroupOffsetsResult {
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#alterShareGroupOffsets`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock fails the group's future instead of
+        // panicking.
+        let handle = KafkaFutureImpl::new();
+        handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
+        AlterShareGroupOffsetsResult::new(handle.future())
+    }
+
+    fn list_share_group_offsets_with_options(
+        &self,
+        group_specs: &HashMap<String, ListShareGroupOffsetsSpec>,
+        _options: ListShareGroupOffsetsOptions,
+    ) -> ListShareGroupOffsetsResult {
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#listShareGroupOffsets`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock fails the future of every group
+        // instead of panicking.
+        let mut futures = HashMap::new();
+        for group_id in group_specs.keys() {
+            let handle: KafkaFutureImpl<ShareGroupOffsets> = KafkaFutureImpl::new();
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
+            futures.insert(group_id.clone(), handle.future());
+        }
+        ListShareGroupOffsetsResult::new(futures)
+    }
+
+    fn delete_share_group_offsets_with_options(
+        &self,
+        _group_id: &str,
+        topics: &HashSet<String>,
+        _options: DeleteShareGroupOffsetsOptions,
+    ) -> DeleteShareGroupOffsetsResult {
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#deleteShareGroupOffsets`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock fails the group's future instead of
+        // panicking.
+        let handle = KafkaFutureImpl::new();
+        handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
+        DeleteShareGroupOffsetsResult::new(handle.future(), topics.clone())
+    }
+
+    fn delete_share_groups_with_options(
+        &self,
+        group_ids: &[String],
+        _options: DeleteShareGroupsOptions,
+    ) -> DeleteShareGroupsResult {
+        // Java's
+        // `org.apache.kafka.clients.admin.MockAdminClient#deleteShareGroups`
+        // throws `UnsupportedOperationException("Not implemented yet")`. Per
+        // admin-client.md §9 the Rust mock fails the future of every group
+        // instead of panicking.
+        let mut futures = HashMap::new();
+        for group_id in group_ids {
+            let handle: KafkaFutureImpl<()> = KafkaFutureImpl::new();
+            handle.complete_with_error(Error::local_unsupported_operation("Not implemented yet"));
+            futures.insert(group_id.clone(), handle.future());
+        }
+        DeleteShareGroupsResult::new(futures)
     }
 
     fn remove_members_from_consumer_group_with_options(

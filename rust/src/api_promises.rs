@@ -584,6 +584,46 @@ fn admin_types_are_send_and_sync() {
         "ListPartitionReassignmentsResult"
     );
     assert!(
+        is_send!(AlterShareGroupOffsetsOptions) && is_sync!(AlterShareGroupOffsetsOptions),
+        "AlterShareGroupOffsetsOptions"
+    );
+    assert!(
+        is_send!(AlterShareGroupOffsetsResult) && is_sync!(AlterShareGroupOffsetsResult),
+        "AlterShareGroupOffsetsResult"
+    );
+    assert!(
+        is_send!(DeleteShareGroupOffsetsOptions) && is_sync!(DeleteShareGroupOffsetsOptions),
+        "DeleteShareGroupOffsetsOptions"
+    );
+    assert!(
+        is_send!(DeleteShareGroupOffsetsResult) && is_sync!(DeleteShareGroupOffsetsResult),
+        "DeleteShareGroupOffsetsResult"
+    );
+    assert!(
+        is_send!(DeleteShareGroupsOptions) && is_sync!(DeleteShareGroupsOptions),
+        "DeleteShareGroupsOptions"
+    );
+    assert!(
+        is_send!(DeleteShareGroupsResult) && is_sync!(DeleteShareGroupsResult),
+        "DeleteShareGroupsResult"
+    );
+    assert!(
+        is_send!(DescribeShareGroupsOptions) && is_sync!(DescribeShareGroupsOptions),
+        "DescribeShareGroupsOptions"
+    );
+    assert!(
+        is_send!(DescribeShareGroupsResult) && is_sync!(DescribeShareGroupsResult),
+        "DescribeShareGroupsResult"
+    );
+    assert!(
+        is_send!(ListShareGroupOffsetsOptions) && is_sync!(ListShareGroupOffsetsOptions),
+        "ListShareGroupOffsetsOptions"
+    );
+    assert!(
+        is_send!(ListShareGroupOffsetsResult) && is_sync!(ListShareGroupOffsetsResult),
+        "ListShareGroupOffsetsResult"
+    );
+    assert!(
         is_send!(ListShareGroupOffsetsSpec) && is_sync!(ListShareGroupOffsetsSpec),
         "ListShareGroupOffsetsSpec"
     );

@@ -148,6 +148,10 @@ use super::internals::PartitionLeaderCache;
 use super::internals::RemoveMembersFromConsumerGroupHandler;
 use super::internals::{AdminApiDriver, RequestSpec};
 use super::internals::{AdminClientRunnable, ShutdownSignal};
+use super::internals::{
+    AlterShareGroupOffsetsHandler, DeleteShareGroupOffsetsHandler, DeleteShareGroupsHandler,
+    DescribeShareGroupsHandler, ListShareGroupOffsetsHandler,
+};
 use super::internals::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
 use super::{
     AbortTransactionOptions, AbortTransactionResult, AbortTransactionSpec, DescribeProducersOptions,
@@ -176,6 +180,11 @@ use super::{
     LogDirDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment,
     RemoveMembersFromConsumerGroupOptions, RemoveMembersFromConsumerGroupResult, RenewDelegationTokenOptions,
     RenewDelegationTokenResult, ReplicaInfo, ReplicaLogDirInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
+};
+use super::{
+    AlterShareGroupOffsetsOptions, AlterShareGroupOffsetsResult, DeleteShareGroupOffsetsOptions,
+    DeleteShareGroupOffsetsResult, DeleteShareGroupsOptions, DeleteShareGroupsResult, DescribeShareGroupsOptions,
+    DescribeShareGroupsResult, ListShareGroupOffsetsOptions, ListShareGroupOffsetsResult, ListShareGroupOffsetsSpec,
 };
 use super::{
     AlterUserScramCredentialsOptions, AlterUserScramCredentialsResult, DescribeUserScramCredentialsOptions,
@@ -4882,6 +4891,111 @@ impl Admin for KafkaAdminClient {
         invoke_driver(driver, self.driver_context(), now);
 
         DeleteConsumerGroupsResult::new(coordinator_keyed_by_id(result_map))
+    }
+
+    fn describe_share_groups_with_options(
+        &self,
+        group_ids: &[String],
+        options: DescribeShareGroupsOptions,
+    ) -> DescribeShareGroupsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = DescribeShareGroupsHandler::new_future(group_ids);
+        let result_map = future.all();
+        let handler = DescribeShareGroupsHandler::new(options.include_authorized_operations(), log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        DescribeShareGroupsResult::new(coordinator_keyed_by_id(result_map))
+    }
+
+    fn alter_share_group_offsets_with_options(
+        &self,
+        group_id: &str,
+        offsets: &HashMap<TopicPartition, i64>,
+        options: AlterShareGroupOffsetsOptions,
+    ) -> AlterShareGroupOffsetsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = AlterShareGroupOffsetsHandler::new_future(group_id);
+        let result_map = future.all();
+        let key = CoordinatorKey::by_group_id(group_id);
+        let handler = AlterShareGroupOffsetsHandler::new(group_id, offsets.clone(), log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        AlterShareGroupOffsetsResult::new(result_map.get(&key).expect("future exists for the group key").clone())
+    }
+
+    fn list_share_group_offsets_with_options(
+        &self,
+        group_specs: &HashMap<String, ListShareGroupOffsetsSpec>,
+        options: ListShareGroupOffsetsOptions,
+    ) -> ListShareGroupOffsetsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let group_ids: Vec<String> = group_specs.keys().cloned().collect();
+        let future = ListShareGroupOffsetsHandler::new_future(&group_ids);
+        let result_map = future.all();
+        let handler = ListShareGroupOffsetsHandler::new(group_specs.clone(), log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        ListShareGroupOffsetsResult::new(coordinator_keyed_by_id(result_map))
+    }
+
+    fn delete_share_group_offsets_with_options(
+        &self,
+        group_id: &str,
+        topics: &HashSet<String>,
+        options: DeleteShareGroupOffsetsOptions,
+    ) -> DeleteShareGroupOffsetsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        let future = DeleteShareGroupOffsetsHandler::new_future(group_id);
+        let result_map = future.all();
+        let key = CoordinatorKey::by_group_id(group_id);
+        let handler = DeleteShareGroupOffsetsHandler::new(group_id, topics.clone(), log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        DeleteShareGroupOffsetsResult::new(
+            result_map.get(&key).expect("future exists for the group key").clone(),
+            topics.clone(),
+        )
+    }
+
+    fn delete_share_groups_with_options(
+        &self,
+        group_ids: &[String],
+        options: DeleteShareGroupsOptions,
+    ) -> DeleteShareGroupsResult {
+        let log_context = LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id));
+        // Java's `DeleteShareGroupsHandler.newFuture` is the inherited
+        // `DeleteGroupsHandler#newFuture`.
+        let future = DeleteGroupsHandler::new_future(group_ids);
+        let result_map = future.all();
+        let handler = DeleteShareGroupsHandler::new(log_context.clone());
+
+        let now = self.now();
+        let deadline = calc_deadline_ms(now, options.timeout_ms(), self.shared.default_api_timeout_ms);
+        let retry_backoff = self.retry_backoff();
+        let driver = AdminApiDriver::new(Box::new(handler), Box::new(future), deadline, retry_backoff, log_context);
+        invoke_driver(driver, self.driver_context(), now);
+
+        DeleteShareGroupsResult::new(coordinator_keyed_by_id(result_map))
     }
 
     fn remove_members_from_consumer_group_with_options(
