@@ -93,12 +93,41 @@ typedef struct {
     const AdminResultDesc* desc;
 } AdminResultBox;
 
-// The rows of an AdminResultDesc, each naming its header function in full
-// (the casts drop only the `const <Rpc>Result_t *` of the first parameter).
-#define ADMIN_RESULT_DESTROY_FN(fn) ((void (*)(void*, kafka_common_Error_t**))(fn))
-#define ADMIN_ACC_ONE(acc, fn, conv) {#acc, NULL, (admin_one_acc_fn)(fn), NULL, NULL, NULL, (conv), 0}
-#define ADMIN_ACC_MAP(acc, fn, keyfn, conv) {#acc, (admin_map_acc_fn)(fn), NULL, NULL, NULL, (keyfn), (conv), 0}
-#define ADMIN_ACC_STR(acc, fn, conv) {#acc, NULL, NULL, (admin_str_acc_fn)(fn), NULL, NULL, (conv), 0}
+// One RPC's descriptor tables are written in a section that binds the RPC
+// once, `#define ADMIN_RPC <Rpc>` ... `#undef ADMIN_RPC`: the tables, their
+// names and the types the rows are checked against all come from it, so a row
+// copied from another RPC's section does not compile. Each row still names its
+// header function in full, which the lints read. A section left without its
+// `#undef` is a macro redefinition at the next one, and a row outside any
+// section names no type, so neither compiles.
+#define ADMIN_CAT_(a, b) a##b
+#define ADMIN_CAT(a, b) ADMIN_CAT_(a, b)
+#define ADMIN_STR_(a) #a
+#define ADMIN_STR(a) ADMIN_STR_(a)
+#define ADMIN_RESULT_T ADMIN_CAT(ADMIN_CAT(kafka_admin_, ADMIN_RPC), Result_t)
+#define ADMIN_OPTIONS_T ADMIN_CAT(ADMIN_CAT(kafka_admin_, ADMIN_RPC), Options_t)
+#define ADMIN_RESULT_DESC ADMIN_CAT(ADMIN_RPC, Result_desc)
+#define ADMIN_OPTIONS_DESC ADMIN_CAT(ADMIN_RPC, Options_desc)
+#define ADMIN_RESULT_NAME ADMIN_STR(ADMIN_RPC) "Result"
+#define ADMIN_OPTIONS_NAME ADMIN_STR(ADMIN_RPC) "Options"
+
+// The rows of an AdminResultDesc: `ADMIN_CHECKED` (a `_Generic` with no
+// default) makes a row compile only when its function has the type the header
+// gives the section's RPC; the casts then drop only the `<Rpc>Result_t *` of
+// the first parameter.
+#define ADMIN_CHECKED(T, fn) _Generic((fn), T: (fn))
+#define ADMIN_RESULT_DESTROY_FN(fn) \
+    ((void (*)(void*, kafka_common_Error_t**))ADMIN_CHECKED(void (*)(ADMIN_RESULT_T*, kafka_common_Error_t**), fn))
+#define ADMIN_ACC_ONE(acc, fn, conv)                                                                                   \
+    {#acc, NULL, (admin_one_acc_fn)ADMIN_CHECKED(kafka_common_KafkaFuture_t * (*)(const ADMIN_RESULT_T*, kafka_common_Error_t**), fn), \
+     NULL, NULL, NULL, (conv), 0}
+#define ADMIN_ACC_MAP(acc, fn, keyfn, conv)                                                                  \
+    {#acc, (admin_map_acc_fn)ADMIN_CHECKED(kafka_Map_t * (*)(const ADMIN_RESULT_T*, kafka_common_Error_t**), fn), \
+     NULL, NULL, NULL, (keyfn), (conv), 0}
+#define ADMIN_ACC_STR(acc, fn, conv)                                                                                  \
+    {#acc, NULL, NULL,                                                                                                \
+     (admin_str_acc_fn)ADMIN_CHECKED(kafka_common_KafkaFuture_t * (*)(const ADMIN_RESULT_T*, const char*, kafka_common_Error_t**), fn), \
+     NULL, NULL, (conv), 0}
 #define ADMIN_ACC_JS(acc, fn, conv) {#acc, NULL, NULL, NULL, (fn), NULL, (conv), 0}
 #define ADMIN_ACC_END {NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0}
 
@@ -119,8 +148,11 @@ typedef struct {
     AdminOptionSetter setters[12];             // ended by a row with a NULL name
 } AdminOptionsDesc;
 
-#define ADMIN_OPTIONS_NEW_FN(fn) ((void* (*)(kafka_common_Error_t**))(fn))
-#define ADMIN_OPTIONS_DESTROY_FN(fn) ((void (*)(void*, kafka_common_Error_t**))(fn))
+// The options' create and destroy, checked against the section's RPC as the
+// result's rows are.
+#define ADMIN_OPTIONS_NEW_FN(fn) ((void* (*)(kafka_common_Error_t**))ADMIN_CHECKED(ADMIN_OPTIONS_T * (*)(kafka_common_Error_t**), fn))
+#define ADMIN_OPTIONS_DESTROY_FN(fn) \
+    ((void (*)(void*, kafka_common_Error_t**))ADMIN_CHECKED(void (*)(ADMIN_OPTIONS_T*, kafka_common_Error_t**), fn))
 
 // Java's null options: a marker the entry point turns into NULL.
 #define ADMIN_NULL_OPTIONS ((void*)&admin_null_options_marker)
@@ -129,33 +161,36 @@ static inline void* admin_opts(void* options) {
     return options == ADMIN_NULL_OPTIONS ? NULL : options;
 }
 
-// The setter functions, named `<Rpc>Options__<js setter>`, over the header's
-// `kafka_admin_<Rpc>Options_set_<field>_err`, named in full.
+// The setter functions, named `<Rpc>Options__<js setter>` after the
+// section's RPC, over the header's `kafka_admin_<Rpc>Options_set_<field>_err`,
+// named in full; the options are passed as the section's own type, so another
+// RPC's setter does not compile.
 int admin_option_timeout(napi_env env, napi_value value, int32_t* out);
 int admin_option_bool(napi_env env, napi_value value, int8_t* out);
 int admin_option_int32(napi_env env, napi_value value, int32_t* out);
-#define ADMIN_OPT_TIMEOUT(Rpc, fn)                                                                       \
-    static int Rpc##Options__timeoutMs(napi_env env, void* o, napi_value v, kafka_common_Error_t** e) {  \
-        int32_t t;                                                                                       \
-        if (admin_option_timeout(env, v, &t) < 0) return -1;                                             \
-        fn(o, t, e);                                                                                     \
-        return 0;                                                                                        \
+#define ADMIN_SETTER_FN(js) ADMIN_CAT(ADMIN_CAT(ADMIN_RPC, Options__), js)
+#define ADMIN_OPT_TIMEOUT(fn)                                                                               \
+    static int ADMIN_SETTER_FN(timeoutMs)(napi_env env, void* o, napi_value v, kafka_common_Error_t** e) { \
+        int32_t t;                                                                                          \
+        if (admin_option_timeout(env, v, &t) < 0) return -1;                                                \
+        fn((ADMIN_OPTIONS_T*)o, t, e);                                                                      \
+        return 0;                                                                                           \
     }
-#define ADMIN_OPT_BOOL(Rpc, js, fn)                                                                      \
-    static int Rpc##Options__##js(napi_env env, void* o, napi_value v, kafka_common_Error_t** e) {       \
-        int8_t b;                                                                                        \
-        if (admin_option_bool(env, v, &b) < 0) return -1;                                                \
-        fn(o, b, e);                                                                                     \
-        return 0;                                                                                        \
+#define ADMIN_OPT_BOOL(js, fn)                                                                       \
+    static int ADMIN_SETTER_FN(js)(napi_env env, void* o, napi_value v, kafka_common_Error_t** e) { \
+        int8_t b;                                                                                    \
+        if (admin_option_bool(env, v, &b) < 0) return -1;                                            \
+        fn((ADMIN_OPTIONS_T*)o, b, e);                                                               \
+        return 0;                                                                                    \
     }
-#define ADMIN_OPT_INT32(Rpc, js, fn)                                                                     \
-    static int Rpc##Options__##js(napi_env env, void* o, napi_value v, kafka_common_Error_t** e) {       \
-        int32_t i;                                                                                       \
-        if (admin_option_int32(env, v, &i) < 0) return -1;                                               \
-        fn(o, i, e);                                                                                     \
-        return 0;                                                                                        \
+#define ADMIN_OPT_INT32(js, fn)                                                                      \
+    static int ADMIN_SETTER_FN(js)(napi_env env, void* o, napi_value v, kafka_common_Error_t** e) { \
+        int32_t i;                                                                                   \
+        if (admin_option_int32(env, v, &i) < 0) return -1;                                           \
+        fn((ADMIN_OPTIONS_T*)o, i, e);                                                               \
+        return 0;                                                                                    \
     }
-#define ADMIN_SETTER(Rpc, js) {#js, Rpc##Options__##js}
+#define ADMIN_SETTER(js) {#js, ADMIN_SETTER_FN(js)}
 
 // The options of `desc` built from JS's [setter, value] pairs (from
 // `<Rpc>Options_new`, the core's Java defaults), ADMIN_NULL_OPTIONS for
@@ -166,8 +201,10 @@ void admin_options_free(napi_env env, const AdminOptionsDesc* desc, void* option
 napi_value admin_rpc_return(napi_env env, const AdminOptionsDesc* odesc, void* options, kafka_common_Error_t* err,
                             void* result, const AdminResultDesc* rdesc);
 
-// The handle behind a JS admin handle, or NULL with a TypeError pending.
+// The handle behind a JS admin handle, or NULL with a TypeError pending; the
+// same for a MockAdminClient's handle only.
 Admin* admin_unwrap(napi_env env, napi_value handle);
+Admin* admin_mock_unwrap(napi_env env, napi_value handle);
 // A box over an owned result (or map), destroyed by its finalizer.
 napi_value admin_box_new(napi_env env, void* result, kafka_Map_t* map, const AdminResultDesc* desc);
 // A future's context in the slot table: its slot, or -1 with a JS exception

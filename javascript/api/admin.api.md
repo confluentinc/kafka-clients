@@ -23,11 +23,69 @@ export interface Admin {
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
+    createPartitions(newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>): CreatePartitionsResult;
+    createPartitions(args: {
+        newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
+        options?: never;
+    }): CreatePartitionsResult;
+    createPartitions(args: {
+        newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
+        options: CreatePartitionsOptions;
+    }): CreatePartitionsResult;
+    createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
+    createTopics(args: {
+        newTopics: Iterable<NewTopic>;
+        options?: never;
+    }): CreateTopicsResult;
+    createTopics(args: {
+        newTopics: Iterable<NewTopic>;
+        options: CreateTopicsOptions;
+    }): CreateTopicsResult;
+    deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
+    deleteRecords(args: {
+        recordsToDelete: TopicPartitionMap<RecordsToDelete>;
+        options?: never;
+    }): DeleteRecordsResult;
+    deleteRecords(args: {
+        recordsToDelete: TopicPartitionMap<RecordsToDelete>;
+        options: DeleteRecordsOptions;
+    }): DeleteRecordsResult;
+    deleteTopics(topics: Iterable<string> | TopicCollection): DeleteTopicsResult;
+    deleteTopics(args: {
+        topics: Iterable<string> | TopicCollection;
+        options?: never;
+    }): DeleteTopicsResult;
+    deleteTopics(args: {
+        topics: Iterable<string> | TopicCollection;
+        options: DeleteTopicsOptions;
+    }): DeleteTopicsResult;
     describeCluster(): DescribeClusterResult;
     describeCluster(args: {
         options: DescribeClusterOptions;
     }): DescribeClusterResult;
     describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
+    describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
+    describeTopics(args: {
+        topicNames: Iterable<string>;
+        topics?: never;
+        options?: never;
+    }): DescribeTopicsResult;
+    describeTopics(args: {
+        topicNames: Iterable<string>;
+        options: DescribeTopicsOptions;
+        topics?: never;
+    }): DescribeTopicsResult;
+    describeTopics(topics: TopicCollection): DescribeTopicsResult;
+    describeTopics(args: {
+        topics: TopicCollection;
+        topicNames?: never;
+        options?: never;
+    }): DescribeTopicsResult;
+    describeTopics(args: {
+        topics: TopicCollection;
+        options: DescribeTopicsOptions;
+        topicNames?: never;
+    }): DescribeTopicsResult;
     listTopics(): ListTopicsResult;
     listTopics(args: {
         options: ListTopicsOptions;
@@ -96,6 +154,253 @@ export type CloseArgs = {
 };
 
 // @public
+export class Config {
+    constructor(entries: Iterable<ConfigEntry>);
+    constructor(options: {
+        entries: Iterable<ConfigEntry>;
+    });
+    entries(): ConfigEntry[];
+    equals(o: unknown): boolean;
+    get(name: string | null): ConfigEntry | null;
+    get(options: {
+        name: string | null;
+    }): ConfigEntry | null;
+    hashCode(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+}
+
+// @public
+export class ConfigEntry {
+    constructor(options: {
+        name: string;
+        value: string | null;
+        source?: never;
+        isSensitive?: never;
+        isReadOnly?: never;
+        synonyms?: never;
+        type?: never;
+        documentation?: never;
+    });
+    constructor(options: {
+        name: string;
+        value: string | null;
+        source: ConfigEntry.ConfigSource | null;
+        isSensitive: boolean;
+        isReadOnly: boolean;
+        synonyms: Iterable<ConfigEntry.ConfigSynonym> | null;
+        type: ConfigEntry.ConfigType | null;
+        documentation: string | null;
+    });
+    documentation(): string | null;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    isDefault(): boolean;
+    isReadOnly(): boolean;
+    isSensitive(): boolean;
+    name(): string;
+    source(): ConfigEntry.ConfigSource | null;
+    synonyms(): ConfigEntry.ConfigSynonym[] | null;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    type(): ConfigEntry.ConfigType | null;
+    value(): string | null;
+}
+
+// @public (undocumented)
+export namespace ConfigEntry {
+    export class ConfigSource {
+        static readonly DEFAULT_CONFIG: ConfigSource;
+        static readonly DYNAMIC_BROKER_CONFIG: ConfigSource;
+        static readonly DYNAMIC_BROKER_LOGGER_CONFIG: ConfigSource;
+        static readonly DYNAMIC_CLIENT_METRICS_CONFIG: ConfigSource;
+        static readonly DYNAMIC_DEFAULT_BROKER_CONFIG: ConfigSource;
+        static readonly DYNAMIC_GROUP_CONFIG: ConfigSource;
+        static readonly DYNAMIC_TOPIC_CONFIG: ConfigSource;
+        name(): string;
+        ordinal(): number;
+        static readonly STATIC_BROKER_CONFIG: ConfigSource;
+        toJSON(key?: string): string;
+        toString(): string;
+        static readonly UNKNOWN: ConfigSource;
+        static valueOf(name: string): ConfigSource;
+        static valueOf(options: {
+            name: string;
+        }): ConfigSource;
+        static values(): ConfigSource[];
+    }
+    export class ConfigSynonym {
+        equals(o: unknown): boolean;
+        hashCode(): number;
+        name(): string | null;
+        source(): ConfigSource | null;
+        toJSON(): Record<string, unknown>;
+        toString(): string;
+        value(): string | null;
+    }
+    export class ConfigType {
+        static readonly BOOLEAN: ConfigType;
+        static readonly CLASS: ConfigType;
+        static readonly DOUBLE: ConfigType;
+        static readonly INT: ConfigType;
+        static readonly LIST: ConfigType;
+        static readonly LONG: ConfigType;
+        name(): string;
+        ordinal(): number;
+        static readonly PASSWORD: ConfigType;
+        static readonly SHORT: ConfigType;
+        static readonly STRING: ConfigType;
+        toJSON(key?: string): string;
+        toString(): string;
+        static readonly UNKNOWN: ConfigType;
+        static valueOf(name: string): ConfigType;
+        static valueOf(options: {
+            name: string;
+        }): ConfigType;
+        static values(): ConfigType[];
+    }
+}
+
+// @public
+export class CreatePartitionsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        validateOnly?: boolean;
+        retryOnQuotaViolation?: boolean;
+    });
+    retryOnQuotaViolation(retryOnQuotaViolation: boolean): this;
+    retryOnQuotaViolation(options: {
+        retryOnQuotaViolation: boolean;
+    }): this;
+    shouldRetryOnQuotaViolation(): boolean;
+    validateOnly(): boolean;
+    validateOnly(validateOnly: boolean): this;
+    validateOnly(options: {
+        validateOnly: boolean;
+    }): this;
+}
+
+// @public
+export class CreatePartitionsResult {
+    all(): KafkaFuture<void>;
+    values(): Map<string, KafkaFuture<void>>;
+}
+
+// @public
+export class CreateTopicsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        validateOnly?: boolean;
+        retryOnQuotaViolation?: boolean;
+    });
+    retryOnQuotaViolation(retryOnQuotaViolation: boolean): this;
+    retryOnQuotaViolation(options: {
+        retryOnQuotaViolation: boolean;
+    }): this;
+    shouldRetryOnQuotaViolation(): boolean;
+    shouldValidateOnly(): boolean;
+    validateOnly(validateOnly: boolean): this;
+    validateOnly(options: {
+        validateOnly: boolean;
+    }): this;
+}
+
+// @public
+export class CreateTopicsResult {
+    protected constructor(futures: Map<string, KafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>);
+    all(): KafkaFuture<void>;
+    config(topic: string): KafkaFuture<Config | null>;
+    // (undocumented)
+    config(options: {
+        topic: string;
+    }): KafkaFuture<Config | null>;
+    numPartitions(topic: string): KafkaFuture<number>;
+    // (undocumented)
+    numPartitions(options: {
+        topic: string;
+    }): KafkaFuture<number>;
+    replicationFactor(topic: string): KafkaFuture<number>;
+    // (undocumented)
+    replicationFactor(options: {
+        topic: string;
+    }): KafkaFuture<number>;
+    topicId(topic: string): KafkaFuture<Uuid>;
+    // (undocumented)
+    topicId(options: {
+        topic: string;
+    }): KafkaFuture<Uuid>;
+    values(): Map<string, KafkaFuture<void>>;
+}
+
+// @public (undocumented)
+export namespace CreateTopicsResult {
+    export class TopicMetadataAndConfig {
+        constructor(options: {
+            topicId: Uuid | null;
+            numPartitions: number;
+            replicationFactor: number;
+            config: Config | null;
+        });
+        constructor(options: {
+            exception: ApiError | null;
+        });
+        config(): Config | null;
+        numPartitions(): number;
+        replicationFactor(): number;
+        toJSON(): Record<string, unknown>;
+        topicId(): Uuid | null;
+    }
+}
+
+// @public
+export class DeletedRecords {
+    constructor(lowWatermark: bigint | number);
+    constructor(options: {
+        lowWatermark: bigint | number;
+    });
+    lowWatermark(): bigint;
+    toJSON(): Record<string, unknown>;
+}
+
+// @public
+export class DeleteRecordsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class DeleteRecordsResult {
+    constructor(futures: TopicPartitionMap<KafkaFuture<DeletedRecords>> | null);
+    constructor(options: {
+        futures: TopicPartitionMap<KafkaFuture<DeletedRecords>> | null;
+    });
+    all(): KafkaFuture<void>;
+    lowWatermarks(): TopicPartitionMap<KafkaFuture<DeletedRecords>> | null;
+}
+
+// @public
+export class DeleteTopicsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        retryOnQuotaViolation?: boolean;
+    });
+    retryOnQuotaViolation(retryOnQuotaViolation: boolean): this;
+    retryOnQuotaViolation(options: {
+        retryOnQuotaViolation: boolean;
+    }): this;
+    shouldRetryOnQuotaViolation(): boolean;
+}
+
+// @public
+export class DeleteTopicsResult {
+    protected constructor(topicIdFutures: UuidMap<KafkaFuture<void>> | null, nameFutures: Map<string, KafkaFuture<void>> | null);
+    all(): KafkaFuture<void>;
+    topicIdValues(): UuidMap<KafkaFuture<void>> | null;
+    topicNameValues(): Map<string, KafkaFuture<void>> | null;
+}
+
+// @public
 export class DescribeClusterOptions extends AbstractOptions {
     constructor(options?: {
         timeoutMs?: number | null;
@@ -123,16 +428,102 @@ export class DescribeClusterResult {
 }
 
 // @public
+export class DescribeTopicsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        includeAuthorizedOperations?: boolean;
+        partitionSizeLimitPerResponse?: number;
+    });
+    includeAuthorizedOperations(): boolean;
+    includeAuthorizedOperations(includeAuthorizedOperations: boolean): this;
+    includeAuthorizedOperations(options: {
+        includeAuthorizedOperations: boolean;
+    }): this;
+    partitionSizeLimitPerResponse(): number;
+    partitionSizeLimitPerResponse(partitionSizeLimitPerResponse: number): this;
+    partitionSizeLimitPerResponse(options: {
+        partitionSizeLimitPerResponse: number;
+    }): this;
+}
+
+// @public
+export class DescribeTopicsResult {
+    protected constructor(topicIdFutures: UuidMap<KafkaFuture<TopicDescription>> | null, nameFutures: Map<string, KafkaFuture<TopicDescription>> | null);
+    allTopicIds(): KafkaFuture<UuidMap<TopicDescription>> | null;
+    allTopicNames(): KafkaFuture<Map<string, TopicDescription>> | null;
+    topicIdValues(): UuidMap<KafkaFuture<TopicDescription>> | null;
+    topicNameValues(): Map<string, KafkaFuture<TopicDescription>> | null;
+}
+
+// @public
 export class KafkaAdminClient implements Admin {
     [Symbol.asyncDispose](): Promise<void>;
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
+    createPartitions(newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>): CreatePartitionsResult;
+    createPartitions(args: {
+        newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
+        options?: never;
+    }): CreatePartitionsResult;
+    createPartitions(args: {
+        newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
+        options: CreatePartitionsOptions;
+    }): CreatePartitionsResult;
+    createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
+    createTopics(args: {
+        newTopics: Iterable<NewTopic>;
+        options?: never;
+    }): CreateTopicsResult;
+    createTopics(args: {
+        newTopics: Iterable<NewTopic>;
+        options: CreateTopicsOptions;
+    }): CreateTopicsResult;
+    deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
+    deleteRecords(args: {
+        recordsToDelete: TopicPartitionMap<RecordsToDelete>;
+        options?: never;
+    }): DeleteRecordsResult;
+    deleteRecords(args: {
+        recordsToDelete: TopicPartitionMap<RecordsToDelete>;
+        options: DeleteRecordsOptions;
+    }): DeleteRecordsResult;
+    deleteTopics(topics: Iterable<string> | TopicCollection): DeleteTopicsResult;
+    deleteTopics(args: {
+        topics: Iterable<string> | TopicCollection;
+        options?: never;
+    }): DeleteTopicsResult;
+    deleteTopics(args: {
+        topics: Iterable<string> | TopicCollection;
+        options: DeleteTopicsOptions;
+    }): DeleteTopicsResult;
     describeCluster(): DescribeClusterResult;
     describeCluster(args: {
         options: DescribeClusterOptions;
     }): DescribeClusterResult;
     describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
+    describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
+    describeTopics(args: {
+        topicNames: Iterable<string>;
+        topics?: never;
+        options?: never;
+    }): DescribeTopicsResult;
+    describeTopics(args: {
+        topicNames: Iterable<string>;
+        options: DescribeTopicsOptions;
+        topics?: never;
+    }): DescribeTopicsResult;
+    describeTopics(topics: TopicCollection): DescribeTopicsResult;
+    describeTopics(args: {
+        topics: TopicCollection;
+        topicNames?: never;
+        options?: never;
+    }): DescribeTopicsResult;
+    describeTopics(args: {
+        topics: TopicCollection;
+        options: DescribeTopicsOptions;
+        topicNames?: never;
+    }): DescribeTopicsResult;
     listTopics(): ListTopicsResult;
     listTopics(args: {
         options: ListTopicsOptions;
@@ -171,6 +562,12 @@ export class MockAdminClient implements Admin {
         brokers: Iterable<Node>;
         controller: Node;
     });
+    addTopic(options: {
+        internal: boolean;
+        name: string;
+        partitions: Iterable<TopicPartitionInfo>;
+        configs: ReadonlyMap<string, string | null> | Readonly<Record<string, string | null>> | null;
+    }): void;
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
@@ -179,18 +576,85 @@ export class MockAdminClient implements Admin {
         controller: Node;
     }): void;
     static create(): MockAdminClient.Builder;
+    createPartitions(newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>): CreatePartitionsResult;
+    createPartitions(args: {
+        newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
+        options?: never;
+    }): CreatePartitionsResult;
+    createPartitions(args: {
+        newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
+        options: CreatePartitionsOptions;
+    }): CreatePartitionsResult;
+    createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
+    createTopics(args: {
+        newTopics: Iterable<NewTopic>;
+        options?: never;
+    }): CreateTopicsResult;
+    createTopics(args: {
+        newTopics: Iterable<NewTopic>;
+        options: CreateTopicsOptions;
+    }): CreateTopicsResult;
     static readonly DEFAULT_CLUSTER_ID: string;
     static readonly DEFAULT_LOG_DIRS: ReadonlyArray<string>;
+    deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
+    deleteRecords(args: {
+        recordsToDelete: TopicPartitionMap<RecordsToDelete>;
+        options?: never;
+    }): DeleteRecordsResult;
+    deleteRecords(args: {
+        recordsToDelete: TopicPartitionMap<RecordsToDelete>;
+        options: DeleteRecordsOptions;
+    }): DeleteRecordsResult;
+    deleteTopics(topics: Iterable<string> | TopicCollection): DeleteTopicsResult;
+    deleteTopics(args: {
+        topics: Iterable<string> | TopicCollection;
+        options?: never;
+    }): DeleteTopicsResult;
+    deleteTopics(args: {
+        topics: Iterable<string> | TopicCollection;
+        options: DeleteTopicsOptions;
+    }): DeleteTopicsResult;
     describeCluster(): DescribeClusterResult;
     describeCluster(args: {
         options: DescribeClusterOptions;
     }): DescribeClusterResult;
     describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
+    describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
+    describeTopics(args: {
+        topicNames: Iterable<string>;
+        topics?: never;
+        options?: never;
+    }): DescribeTopicsResult;
+    describeTopics(args: {
+        topicNames: Iterable<string>;
+        options: DescribeTopicsOptions;
+        topics?: never;
+    }): DescribeTopicsResult;
+    describeTopics(topics: TopicCollection): DescribeTopicsResult;
+    describeTopics(args: {
+        topics: TopicCollection;
+        topicNames?: never;
+        options?: never;
+    }): DescribeTopicsResult;
+    describeTopics(args: {
+        topics: TopicCollection;
+        options: DescribeTopicsOptions;
+        topicNames?: never;
+    }): DescribeTopicsResult;
     listTopics(): ListTopicsResult;
     listTopics(args: {
         options: ListTopicsOptions;
     }): ListTopicsResult;
     listTopics(options: ListTopicsOptions): ListTopicsResult;
+    markTopicForDeletion(name: string): void;
+    // (undocumented)
+    markTopicForDeletion(options: {
+        name: string;
+    }): void;
+    setFetchesRemainingUntilVisible(options: {
+        topicName: string;
+        fetchesRemainingUntilVisible: number;
+    }): void;
     timeoutNextRequest(numberOfRequest: number): void;
     timeoutNextRequest(options: {
         numberOfRequest: number;
@@ -213,9 +677,9 @@ export namespace MockAdminClient {
             maxSupportedFeatureLevels?: ReadonlyMap<string, number> | Readonly<Record<string, number>>;
             defaultGroupConfigs?: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
         });
-        brokerLogDirs(brokerLogDirs: ReadonlyArray<ReadonlyArray<string>>): this;
+        brokerLogDirs(brokerLogDirs: Iterable<Iterable<string>>): this;
         brokerLogDirs(options: {
-            brokerLogDirs: ReadonlyArray<ReadonlyArray<string>>;
+            brokerLogDirs: Iterable<Iterable<string>>;
         }): this;
         brokers(brokers: Iterable<Node>): this;
         brokers(options: {
@@ -263,6 +727,105 @@ export namespace MockAdminClient {
             usingRaftController: boolean;
         }): this;
     }
+}
+
+// @public
+export class NewPartitions {
+    assignments(): number[][] | null;
+    static increaseTo(totalCount: number): NewPartitions;
+    static increaseTo(options: {
+        totalCount: number;
+        newAssignments?: never;
+    }): NewPartitions;
+    static increaseTo(options: {
+        totalCount: number;
+        newAssignments: Iterable<Iterable<number>> | null;
+    }): NewPartitions;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    totalCount(): number;
+}
+
+// @public
+export class NewTopic {
+    constructor(options: {
+        name: string;
+        numPartitions: number;
+        replicationFactor: number;
+        replicasAssignments?: never;
+    });
+    constructor(options: {
+        name: string;
+        numPartitions: number | null;
+        replicationFactor: number | null;
+        replicasAssignments?: never;
+    });
+    constructor(options: {
+        name: string;
+        replicasAssignments: ReadonlyMap<number, Iterable<number>>;
+        numPartitions?: never;
+        replicationFactor?: never;
+    });
+    configs(): Map<string, string> | null;
+    configs(configs: ReadonlyMap<string, string> | Readonly<Record<string, string>>): this;
+    configs(options: {
+        configs: ReadonlyMap<string, string> | Readonly<Record<string, string>> | null;
+    }): this;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    name(): string;
+    numPartitions(): number;
+    replicasAssignments(): ReadonlyMap<number, readonly number[]> | null;
+    replicationFactor(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+}
+
+// @public
+export class RecordsToDelete {
+    static beforeOffset(offset: bigint | number): RecordsToDelete;
+    static beforeOffset(options: {
+        offset: bigint | number;
+    }): RecordsToDelete;
+    beforeOffset(): bigint;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+}
+
+// @public
+export class TopicDescription {
+    constructor(options: {
+        name: string | null;
+        internal: boolean;
+        partitions: Iterable<TopicPartitionInfo>;
+        authorizedOperations?: never;
+        topicId?: never;
+    });
+    constructor(options: {
+        name: string | null;
+        internal: boolean;
+        partitions: Iterable<TopicPartitionInfo>;
+        authorizedOperations: Iterable<AclOperation> | null;
+        topicId?: never;
+    });
+    constructor(options: {
+        name: string | null;
+        internal: boolean;
+        partitions: Iterable<TopicPartitionInfo>;
+        authorizedOperations: Iterable<AclOperation> | null;
+        topicId: Uuid | null;
+    });
+    readonly authorizedOperations: ReadonlySet<AclOperation> | null;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    readonly isInternal: boolean;
+    readonly name: string | null;
+    readonly partitions: readonly TopicPartitionInfo[];
+    toJSON(): Record<string, unknown>;
+    readonly topicId: Uuid | null;
+    toString(): string;
 }
 
 // @public
