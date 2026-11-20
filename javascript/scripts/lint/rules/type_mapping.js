@@ -58,11 +58,12 @@
 // | Set<TopicPartition>, returned                | TopicPartitionSet                       |
 // | Map<TopicPartition, V>                       | TopicPartitionMap<V>                    |
 // | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
-// | Map<String, String>, returned                | Map<string, string>                     |
-// | Map<String, String>, taken                   | a Map or ReadonlyMap, or a plain object (Record) of string to string |
+// | Map<String, V>, returned                     | Map<string, V>                          |
+// | Map<String, V>, taken                        | a Map or ReadonlyMap, or a plain object (Record) of string to V |
 // | Map, Properties (a client's configuration)   | the `...Configs` configuration type (& its serde keys) |
 // | a type variable                              | a type parameter                        |
 // | a Java class translated in src/              | its TypeScript type                     |
+// | a nested Java class (MockAdminClient.Builder) | the TypeScript class of its name       |
 //
 // Any other Java type is `unmapped`, naming both types.
 
@@ -280,10 +281,10 @@ module.exports = {
       if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'TopicPartition') {
         return symbolName(t) === 'TopicPartitionMap' && matches(j.args[1], typeArgs(t)[0]) === true;
       }
-      if (j.name === 'Map' && j.args.length === 2 && j.args.every((a) => a.name === 'String' && a.dims === 0)) {
+      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'String' && j.args[0].dims === 0 && j.args[1].name !== 'Object') {
         // A map keyed by strings: a Map returned; taken, a Map, a ReadonlyMap
-        // or a plain object of string to string (javascript/CLAUDE.md, JavaScript
-        // Binding Conventions, Types, "Other collections taken").
+        // or a plain object of string to its values (javascript/CLAUDE.md,
+        // JavaScript Binding Conventions, Types, "Other collections taken").
         if ((t0.aliasSymbol && t0.aliasSymbol.name.endsWith('Configs')) || symbolName(t).endsWith('Configs')) return true;
         const part = (p) => {
           const n = symbolName(p);
@@ -318,6 +319,9 @@ module.exports = {
         return configsType(t) ? true : 'unmapped';
       }
       if (/^[A-Z]$/.test(j.name)) return (t.flags & ts.TypeFlags.TypeParameter) !== 0;
+      // A nested class is a class of the namespace merged with its outer
+      // class's, exported with it (Names, Q11): its TypeScript name is Java's.
+      if (!tsNames.has(j.name) && t.symbol && t.symbol.flags & ts.SymbolFlags.Class && t.symbol.name === j.name) return true;
       if (tsNames.has(j.name)) {
         const want = tsNames.get(j.name);
         return symbolName(t) === want || parts(t).every((p) => symbolName(p) === want || checker.typeToString(p) === want);
@@ -440,9 +444,18 @@ module.exports = {
           return;
         }
         const options = p0 === null ? null : strip(checker.getTypeAtLocation(p0));
+        // An object whose keys are all the forms' parameter names is the
+        // options object too, as the admin clients' `{ options }` form of an
+        // RPC Java's class declares in one form (the interface's default
+        // declares the other).
+        const formNames = new Set(names.flat());
+        const keyedByParams =
+          options !== null &&
+          checker.getPropertiesOfType(options).length > 0 &&
+          checker.getPropertiesOfType(options).every((prop) => formNames.has(prop.name));
         const isOptions =
           options !== null &&
-          (forms.length > 1 || (ts.isIdentifier(p0.name) && p0.name.text === 'options')) &&
+          (forms.length > 1 || (ts.isIdentifier(p0.name) && p0.name.text === 'options') || keyedByParams) &&
           (options.flags & ts.TypeFlags.Object) !== 0 &&
           !options.isUnion() &&
           !checker.isArrayType(options) &&
