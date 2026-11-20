@@ -32,10 +32,13 @@ export { MetricName } from './metric_name';
 export { MetricNameMap } from './metric_name_map';
 export { Node } from './node';
 export { PartitionInfo } from './partition_info';
+export { TopicCollection } from './topic_collection';
 export { TopicPartition } from './topic_partition';
+export { TopicPartitionInfo } from './topic_partition_info';
 export { TopicPartitionMap } from './topic_partition_map';
 export { TopicPartitionSet } from './topic_partition_set';
 export { Uuid } from './uuid';
+export { UuidMap } from './uuid_map';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { InvalidRecordError } from './invalid_record_error';
 export { KafkaError } from './kafka_error';
