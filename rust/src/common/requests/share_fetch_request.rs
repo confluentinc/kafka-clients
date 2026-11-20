@@ -25,6 +25,7 @@ use crate::ShareFetchRequestData;
 use crate::common::errors::UnsupportedVersionError;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::common::{TopicIdPartition, TopicPartition, Uuid};
+use crate::consumer::internals::ShareAcquireMode;
 use crate::share_fetch_request_data::{AcknowledgementBatch, FetchPartition, FetchTopic, ForgottenTopic};
 
 use super::AbstractRequest;
@@ -32,16 +33,6 @@ use super::ConcreteResponse;
 use super::RequestBuilder;
 use super::ShareFetchResponse;
 use super::ShareRequestMetadata;
-
-/// The wire id of `ShareAcquireMode.BATCH_OPTIMIZED`, the only acquire mode a
-/// v1 `ShareFetch` supports.
-///
-/// `ShareAcquireMode` (`org.apache.kafka.clients.consumer.internals`) is
-/// translated in Milestone 18 P2, in parallel with this file; until the two
-/// meet, `Builder::build_version` compares against this value, which is
-/// `ShareAcquireMode.BATCH_OPTIMIZED.id()` (`(byte) 0`). Tracked in the
-/// Milestone 18 deferral ledger.
-const SHARE_ACQUIRE_MODE_BATCH_OPTIMIZED_ID: i8 = 0;
 
 /// A `ShareFetch` request.
 ///
@@ -373,7 +364,7 @@ impl RequestBuilder for Builder {
                 );
             }
             // The v1 only supports ShareAcquireMode.BATCH_OPTIMIZED.
-            if self.data.share_acquire_mode != SHARE_ACQUIRE_MODE_BATCH_OPTIMIZED_ID {
+            if self.data.share_acquire_mode != ShareAcquireMode::BatchOptimized.id() {
                 return Err(UnsupportedVersionError::new(
                     "The v1 ShareFetch only supports ShareAcquireMode.BATCH_OPTIMIZED",
                 )
@@ -462,7 +453,7 @@ mod tests {
     #[test]
     fn test_build_rejects_record_limit_acquire_mode_below_v2() {
         let mut data = ShareFetchRequestData::new();
-        data.set_share_acquire_mode(1);
+        data.set_share_acquire_mode(ShareAcquireMode::RecordLimit.id());
         let mut builder = Builder::new(data);
         assert_unsupported_version(
             &builder.build_version(1).unwrap_err(),
@@ -471,7 +462,7 @@ mod tests {
         assert_eq!(1, unwrap(builder.build_version(2).unwrap()).data().share_acquire_mode());
         // BATCH_OPTIMIZED builds at v1.
         let mut data = ShareFetchRequestData::new();
-        data.set_share_acquire_mode(SHARE_ACQUIRE_MODE_BATCH_OPTIMIZED_ID);
+        data.set_share_acquire_mode(ShareAcquireMode::BatchOptimized.id());
         assert_eq!(1, unwrap(Builder::new(data).build_version(1).unwrap()).version());
     }
 
@@ -479,7 +470,8 @@ mod tests {
     #[test]
     fn test_build_checks_renew_before_acquire_mode() {
         let mut data = ShareFetchRequestData::new();
-        data.set_is_renew_ack(true).set_share_acquire_mode(1);
+        data.set_is_renew_ack(true)
+            .set_share_acquire_mode(ShareAcquireMode::RecordLimit.id());
         assert_unsupported_version(
             &Builder::new(data).build_version(1).unwrap_err(),
             "The v1 ShareFetch does not support AcknowledgeType.RENEW",
