@@ -200,7 +200,7 @@ use crate::consumer::{
 /// ]);
 ///
 /// let mut consumer = KafkaShareConsumer::new(&props, StringDeserializer::new(), StringDeserializer::new())?;
-/// consumer.subscribe(&["foo".to_string()]).await?;
+/// consumer.subscribe(vec!["foo".to_string()]).await?;
 /// loop {
 ///     let records = consumer.poll(Duration::from_millis(1000)).await?;
 ///     for record in &records {
@@ -228,7 +228,7 @@ use crate::consumer::{
 /// #     ("group.id".to_string(), "test".to_string()),
 /// # ]);
 /// let mut consumer = KafkaShareConsumer::new(&props, StringDeserializer::new(), StringDeserializer::new())?;
-/// consumer.subscribe(&["foo".to_string()]).await?;
+/// consumer.subscribe(vec!["foo".to_string()]).await?;
 /// loop {
 ///     let records = consumer.poll(Duration::from_millis(1000)).await?;
 ///     for record in &records {
@@ -263,7 +263,7 @@ use crate::consumer::{
 /// ]);
 ///
 /// let mut consumer = KafkaShareConsumer::new(&props, StringDeserializer::new(), StringDeserializer::new())?;
-/// consumer.subscribe(&["foo".to_string()]).await?;
+/// consumer.subscribe(vec!["foo".to_string()]).await?;
 /// loop {
 ///     let records = consumer.poll(Duration::from_millis(1000)).await?;
 ///     for record in &records {
@@ -365,7 +365,7 @@ use crate::consumer::{
 /// let mut consumer = KafkaShareConsumer::new(&props, StringDeserializer::new(), StringDeserializer::new())?;
 /// consumer.set_acknowledgement_commit_callback(Some(Arc::new(CancelOnFailure(Arc::clone(&processing)))));
 ///
-/// consumer.subscribe(&["foo".to_string()]).await?;
+/// consumer.subscribe(vec!["foo".to_string()]).await?;
 /// loop {
 ///     let records = consumer.poll(Duration::from_millis(1000)).await?;
 ///
@@ -429,7 +429,7 @@ use crate::consumer::{
 ///         let runner = Self { closed: Arc::clone(&closed), handle: consumer.handle() };
 ///         let task = tokio::spawn(async move {
 ///             let result: Result<(), Error> = async {
-///                 consumer.subscribe(&["topic".to_string()]).await?;
+///                 consumer.subscribe(vec!["topic".to_string()]).await?;
 ///                 while !closed.load(Ordering::SeqCst) {
 ///                     let _records = consumer.poll(Duration::from_millis(1000)).await?;
 ///                     // Handle new records
@@ -664,7 +664,7 @@ where
         self.delegate.subscription()
     }
 
-    fn subscribe(&mut self, topics: &[String]) -> impl Future<Output = Result<(), Error>> + Send {
+    fn subscribe(&mut self, topics: Vec<String>) -> impl Future<Output = Result<(), Error>> + Send {
         self.delegate.subscribe(topics)
     }
 
@@ -1359,7 +1359,7 @@ mod tests {
         );
 
         let mut consumer = f.new_share_consumer(CLIENT_ID1);
-        consumer.subscribe(&[TOPIC1.to_string()]).await.expect("subscribed");
+        consumer.subscribe(vec![TOPIC1.to_string()]).await.expect("subscribed");
         consumer.poll(Duration::ZERO).await.expect("poll");
 
         wait_for(|| heartbeats_received.load(Ordering::SeqCst) >= 2, "two heartbeats").await;
@@ -1422,7 +1422,7 @@ mod tests {
         );
 
         let mut consumer = f.new_share_consumer(CLIENT_ID1);
-        consumer.subscribe(&[TOPIC1.to_string()]).await.expect("subscribed");
+        consumer.subscribe(vec![TOPIC1.to_string()]).await.expect("subscribed");
 
         // This will be a SHARE_GROUP_HEARTBEAT to establish the membership and then a SHARE_FETCH [A]
         poll_bounded(&mut consumer, Duration::from_millis(5000)).await;
@@ -1465,7 +1465,7 @@ mod tests {
         );
 
         let mut consumer = f.new_share_consumer(CLIENT_ID1);
-        consumer.subscribe(&[TOPIC1.to_string()]).await.expect("subscribed");
+        consumer.subscribe(vec![TOPIC1.to_string()]).await.expect("subscribed");
 
         // This will be a SHARE_GROUP_HEARTBEAT to establish the membership and then a SHARE_FETCH [A]
         poll_bounded(&mut consumer, Duration::from_millis(5000)).await;
@@ -1504,7 +1504,7 @@ mod tests {
         let mut consumer =
             KafkaShareConsumer::<String, String>::new(&configs, StringDeserializer::new(), StringDeserializer::new())
                 .expect("a positive timeout defers resolution, so construction succeeds");
-        consumer.subscribe(&["test-topic".to_string()]).await.expect("subscribed");
+        consumer.subscribe(vec!["test-topic".to_string()]).await.expect("subscribed");
 
         // Poll continuously until we get the BootstrapResolutionError. The error should be
         // returned after bootstrap.resolve.timeout.ms expires.
@@ -1568,7 +1568,7 @@ mod tests {
     /// `poll` waits for its whole timeout.
     async fn new_subscribed_consumer(f: &Fixture) -> KafkaShareConsumer<String, String> {
         let mut consumer = f.new_share_consumer(CLIENT_ID1);
-        consumer.subscribe(&[TOPIC1.to_string()]).await.expect("subscribed");
+        consumer.subscribe(vec![TOPIC1.to_string()]).await.expect("subscribed");
         consumer
     }
 

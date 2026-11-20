@@ -117,7 +117,7 @@ where
     /// # Errors
     ///
     /// As [`ShareConsumer::subscribe`].
-    fn subscribe<'a>(&'a mut self, topics: &'a [String]) -> BoxFuture<'a, Result<(), Error>>;
+    fn subscribe<'a>(&'a mut self, topics: Vec<String>) -> BoxFuture<'a, Result<(), Error>>;
 
     /// See [`ShareConsumer::unsubscribe`].
     ///
@@ -276,7 +276,7 @@ where
         ShareConsumer::subscription(self)
     }
 
-    fn subscribe<'a>(&'a mut self, topics: &'a [String]) -> BoxFuture<'a, Result<(), Error>> {
+    fn subscribe<'a>(&'a mut self, topics: Vec<String>) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(ShareConsumer::subscribe(self, topics))
     }
 
@@ -348,12 +348,8 @@ where
 // On the trait object rather than on `Box<dyn DynShareConsumer>`: a boxed
 // consumer that implemented `ShareConsumer` would also pick up the blanket
 // `DynShareConsumer` impl, and a method call on the box would then box every
-// future twice.
-//
-// `subscribe`, whose borrowed argument besides `self` gives its future the
-// shorter of two input lifetimes, is an `async fn` rather than returning the
-// boxed future directly: the trait's opaque return type cannot name that
-// lifetime.
+// future twice. No asynchronous method borrows an argument besides `self`, so
+// each returns the boxed future directly.
 impl<K, V> ShareConsumer<K, V> for dyn DynShareConsumer<K, V>
 where
     K: Send + 'static,
@@ -363,8 +359,8 @@ where
         DynShareConsumer::subscription(self)
     }
 
-    async fn subscribe(&mut self, topics: &[String]) -> Result<(), Error> {
-        DynShareConsumer::subscribe(self, topics).await
+    fn subscribe(&mut self, topics: Vec<String>) -> impl Future<Output = Result<(), Error>> + Send {
+        DynShareConsumer::subscribe(self, topics)
     }
 
     fn unsubscribe(&mut self) -> impl Future<Output = Result<(), Error>> + Send {
@@ -449,13 +445,13 @@ mod tests {
         ConsumerRecord::new(topic, 0, offset, Some(format!("key-{offset}")), Some(format!("value-{offset}")))
     }
 
-    /// Generic code over `C: ShareConsumer + ?Sized`, using the methods whose
-    /// borrowed argument makes them `async fn` on `dyn DynShareConsumer`.
+    /// Generic code over `C: ShareConsumer + ?Sized`, including a method
+    /// with a borrowed argument (`acknowledge_with_record`).
     async fn subscribe_and_acknowledge<C: ShareConsumer<String, String> + ?Sized>(
         consumer: &mut C,
         topic: &str,
     ) -> HashSet<String> {
-        ShareConsumer::subscribe(consumer, &topics(&[topic])).await.expect("subscribe");
+        ShareConsumer::subscribe(consumer, topics(&[topic])).await.expect("subscribe");
         ShareConsumer::acknowledge_with_record(consumer, &record(topic, 0)).expect("the mock accepts any record");
         ShareConsumer::subscription(consumer)
     }
@@ -480,7 +476,9 @@ mod tests {
             let mut consumers: Vec<&mut dyn DynShareConsumer<String, String>> = vec![&mut first, &mut second];
             for (index, consumer) in consumers.iter_mut().enumerate() {
                 let topic = format!("topic-{index}");
-                DynShareConsumer::subscribe(&mut **consumer, &[topic]).await.expect("subscribe");
+                DynShareConsumer::subscribe(&mut **consumer, vec![topic])
+                    .await
+                    .expect("subscribe");
             }
         }
 
@@ -494,7 +492,7 @@ mod tests {
         let mut consumers: Vec<Box<dyn DynShareConsumer<String, String>>> = vec![Box::new(mock()), Box::new(mock())];
 
         for consumer in &mut consumers {
-            DynShareConsumer::subscribe(&mut **consumer, &topics(&["topic"]))
+            DynShareConsumer::subscribe(&mut **consumer, topics(&["topic"]))
                 .await
                 .expect("subscribe");
             assert_eq!(
@@ -506,7 +504,7 @@ mod tests {
     }
 
     /// R8 D3: `dyn DynShareConsumer` is a `ShareConsumer`, including the
-    /// methods with a borrowed argument.
+    /// method with a borrowed argument.
     #[tokio::test]
     async fn test_dyn_share_consumer_is_a_share_consumer() {
         let mut boxed: Box<dyn DynShareConsumer<String, String>> = Box::new(mock());
@@ -540,11 +538,11 @@ mod tests {
         ShareConsumer::close(&mut direct).await.expect("close");
         ShareConsumer::close(&mut through_dyn).await.expect("close");
 
-        let expected = ShareConsumer::subscribe(&mut direct, &topics(&["topic"]))
+        let expected = ShareConsumer::subscribe(&mut direct, topics(&["topic"]))
             .await
             .expect_err("subscribe on a closed mock");
         let as_dyn: &mut dyn DynShareConsumer<String, String> = &mut through_dyn;
-        let error = DynShareConsumer::subscribe(as_dyn, &topics(&["topic"]))
+        let error = DynShareConsumer::subscribe(as_dyn, topics(&["topic"]))
             .await
             .expect_err("same call through DynShareConsumer");
         assert!(error.is_local_illegal_state_error(), "{error:?}");
@@ -577,7 +575,7 @@ mod tests {
     #[tokio::test]
     async fn test_dyn_share_consumer_futures_can_be_spawned() {
         let mut inner = mock();
-        ShareConsumer::subscribe(&mut inner, &topics(&["topic"]))
+        ShareConsumer::subscribe(&mut inner, topics(&["topic"]))
             .await
             .expect("subscribe");
         inner.add_record(record("topic", 0)).expect("subscribed");

@@ -42,6 +42,10 @@ use crate::consumer::{
 // Methods that block in Java return `impl Future + Send`; hold
 // `DynShareConsumer` to keep different implementations behind one type.
 //
+// Parameters follow the `Consumer` trait's convention (`consumer/mod.rs`): a
+// `Vec` is retained by the implementation (`subscribe` moves the topics into
+// the subscription), a reference is only read.
+//
 // The shape is the `Consumer` trait's (`share-consumer.md` §1): `Send +
 // 'static`, not `Sync`, with `&mut self` on every method Java's
 // `ShareConsumerImpl` guards with `acquireAndEnsureOpen()` or `acquire()`,
@@ -104,7 +108,7 @@ where
     /// - `Error::is_local_illegal_argument_error` if topics contains empty elements
     /// - `Error::is_kafka_error` for any other unrecoverable errors
     #[doc(alias = "org.apache.kafka.clients.consumer.ShareConsumer#subscribe")]
-    fn subscribe(&mut self, topics: &[String]) -> impl Future<Output = Result<(), Error>> + Send;
+    fn subscribe(&mut self, topics: Vec<String>) -> impl Future<Output = Result<(), Error>> + Send;
 
     /// Unsubscribe from topics currently subscribed with [`Self::subscribe`].
     ///

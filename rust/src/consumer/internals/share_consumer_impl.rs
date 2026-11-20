@@ -819,7 +819,7 @@ where
     /// - `LocalIllegalStateError` when the consumer is closed;
     /// - the error the background task completes the subscription with.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareConsumerImpl#subscribe")]
-    pub(crate) async fn subscribe(&mut self, topics: &[String]) -> Result<(), Error> {
+    pub(crate) async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
         self.acquire_and_ensure_open()?;
         Self::maybe_return_invalid_group_id_error(self.group_id.as_deref())?;
         // Java's `topics == null` check has no Rust counterpart.
@@ -827,7 +827,7 @@ where
             // treat subscribing to empty topic list as the same as unsubscribing
             return self.unsubscribe().await;
         }
-        for topic in topics {
+        for topic in &topics {
             if Utils::is_blank(Some(topic)) {
                 return Err(Error::local_illegal_argument(
                     "Topic collection to subscribe to cannot contain null or empty topic",
@@ -838,13 +838,14 @@ where
         // Trigger subscribe event to effectively join the group if not already part of it,
         // or just send the new subscription to the broker.
         let (handle, receiver) = CompletableEventHandle::new(i64::MAX);
-        let event = ApplicationEvent::ShareSubscriptionChange { handle, topics: topics.iter().cloned().collect() };
+        let joined = topics.join(", ");
+        let event = ApplicationEvent::ShareSubscriptionChange { handle, topics: topics.into_iter().collect() };
         self.application_event_handler
             .add_and_get(event, receiver, self.time.milliseconds())
             .await
             .map_err(Self::result_error)?;
 
-        info!("Subscribed to topics: {}", topics.join(", "));
+        info!("Subscribed to topics: {joined}");
         Ok(())
     }
 
@@ -2145,7 +2146,7 @@ mod tests {
     //!
     //! Not translated: `testSubscribeToNullTopicCollection` and
     //! `testSubscriptionOnNullTopic` pass a `null` collection or topic, which a
-    //! `&[String]` cannot hold. No test of the class asserts Java's runtime
+    //! `Vec<String>` cannot hold. No test of the class asserts Java's runtime
     //! "methods are not accessible from user-defined acknowledgement commit
     //! callback" check (`&mut self`, decision D6).
 
@@ -2435,7 +2436,7 @@ mod tests {
 
         async fn subscribe(&mut self, topics: &[&str]) -> Result<(), Error> {
             let topics: Vec<String> = topics.iter().map(|t| t.to_string()).collect();
-            drive(&mut self.responder, self.consumer.subscribe(&topics)).await
+            drive(&mut self.responder, self.consumer.subscribe(topics)).await
         }
 
         async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<String, String>, Error> {
@@ -3401,7 +3402,7 @@ mod tests {
         let time = Arc::new(MockTime::new());
         time.sleep(1_000_000);
         let mut consumer = new_share_consumer_over_mock_client(Arc::clone(&time));
-        consumer.subscribe(&["test".to_string()]).await.expect("subscribed");
+        consumer.subscribe(vec!["test".to_string()]).await.expect("subscribed");
         // Test default values
         assert_eq!(Some(-1.0), share_metric(&consumer, "last-poll-seconds-ago"));
         assert!(share_metric(&consumer, "time-between-poll-avg").expect("registered").is_nan());
@@ -3490,7 +3491,7 @@ mod tests {
     async fn test_closing_consumer_unregisters_consumer_metrics() {
         let time = Arc::new(MockTime::with_auto_tick_ms(1));
         let mut consumer = new_share_consumer_over_mock_client(time);
-        consumer.subscribe(&["test".to_string()]).await.expect("subscribed");
+        consumer.subscribe(vec!["test".to_string()]).await.expect("subscribed");
         for name in [
             "last-poll-seconds-ago",
             "time-between-poll-avg",
@@ -3536,7 +3537,7 @@ mod tests {
     async fn new_reads_the_configuration_and_serves_subscribe_and_close() {
         let mut consumer = new_share_consumer_from_config(&production_config(Some("explicit"))).expect("built");
         assert_eq!("client-id", consumer.client_id());
-        consumer.subscribe(&["topic-a".to_string()]).await.expect("subscribed");
+        consumer.subscribe(vec!["topic-a".to_string()]).await.expect("subscribed");
         assert_eq!(HashSet::from(["topic-a".to_string()]), consumer.subscription());
         let not_in_flight = ConsumerRecord::new("topic-a", 0, 0, None::<String>, None::<String>);
         let e = consumer
@@ -4352,7 +4353,7 @@ mod tests {
             assert_send(&consumer.poll(Duration::ZERO));
             assert_send(&consumer.commit_sync());
             assert_send(&consumer.commit_async());
-            assert_send(&consumer.subscribe(&[]));
+            assert_send(&consumer.subscribe(Vec::new()));
             assert_send(&consumer.unsubscribe());
             assert_send(&consumer.close());
         }

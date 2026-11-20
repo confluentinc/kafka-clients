@@ -154,10 +154,9 @@ where
         self.subscriptions.subscription()
     }
 
-    async fn subscribe(&mut self, topics: &[String]) -> Result<(), Error> {
+    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
         self.ensure_not_closed()?;
-        self.subscriptions
-            .subscribe_with_topics(topics.iter().cloned().collect(), None)?;
+        self.subscriptions.subscribe_with_topics(topics.into_iter().collect(), None)?;
         Ok(())
     }
 
@@ -277,7 +276,7 @@ mod tests {
     #[tokio::test]
     async fn test_simple_mock() {
         let mut consumer = MockShareConsumer::<String, String>::new();
-        consumer.subscribe(&["test".to_string()]).await.expect("subscribe");
+        consumer.subscribe(vec!["test".to_string()]).await.expect("subscribe");
         assert_eq!(0, consumer.poll(Duration::ZERO).await.expect("poll").count());
         let rec1 = record(0, "key1", "value1");
         let rec2 = record(1, "key2", "value2");
@@ -317,7 +316,7 @@ mod tests {
         // A second close does nothing.
         consumer.close().await.expect("close");
         for error in [
-            consumer.subscribe(&["test".to_string()]).await.expect_err("closed"),
+            consumer.subscribe(vec!["test".to_string()]).await.expect_err("closed"),
             consumer.unsubscribe().await.expect_err("closed"),
             consumer.poll(Duration::ZERO).await.expect_err("closed"),
         ] {
@@ -341,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn unsubscribe_clears_the_subscription_and_poll_drains_the_records() {
         let mut consumer = MockShareConsumer::<String, String>::new();
-        consumer.subscribe(&["test".to_string()]).await.expect("subscribe");
+        consumer.subscribe(vec!["test".to_string()]).await.expect("subscribe");
         assert_eq!(HashSet::from(["test".to_string()]), consumer.subscription());
         consumer.add_record(record(0, "key", "value")).expect("subscribed");
         assert_eq!(1, consumer.poll(Duration::ZERO).await.expect("poll").count());
