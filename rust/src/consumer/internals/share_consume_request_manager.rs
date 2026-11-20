@@ -1645,7 +1645,7 @@ impl ShareConsumeRequestManager {
         is_renew_ack: bool,
         acquisition_lock_timeout_ms: Option<i32>,
     ) {
-        if let Some(partition_exception) = partition_error.error() {
+        if let Some(partition_error_value) = partition_error.error() {
             let mut retry = false;
             if matches!(partition_error, Errors::NotLeaderOrFollower | Errors::FencedLeaderEpoch) {
                 // If the leader has changed, there's no point in retrying the operation because the acquisition locks
@@ -1655,7 +1655,7 @@ impl ShareConsumeRequestManager {
             } else if matches!(partition_error, Errors::UnknownTopicOrPartition | Errors::UnknownTopicId) {
                 self.share_session_leader_map.remove(tip);
                 self.share_session_topic_id_map.remove(tip.topic_partition());
-            } else if partition_exception.is_retriable_error() {
+            } else if partition_error_value.is_retriable_error() {
                 retry = true;
             }
 
