@@ -260,8 +260,10 @@ pub(crate) enum ApplicationEvent {
     /// with `deadlineMs = Long.MAX_VALUE`.
     ApplyAssignment {
         handle: CompletableEventHandle<()>,
-        /// Full assignment to apply in the subscription state.
-        assigned_partitions: HashSet<TopicPartition>,
+        /// Full assignment to apply in the subscription state, in Java's
+        /// order (topic name, then partition: the `SortedSet` that Java's
+        /// `ApplyAssignmentEvent` carries).
+        assigned_partitions: Vec<TopicPartition>,
         /// Newly added partitions — marked as awaiting callback so no
         /// fetching / position init happens for them while the callback runs.
         added_partitions: Vec<TopicPartition>,

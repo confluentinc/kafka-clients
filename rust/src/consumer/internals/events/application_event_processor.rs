@@ -1173,7 +1173,7 @@ impl ApplicationEventProcessor {
     fn process_apply_assignment(
         &mut self,
         handle: super::CompletableEventHandle<()>,
-        assigned_partitions: HashSet<TopicPartition>,
+        assigned_partitions: Vec<TopicPartition>,
         added_partitions: Vec<TopicPartition>,
     ) {
         let membership_arc = {

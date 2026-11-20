@@ -265,12 +265,15 @@ impl ConsumerMembershipManager {
     /// AEP can complete the `ApplyAssignmentEvent` handle exceptionally
     /// (mirroring Java's try/catch → `event.future().completeExceptionally(e)`).
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager#applyAssignment")]
-    pub(crate) fn apply_assignment(
+    pub(crate) fn apply_assignment<'a>(
         &self,
-        assigned_partitions: &HashSet<TopicPartition>,
+        assigned_partitions: impl IntoIterator<Item = &'a TopicPartition>,
         added_partitions: &[TopicPartition],
     ) -> Result<(), Error> {
-        let assigned_vec: Vec<TopicPartition> = assigned_partitions.iter().cloned().collect();
+        // Java's `assignedPartitions` is the reconciliation's `SortedSet`;
+        // `SubscriptionState#assignFromSubscribed` keeps the order it is given.
+        let assigned_vec: Vec<TopicPartition> = assigned_partitions.into_iter().cloned().collect();
+        let assigned_set: HashSet<TopicPartition> = assigned_vec.iter().cloned().collect();
         {
             let mut subs = match self.abstract_mm.subscriptions.lock() {
                 Ok(g) => g,
@@ -283,7 +286,7 @@ impl ConsumerMembershipManager {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            guard.notify_assignment_change(assigned_partitions);
+            guard.notify_assignment_change(&assigned_set);
         }
         Ok(())
     }
@@ -1429,6 +1432,56 @@ mod tests {
     /// frozen while the ack is pending — repeated `reconcile` calls return
     /// promptly (each is a non-blocking `try_recv`), leaving the state in
     /// `RECONCILING`, until the ack is delivered.
+    /// Rust-only: after a reconciliation the subscription state holds the
+    /// assignment in Java's order, topic name then partition, whatever the
+    /// order of the heartbeat's assignment. Java gets it from
+    /// `TopicIdPartitionSet#topicPartitions()` (a `TreeSet`), carried through
+    /// `PartitionsAssignedEvent` and `ApplyAssignmentEvent` into
+    /// `SubscriptionState#assignFromSubscribedAwaitingCallback`. Repeated over
+    /// fresh managers so that a hash-ordered step would show.
+    #[tokio::test]
+    async fn reconcile_applies_the_assignment_in_java_order() {
+        let tp = |topic: &str, partition: i32| TopicPartition::new(topic.to_string(), partition);
+        let expected = vec![
+            tp("alpha", 0),
+            tp("alpha", 2),
+            tp("beta", 0),
+            tp("beta", 1),
+            tp("beta", 3),
+            tp("gamma", 1),
+        ];
+        for _ in 0..20 {
+            let (mgr, mut rx) = make(None, None, None);
+            mgr.transition_to_joining().unwrap();
+
+            let mut new_assignment = HashMap::new();
+            for (topic, partitions) in [("gamma", vec![1]), ("alpha", vec![2, 0]), ("beta", vec![3, 0, 1])] {
+                let topic_id = Uuid::random_uuid();
+                mgr.abstract_mm
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .assigned_topic_names_cache
+                    .insert(topic_id, topic.to_string());
+                new_assignment.insert(topic_id, partitions);
+            }
+            mgr.abstract_mm.process_assignment_received(new_assignment).unwrap();
+
+            mgr.reconcile(0, true).unwrap();
+            let env = rx.recv().await.expect("event");
+            let BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } = env.event else {
+                panic!("expected PartitionsAssigned");
+            };
+            assert_eq!(expected, assigned_partitions);
+
+            // The app side hands the assignment back in an `ApplyAssignmentEvent`.
+            mgr.apply_assignment(&assigned_partitions, &added_partitions).unwrap();
+            ack.send(Ok(())).unwrap();
+            let subscriptions = mgr.abstract_mm.subscriptions.lock().unwrap();
+            assert_eq!(expected, subscriptions.assigned_partitions_list());
+        }
+    }
+
     #[tokio::test]
     async fn reconcile_does_not_advance_until_ack_and_loop_is_not_frozen() {
         let (mgr, mut rx) = make(None, None, None);

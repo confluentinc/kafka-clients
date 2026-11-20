@@ -887,6 +887,39 @@ mod tests {
         fx
     }
 
+    /// Rust-only: the share reconciliation hands `SubscriptionState` the
+    /// assignment in Java's order, topic name then partition
+    /// (`TopicIdPartitionSet#topicPartitions()` passed by
+    /// `ShareMembershipManager#signalPartitionsAssigned`), whatever the order
+    /// of the heartbeat's assignment. Repeated over fresh managers so that a
+    /// hash-ordered step would show.
+    #[test]
+    fn test_reconciliation_assigns_partitions_in_java_order() {
+        for _ in 0..20 {
+            let fx = create_membership_manager_joining_group();
+            let (topic, topic1, topic2) = (Uuid::random_uuid(), Uuid::random_uuid(), Uuid::random_uuid());
+            fx.seed_metadata(&[("topic", topic), ("topic1", topic1), ("topic2", topic2)]);
+            fx.stub_has_auto_assigned_partitions(true);
+            let target = assignment(vec![
+                topic_partitions(topic2, vec![5, 3]),
+                topic_partitions(topic, vec![1]),
+                topic_partitions(topic1, vec![2, 0, 1]),
+            ]);
+            fx.on_heartbeat_success(&create_share_group_heartbeat_response(target, fx.mgr.member_id()));
+            fx.poll();
+
+            let expected = vec![
+                tp("topic", 1),
+                tp("topic1", 0),
+                tp("topic1", 1),
+                tp("topic1", 2),
+                tp("topic2", 3),
+                tp("topic2", 5),
+            ];
+            assert_eq!(expected, fx.subscriptions.lock().unwrap().assigned_partitions_list());
+        }
+    }
+
     /// Java `createAssignment(boolean mockMetadata)`.
     fn create_assignment(fx: &Fixture, mock_metadata: bool) -> Assignment {
         let topic1 = Uuid::random_uuid();

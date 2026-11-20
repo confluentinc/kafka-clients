@@ -1014,6 +1014,13 @@ impl AbstractMembershipManager {
         Ok(())
     }
 
+    /// Java's `TOPIC_PARTITION_COMPARATOR`, a `Utils.TopicPartitionComparator`:
+    /// topic name, then partition. Topic names are ASCII, so byte order is
+    /// Java's `String#compareTo` order.
+    fn compare_topic_partitions(a: &TopicPartition, b: &TopicPartition) -> std::cmp::Ordering {
+        a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition()))
+    }
+
     /// Resolve topic names for the current target assignment from the
     /// metadata cache. Builds a [`HashMap`] of topic ID → (topic name,
     /// partitions) and triggers a metadata update for any unresolved
@@ -1991,6 +1998,15 @@ impl AbstractMembershipManager {
                 assigned_topic_partitions.push(TopicPartition::new(topic_name.clone(), *p));
             }
         }
+        // Java's `TopicIdPartitionSet#topicPartitions()` (what
+        // `findResolvableAssignmentAndTriggerMetadataUpdate` returns): a
+        // `TreeSet` ordered by `Utils.TopicPartitionComparator`, topic name then
+        // partition. Both `signalPartitionsAssigned` overrides pass that order on
+        // to `SubscriptionState#assignFromSubscribedAwaitingCallback`. The
+        // resolved assignment above follows a `HashMap`, so sort (and dedup, as
+        // the set does) once here.
+        assigned_topic_partitions.sort_by(Self::compare_topic_partitions);
+        assigned_topic_partitions.dedup();
         let assigned_set: HashSet<TopicPartition> = assigned_topic_partitions.iter().cloned().collect();
 
         let owned_set: HashSet<TopicPartition> = {

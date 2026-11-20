@@ -31,12 +31,13 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
     runs, and skipping `onPartitionsRevoked` for a member in the fatal state.
     On every reachable path the rebalance has already stopped before either
     could make a difference.
-- Change: the consumer's internal order of its assigned partitions, which
-  decides the order fetch requests list them in after a rebalance, is now
-  deterministic: the order the assignment lists them in, grouped by topic, as
-  Java's `SubscriptionState#assignFromSubscribed` keeps it. It used to be
-  random, changing from one assignment to the next. No API or signature
-  changes.
+- Change: after a rebalance the consumer holds its assigned partitions in
+  Java's order, sorted by topic name, then partition (Java's
+  `TopicIdPartitionSet#topicPartitions()`, kept through
+  `SubscriptionState#assignFromSubscribed`). This order decides the order fetch
+  requests list partitions in. It used to be random, changing from one
+  assignment to the next. A manual `assign()` is unchanged. No API or
+  signature changes.
 
 ### C FFI
 

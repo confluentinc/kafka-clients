@@ -5355,8 +5355,8 @@ where
                     // 2. If a listener is registered, run `on_partitions_assigned`.
                     // 3. Reply on the ack (the `PartitionsAssignedEvent.future()`)
                     //    so the bg reconciliation resumes.
-                    let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
-
+                    // Java's `ApplyAssignmentEvent` carries the `SortedSet` the
+                    // `PartitionsAssignedEvent` holds; the `Vec` keeps that order.
                     // Step 1 — applyNewAssignment: enqueue + await the
                     // ApplyAssignmentEvent. Java `addAndGet(applyEvent)`.
                     let apply_result = {
@@ -5368,7 +5368,7 @@ where
                             .add_and_get::<()>(
                                 ApplicationEvent::ApplyAssignment {
                                     handle: apply_handle,
-                                    assigned_partitions: assigned_set,
+                                    assigned_partitions,
                                     added_partitions: added_partitions.clone(),
                                 },
                                 apply_rx,
