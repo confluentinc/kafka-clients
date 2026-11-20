@@ -202,6 +202,10 @@ where
     /// waiting on the buffer.
     #[cfg(test)]
     await_not_empty_stub: Option<AwaitNotEmptyStub>,
+    /// The background task's request managers, for the tests that check
+    /// what the constructor gave them (the consumer keeps the same `Arc`).
+    #[cfg(test)]
+    request_managers: Option<Arc<Mutex<RequestManagers>>>,
 }
 
 /// The pieces [`ShareConsumerImpl::with_components`] assembles the consumer
@@ -353,6 +357,18 @@ impl Drop for SetClosed {
     }
 }
 
+/// What `ShareConsumerImpl::start_background_task` returns: Java's
+/// `ApplicationEventHandler`, which owns the network thread it starts.
+/// Rust-only (DoD §7): the handler is the channel's sending side, and the task
+/// is joined through its close handle.
+struct BackgroundTask {
+    application_event_handler: Arc<ApplicationEventHandler>,
+    network_thread_close: NetworkThreadCloseHandle,
+    max_time_to_wait_ms: Arc<AtomicI64>,
+    #[cfg(test)]
+    request_managers: Arc<Mutex<RequestManagers>>,
+}
+
 impl<K, V> ShareConsumerImpl<K, V>
 where
     K: Send + Sync + 'static,
@@ -476,7 +492,7 @@ where
             share_fetch_config,
             deserializers.disarm(),
         );
-        let (application_event_handler, network_thread_close, max_time_to_wait_ms) = Self::start_background_task(
+        let background_task = Self::start_background_task(
             &time,
             network_client_delegate,
             request_managers,
@@ -490,15 +506,17 @@ where
         config.mark_read_keys_used();
         config.log_unused();
         debug!("Kafka share consumer initialized");
-        Ok(Self::with_components(ShareConsumerImplComponents {
+        #[cfg(test)]
+        let request_managers_for_test = Arc::clone(&background_task.request_managers);
+        let consumer = Self::with_components(ShareConsumerImplComponents {
             client_id,
             fetch_buffer,
             fetch_collector,
             share_fetch_metrics_manager,
             time,
-            application_event_handler,
-            network_thread_close,
-            max_time_to_wait_ms,
+            application_event_handler: background_task.application_event_handler,
+            network_thread_close: background_task.network_thread_close,
+            max_time_to_wait_ms: background_task.max_time_to_wait_ms,
             wakeup_trigger,
             acknowledgement_event_handler,
             background_event_rx,
@@ -512,7 +530,10 @@ where
             default_api_timeout_ms,
             group_id,
             acknowledgement_mode,
-        }))
+        });
+        #[cfg(test)]
+        let consumer = Self { request_managers: Some(request_managers_for_test), ..consumer };
+        Ok(consumer)
     }
 
     /// Creates a share consumer over `client` (Java's visible-for-testing
@@ -589,7 +610,7 @@ where
             &completion_notify,
         )?;
         let wakeup_trigger = WakeupTrigger::new();
-        let (application_event_handler, network_thread_close, max_time_to_wait_ms) = Self::start_background_task(
+        let background_task = Self::start_background_task(
             &time,
             network_client_delegate,
             request_managers,
@@ -599,15 +620,15 @@ where
             &async_consumer_metrics,
             false,
         );
-        Ok(Self::with_components(ShareConsumerImplComponents {
+        let consumer = Self::with_components(ShareConsumerImplComponents {
             client_id: Arc::from(client_id),
             fetch_buffer,
             fetch_collector,
             share_fetch_metrics_manager,
             time,
-            application_event_handler,
-            network_thread_close,
-            max_time_to_wait_ms,
+            application_event_handler: background_task.application_event_handler,
+            network_thread_close: background_task.network_thread_close,
+            max_time_to_wait_ms: background_task.max_time_to_wait_ms,
             wakeup_trigger,
             acknowledgement_event_handler,
             background_event_rx,
@@ -621,7 +642,11 @@ where
             default_api_timeout_ms,
             group_id: Some(group_id.to_string()),
             acknowledgement_mode,
-        }))
+        });
+        Ok(Self {
+            request_managers: Some(Arc::clone(&background_task.request_managers)),
+            ..consumer
+        })
     }
 
     /// Assembles a share consumer from its collaborators: Java's
@@ -664,6 +689,8 @@ where
             collect_stub: None,
             #[cfg(test)]
             await_not_empty_stub: None,
+            #[cfg(test)]
+            request_managers: None,
         }
     }
 
@@ -672,7 +699,7 @@ where
     /// creates and starts the `ConsumerNetworkThread` with the application
     /// event processor, as `AsyncKafkaConsumer::new` does. Returns the
     /// application event handler, the task's close handle and its
-    /// `maximumTimeToWait` cell. `dedicated` runs the task on its own thread
+    /// `maximumTimeToWait` cell ([`BackgroundTask`]). `dedicated` runs the task on its own thread
     /// (production), otherwise on the caller's runtime (tests).
     #[expect(clippy::too_many_arguments, reason = "the collaborators of the background task")]
     fn start_background_task<C: KafkaClient + Send + 'static>(
@@ -684,12 +711,14 @@ where
         wakeup_trigger: &WakeupTrigger,
         async_consumer_metrics: &Arc<AsyncConsumerMetrics>,
         dedicated: bool,
-    ) -> (Arc<ApplicationEventHandler>, NetworkThreadCloseHandle, Arc<AtomicI64>) {
+    ) -> BackgroundTask {
         let event_notify = network_client_delegate.wakeup_handle();
         let (application_event_tx, application_event_rx) = mpsc::unbounded_channel();
         let application_event_queue_size = Arc::new(AtomicI64::new(0));
         let application_event_reaper = Arc::new(Mutex::new(CompletableEventReaper::new()));
         let request_managers = Arc::new(Mutex::new(request_managers));
+        #[cfg(test)]
+        let request_managers_for_test = Arc::clone(&request_managers);
         let application_event_processor = ApplicationEventProcessor::new(
             Arc::clone(&request_managers),
             metadata.metadata_arc(),
@@ -725,7 +754,13 @@ where
         } else {
             NetworkThreadCloseHandle::new(signal_close_fn, wakeup_fn, tokio::spawn(network_thread.run()))
         };
-        (Arc::new(application_event_handler), network_thread_close, max_time_to_wait_ms)
+        BackgroundTask {
+            application_event_handler: Arc::new(application_event_handler),
+            network_thread_close,
+            max_time_to_wait_ms,
+            #[cfg(test)]
+            request_managers: Arc::clone(&request_managers_for_test),
+        }
     }
 
     /// Returns the current subscription.
@@ -3341,6 +3376,33 @@ mod tests {
         consumer.close_with_timeout(Duration::ZERO).await.expect("closed");
         let e = consumer.unsubscribe().await.expect_err("closed");
         assert_eq!("This consumer has already been closed.", e.message());
+    }
+
+    /// Rust-only (R3): `client.rack` reaches the share membership manager,
+    /// as Java's `GroupRebalanceConfig#rackId` (absent when empty), and
+    /// `group.id` the share managers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_passes_the_group_id_and_the_rack_id_to_the_share_managers() {
+        for (configured, expected) in [(Some("rack-a"), Some("rack-a")), (None, None), (Some(""), None)] {
+            let mut props = production_config(None);
+            props.remove(ConsumerConfig::CLIENT_RACK_CONFIG);
+            if let Some(rack) = configured {
+                props.insert(ConsumerConfig::CLIENT_RACK_CONFIG.to_string(), rack.to_string());
+            }
+            let mut consumer = new_share_consumer_from_config(&props).expect("built");
+            let membership = consumer
+                .request_managers
+                .as_ref()
+                .expect("built by the constructor")
+                .lock()
+                .unwrap()
+                .share_membership
+                .clone()
+                .expect("a share membership manager");
+            assert_eq!(expected, membership.rack_id(), "client.rack = {configured:?}");
+            assert_eq!("group-id", membership.group_id());
+            consumer.close_with_timeout(Duration::ZERO).await.expect("closed");
+        }
     }
 
     /// Rust-only: the default acknowledgement mode is implicit (decision D7
