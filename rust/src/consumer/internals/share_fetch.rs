@@ -136,7 +136,14 @@ where
     /// is released and its batch carries the failure, as a record whose first
     /// delivery fails; the failure is returned only if no record is in flight
     /// afterwards, as `ShareFetchCollector#collect` throws a batch's failure
-    /// only when the fetch is otherwise empty. The application can then
+    /// only when the fetch is otherwise empty. As the collector stops at the
+    /// first partition that fails, so does this: the batches after it take
+    /// their renewals, and report their own failures, on later calls.
+    ///
+    /// # Cancellation
+    ///
+    /// A call dropped mid-way leaves every renewal it did not redeliver
+    /// pending for the next call ([`ShareInFlightBatch::take_renewals`]). The application can then
     /// acknowledge the released record differently, as after any delivery
     /// failure (`ShareFetch#acknowledge(String, int, long, AcknowledgeType)`).
     ///
@@ -146,10 +153,14 @@ where
     /// is in flight.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ShareFetch#takeRenewedRecords")]
     pub(crate) async fn take_renewed_records(&mut self, deserializers: &Deserializers<K, V>) -> Result<(), Error> {
+        // Java's collector stops at the first partition that fails, and the
+        // partitions after it are read on later polls: so do the renewals, whose
+        // batches keep their renewals pending (`has_renewals`) until then.
         let mut first_error = None;
         for batch in self.batches.values_mut().flatten() {
             if let Some(error) = batch.take_renewals(deserializers).await {
-                first_error.get_or_insert(error);
+                first_error = Some(error);
+                break;
             }
         }
         // Any acquisition lock timeout updated by renewal is applied as the renewed records are move back to in-flight
@@ -535,5 +546,78 @@ mod tests {
             Some(AcknowledgeType::Reject),
             acknowledgements[&partition0].acknowledgements().get(4)
         );
+    }
+
+    /// Critic 251 Q1: as `ShareFetchCollector#collect` stops at the first
+    /// partition that fails, `take_renewed_records` stops at the first batch
+    /// whose redelivery fails; the next partition's failure is reported by the
+    /// next call.
+    #[test]
+    fn test_take_renewed_records_reports_one_failing_partition_per_call() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use futures_util::FutureExt;
+
+        use crate::consumer::internals::share_completed_fetch::tests::{
+            acquired_records, fetch, new_records, new_share_completed_fetch, partition_data,
+        };
+
+        #[derive(Clone, Default)]
+        struct FailWhenArmed(Arc<AtomicBool>);
+        impl crate::common::serialization::Deserializer<String> for FailWhenArmed {
+            async fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                if self.0.load(Ordering::SeqCst) {
+                    return Err(Error::serialization("armed"));
+                }
+                Ok(String::from_utf8_lossy(data).into_owned())
+            }
+        }
+
+        let (partition0, partition1) = partitions();
+        let value = FailWhenArmed::default();
+        let deserializers = Deserializers::new(
+            Box::new(crate::common::serialization::StringDeserializer::new()),
+            Box::new(value.clone()),
+        );
+        let mut fetch_ = ShareFetch::empty();
+        for partition in [&partition0, &partition1] {
+            let mut completed_fetch =
+                new_share_completed_fetch(partition, partition_data(Some(new_records(0, 1)), acquired_records(0, 1)));
+            fetch_.add(partition.clone(), fetch(&mut completed_fetch, &deserializers, 10, true));
+        }
+        assert_eq!(2, fetch_.records().len());
+        fetch_.acknowledge_all(AcknowledgeType::Renew);
+        let acknowledgements: HashMap<TopicIdPartition, Acknowledgements> = fetch_
+            .take_acknowledged_records()
+            .into_iter()
+            .map(|(tip, node_acknowledgements)| {
+                let mut acks = node_acknowledgements.acknowledgements().clone();
+                acks.complete(None);
+                (tip, acks)
+            })
+            .collect();
+        assert_eq!(2, fetch_.renew(&acknowledgements, None).unwrap());
+
+        value.0.store(true, Ordering::SeqCst);
+        let take =
+            |f: &mut ShareFetch<String, String>| f.take_renewed_records(&deserializers).now_or_never().expect("ready");
+        let released = |f: &mut ShareFetch<String, String>| {
+            f.take_acknowledged_records()
+                .values()
+                .filter(|acks| acks.acknowledgements().get(0) == Some(AcknowledgeType::Release))
+                .count()
+        };
+
+        let first = take(&mut fetch_).expect_err("the first failing partition is reported");
+        assert!(matches!(first, Error::RecordDeserialization(_)), "{first:?}");
+        assert!(fetch_.has_renewals(), "the other partition's renewal waits for the next call");
+        assert_eq!(1, released(&mut fetch_));
+
+        let second = take(&mut fetch_).expect_err("the other partition is reported next");
+        assert!(matches!(second, Error::RecordDeserialization(_)), "{second:?}");
+        assert!(!fetch_.has_renewals());
+        assert_eq!(1, released(&mut fetch_));
+        take(&mut fetch_).expect("nothing left");
     }
 }

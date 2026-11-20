@@ -939,15 +939,12 @@ mod tests {
 
     /// Translation-checklist R4 item 8: a collect dropped while a deserializer
     /// is pending sets the fetch it was reading back as the next in line, so
-    /// it stays buffered and is read again.
+    /// it stays buffered, and the next collect reads it again from the record
+    /// the dropped one was decoding (Critic 251 Issue 1: that record is
+    /// neither skipped nor acknowledged as a gap).
     #[test]
     fn test_collect_dropped_mid_deserialize_puts_the_fetch_back() {
-        struct PendingDeserializer;
-        impl crate::common::serialization::Deserializer<String> for PendingDeserializer {
-            async fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, Error> {
-                std::future::pending().await
-            }
-        }
+        use crate::consumer::internals::share_completed_fetch::tests::PendOnceDeserializer;
 
         let mut f = Fixture::new();
         f.subscribe_and_assign(&f.topic_a_partition0);
@@ -959,13 +956,15 @@ mod tests {
             Arc::clone(&f.subscriptions),
             ClusterResourceListeners::new(),
         ));
+        let value = PendOnceDeserializer::default();
+        value.pend_on.store(1, std::sync::atomic::Ordering::SeqCst);
         f.fetch_collector = ShareFetchCollector::new(
             metadata,
             Arc::clone(&f.subscriptions),
             f.fetch_collector.share_fetch_config.clone(),
             Arc::new(Deserializers::new(
                 Box::new(crate::common::serialization::StringDeserializer::new()),
-                Box::new(PendingDeserializer),
+                Box::new(value),
             )),
         );
         f.fetch_buffer.add([f.build(f.builder().record_count(3))]);
@@ -978,5 +977,11 @@ mod tests {
             f.fetch_buffer.buffered_partitions()
         );
         assert_eq!(HashSet::from([0]), f.fetch_buffer.buffered_nodes());
+
+        // The next collect delivers every record, the interrupted one first.
+        let mut fetch = f.collect_ok();
+        let records = fetch.records().remove(f.topic_a_partition0.topic_partition()).expect("records");
+        assert_eq!(vec![0, 1, 2], records.iter().map(ConsumerRecord::offset).collect::<Vec<_>>());
+        assert!(fetch.take_acknowledged_records().is_empty(), "no gap acknowledgements");
     }
 }
