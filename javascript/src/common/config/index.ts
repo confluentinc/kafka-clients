@@ -19,9 +19,11 @@
 export { SslClientAuth } from './ssl_client_auth';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { ConfigError } from './config_error';
+export { LogLevelConfig } from './log_level_config';
 export { SaslConfigs } from './sasl_configs';
 export { SecurityConfig } from './security_config';
 export { SslConfigs } from './ssl_configs';
+export { TopicConfig } from './topic_config';
 // END GENERATED EXPORTS
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import

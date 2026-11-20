@@ -216,7 +216,7 @@ test('a completion that does not end its count once, last, on every path, or an 
   // Before the JS callback.
   r = run(ending('  cbq_call_end(env, &p->queue);\n  call_ref(env, ctx->done, 1, &arg, NULL);\n  free(ctx);\n') + FLUSH + CLOSE);
   assert.deepEqual(findings(r), [
-    'native/producer.c:1: the completion flush_on_complete calls cbq_call_end (line 2) before its end or under a condition: it is the last statement of the body, after the JS callback, and only producer_release may follow it',
+    'native/producer.c:1: the completion flush_on_complete calls cbq_call_end (line 2) before its end or under a condition: it is the last statement of the body, after the JS callback, and only producer_release, admin_release may follow it',
   ]);
   // Under a condition, braced or not.
   /** @type {[string, number][]} */
@@ -227,7 +227,7 @@ test('a completion that does not end its count once, last, on every path, or an 
   for (const [body, line] of conditions) {
     r = run(ending(body) + FLUSH + CLOSE);
     assert.deepEqual(findings(r), [
-      `native/producer.c:1: the completion flush_on_complete calls cbq_call_end (line ${line}) before its end or under a condition: it is the last statement of the body, after the JS callback, and only producer_release may follow it`,
+      `native/producer.c:1: the completion flush_on_complete calls cbq_call_end (line ${line}) before its end or under a condition: it is the last statement of the body, after the JS callback, and only producer_release, admin_release may follow it`,
     ]);
   }
   // An early return skips it.
