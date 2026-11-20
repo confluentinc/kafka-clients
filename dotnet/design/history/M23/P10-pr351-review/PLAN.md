@@ -1,6 +1,6 @@
 # Plan: the owner's decisions on the review of PR #351
 
-Status: in progress.
+Status: done (2026-11-20); `make verify-dotnet` not run (the owner's), not squashed, not pushed.
 
 Milestone 23, Phase 10. Agent number N=133. Mode A (.NET only): no Rust, C ABI, header, Python or proto change, and
 no new P/Invoke. Branch `esabellico/dotnet_async_serdes_and_zero_copy`, at `8be49a80e` (a merge of `origin/master`
@@ -77,4 +77,40 @@ server unit tests, `make -C dotnet test-aot-dotnet` and, if no Docker conflict s
 
 ## Deviations and open items
 
-Filled in at S5.
+**Commits.** `fcd35c814` S0 plan; `b77cf26dc` S1 token defaults; `80f4e9ddb` S2 serializer split; `115e90ea1` S3
+deserializer split; `15a565ed9` S4 rule text (+ fixup `137a254ed`); the S5 commit, this section and `STATUS.md`.
+
+**Public API (breaking for implementers).** `IAsyncSerializer<T>.Serialize(topic, headers, data, token)` became
+`Serialize(topic, data, token = default)`, the headers form moving to the new `IAsyncSerializerWithHeaders<T>`;
+`IAsyncDeserializer<T>.Deserialize(topic, headers, data, token)` became `Deserialize(topic, data, token = default)`,
+the headers form moving to the new `IAsyncDeserializerWithHeaders<T>`; `IAsyncDeserializerWithRetention<T>` now
+extends `IAsyncDeserializerWithHeaders<T>`; `AsyncSerializerExtensions.Serialize` /
+`AsyncDeserializerExtensions.Deserialize` take the headers form for any serde. Every `Configure` and every built-in
+`Async*` method takes `CancellationToken cancellationToken = default`. The ten plain built-in async deserializers and
+every built-in async serializer implement only the form without headers, as their synchronous classes do;
+`AsyncReadOnlyMemoryDeserializer` keeps the headers form (no copy) and gains the plain one (a copy), as
+`ReadOnlyMemoryDeserializer` has both.
+
+**Tokens left without a default** (decision 1's report): `KafkaFuture<T>.Get(CancellationToken)`,
+`KafkaFuture.Get(CancellationToken)` (the `Void` future), `AsyncKafkaFuture<T>.Get(CancellationToken)` and
+`AsyncKafkaFuture.Get(CancellationToken)`. Each sits beside a parameterless `Get()` (and `Get(TimeSpan)`), so a
+default would make `Get()` ambiguous (CS0121) and break §3 Java names rule 8 (an overload per member). No other public
+method in `src/` has a token without a default.
+
+**Rule text (decision 4).** P7's R1, R3, R4 and R5 and P8's R1–R7, R9, R10, R13 and R14 applied as written. P7's R2
+written as decisions 1–3 make it, with P8's R11 added and adjusted to decision 1 (`Configure`'s token optional on the
+interface too, superseding ledger 572). P8's R8 applied with the async serde interfaces, and the `AsyncMockProducer`
+/ `AsyncMockConsumer` constructors of the same sketches corrected to them. Beyond the drafts, three lines still
+calling keep-alive deferred were brought in line with P7's R1 (`dotnet/CLAUDE.md` §3's `byte[]` row and §4's
+**Key/value type** row; `ffi-marshalling.md`'s `ConsumerRecords_t` row), and the §3 `Serdes` sketch gained the
+async interfaces. P8's R12: `README.md` now also describes the async headers interfaces and retention's form.
+
+**Gates (S5).** Native library debug (`-p:CargoProfileDir=debug`). `Confluent.Kafka.sln` Release 0 warnings / 0
+errors; unit tests net8.0 and net10.0 `Passed: 9635, Skipped: 51, Failed: 0`; gRPC server unit tests 254 passed
+(directly and through `make -C dotnet test-grpc-server-dotnet`, which needs no Docker); `dotnet format
+--verify-no-changes` clean; `make -C dotnet test-aot-dotnet` "all passed" on net8.0 and net10.0, with no change to
+AotSmoke's expected texts. Integration tests (Docker) were not run in this phase; the broker path of the consumers'
+form choice is the same `NativeConsumer.PollWithCallback` the new unit tests drive.
+
+**Open.** `make verify-dotnet`, squash and push are the owner's. The minor findings of `COMMENTS.131.md` are
+untouched, as decided. No Critic loop was run for this phase.
