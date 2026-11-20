@@ -254,10 +254,11 @@ mod grpc_backends {
     /// Consumer twin of [`producer_with_log`].
     async fn consumer_with_log(
         channel: &Channel,
+        untimed_channel: &Channel,
         config: HashMap<String, String>,
         backend: &'static str,
     ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-        let consumer = MultilanguageConsumer::new(channel.clone(), config, backend).await?;
+        let consumer = MultilanguageConsumer::new(channel.clone(), untimed_channel.clone(), config, backend).await?;
         let log = ConsumerCallbackLog::Grpc(ConsumerLog::new(channel.clone(), consumer.consumer_id(), backend));
         Ok((Box::new(consumer), log))
     }
@@ -309,7 +310,8 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
-                MultilanguageConsumer::new(self.channel.clone(), config, "python").await?,
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "python")
+                    .await?,
             ))
         }
 
@@ -317,7 +319,7 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-            consumer_with_log(&self.channel, config, "python").await
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "python").await
         }
 
         fn name(&self) -> &'static str {
@@ -396,7 +398,8 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
-                MultilanguageConsumer::new(self.channel.clone(), config, "python_async").await?,
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "python_async")
+                    .await?,
             ))
         }
 
@@ -404,7 +407,7 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-            consumer_with_log(&self.channel, config, "python_async").await
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "python_async").await
         }
 
         fn name(&self) -> &'static str {
@@ -480,14 +483,16 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
-            Ok(Box::new(MultilanguageConsumer::new(self.channel.clone(), config, "c").await?))
+            Ok(Box::new(
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "c").await?,
+            ))
         }
 
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-            consumer_with_log(&self.channel, config, "c").await
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "c").await
         }
 
         fn name(&self) -> &'static str {
@@ -550,7 +555,8 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
-                MultilanguageConsumer::new(self.channel.clone(), config, "dotnet").await?,
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "dotnet")
+                    .await?,
             ))
         }
 
@@ -558,7 +564,7 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-            consumer_with_log(&self.channel, config, "dotnet").await
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "dotnet").await
         }
 
         fn name(&self) -> &'static str {
@@ -620,7 +626,8 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
-                MultilanguageConsumer::new(self.channel.clone(), config, "dotnet_async").await?,
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "dotnet_async")
+                    .await?,
             ))
         }
 
@@ -628,7 +635,7 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-            consumer_with_log(&self.channel, config, "dotnet_async").await
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "dotnet_async").await
         }
 
         fn name(&self) -> &'static str {
