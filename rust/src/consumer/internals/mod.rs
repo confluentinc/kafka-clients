@@ -28,7 +28,7 @@ mod acknowledgement_batch;
 mod acknowledgement_commit_callback_handler;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3a on")
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P7 on")
 )]
 mod acknowledgements;
 mod async_kafka_consumer;
@@ -122,12 +122,12 @@ mod share_fetch_buffer;
 mod share_fetch_collector;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P3b on")
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P5a on")
 )]
 mod share_fetch_config;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P6 on")
+    expect(dead_code, reason = "the share consumer uses it from Milestone 18 P5a on")
 )]
 mod share_fetch_metrics_aggregator;
 #[cfg_attr(

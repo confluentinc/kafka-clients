@@ -181,3 +181,246 @@ Rust-only: `metadata_arc` and `Deref<Target = Metadata>` stand in for Java's
 | `ShareConsumerMetadata` | 5 | 5 | 0 |
 
 No unmapped method.
+
+## P3a
+
+### `ShareFetchConfig` (`share_fetch_config.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareFetchConfig(int, int, int, int, int, boolean, String, IsolationLevel, ShareAcquireMode)` | `ShareFetchConfig::new` |
+| `ShareFetchConfig(ConsumerConfig)` | `ShareFetchConfig::with_consumer_config` (isolation level through `ConsumerUtils::configured_isolation_level`, acquire mode through `ShareAcquireMode::of`) |
+| `toString()` | `impl Display` |
+| public final fields `minBytes` … `shareAcquireMode` | `pub` fields on the crate-private struct, as `FetchConfig` |
+
+### `ShareSessionHandler` (`share_session_handler.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareSessionHandler(LogContext, int, Uuid)` | `ShareSessionHandler::new(node, member_id)` (the `LogContext` is dropped; `log` crate) |
+| `sessionPartitionMap()` | `ShareSessionHandler::session_partition_map` |
+| `addPartitionToFetch(TopicIdPartition, Acknowledgements)` | `ShareSessionHandler::add_partition_to_fetch` (`Option<Acknowledgements>` for the nullable argument) |
+| `addPartitionToAcknowledgeOnly(TopicIdPartition, Acknowledgements)` | `ShareSessionHandler::add_partition_to_acknowledge_only` |
+| `isNewSession()` | `ShareSessionHandler::is_new_session` |
+| `isSessionEmpty()` | `ShareSessionHandler::is_session_empty` |
+| `newShareFetchBuilder(String, ShareFetchConfig, boolean)` | `ShareSessionHandler::new_share_fetch_builder` (`None` for Java's `null`) |
+| `newShareAcknowledgeBuilder(String)` | `ShareSessionHandler::new_share_acknowledge_builder` (`None` for Java's `null`) |
+| `topicIdPartitionsToLogString(Collection)` (private) | `ShareSessionHandler::topic_id_partitions_to_log_string` |
+| `handleResponse(ShareFetchResponse, short)` | `ShareSessionHandler::handle_response_with_share_fetch_response` (CLAUDE.md §2: same parameter name, different type) |
+| `handleResponse(ShareAcknowledgeResponse, short)` | `ShareSessionHandler::handle_response_with_share_acknowledge_response` |
+| `notifyClose()` | `ShareSessionHandler::notify_close` |
+| `handleError(Throwable)` | `ShareSessionHandler::handle_error(&Error)` |
+
+### `ShareInFlightBatch` (`share_in_flight_batch.rs`)
+
+The record objects Java keeps are offset → delivery-count entries (D5 option
+(c)); a renewed record is decoded again behind the private seam
+`redeliver_record`.
+
+| Java method | Rust |
+|---|---|
+| `ShareInFlightBatch(int, TopicIdPartition, Optional<Integer>)` | `ShareInFlightBatch::new` |
+| `addAcknowledgement(long, AcknowledgeType)` | `ShareInFlightBatch::add_acknowledgement` |
+| `acknowledge(ConsumerRecord, AcknowledgeType)` | `ShareInFlightBatch::acknowledge` (`Err(IllegalStateError)` with Java's text) |
+| `acknowledgeAll(AcknowledgeType)` | `ShareInFlightBatch::acknowledge_all` |
+| `checkAllInFlightAreAcknowledged()` | `ShareInFlightBatch::check_all_in_flight_are_acknowledged` |
+| `addRecord(ConsumerRecord)` | `ShareInFlightBatch::add_record` |
+| `addGap(long)` | `ShareInFlightBatch::add_gap` |
+| `isInFlight(long)` | `ShareInFlightBatch::is_in_flight` |
+| `getInFlightRecords()` | `ShareInFlightBatch::in_flight_records` (hands each record out once; see the type's doc) |
+| `numRecords()` | `ShareInFlightBatch::num_records` |
+| `nodeId()` | `ShareInFlightBatch::node_id` |
+| `takeAcknowledgedRecords()` | `ShareInFlightBatch::take_acknowledged_records` (also applies the copy-on-renew memory policy) |
+| `renew(Acknowledgements)` | `ShareInFlightBatch::renew` (`Err(IllegalStateError)` with Java's text) |
+| `hasRenewals()` | `ShareInFlightBatch::has_renewals` |
+| `takeRenewals()` | `ShareInFlightBatch::take_renewals(&Deserializers)` (async: redelivers through the seam) |
+| `getAcknowledgements()` | `ShareInFlightBatch::acknowledgements` |
+| `getAcquisitionLockTimeoutMs()` | `ShareInFlightBatch::acquisition_lock_timeout_ms` |
+| `isEmpty()` | `ShareInFlightBatch::is_empty` |
+| `setException(ShareInFlightBatchException)` | `ShareInFlightBatch::set_error` |
+| `getException()` | `ShareInFlightBatch::error` |
+| `setHasCachedException(boolean)` | `ShareInFlightBatch::set_has_cached_error` |
+| `hasCachedException()` | `ShareInFlightBatch::has_cached_error` |
+
+Rust-only: `set_record_batches` (the seam's input from `ShareCompletedFetch`),
+`redeliver_record` (the seam), `retain_record_batches_for_redelivery` (memory
+policy), `release_after_failed_delivery`, `status` + `ShareInFlightBatchStatus`
+(Java shares the batch with `ShareCompletedFetch#deliveredBatch`),
+`publish_status`; `corrupt_batch_error` (Java's
+`ShareCompletedFetch#maybeEnsureValid` text, shared with the redelivery decoder).
+
+### `ShareInFlightBatchException` (`consumer_share_in_flight_batch_error.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareInFlightBatchException(KafkaException, Set<Long>)` | `ConsumerShareInFlightBatchError::new` |
+| `cause()` | `ConsumerShareInFlightBatchError::cause` |
+| `offsets()` | `ConsumerShareInFlightBatchError::offsets` |
+
+### `ShareCompletedFetch` (`share_completed_fetch.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareCompletedFetch(LogContext, BufferSupplier, int, TopicIdPartition, PartitionData, Optional<Integer>, ShareFetchMetricsAggregator, short)` | `ShareCompletedFetch::new` (`LogContext` dropped) |
+| `buildAcquiredRecordList(List)` (private) | `ShareCompletedFetch::build_acquired_record_list` (preallocation capped at 65 536) |
+| `isInitialized()` | `ShareCompletedFetch::is_initialized` |
+| `setInitialized()` | `ShareCompletedFetch::set_initialized` |
+| `isConsumed()` | `ShareCompletedFetch::is_consumed` |
+| `trackDeliveredBatch(ShareInFlightBatch)` | `ShareCompletedFetch::track_delivered_batch` (takes the batch's `ShareInFlightBatchStatus`) |
+| `hasPendingAcknowledgements()` | `ShareCompletedFetch::has_pending_acknowledgements` |
+| `drain()` | `ShareCompletedFetch::drain` (also drops the cursor, releasing this fetch's hold on the response) |
+| `recordAggregatedMetrics(int, int)` | `ShareCompletedFetch::record_aggregated_metrics` |
+| `fetchRecords(Deserializers, int, boolean)` | `ShareCompletedFetch::fetch_records` (async; the `try` body is `fetch_records_loop`) |
+| `initializeNextAcquired()` (private) | `ShareCompletedFetch::initialize_next_acquired` |
+| `nextAcquiredRecord()` (private) | `ShareCompletedFetch::next_acquired_record` |
+| `rejectRecordBatch(ShareInFlightBatch, RecordBatch)` (private) | `ShareCompletedFetch::reject_record_batch` (reads the current batch from the fetch) |
+| `parseRecord(Deserializers, TopicIdPartition, Optional, TimestampType, Record, short)` | `batch_cursor::parse_record` (shared with `CompletedFetch`), called with the delivery count |
+| `newRecordDeserializationException(...)` (private static) | `batch_cursor::wrap_deserialization_error` with tail `"The record has been released."` |
+| `nextFetchedRecord(boolean)` (private) | `ShareCompletedFetch::next_fetched_record` |
+| `maybeLeaderEpoch(int)` (private) | `batch_cursor::maybe_leader_epoch` |
+| `maybeEnsureValid(RecordBatch, boolean)` (private) | `ShareCompletedFetch::maybe_ensure_valid` (+ `BatchCursor::ensure_valid`) |
+| `maybeEnsureValid(Record, boolean)` (private) | none: `DefaultRecord#ensureValid` is a no-op for v2 records, and v0/v1 batches are refused by the decoder (consumer D7) |
+| `maybeCloseRecordStream()` (private) | `ShareCompletedFetch::maybe_close_record_stream` |
+| `OffsetAndDeliveryCount` (nested, `toString`) | `(i64, i16)` tuples; the `toString` is never called |
+
+Rust-only: `records_size` (the collector's trace line), `consume_current_record`
+(Java's `records.next()` consumes on read; here on parse return, cancel-safe),
+`skip_current_batch` (leaves a failed batch unread).
+
+### `CompletedFetch` decoder extraction (`batch_cursor.rs`, behaviour-neutral)
+
+| Moved from `completed_fetch.rs` | Now |
+|---|---|
+| `BatchMetadata`, `BatchCursor`, `RecordSource`, `PendingRecordSource`, `RecordStream` | `batch_cursor.rs`, same bodies (`BatchMetadata` gains `batch_start`/`batch_end`) |
+| `CompletedFetch::{read_current_record, ensure_none_remaining, peek_current_record, advance_record_cursor, current_record_source_bytes}` | `BatchCursor` methods taking the partition; `CompletedFetch` keeps thin wrappers |
+| `CompletedFetch::load_next_batch` phases 1 and 3 | `BatchCursor::next_batch` / `BatchCursor::install_batch`; READ_COMMITTED stays in `CompletedFetch` |
+| `CompletedFetch::maybe_close_record_stream` body | `BatchCursor::close_record_stream` |
+| the per-record parse in `fetch_records_loop` | `batch_cursor::parse_record` |
+| `wrap_deserialization_error`, `premature_eof_error`, `record_size_is_premature_eof`, `read_record`, `records_remaining_error`, `raw_base_offset`, `maybe_leader_epoch` | `batch_cursor.rs` |
+
+## P3b
+
+### `ShareFetch` (`share_fetch.rs`)
+
+| Java method | Rust |
+|---|---|
+| `empty()` | `ShareFetch::empty` |
+| `ShareFetch(Map, Optional)` (private) | folded into `empty`, its only caller |
+| `add(TopicIdPartition, ShareInFlightBatch)` | `ShareFetch::add` |
+| `records()` | `ShareFetch::records` (owned map; records handed out once) |
+| `numRecords()` | `ShareFetch::num_records` |
+| `isEmpty()` | `ShareFetch::is_empty` |
+| `acquisitionLockTimeoutMs()` | `ShareFetch::acquisition_lock_timeout_ms` |
+| `hasRenewals()` | `ShareFetch::has_renewals` |
+| `takeRenewedRecords()` | `ShareFetch::take_renewed_records(&Deserializers)` (async, `Result`: redelivery failure when nothing is in flight) |
+| `acknowledge(ConsumerRecord, AcknowledgeType)` | `ShareFetch::acknowledge_with_record` |
+| `acknowledge(String, int, long, AcknowledgeType)` | `ShareFetch::acknowledge_with_topic_partition_offset` |
+| `acknowledgeAll(AcknowledgeType)` | `ShareFetch::acknowledge_all` |
+| `checkAllInFlightAreAcknowledged()` | `ShareFetch::check_all_in_flight_are_acknowledged` |
+| `takeAcknowledgedRecords()` | `ShareFetch::take_acknowledged_records` (`IndexMap`, R5) |
+| `renew(Map, Optional)` | `ShareFetch::renew` |
+
+### `ShareFetchException` (`consumer_share_fetch_error.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareFetchException(ShareFetch, KafkaException)` | `ConsumerShareFetchError::new` |
+| `shareFetch()` | `ConsumerShareFetchError::share_fetch` |
+| `cause()` | `ConsumerShareFetchError::cause` |
+
+Rust-only: `into_parts` (P7's `currentFetch = e.shareFetch(); throw e.cause();` by value).
+
+### `ShareFetchBuffer` (`share_fetch_buffer.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareFetchBuffer(LogContext)` | `ShareFetchBuffer::new` (`LogContext` dropped) |
+| `isEmpty()` | `ShareFetchBuffer::is_empty` |
+| `add(List)` | `ShareFetchBuffer::add` |
+| `nextInLineFetch()` | `ShareFetchBuffer::next_in_line_fetch(f)` (calls `f` with the reference under the lock) |
+| `setNextInLineFetch(ShareCompletedFetch)` | `ShareFetchBuffer::set_next_in_line_fetch` |
+| `peek()` | `ShareFetchBuffer::peek(f)` |
+| `poll()` | `ShareFetchBuffer::poll` |
+| `awaitNotEmpty(Timer)` | `ShareFetchBuffer::await_not_empty(Duration)` (async) |
+| `wakeup()` | `ShareFetchBuffer::wakeup` |
+| `bufferedPartitions()` | `ShareFetchBuffer::buffered_partitions` |
+| `bufferedNodes()` | `ShareFetchBuffer::buffered_nodes` |
+| `prunePendingAcknowledgementFetches()` (private) | `ShareFetchBuffer::prune_pending_acknowledgement_fetches` |
+| `drainAll()` (private) | `ShareFetchBuffer::drain_all` |
+| `close()` | `ShareFetchBuffer::close` (closed flag for `IdempotentCloser`, G14) |
+
+Rust-only: `take_next_in_line_fetch`, `poll_checked_out`, `push_front`,
+`clear_checked_out` (the collector reads a fetch out of the lock; the
+checked-out marker keeps it buffered, as Java's in-place read does).
+
+### `ShareFetchCollector` (`share_fetch_collector.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareFetchCollector(LogContext, ShareConsumerMetadata, SubscriptionState, ShareFetchConfig, Deserializers)` | `ShareFetchCollector::new` (`LogContext` dropped; `Arc<Deserializers>` shared with the consumer, as `FetchCollector`) |
+| `collect(ShareFetchBuffer)` | `ShareFetchCollector::collect` (async; the `try` body is `collect_into`) |
+| `initialize(ShareCompletedFetch)` (protected) | `ShareFetchCollector::initialize` (returns whether to read the fetch; Java returns it or `null`) |
+| `handleInitializeSuccess(ShareCompletedFetch)` (private) | `ShareFetchCollector::handle_initialize_success` |
+| `handleInitializeErrors(ShareCompletedFetch, Errors)` (private) | `ShareFetchCollector::handle_initialize_errors` |
+
+Rust-only: `request_metadata_update` (forwards to `FetchUtils`, now taking
+`&Metadata` as Java's does), `CheckedOut` (drop guard), the test-only
+`set_force_initialize_error` (Java's anonymous `initialize` overrides).
+
+### `ShareFetchMetricsRegistry` (`share_fetch_metrics_registry.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareFetchMetricsRegistry()` | `ShareFetchMetricsRegistry::new` |
+| `ShareFetchMetricsRegistry(String)` | `ShareFetchMetricsRegistry::with_metric_grp_prefix` |
+| `ShareFetchMetricsRegistry(Set, String)` | `ShareFetchMetricsRegistry::with_tags_metric_grp_prefix` (`IndexSet`, as `FetchMetricsRegistry::new`) |
+| 18 public `MetricNameTemplate` fields | `pub(crate)` fields with the same snake_case names (the type is crate-private) |
+
+### `ShareFetchMetricsManager` (`share_fetch_metrics_manager.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareFetchMetricsManager(Metrics, ShareFetchMetricsRegistry)` | `ShareFetchMetricsManager::new` |
+| `ShareFetchMetricsManager(MetricsLedger, ShareFetchMetricsRegistry)` (private) | folded into `new`, its only caller |
+| `throttleTimeSensor()` | `ShareFetchMetricsManager::throttle_time_sensor` |
+| `recordLatency(String, long)` | `ShareFetchMetricsManager::record_latency` |
+| `recordBytesFetched(int)` | `ShareFetchMetricsManager::record_bytes_fetched` |
+| `recordRecordsFetched(int)` | `ShareFetchMetricsManager::record_records_fetched` |
+| `recordAcknowledgementSent(int)` | `ShareFetchMetricsManager::record_acknowledgement_sent` |
+| `recordFailedAcknowledgements(int)` | `ShareFetchMetricsManager::record_failed_acknowledgements` |
+| `close()` (inherited from `AbstractConsumerMetricsManager`) | `ShareFetchMetricsManager::close` (forwards to the composed base) |
+
+### `ShareFetchMetricsAggregator` (`share_fetch_metrics_aggregator.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareFetchMetricsAggregator(ShareFetchMetricsManager, Set)` | `ShareFetchMetricsAggregator::new` |
+| `record(TopicPartition, int, int)` | `ShareFetchMetricsAggregator::record` |
+| `maybeRecordMetrics(TopicPartition)` (private) | `ShareFetchMetricsAggregator::maybe_record_metrics` (returns the totals so `record` writes them outside the lock) |
+| `FetchMetrics#increment(int, int)` (nested, private) | `FetchMetrics::increment` |
+
+### `ConsumerUtils` (G4, `consumer_utils.rs`)
+
+| Java method | Rust |
+|---|---|
+| `createShareFetchMetricsManager(Metrics)` | `ConsumerUtils::create_share_fetch_metrics_manager` |
+
+### Summary (P3a + P3b)
+
+| Class | Java methods | Mapped to a Rust function | No Rust function, with reason |
+|---|---|---|---|
+| `ShareFetchConfig` | 3 (+ fields) | 3 | 0 |
+| `ShareSessionHandler` | 13 | 13 | 0 |
+| `ShareInFlightBatch` | 22 | 22 | 0 |
+| `ShareInFlightBatchException` | 3 | 3 | 0 |
+| `ShareCompletedFetch` (+ `OffsetAndDeliveryCount`) | 21 | 19 | 2: `maybeEnsureValid(Record, boolean)` (no-op for v2), `OffsetAndDeliveryCount#toString` (a tuple; never called) |
+| `ShareFetch` | 15 | 14 | 1: private constructor folded into `empty` |
+| `ShareFetchException` | 3 | 3 | 0 |
+| `ShareFetchBuffer` | 14 | 14 | 0 |
+| `ShareFetchCollector` | 5 | 5 | 0 |
+| `ShareFetchMetricsRegistry` | 3 | 3 | 0 (the 18 fields map to fields) |
+| `ShareFetchMetricsManager` | 9 | 8 | 1: private constructor folded into `new` |
+| `ShareFetchMetricsAggregator` (+ `FetchMetrics`) | 4 | 4 | 0 |
+| `ConsumerUtils#createShareFetchMetricsManager` | 1 | 1 | 0 |
+
+No unmapped method.
