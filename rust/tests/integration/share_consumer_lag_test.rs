@@ -24,6 +24,16 @@
 //! broker, so they run on a dedicated three-broker `Type::Kraft` cluster with
 //! Java's per-test `serverProperties` added to the class defaults, as Java's
 //! `@ClusterTest` merges them.
+//!
+//! # Broker-version gate
+//!
+//! `testSharePartitionLagAfterAlterShareGroupOffsets` needs a 4.3+ broker
+//! ([`SHARE_LAG_AFTER_ALTER_RELEASE`]). Java added it with the broker fix
+//! KAFKA-20034 (4.3.0): before it, a share partition whose start offset is
+//! altered keeps an unknown delivery-complete count, so `listShareGroupOffsets`
+//! reports no lag (`Lag` -1) until consumption resumes, and the test's
+//! `verifySharePartitionLag(..., 65)` cannot hold. Observed on 4.2.0: start
+//! offset 40, lag absent; on 4.4.0 lag 65.
 
 use std::collections::HashMap;
 
@@ -38,6 +48,11 @@ use crate::common::cluster_config::ClusterConfig;
 
 /// `Topic#GROUP_METADATA_TOPIC_NAME`.
 const GROUP_METADATA_TOPIC_NAME: &str = "__consumer_offsets";
+
+/// The broker release with KAFKA-20034 (`PartitionFactory`,
+/// `ShareGroupOffset`): an altered start offset initializes the share
+/// partition's delivery-complete count to 0, so its lag is known at once (4.3).
+const SHARE_LAG_AFTER_ALTER_RELEASE: (u32, u32) = (4, 3);
 
 /// The record every Java test produces:
 /// `new ProducerRecord<>(topic, partition, null, "key".getBytes(), "Message".getBytes())`.
@@ -362,6 +377,12 @@ async fn share_partition_lag_on_coordinator_movement(coordinator_topic: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_share_partition_lag_after_alter_share_group_offsets() {
+    if skip_below(
+        SHARE_LAG_AFTER_ALTER_RELEASE,
+        "testSharePartitionLagAfterAlterShareGroupOffsets (KAFKA-20034)",
+    ) {
+        return;
+    }
     let base = ShareConsumerTestBase::setup(default_share_cluster_config()).await;
     let group_id = base.group("group1");
     let producer = base.create_producer().await;
