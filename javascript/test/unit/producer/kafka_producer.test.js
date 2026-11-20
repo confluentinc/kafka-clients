@@ -1620,7 +1620,6 @@ test('the preview notice is one ExperimentalWarning per process, which --no-warn
     notices[0],
     /\) ExperimentalWarning: The JavaScript client is in preview and not yet recommended for production use\. The public API is not stable before the GA release and may change\. We welcome your feedback while the design is still open$/,
   );
-  assert.ok(!r.stderr.includes('never closed'), r.stderr);
   r = runNode(script, 30000, ['--no-warnings']);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(!r.stderr.includes('ExperimentalWarning'), r.stderr);

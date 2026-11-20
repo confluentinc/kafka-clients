@@ -404,3 +404,15 @@ rules and readings. Newest entries are at the end; dates are in IST.
     callback task's error; the addon holds its function strongly from the moment it waits, so `clear()` leaves it to
     run, as Java's mock ran the callback of every record it completed; and with `autoComplete` a callback that awaits
     a `send()` it made never settles, the nested record's callback waiting for its turn behind it.
+
+## No warning for a client never closed (decided by the owner, 2026-11-20)
+
+35. **The producer's never-closed warning is removed, and the admin client gets none.** The warning counted the
+    open producers and printed at `process` `'beforeExit'`, but an open producer keeps Node running (entry 33), so
+    `'beforeExit'` never comes while one is open and the warning could never print. Kaushik's inline comment on
+    "Q21: keeping Node running while work is pending" (Confluence, "JavaScript binding design decisions") reads
+    "This case should not happen, because producer is alive", and the owner removed the dead code on 2026-11-20:
+    the count, the `'beforeExit'` hook, the warning and its code `CONFLUENT_KAFKA_PRODUCER_NOT_CLOSED`, with their
+    tests; the preview notice stays. The JS conventions' Lifetime sentence ("…runs until the process exits, with
+    a warning") and their "Not decided yet" row on when and how that warning is logged describe a case that can't
+    happen: marked **(conventions conflict)** in `javascript/CLAUDE.md` ("Threads and liveness") for the rules' owner.
