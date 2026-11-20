@@ -432,6 +432,130 @@ Rust-only: `request_metadata_update` (forwards to `FetchUtils`, now taking
 
 No unmapped method.
 
+## P5
+
+`ShareConsumeRequestManager` and its nested classes are in
+`share_consume_request_manager.rs`; the two event classes pulled forward from
+P6 are under `events/`. A nested class's methods that reach the outer
+instance in Java take the manager as a parameter (`manager`).
+
+### `ShareConsumeRequestManager` (`share_consume_request_manager.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareConsumeRequestManager(Time, LogContext, String, ShareConsumerMetadata, SubscriptionState, ShareFetchConfig, ShareFetchBuffer, ShareAcknowledgementEventHandler, ShareFetchMetricsManager, long, long)` | `ShareConsumeRequestManager::new` (the `LogContext` is the `log` crate) |
+| `poll(long)` | `RequestManager::poll` (runs `handle_completed_requests` first) |
+| `isShareAcquireModeRecordLimit()` (private) | `is_share_acquire_mode_record_limit` |
+| `maybeAddAcknowledgements(ShareSessionHandler, Node, TopicIdPartition, Acknowledgements)` (private) | `maybe_add_acknowledgements` (returns the copy for the session handler instead of `boolean`) |
+| `prepareRemainingSessionHandlerForRequest(Node, ShareSessionHandler, Map)` (private) | `prepare_remaining_session_handler_for_request` |
+| `isSessionCloseCandidate(Node, ShareSessionHandler, Map, Set)` (private) | `is_session_close_candidate` |
+| `nodeHasPendingAcknowledgements(int)` (private) | `node_has_pending_acknowledgements` |
+| `removeSessionHandlersForMissingNodes(Set)` (private) | `remove_session_handlers_for_missing_nodes` |
+| `fetch(Map)` | `fetch` |
+| `processAcknowledgementsMap(Map)` (private) | `process_acknowledgements_map` |
+| `processAcknowledgements(long)` (private) | `process_acknowledgements` (`Option<PollResult>` for Java's nullable) |
+| `isNodeFree(int)` (private) | `is_node_free` |
+| `setAcknowledgementCommitCallbackRegistered(boolean)` | `set_acknowledgement_commit_callback_registered` |
+| `maybeSendShareAcknowledgementEvent(Map, boolean, Optional)` (private) | `maybe_send_share_acknowledgement_event` (takes the map by value) |
+| `maybeBuildRequest(AcknowledgeRequestState, long, boolean, AtomicBoolean)` (private) | `maybe_build_request` (the `finally`) + `do_maybe_build_request` (the `try` body) |
+| `checkAndRemoveCompletedAcknowledgements()` (private) | `check_and_remove_completed_acknowledgements` |
+| `isRequestStateInProgress(AcknowledgeRequestState)` (private) | `is_request_state_in_progress` |
+| `areRequestStatesInProgress(Queue)` (private) | `are_request_states_in_progress` |
+| `commitSync(Map, long)` | `commit_sync` (returns `KafkaFutureImpl<HashMap<..>>`, Java's `CompletableFuture`) |
+| `commitAsync(Map, long)` | `commit_async` |
+| `acknowledgeOnClose(Map, long)` | `acknowledge_on_close` (returns the `close_future` handle) |
+| `handleShareFetchSuccess(Node, ShareFetchRequestData, ClientResponse)` (private) | `handle_share_fetch_success` (`finally`) + `do_handle_share_fetch_success` (`try`) |
+| `handleShareFetchFailure(Node, ShareFetchRequestData, Throwable)` (private) | `handle_share_fetch_failure` |
+| `maybeRemoveSessionHandlerOnClose(int, ShareFetchRequestData)` (private) | `maybe_remove_session_handler_on_close` (takes the epoch, the only field read) |
+| `handleShareAcknowledgeSuccess(Node, ShareAcknowledgeRequestData, AcknowledgeRequestState, ClientResponse, long)` (private) | `handle_share_acknowledge_success` (`finally`) + `do_handle_share_acknowledge_success` (`try`) |
+| `handleShareAcknowledgeFailure(Node, ShareAcknowledgeRequestData, AcknowledgeRequestState, Throwable, long)` (private) | `handle_share_acknowledge_failure` |
+| `handlePartitionError(...)` (private) | `handle_partition_error` |
+| `processRetryLogic(AcknowledgeRequestState, AtomicBoolean, long)` (private) | `process_retry_logic` |
+| `updateLeaderInfoMap(...)` (private) | `update_leader_info_map` |
+| `maybeUpdateLeaderCache(TopicIdPartition, int, int)` (private) | `maybe_update_leader_cache` |
+| `acknowledgementsCannotBeSentError(int, TopicIdPartition)` (private) | `acknowledgements_cannot_be_sent_error` |
+| `lookupTopicId(Uuid, int)` (private) | `lookup_topic_id` (one `topic_names()` snapshot per response) |
+| `partitionsToFetch()` (private) | `partitions_to_fetch` |
+| `sessionHandler(int)` | `session_handler` |
+| `hasCompletedFetches()` | `has_completed_fetches` |
+| `closeInternal()` (protected) | `close_internal` |
+| `close()` | `close` (Java's `IdempotentCloser` is the `closed` flag) |
+| `onMemberEpochUpdated(Optional, String)` | `on_member_epoch_updated` (inherent, `&mut self`) + `impl MemberStateListener for Mutex<ShareConsumeRequestManager>` |
+| `requestStates(int)` | `request_states` |
+| `shareSessionNodeId(TopicIdPartition)` | `share_session_node_id` (test-only in Java too) |
+| `RequestManager#pollOnClose`, `#maximumTimeToWait`, `#signalClose` | not overridden in Java; the `RequestManager` trait defaults apply |
+| *(Rust-only)* | `handle_completed_requests`: runs the `whenComplete` callback bodies (DoD §7: Java runs them inside the network poll); `acknowledgements_by_node`: the grouping loop Java repeats in `commitSync` / `commitAsync` / `acknowledgeOnClose` |
+
+### `ShareConsumeRequestManager.AcknowledgeRequestState`
+
+`extends TimedRequestState`: a `base: TimedRequestState` field; the inherited
+`canSendRequest`, `onSendAttempt`, `onSuccessfulAttempt`, `onFailedAttempt`
+delegate to it.
+
+| Java method | Rust |
+|---|---|
+| `AcknowledgeRequestState(LogContext, String, long, long, long, ShareSessionHandler, int, Map, ResultHandler, AcknowledgeRequestType)` | `AcknowledgeRequestState::new` (takes `&dyn Time`, Java's outer `time`) |
+| `buildRequest()` | `build_request(manager, this)` |
+| `getInFlightAcknowledgementsCount(TopicIdPartition)` | `in_flight_acknowledgements_count` |
+| `getIncompleteAcknowledgementsCount(TopicIdPartition)` | `incomplete_acknowledgements_count` |
+| `getAcknowledgementsToSendCount(TopicIdPartition)` | `acknowledgements_to_send_count` (test-only in Java too) |
+| `isEmpty()` | `is_empty` |
+| `maybeResetTimerAndRequestState()` | `maybe_reset_timer_and_request_state` |
+| `handleAcknowledgeErrorCode(TopicIdPartition, Errors, boolean, Optional)` | `handle_acknowledge_error_code` |
+| `handleAcknowledgeTimedOut(TopicIdPartition)` | `handle_acknowledge_timed_out` (takes the entry out; its only caller clears the map next) |
+| `failPendingAcknowledgementsCannotBeSent()` | `fail_pending_acknowledgements_cannot_be_sent` |
+| `sessionHandler()` | `session_handler` |
+| `processingComplete()` | `processing_complete` |
+| `processPendingInFlightAcknowledgements(KafkaException)` (private) | `process_pending_in_flight_acknowledgements` |
+| `moveAllToIncompleteAcks()` | `move_all_to_incomplete_acks` |
+| `maybeExpire()` | `maybe_expire` |
+| `moveToIncompleteAcks(TopicIdPartition)` | `move_to_incomplete_acks` |
+| `isCloseRequest()` | `is_close_request` |
+
+### `ShareConsumeRequestManager.ResultHandler`, `Tuple`, `IdAndPartition`, `LeaderIdAndEpoch`, `AcknowledgeRequestType`
+
+| Java method | Rust |
+|---|---|
+| `ResultHandler(Optional)` | `ResultHandler::new` |
+| `ResultHandler(AtomicInteger, Optional)` | `ResultHandler::with_remaining_results_future` |
+| `ResultHandler#complete(TopicIdPartition, Acknowledgements, AcknowledgeRequestType, boolean, Optional)` | `ResultHandler::complete(manager, ..)` |
+| `ResultHandler#completeIfEmpty()` | `ResultHandler::complete_if_empty` |
+| `Tuple(V, Queue, V)` | `Tuple::new` |
+| `Tuple#setAsyncRequest`, `#nullifySyncRequestQueue`, `#addSyncRequest`, `#setCloseRequest` | `set_async_request`, `nullify_sync_request_queue`, `add_sync_request`, `set_close_request` |
+| `Tuple#getAsyncRequest`, `#getSyncRequestQueue`, `#getCloseRequest` | `async_request`, `sync_request_queue`, `close_request` |
+| `IdAndPartition(Uuid, int)` | `IdAndPartition::new` |
+| `IdAndPartition#hashCode`, `#equals` | `#[derive(Hash, PartialEq, Eq)]` |
+| `LeaderIdAndEpoch(int, int)` | `LeaderIdAndEpoch::new` |
+| `AcknowledgeRequestType` constants, `id` field | enum variants, `AcknowledgeRequestType::id` |
+| `AcknowledgeRequestType(byte)` (enum constructor) | none: a Rust enum has no constructor |
+| `AcknowledgeRequestType#toString()` | `impl Display` (lower-case name) |
+
+### `ShareAcknowledgementEvent` / `ShareAcknowledgementEventHandler` (`events/`, pulled forward from P6)
+
+| Java method | Rust |
+|---|---|
+| `ShareAcknowledgementEvent(Map, boolean, Optional)` | `ShareAcknowledgementEvent::new` (takes the map by value; Java's `Map.copyOf`) |
+| `acknowledgementsMap()`, `checkForRenewAcknowledgements()`, `acquisitionLockTimeoutMs()` | same names, snake_case |
+| `ShareAcknowledgementEventHandler(BlockingQueue)` | `ShareAcknowledgementEventHandler::new` (owns the channel) |
+| `add(ShareAcknowledgementEvent)` | `add` |
+| `drainEvents()` | `drain_events` |
+
+### Summary
+
+| Class | Java methods | Mapped to a Rust function | No Rust function, with reason |
+|---|---|---|---|
+| `ShareConsumeRequestManager` | 40 (+ 3 inherited defaults) | 40 | 0 (the 3 defaults are not overridden in Java) |
+| `AcknowledgeRequestState` | 17 | 17 | 0 |
+| `ResultHandler` | 4 | 4 | 0 |
+| `Tuple` | 8 | 8 | 0 |
+| `IdAndPartition` | 3 | 3 (2 by derive) | 0 |
+| `LeaderIdAndEpoch` | 1 | 1 | 0 |
+| `AcknowledgeRequestType` | 2 (+ constructor) | 2 | 1: the enum constructor |
+| `ShareAcknowledgementEvent` | 4 | 4 | 0 |
+| `ShareAcknowledgementEventHandler` | 3 | 3 | 0 |
+
+No unmapped method.
+
 ## P9
 
 Admin share-group RPCs (`org.apache.kafka.clients.admin`). Paths are under
