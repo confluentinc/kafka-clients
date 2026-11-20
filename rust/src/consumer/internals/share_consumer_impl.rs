@@ -2590,13 +2590,15 @@ mod tests {
         f.poll(Duration::ZERO).await.expect("the wakeup was raised once");
     }
 
-    /// Rust-only: `close` starts with Java's `disableWakeups()`. A wakeup
-    /// pending when it starts is discarded and a later one does nothing, which
-    /// is what keeps `wakeup()` from interrupting close. A dropped `close`
-    /// leaves the consumer open (PLAN §8.1 row 19), so the next `poll` shows
-    /// both: it is not woken up.
+    /// Rust-only: pins the current behaviour that wakeups are disabled once
+    /// `close` starts (`disable()` runs before close's first `.await`, as
+    /// Java's `disableWakeups()` is close's first step). A wakeup pending when
+    /// `close` starts is discarded, and later ones, also through the handle, do
+    /// nothing. Java's `close` cannot be abandoned; here a dropped `close`
+    /// leaves the consumer open with wakeups still disabled (PLAN §8.1 row 19,
+    /// an open question for the user), which is how the next `poll` observes it.
     #[tokio::test]
-    async fn close_disables_wakeups() {
+    async fn wakeup_is_disabled_once_close_starts() {
         let mut f = new_consumer();
         f.stub_collect(ShareFetch::empty);
         f.responder.complete_share_subscription_change = true;

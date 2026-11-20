@@ -373,6 +373,14 @@ where
     /// - `Error::is_interrupt_error` if the thread is interrupted before or while this method is
     ///   called
     /// - `Error::is_kafka_error` for any other error during close
+    ///
+    /// # Translation notes
+    ///
+    /// Wakeups are disabled once `close` starts. A `close` future dropped before
+    /// it completes, for example by `tokio::time::timeout`, leaves the consumer
+    /// open with wakeups still disabled: `wakeup`, also through a
+    /// [`ShareConsumerHandle`], then has no effect. Call `close` again to finish
+    /// closing.
     #[doc(alias = "org.apache.kafka.clients.consumer.ShareConsumer#close()")]
     fn close(&mut self) -> impl Future<Output = Result<(), Error>> + Send;
 
@@ -408,6 +416,14 @@ where
     /// - `Error::is_interrupt_error` if the thread is interrupted before or while this method is
     ///   called
     /// - `Error::is_kafka_error` for any other error during close
+    ///
+    /// # Translation notes
+    ///
+    /// Wakeups are disabled once `close` starts. A `close` future dropped before
+    /// it completes, for example by `tokio::time::timeout`, leaves the consumer
+    /// open with wakeups still disabled: `wakeup`, also through a
+    /// [`ShareConsumerHandle`], then has no effect. Call `close` again to finish
+    /// closing.
     #[doc(alias = "org.apache.kafka.clients.consumer.ShareConsumer#close(Duration)")]
     fn close_with_timeout(&mut self, timeout: Duration) -> impl Future<Output = Result<(), Error>> + Send;
 

@@ -50,7 +50,10 @@ use crate::consumer::internals::WakeupTrigger;
 /// from inside the acknowledgement commit callback
 /// (`ShareConsumerImpl#acquire`), so there is no callback reentrancy to
 /// support. Clones share the consumer, and the handle stays usable after the
-/// consumer is closed or dropped, where `wakeup` then does nothing.
+/// consumer is closed or dropped. `wakeup` does nothing once the consumer's
+/// `close` has started, including a `close` that was dropped before it
+/// finished and left the consumer open (call `close` again to finish it),
+/// and after the consumer is dropped.
 // D6: `poll` holds `&mut self`, so `wakeup(&self)` on the consumer is not
 // reachable from a second thread during the poll (PLAN §7.1).
 #[derive(Clone)]
@@ -91,6 +94,10 @@ impl ShareConsumerHandle {
     /// consumer itself does: the call blocking in `poll` or `commit_sync` returns the
     /// `WakeupError` (predicate `is_wakeup_error`), or, with no such call in
     /// progress, the next one does.
+    ///
+    /// It has no effect once the consumer's `close` has started, even when
+    /// that `close` was dropped before it finished and the consumer is still
+    /// open, as on the consumer itself.
     pub fn wakeup(&self) {
         match &self.inner {
             ShareConsumerHandleInner::Impl(wakeup_trigger) => wakeup_trigger.wakeup(),
