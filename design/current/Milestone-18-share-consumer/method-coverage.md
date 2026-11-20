@@ -556,6 +556,141 @@ delegate to it.
 
 No unmapped method.
 
+## P6
+
+The eight share application events are `ApplicationEvent` variants in
+`events/application_event.rs` (the consumer's one-enum translation of the
+`ApplicationEvent` hierarchy); a Java field is a variant field, and an
+accessor of a field is the field read by the `match` that destructures the
+variant. A completable event's `deadlineMs()` and `future()` are its
+`handle` (`CompletableEventHandle::deadline_ms`, the handle itself). Java's
+`toStringBase()` overrides have no Rust function: as for every consumer
+event, `Display` prints the variant name (`ApplicationEvent::type_name`).
+
+### `SharePollEvent` (`ApplicationEvent::SharePoll`)
+
+| Java method | Rust |
+|---|---|
+| `SharePollEvent(long, long)` | the variant (`deadline_ms`, `poll_time_ms`, `is_complete`) |
+| `deadlineMs()`, `pollTimeMs()` | the fields |
+| `isComplete()` | `is_complete.load(..)`: the application side keeps a clone of the `Arc<AtomicBool>` (P7) |
+| `completeSuccessfully()` | `is_complete.store(true, ..)` in `ApplicationEventProcessor::process_share_poll` |
+| `isExpired(Time)` | none: the event moves to the background task, so the application side compares the deadline it kept (P7, as `AsyncKafkaConsumer`'s `InflightPoll` does for `AsyncPollEvent`) |
+| `toStringBase()` | `Display` (variant name) |
+
+### `ShareFetchEvent`, `ShareAcknowledgeAsyncEvent`, `ShareAcknowledgementCommitCallbackRegistrationEvent`
+
+| Java method | Rust |
+|---|---|
+| `ShareFetchEvent(Map)` | `ApplicationEvent::ShareFetch { acknowledgements_map }` |
+| `ShareFetchEvent#acknowledgementsMap()` | the field |
+| `ShareFetchEvent#toStringBase()` | `Display` (variant name) |
+| `ShareAcknowledgeAsyncEvent(Map, long)` | `ApplicationEvent::ShareAcknowledgeAsync { acknowledgements_map, deadline_ms }` |
+| `ShareAcknowledgeAsyncEvent#acknowledgementsMap()`, `#deadlineMs()` | the fields |
+| `ShareAcknowledgeAsyncEvent#toStringBase()` | `Display` (variant name) |
+| `ShareAcknowledgementCommitCallbackRegistrationEvent(boolean)` | `ApplicationEvent::ShareAcknowledgementCommitCallbackRegistration { is_callback_registered }` |
+| `ShareAcknowledgementCommitCallbackRegistrationEvent#isCallbackRegistered()` | the field |
+
+### `ShareAcknowledgeSyncEvent`, `ShareAcknowledgeOnCloseEvent`, `ShareSubscriptionChangeEvent`, `ShareUnsubscribeEvent`
+
+| Java method | Rust |
+|---|---|
+| `ShareAcknowledgeSyncEvent(Map, long)` | `ApplicationEvent::ShareAcknowledgeSync { handle, acknowledgements_map }` (`CompletableEventHandle<HashMap<TopicIdPartition, Acknowledgements>>`, deadline on the handle) |
+| `ShareAcknowledgeSyncEvent#acknowledgementsMap()` | the field |
+| `ShareAcknowledgeSyncEvent#toStringBase()` | `Display` (variant name) |
+| `ShareAcknowledgeOnCloseEvent(Map, long)` | `ApplicationEvent::ShareAcknowledgeOnClose { handle, acknowledgements_map }` |
+| `ShareAcknowledgeOnCloseEvent#acknowledgementsMap()` | the field |
+| `ShareAcknowledgeOnCloseEvent#toStringBase()` | `Display` (variant name) |
+| `ShareSubscriptionChangeEvent(Collection)` | `ApplicationEvent::ShareSubscriptionChange { handle, topics }` (`HashSet`: Java's `Set.copyOf`; handle deadline `i64::MAX`, Java's `Long.MAX_VALUE`) |
+| `ShareSubscriptionChangeEvent#topics()` | the field |
+| `ShareSubscriptionChangeEvent#toStringBase()` | `Display` (variant name) |
+| `ShareUnsubscribeEvent(long)` | `ApplicationEvent::ShareUnsubscribe { handle }` |
+| `ApplicationEvent.Type` share values (`SHARE_POLL`, …) | the variant discriminants (`ApplicationEvent::type_name`) |
+
+### `ApplicationEventProcessor` (`events/application_event_processor.rs`, share arms)
+
+| Java method | Rust |
+|---|---|
+| `process(ApplicationEvent)`, the eight `SHARE_*` cases | the share arms of `EventProcessor::process`'s `match` |
+| `process(SharePollEvent)` (private) | `process_share_poll` |
+| `process(ShareFetchEvent)` (private) | `process_share_fetch` |
+| `process(ShareAcknowledgeSyncEvent)` (private) | `process_share_acknowledge_sync` |
+| `process(ShareAcknowledgeAsyncEvent)` (private) | `process_share_acknowledge_async` |
+| `process(ShareSubscriptionChangeEvent)` (private) | `process_share_subscription_change` |
+| `process(ShareUnsubscribeEvent)` (private) | `process_share_unsubscribe` |
+| `process(ShareAcknowledgeOnCloseEvent)` (private) | `process_share_acknowledge_on_close` |
+| `process(ShareAcknowledgementCommitCallbackRegistrationEvent)` (private) | `process_share_acknowledgement_commit_callback_registration` |
+| `complete(CompletableFuture)` (private) | `ApplicationEventProcessor::complete` (first use; the consumer arms keep their own `complete_handle_on_leave`) |
+| *(Rust-only)* | `share_heartbeat_membership_manager`, `share_consume_request_manager`: clone the manager out of `RequestManagers` so its lock is released before the call (Java reads the `Optional` fields); `lock`, the poison-tolerant lock of the share consume manager |
+
+### `RequestManagers` (`request_managers.rs`, share members)
+
+| Java member | Rust |
+|---|---|
+| `shareHeartbeatRequestManager`, `shareMembershipManager`, `shareConsumeRequestManager` (fields) | `share_heartbeat`, `share_membership` (`Arc`), `share_consume` (`Arc<Mutex<_>>`) |
+| `RequestManagers(LogContext, ShareConsumeRequestManager, Optional, Optional, Optional)` | `RequestManagers::with_share_consume_request_manager` (`LogContext` dropped) |
+| `supplier(Time, LogContext, ShareAcknowledgementEventHandler, BackgroundEventHandler, ShareConsumerMetadata, SubscriptionState, ShareFetchBuffer, ConsumerConfig, GroupRebalanceConfig, ShareFetchMetricsManager, Optional<ClientTelemetryReporter>, Metrics)` (static) | `RequestManagers::supplier_with_share_acknowledgement_event_handler`: returns the managers, not a `Supplier`; `GroupRebalanceConfig` → `group_id`, `rack_id` (G8); `LogContext`, `ClientTelemetryReporter` and the member-id label update dropped (G16); Rust-only `completion_notify` |
+| `entries()` | `entries` / `for_each_entry`: share heartbeat → share membership → share consume after the (absent) consumer heartbeat |
+| `close()` | `close`, which now also closes the share consume request manager (Java's `Closeable` filter) |
+| *(Rust-only)* | `handle_completed_requests` (routes the hook below), `for_each_entry` (the non-allocating walk `entries` and the hook share) |
+
+### `RequestManager` (`request_manager.rs`) and `ConsumerNetworkThread` (`consumer_network_thread.rs`)
+
+| Java member | Rust |
+|---|---|
+| *(Rust-only)* `RequestManager::handle_completed_requests` | default no-op; overridden by `ShareConsumeRequestManager` and `Arc<Mutex<ShareConsumeRequestManager>>` (DoD §7: Java runs `whenComplete` inside `NetworkClientDelegate#poll`) |
+| `ConsumerNetworkThread#runOnce` | `run_once`: Phase 4.5 calls `RequestManagers::handle_completed_requests` right after the network poll, before `maximumTimeToWait` and the reaper |
+| `ConsumerNetworkThread#sendUnsentRequests` (in `cleanup`) | `cleanup` step 2: the hook after each close poll |
+
+### `ShareConsumeRequestManager` and `ShareMembershipManager` (P6 additions)
+
+| Java member | Rust |
+|---|---|
+| `ShareConsumeRequestManager` as a `RequestManagers` entry | *(Rust-only)* `impl RequestManager for Arc<Mutex<ShareConsumeRequestManager>>` (each method locks for the call; `signal_close` keeps the default, as Java's manager does not override it) |
+| `ShareConsumeRequestManager` `whenComplete` bodies | `RequestManager::handle_completed_requests` override, forwarding to the inherent `handle_completed_requests` |
+| Mockito `verify(manager).setAcknowledgementCommitCallbackRegistered(b)` | *(test-only)* `is_acknowledgement_commit_callback_registered_for_test` |
+| `AbstractMembershipManager#maybeReconcile(boolean)` (inherited by `ShareMembershipManager`) | `ShareMembershipManager::maybe_reconcile` |
+| `AbstractMembershipManager#registerStateListener(MemberStateListener)` (inherited) | `ShareMembershipManager::register_state_listener` |
+| `ShareMembershipManager` as a `RequestManagers` entry | *(Rust-only)* `impl RequestManager for Arc<ShareMembershipManager>` (its `poll`) |
+
+### `SubscriptionState` (share members, `subscription_state.rs`; verified, unchanged)
+
+| Java member | Rust |
+|---|---|
+| `SubscriptionType.AUTO_TOPICS_SHARE` | `SubscriptionType::AutoTopicsShare` |
+| `subscribeToShareGroup(Set)` | `subscribe_to_share_group` |
+| `prettyString()`, `AUTO_TOPICS_SHARE` case | `pretty_string` (`"Subscribe to Share Group(..)"`) |
+| `fetchablePartitions(Predicate)`, `hasFetchablePartitions(Predicate)`, `AUTO_TOPICS_SHARE` branch | `fetchable_partitions`, `has_fetchable_partitions` |
+| `hasAutoAssignedPartitions()`, `AUTO_TOPICS_SHARE` operand | `has_auto_assigned_partitions` |
+
+### `WakeupTrigger` (share members)
+
+| Java member | Rust |
+|---|---|
+| `setShareFetchAction(ShareFetchBuffer)` | none: the trigger has no task state (module docs); the share `poll` `select!`s on the token around `ShareFetchBuffer::await_not_empty` (P7) |
+| `ShareFetchAction` (nested class), `#fetchBuffer()` | none, for the same reason |
+| `wakeup()`, `ShareFetchAction` branch (`fetchBuffer().wakeup()`) | `wakeup` cancels the token, which ends the `select!` |
+| `clearTask()` / `disableWakeups()`, `ShareFetchAction` cases | `rotate` / `disable` (no per-task case) |
+
+### Summary
+
+| Class | Java members | Mapped to a Rust function or field | No Rust function, with reason |
+|---|---|---|---|
+| `SharePollEvent` | 7 | 6 (`toStringBase` as `Display`) | 1: `isExpired`, read on the application side (P7) |
+| `ShareFetchEvent` | 3 | 3 | 0 |
+| `ShareAcknowledgeAsyncEvent` | 4 | 4 | 0 |
+| `ShareAcknowledgementCommitCallbackRegistrationEvent` | 2 | 2 | 0 |
+| `ShareAcknowledgeSyncEvent` | 3 | 3 | 0 |
+| `ShareAcknowledgeOnCloseEvent` | 3 | 3 | 0 |
+| `ShareSubscriptionChangeEvent` | 3 | 3 | 0 |
+| `ShareUnsubscribeEvent` | 1 | 1 | 0 |
+| `ApplicationEventProcessor` (share) | 10 | 10 | 0 |
+| `RequestManagers` (share) | 7 | 7 | 0 |
+| `SubscriptionState` (share) | 5 | 5 | 0 |
+| `WakeupTrigger` (share) | 4 | 2 | 2: `setShareFetchAction`, `ShareFetchAction` (no task state in the Rust trigger) |
+
+No unmapped method.
+
 ## P9
 
 Admin share-group RPCs (`org.apache.kafka.clients.admin`). Paths are under
