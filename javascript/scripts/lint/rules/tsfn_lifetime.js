@@ -65,7 +65,7 @@ const BEGIN = 'cbq_call_begin';
 const END = 'cbq_call_end';
 
 /** The releases of a client struct, which may free the queue the count is on, so they may follow `END`. */
-const RELEASES = ['producer_release'];
+const RELEASES = ['producer_release', 'admin_release'];
 
 /** A `_cb` twin of the bindings header: `kafka_..._cb`. */
 const CB_CALL = /^kafka_\w+_cb$/;

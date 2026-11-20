@@ -35,6 +35,7 @@ export { PartitionInfo } from './partition_info';
 export { TopicPartition } from './topic_partition';
 export { TopicPartitionMap } from './topic_partition_map';
 export { TopicPartitionSet } from './topic_partition_set';
+export { Uuid } from './uuid';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { InvalidRecordError } from './invalid_record_error';
 export { KafkaError } from './kafka_error';

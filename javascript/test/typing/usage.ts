@@ -1024,3 +1024,55 @@ async function mocks(): Promise<void> {
   await Promise.all([typed.close(), untyped.close()]);
 }
 void mocks;
+
+// The admin client: Admin.create, the RPCs' Results and their futures, the
+// option classes and the mock.
+async function adminClient(): Promise<void> {
+  const { Admin, DescribeClusterOptions, KafkaAdminClient, ListTopicsOptions, MockAdminClient } =
+    await import('@confluentinc/kafka-javascript/admin');
+  const { AclOperation } = await import('@confluentinc/kafka-javascript/common/acl');
+  const { Node, Uuid } = await import('@confluentinc/kafka-javascript/common');
+  type AdminType = import('@confluentinc/kafka-javascript/admin').Admin;
+  type KafkaFutureOf<T> = import('@confluentinc/kafka-javascript/common').KafkaFuture<T>;
+  type AclOperationType = import('@confluentinc/kafka-javascript/common/acl').AclOperation;
+  const admin = Admin.create({ 'bootstrap.servers': 'localhost:9092', 'request.timeout.ms': 1000 });
+  expectTypeOf(admin).toEqualTypeOf<AdminType>();
+  void Admin.create({ configs: { 'bootstrap.servers': 'localhost:9092' } });
+  const cluster = admin.describeCluster(new DescribeClusterOptions({ includeAuthorizedOperations: true }));
+  expectTypeOf(cluster.nodes()).toEqualTypeOf<KafkaFutureOf<InstanceType<typeof Node>[]>>();
+  expectTypeOf(cluster.controller()).toEqualTypeOf<KafkaFutureOf<InstanceType<typeof Node> | null>>();
+  expectTypeOf(cluster.clusterId()).toEqualTypeOf<KafkaFutureOf<string>>();
+  expectTypeOf(cluster.authorizedOperations()).toEqualTypeOf<KafkaFutureOf<Set<AclOperationType> | null>>();
+  const topics = admin.listTopics({ options: new ListTopicsOptions().listInternal(true) });
+  expectTypeOf(topics.names()).toEqualTypeOf<KafkaFutureOf<Set<string>>>();
+  expectTypeOf(await topics.namesToListings().get()).toExtend<Map<string, unknown>>();
+  // @ts-expect-error the options are an instance, not a plain object
+  admin.listTopics({ options: { listInternal: true } });
+  // @ts-expect-error an RPC takes the options of its own class
+  admin.describeCluster(new ListTopicsOptions());
+  const options = new DescribeClusterOptions({ timeoutMs: 100 });
+  expectTypeOf(options.timeoutMs()).toEqualTypeOf<number | null>();
+  expectTypeOf(options.timeoutMs(5)).toEqualTypeOf<InstanceType<typeof DescribeClusterOptions>>();
+  expectTypeOf(options.includeFencedBrokers()).toEqualTypeOf<boolean>();
+  // @ts-expect-error listInternal only sets; shouldListInternal reads
+  new ListTopicsOptions().listInternal();
+  // @ts-expect-error an unknown key of the keyed constructor
+  void new DescribeClusterOptions({ validateOnly: true });
+  // @ts-expect-error KafkaAdminClient's constructor is private: Admin.create builds it
+  void new KafkaAdminClient();
+  await admin.close({ timeout: 1000 });
+  await admin.close();
+  const mock = MockAdminClient.create().numBrokers(3).controller(1).clusterId('c').build();
+  expectTypeOf(mock).toEqualTypeOf<InstanceType<typeof MockAdminClient>>();
+  mock.controller(new Node({ id: 0, host: 'localhost', port: 1000 }));
+  mock.timeoutNextRequest(1);
+  void new MockAdminClient.Builder({ brokers: [new Node({ id: 0, host: 'h', port: 1 })], controller: 0 });
+  await using disposed = new MockAdminClient();
+  void disposed;
+  const id = Uuid.randomUuid();
+  expectTypeOf(id.getMostSignificantBits()).toEqualTypeOf<bigint>();
+  expectTypeOf(Uuid.fromString(id.toString())).toEqualTypeOf<InstanceType<typeof Uuid>>();
+  expectTypeOf(AclOperation.fromCode(3)).toEqualTypeOf<AclOperationType>();
+  await mock.close();
+}
+void adminClient;
