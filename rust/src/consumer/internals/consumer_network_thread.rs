@@ -34,15 +34,18 @@
 //!    `ConsumerMembershipManager::reconcile(now)`. Java's
 //!    `RequestManagers.entries()` includes membership (whose `poll(...)`
 //!    body returns `PollResult.EMPTY` after calling
-//!    `maybeReconcile(false)`). Rust's `entries()` intentionally skips
-//!    membership because the same `Arc` is shared with the heartbeat
-//!    manager (we cannot produce `&mut dyn RequestManager` from an
-//!    `Arc`). The Java side-effect is re-supplied here, at the same
-//!    phase point Java's loop would visit it.
-//! 4. **Poll the network client** — wrapped in `tokio::select!` against
-//!    the current wakeup token and the shutdown signal. This is the
-//!    only `.await` point in `run_once` that must be cancellation-safe
-//!    against the wakeup primitive (`consumer-threading.md` §11). Right
+//!    `maybeReconcile(false)`) between the heartbeat and the offsets
+//!    managers. Rust's `entries()` skips the consumer membership manager
+//!    (its `Arc` is shared with the heartbeat manager) and drives it here,
+//!    AFTER every manager of step 2 has polled, including offsets, topic
+//!    metadata and fetch, so those polls see the reconcile's effects one
+//!    iteration later than Java's do (PLAN §8 of Milestone 18 records it
+//!    as a consumer follow-up). Only the `addAll` processing of their
+//!    results is split around the reconcile.
+//! 4. **Poll the network client** — a plain `.await`, never raced in a
+//!    `tokio::select!`: the poll is not cancel-safe, and everything that
+//!    wants to interrupt it pokes the selector's wakeup handle instead
+//!    (`consumer-threading.md` §10, and the Phase 4 comment). Right
 //!    after it (Phase 4.5), `RequestManagers::handle_completed_requests`
 //!    runs the `whenComplete` callbacks Java's `NetworkClientDelegate#poll`
 //!    runs inside the poll (`cleanup` does the same after each close poll).
@@ -415,14 +418,16 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // heartbeat and offsets); its `poll(...)` body is
         // `maybeReconcile(false); return EMPTY;` so the side-effect
         // happens between the heartbeat's `addAll` and the offsets'
-        // `poll(...)`. Rust's `entries()` intentionally skips
-        // membership (Phase 8b ownership: `Arc` shared with the
-        // heartbeat manager), so we split the entries walk in two and
-        // call `ConsumerMembershipManager::reconcile(now, false)`
-        // between them — preserving Java's invariant that
-        // `offsets.poll()` / `topic_metadata.poll()` / `fetch.poll()`
-        // observe any post-reconcile subscription-state updates within
-        // the SAME `run_once` iteration.
+        // `poll(...)`. Rust's `entries()` skips the consumer membership
+        // manager (Phase 8b ownership: `Arc` shared with the heartbeat
+        // manager) and Phase 2.5 calls
+        // `ConsumerMembershipManager::reconcile(now, false)` instead. All
+        // the `poll(...)` calls below, offsets, topic metadata and fetch
+        // included, run BEFORE that reconcile; only the processing of
+        // their results is split around it (before-batch, then the
+        // reconcile, then after-batch). So unlike Java, those polls see
+        // the reconcile's effects one iteration later (Milestone 18 PLAN
+        // §8: a consumer follow-up, latency only).
         //
         // Rust additionally drains `PollResult::try_connect` (Phase 10
         // 3d) — Java's request managers call
@@ -506,11 +511,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // dyn`; fetch is polled right after (`dyn` is test-only and never
             // populated together with fetch).
             // `membership_boundary()` returns the heartbeat count (0 or 1):
-            // the leading `boundary` results join the before-batch (they are
-            // processed before `membership.reconcile`); the rest join the
-            // after-batch (processed in Phase 2.6, observing post-reconcile
-            // subscription-state updates within the SAME iteration — Java's
-            // invariant).
+            // the leading `boundary` results join the before-batch (handed to
+            // the delegate before `membership.reconcile`); the rest join the
+            // after-batch (handed to the delegate in Phase 2.6). Every poll
+            // itself has already run by then, before the reconcile.
             let boundary = rm_guard.membership_boundary();
             for (i, rm) in rm_guard.entries().into_iter().enumerate() {
                 let result = rm.poll(current_time_ms);

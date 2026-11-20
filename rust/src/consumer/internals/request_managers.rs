@@ -367,12 +367,18 @@ impl RequestManagers {
     /// `Arc<CommitRequestManager>`, and `Arc<ConsumerMembershipManager>`
     /// respectively so the heartbeat manager and the membership manager
     /// can share the same instance with the slot in this container
-    /// (Java does the same via heap references). Producing a
-    /// `&mut dyn RequestManager` from a shared `Arc<...>` would
-    /// require refactoring `RequestManager::poll` to take `&self`
-    /// (semantic mismatch with Java). Instead the bg task polls them
-    /// separately via [`Self::coordinator_handle`],
+    /// (Java does the same via heap references). Instead the bg task
+    /// polls them separately via [`Self::coordinator_handle`],
     /// [`Self::commit_handle`], and `ConsumerMembershipManager::reconcile`.
+    /// An `Arc`-shared manager can be an entry (the share managers are,
+    /// through `impl RequestManager for Arc<ShareMembershipManager>` and
+    /// `for Arc<Mutex<ShareConsumeRequestManager>>`); the consumer's are
+    /// not, which is why its membership reconcile runs after the offsets
+    /// and fetch polls (Milestone 18 PLAN §8).
+    ///
+    /// For a share consumer the order is `(coordinator skipped) → share
+    /// heartbeat → share membership → share consume`, Java's share
+    /// constructor order.
     ///
     /// `fetch` is skipped too, and polled last by the bg task, because its
     /// `poll` / `poll_on_close` take the network-client delegate the bg task
