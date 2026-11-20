@@ -143,6 +143,48 @@ run in a parallel worktree.
 
 Total: 14 loop phases plus P0 and P11, about the size of Milestone 16.
 
+### 4.1 P8 test plan for the Rust-only types (translation-checklist R8)
+
+P8 adds three public types with no Java class to diff. Each behaviour below names the test that pins
+it; "mock" rows are the `MockShareConsumer` variant (R8: the mock variant is planned too, lesson
+C5-24).
+
+**`DynShareConsumer`** (sealed, dyn-compatible companion of `ShareConsumer`, as `DynConsumer` is of
+`Consumer`; `dyn_share_consumer.rs`):
+
+| # | Behaviour | Test |
+|---|---|---|
+| D1 | `dyn DynShareConsumer` and its box are `Send + !Sync` | `dyn_share_consumer_is_send_and_not_sync`; `api_promises.rs` `consumers_are_send_but_not_sync` |
+| D2 | Different implementations live behind one type (`Vec<&mut dyn …>`, `Vec<Box<dyn …>>`) and each call reaches its own consumer | `test_different_share_consumers_in_one_vec`, `test_boxed_share_consumers_in_one_vec` |
+| D3 | `dyn DynShareConsumer` implements `ShareConsumer`: generic code over `C: ShareConsumer + ?Sized` accepts a box, including the methods with a borrowed argument (`subscribe`, `acknowledge_with_record`) | `test_dyn_share_consumer_is_a_share_consumer` |
+| D4 | Errors pass through unchanged (message and variant) | `test_errors_pass_through_unchanged` |
+| D5 | The sync methods (`wakeup`, `handle`, `acquisition_lock_timeout_ms`, `set_acknowledgement_commit_callback`) and `close` reach the consumer | `test_sync_methods_reach_the_share_consumer` |
+| D6 | The boxed futures are `Send`: a boxed consumer can be driven from a spawned task | `test_dyn_share_consumer_futures_can_be_spawned` |
+| D7 | It cannot be implemented outside the crate (sealed) | doc test `compile_fail` on the trait |
+
+**`ShareConsumerHandle`** (decision D6: the `Send + Sync` view exposing only `wakeup`, because `poll`
+holds `&mut self` and the consumer is `!Sync`; `share_consumer_handle.rs`):
+
+| # | Behaviour | Test |
+|---|---|---|
+| H1 | `Send + Sync + Clone`; `Debug` prints no state | `share_consumer_handle_is_send_sync_and_clone`; `api_promises.rs` |
+| H2 | A `wakeup` from another task ends a `KafkaShareConsumer::poll` that is waiting, which returns the `WakeupError` (`is_wakeup_error`), as Java's `wakeup()` from another thread does | `handle_wakeup_from_another_task_ends_a_waiting_poll` (`kafka_share_consumer.rs`, over `MockClient`) |
+| H3 | A `wakeup` with no call waiting makes the next `poll` return the `WakeupError`, and only that one (Java's `WakeupTrigger` clears the flag when it throws) | `handle_wakeup_before_poll_fails_only_the_next_poll` |
+| H4 | A `wakeup` from another task also ends a waiting `commit_sync` (Java's `setActiveTask(commitFuture)`) | `handle_wakeup_from_another_task_ends_a_waiting_commit_sync` |
+| H5 | Clones share the consumer: a wakeup through a clone wakes the consumer | `handle_clones_wake_the_same_consumer` |
+| H6 | The handle outlives `close`: `wakeup` after `close` does nothing and does not panic (Java's `wakeup` does not check `closed`) | `handle_wakeup_after_close_does_not_panic` |
+| H7 | mock: the handle's `wakeup` sets the mock's flag, as `MockShareConsumer::wakeup` does (Java's mock never reads it) | `mock_handle_wakeup_sets_the_mock_flag` (`mock_share_consumer.rs`) |
+
+**`AcknowledgeOptions` / `AcknowledgeOptionsBuilder`** (the CLAUDE.md §2 `Options` form of
+`acknowledge(String, int, long, AcknowledgeType)`; `acknowledge_options.rs`):
+
+| # | Behaviour | Test |
+|---|---|---|
+| O1 | `build` with the four parameters set returns options carrying them | `build_with_every_parameter` |
+| O2 | `build` names the first unset mandatory parameter (`topic`, `partition`, `offset`, `type`) in a `LocalIllegalArgumentError`, exact message asserted | `build_names_the_first_unset_parameter` |
+| O3 | `acknowledge_with_options` keeps Java's misuse errors: implicit mode → "Implicit acknowledgement of delivery is being used.", explicit mode with no failed batch → "The record cannot be acknowledged.", closed → "This consumer has already been closed." | `acknowledge_with_options_reports_java_misuse_errors` (`kafka_share_consumer.rs`) |
+| O4 | `Send + Sync` | `api_promises.rs` |
+
 ## 5. Risks
 
 1. **Shared-infra conflicts.** P6/P7 touch `request_managers.rs`, `application_event_processor.rs`,
