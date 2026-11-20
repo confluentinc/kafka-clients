@@ -43,6 +43,21 @@ test('an owned type never destroyed nor consumed is a finding', () => {
   ]);
 });
 
+test("a destroy counts in a descriptor table's destroy row only, never in a comment", () => {
+  const without = PRODUCER_C.replace('    FFI_DISCARD(kafka_x_Thing_destroy_err(value, &ffi_err));\n', '');
+  // Named only by a comment: still never destroyed.
+  let r = runN(RULE, { 'native/producer.c': `${without}// freed by kafka_x_Thing_destroy_err elsewhere\n` });
+  assert.ok(
+    findings(r).some((f) => f.startsWith('kafka_x_Thing_t: native/ receives it owned')),
+    r.text,
+  );
+  // Taken by address into a table's destroy row: destroyed there.
+  r = runN(RULE, {
+    'native/producer.c': `${without}static void (*const thing_destroy)(void*, kafka_common_Error_t**) = ADMIN_RESULT_DESTROY_FN(kafka_x_Thing_destroy_err);\n`,
+  });
+  assert.ok(!findings(r).some((f) => f.startsWith('kafka_x_Thing_t:')), r.text);
+});
+
 test('a borrowed parameter passed to a destroy, directly or through a native helper, is a finding', () => {
   const r = runN(RULE, {
     'native/producer.c': PRODUCER_C.replace(

@@ -1220,7 +1220,7 @@ napi_value js_producer_flush(napi_env env, napi_callback_info info) {
 
 // A node's fields as src/common/node.ts's constructor takes them: { id, host,
 // port, rack, isFenced }, or null for a NULL node.
-static napi_value node_to_js(napi_env env, const kafka_common_Node_t* n) {
+napi_value node_to_js(napi_env env, const kafka_common_Node_t* n) {
     napi_value obj, v;
     if (n == NULL) {
         NAPI_CHECK(env, napi_get_null(env, &obj), NULL);
