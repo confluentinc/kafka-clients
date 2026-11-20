@@ -722,7 +722,7 @@ follow CLAUDE.md §2 provisionally; P8 fixes the public ones
 | `sendShareAcknowledgeAsyncEvent(Map)` | `send_share_acknowledge_async_event` |
 | `acknowledge(ConsumerRecord)` | `acknowledge_with_record` |
 | `acknowledge(ConsumerRecord, AcknowledgeType)` | `acknowledge_with_record_type` (`Result`, D7) |
-| `acknowledge(String, int, long, AcknowledgeType)` | `acknowledge_with_topic_partition_offset_type` (`Result`, D7) |
+| `acknowledge(String, int, long, AcknowledgeType)` | `acknowledge_with_options(AcknowledgeOptions)` (`Result`, D7; renamed in P8 by the CLAUDE.md §2 `Options` rule) |
 | `commitSync()` | `commit_sync` |
 | `commitSync(Duration)` | `commit_sync_with_timeout` |
 | `commitAsync()` | `commit_async` (async: runs the callback) |
@@ -794,9 +794,95 @@ follow CLAUDE.md §2 provisionally; P8 fixes the public ones
 
 | Class | Java members | Mapped to a Rust function | No Rust function, with reason |
 |---|---|---|---|
-| `ShareConsumerImpl` | 4 constructors, 49 methods, 2 nested processors (5 members), 2 test factory interfaces | 3 constructors, 45 methods, the 5 processor members (inlined) | 1 constructor (Mockito injection); 4 methods: `registerMetricForSubscription`, `unregisterMetricFromSubscription` (D2, P8), `acquire`, `release` (`&mut self`); the 2 factory interfaces (Mockito seams) |
+| `ShareConsumerImpl` | 4 constructors, 49 methods, 2 nested processors (5 members), 2 test factory interfaces | 3 constructors, 45 methods, the 5 processor members (inlined) | 1 constructor (Mockito injection); 4 methods: `registerMetricForSubscription`, `unregisterMetricFromSubscription` (D2: not translated, decided 2026-11-20), `acquire`, `release` (`&mut self`); the 2 factory interfaces (Mockito seams) |
 | `KafkaShareConsumerMetrics` | 4 | 4 | 0 |
 | `ShareConsumerMetrics` | 3 | 3 | 0 |
+
+No unmapped method.
+
+## P8
+
+The public share consumer API: `ShareConsumer` (`share_consumer.rs`),
+`KafkaShareConsumer` (`kafka_share_consumer.rs`), `MockShareConsumer`
+(`mock_share_consumer.rs`), plus the Rust-only `DynShareConsumer`,
+`ShareConsumerHandle` and `AcknowledgeOptions` / `AcknowledgeOptionsBuilder`
+(R8 test plan in PLAN §4.1). `KafkaShareConsumer` forwards every trait method to
+the `ShareConsumerImpl` method of the same Rust name (P7 table).
+
+### `ShareConsumer` (trait)
+
+| Java method | Rust |
+|---|---|
+| `subscription()` | `ShareConsumer::subscription` (`&mut self`; panics on a closed consumer, CLAUDE.md §12.5) |
+| `subscribe(Collection)` | `ShareConsumer::subscribe(&[String])` (the only overload, so the plain name) |
+| `unsubscribe()` | `ShareConsumer::unsubscribe` |
+| `poll(Duration)` | `ShareConsumer::poll` |
+| `acknowledge(ConsumerRecord)` | `ShareConsumer::acknowledge_with_record` (`Result`, D7 as P7) |
+| `acknowledge(ConsumerRecord, AcknowledgeType)` | `ShareConsumer::acknowledge_with_record_type` |
+| `acknowledge(String, int, long, AcknowledgeType)` | `ShareConsumer::acknowledge_with_options(AcknowledgeOptions)` (four parameters: CLAUDE.md §2 `Options` rule) |
+| `commitSync()` | `ShareConsumer::commit_sync` |
+| `commitSync(Duration)` | `ShareConsumer::commit_sync_with_timeout` |
+| `commitAsync()` | `ShareConsumer::commit_async` (async: it runs the callback, `share-consumer.md` §1) |
+| `setAcknowledgementCommitCallback(AcknowledgementCommitCallback)` | `ShareConsumer::set_acknowledgement_commit_callback(Option<Arc<dyn …>>)` (`None` is Java's `null`) |
+| `clientInstanceId(Duration)` | not on the trait: KIP-714, decision D2 (as `Consumer`); `ShareConsumerImpl::client_instance_id` stays crate-private |
+| `acquisitionLockTimeoutMs()` | `ShareConsumer::acquisition_lock_timeout_ms` |
+| `metrics()` | `ShareConsumer::metrics` (`&self`) |
+| `registerMetricForSubscription(KafkaMetric)` | not translated: KIP-714, decision D2 |
+| `unregisterMetricFromSubscription(KafkaMetric)` | not translated: KIP-714, decision D2 |
+| `close()` | `ShareConsumer::close` |
+| `close(Duration)` | `ShareConsumer::close_with_timeout` (not deprecated on `ShareConsumer`, unlike `Consumer#close(Duration)`) |
+| `wakeup()` | `ShareConsumer::wakeup` (`&self`) |
+| *(Rust-only)* | `ShareConsumer::handle` → `ShareConsumerHandle` (D6) |
+
+### `KafkaShareConsumer`
+
+| Java member | Rust |
+|---|---|
+| `KafkaShareConsumer(Map)`, `KafkaShareConsumer(Properties)` | not translated: the deserializers would come from class-valued keys, which the Rust configuration does not have (CLAUDE.md §2) |
+| `KafkaShareConsumer(Properties, Deserializer, Deserializer)`, `KafkaShareConsumer(Map, Deserializer, Deserializer)` | `KafkaShareConsumer::new(&HashMap<String, String>, impl Deserializer<K>, impl Deserializer<V>)`: both take the same string map in Rust |
+| `KafkaShareConsumer(ShareConsumerConfig, Deserializer, Deserializer)` (package-private) | inlined in `new`: it only calls the delegate creator |
+| `KafkaShareConsumer(LogContext, String, String, ShareConsumerConfig, Deserializer, Deserializer, Time, KafkaClient, SubscriptionState, ShareConsumerMetadata)` (package-private, tests) | `KafkaShareConsumer::with_client` (`#[cfg(test)]`; `LogContext` dropped, as `ShareConsumerImpl::with_client`) |
+| the 19 `ShareConsumer` overrides | `impl ShareConsumer for KafkaShareConsumer`, forwarding to the delegate (KIP-714 three per D2) |
+| `clientId()`, `metricsRegistry()`, `kafkaShareConsumerMetrics()` (package-private, tests) | `client_id`, `metrics_registry`, `kafka_share_consumer_metrics` (`#[cfg(test)]`) |
+
+### `MockShareConsumer`
+
+| Java member | Rust |
+|---|---|
+| `MockShareConsumer()` | `MockShareConsumer::new` (and `Default`) |
+| `subscription()` | `subscription` (panics when closed: Java's `ensureNotClosed` throws, CLAUDE.md §12.5) |
+| `subscribe(Collection)` | `subscribe` (`SubscriptionState::subscribe_with_topics`, as Java's `subscribe(Set, Optional.empty())`) |
+| `unsubscribe()` | `unsubscribe` |
+| `poll(Duration)` | `poll` (drains the records; empty next offsets) |
+| `acknowledge(ConsumerRecord)`, `acknowledge(ConsumerRecord, AcknowledgeType)`, `acknowledge(String, int, long, AcknowledgeType)` | `acknowledge_with_record`, `acknowledge_with_record_type`, `acknowledge_with_options` (no-ops returning `Ok`) |
+| `commitSync()`, `commitSync(Duration)`, `commitAsync()` | `commit_sync`, `commit_sync_with_timeout` (empty maps), `commit_async` |
+| `setAcknowledgementCommitCallback(AcknowledgementCommitCallback)` | `set_acknowledgement_commit_callback` (no-op) |
+| `setClientInstanceId(Uuid)`, `clientInstanceId(Duration)` | not translated: KIP-714, decision D2 (`MockConsumer` has neither) |
+| `metrics()` | `metrics` (panics when closed, as Java's `ensureNotClosed` throws) |
+| `acquisitionLockTimeoutMs()` | `acquisition_lock_timeout_ms` (`None`) |
+| `registerMetricForSubscription`, `unregisterMetricFromSubscription` | not translated: KIP-714, decision D2 |
+| `close()`, `close(Duration)` | `close` (forwards the 30 s default), `close_with_timeout` |
+| `wakeup()` | `wakeup` (sets the flag, which Java's mock never reads) |
+| `addRecord(ConsumerRecord)` | `add_record` (`Result`, as `MockConsumer::add_record`) |
+| `ensureNotClosed()` (private) | `ensure_not_closed` (and `panic_if_closed` for the methods with no error channel) |
+| *(Rust-only)* | `handle` (the mock's flag), `wakeup_requested` (`#[cfg(test)]`, reads the flag) |
+
+### `ShareConsumerDelegate`, `ShareConsumerDelegateCreator`
+
+| Java member | Rust |
+|---|---|
+| `ShareConsumerDelegate` (interface extending `ShareConsumer` with `clientId`, `metricsRegistry`, `kafkaShareConsumerMetrics`) | none: one delegate, held as `ShareConsumerImpl`, whose three methods of the same names `KafkaShareConsumer`'s test accessors call (`share-consumer.md` §1) |
+| `ShareConsumerDelegateCreator#create(ConsumerConfig, Deserializer, Deserializer)` | collapsed into `KafkaShareConsumer::new`; the "Failed to construct Kafka share consumer" wrap is `ShareConsumerImpl::new`'s |
+| `ShareConsumerDelegateCreator#create(LogContext, …, ShareConsumerMetadata)` | collapsed into `KafkaShareConsumer::with_client` |
+
+### Summary
+
+| Class | Java members | Mapped to a Rust function | No Rust function, with reason |
+|---|---|---|---|
+| `ShareConsumer` | 19 | 16 | 3: `clientInstanceId`, `registerMetricForSubscription`, `unregisterMetricFromSubscription` (D2) |
+| `KafkaShareConsumer` | 6 constructors, 19 overrides, 3 test accessors | 2 constructors (`new`, `with_client`) covering 4 Java ones, 16 overrides, 3 accessors | 2 constructors (class-valued deserializer keys), 3 overrides (D2) |
+| `MockShareConsumer` | 1 constructor, 21 methods, 1 private | 1, 17, 1 | 4 methods: `setClientInstanceId`, `clientInstanceId`, `registerMetricForSubscription`, `unregisterMetricFromSubscription` (D2) |
+| `ShareConsumerDelegate` / `ShareConsumerDelegateCreator` | 3 own / 2 | 3 (on `ShareConsumerImpl`) / 2 (collapsed) | the interface type itself (one delegate) |
 
 No unmapped method.
 

@@ -6,6 +6,13 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 
 ### Consumer
 
+- New: the share consumer (KIP-932) public API, translated from Java 4.4.0:
+  the `ShareConsumer` trait with its dyn-compatible `DynShareConsumer`,
+  `KafkaShareConsumer` (built from a string configuration map and two
+  deserializers), `MockShareConsumer`, `ShareConsumerHandle` (`wakeup` from
+  another task while `poll` holds the consumer) and `AcknowledgeOptions` /
+  `AcknowledgeOptionsBuilder` for acknowledging by topic, partition and
+  offset. The KIP-714 telemetry methods are not included, as for `Consumer`.
 - Fix: partition revocation now follows Java 4.4.0's
   `AbstractMembershipManager#revokePartitions`, which the consumer had not
   translated. No API or signature changes. What changes:
