@@ -361,7 +361,9 @@ added to CLAUDE.md or the DoD:
   (`ShareConsumerImpl#acquire` throws *"KafkaShareConsumer methods are not accessible from
   user-defined acknowledgement commit callback"*). Rust enforces this at compile time, so the Java
   tests that assert it are skipped with that reason.
-- **D7 — `acknowledge*` misuse: `Result` or panic** (CLAUDE.md §12.5). The cases are *"Implicit
+- **D7 — `acknowledge*` misuse: `Result` or panic** (CLAUDE.md §12.5). **Decided (user; recorded 2026-11-20 in the P8
+  fix round): `Result<(), Error>`** with Java's `IllegalStateException` texts as `LocalIllegalStateError`, per
+  CLAUDE.md §12.2; implemented in P7 (`ShareConsumerImpl`) and P8 (`ShareConsumer::acknowledge_*`). The cases are *"Implicit
   acknowledgement of delivery is being used."* and *"The record cannot be acknowledged."*, the latter
   also reachable from `acknowledge(topic, partition, offset, type)` with arbitrary input.
   Recommended: `Result<(), Error>` (`IllegalStateError`, Java's text). Whether a record is still in
@@ -381,7 +383,7 @@ added to CLAUDE.md or the DoD:
 | D3 (PR shape) | — | Decided: one milestone PR |
 | **D5 (renew retention)** — decided 2026-11-20, (c) provisional | **P3a** | `ShareInFlightBatch` / `ShareCompletedFetch` own the record-retention shape; P3b, P5b, P7 and `ShareConsumerRenewTest` build on it |
 | D1 (admin slice) | P9, P10 | |
-| D6 (wakeup handle), D7 (`Result` vs panic), D2 (KIP-714) | P7 / P8 | D2, D6 decided 2026-11-20; D7 still open (P7 and P8 follow its recommendation, `Result`) |
+| D6 (wakeup handle), D7 (`Result` vs panic), D2 (KIP-714) | P7 / P8 | all three decided: D2 and D6 on 2026-11-20, D7 (`Result`) recorded in the P8 fix round; implemented in P7 / P8 |
 
 P0, P1, P2 and P4 (and P9, once D1 is settled) don't depend on D5. That is ~11–16k of the estimated
 Rust lines, so they can run while the team discusses renew. Keep P1/P2/P4 free of any record-ownership
