@@ -42,10 +42,6 @@
 //!   try-with-resources are closed explicitly, and a close failure fails the
 //!   test, as a throwing `close` does in Java.
 
-// The suites that use the rest of the fixture land in the commits after this
-// one; the expectation fails, and goes, once they all do.
-#![expect(dead_code, reason = "the share suites translated next use the remaining helpers")]
-
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -426,11 +422,6 @@ impl ShareConsumerTestBase {
     /// The test's context, for the cluster and the bootstrap servers.
     pub fn ctx(&self) -> &TestContext {
         &self.ctx
-    }
-
-    /// The test's context, mutably, to name more topics.
-    pub fn ctx_mut(&mut self) -> &mut TestContext {
-        &mut self.ctx
     }
 
     /// The per-test name of the group Java calls `name`.
