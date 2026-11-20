@@ -35,7 +35,7 @@ string topic = args[1];
 Dictionary<string, object?> conf = new() { ["bootstrap.servers"] = broker };
 
 // The serializers encode keys and values as UTF-8; the records sent here have no key.
-using (KafkaProducer<string, string> producer = new(conf, new StringSerializer(), new StringSerializer()))
+using (KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(conf, new StringSerializer(), new StringSerializer()))
 {
     // Read lines from stdin and send each one (without its newline).
     // Send() does not throw when the local buffer is full: it waits for space, up to max.block.ms.

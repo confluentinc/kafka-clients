@@ -226,7 +226,7 @@ internal static class Program
             SoakConfig.ValidateConfig(cconf, SoakConfig.ConsumerConfigKeys, "consumer");
 
             using (var producer = new AsyncMockProducer<byte[], SoakRecord>(
-                Serdes.ByteArray().Serializer(), new SoakRecordSerializer(options.PayloadSize)))
+                new AsyncByteArraySerializer(), new SoakRecordSerializer(options.PayloadSize)))
             {
                 using var consumer = new MockConsumer<byte[], SoakRecord>(
                     Serdes.ByteArray().Deserializer(), new SoakRecordDeserializer());

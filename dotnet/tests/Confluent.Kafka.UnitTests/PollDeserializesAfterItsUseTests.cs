@@ -88,7 +88,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         DisposingDeserializer values = new DisposingDeserializer();
         AsyncMockConsumer<string?, string?> consumer =
-            new AsyncMockConsumer<string?, string?>(new DisposingDeserializer(), values);
+            new AsyncMockConsumer<string?, string?>(new DisposingDeserializer().AsAsync(), values.AsAsync());
         values.Target = consumer;
         try
         {
@@ -132,7 +132,7 @@ public sealed class PollDeserializesAfterItsUseTests
     public async Task AsyncPoll_ADeserializerThatThrows_LeavesThePositionUnchanged()
     {
         AsyncMockConsumer<string?, string?> consumer =
-            new AsyncMockConsumer<string?, string?>(new FailingDeserializer(), new FailingDeserializer());
+            new AsyncMockConsumer<string?, string?>(new FailingDeserializer().AsAsync(), new FailingDeserializer().AsAsync());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
@@ -224,7 +224,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(Serdes.ByteArray().Deserializer(), values);
+        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(new AsyncByteArrayDeserializer(), values.AsAsync());
         values.Reassign = partitions => Block(() => consumer.Assign(partitions));
         try
         {
@@ -265,7 +265,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(Serdes.ByteArray().Deserializer(), values);
+        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(new AsyncByteArrayDeserializer(), values.AsAsync());
         values.Reassign = partitions => Block(() => consumer.Assign(partitions));
         try
         {
@@ -296,7 +296,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(Serdes.ByteArray().Deserializer(), values);
+        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(new AsyncByteArrayDeserializer(), values.AsAsync());
         values.Reassign = partitions => Block(() => consumer.Assign(partitions));
         using ManualResetEventSlim closing = new ManualResetEventSlim();
         using ManualResetEventSlim finish = new ManualResetEventSlim();

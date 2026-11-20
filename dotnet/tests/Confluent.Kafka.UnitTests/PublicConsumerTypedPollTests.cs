@@ -67,7 +67,7 @@ public sealed class PublicConsumerTypedPollTests
     public async Task AsyncPoll_StringLong_RoundTripsDecodedKeyAndValue()
     {
         AsyncMockConsumer<string, long?> consumer =
-            new AsyncMockConsumer<string, long?>(Serdes.String().Deserializer(), Serdes.Long().Deserializer());
+            new AsyncMockConsumer<string, long?>(new AsyncStringDeserializer(), new AsyncLongDeserializer());
         try
         {
             await TestTimeout.Run(

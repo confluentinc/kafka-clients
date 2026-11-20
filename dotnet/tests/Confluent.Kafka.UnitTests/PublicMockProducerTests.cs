@@ -86,7 +86,7 @@ public sealed class PublicMockProducerTests : IDisposable
     public void GroupMetadata_FromANeverConnectedConsumer_IsTheConfiguredGroupId()
     {
         using KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(ConsumerConfig("g1"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            KafkaConsumer<byte[], byte[]>.Create(ConsumerConfig("g1"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
         ConsumerGroupMetadata metadata = consumer.GroupMetadata();
 
@@ -817,7 +817,7 @@ public sealed class PublicMockProducerTests : IDisposable
         s_groupMetadata.GetOrAdd(groupId, id =>
         {
             using KafkaConsumer<byte[], byte[]> consumer =
-                new KafkaConsumer<byte[], byte[]>(ConsumerConfig(id), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+                KafkaConsumer<byte[], byte[]>.Create(ConsumerConfig(id), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
             return consumer.GroupMetadata();
         });
 

@@ -3,3 +3,9 @@
 
 # Java's ConfigResource.Type: a bare `Type` would clash with System.Type (M15/P3 D16).
 Confluent.Kafka.Common.Config.ConfigResourceType org.apache.kafka.common.config.ConfigResource$Type
+
+# Java's ByteBuffer serde family, named after ReadOnlyMemory, the .NET type that stands for Java's ByteBuffer
+# (M23/P7, ledger 540). An Async class pairs through its synchronous class.
+Confluent.Kafka.Common.Serialization.ReadOnlyMemoryDeserializer org.apache.kafka.common.serialization.ByteBufferDeserializer
+Confluent.Kafka.Common.Serialization.ReadOnlyMemorySerializer org.apache.kafka.common.serialization.ByteBufferSerializer
+Confluent.Kafka.Common.Serialization.Serdes.ReadOnlyMemorySerde org.apache.kafka.common.serialization.Serdes$ByteBufferSerde

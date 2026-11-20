@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -33,8 +34,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// The send's pins: the process-wide empty sentinel, a slice's own address passed through to the native record, the
-/// async send's one pin and one unpin per buffer by the first stage, and no pin left by the sync send, asserted
-/// directly, since a wrong pin lifetime works almost always and corrupts rarely.
+/// async send's one pin and one unpin per buffer by the first stage, and the sync send's one pin and one unpin of a
+/// memory manager's buffer around its call, asserted directly, since a wrong pin lifetime works almost always and corrupts rarely.
 /// </summary>
 public sealed class ProducerSendPinLifetimeTests
 {
@@ -114,7 +115,7 @@ public sealed class ProducerSendPinLifetimeTests
         WeakReference[] valueRefs;
 
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using (TestTimeout.Disposal(producer))
         {
             valueRefs = await SendThrowawayBuffersAsync(producer, count: 64);
@@ -195,7 +196,7 @@ public sealed class ProducerSendPinLifetimeTests
         using NativeMemoryManager value = new NativeMemoryManager(32);
         AsyncMockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
             new AsyncMockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
-                MemorySerializer.Instance, MemorySerializer.Instance);
+                new AsyncReadOnlyMemorySerializer(), new AsyncReadOnlyMemorySerializer());
         using (TestTimeout.Disposal(producer))
         {
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(
@@ -219,7 +220,7 @@ public sealed class ProducerSendPinLifetimeTests
         using NativeMemoryManager value = new NativeMemoryManager(32);
         AsyncMockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
             new AsyncMockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
-                MemorySerializer.Instance, MemorySerializer.Instance);
+                new AsyncReadOnlyMemorySerializer(), new AsyncReadOnlyMemorySerializer());
         using (TestTimeout.Disposal(producer))
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(
@@ -251,7 +252,7 @@ public sealed class ProducerSendPinLifetimeTests
     }
 
     [Fact]
-    public void SyncSend_LeavesNoPinOutstandingOnceItReturns()
+    public void SyncSend_PinsAKeyAndValueOfAMemoryManagerOnce_AndUnpinsThemWhenItReturns()
     {
         using NativeMemoryManager key = new NativeMemoryManager(8);
         using NativeMemoryManager value = new NativeMemoryManager(32);
@@ -263,11 +264,78 @@ public sealed class ProducerSendPinLifetimeTests
             KafkaFuture<RecordMetadata> future = default;
             TestTimeout.Run(() => future = producer.Send(MemoryRecord(Topic, key, value)), s_deadline);
 
-            Assert.Equal(key.PinCount, key.UnpinCount);
-            Assert.Equal(value.PinCount, value.UnpinCount);
+            Assert.Equal(1, key.PinCount);
+            Assert.Equal(1, key.UnpinCount);
+            Assert.Equal(1, value.PinCount);
+            Assert.Equal(1, value.UnpinCount);
 
             TestTimeout.Run(() => _ = future.Get(), s_deadline);
             Assert.Equal(1, producer.HistoryCount());
+        }
+    }
+
+    [Fact]
+    public void SyncSend_RejectedTopic_IsRefusedBeforeAnythingIsPinned()
+    {
+        using NativeMemoryManager key = new NativeMemoryManager(8);
+        using NativeMemoryManager value = new NativeMemoryManager(32);
+        MockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
+            new MockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                MemorySerializer.Instance, MemorySerializer.Instance);
+        using (TestTimeout.Disposal(producer))
+        {
+            ArgumentException rejected = Assert.Throws<ArgumentException>(
+                () => { _ = producer.Send(MemoryRecord("bad\0topic", key, value)); });
+
+            Assert.StartsWith(AdminStrings.InvalidTopicMessage, rejected.Message);
+            Assert.Equal(0, key.PinCount);
+            Assert.Equal(0, value.PinCount);
+            Assert.Equal(0, producer.HistoryCount());
+        }
+    }
+
+    [Fact]
+    public void SyncSend_AnUnpinThatThrows_StillSendsTheRecord_UnpinsTheOtherBuffer_AndTracesTheFailure()
+    {
+        string marker = UnpinMarker();
+        using NativeMemoryManager key = new NativeMemoryManager(8, marker);
+        using NativeMemoryManager value = new NativeMemoryManager(32);
+        using UnpinFailureListener listener = new UnpinFailureListener(marker);
+        MockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
+            new MockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                MemorySerializer.Instance, MemorySerializer.Instance);
+        using (TestTimeout.Disposal(producer))
+        {
+            KafkaFuture<RecordMetadata> future = default;
+            TestTimeout.Run(() => future = producer.Send(MemoryRecord(Topic, key, value)), s_deadline);
+            TestTimeout.Run(() => _ = future.Get(), s_deadline);
+
+            Assert.Equal(1, producer.HistoryCount());
+            Assert.Equal(1, key.UnpinCount);
+            Assert.Equal(1, value.UnpinCount);
+            Assert.Single(listener.Messages);
+        }
+    }
+
+    [Fact]
+    public void SyncSend_AValueWhosePinThrows_UnpinsTheKey_AndSendsNothing()
+    {
+        using NativeMemoryManager key = new NativeMemoryManager(8);
+        ReadOnlyMemory<byte> released = new UnpinnableMemoryManager().Memory;
+        MockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
+            new MockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                MemorySerializer.Instance, MemorySerializer.Instance);
+        using (TestTimeout.Disposal(producer))
+        {
+            ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> record =
+                new ProducerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+                    Topic, value: released, key: (ReadOnlyMemory<byte>)key.Memory, partition: 0);
+
+            Assert.Throws<ObjectDisposedException>(() => { _ = producer.Send(record); });
+
+            Assert.Equal(1, key.PinCount);
+            Assert.Equal(1, key.UnpinCount);
+            Assert.Equal(0, producer.HistoryCount());
         }
     }
 
@@ -326,7 +394,7 @@ public sealed class ProducerSendPinLifetimeTests
         using UnpinFailureListener valueListener = new UnpinFailureListener(valueMarker);
         AsyncMockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
             new AsyncMockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
-                MemorySerializer.Instance, MemorySerializer.Instance);
+                new AsyncReadOnlyMemorySerializer(), new AsyncReadOnlyMemorySerializer());
         using (TestTimeout.Disposal(producer))
         {
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(
@@ -350,14 +418,14 @@ public sealed class ProducerSendPinLifetimeTests
         using NativeMemoryManager value = new NativeMemoryManager(32);
         using UnpinFailureListener listener = new UnpinFailureListener(marker);
         AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
-            new AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+            await AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
                 new Dictionary<string, object?>
                 {
                     ["bootstrap.servers"] = "localhost:1",
                     ["max.block.ms"] = 1000,
                 },
-                MemorySerializer.Instance,
-                MemorySerializer.Instance);
+                new AsyncReadOnlyMemorySerializer(),
+                new AsyncReadOnlyMemorySerializer());
         try
         {
             ValueTask<AsyncKafkaFuture<RecordMetadata>> stage = producer.Send(MemoryRecord(topic, key, value));
@@ -504,6 +572,25 @@ public sealed class ProducerSendPinLifetimeTests
         {
             Trace.Listeners.Remove(this);
             base.Dispose(disposing);
+        }
+    }
+
+    /// <summary>A <see cref="MemoryManager{T}"/> whose <see cref="Pin"/> throws, as a released batch's does.</summary>
+    private sealed class UnpinnableMemoryManager : MemoryManager<byte>
+    {
+        private readonly byte[] _bytes = new byte[4];
+
+        public override Span<byte> GetSpan() => _bytes;
+
+        public override MemoryHandle Pin(int elementIndex = 0) =>
+            throw new ObjectDisposedException(nameof(UnpinnableMemoryManager));
+
+        public override void Unpin()
+        {
+        }
+
+        protected override void Dispose(bool disposing)
+        {
         }
     }
 }

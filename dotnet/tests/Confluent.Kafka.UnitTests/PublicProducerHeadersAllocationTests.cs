@@ -82,7 +82,7 @@ public sealed class PublicProducerHeadersAllocationTests
     public async Task AsyncSend_RecordWithHeaders_AllocatesNothingPerHeader()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<byte[], byte[]> plain = Record(0);
         ProducerRecord<byte[], byte[]> withHeaders = Record(HeaderCount);

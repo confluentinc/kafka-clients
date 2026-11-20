@@ -98,7 +98,7 @@ public sealed class PublicConsumerHandleProtectionTests
     public async Task AsyncQueryFamily_AfterDisposeAsync_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         TopicPartition[] partitions = new[] { Tp() };
@@ -128,7 +128,7 @@ public sealed class PublicConsumerHandleProtectionTests
     public async Task Wakeup_AfterDisposeAsync_IsANoOp_DoesNotThrow()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         consumer.Wakeup();
@@ -253,7 +253,7 @@ public sealed class PublicConsumerHandleProtectionTests
                 for (int i = 0; i < 100; i++)
                 {
                     AsyncMockConsumer<byte[], byte[]> consumer =
-                        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+                        new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
                     _ = consumer.Subscribe(ProofTopic());
                     await consumer.DisposeAsync();
                 }
@@ -282,7 +282,7 @@ public sealed class PublicConsumerHandleProtectionTests
                             {
                                 AsyncMockConsumer<byte[], byte[]> consumer =
                                     new AsyncMockConsumer<byte[], byte[]>(
-                                        Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+                                        new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
                                 _ = consumer.Subscribe(ProofTopic());
                                 consumer.Dispose();
                             }

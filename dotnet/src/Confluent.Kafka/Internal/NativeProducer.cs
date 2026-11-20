@@ -40,7 +40,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 
     private const string RecordNotBuilt = "The producer record could not be built.";
 
-    private const string ConstructionFailedMessage = "Failed to construct kafka producer";
+    internal const string ConstructionFailedMessage = "Failed to construct kafka producer";
 
     private const string MaxBlockMsConfig = "max.block.ms";
 
@@ -106,54 +106,130 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// A producer constructor's serializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null for
-    /// configuration <paramref name="key"/>: must be non-null.", which Java throws when the <paramref name="key"/>
-    /// config names no class; .NET config cannot name one.
+    /// Creates the producer in Java's order: the binding's and the core's checks of the configuration, bare; then the
+    /// part inside Java's constructor <c>try</c>, where <paramref name="serdes"/> builds the serializers that were not
+    /// given and the core builds the client.
     /// </summary>
-    internal static T RequireSerializer<T>(T? serializer, string key)
-        where T : class =>
-        serializer ?? throw new ConfigException(key, null, "must be non-null.");
-
     internal static NativeProducer Create(
-        IReadOnlyDictionary<string, object?> configs,
+        IReadOnlyCollection<KeyValuePair<string, object?>> configs,
         string completionThreadName = CompletionThreadName,
-        SerdeDisposal? serdes = null)
+        ConfiguredSerdes? serdes = null)
     {
         IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Producer);
         IntPtr classPointer;
-        try
+        SerdeDisposal? disposal;
+        using (ConfigMarshal.ValidatedConfig config = ConfigMarshal.Validate(prepared, ClientKind.Producer))
         {
-            classPointer = ConfigMarshal.NewClient(prepared, ClientKind.Producer);
-        }
-        catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
-        {
-            // Java's constructor closes the serializers when a step inside its try fails, which the core reports
-            // wrapped; a configuration it refuses before that try, such as a value it cannot parse, comes back bare
-            // and disposes nothing.
-            serdes?.DisposeOnce();
-            throw;
-        }
-
-        try
-        {
-            IntPtr outErr = IntPtr.Zero;
-            IntPtr view = NativeMethods.KafkaProducerAsProducer(classPointer, ref outErr);
-            if (outErr != IntPtr.Zero)
+            disposal = serdes?.Build();
+            try
             {
-                IntPtr destroyErr = IntPtr.Zero;
-                NativeMethods.KafkaProducerDestroy(classPointer, ref destroyErr);
-                FreeError(ref destroyErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
+                classPointer = config.CreateClient();
             }
+            catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+            {
+                // Java's constructor closes the serializers when a step inside its try fails, which the core reports
+                // wrapped.
+                disposal?.DisposeOnce();
+                throw;
+            }
+            catch
+            {
+                // A failure the core reports bare is one Java raises outside that try, which closes nothing: a given
+                // serializer stays its owner's, and one built here has no other owner.
+                serdes?.DisposeBuilt();
+                throw;
+            }
+        }
 
-            return Start(
-                new SafeKafkaProducerHandle(view, classPointer), completionThreadName, MaxBlockMsOf(prepared), serdes);
+        try
+        {
+            return Started(classPointer, completionThreadName, prepared, disposal);
         }
         catch
         {
-            serdes?.DisposeOnce();
+            disposal?.DisposeOnce();
             throw;
         }
+    }
+
+    /// <summary>
+    /// The awaited form of <see cref="Create"/>, for a producer whose serializers' <c>Configure</c> may wait: the
+    /// same steps in the same order. The checks of the configuration throw from the call; what follows, from the
+    /// first function on, completes or fails the task, and a disposal it makes is awaited.
+    /// </summary>
+    /// <exception cref="OperationCanceledException">
+    /// <paramref name="cancellationToken"/> was cancelled before the core built the client: the serializers built so
+    /// far are disposed, and the given ones are not. Once the client exists the token is not read again.
+    /// </exception>
+    internal static Task<NativeProducer> CreateAwaited(
+        IReadOnlyCollection<KeyValuePair<string, object?>> configs,
+        string completionThreadName,
+        ConfiguredSerdes serdes,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<KeyValuePair<string, string>> prepared = ClientConfigs.Prepare(configs, ClientKind.Producer);
+        ConfigMarshal.ValidatedConfig config = ConfigMarshal.Validate(prepared, ClientKind.Producer);
+        return CreateAwaited(config, prepared, completionThreadName, serdes, cancellationToken);
+    }
+
+    private static async Task<NativeProducer> CreateAwaited(
+        ConfigMarshal.ValidatedConfig validated,
+        IReadOnlyList<KeyValuePair<string, string>> prepared,
+        string completionThreadName,
+        ConfiguredSerdes serdes,
+        CancellationToken cancellationToken)
+    {
+        IntPtr classPointer;
+        SerdeDisposal disposal;
+        using (ConfigMarshal.ValidatedConfig config = validated)
+        {
+            disposal = await serdes.BuildAwaited(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                classPointer = config.CreateClient();
+            }
+            catch (KafkaException failure) when (failure.Message == ConstructionFailedMessage)
+            {
+                await disposal.DisposeOnceAsync().ConfigureAwait(false);
+                throw;
+            }
+            catch
+            {
+                // A cancellation, like a failure the core reports bare, is not one of Java's constructor.
+                await serdes.DisposeBuiltAwaited().ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        try
+        {
+            return Started(classPointer, completionThreadName, prepared, disposal);
+        }
+        catch
+        {
+            await disposal.DisposeOnceAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static NativeProducer Started(
+        IntPtr classPointer,
+        string completionThreadName,
+        IReadOnlyList<KeyValuePair<string, string>> prepared,
+        SerdeDisposal? disposal)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr view = NativeMethods.KafkaProducerAsProducer(classPointer, ref outErr);
+        if (outErr != IntPtr.Zero)
+        {
+            IntPtr destroyErr = IntPtr.Zero;
+            NativeMethods.KafkaProducerDestroy(classPointer, ref destroyErr);
+            FreeError(ref destroyErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+
+        return Start(new SafeKafkaProducerHandle(view, classPointer), completionThreadName, MaxBlockMsOf(prepared), disposal);
     }
 
     internal static NativeProducer CreateMock(
@@ -1131,7 +1207,9 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     // async callback of a serializer failure, which may still use them, is running, the one that closed the producer
     // included: then once the last of those ends, as Python closes its serializers after its callbacks. A close
     // returns only once they are disposed, except one from inside such a callback, which would wait for itself. A
-    // send still running on another thread when the close starts is not waited for, as in Java and Python.
+    // send still running on another thread when the close starts is not waited for, as in Java and Python. An
+    // asynchronous serializer's DisposeAsync is started here and not waited for on this thread: the close awaits the
+    // returned task, and a synchronous Dispose blocks on it.
     private Task DisposeTheSerializersAfter(Task failureCallbacks)
     {
         if (_serdes is not { } serdes)
@@ -1141,15 +1219,15 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
 
         if (failureCallbacks.IsCompleted)
         {
-            serdes.DisposeOnce();
-            return Task.CompletedTask;
+            ValueTask disposed = serdes.DisposeOnceAsync();
+            return disposed.IsCompletedSuccessfully ? Task.CompletedTask : disposed.AsTask();
         }
 
         return failureCallbacks.ContinueWith(
-            _ => serdes.DisposeOnce(),
+            _ => serdes.DisposeOnceAsync().AsTask(),
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+            TaskScheduler.Default).Unwrap();
     }
 
     private void WaitForTheSerializers() => TheSerializersDisposed().GetAwaiter().GetResult();

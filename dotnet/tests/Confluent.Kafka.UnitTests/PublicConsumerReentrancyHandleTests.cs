@@ -159,7 +159,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     public async Task AsyncKafkaConsumer_AHandle_ReadsItsAssignment()
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer =
-            new AsyncKafkaConsumer<byte[], byte[]>(Config("p8-async-handle"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            await AsyncKafkaConsumer<byte[], byte[]>.Create(Config("p8-async-handle"), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await using (TestTimeout.AsyncDisposal(consumer))
         {
             using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
@@ -695,7 +695,7 @@ public sealed class PublicConsumerReentrancyHandleTests
         new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     private static Dictionary<string, object?> Config(string groupId) => new()
     {
@@ -705,7 +705,7 @@ public sealed class PublicConsumerReentrancyHandleTests
     };
 
     private static KafkaConsumer<byte[], byte[]> NewKafkaConsumer(string groupId) =>
-        new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        KafkaConsumer<byte[], byte[]>.Create(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
     private static Dictionary<TopicPartition, OffsetAndMetadata> Empty() =>
         new Dictionary<TopicPartition, OffsetAndMetadata>();

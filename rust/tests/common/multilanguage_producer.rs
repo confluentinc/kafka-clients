@@ -490,12 +490,13 @@ pub(crate) fn node_from_proto(n: proto::Node) -> Node {
 }
 
 /// The per-request timeout of [`BackendHandle::channel`](crate::common::backend_pool::BackendHandle::channel),
-/// which every other RPC keeps.
-const DEFAULT_RPC_DEADLINE: Duration = Duration::from_secs(30);
+/// which every other RPC keeps, of the producer and of
+/// [`MultilanguageConsumer`](crate::common::multilanguage_consumer::MultilanguageConsumer).
+pub(crate) const DEFAULT_RPC_DEADLINE: Duration = Duration::from_secs(30);
 
 /// What a blocking RPC's deadline adds to the longest wait its call may
 /// legitimately make, for the server's own work and the round trip.
-const BLOCKING_DEADLINE_MARGIN: Duration = Duration::from_secs(30);
+pub(crate) const BLOCKING_DEADLINE_MARGIN: Duration = Duration::from_secs(30);
 
 /// The deadline of the producer's blocking RPCs (`send`, `flush`, the
 /// transaction calls, `close`): the longest wait the native call may

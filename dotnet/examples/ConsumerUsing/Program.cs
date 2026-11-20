@@ -49,7 +49,7 @@ Dictionary<string, object?> conf = new()
 };
 
 // The deserializers decode keys and values as UTF-8.
-using (KafkaConsumer<string, string> consumer = new(conf, new StringDeserializer(), new StringDeserializer()))
+using (KafkaConsumer<string, string> consumer = KafkaConsumer<string, string>.Create(conf, new StringDeserializer(), new StringDeserializer()))
 {
     // Ctrl+C wakes the consumer up: the Poll() in progress, or the next one, throws WakeupException.
     // Cancelling the event keeps the process running, so that the consumer is closed.

@@ -105,7 +105,7 @@ internal static class Program
             ["group.id"] = "package-smoke",
             ["group.protocol"] = "consumer",
         };
-        using (var consumer = new KafkaConsumer<string, string>(consumerConfig, Serdes.String().Deserializer(), Serdes.String().Deserializer()))
+        using (var consumer = KafkaConsumer<string, string>.Create(consumerConfig, Serdes.String().Deserializer(), Serdes.String().Deserializer()))
         {
             consumer.Close();
         }
@@ -115,7 +115,7 @@ internal static class Program
 
     private static void CloseProducer(Dictionary<string, object?> config)
     {
-        using var producer = new KafkaProducer<string, string>(config, Serdes.String().Serializer(), Serdes.String().Serializer());
+        using var producer = KafkaProducer<string, string>.Create(config, Serdes.String().Serializer(), Serdes.String().Serializer());
         producer.Close(TimeSpan.FromSeconds(10));
     }
 

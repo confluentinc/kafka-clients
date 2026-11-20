@@ -1052,7 +1052,8 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         while (watch.Elapsed < s_deadline)
         {
             consumer.PollTyped(
-                TimeSpan.FromMilliseconds(100), Serdes.ByteArray().Deserializer(), null, Serdes.ByteArray().Deserializer(), null);
+                TimeSpan.FromMilliseconds(100), Serdes.ByteArray().Deserializer(), null, null,
+                Serdes.ByteArray().Deserializer(), null, null);
         }
     }
 
