@@ -478,7 +478,7 @@ napi_value js_admin_result_future(napi_env env, napi_callback_info info) {
 
 // adminResultFutures(handle, box, name): the futures of map accessor `name`
 // (`values()`), as an array of [key, slot] in the map's order, each key as the
-// accessor's key converter reads it. The map owns its futures: it is kept in
+// accessor's key converter reads it, or null when the accessor gives no map. The map owns its futures: it is kept in
 // a box of its own, which each future's context holds.
 napi_value js_admin_result_futures(napi_env env, napi_callback_info info) {
     size_t argc = 3;
@@ -506,34 +506,59 @@ napi_value js_admin_result_futures(napi_env env, napi_callback_info info) {
         return NULL;
     }
     napi_value out;
+    // No map: Java's null (topicIdValues() of a request by names).
+    if (map == NULL) {
+        NAPI_CHECK(env, napi_get_null(env, &out), NULL);
+        return out;
+    }
     NAPI_CHECK(env, napi_create_array(env, &out), NULL);
-    if (map == NULL) return out;
     // The map's own box: destroyed, with its futures, once no context holds it.
     napi_value holder = admin_box_new(env, NULL, map, r->desc);
     if (holder == NULL) return NULL;
     int32_t n = 0;
     err = FFI_SET(n, kafka_Map_size_err(map, &ffi_err));
-    for (int32_t i = 0; err == NULL && i < n; i++) {
+    // The contexts made so far, released when a later entry fails, so no
+    // slot stays taken by a future JS never sees.
+    int32_t* made = err == NULL && n > 0 ? (int32_t*)calloc((size_t)n, sizeof(int32_t)) : NULL;
+    if (err == NULL && n > 0 && made == NULL) {
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    int32_t count = 0;
+    int ok = err == NULL;
+    for (int32_t i = 0; ok && i < n; i++) {
         void* k = NULL;
         void* v = NULL;
         err = FFI_SET(k, kafka_Map_key_err(map, i, &ffi_err));
         if (err == NULL) err = FFI_SET(v, kafka_Map_value_err(map, i, &ffi_err));
-        if (err != NULL) break;
+        if (err != NULL) {
+            ok = 0;
+            break;
+        }
         napi_value key = acc->key(env, k);
-        if (key == NULL) return NULL;
-        int32_t slot = admin_future_new(env, a, (kafka_common_KafkaFuture_t*)v, 0, holder, acc->conv);
-        if (slot < 0) return NULL;
+        int32_t slot = key == NULL ? -1 : admin_future_new(env, a, (kafka_common_KafkaFuture_t*)v, 0, holder, acc->conv);
+        if (slot < 0) {
+            ok = 0;
+            break;
+        }
+        made[count++] = slot;
         napi_value pair, slot_value;
-        NAPI_CHECK(env, napi_create_array_with_length(env, 2, &pair), NULL);
-        NAPI_CHECK(env, napi_create_int32(env, slot, &slot_value), NULL);
-        NAPI_CHECK(env, napi_set_element(env, pair, 0, key), NULL);
-        NAPI_CHECK(env, napi_set_element(env, pair, 1, slot_value), NULL);
-        NAPI_CHECK(env, napi_set_element(env, out, (uint32_t)i, pair), NULL);
+        if (napi_create_array_with_length(env, 2, &pair) != napi_ok || napi_create_int32(env, slot, &slot_value) != napi_ok
+            || napi_set_element(env, pair, 0, key) != napi_ok || napi_set_element(env, pair, 1, slot_value) != napi_ok
+            || napi_set_element(env, out, (uint32_t)i, pair) != napi_ok) {
+            js_throw_last_napi_error(env, "the futures' array");
+            ok = 0;
+        }
     }
+    if (!ok) {
+        for (int32_t j = 0; j < count; j++) future_release(env, a->slots[made[j]]);
+    }
+    free(made);
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
     }
+    if (!ok) return NULL;
     return out;
 }
 
@@ -910,7 +935,7 @@ napi_value js_admin_create(napi_env env, napi_callback_info info) {
 
 // ---- MockAdminClient ----------------------------------------------------------
 
-static Admin* unwrap_mock(napi_env env, napi_value handle) {
+Admin* admin_mock_unwrap(napi_env env, napi_value handle) {
     Admin* a = admin_unwrap(env, handle);
     if (a == NULL) return NULL;
     if (a->mock == NULL) {
@@ -1076,7 +1101,7 @@ napi_value js_mock_admin_controller(napi_env env, napi_callback_info info) {
         napi_throw_type_error(env, NULL, "mockAdminController(handle, node)");
         return NULL;
     }
-    Admin* a = unwrap_mock(env, argv[0]);
+    Admin* a = admin_mock_unwrap(env, argv[0]);
     if (a == NULL) return NULL;
     napi_valuetype type;
     kafka_common_Node_t* node = NULL;
@@ -1099,7 +1124,7 @@ napi_value js_mock_admin_timeout_next_request(napi_env env, napi_callback_info i
         napi_throw_type_error(env, NULL, "mockAdminTimeoutNextRequest(handle, numberOfRequests)");
         return NULL;
     }
-    Admin* a = unwrap_mock(env, argv[0]);
+    Admin* a = admin_mock_unwrap(env, argv[0]);
     if (a == NULL) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
     kafka_common_Error_t* err = FFI_ERR(kafka_admin_MockAdminClient_timeout_next_request_err(a->mock, n, &ffi_err));
@@ -1152,6 +1177,7 @@ static kafka_Map_t* pairs_map(napi_env env, napi_value pairs, int shorts, int* i
     kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
     uint32_t count = 0;
     if (err == NULL && napi_get_array_length(env, pairs, &count) != napi_ok) {
+        admin_map_free(env, map);
         napi_throw_type_error(env, NULL, "a map's entries");
         return NULL;
     }
@@ -1230,6 +1256,7 @@ static kafka_List_t* string_lists(napi_env env, napi_value arrays, int* is_null)
     kafka_common_Error_t* err = FFI_SET(outer, kafka_List_new_err(&ffi_err));
     uint32_t count = 0;
     if (err == NULL && napi_get_array_length(env, arrays, &count) != napi_ok) {
+        admin_list_free(env, outer, string_list_destroy);
         napi_throw_type_error(env, NULL, "brokerLogDirs must be an array of arrays of strings");
         return NULL;
     }
@@ -1243,7 +1270,11 @@ static kafka_List_t* string_lists(napi_env env, napi_value arrays, int* is_null)
             return NULL;
         }
         err = FFI_SET(inner, kafka_List_new_err(&ffi_err));
-        if (err == NULL) err = FFI_ERR(kafka_List_add_err(outer, inner, &ffi_err));
+        if (err == NULL) {
+            err = FFI_ERR(kafka_List_add_err(outer, inner, &ffi_err));
+            // Not added: freed here, the outer list does not own it.
+            if (err != NULL) FFI_DISCARD(string_list_destroy(inner, &ffi_err));
+        }
         for (uint32_t j = 0; err == NULL && j < n; j++) {
             napi_value s_value;
             char* s = NULL;

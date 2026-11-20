@@ -21,7 +21,11 @@
 // (rust/src/admin/kafka_admin_client.rs). Where Java uses the double only to
 // make a call fail, the port runs against an unreachable bootstrap address,
 // as Python's test_admin_java_ports.py does; those of this file cover
-// describeCluster, listTopics and the client's lifecycle and configuration.
+// describeCluster, listTopics, the client's lifecycle and configuration, and
+// the topic calls: KafkaAdminClientTest#testAdminClientFailureWhenClosed and
+// #testTimeoutWithoutMetadata on createTopics, as Java writes them, and
+// KafkaAdminClientTopicTest#testInvalidTopicNames and
+// #testDescribeTopicsTimeoutWhenNoBrokerResponds.
 // AdminClientConfigTest is ported through Admin.create, as SaslConfigsTest is
 // through the producer's constructor: testInvalidMetadataRecoveryStrategy
 // here; testDefaultMetadataRecoveryStrategy is skipped, as AdminClientConfig
@@ -34,11 +38,24 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 
-const { ExecutionError, IllegalArgumentError } = require('@confluentinc/kafka-javascript');
-const { Admin, DescribeClusterOptions, KafkaAdminClient, ListTopicsOptions } = require('@confluentinc/kafka-javascript/admin');
+const { ExecutionError, IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
+const {
+  Admin,
+  CreateTopicsOptions,
+  DescribeClusterOptions,
+  DescribeTopicsOptions,
+  KafkaAdminClient,
+  ListTopicsOptions,
+  NewTopic,
+} = require('@confluentinc/kafka-javascript/admin');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
-const { BootstrapResolutionError, TimeoutError } = require('@confluentinc/kafka-javascript/common/errors');
+const { BootstrapResolutionError, InvalidTopicError, TimeoutError } = require('@confluentinc/kafka-javascript/common/errors');
+
+/**
+ * @template T
+ * @typedef {import('@confluentinc/kafka-javascript/common').KafkaFuture<T>} KafkaFuture
+ */
 const { POISON } = require('../../memory/_probe');
 
 const UNREACHABLE = '127.0.0.1:1';
@@ -219,6 +236,63 @@ test('cancel() cancels the JavaScript future, not the request', async () => {
   }
 });
 
+test('testAdminClientFailureWhenClosed: createTopics on a closed client fails its futures with IllegalStateError', async () => {
+  const client = admin();
+  await client.close();
+  const topic = new NewTopic({ name: 'myTopic', replicasAssignments: new Map([[0, [0, 1, 2]]]) });
+  const cause = await failure(client.createTopics({ newTopics: [topic], options: new CreateTopicsOptions({ timeoutMs: 10000 }) }).all());
+  assert.ok(cause instanceof IllegalStateError, `Expected an IllegalStateException error, but got ${String(cause)}`);
+});
+
+test('testTimeoutWithoutMetadata: createTopics times out when no metadata arrives', async () => {
+  const client = admin({ 'request.timeout.ms': 10 });
+  try {
+    const topic = new NewTopic({ name: 'myTopic', replicasAssignments: new Map([[0, [0, 1, 2]]]) });
+    const cause = await failure(client.createTopics({ newTopics: [topic], options: new CreateTopicsOptions({ timeoutMs: 1000 }) }).all());
+    assert.ok(cause instanceof TimeoutError, String(cause));
+  } finally {
+    await client.close();
+  }
+});
+
+// ---- KafkaAdminClientTopicTest ------------------------------------------------
+
+test("testInvalidTopicNames: an empty name fails its deleteTopics, describeTopics and createTopics futures, Java's null name aside", async () => {
+  // Java's null name: the C FFI refuses a null element, where Java fails its
+  // future (asList("", null)); the empty name stands for both.
+  const client = admin();
+  try {
+    const deleted = client.deleteTopics(['']).topicNameValues();
+    assert.ok(deleted);
+    assert.ok((await failure(/** @type {KafkaFuture<void>} */ (deleted.get('')))) instanceof InvalidTopicError);
+    const described = client.describeTopics(['']).topicNameValues();
+    assert.ok(described);
+    assert.ok((await failure(/** @type {KafkaFuture<unknown>} */ (described.get('')))) instanceof InvalidTopicError);
+    const created = client.createTopics([new NewTopic({ name: '', numPartitions: 1, replicationFactor: 1 })]).values();
+    const cause = await failure(/** @type {KafkaFuture<void>} */ (created.get('')));
+    assert.ok(cause instanceof InvalidTopicError, String(cause));
+    assert.equal(/** @type {Error} */ (cause).message, "The given topic name '' cannot be represented in a request.");
+  } finally {
+    await client.close();
+  }
+});
+
+test('testDescribeTopicsTimeoutWhenNoBrokerResponds: the call timeout, well before the request timeout', async () => {
+  const client = admin({ retries: 0, 'request.timeout.ms': 30000 });
+  try {
+    const start = Date.now();
+    const result = client.describeTopics({ topicNames: ['test-topic'], options: new DescribeTopicsOptions({ timeoutMs: 200 }) });
+    const values = result.topicNameValues();
+    assert.ok(values);
+    const cause = await failure(/** @type {KafkaFuture<unknown>} */ (values.get('test-topic')));
+    const duration = Date.now() - start;
+    assert.ok(cause instanceof TimeoutError, String(cause));
+    assert.ok(duration >= 150 && duration < 30000, `took ${duration} ms`);
+  } finally {
+    await client.close();
+  }
+}, 40000);
+
 // ---- the binding's own ----------------------------------------------------------
 
 test("Admin.create takes the configs bare or by name, and Java's form errors", async () => {
@@ -341,7 +415,8 @@ test('the native objects are freed: the client once closed and collected, each r
   const r = runNode(
     `
     const native = require('./dist/internal/native.js');
-    const { Admin, MockAdminClient } = require('@confluentinc/kafka-javascript/admin');
+    const { Admin, MockAdminClient, NewTopic } = require('@confluentinc/kafka-javascript/admin');
+    const { TopicCollection } = require('@confluentinc/kafka-javascript/common');
     (async () => {
       const before = native.adminStats();
       // One function per round, so no client stays in a frame after it.
@@ -352,11 +427,25 @@ test('the native objects are freed: the client once closed and collected, each r
         const m = new MockAdminClient();
         await m.describeCluster().clusterId().get();
         await m.close();
+        // The map accessors (each future holding the map's box) and the
+        // refinements, read and unread.
+        const t = new MockAdminClient.Builder().numBrokers(1).build();
+        const created = t.createTopics([new NewTopic({ name: 't', numPartitions: 1, replicationFactor: 1 })]);
+        await created.all().get();
+        await created.numPartitions('t').get();
+        created.config('t');
+        await created.topicId('absent').get().catch(() => {});
+        const byName = t.describeTopics(['t', 'u']);
+        await byName.topicNameValues().get('t').get();
+        const id = (await t.describeTopics(['t']).allTopicNames().get()).get('t').topicId;
+        t.describeTopics(TopicCollection.ofTopicIds([id]));
+        await t.deleteTopics(['t']).all().get();
+        await t.close();
       }
       for (let i = 0; i < 3; i++) await round();
       await new Promise((r) => setTimeout(r, 50));
       let after = native.adminStats();
-      for (let i = 0; i < 100 && after.adminsFreed - before.adminsFreed < 6; i++) {
+      for (let i = 0; i < 100 && after.adminsFreed - before.adminsFreed < 9; i++) {
         global.gc();
         await new Promise((r) => setTimeout(r, 20));
         after = native.adminStats();
@@ -369,7 +458,7 @@ test('the native objects are freed: the client once closed and collected, each r
     ['--expose-gc'],
   );
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, '[6,6,true,true,true]\n');
+  assert.equal(r.stdout, '[9,9,true,true,true]\n');
 });
 
 test('the admin client emits the preview notice once; the mock emits none', () => {
