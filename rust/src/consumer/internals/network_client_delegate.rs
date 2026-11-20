@@ -519,6 +519,104 @@ pub(crate) struct NetworkClientDelegate<K: KafkaClient + Send> {
     async_consumer_metrics: Option<Arc<AsyncConsumerMetrics>>,
 }
 
+impl NetworkClientDelegate<crate::NetworkClient<crate::common::network::Selector, crate::DefaultHostResolver>> {
+    /// Creates the delegate of a consumer's background task over a new
+    /// [`NetworkClient`](crate::NetworkClient) built from `config`, the
+    /// selector and network client [`ClientUtils#createNetworkClient`] builds.
+    ///
+    /// Java returns a `Supplier` that the network thread calls; Rust has no
+    /// deferred creation there (the network thread is built with its
+    /// delegate), so the delegate is created here. Java's `LogContext`,
+    /// `Metrics` and `ClientTelemetrySender` parameters are dropped: the
+    /// `log` crate is used, the Rust selector registers no metrics, and
+    /// KIP-714 telemetry is not translated. The share consumer calls it;
+    /// `AsyncKafkaConsumer::new` builds the same client inline.
+    ///
+    /// # Errors
+    ///
+    /// `Error::Config` when the channel builder cannot be created from the
+    /// security settings, or when `bootstrap.servers` holds a malformed URL
+    /// with asynchronous bootstrap resolution enabled.
+    #[expect(clippy::too_many_arguments, reason = "the Java supplier's parameters")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.NetworkClientDelegate#supplier")]
+    pub(crate) fn supplier(
+        time: Arc<dyn crate::common::utils::Time>,
+        log_context: crate::common::utils::internals::LogContext,
+        metadata: Arc<Metadata>,
+        config: &ConsumerConfig,
+        api_versions: Arc<crate::ApiVersions>,
+        throttle_time_sensor: Option<Arc<crate::common::metrics::Sensor>>,
+        background_event_handler: Arc<BackgroundEventHandler>,
+        notify_metadata_errors_via_error_queue: bool,
+        async_consumer_metrics: Arc<AsyncConsumerMetrics>,
+    ) -> Result<Self, Error> {
+        use crate::ClientUtils;
+        use crate::DefaultHostResolver;
+        use crate::MetadataRecoveryStrategy;
+        use crate::NetworkClient;
+        use crate::common::network::{ChannelBuilders, Selector};
+        use crate::consumer::internals::ConsumerUtils;
+
+        // `ClientUtils#createChannelBuilder(config, time, logContext)`; as in
+        // `AsyncKafkaConsumer::new`, a failure is a `ConfigException`.
+        let channel_builder = ChannelBuilders::client_channel_builder(
+            config.security_protocol,
+            Some(&config.ssl_config),
+            Some(&config.sasl_config),
+            None,
+            config.client_id(),
+            log_context.clone(),
+        )
+        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
+        let mut selector = Selector::with_defaults_and_log_context(
+            config.connections_max_idle_ms,
+            channel_builder,
+            log_context.clone(),
+        );
+        selector.set_time(Arc::clone(&time));
+        let mut network_client = NetworkClient::with_metadata_rebootstrap_trigger_ms(
+            selector,
+            Arc::clone(&metadata),
+            config.client_id(),
+            ConsumerUtils::CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION as usize,
+            config.reconnect_backoff_ms,
+            config.reconnect_backoff_max_ms,
+            config.send_buffer_bytes,
+            config.receive_buffer_bytes,
+            config.request_timeout_ms,
+            config.socket_connection_setup_timeout_ms,
+            config.socket_connection_setup_timeout_max_ms,
+            true,
+            api_versions,
+            DefaultHostResolver::new(),
+            config.metadata_recovery_rebootstrap_trigger_ms,
+            MetadataRecoveryStrategy::for_name(config.metadata_recovery_strategy())
+                .map_err(Error::local_illegal_argument)?,
+            log_context,
+        );
+        network_client.set_time(time);
+        network_client.set_metadata_cluster_check_enable(config.metadata_cluster_check_enable);
+        if let Some(throttle_time_sensor) = throttle_time_sensor {
+            network_client.set_throttle_time_sensor(throttle_time_sensor);
+        }
+        network_client.set_bootstrap_configuration(ClientUtils::bootstrap_configuration(
+            config.bootstrap_resolve_timeout_ms(),
+            config.client_dns_lookup(),
+            config.retry_backoff_ms(),
+            config.bootstrap_servers(),
+        )?);
+        let mut delegate = NetworkClientDelegate::new(
+            config,
+            network_client,
+            metadata,
+            background_event_handler,
+            notify_metadata_errors_via_error_queue,
+        );
+        delegate.set_async_consumer_metrics(async_consumer_metrics);
+        Ok(delegate)
+    }
+}
+
 impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     /// Construct a new delegate.
     ///

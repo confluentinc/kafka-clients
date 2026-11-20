@@ -34,14 +34,14 @@
 //!    Java's `KafkaException` cast-or-wrap.
 //!  - `create_share_fetch_metrics_manager` — the share consumer's fetch
 //!    metrics manager (Milestone 18 P3b, ledger gap G4).
+//!  - `create_metrics` — the metrics registry, used by the share consumer
+//!    (Milestone 18 P7); `AsyncKafkaConsumer` builds the same registry inline.
 //!
 //! # Out of scope (skipped per PLAN.md deferral #7)
 //!
 //! - `createConsumerNetworkClient` — uses `ConsumerNetworkClient` which is
 //!   classic-protocol-only per `consumer-threading.md` §20.
-//! - `createMetrics`, `createFetchMetricsManager` — the metrics framework is
-//!   deferred across Milestone-8 (see Phase 11 PLAN.md "AsyncConsumerMetrics"
-//!   note); `AsyncKafkaConsumer` builds both inline.
+//! - `createFetchMetricsManager` — `AsyncKafkaConsumer` builds it inline.
 //! - `configuredConsumerInterceptors` — relies on Java's reflection-based
 //!   class-name-to-instance machinery. Phase 2 made the decision to take
 //!   interceptors as already-constructed `Vec<Box<dyn ConsumerInterceptor>>`
@@ -57,8 +57,9 @@ use std::time::Duration;
 
 use log::info;
 
-use crate::common::metrics::Metrics;
+use crate::common::metrics::{MetricConfig, Metrics, RecordingLevel};
 use crate::common::protocol::Errors;
+use crate::common::utils::Time;
 use crate::common::{Error, IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::OffsetAndMetadata;
@@ -119,6 +120,28 @@ impl ConsumerUtils {
 
     /// Java: `CONSUMER_CLIENT_ID_METRIC_TAG` (package-private).
     pub(crate) const CONSUMER_CLIENT_ID_METRIC_TAG: &str = "client-id";
+
+    /// Builds a consumer's metrics registry: `metrics.num.samples`,
+    /// `metrics.sample.window.ms` and `metrics.recording.level`, with the
+    /// `client-id` tag on every metric.
+    ///
+    /// Translates Java's static `createMetrics(ConsumerConfig, Time,
+    /// List<MetricsReporter>)`. The reporter list and the JMX
+    /// `MetricsContext` are not translated (the consumer's registry has
+    /// neither), and an unknown recording level, which `ConsumerConfig`
+    /// rejects, falls back to `INFO`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerUtils#createMetrics")]
+    pub(crate) fn create_metrics(config: &ConsumerConfig, time: Arc<dyn Time>) -> Arc<Metrics> {
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert(Self::CONSUMER_CLIENT_ID_METRIC_TAG.to_string(), config.client_id().to_string());
+        let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
+        let metric_config = MetricConfig::new()
+            .set_samples(config.metrics_num_samples)
+            .set_time_window_ms(config.metrics_sample_window_ms)
+            .set_record_level(recording_level)
+            .set_tags(tags);
+        Arc::new(Metrics::with_default_config_time(Arc::new(metric_config), time))
+    }
 
     /// Builds the share consumer's fetch metrics manager, its metric names
     /// tagged with `client-id` in the `consumer-share-fetch-manager-metrics`
