@@ -21,6 +21,7 @@
 // plain JS values (nested values nested, a `long` as a bigint); TypeScript
 // builds the classes from them. Python's admin marshaling is the reference.
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -3426,3 +3427,1216 @@ napi_value js_mock_admin_update_consumer_group_offsets(napi_env env, napi_callba
     if (err != NULL) error_throw_owned(env, err);
     return NULL;
 }
+
+// ---- security: ACLs: shared values ----------------------------------------------------------
+
+// An ACL value crosses as Python's seven-tuple
+// [resourceTypeCode, name, patternTypeCode, principal, host, operationCode,
+// permissionTypeCode], each enum as Java's byte code; a filter's name,
+// principal and host may be null.
+
+static void acl_binding_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_acl_AclBinding_destroy_err((kafka_common_acl_AclBinding_t*)item, out_err);
+}
+
+static void acl_binding_filter_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_acl_AclBindingFilter_destroy_err((kafka_common_acl_AclBindingFilter_t*)item, out_err);
+}
+
+// The seven fields of a JS tuple: the codes in codes[0..3] (resource type,
+// pattern type, operation, permission type), the strings malloc'ed (NULL for
+// null) in strs[0..2] (name, principal, host); 0, or -1 with a JS exception
+// pending (nothing left to free).
+static int acl_fields_from_js(napi_env env, napi_value tuple, int32_t codes[4], char* strs[3]) {
+    static const uint32_t code_at[4] = {0, 2, 5, 6};
+    static const uint32_t str_at[3] = {1, 3, 4};
+    static const char* const what[3] = {"an ACL's resource name must be a string or null", "an ACL's principal must be a string or null",
+                                         "an ACL's host must be a string or null"};
+    int ok = 1;
+    for (int i = 0; i < 4 && ok; i++) {
+        napi_value v = element(env, tuple, code_at[i]);
+        if (v == NULL) return -1;
+        codes[i] = int32_of(env, v, "an ACL's code", &ok);
+    }
+    if (!ok) return -1;
+    for (int i = 0; i < 3; i++) strs[i] = NULL;
+    for (int i = 0; i < 3; i++) {
+        napi_value v = element(env, tuple, str_at[i]);
+        if (v != NULL) strs[i] = string_or_null(env, v, what[i], &ok);
+        if (v == NULL || !ok) {
+            for (int j = 0; j < i; j++) free(strs[j]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// The enum singletons of four codes, through each enum's fromCode (UNKNOWN for
+// a code Java does not know).
+typedef struct {
+    const kafka_common_resource_ResourceType_t* resource_type;
+    const kafka_common_resource_PatternType_t* pattern_type;
+    const kafka_common_acl_AclOperation_t* operation;
+    const kafka_common_acl_AclPermissionType_t* permission_type;
+} AclEnums;
+
+static kafka_common_Error_t* acl_enums_of(const int32_t codes[4], AclEnums* out) {
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* err = FFI_SET(out->resource_type, kafka_common_resource_ResourceType_from_code_err((int8_t)codes[0], &ffi_err));
+    if (err == NULL) err = FFI_SET(out->pattern_type, kafka_common_resource_PatternType_from_code_err((int8_t)codes[1], &ffi_err));
+    if (err == NULL) err = FFI_SET(out->operation, kafka_common_acl_AclOperation_from_code_err((int8_t)codes[2], &ffi_err));
+    if (err == NULL)
+        err = FFI_SET(out->permission_type, kafka_common_acl_AclPermissionType_from_code_err((int8_t)codes[3], &ffi_err));
+    return err;
+}
+
+// A JS tuple as an owned AclBinding, or NULL with a JS exception pending.
+static void* acl_binding_from_js(napi_env env, napi_value tuple) {
+    int32_t codes[4];
+    char* strs[3];
+    if (acl_fields_from_js(env, tuple, codes, strs) < 0) return NULL;
+    kafka_common_acl_AclBinding_t* binding = NULL;
+    kafka_common_Error_t* err = NULL;
+    if (strs[0] == NULL || strs[1] == NULL || strs[2] == NULL) {
+        napi_throw_type_error(env, NULL, "an AclBinding's name, principal and host must be strings");
+    } else {
+        AclEnums e;
+        kafka_common_Error_t* ffi_err = NULL;
+        kafka_common_resource_ResourcePattern_t* pattern = NULL;
+        kafka_common_acl_AccessControlEntry_t* entry = NULL;
+        err = acl_enums_of(codes, &e);
+        if (err == NULL) err = FFI_SET(pattern, kafka_common_resource_ResourcePattern_new(e.resource_type, strs[0], e.pattern_type, &ffi_err));
+        if (err == NULL)
+            err = FFI_SET(entry, kafka_common_acl_AccessControlEntry_new(strs[1], strs[2], e.operation, e.permission_type, &ffi_err));
+        if (err == NULL) err = FFI_SET(binding, kafka_common_acl_AclBinding_new_err(pattern, entry, &ffi_err));
+        // The binding holds copies.
+        if (pattern != NULL) error_warn(env, 1, FFI_ERR(kafka_common_resource_ResourcePattern_destroy_err(pattern, &ffi_err)));
+        if (entry != NULL) error_warn(env, 1, FFI_ERR(kafka_common_acl_AccessControlEntry_destroy_err(entry, &ffi_err)));
+    }
+    for (int i = 0; i < 3; i++) free(strs[i]);
+    if (err != NULL) error_throw_owned(env, err);
+    return binding;
+}
+
+// A JS tuple as an owned AclBindingFilter, or NULL with a JS exception pending.
+static kafka_common_acl_AclBindingFilter_t* acl_binding_filter_from_js(napi_env env, napi_value tuple) {
+    int32_t codes[4];
+    char* strs[3];
+    if (acl_fields_from_js(env, tuple, codes, strs) < 0) return NULL;
+    AclEnums e;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_resource_ResourcePatternFilter_t* pattern = NULL;
+    kafka_common_acl_AccessControlEntryFilter_t* entry = NULL;
+    kafka_common_acl_AclBindingFilter_t* filter = NULL;
+    kafka_common_Error_t* err = acl_enums_of(codes, &e);
+    if (err == NULL)
+        err = FFI_SET(pattern, kafka_common_resource_ResourcePatternFilter_new_err(e.resource_type, strs[0], e.pattern_type, &ffi_err));
+    if (err == NULL)
+        err = FFI_SET(entry, kafka_common_acl_AccessControlEntryFilter_new_err(strs[1], strs[2], e.operation, e.permission_type, &ffi_err));
+    if (err == NULL) err = FFI_SET(filter, kafka_common_acl_AclBindingFilter_new_err(pattern, entry, &ffi_err));
+    // The filter holds copies.
+    if (pattern != NULL) error_warn(env, 1, FFI_ERR(kafka_common_resource_ResourcePatternFilter_destroy_err(pattern, &ffi_err)));
+    if (entry != NULL) error_warn(env, 1, FFI_ERR(kafka_common_acl_AccessControlEntryFilter_destroy_err(entry, &ffi_err)));
+    for (int i = 0; i < 3; i++) free(strs[i]);
+    if (err != NULL) error_throw_owned(env, err);
+    return filter;
+}
+
+static void* acl_binding_filter_from_js_item(napi_env env, napi_value v) {
+    return acl_binding_filter_from_js(env, v);
+}
+
+// Four borrowed enum singletons and three borrowed strings (NULL as null) as a
+// JS seven-tuple.
+static napi_value acl_tuple_to_js(napi_env env, const AclEnums* e, const char* name, const char* principal, const char* host) {
+    kafka_common_Error_t* ffi_err = NULL;
+    int8_t codes[4] = {0, 0, 0, 0};
+    kafka_common_Error_t* err = FFI_SET(codes[0], kafka_common_resource_ResourceType_code_err(e->resource_type, &ffi_err));
+    if (err == NULL) err = FFI_SET(codes[1], kafka_common_resource_PatternType_code_err(e->pattern_type, &ffi_err));
+    if (err == NULL) err = FFI_SET(codes[2], kafka_common_acl_AclOperation_code_err(e->operation, &ffi_err));
+    if (err == NULL) err = FFI_SET(codes[3], kafka_common_acl_AclPermissionType_code_err(e->permission_type, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value vals[7] = {js_int32(env, codes[0]),         js_string_or_null(env, name), js_int32(env, codes[1]),
+                          js_string_or_null(env, principal), js_string_or_null(env, host), js_int32(env, codes[2]),
+                          js_int32(env, codes[3])};
+    napi_value tuple;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 7, &tuple), NULL);
+    for (uint32_t i = 0; i < 7; i++) {
+        if (vals[i] == NULL) return NULL;
+        NAPI_CHECK(env, napi_set_element(env, tuple, i, vals[i]), NULL);
+    }
+    return tuple;
+}
+
+// A borrowed AclBinding as its seven-tuple.
+static napi_value acl_binding_to_js(napi_env env, const kafka_common_acl_AclBinding_t* b) {
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_common_resource_ResourcePattern_t* pattern = NULL;
+    const kafka_common_acl_AccessControlEntry_t* entry = NULL;
+    const char *name = NULL, *principal = NULL, *host = NULL;
+    AclEnums e = {NULL, NULL, NULL, NULL};
+    kafka_common_Error_t* err = FFI_SET(pattern, kafka_common_acl_AclBinding_pattern_err(b, &ffi_err));
+    if (err == NULL) err = FFI_SET(entry, kafka_common_acl_AclBinding_entry_err(b, &ffi_err));
+    if (err == NULL) err = FFI_SET(e.resource_type, kafka_common_resource_ResourcePattern_resource_type_err(pattern, &ffi_err));
+    if (err == NULL) err = FFI_SET(name, kafka_common_resource_ResourcePattern_name_err(pattern, &ffi_err));
+    if (err == NULL) err = FFI_SET(e.pattern_type, kafka_common_resource_ResourcePattern_pattern_type_err(pattern, &ffi_err));
+    if (err == NULL) err = FFI_SET(principal, kafka_common_acl_AccessControlEntry_principal_err(entry, &ffi_err));
+    if (err == NULL) err = FFI_SET(host, kafka_common_acl_AccessControlEntry_host_err(entry, &ffi_err));
+    if (err == NULL) err = FFI_SET(e.operation, kafka_common_acl_AccessControlEntry_operation_err(entry, &ffi_err));
+    if (err == NULL) err = FFI_SET(e.permission_type, kafka_common_acl_AccessControlEntry_permission_type_err(entry, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return acl_tuple_to_js(env, &e, name, principal, host);
+}
+
+// A borrowed AclBindingFilter as its seven-tuple, its null fields null.
+static napi_value acl_binding_filter_to_js(napi_env env, const kafka_common_acl_AclBindingFilter_t* f) {
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_common_resource_ResourcePatternFilter_t* pattern = NULL;
+    const kafka_common_acl_AccessControlEntryFilter_t* entry = NULL;
+    const char *name = NULL, *principal = NULL, *host = NULL;
+    AclEnums e = {NULL, NULL, NULL, NULL};
+    kafka_common_Error_t* err = FFI_SET(pattern, kafka_common_acl_AclBindingFilter_pattern_filter_err(f, &ffi_err));
+    if (err == NULL) err = FFI_SET(entry, kafka_common_acl_AclBindingFilter_entry_filter_err(f, &ffi_err));
+    if (err == NULL) err = FFI_SET(e.resource_type, kafka_common_resource_ResourcePatternFilter_resource_type_err(pattern, &ffi_err));
+    if (err == NULL) err = FFI_SET(name, kafka_common_resource_ResourcePatternFilter_name_err(pattern, &ffi_err));
+    if (err == NULL) err = FFI_SET(e.pattern_type, kafka_common_resource_ResourcePatternFilter_pattern_type_err(pattern, &ffi_err));
+    if (err == NULL) err = FFI_SET(principal, kafka_common_acl_AccessControlEntryFilter_principal_err(entry, &ffi_err));
+    if (err == NULL) err = FFI_SET(host, kafka_common_acl_AccessControlEntryFilter_host_err(entry, &ffi_err));
+    if (err == NULL) err = FFI_SET(e.operation, kafka_common_acl_AccessControlEntryFilter_operation_err(entry, &ffi_err));
+    if (err == NULL) err = FFI_SET(e.permission_type, kafka_common_acl_AccessControlEntryFilter_permission_type_err(entry, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return acl_tuple_to_js(env, &e, name, principal, host);
+}
+
+static napi_value key_acl_binding(napi_env env, const void* k) {
+    return acl_binding_to_js(env, (const kafka_common_acl_AclBinding_t*)k);
+}
+
+static napi_value item_acl_binding(napi_env env, const void* item) {
+    return acl_binding_to_js(env, (const kafka_common_acl_AclBinding_t*)item);
+}
+
+static napi_value key_acl_binding_filter(napi_env env, const void* k) {
+    return acl_binding_filter_to_js(env, (const kafka_common_acl_AclBindingFilter_t*)k);
+}
+
+// describeAcls' value: the future's list of bindings, borrowed.
+static napi_value conv_acl_bindings(napi_env env, void* v) {
+    return admin_list_to_js(env, (const kafka_List_t*)v, item_acl_binding, 0);
+}
+
+// A FilterResult as { binding, error }: the binding's tuple, or null when the
+// deletion failed; the error, or null when it succeeded (both borrowed).
+static napi_value item_filter_result(napi_env env, const void* item) {
+    const kafka_admin_DeleteAclsResult_FilterResult_t* r = (const kafka_admin_DeleteAclsResult_FilterResult_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_common_acl_AclBinding_t* binding = NULL;
+    const kafka_common_Error_t* error = NULL;
+    kafka_common_Error_t* err = FFI_SET(binding, kafka_admin_DeleteAclsResult_FilterResult_binding_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(error, kafka_admin_DeleteAclsResult_FilterResult_error_err(r, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value b = binding == NULL ? js_null(env) : acl_binding_to_js(env, binding);
+    if (b == NULL) return NULL;
+    napi_value e = error == NULL ? js_null(env) : error_to_js(env, error);
+    if (e == NULL) return NULL;
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "binding", b), NULL);
+    NAPI_CHECK(env, napi_set_named_property(env, obj, "error", e), NULL);
+    return obj;
+}
+
+// deleteAcls' value: a borrowed FilterResults as an array of { binding,
+// error }, read from the owned list of copies its values() hands out, which
+// is destroyed with its elements.
+static napi_value conv_filter_results(napi_env env, void* v) {
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_List_t* list = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(list, kafka_admin_DeleteAclsResult_FilterResults_values_err((const kafka_admin_DeleteAclsResult_FilterResults_t*)v, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value out = admin_list_to_js(env, list, item_filter_result, 0);
+    error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
+    return out;
+}
+
+// ---- createAcls -------------------------------------------------------------------------------
+
+#define ADMIN_RPC CreateAcls
+
+ADMIN_OPT_TIMEOUT(kafka_admin_CreateAclsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_CreateAclsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_CreateAclsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_CreateAclsResult_destroy_err),
+    {ADMIN_ACC_MAP(values, kafka_admin_CreateAclsResult_values_err, key_acl_binding, NULL), ADMIN_ACC_END},
+};
+
+// adminCreateAcls(handle, acls, options): each binding as its seven-tuple;
+// the result's futures are `values`, a map keyed by the binding's tuple
+// (Java's all() is composed in TypeScript).
+napi_value js_admin_create_acls(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* acls = handle_list(env, argv[1], acl_binding_from_js, acl_binding_destroy);
+    if (acls == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, acls, acl_binding_destroy);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_create_acls_with_options_err(a->view, acls, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, acls, acl_binding_destroy);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison CreateAclsOptions_desc CreateAclsResult_desc
+
+// ---- describeAcls -----------------------------------------------------------------------------
+
+#define ADMIN_RPC DescribeAcls
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeAclsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeAclsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeAclsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeAclsResult_destroy_err),
+    {ADMIN_ACC_ONE_BORROWED(values, kafka_admin_DescribeAclsResult_values_err, conv_acl_bindings), ADMIN_ACC_END},
+};
+
+// adminDescribeAcls(handle, filter, options): the filter as its seven-tuple;
+// the result's one future is `values`, which the result lends out.
+napi_value js_admin_describe_acls(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_common_acl_AclBindingFilter_t* filter = acl_binding_filter_from_js(env, argv[1]);
+    if (filter == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = NULL;
+    if (o != NULL)
+        err = FFI_SET(r, kafka_admin_Admin_describe_acls_with_options_err(a->view, filter, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    error_warn(env, 1, FFI_ERR(kafka_common_acl_AclBindingFilter_destroy_err(filter, &ffi_err)));
+    if (o == NULL) return NULL;
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeAclsOptions_desc DescribeAclsResult_desc
+
+// ---- deleteAcls -------------------------------------------------------------------------------
+
+#define ADMIN_RPC DeleteAcls
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DeleteAclsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DeleteAclsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DeleteAclsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DeleteAclsResult_destroy_err),
+    {ADMIN_ACC_MAP(values, kafka_admin_DeleteAclsResult_values_err, key_acl_binding_filter, conv_filter_results), ADMIN_ACC_END},
+};
+
+// adminDeleteAcls(handle, filters, options): each filter as its seven-tuple;
+// the result's futures are `values`, a map keyed by the filter's tuple, each
+// an array of { binding, error } (Java's all() is composed in TypeScript).
+napi_value js_admin_delete_acls(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* filters = handle_list(env, argv[1], acl_binding_filter_from_js_item, acl_binding_filter_destroy);
+    if (filters == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, filters, acl_binding_filter_destroy);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_delete_acls_with_options_err(a->view, filters, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, filters, acl_binding_filter_destroy);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DeleteAclsOptions_desc DeleteAclsResult_desc
+
+// ---- security: client quotas: shared values -------------------------------------------------
+
+// An entity crosses as its entries, [[entityType, name | null], ...]; an
+// alteration as [entityEntries, [[key, value | null], ...]], a null value a
+// removal (Java's null Double, which the core reads from NaN); a filter as
+// [strict, [[entityType, matchKind, name | null], ...]], matchKind 0 for an
+// exact name, 1 for the default name and 2 for any name.
+
+static void quota_alteration_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_quota_ClientQuotaAlteration_destroy_err((kafka_common_quota_ClientQuotaAlteration_t*)item, out_err);
+}
+
+static void quota_op_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_quota_ClientQuotaAlteration_Op_destroy_err((kafka_common_quota_ClientQuotaAlteration_Op_t*)item, out_err);
+}
+
+static void quota_component_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_quota_ClientQuotaFilterComponent_destroy_err((kafka_common_quota_ClientQuotaFilterComponent_t*)item, out_err);
+}
+
+// An entity's entries as an owned entity, or NULL with a JS exception pending.
+static kafka_common_quota_ClientQuotaEntity_t* quota_entity_from_js(napi_env env, napi_value pairs) {
+    int is_null = 0;
+    kafka_Map_t* map = string_map(env, pairs, &is_null);
+    if (map == NULL) {
+        if (is_null) napi_throw_type_error(env, NULL, "a quota entity's entries must not be null");
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_quota_ClientQuotaEntity_t* entity = NULL;
+    kafka_common_Error_t* err = FFI_SET(entity, kafka_common_quota_ClientQuotaEntity_new_err(map, &ffi_err));  // copies
+    admin_map_free(env, map);
+    if (err != NULL) error_throw_owned(env, err);
+    return entity;
+}
+
+// An alteration's ops as an owned list of owned ops, or NULL with a JS
+// exception pending.
+static kafka_List_t* quota_ops_from_js(napi_env env, napi_value ops) {
+    int ok = 0;
+    uint32_t n = length_of(env, ops, &ok);
+    if (!ok) return NULL;
+    kafka_List_t* list = list_new(env);
+    if (list == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    for (uint32_t i = 0; i < n; i++) {
+        napi_value row = element(env, ops, i);
+        napi_value k = row == NULL ? NULL : element(env, row, 0);
+        napi_value v = row == NULL ? NULL : element(env, row, 1);
+        char* key = k == NULL ? NULL : js_string_dup(env, k, "a quota op's key must be a string");
+        napi_valuetype type = napi_undefined;
+        double value = NAN;
+        if (key == NULL || v == NULL || napi_typeof(env, v, &type) != napi_ok
+            || (type != napi_null && napi_get_value_double(env, v, &value) != napi_ok)) {
+            bool pending = false;
+            if (key != NULL && napi_is_exception_pending(env, &pending) == napi_ok && !pending) {
+                napi_throw_type_error(env, NULL, "a quota op's value must be a number or null");
+            }
+            free(key);
+            admin_list_free(env, list, quota_op_destroy);
+            return NULL;
+        }
+        kafka_common_quota_ClientQuotaAlteration_Op_t* op = NULL;
+        kafka_common_Error_t* err = FFI_SET(op, kafka_common_quota_ClientQuotaAlteration_Op_new_err(key, value, &ffi_err));
+        free(key);
+        if (err != NULL) {
+            admin_list_free(env, list, quota_op_destroy);
+            error_throw_owned(env, err);
+            return NULL;
+        }
+        if (list_add(env, list, op, quota_op_destroy) < 0) {
+            admin_list_free(env, list, quota_op_destroy);
+            return NULL;
+        }
+    }
+    return list;
+}
+
+// An alteration as an owned ClientQuotaAlteration, or NULL with a JS
+// exception pending.
+static void* quota_alteration_from_js(napi_env env, napi_value row) {
+    napi_value pairs = element(env, row, 0);
+    napi_value ops_value = pairs == NULL ? NULL : element(env, row, 1);
+    if (ops_value == NULL) return NULL;
+    kafka_common_quota_ClientQuotaEntity_t* entity = quota_entity_from_js(env, pairs);
+    if (entity == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_List_t* ops = quota_ops_from_js(env, ops_value);
+    if (ops == NULL) {
+        error_warn(env, 1, FFI_ERR(kafka_common_quota_ClientQuotaEntity_destroy_err(entity, &ffi_err)));
+        return NULL;
+    }
+    kafka_common_quota_ClientQuotaAlteration_t* alteration = NULL;
+    kafka_common_Error_t* err = FFI_SET(alteration, kafka_common_quota_ClientQuotaAlteration_new_err(entity, ops, &ffi_err));  // copies
+    admin_list_free(env, ops, quota_op_destroy);
+    error_warn(env, 1, FFI_ERR(kafka_common_quota_ClientQuotaEntity_destroy_err(entity, &ffi_err)));
+    if (err != NULL) error_throw_owned(env, err);
+    return alteration;
+}
+
+// A filter as an owned ClientQuotaFilter, or NULL with a JS exception pending.
+static kafka_common_quota_ClientQuotaFilter_t* quota_filter_from_js(napi_env env, napi_value spec) {
+    napi_value strict_value = element(env, spec, 0);
+    napi_value rows = strict_value == NULL ? NULL : element(env, spec, 1);
+    if (rows == NULL) return NULL;
+    bool strict = false;
+    if (napi_get_value_bool(env, strict_value, &strict) != napi_ok) {
+        napi_throw_type_error(env, NULL, "a quota filter's strictness must be a boolean");
+        return NULL;
+    }
+    int ok = 0;
+    uint32_t n = length_of(env, rows, &ok);
+    if (!ok) return NULL;
+    kafka_List_t* list = list_new(env);
+    if (list == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    for (uint32_t i = 0; i < n; i++) {
+        napi_value row = element(env, rows, i);
+        napi_value t = row == NULL ? NULL : element(env, row, 0);
+        napi_value m = t == NULL ? NULL : element(env, row, 1);
+        napi_value nm = m == NULL ? NULL : element(env, row, 2);
+        char* type = nm == NULL ? NULL : js_string_dup(env, t, "a quota filter component's entity type must be a string");
+        int32_t kind = type == NULL ? 0 : int32_of(env, m, "a quota filter component's match kind", &ok);
+        char* name = (type == NULL || !ok) ? NULL : string_or_null(env, nm, "a quota filter component's name must be a string", &ok);
+        if (type == NULL || !ok || (kind == 0 && name == NULL) || kind < 0 || kind > 2) {
+            bool pending = false;
+            if (napi_is_exception_pending(env, &pending) == napi_ok && !pending) {
+                napi_throw_type_error(env, NULL, "a quota filter component must be [entityType, matchKind, name]");
+            }
+            free(type);
+            free(name);
+            admin_list_free(env, list, quota_component_destroy);
+            return NULL;
+        }
+        kafka_common_quota_ClientQuotaFilterComponent_t* c = NULL;
+        kafka_common_Error_t* err =
+            kind == 0   ? FFI_SET(c, kafka_common_quota_ClientQuotaFilterComponent_of_entity_err(type, name, &ffi_err))
+            : kind == 1 ? FFI_SET(c, kafka_common_quota_ClientQuotaFilterComponent_of_default_entity_err(type, &ffi_err))
+                        : FFI_SET(c, kafka_common_quota_ClientQuotaFilterComponent_of_entity_type_err(type, &ffi_err));
+        free(type);
+        free(name);
+        if (err != NULL) {
+            admin_list_free(env, list, quota_component_destroy);
+            error_throw_owned(env, err);
+            return NULL;
+        }
+        if (list_add(env, list, c, quota_component_destroy) < 0) {
+            admin_list_free(env, list, quota_component_destroy);
+            return NULL;
+        }
+    }
+    kafka_common_quota_ClientQuotaFilter_t* filter = NULL;
+    kafka_common_Error_t* err = strict ? FFI_SET(filter, kafka_common_quota_ClientQuotaFilter_contains_only_err(list, &ffi_err))
+                                       : FFI_SET(filter, kafka_common_quota_ClientQuotaFilter_contains_err(list, &ffi_err));  // copies
+    admin_list_free(env, list, quota_component_destroy);
+    if (err != NULL) error_throw_owned(env, err);
+    return filter;
+}
+
+// A borrowed entity as its entries, [[entityType, name | null], ...], read
+// from the owned map entries() hands out, destroyed with its strings.
+static napi_value quota_entity_to_js(napi_env env, const kafka_common_quota_ClientQuotaEntity_t* e) {
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* entries = NULL;
+    kafka_common_Error_t* err = FFI_SET(entries, kafka_common_quota_ClientQuotaEntity_entries_err(e, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value out = admin_map_to_js(env, entries, key_string, admin_item_string);
+    error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(entries, &ffi_err)));
+    return out;
+}
+
+static napi_value key_quota_entity(napi_env env, const void* k) {
+    return quota_entity_to_js(env, (const kafka_common_quota_ClientQuotaEntity_t*)k);
+}
+
+static napi_value item_double(napi_env env, const void* item) {
+    napi_value v = NULL;
+    if (napi_create_double(env, item == NULL ? NAN : *(const double*)item, &v) != napi_ok) js_throw_last_napi_error(env, "napi_create_double");
+    return v;
+}
+
+// One entity's quotas, [[name, value], ...].
+static napi_value item_quota_values(napi_env env, const void* item) {
+    return admin_map_to_js(env, (const kafka_Map_t*)item, key_string, item_double);
+}
+
+// describeClientQuotas' value: [[entityEntries, [[name, value], ...]], ...].
+static napi_value conv_quota_entities(napi_env env, void* v) {
+    return admin_map_to_js(env, (const kafka_Map_t*)v, key_quota_entity, item_quota_values);
+}
+
+// ---- describeClientQuotas ---------------------------------------------------------------------
+
+#define ADMIN_RPC DescribeClientQuotas
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeClientQuotasOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeClientQuotasOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeClientQuotasOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeClientQuotasResult_destroy_err),
+    {ADMIN_ACC_ONE_BORROWED(entities, kafka_admin_DescribeClientQuotasResult_entities_err, conv_quota_entities), ADMIN_ACC_END},
+};
+
+// adminDescribeClientQuotas(handle, filter, options): the filter as [strict,
+// components]; the result's one future is `entities`, which the result lends
+// out.
+napi_value js_admin_describe_client_quotas(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_common_quota_ClientQuotaFilter_t* filter = quota_filter_from_js(env, argv[1]);
+    if (filter == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = NULL;
+    if (o != NULL)
+        err = FFI_SET(r, kafka_admin_Admin_describe_client_quotas_with_options_err(a->view, filter, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    error_warn(env, 1, FFI_ERR(kafka_common_quota_ClientQuotaFilter_destroy_err(filter, &ffi_err)));
+    if (o == NULL) return NULL;
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeClientQuotasOptions_desc DescribeClientQuotasResult_desc
+
+// ---- alterClientQuotas ------------------------------------------------------------------------
+
+#define ADMIN_RPC AlterClientQuotas
+
+ADMIN_OPT_TIMEOUT(kafka_admin_AlterClientQuotasOptions_set_timeout_ms_err)
+ADMIN_OPT_BOOL(validateOnly, kafka_admin_AlterClientQuotasOptions_set_validate_only_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_AlterClientQuotasOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_AlterClientQuotasOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(validateOnly), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_AlterClientQuotasResult_destroy_err),
+    {ADMIN_ACC_MAP(values, kafka_admin_AlterClientQuotasResult_values_err, key_quota_entity, NULL), ADMIN_ACC_END},
+};
+
+// adminAlterClientQuotas(handle, entries, options): each alteration as
+// [entityEntries, ops]; the result's futures are `values`, a map keyed by the
+// entity's entries (Java's all() is composed in TypeScript).
+napi_value js_admin_alter_client_quotas(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* entries = handle_list(env, argv[1], quota_alteration_from_js, quota_alteration_destroy);
+    if (entries == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, entries, quota_alteration_destroy);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_alter_client_quotas_with_options_err(a->view, entries, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, entries, quota_alteration_destroy);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison AlterClientQuotasOptions_desc AlterClientQuotasResult_desc
+
+// ---- security: SCRAM: shared values ---------------------------------------------------------
+
+// A description crosses as { name, credentialInfos: [[mechanismType,
+// iterations], ...] }; an alteration as [0, user, mechanismType, iterations,
+// password, salt] for an upsertion (TypeScript always has its salt) or [1,
+// user, mechanismType] for a deletion.
+
+static void scram_alteration_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_admin_UserScramCredentialAlteration_destroy_err((kafka_admin_UserScramCredentialAlteration_t*)item, out_err);
+}
+
+// A borrowed ScramCredentialInfo as [mechanismType, iterations].
+static napi_value item_scram_credential_info(napi_env env, const void* item) {
+    const kafka_admin_ScramCredentialInfo_t* i = (const kafka_admin_ScramCredentialInfo_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_admin_ScramMechanism_t* mechanism = NULL;
+    int8_t type = 0;
+    int32_t iterations = 0;
+    kafka_common_Error_t* err = FFI_SET(mechanism, kafka_admin_ScramCredentialInfo_mechanism_err(i, &ffi_err));
+    if (err == NULL) err = FFI_SET(type, kafka_admin_ScramMechanism_type_err(mechanism, &ffi_err));
+    if (err == NULL) err = FFI_SET(iterations, kafka_admin_ScramCredentialInfo_iterations_err(i, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value pair, t = js_int32(env, type), n = js_int32(env, iterations);
+    if (t == NULL || n == NULL) return NULL;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 2, &pair), NULL);
+    NAPI_CHECK(env, napi_set_element(env, pair, 0, t), NULL);
+    NAPI_CHECK(env, napi_set_element(env, pair, 1, n), NULL);
+    return pair;
+}
+
+// A borrowed UserScramCredentialsDescription as { name, credentialInfos },
+// its infos read from the owned list of copies the accessor hands out.
+static napi_value item_scram_description(napi_env env, const void* item) {
+    const kafka_admin_UserScramCredentialsDescription_t* d = (const kafka_admin_UserScramCredentialsDescription_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    const char* name = NULL;
+    kafka_List_t* infos = NULL;
+    kafka_common_Error_t* err = FFI_SET(name, kafka_admin_UserScramCredentialsDescription_name_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(infos, kafka_admin_UserScramCredentialsDescription_credential_infos_err(d, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "name", js_string_or_null(env, name)) < 0) {
+        error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(infos, &ffi_err)));
+        return NULL;
+    }
+    if (set(env, obj, "credentialInfos", owned_list_to_js(env, infos, item_scram_credential_info, 0)) < 0) return NULL;
+    return obj;
+}
+
+static napi_value conv_scram_description(napi_env env, void* v) {
+    return item_scram_description(env, v);
+}
+
+// describeUserScramCredentials' all(): [[user, description], ...].
+static napi_value conv_scram_descriptions(napi_env env, void* v) {
+    return admin_map_to_js(env, (const kafka_Map_t*)v, key_string, item_scram_description);
+}
+
+// users(): [user, ...].
+static napi_value conv_strings(napi_env env, void* v) {
+    return admin_list_to_js(env, (const kafka_List_t*)v, admin_item_string, 0);
+}
+
+// The mechanism of a type code (UNKNOWN for a code Java does not know).
+static const kafka_admin_ScramMechanism_t* scram_mechanism_of(int32_t type, kafka_common_Error_t** out) {
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_admin_ScramMechanism_t* m = NULL;
+    *out = FFI_SET(m, kafka_admin_ScramMechanism_from_type_err((int8_t)type, &ffi_err));
+    return m;
+}
+
+// An upsertion [0, user, type, iterations, password, salt] as an owned
+// alteration, with the user, the mechanism and the codes read; NULL with a JS
+// exception pending.
+static kafka_admin_UserScramCredentialAlteration_t* scram_upsertion_from_js(napi_env env, napi_value row, const char* user,
+                                                                            const kafka_admin_ScramMechanism_t* mechanism) {
+    int ok = 1;
+    napi_value it = element(env, row, 3);
+    napi_value pw = it == NULL ? NULL : element(env, row, 4);
+    napi_value sa = pw == NULL ? NULL : element(env, row, 5);
+    if (sa == NULL) return NULL;
+    int32_t iterations = int32_of(env, it, "a credential's iterations", &ok);
+    if (!ok) return NULL;
+    JsBytes password, salt;
+    if (js_bytes(env, pw, "a credential's password must be a Uint8Array", &password) < 0) return NULL;
+    if (js_bytes(env, sa, "a credential's salt must be a Uint8Array", &salt) < 0) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_admin_ScramCredentialInfo_t* info = NULL;
+    kafka_admin_UserScramCredentialUpsertion_t* up = NULL;
+    kafka_admin_UserScramCredentialAlteration_t* alteration = NULL;
+    kafka_common_Error_t* err = FFI_SET(info, kafka_admin_ScramCredentialInfo_new_err(mechanism, iterations, &ffi_err));
+    if (err == NULL)
+        err = FFI_SET(up, kafka_admin_UserScramCredentialUpsertion_with_salt_err(user, info, password.bytes, salt.bytes, &ffi_err));  // copies
+    if (err == NULL) err = FFI_SET(alteration, kafka_admin_UserScramCredentialAlteration_upsertion_err(up, &ffi_err));  // copies
+    if (info != NULL) error_warn(env, 1, FFI_ERR(kafka_admin_ScramCredentialInfo_destroy_err(info, &ffi_err)));
+    if (up != NULL) error_warn(env, 1, FFI_ERR(kafka_admin_UserScramCredentialUpsertion_destroy_err(up, &ffi_err)));
+    if (err != NULL) error_throw_owned(env, err);
+    return alteration;
+}
+
+// An alteration row as an owned UserScramCredentialAlteration, or NULL with a
+// JS exception pending.
+static void* scram_alteration_from_js(napi_env env, napi_value row) {
+    int ok = 1;
+    napi_value k = element(env, row, 0);
+    napi_value u = k == NULL ? NULL : element(env, row, 1);
+    napi_value t = u == NULL ? NULL : element(env, row, 2);
+    if (t == NULL) return NULL;
+    int32_t kind = int32_of(env, k, "an alteration's kind", &ok);
+    int32_t type = ok ? int32_of(env, t, "an alteration's mechanism type", &ok) : 0;
+    if (!ok) return NULL;
+    char* user = js_string_dup(env, u, "an alteration's user must be a string");
+    if (user == NULL) return NULL;
+    kafka_common_Error_t* err = NULL;
+    const kafka_admin_ScramMechanism_t* mechanism = scram_mechanism_of(type, &err);
+    kafka_admin_UserScramCredentialAlteration_t* alteration = NULL;
+    if (err != NULL) {
+        error_throw_owned(env, err);
+    } else if (kind == 0) {
+        alteration = scram_upsertion_from_js(env, row, user, mechanism);
+    } else {
+        kafka_common_Error_t* ffi_err = NULL;
+        kafka_admin_UserScramCredentialDeletion_t* del = NULL;
+        err = FFI_SET(del, kafka_admin_UserScramCredentialDeletion_new_err(user, mechanism, &ffi_err));
+        if (err == NULL) err = FFI_SET(alteration, kafka_admin_UserScramCredentialAlteration_deletion_err(del, &ffi_err));  // copies
+        if (del != NULL) error_warn(env, 1, FFI_ERR(kafka_admin_UserScramCredentialDeletion_destroy_err(del, &ffi_err)));
+        if (err != NULL) error_throw_owned(env, err);
+    }
+    free(user);
+    return alteration;
+}
+
+// `description(userName)`: the name a string, or null, which names no user.
+static kafka_common_KafkaFuture_t* scram_description_of(napi_env env, const void* result, napi_value key, kafka_common_Error_t** out_err) {
+    int ok = 0;
+    char* name = string_or_null(env, key, "the user name must be a string or null", &ok);
+    if (!ok) return NULL;
+    kafka_common_KafkaFuture_t* future =
+        kafka_admin_DescribeUserScramCredentialsResult_description_err((const kafka_admin_DescribeUserScramCredentialsResult_t*)result, name, out_err);
+    free(name);
+    return future;
+}
+
+// ---- describeUserScramCredentials -------------------------------------------------------------
+
+#define ADMIN_RPC DescribeUserScramCredentials
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeUserScramCredentialsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeUserScramCredentialsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeUserScramCredentialsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeUserScramCredentialsResult_destroy_err),
+    {ADMIN_ACC_ONE(all, kafka_admin_DescribeUserScramCredentialsResult_all_err, conv_scram_descriptions),
+     ADMIN_ACC_ONE(users, kafka_admin_DescribeUserScramCredentialsResult_users_err, conv_strings),
+     ADMIN_ACC_JS(description, scram_description_of, conv_scram_description), ADMIN_ACC_END},
+};
+
+// adminDescribeUserScramCredentials(handle, users, options): `users` an array
+// of names, or null (every user, Java's null); the result's futures are the
+// core's own `all`, `users` and `description(user)`, each read when asked for
+// (Python's composition: the Result takes the C futures).
+napi_value js_admin_describe_user_scram_credentials(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    kafka_List_t* users = NULL;
+    if (type != napi_null) {
+        users = string_list(env, argv[1]);
+        if (users == NULL) return NULL;
+    }
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        if (users != NULL) admin_list_free(env, users, free_item);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = FFI_SET(
+        r, kafka_admin_Admin_describe_user_scram_credentials_with_users_options_err(a->view, users, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    if (users != NULL) admin_list_free(env, users, free_item);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeUserScramCredentialsOptions_desc DescribeUserScramCredentialsResult_desc
+
+// ---- alterUserScramCredentials ----------------------------------------------------------------
+
+#define ADMIN_RPC AlterUserScramCredentials
+
+ADMIN_OPT_TIMEOUT(kafka_admin_AlterUserScramCredentialsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_AlterUserScramCredentialsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_AlterUserScramCredentialsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_AlterUserScramCredentialsResult_destroy_err),
+    {ADMIN_ACC_MAP(values, kafka_admin_AlterUserScramCredentialsResult_values_err, key_string, NULL), ADMIN_ACC_END},
+};
+
+// adminAlterUserScramCredentials(handle, alterations, options): each
+// alteration as its row; the result's futures are `values`, keyed by user
+// (Java's all() is composed in TypeScript).
+napi_value js_admin_alter_user_scram_credentials(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* alterations = handle_list(env, argv[1], scram_alteration_from_js, scram_alteration_destroy);
+    if (alterations == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, alterations, scram_alteration_destroy);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = FFI_SET(
+        r, kafka_admin_Admin_alter_user_scram_credentials_with_options_err(a->view, alterations, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, alterations, scram_alteration_destroy);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison AlterUserScramCredentialsOptions_desc AlterUserScramCredentialsResult_desc
+
+// ---- security: delegation tokens: shared values ---------------------------------------------
+
+// A principal crosses as [principalType, name] into the core and as
+// [principalType, name, tokenAuthenticated] out of it; a token as [tokenId,
+// owner, tokenRequester, renewers, issueTimestamp, maxTimestamp,
+// expiryTimestamp, hmac], the timestamps bigints and the HMAC a copied
+// Buffer.
+
+static void principal_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_security_auth_KafkaPrincipal_destroy_err((kafka_common_security_auth_KafkaPrincipal_t*)item, out_err);
+}
+
+// [principalType, name] as an owned principal, or NULL with a JS exception
+// pending.
+static kafka_common_security_auth_KafkaPrincipal_t* principal_from_js(napi_env env, napi_value pair) {
+    napi_value t = element(env, pair, 0);
+    napi_value n = t == NULL ? NULL : element(env, pair, 1);
+    if (n == NULL) return NULL;
+    char* type = js_string_dup(env, t, "a principal's type must be a string");
+    char* name = type == NULL ? NULL : js_string_dup(env, n, "a principal's name must be a string");
+    if (name == NULL) {
+        free(type);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_security_auth_KafkaPrincipal_t* p = NULL;
+    kafka_common_Error_t* err = FFI_SET(p, kafka_common_security_auth_KafkaPrincipal_new_err(type, name, &ffi_err));
+    free(type);
+    free(name);
+    if (err != NULL) error_throw_owned(env, err);
+    return p;
+}
+
+static void* principal_from_js_item(napi_env env, napi_value v) {
+    return principal_from_js(env, v);
+}
+
+// A borrowed principal as [principalType, name, tokenAuthenticated].
+static napi_value principal_to_js(napi_env env, const kafka_common_security_auth_KafkaPrincipal_t* p) {
+    if (p == NULL) return js_null(env);
+    kafka_common_Error_t* ffi_err = NULL;
+    const char *type = NULL, *name = NULL;
+    int8_t token = 0;
+    kafka_common_Error_t* err = FFI_SET(type, kafka_common_security_auth_KafkaPrincipal_principal_type_err(p, &ffi_err));
+    if (err == NULL) err = FFI_SET(name, kafka_common_security_auth_KafkaPrincipal_name_err(p, &ffi_err));
+    if (err == NULL) err = FFI_SET(token, kafka_common_security_auth_KafkaPrincipal_token_authenticated_err(p, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value vals[3] = {js_string_or_null(env, type), js_string_or_null(env, name), js_bool(env, token)};
+    napi_value out;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 3, &out), NULL);
+    for (uint32_t i = 0; i < 3; i++) {
+        if (vals[i] == NULL) return NULL;
+        NAPI_CHECK(env, napi_set_element(env, out, i, vals[i]), NULL);
+    }
+    return out;
+}
+
+static napi_value item_principal(napi_env env, const void* item) {
+    return principal_to_js(env, (const kafka_common_security_auth_KafkaPrincipal_t*)item);
+}
+
+// A borrowed DelegationToken as its eight-tuple.
+static napi_value item_delegation_token(napi_env env, const void* item) {
+    const kafka_common_security_token_delegation_DelegationToken_t* t = (const kafka_common_security_token_delegation_DelegationToken_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_common_security_token_delegation_TokenInformation_t* info = NULL;
+    const char* id = NULL;
+    const kafka_common_security_auth_KafkaPrincipal_t *owner = NULL, *requester = NULL;
+    kafka_List_t* renewers = NULL;
+    int64_t issue = 0, max = 0, expiry = 0;
+    kafka_Bytes_t hmac = {NULL, 0};
+    kafka_common_Error_t* err = FFI_SET(info, kafka_common_security_token_delegation_DelegationToken_token_info_err(t, &ffi_err));
+    if (err == NULL) err = FFI_SET(id, kafka_common_security_token_delegation_TokenInformation_token_id_err(info, &ffi_err));
+    if (err == NULL) err = FFI_SET(owner, kafka_common_security_token_delegation_TokenInformation_owner_err(info, &ffi_err));
+    if (err == NULL) err = FFI_SET(requester, kafka_common_security_token_delegation_TokenInformation_token_requester_err(info, &ffi_err));
+    if (err == NULL) err = FFI_SET(issue, kafka_common_security_token_delegation_TokenInformation_issue_timestamp_err(info, &ffi_err));
+    if (err == NULL) err = FFI_SET(max, kafka_common_security_token_delegation_TokenInformation_max_timestamp_err(info, &ffi_err));
+    if (err == NULL) err = FFI_SET(expiry, kafka_common_security_token_delegation_TokenInformation_expiry_timestamp_err(info, &ffi_err));
+    if (err == NULL) err = FFI_SET(hmac, kafka_common_security_token_delegation_DelegationToken_hmac_err(t, &ffi_err));
+    if (err == NULL) err = FFI_SET(renewers, kafka_common_security_token_delegation_TokenInformation_renewers_err(info, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value buffer = NULL;
+    void* ignored = NULL;
+    napi_value vals[8] = {js_string_or_null(env, id), principal_to_js(env, owner), principal_to_js(env, requester),
+                          owned_list_to_js(env, renewers, item_principal, 0), js_int64(env, issue), js_int64(env, max),
+                          js_int64(env, expiry), NULL};
+    NAPI_CHECK(env, napi_create_buffer_copy(env, (size_t)(hmac.data == NULL || hmac.len < 0 ? 0 : hmac.len), hmac.data, &ignored, &buffer), NULL);
+    vals[7] = buffer;
+    napi_value out;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 8, &out), NULL);
+    for (uint32_t i = 0; i < 8; i++) {
+        if (vals[i] == NULL) return NULL;
+        NAPI_CHECK(env, napi_set_element(env, out, i, vals[i]), NULL);
+    }
+    return out;
+}
+
+static napi_value conv_delegation_token(napi_env env, void* v) {
+    return item_delegation_token(env, v);
+}
+
+static napi_value conv_delegation_tokens(napi_env env, void* v) {
+    return admin_list_to_js(env, (const kafka_List_t*)v, item_delegation_token, 0);
+}
+
+// An expiry timestamp: the future's `int64_t *`, as a bigint.
+static napi_value conv_int64_ptr(napi_env env, void* v) {
+    return js_int64(env, v == NULL ? 0 : *(const int64_t*)v);
+}
+
+// An HMAC argument, a Uint8Array, as a borrowed byte view; -1 with a JS
+// exception pending.
+static int hmac_of(napi_env env, napi_value value, kafka_Bytes_t* out) {
+    JsBytes b;
+    if (js_bytes(env, value, "hmac must be a Uint8Array", &b) < 0) return -1;
+    if (b.is_null) {
+        napi_throw_type_error(env, NULL, "hmac must not be null");
+        return -1;
+    }
+    *out = b.bytes;
+    return 0;
+}
+
+// ---- createDelegationToken --------------------------------------------------------------------
+
+#define ADMIN_RPC CreateDelegationToken
+
+ADMIN_OPT_TIMEOUT(kafka_admin_CreateDelegationTokenOptions_set_timeout_ms_err)
+ADMIN_OPT_INT64(maxLifetimeMs, kafka_admin_CreateDelegationTokenOptions_set_max_lifetime_ms_err)
+// `renewers`: the stored list as [principalType, name] pairs (TypeScript
+// refuses a null one at the call, as Java's createDelegationToken does).
+static int ADMIN_SETTER_FN(renewers)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    kafka_List_t* list = handle_list(env, v, principal_from_js_item, principal_destroy);
+    if (list == NULL) return -1;
+    kafka_admin_CreateDelegationTokenOptions_set_renewers_err((ADMIN_OPTIONS_T*)o, list, out_err);  // copies
+    admin_list_free(env, list, principal_destroy);
+    return 0;
+}
+// `owner`: [principalType, name], or null, which leaves the request
+// principal the owner.
+static int ADMIN_SETTER_FN(owner)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    napi_valuetype type;
+    if (napi_typeof(env, v, &type) != napi_ok) return -1;
+    kafka_common_security_auth_KafkaPrincipal_t* owner = type == napi_null ? NULL : principal_from_js(env, v);
+    if (type != napi_null && owner == NULL) return -1;
+    kafka_admin_CreateDelegationTokenOptions_set_owner_err((ADMIN_OPTIONS_T*)o, owner, out_err);  // copies
+    kafka_common_Error_t* ffi_err = NULL;
+    if (owner != NULL) error_warn(env, 1, FFI_ERR(kafka_common_security_auth_KafkaPrincipal_destroy_err(owner, &ffi_err)));
+    return 0;
+}
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_CreateDelegationTokenOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_CreateDelegationTokenOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(renewers), ADMIN_SETTER(owner), ADMIN_SETTER(maxLifetimeMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_CreateDelegationTokenResult_destroy_err),
+    {ADMIN_ACC_ONE_BORROWED(delegation_token, kafka_admin_CreateDelegationTokenResult_delegation_token_err, conv_delegation_token),
+     ADMIN_ACC_END},
+};
+
+// adminCreateDelegationToken(handle, options): the result's one future is
+// `delegation_token`, which the result lends out.
+napi_value js_admin_create_delegation_token(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 2 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[1]);
+    if (o == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = FFI_SET(r, kafka_admin_Admin_create_delegation_token_with_options_err(a->view, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison CreateDelegationTokenOptions_desc CreateDelegationTokenResult_desc
+
+// ---- renewDelegationToken ---------------------------------------------------------------------
+
+#define ADMIN_RPC RenewDelegationToken
+
+ADMIN_OPT_TIMEOUT(kafka_admin_RenewDelegationTokenOptions_set_timeout_ms_err)
+ADMIN_OPT_INT64(renewTimePeriodMs, kafka_admin_RenewDelegationTokenOptions_set_renew_time_period_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_RenewDelegationTokenOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_RenewDelegationTokenOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(renewTimePeriodMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_RenewDelegationTokenResult_destroy_err),
+    {ADMIN_ACC_ONE_BORROWED(expiry_timestamp, kafka_admin_RenewDelegationTokenResult_expiry_timestamp_err, conv_int64_ptr), ADMIN_ACC_END},
+};
+
+// adminRenewDelegationToken(handle, hmac, options): the HMAC a Uint8Array,
+// which the core copies during the call; the result's one future is
+// `expiry_timestamp`, which the result lends out.
+napi_value js_admin_renew_delegation_token(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_Bytes_t hmac;
+    if (hmac_of(env, argv[1], &hmac) < 0) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_renew_delegation_token_with_options_err(a->view, hmac, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison RenewDelegationTokenOptions_desc RenewDelegationTokenResult_desc
+
+// ---- expireDelegationToken --------------------------------------------------------------------
+
+#define ADMIN_RPC ExpireDelegationToken
+
+ADMIN_OPT_TIMEOUT(kafka_admin_ExpireDelegationTokenOptions_set_timeout_ms_err)
+ADMIN_OPT_INT64(expiryTimePeriodMs, kafka_admin_ExpireDelegationTokenOptions_set_expiry_time_period_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_ExpireDelegationTokenOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_ExpireDelegationTokenOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(expiryTimePeriodMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_ExpireDelegationTokenResult_destroy_err),
+    {ADMIN_ACC_ONE_BORROWED(expiry_timestamp, kafka_admin_ExpireDelegationTokenResult_expiry_timestamp_err, conv_int64_ptr), ADMIN_ACC_END},
+};
+
+// adminExpireDelegationToken(handle, hmac, options): as renew.
+napi_value js_admin_expire_delegation_token(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_Bytes_t hmac;
+    if (hmac_of(env, argv[1], &hmac) < 0) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_expire_delegation_token_with_options_err(a->view, hmac, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison ExpireDelegationTokenOptions_desc ExpireDelegationTokenResult_desc
+
+// ---- describeDelegationToken ------------------------------------------------------------------
+
+#define ADMIN_RPC DescribeDelegationToken
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeDelegationTokenOptions_set_timeout_ms_err)
+// `owners`: the stored list as [principalType, name] pairs, or null, Java's
+// null (every token the caller owns or may describe).
+static int ADMIN_SETTER_FN(owners)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    napi_valuetype type;
+    if (napi_typeof(env, v, &type) != napi_ok) return -1;
+    if (type == napi_null) {
+        kafka_admin_DescribeDelegationTokenOptions_set_owners_err((ADMIN_OPTIONS_T*)o, NULL, out_err);
+        return 0;
+    }
+    kafka_List_t* list = handle_list(env, v, principal_from_js_item, principal_destroy);
+    if (list == NULL) return -1;
+    kafka_admin_DescribeDelegationTokenOptions_set_owners_err((ADMIN_OPTIONS_T*)o, list, out_err);  // copies
+    admin_list_free(env, list, principal_destroy);
+    return 0;
+}
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeDelegationTokenOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeDelegationTokenOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(owners), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeDelegationTokenResult_destroy_err),
+    {ADMIN_ACC_ONE_BORROWED(delegation_tokens, kafka_admin_DescribeDelegationTokenResult_delegation_tokens_err, conv_delegation_tokens),
+     ADMIN_ACC_END},
+};
+
+// adminDescribeDelegationToken(handle, options): the result's one future is
+// `delegation_tokens`, which the result lends out.
+napi_value js_admin_describe_delegation_token(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 2 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[1]);
+    if (o == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_describe_delegation_token_with_options_err(a->view, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeDelegationTokenOptions_desc DescribeDelegationTokenResult_desc

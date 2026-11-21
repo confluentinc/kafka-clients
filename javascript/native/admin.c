@@ -681,6 +681,16 @@ int admin_option_int32(napi_env env, napi_value value, int32_t* out) {
     return 0;
 }
 
+// A Java `long` option: the bigint TypeScript recorded.
+int admin_option_int64(napi_env env, napi_value value, int64_t* out) {
+    bool lossless = false;
+    if (napi_get_value_bigint_int64(env, value, out, &lossless) != napi_ok || !lossless) {
+        napi_throw_type_error(env, NULL, "the option must be a bigint within Java's long");
+        return -1;
+    }
+    return 0;
+}
+
 // ---- close and destroy --------------------------------------------------------
 
 typedef struct {
