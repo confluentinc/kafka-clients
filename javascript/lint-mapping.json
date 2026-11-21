@@ -13,6 +13,8 @@
     "Header.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "ProducerRecord.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
     "RecordMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
+    "Node.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "PartitionInfo.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "TopicPartition.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "OffsetAndMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
     "TimestampType.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",

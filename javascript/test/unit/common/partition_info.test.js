@@ -172,3 +172,16 @@ test('the constructor takes Java forms only, with run-time types', () => {
     message: 'inSyncReplicas must hold only Node, not a string',
   });
 });
+
+test('the JSON form: the fields, the nodes by their own JSON form', () => {
+  const leader = new Node({ id: 1, host: 'h', port: 9092 });
+  const info = new PartitionInfo({ topic: 't', partition: 0, leader, replicas: [leader], inSyncReplicas: [] });
+  assert.deepEqual(JSON.parse(JSON.stringify(info)), {
+    topic: 't',
+    partition: 0,
+    leader: leader.toJSON(),
+    replicas: [leader.toJSON()],
+    inSyncReplicas: [],
+    offlineReplicas: [],
+  });
+});
