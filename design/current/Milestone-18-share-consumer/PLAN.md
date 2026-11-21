@@ -460,7 +460,7 @@ mechanise this.
 ### Bugs found by P10
 
 **None in the client.** All 115 Java methods of the seven `clients-integration-tests` share classes were run end to
-end (110 translated, 5 skipped with reasons, ledger §2.4) on apache/kafka 4.2.0 and 4.4.0; no failure traced back
+end (113 translated, 2 skipped with reasons, ledger §2.4) on apache/kafka 4.2.0 and 4.4.0; no failure traced back
 to the share consumer, the consumer or the admin share RPCs.
 
 **Harness finding (environment, fixed in the tests):** the first run of the whole share suite on 4.4.0 failed 36
