@@ -234,6 +234,36 @@ export class Node {
   }
 
   /**
+   * The node as JSON: its fields, as a spread of it gives them.
+   *
+   * @returns the fields
+   *
+   * @remarks *(js-only)* JavaScript's JSON protocol, whose output is frozen
+   * once released.
+   */
+  toJSON(): {
+    id: number;
+    idString: string;
+    host: string | null;
+    port: number;
+    hasRack: boolean;
+    rack: string | null;
+    isFenced: boolean;
+    isEmpty: boolean;
+  } {
+    return {
+      id: this.id,
+      idString: this.idString,
+      host: this.host,
+      port: this.port,
+      hasRack: this.hasRack,
+      rack: this.rack,
+      isFenced: this.isFenced,
+      isEmpty: this.isEmpty,
+    };
+  }
+
+  /**
    * The node as Java writes it:
    * `<host>:<port> (id: <idString> rack: <rack> isFenced: <isFenced>)`.
    *
