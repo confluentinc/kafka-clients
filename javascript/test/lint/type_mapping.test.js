@@ -367,7 +367,7 @@ test("a serializer's serialize may also return a Promise of the bytes it takes (
   assert.match(findings(r)[0], /^Serializer\.serialize: return: Java byte\[\] is not TypeScript /);
 });
 
-test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition, MetricName and Uuid collections; integer keys are a Map of numbers', () => {
+test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition, MetricName, Uuid, ConfigResource, TopicPartitionReplica and MemberToRemove collections; integer keys are a Map of numbers; an OptionalLong is a bigint or null', () => {
   const coll = javaClass('clients.producer.Coll', {
     overloads: [
       method('take', ['Node[]'], { param_types: ['Node[]'], return_type: 'void', param_names: ['nodes'] }),
@@ -380,6 +380,10 @@ test('a Java array or collection taken is any iterable; one returned is an array
       method('labels', [], { return_type: 'Map<String, String>' }),
       method('label', ['Map'], { param_types: ['Map<String, String>'], return_type: 'void', param_names: ['labels'] }),
       method('byId', [], { return_type: 'Map<Uuid, Long>' }),
+      method('byResource', [], { return_type: 'Map<ConfigResource, Long>' }),
+      method('byReplica', [], { return_type: 'Map<TopicPartitionReplica, String>' }),
+      method('members', [], { return_type: 'Set<MemberToRemove>' }),
+      method('total', [], { return_type: 'OptionalLong' }),
       method('assignments', [], { return_type: 'Map<Integer, List<Integer>>' }),
     ],
   });
@@ -390,6 +394,9 @@ test('a Java array or collection taken is any iterable; one returned is an array
     javaClass('common.MetricName', {}),
     javaClass('common.Metric', { kind: 'interface' }),
     javaClass('common.Uuid', {}),
+    javaClass('common.config.ConfigResource', {}),
+    javaClass('common.TopicPartitionReplica', {}),
+    javaClass('clients.admin.MemberToRemove', {}),
   ];
   const GOOD = {
     take: 'take(nodes: Iterable<Node>): void { void nodes; }',
@@ -402,11 +409,15 @@ test('a Java array or collection taken is any iterable; one returned is an array
     labels: 'labels(): Map<string, string> { return new Map(); }',
     label: 'label(labels: ReadonlyMap<string, string> | Readonly<Record<string, string>>): void { void labels; }',
     byId: 'byId(): UuidMap<bigint> { return new UuidMap(); }',
+    byResource: 'byResource(): ConfigResourceMap<bigint> { return new ConfigResourceMap(); }',
+    byReplica: 'byReplica(): TopicPartitionReplicaMap<string> { return new TopicPartitionReplicaMap(); }',
+    members: 'members(): MemberToRemoveSet { return new MemberToRemoveSet(); }',
+    total: 'total(): bigint | null { return null; }',
     assignments: 'assignments(): ReadonlyMap<number, readonly number[]> { return new Map(); }',
   };
   const source = (/** @type {Record<string, string>} */ members) =>
     "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
-    "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport { MetricNameMap, TopicPartitionMap, TopicPartitionSet, UuidMap } from './collections';\n" +
+    "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport { ConfigResourceMap, MemberToRemoveSet, MetricNameMap, TopicPartitionMap, TopicPartitionReplicaMap, TopicPartitionSet, UuidMap } from './collections';\n" +
     `void TopicPartition;\nexport class Coll {\n${Object.values(members)
       .map((m) => `  ${m}\n`)
       .join('')}}\n`;
@@ -424,7 +435,9 @@ test('a Java array or collection taken is any iterable; one returned is an array
       'src/common/metric.ts': 'export interface Metric { metricValue(): unknown }\n',
       'src/producer/collections.ts':
         'export class TopicPartitionSet { private readonly b = 1; }\nexport class TopicPartitionMap<V> { private readonly v: V | null = null; }\n' +
-        'export class MetricNameMap<V> { private readonly v: V | null = null; }\nexport class UuidMap<V> { private readonly v: V | null = null; }\n',
+        'export class MetricNameMap<V> { private readonly v: V | null = null; }\nexport class UuidMap<V> { private readonly v: V | null = null; }\n' +
+        'export class ConfigResourceMap<V> { private readonly v: V | null = null; }\nexport class TopicPartitionReplicaMap<V> { private readonly v: V | null = null; }\n' +
+        'export class MemberToRemoveSet { private readonly m = 1; }\n',
       'src/producer/coll.ts': source(members),
     });
   let r = lint(files(GOOD), [RULE]);
@@ -458,6 +471,22 @@ test('a Java array or collection taken is any iterable; one returned is an array
       'byId(): Map<string, bigint> { return new Map(); }',
       'Coll.byId: return: Java Map<Uuid, Long> is not TypeScript Map<string, bigint>',
     ],
+    [
+      'byResource',
+      'byResource(): UuidMap<bigint> { return new UuidMap(); }',
+      'Coll.byResource: return: Java Map<ConfigResource, Long> is not TypeScript UuidMap<bigint>',
+    ],
+    [
+      'byReplica',
+      'byReplica(): Map<string, string> { return new Map(); }',
+      'Coll.byReplica: return: Java Map<TopicPartitionReplica, String> is not TypeScript Map<string, string>',
+    ],
+    [
+      'members',
+      'members(): Set<string> { return new Set(); }',
+      'Coll.members: return: Java Set<MemberToRemove> is not TypeScript Set<string>',
+    ],
+    ['total', 'total(): number | null { return null; }', 'Coll.total: return: Java OptionalLong is not TypeScript number | null'],
     [
       'assignments',
       'assignments(): Map<string, number[]> { return new Map(); }',

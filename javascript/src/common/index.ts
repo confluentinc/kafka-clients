@@ -36,6 +36,8 @@ export { TopicCollection } from './topic_collection';
 export { TopicPartition } from './topic_partition';
 export { TopicPartitionInfo } from './topic_partition_info';
 export { TopicPartitionMap } from './topic_partition_map';
+export { TopicPartitionReplica } from './topic_partition_replica';
+export { TopicPartitionReplicaMap } from './topic_partition_replica_map';
 export { TopicPartitionSet } from './topic_partition_set';
 export { Uuid } from './uuid';
 export { UuidMap } from './uuid_map';

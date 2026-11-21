@@ -168,6 +168,18 @@ const ALLOWED = [
     reason: "one partition's last known eligible leader replicas (Java's List<Node>), not a store of records",
   },
   { key: 'UuidMap.#entries', reason: "the entries of Java's Map<Uuid, V> the caller builds or a call returns, not a store of records" },
+  {
+    key: 'ConfigResourceMap.#entries',
+    reason: "the entries of Java's Map<ConfigResource, V> the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'TopicPartitionReplicaMap.#entries',
+    reason: "the entries of Java's Map<TopicPartitionReplica, V> the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'DescribeLogDirsResult.#futures',
+    reason: "one call's futures by broker id (Java's Map<Integer, KafkaFuture<...>>), not a store of records",
+  },
   { key: 'SslClientAuth.VALUES', reason: "Java's SslClientAuth.VALUES, the enum's constants in order" },
   {
     key: 'src/common/kafka_future.ts:MAX_TIMER_MS',
