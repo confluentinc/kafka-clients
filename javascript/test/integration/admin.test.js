@@ -21,6 +21,13 @@ const assert = require('node:assert/strict');
 
 const {
   Admin,
+  ClassicGroupDescription,
+  ConsumerGroupDescription,
+  GroupListing,
+  ListConsumerGroupOffsetsSpec,
+  ListGroupsOptions,
+  MemberToRemove,
+  RemoveMembersFromConsumerGroupOptions,
   AlterConfigOp,
   AlterConfigsOptions,
   ConfigEntry,
@@ -44,6 +51,9 @@ const {
 } = require('@confluentinc/kafka-javascript/admin');
 const { AclOperation } = require('@confluentinc/kafka-javascript/common/acl');
 const {
+  ClassicGroupState,
+  GroupState,
+  GroupType,
   ElectionType,
   IsolationLevel,
   Node,
@@ -58,12 +68,15 @@ const {
 const { ConfigResource, ConfigResourceMap } = require('@confluentinc/kafka-javascript/common/config');
 const {
   ElectionNotNeededError,
+  GroupIdNotFoundError,
+  UnknownMemberIdError,
   InvalidReplicaAssignmentError,
   LogDirNotFoundError,
   NoReassignmentInProgressError,
   TopicExistsError,
   UnknownTopicOrPartitionError,
 } = require('@confluentinc/kafka-javascript/common/errors');
+const { OffsetAndMetadata } = require('@confluentinc/kafka-javascript/consumer');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 // A string in every test that runs: the tests are skipped when it is unset.
@@ -450,6 +463,100 @@ async function retryUntil(call, accept) {
       // A broker the cluster has not is an invalid assignment.
       const invalid = admin.alterPartitionReassignments(new TopicPartitionMap([[tp, new NewPartitionReassignment([999])]]));
       await assert.rejects(invalid.all().get(), (error) => /** @type {Error} */ (error).cause instanceof InvalidReplicaAssignmentError);
+    } finally {
+      await admin
+        .deleteTopics([topic])
+        .all()
+        .get()
+        .catch(() => {});
+      await admin.close();
+    }
+  },
+  60000,
+);
+
+(SKIP ? test.skip : test)(
+  'the group calls: offsets committed to an empty group, listed, described, deleted; the group listed, its members removed, the group deleted',
+  async () => {
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    const topic = `js-admin-groups-${process.pid}-${Date.now()}`;
+    const groupId = `js-admin-group-${process.pid}-${Date.now()}`;
+    try {
+      await admin
+        .createTopics([new NewTopic({ name: topic, numPartitions: 2, replicationFactor: 1 })])
+        .all()
+        .get();
+      const tp0 = new TopicPartition({ topic, partition: 0 });
+      const tp1 = new TopicPartition({ topic, partition: 1 });
+
+      // An empty group: its offsets can be altered, which creates it.
+      const altered = admin.alterConsumerGroupOffsets({
+        groupId,
+        offsets: new TopicPartitionMap([
+          [tp0, new OffsetAndMetadata({ offset: 5n, metadata: 'm' })],
+          [tp1, new OffsetAndMetadata(7n)],
+        ]),
+      });
+      assert.equal(await altered.all().get(), null);
+      assert.equal(await altered.partitionResult(tp0).get(), null);
+
+      const offsets = await admin.listConsumerGroupOffsets(groupId).partitionsToOffsetAndMetadata().get();
+      assert.equal(offsets.get(tp0)?.offset, 5n);
+      assert.equal(offsets.get(tp0)?.metadata, 'm');
+      assert.equal(offsets.get(tp1)?.offset, 7n);
+      const selected = await admin
+        .listConsumerGroupOffsets({ groupSpecs: { [groupId]: new ListConsumerGroupOffsetsSpec({ topicPartitions: [tp1] }) } })
+        .all()
+        .get();
+      assert.deepEqual([...selected.keys()], [groupId]);
+      assert.equal(selected.get(groupId)?.get(tp1)?.offset, 7n);
+
+      // The group is listed, as an empty classic group with no protocol.
+      const listings = await admin.listGroups().all().get();
+      const listing = listings.find((l) => l.groupId() === groupId);
+      assert.ok(listing instanceof GroupListing, JSON.stringify(listings));
+      assert.equal(listing.groupState(), GroupState.EMPTY);
+      assert.equal(listing.type(), GroupType.CLASSIC);
+      assert.ok(listing.isSimpleConsumerGroup());
+      const stable = await admin
+        .listGroups(new ListGroupsOptions({ groupStates: [GroupState.STABLE] }))
+        .all()
+        .get();
+      assert.ok(!stable.some((l) => l.groupId() === groupId));
+
+      const described = await admin.describeConsumerGroups([groupId]).all().get();
+      const description = described.get(groupId);
+      assert.ok(description instanceof ConsumerGroupDescription);
+      assert.equal(description.groupId, groupId);
+      assert.equal(description.groupState, GroupState.EMPTY);
+      assert.deepEqual(description.members, []);
+      assert.ok(description.coordinator instanceof Node);
+
+      const classic = await admin.describeClassicGroups([groupId]).all().get();
+      const classicDescription = classic.get(groupId);
+      assert.ok(classicDescription instanceof ClassicGroupDescription);
+      assert.equal(classicDescription.state, ClassicGroupState.EMPTY);
+      assert.deepEqual(classicDescription.members, []);
+
+      // A static member the group has not: the broker's UnknownMemberIdError.
+      const member = new MemberToRemove('absent-instance');
+      const removed = admin.removeMembersFromConsumerGroup({ groupId, options: new RemoveMembersFromConsumerGroupOptions([member]) });
+      await assert.rejects(
+        removed.memberResult(member).get(),
+        (error) => /** @type {Error} */ (error).cause instanceof UnknownMemberIdError,
+      );
+
+      // An empty group's offsets can be deleted, and then the group.
+      const offsetsDeleted = admin.deleteConsumerGroupOffsets({ groupId, partitions: [tp0] });
+      assert.equal(await offsetsDeleted.all().get(), null);
+      assert.equal(await offsetsDeleted.partitionResult(tp0).get(), null);
+      const left = await admin.listConsumerGroupOffsets(groupId).partitionsToOffsetAndMetadata().get();
+      assert.equal(left.has(tp0), false);
+      assert.equal(await admin.deleteConsumerGroups([groupId]).all().get(), null);
+      await assert.rejects(
+        admin.deleteConsumerGroups([groupId]).all().get(),
+        (error) => /** @type {Error} */ (error).cause instanceof GroupIdNotFoundError,
+      );
     } finally {
       await admin
         .deleteTopics([topic])
