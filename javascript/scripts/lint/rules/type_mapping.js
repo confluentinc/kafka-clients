@@ -38,7 +38,7 @@
 // | String                                       | string                                  |
 // | void, Void                                   | void                                    |
 // | Object                                       | unknown                                 |
-// | Optional<T>, OptionalInt                     | T (or number) | null                    |
+// | Optional<T>, OptionalInt, OptionalLong       | T (or number, bigint) | null            |
 // | Duration; long x, TimeUnit unit (one Duration) | number (milliseconds) or a Temporal.Duration |
 // | byte[], taken                                | Uint8Array (a Buffer is one), never a string |
 // | byte[], returned (a return, a field)         | Buffer                                  |
@@ -58,9 +58,12 @@
 // | Iterable<T>, returned                        | Iterable<T>, or an array of T           |
 // | Set<T>, returned (a constant: read-only)     | Set<T> or ReadonlySet<T>                |
 // | Set<TopicPartition>, returned                | TopicPartitionSet                       |
+// | Set<MemberToRemove>, returned                | MemberToRemoveSet                       |
 // | Map<TopicPartition, V>                       | TopicPartitionMap<V>                    |
 // | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
 // | Map<Uuid, V>                                 | UuidMap<V>                              |
+// | Map<ConfigResource, V>                       | ConfigResourceMap<V>                    |
+// | Map<TopicPartitionReplica, V>                | TopicPartitionReplicaMap<V>             |
 // | Map<Integer, V> (broker ids, partitions)     | Map<number, V>, or a ReadonlyMap (taken, or an unmodifiable view returned) |
 // | Map<String, V>, returned                     | Map<string, V>                          |
 // | Map<String, V>, taken                        | a Map or ReadonlyMap, or a plain object (Record) of string to V |
@@ -72,6 +75,19 @@
 // Any other Java type is `unmapped`, naming both types.
 
 const { atNode } = require('../location');
+
+/**
+ * The maps keyed by a value class other than TopicPartition and MetricName,
+ * one class per key type (javascript/design/current/admin/PLAN.md, D2): the
+ * Java key class, and the TypeScript class of its map.
+ */
+const VALUE_KEYED_MAPS = new Map([
+  ['Uuid', 'UuidMap'],
+  ['ConfigResource', 'ConfigResourceMap'],
+  ['TopicPartitionReplica', 'TopicPartitionReplicaMap'],
+]);
+/** The sets of a value class returned (D2): the Java member class, and the TypeScript class of its set. */
+const VALUE_KEYED_SETS = new Map([['MemberToRemove', 'MemberToRemoveSet']]);
 const { mappedMembers } = require('./java_members');
 const { liveForms, optionName, formOptionNames, signaturesOf } = require('./overload_shape');
 const { waitingMembers } = require('./waiting_call_promise');
@@ -317,6 +333,7 @@ module.exports = {
       // Conventions, Types): null is stripped, T compared.
       if (j.name === 'Optional') return j.args.length === 0 ? true : matches(j.args[0], t);
       if (j.name === 'OptionalInt') return (t.flags & ts.TypeFlags.NumberLike) !== 0;
+      if (j.name === 'OptionalLong') return (t.flags & ts.TypeFlags.BigIntLike) !== 0;
       if (j.name === 'Future' || j.name === 'KafkaFuture') {
         return symbolName(t) === 'KafkaFuture' && (j.args.length === 0 || matches(j.args[0], checker.getTypeArguments(t)[0]) === true);
       }
@@ -325,6 +342,11 @@ module.exports = {
         // members compare by value (javascript/CLAUDE.md, JavaScript Binding
         // Conventions, Types).
         return symbolName(t) === 'TopicPartitionSet';
+      }
+      if (j.name === 'Set' && outward && j.args[0] !== undefined && VALUE_KEYED_SETS.has(j.args[0].name)) {
+        // A set of another value class returned, one class per member type
+        // (javascript/design/current/admin/PLAN.md, D2).
+        return symbolName(t) === VALUE_KEYED_SETS.get(j.args[0].name);
       }
       if (j.name === 'Set' && outward && ['ReadonlySet', 'Set'].includes(symbolName(t))) {
         // A Set returned is a Set; a constant one a read-only set
@@ -353,10 +375,10 @@ module.exports = {
         };
         return parts(t).every(part);
       }
-      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'Uuid') {
+      if (j.name === 'Map' && j.args.length === 2 && VALUE_KEYED_MAPS.has(j.args[0].name)) {
         // A map keyed by another value class, one class per key type
         // (javascript/design/current/admin/PLAN.md, D2).
-        return symbolName(t) === 'UuidMap' && matches(j.args[1], typeArgs(t)[0]) === true;
+        return symbolName(t) === VALUE_KEYED_MAPS.get(j.args[0].name) && matches(j.args[1], typeArgs(t)[0]) === true;
       }
       if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'Integer' && j.args[0].dims === 0) {
         // Integer keys (broker ids, partitions) are the number keys of a Map;

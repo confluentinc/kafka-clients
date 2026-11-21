@@ -59,6 +59,14 @@ const DEPENDANTS = [
   { key: 'DeleteTopicsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
   { key: 'DescribeTopicsResult.allTopicNames', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
   { key: 'DescribeTopicsResult.allTopicIds', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'AlterConfigsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DescribeConfigsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  {
+    key: 'DescribeLogDirsResult.allDescriptions',
+    reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values",
+  },
+  { key: 'DescribeReplicaLogDirsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'AlterReplicaLogDirsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
 ];
 
 /**

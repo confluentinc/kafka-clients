@@ -137,6 +137,11 @@ test("a DEPENDANTS entry that matches nothing is a finding; the real tree lists 
       'DeleteTopicsResult.all',
       'DescribeTopicsResult.allTopicNames',
       'DescribeTopicsResult.allTopicIds',
+      'AlterConfigsResult.all',
+      'DescribeConfigsResult.all',
+      'DescribeLogDirsResult.allDescriptions',
+      'DescribeReplicaLogDirsResult.all',
+      'AlterReplicaLogDirsResult.all',
     ],
   );
 });
