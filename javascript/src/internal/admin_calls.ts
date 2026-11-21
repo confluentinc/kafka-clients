@@ -21,7 +21,7 @@
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way
 import native = require('./native');
-import { JavaForms, kind } from './args';
+import { isPlainObject, JavaForms, kind } from './args';
 import { durationToMillis, isDurationOrNull } from './duration';
 import { adminFuture, adminFutures } from './admin_result';
 import type { AdminHandle } from './admin_result';
@@ -109,6 +109,20 @@ export function optionSetters(
 }
 
 /**
+ * Java's first dereference, `options`, checked before the arguments Java only
+ * stores (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors, Q36: the
+ * checks run in Java's order), for the RPCs whose Java body reads the options
+ * first. Options left out are Java's `new XxxOptions()`.
+ *
+ * @param forms - the RPC's forms
+ * @param args - the call's argument
+ * @throws `TypeError` "options must not be null", the FFI's own text
+ */
+export function optionsFirst(forms: JavaForms, args: unknown): void {
+  if (forms.value(args, 'options') === null) throw new TypeError('options must not be null');
+}
+
+/**
  * A node the addon read, as Java's `new Node(id, host, port, rack, isFenced)`.
  *
  * @param fields - the node's fields, or null
@@ -165,7 +179,7 @@ export function uuidFields(id: Uuid): [bigint, bigint] {
  *
  * @returns null, as void
  */
-function voidOf(): void {
+export function voidOf(): void {
   return null as unknown as void;
 }
 
@@ -247,7 +261,7 @@ interface ConfigEntryFields {
  * @param raw - the entries' fields, or null
  * @returns the configuration, or null
  */
-function configOf(raw: unknown): Config | null {
+export function configOf(raw: unknown): Config | null {
   if (raw === null) return null;
   const sources = ConfigEntry.ConfigSource.values();
   const types = ConfigEntry.ConfigType.values();
@@ -277,7 +291,7 @@ function configOf(raw: unknown): Config | null {
  * @returns the elements
  * @throws `TypeError` when it is null, not an iterable, or holds another value
  */
-function instancesOf<T>(value: unknown, name: string, cls: abstract new (...args: never[]) => T): T[] {
+export function instancesOf<T>(value: unknown, name: string, cls: abstract new (...args: never[]) => T): T[] {
   if (value === null) throw new TypeError(`${name} must not be null`);
   if (typeof value !== 'object' || typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function') {
     throw new TypeError(`${name} must be an iterable of ${cls.name}, not ${kind(value)}`);
@@ -299,7 +313,7 @@ function instancesOf<T>(value: unknown, name: string, cls: abstract new (...args
  * @returns its entries
  * @throws `TypeError` when it is null or neither a `Map` nor a plain object
  */
-function stringKeyedEntries(value: unknown, name: string): Array<[string, unknown]> {
+export function stringKeyedEntries(value: unknown, name: string): Array<[string, unknown]> {
   if (value === null) throw new TypeError(`${name} must not be null`);
   if (value instanceof Map) {
     const out: Array<[string, unknown]> = [];
@@ -309,8 +323,8 @@ function stringKeyedEntries(value: unknown, name: string): Array<[string, unknow
     }
     return out;
   }
-  if (typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${name} must be a Map or a plain object, not ${kind(value)}`);
-  return Object.entries(value as Record<string, unknown>);
+  if (!isPlainObject(value)) throw new TypeError(`${name} must be a Map or a plain object, not ${kind(value)}`);
+  return Object.entries(value);
 }
 
 /**
@@ -364,7 +378,7 @@ function topicCollectionForm(topics: unknown): [number, unknown[]] {
  * @throws `TypeError` for null, a string, or another value than an iterable
  *   of strings
  */
-function topicNames(value: unknown, name: string): Array<string | null> {
+export function topicNames(value: unknown, name: string): Array<string | null> {
   if (value === null) throw new TypeError(`${name} must not be null`);
   if (typeof value === 'string') throw new TypeError(`${name} must be an iterable of strings, not string`);
   if (typeof value !== 'object' || typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function') {
