@@ -715,15 +715,15 @@ mod grpc_backends {
         }
     }
 
-    /// Backend that drives the Node.js producer (`javascript/src/producer`)
-    /// through `javascript/grpc-server/grpc_server.js`, natively or in the
+    /// Backend that drives the Node.js producer (`javascript/src/producer`) and
+    /// admin client (`javascript/src/admin`) through
+    /// `javascript/grpc-server/grpc_server.js`, natively or in the
     /// `confluent-kafka-rust/javascript-grpc-server:<MULTILANG_IMAGE_TAG>`
     /// Docker image.
     ///
-    /// Producer only. The JavaScript binding has no consumer or admin client
-    /// yet, so the server registers only `ProducerService` and there is no
-    /// [`AdminBackendFactory`] impl (the admin and consumer macros have no
-    /// `__grpc_js` arm).
+    /// The JavaScript binding has no consumer yet, so the server registers
+    /// `ProducerService` and `AdminService` but not `ConsumerService`, and the
+    /// consumer macro has no `__grpc_js` arm.
     pub struct JsGrpcFactory {
         channel: Channel,
         /// The same backend without the channel's per-request timeout, for the
@@ -749,6 +749,29 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
             producer_with_log(&self.channel, &self.untimed_channel, config, "js").await
+        }
+
+        fn name(&self) -> &'static str {
+            "js"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            crate::common::backend_pool::uses_containers()
+        }
+    }
+
+    /// The admin client of the JavaScript server's `AdminService`
+    /// (`javascript/grpc-server/grpc_admin.js`, over the binding's `Admin`);
+    /// wired as [`CGrpcFactory`]'s admin impl, only the backend label differs.
+    impl AdminBackendFactory for JsGrpcFactory {
+        type Admin = MultilanguageAdmin;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Admin, Error> {
+            MultilanguageAdmin::new(self.channel.clone(), config, "js").await
+        }
+
+        async fn create_mock(&self, num_brokers: i32) -> Result<Self::Admin, Error> {
+            MultilanguageAdmin::new_mock(self.channel.clone(), num_brokers, "js").await
         }
 
         fn name(&self) -> &'static str {
