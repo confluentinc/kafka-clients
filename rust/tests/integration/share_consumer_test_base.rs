@@ -1167,7 +1167,7 @@ impl ShareConsumerTestBase {
         loop {
             match self.is_assigned(group_id, tps).await {
                 Ok(true) => return,
-                Ok(false) => {},
+                Ok(false) => deadline.clear_error(),
                 Err(e) => deadline.record_error(format!("describeShareGroups failed: {e}")),
             }
             deadline.fail_or_pause().await;
@@ -1521,6 +1521,13 @@ impl WaitDeadline {
     /// that throws; the timeout panic reports the last one.
     pub fn record_error(&mut self, error: String) {
         self.last_error = Some(error);
+    }
+
+    /// Forgets the recorded error after an attempt that did not fail, so the
+    /// timeout panic names an error only when the last attempt failed, as Java
+    /// reports only its last attempt.
+    pub fn clear_error(&mut self) {
+        self.last_error = None;
     }
 
     /// Called after the condition was not met: fails the test once the

@@ -286,6 +286,7 @@ async fn wait_for_expected_assignment(
                 if is_expected_assignment(groups.get(group_id), 3, &expected_assignments) {
                     return;
                 }
+                deadline.clear_error();
             },
             Err(e) => deadline.record_error(format!("describeShareGroups: {e}")),
         }
