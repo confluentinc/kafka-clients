@@ -19,6 +19,20 @@ Before GA the public API is not stable, and an interface may change even in a mi
   The admin client still checks a value that crosses as its fields or by value
   (`describe_acls(filter=None)`, `renew_delegation_token(hmac=None)`).
 
+### Fixed
+
+- A `str` argument holding a NUL character raises `ValueError("embedded null
+  character")` where it crosses to the Rust core as a C string, as a record's
+  topic and the producer's and the consumer's configs already did. It reached
+  the core cut at the NUL: `subscribe(topics=["orders\0-test"])` subscribed to
+  `orders` and `delete_topics()` deleted it, an admin client config key
+  `"security.protocol\0"` replaced the application's `security.protocol`, and
+  the same went for the admin client's group ids, transactional ids, user
+  names and group instance ids, its option strings, a `CreateTopicsResult`
+  accessor's topic and committed offset metadata. Like a non-`str`'s
+  `TypeError`, the error comes before the core's own checks (a missing
+  `group.id`, a producer without `transactional.id`).
+
 ## [4.4.0b1] - 2026-10-30
 
 First preview release of the 4.4.0 Python client built on a new Rust core. Its
