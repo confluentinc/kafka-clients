@@ -152,3 +152,18 @@ test('equals is false for a node that differs only in its id, or only in its por
   assert.equal(n1.equals(new Node({ id: 2, host: 'host', port: 9092 })), false);
   assert.equal(n1.equals(new Node({ id: 1, host: 'host', port: 9093 })), false);
 });
+
+test('the JSON form: the fields, in their order, as a spread of the node gives them', () => {
+  const node = new Node({ id: 1, host: 'h', port: 9092, rack: 'r' });
+  assert.deepEqual(Object.keys(node.toJSON()), FIELDS);
+  assert.deepEqual(JSON.parse(JSON.stringify(node)), {
+    id: 1,
+    idString: '1',
+    host: 'h',
+    port: 9092,
+    hasRack: true,
+    rack: 'r',
+    isFenced: false,
+    isEmpty: false,
+  });
+});
