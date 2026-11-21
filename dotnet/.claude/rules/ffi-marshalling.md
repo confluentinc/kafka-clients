@@ -722,6 +722,12 @@ hazard, fixed by pinning.)
     pointer with length 0 (the sentinel byte above: `fixed` over an empty array yields `NULL`, which the
     ABI reads as a `null` value). The copy is a recorded deviation from root `CLAUDE.md` §14 (ledger 301):
     the C API has no borrowed header value (ledger 305), as for Python's binding.
+  - **Headers are read through `IHeader`.** The record's `RecordHeaders` may hold a user's `IHeader`, which
+    may answer differently at each call. The send reads its `Value()` once, in the build, and checks its key
+    at every read: before anything is pinned, and again in the build. A `null` key throws Java's
+    `IllegalArgumentException` and a NUL the existing rejection (`dotnet/CLAUDE.md` §3 call-site checks,
+    ledger 603), so a header that changes between reads cannot reach the ABI. On the async send the later
+    read comes after the key and value pins, which its failure path releases, once each.
 
 **Why:** the borrow ends when the sync call returns, or at the async handover `cb`, so a pin
 of exactly that span is sufficient; Task-scoped pinning is unnecessary and fragments the heap.
@@ -755,6 +761,9 @@ per-message allocation CLAUDE.md §12 exists to prevent.
     it becomes collectable.
   - A record with headers sends them: a `null` value, an empty value and a non-ASCII key read back
     from the native record; a send with headers adds no managed allocation per header.
+  - A user header whose key turns invalid after the async send's pin is rejected with the pins
+    balanced: each pin released once, its `Value()` never read
+    (`AsyncMockSend_AUserHeaderWhoseKeyIsNullOnlyAtALaterRead_UnpinsTheKeyAndValueOnce`).
 
 ---
 

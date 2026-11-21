@@ -1,7 +1,5 @@
 # CKRDA0013 findings not fixed yet, one key per line. A line that matches no finding is CKRDA0014: delete it.
 # Written from a build's findings less the allowlist; fixing a gap removes its line.
-kind T:Confluent.Kafka.Common.Header.Header
-kind T:Confluent.Kafka.Common.Header.Headers
 missing T:Confluent.Kafka.Admin.AdminClientConfig org.apache.kafka.clients.admin.AdminClientConfig#AdminClientConfig(Map)
 missing T:Confluent.Kafka.Admin.AdminClientConfig org.apache.kafka.clients.admin.AdminClientConfig#configDef()
 missing T:Confluent.Kafka.Admin.AdminClientConfig org.apache.kafka.clients.admin.AdminClientConfig#configNames()

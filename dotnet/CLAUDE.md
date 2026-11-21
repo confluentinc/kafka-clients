@@ -87,8 +87,8 @@ bindings/dotnet/
 ├─ src/
 │  └─ Confluent.Kafka/    ← the library project (named for the package id, §4)
 │     ├─ Producer/ · Consumer/ · Admin/   ← public API: one folder per Java package, `clients` dropped
-│     ├─ Common/  + Acl/ · Config/ · Errors/ · Header/ · Quota/ · Record/ · Resource/ ·
-│     │            Security/Auth/ · Security/Token/Delegation/ · Serialization/
+│     ├─ Common/  + Acl/ · Config/ · Errors/ · Header/ · Header/Internals/ · Quota/ · Record/ ·
+│     │            Resource/ · Security/Auth/ · Security/Token/Delegation/ · Serialization/
 │     └─ Internal/                       ← internal scaffolding — the ONLY non-public folder
 │        └─ Interop/                      ← P/Invoke boundary — unsafe lives only here
 └─ tests/
@@ -101,6 +101,8 @@ the assembly.) **`Internal/` is the visibility marker — the *only* folder that
 implies non-public:** every type under it is explicitly `internal` (and `sealed`
 where practical), and `Internal/Interop/` is the only place `unsafe` appears.
 Wanting a type under `Internal/` to be `public` is the signal it belongs in the public tree.
+`Common/Header/Internals/` is not such a folder: it is Java's package `common.header.internals`, and its two
+classes are public (ledger 597, §3 Java names).
 **Every public type lives in the namespace of its Java package, and its file in the folder that
 mirrors that namespace** (M20/P1, ledger 253): drop `org.apache.kafka.`, then `clients.`, PascalCase
 each remaining segment, and prefix `Confluent.Kafka.`, as the Rust core names its modules (root
@@ -178,12 +180,12 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
   `TimeoutException`, and qualifies or aliases it
   (`using FutureTimeoutException = Confluent.Kafka.TimeoutException;`,
   `using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;`).
-- **Names that are also namespaces.** A type may share its name with a namespace, as Java's class
-  and package do (`Confluent.Kafka.Common.Header.Header`). Inside any `Confluent.Kafka.Common.*`
-  namespace the simple name `Header` means the namespace `Confluent.Kafka.Common.Header` (CS0118),
-  whatever the `using` lines say; write `Header.Header` there. The same holds for any later type
-  named like a namespace segment under `Common` (`Record`, `Config`). CA1724 stays at its default,
-  off.
+- **Names that are also namespaces.** A type may share its name with a namespace segment, as a Java
+  class and a package can. Inside any `Confluent.Kafka.Common.*` namespace the simple name of a
+  segment under `Common` (`Config`, `Record`, `Header`) means that namespace (CS0118), whatever the
+  `using` lines say, so a type of that name is written qualified there: the admin client's `Config`
+  as `Admin.Config`. No type under `Common` has such a name (Java's `Header` is `IHeader`, ledger
+  596); a later one follows the same rule. CA1724 stays at its default, off.
 - **`using` lines.** A file imports each namespace it uses with one `using` line outside its
   namespace (IDE0065), in `dotnet format`'s order; there is no `global using`. Code in a
   `Confluent.Kafka.*` namespace (the tests, the gRPC server, soak, perf) imports them like user code
@@ -236,11 +238,11 @@ public sealed class ProducerRecord<TKey, TValue> {   // Java `ProducerRecord<K,V
     public long? Timestamp();                    // null = producer stamps it
     public TKey? Key();                          // null (ref) = no key; three-state via the serializer (§4)
     public TValue? Value();                      // null (ref) = tombstone; three-state via the serializer (§4)
-    public Headers Headers();                    // the record's own copy; read-only once a KafkaProducer sends it
+    public IHeaders Headers();                   // the record's own RecordHeaders; read-only once a KafkaProducer sends it
     public ProducerRecord(string topic, int? partition, long? timestamp, TKey? key, TValue? value,
-        IEnumerable<Header>? headers);           // Java's checks, topic → timestamp → partition
+        IEnumerable<IHeader>? headers);          // Java's checks, topic → timestamp → partition
     public ProducerRecord(string topic, int? partition, long? timestamp, TKey? key, TValue? value);
-    public ProducerRecord(string topic, int? partition, TKey? key, TValue? value, IEnumerable<Header>? headers);
+    public ProducerRecord(string topic, int? partition, TKey? key, TValue? value, IEnumerable<IHeader>? headers);
     public ProducerRecord(string topic, int? partition, TKey? key, TValue? value);
     public ProducerRecord(string topic, TKey? key, TValue? value);
     public ProducerRecord(string topic, TValue? value);   // Java's six, key before value; no optional parameters
@@ -440,7 +442,7 @@ public sealed class ConsumerRecord<TKey, TValue> {  // Java `ConsumerRecord<K,V>
     public TimestampType TimestampType();
     public TKey? Key();          // deserialized (span → T); default(TKey) if absent (deser NOT called — decision C)
     public TValue? Value();      // deserialized (span → T); default(TValue) if absent (deser NOT called — decision C)
-    public Headers Headers();    // the record's own, writable copies (not routed through a deserializer this phase)
+    public IHeaders Headers();   // the record's own, writable RecordHeaders
 }
 
 public sealed class ConsumerRecords<TKey, TValue>          // Java `ConsumerRecords<K,V>`
@@ -668,9 +670,9 @@ callback-parity work: a listener or commit callback can now call back into its o
 consumer, which is what Java gets for free. (The **producer's** half — Java's
 `send(record, Callback)` — closed later, in M14/P1; see the §4 delivery-callback
 divergence. This sentence used to read "the callback-parity work" unqualified, which
-was true of the consumer only.) Still to come:
-headers for the deserializers (row 153; each `ConsumerRecord`'s `Headers` are its own, writable
-copies today, ledger 293). ⚠ The typed **producer** is **no longer** deferred — it shipped in
+was true of the consumer only.) The deserializers get the headers through
+`IDeserializerWithHeaders<T>` (M23/P3, §4 **Serializers**); each `ConsumerRecord`'s `Headers()` is its
+own, writable `RecordHeaders` (ledger 293). ⚠ The typed **producer** is **no longer** deferred — it shipped in
 M11/P5 (generic-only, see the producer sketch above); this line said otherwise until
 M14/P1 corrected it, and the producer completion model (§A7) turned out not to gate it.
 
@@ -711,7 +713,7 @@ public interface IAsyncSerializer<T> {
         CancellationToken cancellationToken = default);                // Java serialize(String, T)
 }
 public interface IAsyncSerializerWithHeaders<T> : IAsyncSerializer<T> {
-    ValueTask<ReadOnlyMemory<byte>?> Serialize(string topic, Headers headers, T? data,
+    ValueTask<ReadOnlyMemory<byte>?> Serialize(string topic, IHeaders headers, T? data,
         CancellationToken cancellationToken = default);                // Java serialize(String, Headers, T)
 }
 public interface IAsyncDeserializer<T> {
@@ -719,7 +721,7 @@ public interface IAsyncDeserializer<T> {
         CancellationToken cancellationToken = default);                // Java deserialize(String, byte[])
 }
 public interface IAsyncDeserializerWithHeaders<T> : IAsyncDeserializer<T> {
-    ValueTask<T?> Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data,
+    ValueTask<T?> Deserialize(string topic, IHeaders headers, ReadOnlyMemory<byte> data,
         CancellationToken cancellationToken = default);                // Java deserialize(String, Headers, ByteBuffer)
 }
 public interface IAsyncDeserializerWithRetention<T> : IAsyncDeserializerWithHeaders<T> { }   // data may be kept (§6.4)
@@ -756,10 +758,11 @@ Deliberate deviations, recorded (§4 decision-point latitude; consumer-threading
   awaited/sent). Sync because a span can't cross an `await` and serde is CPU-bound — also
   Java-faithful (`Deserializer<T>` is sync).
 - **Headers.** Java's headers overloads are rule 10's: `ISerializerWithHeaders<T>` and `IDeserializerWithHeaders<T>`,
-  with extension methods running Java's default. The client tests the type once, at construction. `KafkaProducer` and
-  `AsyncKafkaProducer` pass the record's own `Headers`, writable during the call and sealed after it; the mock producers
-  pass a new, empty `Headers` to each call and drop it, as Java's `MockProducer` does on its empty cluster; the consumers
-  pass the record's own. Java's two deserializer overloads are one span form.
+  with extension methods running Java's default; the headers forms take `IHeaders`, as Java's take `Headers`. The client
+  tests the type once, at construction. `KafkaProducer` and `AsyncKafkaProducer` pass the record's own `RecordHeaders`,
+  writable during the call and sealed after it; the mock producers pass a new, empty `RecordHeaders` to each call and
+  drop it, as Java's `MockProducer` does on its empty cluster; the consumers pass the record's own. Java's two
+  deserializer overloads are one span form.
 - **Async serdes (M23/P7, ledger 536, 538, 539; split in M23/P10).** They have Java's two forms each, as the sync
   ones (rule 10): `IAsyncSerializer<T>` has `serialize(String, T)` and `IAsyncSerializerWithHeaders<T>` adds
   `serialize(String, Headers, T)`; `IAsyncDeserializer<T>` has `deserialize(String, byte[])` over a
@@ -822,13 +825,13 @@ its C# realization, and where the enforcing rule lives.
 | a member .NET forces to be a property | none: a property a .NET interface requires is implemented explicitly beside Java's method (`ConsumerRecords.Count()`, Java's `count()`, and an explicit `IReadOnlyCollection<T>.Count`); the inherited `Exception` ones stay; `PublicJavaMemberShapeTests` and `GeneratedErrorClassesTests` fail on any public property. A name C# forces apart is moved, not renamed: `FeatureUpdate.UpgradeType` (Java's nested enum) sits beside the class as `Confluent.Kafka.Admin.UpgradeType` (CS0102 with Java's `upgradeType()`), as `GroupMembershipOperation` does (ledger 109) | ledger 368 |
 | a .NET-only getter or property | none, except where Java's type has no C# form: `ClientQuotaFilterComponent.MatchType()` tells Java's three `match()` states (`ofEntity`, `ofDefaultEntity`, `ofEntityType`) apart, since C# has no `Optional` that can itself be `null` *(deviation)* | ledger 369 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive for a memory-form deserializer — ffi §B4 / §6.4 |
-| `Headers` / `Header` (record headers) | `Headers : IEnumerable<Header>` with Java's `Add` / `Remove` / `LastHeader` / `ToArray` and `GetHeaders(key)` for Java's `headers(String)` (CS0542); read-only once a `KafkaProducer` sends the record (`IllegalStateException("RecordHeaders has been closed.")`, Java's class), never on the mocks; a fetched record's are its own and writable | send: the header values are copied by the ABI, which has no borrowed form, a recorded deviation from root `CLAUDE.md` §14 (ledger 301) — ffi §A4 |
+| `Headers` / `Header` and `RecordHeaders` / `RecordHeader` (record headers) | Java's interfaces `IHeaders : IEnumerable<IHeader>` (`Add` / `Remove` / `LastHeader` / `Headers(key)` / `ToArray`) and `IHeader` (`Key()` / `Value()`) in `Confluent.Kafka.Common.Header`, in every public signature; a user may implement them. Java's classes `RecordHeaders` and `RecordHeader`, sealed, in `Confluent.Kafka.Common.Header.Internals` (§3 Java names), with Java's members: `RecordHeaders`' three constructors and public `SetReadOnly()` / `IsReadOnly()`; `RecordHeader(key, value)` and, for Java's `ByteBuffer` form, `RecordHeader(ReadOnlyMemory<byte>, ReadOnlyMemory<byte>?)`, decoded on first read. A record's headers are read-only once a `KafkaProducer` sends it (`IllegalStateException("RecordHeaders has been closed.")`, Java's class), never on the mocks; a fetched record's are its own and writable *(Python keeps `Header` / `Headers`)* | ledger 596, 599–601, 606; send: the header values are copied by the ABI, which has no borrowed form, a recorded deviation from root `CLAUDE.md` §14 (ledger 301) — ffi §A4 |
 | opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §A2/§B2 |
 | `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
 | `Map<String, Object>` / `Properties` (a client's configuration) | one `IReadOnlyDictionary<string, object?> configs` per `Kafka*` `Create`; a value of the C# type Java's `parseType` accepts for the key, or Java's text; a `null` meets the key's validator or is not set | §4 **Config**; ffi §0.1, §A5 |
 | `Duration` (timeouts: `poll`/`close`/`committed`) | `TimeSpan` | ABI takes `int64_t` ms |
 | `Map` / `Set` / `List` (returns) | `IReadOnlyDictionary` / `IReadOnlyCollection` / `IReadOnlyList` | `IReadOnlySet` post-dates netstandard2.0 → `IReadOnlyCollection` |
-| a Java array `T[]` (`PartitionInfo.replicas()`, `Headers.toArray()`) | a C# array of the mapped element type (`Node[]`, `Header[]`), as Java's | ledger 370 (proposed) |
+| a Java array `T[]` (`PartitionInfo.replicas()`, `Headers.toArray()`) | a C# array of the mapped element type (`Node[]`, `IHeader[]`), as Java's | ledger 370 (proposed) |
 | a Java primitive parameter (`DescribeFeaturesOptions.nodeId(int)`) | the C# primitive (`int`), never `int?`; an `OptionalInt` getter is `int?` | ledger 181 (amended) |
 | a boxed `Long` / `Integer` / `Short` / `Double` / `Float` / `Boolean` / `UUID` as a serde's type | `long?` / `int?` / `short?` / `double?` / `float?` / `bool?` / `Guid?` | null in, null out, as Java's "nullable" serdes (§3 Serdes) |
 | a Java getter that maps an unset field to a sentinel (`NewTopic.numPartitions()`, `orElse(-1)`) | the same sentinel (`-1`); only `Equals` and `ToString` tell unset from the sentinel, as Java's | ledger 371 (proposed) |
@@ -846,6 +849,17 @@ each goes when the reason it gives goes:
   mocks as well, since they pass the pattern to the C ABI like the real consumers; Java sends it,
   and the broker evaluates it as a regular expression that no topic name can match. Goes when the C
   ABI takes length-delimited strings.
+- **A null header key.** A user `IHeader` whose `Key()` returns `null` makes `Send` throw Java's
+  `IllegalArgumentException` "Invalid null header key found in headers" on all four producers, at
+  every read of the key, so a key that turns `null` at a later read throws too (ledger 603). On an
+  asynchronous producer that awaits a serializer it ends `Send`'s first stage instead, as every
+  exception after that await does (`IAsyncProducer`). Java's `MockProducer` accepts it; the mocks build the record through the C ABI, which cannot carry it, as
+  for a NUL in a key. The first read is checked after the serializers and before the pin (§1), the
+  later ones in the record build, so all before the core's metadata wait, where Java's `doSend`
+  waits for metadata first: with metadata missing, Java
+  fails the future and the callback with a `TimeoutException` before it reaches the check (ledger
+  607, proposed). Goes when the C ABI carries a null key and the core checks it after its metadata
+  wait.
 - **`NewTopic`** with a partition count or a replication factor below -1 throws
   `ArgumentOutOfRangeException` at construction; Java's future fails with
   `InvalidPartitionsException` / `InvalidReplicationFactorException`. The C ABI reads any negative
@@ -989,6 +1003,13 @@ out of date). The rule:
     dispose a serde), a public `Close()` on a serde that is not `IDisposable`, throws `IllegalArgumentException` naming
     what to implement *(best effort: under trimming or Native
     AOT an uncalled method can be removed, and then the check passes)*.
+
+**Two public classes from an `internals` package.** `RecordHeader` and `RecordHeaders` are public although Java's
+package is `common.header.internals` and they are not `@InterfaceAudience.Public` (root `CLAUDE.md` §2), as the Rust
+core keeps them (`public-in-rust`) and as Java users build headers with them; `java-api.txt` lists them through
+`BINDING_PUBLIC_CLASSES` (`rust/xtask/src/java_api.rs`; ledger 597, 598). No other class from an `internals` package
+is public, and outside the Public list only `MockAdminClient` (Java's test jar) and the exception classes (§2
+**Errors**) are.
 
 A difference is fixed or listed, in `analyzers/`: `java-name-allowlist.txt` (kept on purpose, each group
 under a comment saying why), `java-name-pairs.txt` (a renamed type and the Java type it translates, so its

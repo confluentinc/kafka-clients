@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Producer;
@@ -67,7 +68,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         {
             Assert.False(firstStage.IsCompleted);
             Assert.Equal(new[] { (Topic, (string?)"key") }, serializer.Calls());
-            Assert.False(record.Headers().IsReadOnly);
+            Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
             serializer.Complete();
         }
 
@@ -80,12 +81,12 @@ public sealed class AsyncProducerAwaitedSerializerTests
             Assert.Equal(0, metadata.Offset());
             Assert.Equal(1, ((AsyncMockProducer<string, string>)producer).HistoryCount());
             Assert.All(serializer.HeadersGiven(), given => Assert.NotSame(record.Headers(), given));
-            Assert.False(record.Headers().IsReadOnly);
+            Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
         }
         else
         {
             Assert.All(serializer.HeadersGiven(), given => Assert.Same(record.Headers(), given));
-            Assert.True(record.Headers().IsReadOnly);
+            Assert.True(((RecordHeaders)record.Headers()).IsReadOnly());
             await AssertMetadataTimeout(future);
         }
     }
@@ -175,13 +176,13 @@ public sealed class AsyncProducerAwaitedSerializerTests
 
         value.Release("second");
         AsyncKafkaFuture<RecordMetadata> secondFuture = await TestTimeout.Run(() => second.AsTask(), s_deadline);
-        Assert.True(secondRecord.Headers().IsReadOnly);
+        Assert.True(((RecordHeaders)secondRecord.Headers()).IsReadOnly());
         Assert.False(first.IsCompleted);
-        Assert.False(firstRecord.Headers().IsReadOnly);
+        Assert.False(((RecordHeaders)firstRecord.Headers()).IsReadOnly());
 
         value.Release("first");
         AsyncKafkaFuture<RecordMetadata> firstFuture = await TestTimeout.Run(() => first.AsTask(), s_deadline);
-        Assert.True(firstRecord.Headers().IsReadOnly);
+        Assert.True(((RecordHeaders)firstRecord.Headers()).IsReadOnly());
         await AssertMetadataTimeout(secondFuture);
         await AssertMetadataTimeout(firstFuture);
     }
@@ -298,7 +299,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         Assert.Same(
             tooLarge,
             await FutureAssert.ThrowsAsync<RecordTooLargeException>(() => TestTimeout.Run(() => future.Get(), s_deadline)));
-        Assert.False(record.Headers().IsReadOnly);
+        Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
     }
 
     [Theory]
@@ -403,14 +404,14 @@ public sealed class AsyncProducerAwaitedSerializerTests
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(record);
         Assert.False(firstStage.IsCompleted);
-        Assert.False(record.Headers().IsReadOnly);
+        Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
         record.Headers().Add("during", Bytes("the wait"));
         value.Complete();
         AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => firstStage.AsTask(), s_deadline);
 
         Assert.Equal(new[] { "h", "during", "added" }, Array.ConvertAll(record.Headers().ToArray(), header => header.Key()));
         Assert.Equal(Bytes("by the serializer"), record.Headers().LastHeader("added")?.Value());
-        Assert.True(record.Headers().IsReadOnly);
+        Assert.True(((RecordHeaders)record.Headers()).IsReadOnly());
         IllegalStateException closed = Assert.Throws<IllegalStateException>(() => record.Headers().Add("after", Bytes("x")));
         Assert.Equal("RecordHeaders has been closed.", closed.Message);
         await AssertMetadataTimeout(future);
@@ -429,7 +430,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         await TestTimeout.Run(() => firstStage.Delivery(), s_deadline);
 
         Assert.Equal(new[] { "h" }, Array.ConvertAll(record.Headers().ToArray(), header => header.Key()));
-        Assert.False(record.Headers().IsReadOnly);
+        Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
         record.Headers().Add("after", Bytes("x"));
     }
 
@@ -447,7 +448,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         SerializationException thrown = Assert.Throws<SerializationException>(() => { _ = producer.Send(record); });
 
         Assert.Equal("Error when serializing UUID to byte[] due to unsupported encoding no-such-encoding", thrown.Message);
-        Assert.False(record.Headers().IsReadOnly);
+        Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
     }
 
     [Theory]
@@ -468,7 +469,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
 
         Assert.Equal("Error when serializing UUID to byte[] due to unsupported encoding no-such-encoding", thrown.Message);
         Assert.Equal(1, key.CallCount);
-        Assert.False(record.Headers().IsReadOnly);
+        Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
     }
 
     [Theory]
@@ -498,7 +499,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         }
         else
         {
-            Assert.True(record.Headers().IsReadOnly);
+            Assert.True(((RecordHeaders)record.Headers()).IsReadOnly());
             await AssertMetadataTimeout(future);
         }
     }
@@ -613,7 +614,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     // never took it.
     private static void AssertNothingSent<TKey, TValue>(IAsyncProducer<TKey, TValue> producer, ProducerRecord<TKey, TValue> record)
     {
-        Assert.False(record.Headers().IsReadOnly);
+        Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
         if (producer is AsyncMockProducer<TKey, TValue> mock)
         {
             Assert.Equal(0, mock.HistoryCount());
@@ -628,7 +629,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
     }
 
     private static ProducerRecord<string, string> Record(string value) =>
-        new ProducerRecord<string, string>(Topic, value: value, key: "key", headers: new[] { new Header("h", Bytes("1")) }, partition: 0);
+        new ProducerRecord<string, string>(Topic, value: value, key: "key", headers: new[] { new RecordHeader("h", Bytes("1")) }, partition: 0);
 
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?>
@@ -660,7 +661,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
         private readonly TaskCompletionSource<bool> _later =
             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly List<(string Topic, string? Data)> _calls = new List<(string Topic, string? Data)>();
-        private readonly List<Headers> _headers = new List<Headers>();
+        private readonly List<IHeaders> _headers = new List<IHeaders>();
 
         internal Awaiting(bool yields) => _yields = yields;
 
@@ -670,7 +671,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
             throw new InvalidOperationException("the producer called the form without headers");
 
         public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken)
+            string topic, IHeaders headers, string? data, CancellationToken cancellationToken)
         {
             lock (_calls)
             {
@@ -700,7 +701,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
             }
         }
 
-        internal Headers[] HeadersGiven()
+        internal IHeaders[] HeadersGiven()
         {
             lock (_calls)
             {
@@ -832,7 +833,7 @@ public sealed class AsyncProducerAwaitedSerializerTests
             throw new InvalidOperationException("the producer called the form without headers");
 
         public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken)
+            string topic, IHeaders headers, string? data, CancellationToken cancellationToken)
         {
             await _later.Task.ConfigureAwait(false);
             headers.Add("added", Bytes("by the serializer"));

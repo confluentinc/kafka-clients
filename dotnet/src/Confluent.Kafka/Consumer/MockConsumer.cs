@@ -61,9 +61,9 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <see cref="KafkaConsumer{TKey, TValue}"/>.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not
+    /// A deserializer declares a public <c>Deserialize(string, IHeaders, ReadOnlySpan&lt;byte&gt;)</c> but does not
     /// implement <see cref="IDeserializerWithHeaders{T}"/>, or a public
-    /// <c>Deserialize(string, Headers, ReadOnlyMemory&lt;byte&gt;)</c> but not
+    /// <c>Deserialize(string, IHeaders, ReadOnlyMemory&lt;byte&gt;)</c> but not
     /// <see cref="IDeserializerWithReadOnlyMemory{T}"/>: the consumer would never call that method.
     /// </exception>
     public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer)
@@ -88,7 +88,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="autoOffsetReset"/> is <see langword="null"/> ("Auto offset reset strategy is null", as
     /// Java's <c>MockConsumer(String)</c>) or not a valid strategy; or a deserializer declares a public
-    /// <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not implement
+    /// <c>Deserialize(string, IHeaders, ReadOnlySpan&lt;byte&gt;)</c> but does not implement
     /// <see cref="IDeserializerWithHeaders{T}"/>: the consumer would never call that method.
     /// </exception>
     public MockConsumer(

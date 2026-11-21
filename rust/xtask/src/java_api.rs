@@ -20,8 +20,9 @@
 //! differs from what the command would write.
 //!
 //! A type is listed when its top-level class is on the `@InterfaceAudience.Public`
-//! list, is one of [`TEST_JAR_CLASSES`], or is an exception class the error
-//! generator makes a class for, and every class on its path is `public`. A
+//! list, is one of [`TEST_JAR_CLASSES`] or [`BINDING_PUBLIC_CLASSES`], or is an
+//! exception class the error generator makes a class for, and every class on its
+//! path is `public`. A
 //! member is listed when it is `public`. Deprecated types and members are left
 //! out, whether the `kafka` working tree or [`java::DEPRECATED_LIST`] marks them:
 //! deprecated API is not translated. The Java built-in exceptions the bindings
@@ -45,16 +46,27 @@ pub(crate) const BINDING_COPIES: &[&str] = &["../dotnet/analyzers/java-api.txt"]
 /// API: `MockAdminClient` (`.claude/rules/admin-client.md` §9).
 const TEST_JAR_CLASSES: &[&str] = &["org.apache.kafka.clients.admin.MockAdminClient"];
 
+/// Classes of the main jar that are not `@InterfaceAudience.Public` but that the
+/// bindings keep public: `RecordHeader` and `RecordHeaders`, which the Rust core
+/// keeps public with `#[doc(alias = "public-in-rust")]`
+/// (`rust/src/common/header/internals/record_header.rs`, `record_headers.rs`),
+/// because users build headers with them as Java users do.
+const BINDING_PUBLIC_CLASSES: &[&str] = &[
+    "org.apache.kafka.common.header.internals.RecordHeader",
+    "org.apache.kafka.common.header.internals.RecordHeaders",
+];
+
 const HEADER: &str = "\
 # The public API of the Java client, read from the `kafka` submodule by `cargo xtask java-api <file>`,
 # for the bindings' Java-name checks. Do not edit; rerun the command.
 # A type is listed when its top-level class is in design/current/interface-audience-public-4.4.txt,
-# is MockAdminClient (from the test jar) or is an exception class the error generator makes a class
-# for, and every class on its path is public; only public members are listed, and nothing in
-# design/current/java-deprecated.txt. The Java built-in exceptions the bindings translate are listed
-# with their Java 11 constructors. Members Java declares implicitly are listed too: a class's default
-# constructor, and an enum's name(), ordinal(), values() and valueOf(String); a parameter whose name
-# the source does not spell is `?`.
+# is MockAdminClient (from the test jar), is RecordHeader or RecordHeaders (not Public in Java, but
+# public in the Rust core, as users build headers with them), or is an exception class the error
+# generator makes a class for, and every class on its path is public; only public members are
+# listed, and nothing in design/current/java-deprecated.txt. The Java built-in exceptions the
+# bindings translate are listed with their Java 11 constructors. Members Java declares implicitly
+# are listed too: a class's default constructor, and an enum's name(), ordinal(), values() and
+# valueOf(String); a parameter whose name the source does not spell is `?`.
 # One tab-separated line per item; a nested class is Outer$Inner:
 #   type      <class>  <class|abstract class|interface|enum|record>  <supertypes, comma-separated, or ->
 #   ctor      <class>  <Name(Type name, ...)>
@@ -280,7 +292,7 @@ fn is_listed(
     let audience = if class.is_test {
         TEST_JAR_CLASSES.contains(&top.as_str())
     } else {
-        public.contains(&top)
+        public.contains(&top) || BINDING_PUBLIC_CLASSES.contains(&top.as_str())
     };
     if !audience || class.deprecated {
         return false;
@@ -645,6 +657,35 @@ mod tests {
                 "ctor\torg.apache.kafka.clients.admin.MockAdminClient\tMockAdminClient()",
             ]
         );
+    }
+
+    #[test]
+    fn lists_the_binding_public_classes_of_the_main_jar() {
+        let header = "package x; public class RecordHeader { public RecordHeader() { } }";
+        let headers = "package x; public class RecordHeaders { public RecordHeaders() { } }";
+        let other = "package x; public class HeaderCodec { public void encode() { } }";
+        let package: &[&str] = &["common", "header", "internals"];
+        let index = index(&[
+            (package, header, false),
+            (package, headers, false),
+            (package, other, false),
+        ]);
+        assert_eq!(
+            body(&index, &public(&[])),
+            [
+                "type\torg.apache.kafka.common.header.internals.RecordHeader\tclass\t-",
+                "ctor\torg.apache.kafka.common.header.internals.RecordHeader\tRecordHeader()",
+                "type\torg.apache.kafka.common.header.internals.RecordHeaders\tclass\t-",
+                "ctor\torg.apache.kafka.common.header.internals.RecordHeaders\tRecordHeaders()",
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_out_binding_public_classes_from_the_test_jar() {
+        let header = "package x; public class RecordHeader { public RecordHeader() { } }";
+        let index = index(&[(&["common", "header", "internals"], header, true)]);
+        assert!(body(&index, &public(&[])).is_empty());
     }
 
     fn args(list: &[&str]) -> Vec<String> {

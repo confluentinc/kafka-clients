@@ -19,6 +19,7 @@ using System.Text;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -43,7 +44,8 @@ public sealed class ProducerRecordBuildTests
     [Fact]
     public void BuildRecord_WithHeaders_ReadsBackEveryFieldAndEachHeaderInOrder()
     {
-        Headers headers = new Headers()
+        RecordHeaders headers = new RecordHeaders();
+        headers
             .Add("null-value", null)
             .Add("empty-value", Array.Empty<byte>())
             .Add(NonAsciiKey, s_valueWithNul)
@@ -86,7 +88,7 @@ public sealed class ProducerRecordBuildTests
     public void BuildRecord_WithoutHeaders_HasNone_AndJavasNullsForTheUnsetFields(bool emptyHeaders)
     {
         SerializedProducerRecord record = new SerializedProducerRecord(
-            "plain", partition: null, timestamp: null, key: null, value: null, emptyHeaders ? new Headers() : null);
+            "plain", partition: null, timestamp: null, key: null, value: null, emptyHeaders ? new RecordHeaders() : null);
 
         IntPtr native = Build(record, IntPtr.Zero, IntPtr.Zero);
         try
@@ -107,7 +109,8 @@ public sealed class ProducerRecordBuildTests
     [Fact]
     public void BuildRecord_AHeadersRemovedToEmpty_SendsNoHeaders()
     {
-        Headers headers = new Headers().Add("gone", Bytes("x")).Remove("gone");
+        RecordHeaders headers = new RecordHeaders();
+        headers.Add("gone", Bytes("x")).Remove("gone");
         byte[] value = Bytes("v");
         using NativeBytes valueBytes = new NativeBytes(value);
         SerializedProducerRecord record = new SerializedProducerRecord("t", 0, null, null, value, headers);
@@ -148,7 +151,7 @@ public sealed class ProducerRecordBuildTests
         return result;
     }
 
-    private static List<(string? Key, byte[]? Value)> HeadersOf(IntPtr native)
+    internal static List<(string? Key, byte[]? Value)> HeadersOf(IntPtr native)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr recordHeaders = RecordNative.Headers(native, ref outErr);
