@@ -1127,8 +1127,21 @@ impl KafkaCluster {
             let net = network_name.clone();
             let name = node.container_name.clone();
             let node_id = node.node_id;
-            let server_props: Vec<(String, String)> =
+            let mut server_props: Vec<(String, String)> =
                 config.server_properties.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            // A node's own properties come last, so they win.
+            if let Some(node_props) = config.broker_properties.get(&node_id) {
+                server_props.extend(node_props.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            // Test jars go to every node, controllers included: every
+            // node's `KafkaConfig` (and the image's storage format step)
+            // validates a class-valued config such as `group.share.assignors`,
+            // as Java's test kit, with one classpath for all nodes, does.
+            let broker_libs: Vec<(String, std::path::PathBuf)> = config
+                .broker_libs
+                .iter()
+                .map(|jar| (format!("/opt/kafka/libs/{}", jar.file_name()), jar.local_path()))
+                .collect();
 
             // Pre-reserved host ports to bind to container ports (brokers
             // only, plus a combined node's CONTROLLERHOST listener). A proxied
@@ -1168,6 +1181,14 @@ impl KafkaCluster {
 
                 for (key, value) in &server_props {
                     request = request.with_env_var(key, value);
+                }
+                if !broker_libs.is_empty() {
+                    // `kafka-run-class.sh` leaves `*-test.jar` files out of the
+                    // classpath unless `INCLUDE_TEST_JARS` is true.
+                    request = request.with_env_var("INCLUDE_TEST_JARS", "true");
+                }
+                for (target, source) in broker_libs {
+                    request = request.with_copy_to(target, source);
                 }
 
                 request.start().await.map(|container| (node_id, container)).map_err(|err| {

@@ -38,6 +38,8 @@ pub mod test_certs;
 #[expect(dead_code)]
 pub mod test_context;
 #[cfg(feature = "integration-tests")]
+pub mod test_jars;
+#[cfg(feature = "integration-tests")]
 #[expect(dead_code)]
 pub mod test_utils;
 

@@ -31,6 +31,8 @@ pub(crate) mod test_certs;
 #[expect(dead_code)]
 #[path = "../../../tests/common/test_context.rs"]
 pub(crate) mod test_context;
+#[path = "../../../tests/common/test_jars.rs"]
+pub(crate) mod test_jars;
 
 pub(crate) mod selector_utils;
 
