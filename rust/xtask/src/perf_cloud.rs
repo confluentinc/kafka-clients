@@ -1941,15 +1941,14 @@ fn check(options: &RunOptions) -> anyhow::Result<()> {
 // build
 // ---------------------------------------------------------------------------
 
-/// Build the group's harnesses, as `deploy_and_run_perf.py`'s bootstrap
-/// does, but for a generic CPU, as users install the clients (no
-/// `-march=native` / `target-cpu=native`, which the EC2 bootstrap uses): the
-/// baselines are a distribution's librdkafka and a PyPI wheel, neither built
-/// for the machine. The system packages must already be installed: for
-/// `rust` librdkafka-dev (pkg-config `rdkafka`), cmake, a C compiler (`cc`), a
-/// JDK 17+ and Gradle (`$GRADLE` or `gradle`); for `python` python3-venv and
-/// python3-dev (`$PERF_PYTHON` or `python3`); for `dotnet` a .NET 10 SDK
-/// (`$DOTNET` or `dotnet`).
+/// Build the group's harnesses, as `deploy_and_run_perf.py`'s bootstrap does,
+/// for a generic CPU, as users install the clients: the baselines are a
+/// distribution's librdkafka and a PyPI wheel, neither built for the machine.
+/// The system packages must already be installed: for `rust` librdkafka-dev
+/// (pkg-config `rdkafka`), cmake, a C compiler (`cc`), a JDK 17+ and Gradle
+/// (`$GRADLE` or `gradle`); for `python` python3-venv and python3-dev
+/// (`$PERF_PYTHON` or `python3`); for `dotnet` a .NET 10 SDK (`$DOTNET` or
+/// `dotnet`).
 fn build(group: Group) -> anyhow::Result<()> {
     let repo = repo_root();
     let rust = repo.join("rust");
