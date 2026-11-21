@@ -41,8 +41,12 @@
  *
  * - options given as `null` (the FFI's "options must not be null"), also where
  *   Java reads them only once there is something to send, or never (an empty
- *   collection), and on `MockAdminClient`, whose Java counterpart reads the
- *   options of none of these calls and answers them;
+ *   collection), and on `MockAdminClient` where Java's mock answers without
+ *   reading them. Java's mock does read them in the four delegation-token
+ *   calls, where a null throws there too, and in `updateFeatures` when there
+ *   are updates and every one passes; the calls it does not implement throw
+ *   before reading them
+ *   (below);
  * - `listConfigResources`: a null set of types, or a null type in it, which
  *   Java reads when it builds the request;
  * - `incrementalAlterConfigs`: a null list of operations, a null operation, or
@@ -52,9 +56,10 @@
  *   (a key) and `listPartitionReassignments`, where Java fails the future with
  *   `InvalidTopicException` "The given topic name 'null' cannot be represented
  *   in a request."; in `electLeaders`, `listOffsets` (a key),
- *   `alterConsumerGroupOffsets` (a key), `deleteConsumerGroupOffsets` and a
- *   `ListConsumerGroupOffsetsSpec`'s partitions, which Java reads when it
- *   builds the request;
+ *   `alterConsumerGroupOffsets` (a key), `deleteConsumerGroupOffsets`, a
+ *   `ListConsumerGroupOffsetsSpec`'s partitions, `describeProducers` and an
+ *   `AbortTransactionSpec`'s partition, which Java reads when it builds the
+ *   request;
  * - a null element of a partition set, in `electLeaders`,
  *   `deleteConsumerGroupOffsets` and a `ListConsumerGroupOffsetsSpec`'s
  *   partitions, and a null key of `alterConsumerGroupOffsets`' offsets, which
@@ -86,9 +91,20 @@
  *   ops or a null op, an entity with null entries, or an op with a null key,
  *   which Java's request builder reads;
  * - `renewDelegationToken` and `expireDelegationToken`: a null HMAC, which
- *   Java writes when it sends the request;
+ *   Java writes when it sends the request, and which Java's `MockAdminClient`
+ *   matches to no token, failing the future with
+ *   `DelegationTokenNotFoundException("")`;
  * - `describeDelegationToken`: a `DescribeDelegationTokenOptions` whose
- *   owners hold null, which Java's request builder reads.
+ *   owners hold null, which Java's request builder reads, and which Java's
+ *   `MockAdminClient` matches to no token;
+ * - `describeTransactions` and `fenceProducers`: a null id in
+ *   `transactionalIds`, and `forceTerminateTransaction`: a null
+ *   `transactionalId`, which Java's `CoordinatorKey.byTransactionalId`
+ *   stores, the future failing later;
+ * - `listTransactions`: a `ListTransactionsOptions` whose filtered states or
+ *   producer ids hold null, which Java's request builder reads;
+ * - `updateFeatures`: a null `FeatureUpdate`, or one whose upgrade type is
+ *   null, which Java's request builder reads.
  *
  * Why: the C API cannot carry these nulls (a list, a handle, a C string or a
  * singleton cannot be `NULL` there). Goes when: the FFI takes them and the
@@ -96,9 +112,11 @@
  *
  * *(deviation)* `alterUserScramCredentials` takes only the two
  * `UserScramCredentialAlteration` subclasses Java has, and refuses another
- * subclass with a `TypeError` at the call, where Java gives its user a future
- * that no request answers. Why: the C API carries an alteration as one of the
- * two; a subclass Java adds is a new form. Permanent.
+ * subclass with a `TypeError` at the call, where Java leaves its user out of
+ * the request and fails its future after the response with "The broker
+ * response did not contain a result for user <user>", or with the call's
+ * error. Why: the C API carries an alteration as one of the two; a subclass
+ * Java adds is a new form. Permanent.
  *
  * *(deviation)* `alterClientQuotas` with an op whose value is `NaN` clears the
  * quota, as a null value does, where Java sends `NaN`. Why: the FFI reads
@@ -109,12 +127,58 @@
  * FFI reads a `NULL` log directory as `""`. Goes when: the FFI carries the
  * null.
  *
+ * *(deviation)* `updateFeatures` with `options` given as `null` refuses the
+ * options first ("options must not be null"), a null `FeatureUpdate` first
+ * ("featureUpdates must not contain null"), and a `FeatureUpdate` whose
+ * upgrade type is null first ("featureUpdates must not contain a
+ * FeatureUpdate with a null upgradeType"), where Java's
+ * `KafkaAdminClient` first refuses an empty map ("Feature updates can not be
+ * null or empty.") and a blank or null feature name ("Provided feature can
+ * not be empty."). Why: the FFI reads the options and each update before the
+ * core's checks, and the binding repeats none of them. Goes when: the FFI
+ * leaves the options and the updates to the core, after its checks.
+ *
+ * *(deviation)* `MockAdminClient.updateFeatures` with a null feature name
+ * keys its Result, and words its error, by `""` ("Invalid update version 2
+ * for feature . Can't upgrade above 0"), where Java's mock uses null
+ * ("for feature null."). On `KafkaAdminClient` the `""` is Java's answer: the
+ * core refuses it as Java's `Utils.isBlank(null)` does. Why: the C map takes
+ * no `NULL` key, so the FFI reads a null name as `""`. Goes when: the FFI
+ * carries a null feature name.
+ *
+ * *(deviation)* `MockAdminClient` answers through the Result where Java's
+ * mock throws `UnsupportedOperationException` from the call: in the calls
+ * Java's mock does not implement, `describeConsumerGroups`,
+ * `describeClassicGroups`, `deleteConsumerGroups`,
+ * `deleteConsumerGroupOffsets`, `alterConsumerGroupOffsets`,
+ * `removeMembersFromConsumerGroup`, `electLeaders`, `createAcls`,
+ * `describeAcls`, `deleteAcls`, `describeClientQuotas`, `alterClientQuotas`,
+ * `describeUserScramCredentials`, `alterUserScramCredentials`,
+ * `describeProducers`, `describeTransactions`, `abortTransaction`,
+ * `forceTerminateTransaction`, `listTransactions`, `fenceProducers` and
+ * `createPartitions`, and in the cases Java's mock leaves out of the others:
+ * `deleteRecords` with records to delete, `listConsumerGroupOffsets` with
+ * other than one group, and `listOffsets` with an `OffsetSpec.forTimestamp`.
+ * The call returns its Result, whose futures fail with
+ * `UnsupportedOperationError` and Java's message ("Not implemented yet", or
+ * "Not implement yet" where Java's mock spells it so). Given an empty
+ * collection, `describeConsumerGroups`, `describeClassicGroups`,
+ * `deleteConsumerGroups`, `createPartitions`, `createAcls`, `deleteAcls`,
+ * `alterClientQuotas`, `alterUserScramCredentials`, `describeProducers`,
+ * `describeTransactions`, `fenceProducers` and `listConsumerGroupOffsets`
+ * (an empty `groupSpecs`) answer. A null argument is the
+ * binding's `TypeError`, whatever Java's mock would throw. Why: the FFI's mock answers through the
+ * Result, and an RPC's entry point reports no error at the call but a caught
+ * panic. Goes when: the FFI's mock throws from the call as Java's does.
+ *
  * @packageDocumentation
  */
 
+export { AbortTransactionOptions } from './abort_transaction_options';
+export { AbortTransactionResult } from './abort_transaction_result';
+export { AbortTransactionSpec } from './abort_transaction_spec';
 export { AbstractOptions } from './abstract_options';
 export { Admin } from './admin';
-export { AdminClientConfig } from './admin_client_config';
 export type { AdminClientConfigs } from './admin_client_configs';
 export { AlterClientQuotasOptions } from './alter_client_quotas_options';
 export { AlterClientQuotasResult } from './alter_client_quotas_result';
@@ -167,18 +231,29 @@ export { DescribeConsumerGroupsOptions } from './describe_consumer_groups_option
 export { DescribeConsumerGroupsResult } from './describe_consumer_groups_result';
 export { DescribeDelegationTokenOptions } from './describe_delegation_token_options';
 export { DescribeDelegationTokenResult } from './describe_delegation_token_result';
+export { DescribeFeaturesOptions } from './describe_features_options';
+export { DescribeFeaturesResult } from './describe_features_result';
 export { DescribeLogDirsOptions } from './describe_log_dirs_options';
 export { DescribeLogDirsResult } from './describe_log_dirs_result';
+export { DescribeProducersOptions } from './describe_producers_options';
+export { DescribeProducersResult } from './describe_producers_result';
 export { DescribeReplicaLogDirsOptions } from './describe_replica_log_dirs_options';
 export { DescribeReplicaLogDirsResult } from './describe_replica_log_dirs_result';
 export { DescribeTopicsOptions } from './describe_topics_options';
 export { DescribeTopicsResult } from './describe_topics_result';
+export { DescribeTransactionsOptions } from './describe_transactions_options';
+export { DescribeTransactionsResult } from './describe_transactions_result';
 export { DescribeUserScramCredentialsOptions } from './describe_user_scram_credentials_options';
 export { DescribeUserScramCredentialsResult } from './describe_user_scram_credentials_result';
 export { ElectLeadersOptions } from './elect_leaders_options';
 export { ElectLeadersResult } from './elect_leaders_result';
 export { ExpireDelegationTokenOptions } from './expire_delegation_token_options';
 export { ExpireDelegationTokenResult } from './expire_delegation_token_result';
+export { FeatureMetadata } from './feature_metadata';
+export { FeatureUpdate } from './feature_update';
+export { FenceProducersOptions } from './fence_producers_options';
+export { FenceProducersResult } from './fence_producers_result';
+export { FinalizedVersionRange } from './finalized_version_range';
 export { GroupListing } from './group_listing';
 export { KafkaAdminClient } from './kafka_admin_client';
 export { ListConfigResourcesOptions } from './list_config_resources_options';
@@ -194,6 +269,8 @@ export { ListPartitionReassignmentsOptions } from './list_partition_reassignment
 export { ListPartitionReassignmentsResult } from './list_partition_reassignments_result';
 export { ListTopicsOptions } from './list_topics_options';
 export { ListTopicsResult } from './list_topics_result';
+export { ListTransactionsOptions } from './list_transactions_options';
+export { ListTransactionsResult } from './list_transactions_result';
 export { LogDirDescription } from './log_dir_description';
 export { MemberAssignment } from './member_assignment';
 export { MemberDescription } from './member_description';
@@ -205,6 +282,7 @@ export { NewPartitions } from './new_partitions';
 export { NewTopic } from './new_topic';
 export { OffsetSpec } from './offset_spec';
 export { PartitionReassignment } from './partition_reassignment';
+export { ProducerState } from './producer_state';
 export { RecordsToDelete } from './records_to_delete';
 export { RemoveMembersFromConsumerGroupOptions } from './remove_members_from_consumer_group_options';
 export { RemoveMembersFromConsumerGroupResult } from './remove_members_from_consumer_group_result';
@@ -213,12 +291,25 @@ export { RenewDelegationTokenResult } from './renew_delegation_token_result';
 export { ReplicaInfo } from './replica_info';
 export { ScramCredentialInfo } from './scram_credential_info';
 export { ScramMechanism } from './scram_mechanism';
+export { SupportedVersionRange } from './supported_version_range';
+export { TerminateTransactionOptions } from './terminate_transaction_options';
+export { TerminateTransactionResult } from './terminate_transaction_result';
 export { TopicDescription } from './topic_description';
 export { TopicListing } from './topic_listing';
+export { TransactionDescription } from './transaction_description';
+export { TransactionListing } from './transaction_listing';
+export { TransactionState } from './transaction_state';
+export { UnregisterControllerOptions } from './unregister_controller_options';
+export { UnregisterControllerResult } from './unregister_controller_result';
+export { UpdateFeaturesOptions } from './update_features_options';
+export { UpdateFeaturesResult } from './update_features_result';
 export { UserScramCredentialAlteration } from './user_scram_credential_alteration';
 export { UserScramCredentialDeletion } from './user_scram_credential_deletion';
 export { UserScramCredentialUpsertion } from './user_scram_credential_upsertion';
 export { UserScramCredentialsDescription } from './user_scram_credentials_description';
+
+// BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
+export { AdminClientConfig } from './admin_client_config';
 // END GENERATED EXPORTS
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import
