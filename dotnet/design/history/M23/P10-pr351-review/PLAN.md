@@ -1,0 +1,128 @@
+# Plan: the owner's decisions on the review of PR #351
+
+Status: done (2026-11-20); `make verify-dotnet` not run (the owner's), not squashed, not pushed.
+
+Milestone 23, Phase 10. Agent number N=133. Mode A (.NET only): no Rust, C ABI, header, Python or proto change, and
+no new P/Invoke. Branch `esabellico/dotnet_async_serdes_and_zero_copy`, at `8be49a80e` (a merge of `origin/master`
+into M23/P7 and M23/P8), in the worktree `kafka-clients-dotnet-serdes`. Never pushed by an agent. All paths below are
+under `dotnet/`.
+
+## Context
+
+Pranav Shah reviewed PR #351 (M23/P7 asynchronous serdes and zero-copy deserialization, M23/P8 clients built by
+`Create`). The owner answered his comments on 2026-11-20. This phase applies the four answers; the minor findings of
+`COMMENTS.131.md` are not part of it.
+
+## The decisions
+
+1. **`CancellationToken` defaults** (`IAsyncDeserializer.cs`, `IAsyncSerializer.cs`). Every public asynchronous serde
+   method takes `CancellationToken cancellationToken = default`: `Serialize` / `Deserialize` and `Configure` of every
+   public asynchronous serde interface, the new ones included, and every public `Async*Serializer` /
+   `Async*Deserializer` class, since C# applies an interface's default only to a call made through the interface type.
+   Other public methods whose token has no default are listed, with the reason they keep it, under "Deviations and
+   open items".
+2. **`IAsyncSerializer<T>` split like the synchronous serializers.** `IAsyncSerializer<T>.Serialize(string topic, T?
+   data, CancellationToken cancellationToken = default)` is Java's `serialize(String, T)`;
+   `IAsyncSerializerWithHeaders<T> : IAsyncSerializer<T>` adds `Serialize(string topic, Headers headers, T? data,
+   CancellationToken cancellationToken = default)`, Java's default `serialize(String, Headers, T)`. The extension
+   `AsyncSerializerExtensions.Serialize(this IAsyncSerializer<T>, string, Headers, T?, CancellationToken)` plays Java's
+   default, as `SerializerExtensions.Serialize` does. The producers choose the form once, when they are built
+   (`Internal/AsyncSerializerCall.cs`). The mocks call the headers form with a new, empty `Headers` that they drop,
+   and the plain form otherwise, as the synchronous mocks do. The guard refuses, as on the synchronous side, an
+   asynchronous serializer that declares a public headers `Serialize` without the interface.
+3. **`IAsyncDeserializer<T>` split the same way.** `IAsyncDeserializer<T>.Deserialize(string topic,
+   ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)`; `IAsyncDeserializerWithHeaders<T> :
+   IAsyncDeserializer<T>` adds `Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data,
+   CancellationToken cancellationToken = default)`. `IAsyncDeserializerWithRetention<T>` extends
+   `IAsyncDeserializerWithHeaders<T>`, still memberless; its permission applies to the `data` of the headers form,
+   which is the form the consumers call on it. The consumers choose the form once
+   (`Internal/AsyncDeserializerCall.cs`). The copy-out contracts, zero-copy and retention, the revocation of `data`
+   after the call, and cancellation and rewind are unchanged.
+4. **The drafted rule text is applied.** P7's drafts R1–R5 (`dotnet/CLAUDE.md` R1–R3,
+   `dotnet/.claude/rules/ffi-marshalling.md` R4–R5) and P8's R1–R14 (`dotnet/CLAUDE.md`, R12 the README), each
+   located by its quoted text, the asynchronous serde shape written as decisions 1–3 make it, and decisions 1–3 added
+   where the rule files describe that shape. Each of the two plans marks its drafts applied. No rule file outside
+   `dotnet/` is touched.
+
+## Ledger rows
+
+Rows start at 591: 583 is the highest row before this phase on this branch, and the parked M23/P9 (N=132, on
+`esabellico/dotnet_consumer_records_and_headers_wrapped`, not an ancestor of this branch) holds 584–590.
+
+| # | Source | Topic | Decision | Status |
+|---|---|---|---|---|
+| 591 | Owner 2026-11-20 | Token default on the asynchronous serdes | every public asynchronous serde interface method (`Serialize`, `Deserialize`, `Configure`) and every public `Async*Serializer` / `Async*Deserializer` class method takes `CancellationToken cancellationToken = default`. Supersedes ledger 572's "required on the interface method" | Agreed |
+| 592 | Owner 2026-11-20 | `IAsyncSerializerWithHeaders<T>` | `IAsyncSerializer<T>.Serialize(topic, data, token)` is Java's `serialize(String, T)`; `IAsyncSerializerWithHeaders<T> : IAsyncSerializer<T>` adds the headers form, Java's default `serialize(String, Headers, T)`; the producers choose once, at construction; mirrors `ISerializer<T>` / `ISerializerWithHeaders<T>`. Supersedes, for serializers, P7's "one method each … the `Headers` always passed" (its draft R2, the shape behind ledger 539) | Agreed |
+| 593 | Owner 2026-11-20 | `IAsyncDeserializerWithHeaders<T>` | `IAsyncDeserializer<T>.Deserialize(topic, data, token)`; `IAsyncDeserializerWithHeaders<T> : IAsyncDeserializer<T>` adds the headers form; the consumers choose once; mirrors `IDeserializer<T>` / `IDeserializerWithHeaders<T>`. Supersedes the same text for deserializers | Agreed |
+| 594 | Owner 2026-11-20 | Retention | `IAsyncDeserializerWithRetention<T>` extends `IAsyncDeserializerWithHeaders<T>`, has no member, and its permission applies to the `data` of the headers form | Agreed |
+| 595 | Owner 2026-11-20 | Rule text | P7's drafts R1–R5 and P8's R1–R14 are applied to `dotnet/CLAUDE.md`, `dotnet/.claude/rules/ffi-marshalling.md` and `dotnet/README.md`, the asynchronous serde shape written as rows 591–594 make it | Agreed |
+
+## Steps (one commit each, `git commit --no-verify`)
+
+- **S0** this plan and the `STATUS.md` entry.
+- **S1** the token defaults on the existing asynchronous serde interfaces and built-in classes.
+- **S2** the serializer split: interfaces, extension dispatch, `AsyncSerializerCall`, `SerializedProducerRecord`,
+  the guard, the built-ins, every caller and implementer (`src/`, `tests/`, `grpc-server/`, `soak/`, `examples/`,
+  `tools/AotSmoke/`), the analyzer lists, and tests pinning the dispatch on both producers.
+- **S3** the deserializer split, the same way, and tests pinning the dispatch on both consumers, retention included.
+- **S4** the rule text, `README.md`, `examples/README.md` and the XML docs; the two phase plans mark their drafts
+  applied.
+- **S5** the full verification and any fixups; this plan's "Deviations and open items" and the `STATUS.md` entry
+  completed.
+
+## Gates per step
+
+From `dotnet/`, the native library built by `cargo build --features ffi` in `rust/` (debug profile, so every
+`dotnet` command takes `-p:CargoProfileDir=debug`): `dotnet build Confluent.Kafka.sln -c Release` 0 warnings / 0
+errors, `dotnet format --verify-no-changes`, the unit tests on net8.0. At S5 also the unit tests on net10.0, the gRPC
+server unit tests, `make -C dotnet test-aot-dotnet` and, if no Docker conflict stops it,
+`make -C dotnet test-grpc-server-dotnet`. `make verify-dotnet` is the owner's.
+
+## Deviations and open items
+
+**Commits.** `fcd35c814` S0 plan; `b77cf26dc` S1 token defaults; `80f4e9ddb` S2 serializer split; `115e90ea1` S3
+deserializer split; `15a565ed9` S4 rule text (+ fixup `137a254ed`); the S5 commit, this section and `STATUS.md`.
+
+**Public API (breaking for implementers).** `IAsyncSerializer<T>.Serialize(topic, headers, data, token)` became
+`Serialize(topic, data, token = default)`, the headers form moving to the new `IAsyncSerializerWithHeaders<T>`;
+`IAsyncDeserializer<T>.Deserialize(topic, headers, data, token)` became `Deserialize(topic, data, token = default)`,
+the headers form moving to the new `IAsyncDeserializerWithHeaders<T>`; `IAsyncDeserializerWithRetention<T>` now
+extends `IAsyncDeserializerWithHeaders<T>`; `AsyncSerializerExtensions.Serialize` /
+`AsyncDeserializerExtensions.Deserialize` take the headers form for any serde. Every `Configure` and every built-in
+`Async*` method takes `CancellationToken cancellationToken = default`. The ten plain built-in async deserializers and
+every built-in async serializer implement only the form without headers, as their synchronous classes do;
+`AsyncReadOnlyMemoryDeserializer` keeps the headers form (no copy) and gains the plain one (a copy), as
+`ReadOnlyMemoryDeserializer` has both.
+
+**Tokens left without a default** (decision 1's report): `KafkaFuture<T>.Get(CancellationToken)`,
+`KafkaFuture.Get(CancellationToken)` (the `Void` future), `AsyncKafkaFuture<T>.Get(CancellationToken)` and
+`AsyncKafkaFuture.Get(CancellationToken)`. They keep a required token because decision 1 names the asynchronous serde
+methods only, and the parameterless `Get()` beside each already serves a call without a token: a default would add a
+second member for the same call. It would not be ambiguous (C# prefers `Get()`, which needs no default filled in, and
+a method-group conversion binds `Get()` too), and §3 Java names rule 8 allows it (a last optional `CancellationToken`
+is rule 7's own). No other public method in `src/` has a token without a default.
+
+*Open for the owner:* whether the futures take rule 7's shape, one `Get(CancellationToken cancellationToken = default)`
+in place of both `Get()` and `Get(CancellationToken)`. That shape removes a public member, which breaks compiled
+callers and method-group uses such as `Task.Run(future.Get)`. The four overloads are open CKRDA0013 findings in
+`analyzers/java-name-baseline.txt` (the four `overload M:…Get(System.Threading.CancellationToken)` lines):
+`JavaNameAnalyzer` treats a last token as rule 7's own only when it is optional. A default added beside `Get()` would
+likely leave one of the two members unpaired and not close them (read from `JavaNameAnalyzer.Match`, not run).
+
+**Rule text (decision 4).** P7's R1, R3, R4 and R5 and P8's R1–R7, R9, R10, R13 and R14 applied as written. P7's R2
+written as decisions 1–3 make it, with P8's R11 added and adjusted to decision 1 (`Configure`'s token optional on the
+interface too, superseding ledger 572). P8's R8 applied with the async serde interfaces, and the `AsyncMockProducer`
+/ `AsyncMockConsumer` constructors of the same sketches corrected to them. Beyond the drafts, three lines still
+calling keep-alive deferred were brought in line with P7's R1 (`dotnet/CLAUDE.md` §3's `byte[]` row and §4's
+**Key/value type** row; `ffi-marshalling.md`'s `ConsumerRecords_t` row), and the §3 `Serdes` sketch gained the
+async interfaces. P8's R12: `README.md` now also describes the async headers interfaces and retention's form.
+
+**Gates (S5).** Native library debug (`-p:CargoProfileDir=debug`). `Confluent.Kafka.sln` Release 0 warnings / 0
+errors; unit tests net8.0 and net10.0 `Passed: 9635, Skipped: 51, Failed: 0`; gRPC server unit tests 254 passed
+(directly and through `make -C dotnet test-grpc-server-dotnet`, which needs no Docker); `dotnet format
+--verify-no-changes` clean; `make -C dotnet test-aot-dotnet` "all passed" on net8.0 and net10.0, with no change to
+AotSmoke's expected texts. Integration tests (Docker) were not run in this phase; the broker path of the consumers'
+form choice is the same `NativeConsumer.PollWithCallback` the new unit tests drive.
+
+**Open.** `make verify-dotnet`, squash and push are the owner's. The minor findings of `COMMENTS.131.md` are
+untouched, as decided. No Critic loop was run for this phase.

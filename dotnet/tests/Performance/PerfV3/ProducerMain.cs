@@ -136,7 +136,7 @@ internal static class ProducerMain
         if (config.Async)
         {
             Console.WriteLine("Running async producer performance test v3 (confluent-kafka-rust)...");
-            var backend = new V3AsyncProducerBackend(producerConfig);
+            var backend = await V3AsyncProducerBackend.Create(producerConfig).ConfigureAwait(false);
             try
             {
                 return await ProducerBenchmark.RunAsync(backend, config, metrics, messages, PerfSignals.Token).ConfigureAwait(false);

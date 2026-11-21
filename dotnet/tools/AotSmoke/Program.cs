@@ -45,6 +45,10 @@ internal static class Program
 
     private static readonly IDeserializer<string> s_deserializer = Serdes.String().Deserializer();
 
+    private static readonly IAsyncSerializer<string> s_asyncSerializer = new AsyncStringSerializer();
+
+    private static readonly IAsyncDeserializer<string> s_asyncDeserializer = new AsyncStringDeserializer();
+
     private static int s_failures;
 
     private static async Task<int> Main()
@@ -116,7 +120,7 @@ internal static class Program
     {
         await CheckAsync("async producer: Send and Get", "offset 0", async () =>
         {
-            await using var producer = new AsyncMockProducer<string, string>(s_serializer, s_serializer);
+            await using var producer = new AsyncMockProducer<string, string>(s_asyncSerializer, s_asyncSerializer);
             AsyncKafkaFuture<RecordMetadata> future =
                 await producer.Send(new ProducerRecord<string, string>("t", "k", "v")).ConfigureAwait(false);
             RecordMetadata metadata = await future.Get().ConfigureAwait(false);
@@ -211,7 +215,7 @@ internal static class Program
     {
         await CheckAsync("async consumer: Poll", "records=1, value=v", async () =>
         {
-            await using var consumer = new AsyncMockConsumer<string, string>(s_deserializer, s_deserializer);
+            await using var consumer = new AsyncMockConsumer<string, string>(s_asyncDeserializer, s_asyncDeserializer);
             var partition = new TopicPartition("t", 0);
             await consumer.Assign(new[] { partition }).ConfigureAwait(false);
             await consumer.Seek(partition, 0).ConfigureAwait(false);
@@ -277,7 +281,7 @@ internal static class Program
             {
                 try
                 {
-                    using var producer = new KafkaProducer<string, string>(
+                    using var producer = KafkaProducer<string, string>.Create(
                         new Dictionary<string, object?> { ["bootstrap.servers"] = 53 }, s_serializer, s_serializer);
                     return "accepted";
                 }
@@ -293,7 +297,7 @@ internal static class Program
             {
                 try
                 {
-                    using var producer = new KafkaProducer<string, string>(
+                    using var producer = KafkaProducer<string, string>.Create(
                         new Dictionary<string, object?> { ["bootstrap.servers"] = Unreachable, ["acks"] = "bogus" },
                         s_serializer,
                         s_serializer);
@@ -306,7 +310,7 @@ internal static class Program
             });
         Check("real producer: a list and a Type in the configuration", "closed", () =>
         {
-            using var producer = new KafkaProducer<string, string>(
+            using var producer = KafkaProducer<string, string>.Create(
                 new Dictionary<string, object?>
                 {
                     ["bootstrap.servers"] = new List<string> { Unreachable },
@@ -323,7 +327,7 @@ internal static class Program
             "Get threw TimeoutException; callback got TimeoutException",
             () =>
             {
-                using var producer = new KafkaProducer<string, string>(
+                using var producer = KafkaProducer<string, string>.Create(
                     new Dictionary<string, object?> { ["bootstrap.servers"] = Unreachable, ["max.block.ms"] = 500 },
                     s_serializer,
                     s_serializer);
@@ -340,7 +344,7 @@ internal static class Program
             });
         Check("real consumer: created and closed", "group aot-smoke", () =>
         {
-            using var consumer = new KafkaConsumer<string, string>(
+            using var consumer = KafkaConsumer<string, string>.Create(
                 new Dictionary<string, object?>
                 {
                     ["bootstrap.servers"] = Unreachable,
@@ -357,8 +361,12 @@ internal static class Program
     {
         await CheckAsync("real async producer: created and disposed", "disposed", async () =>
         {
-            await using (new AsyncKafkaProducer<string, string>(
-                new Dictionary<string, object?> { ["bootstrap.servers"] = Unreachable }, s_serializer, s_serializer))
+            AsyncKafkaProducer<string, string> producer = await AsyncKafkaProducer<string, string>.Create(
+                    new Dictionary<string, object?> { ["bootstrap.servers"] = Unreachable },
+                    s_asyncSerializer,
+                    s_asyncSerializer)
+                .ConfigureAwait(false);
+            await using (producer.ConfigureAwait(false))
             {
             }
 

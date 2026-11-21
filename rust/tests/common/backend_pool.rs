@@ -327,8 +327,9 @@ impl BackendHandle {
     ///   `ChaosWorkloadService`: a workload's stream stays open for the whole
     ///   run, and may go quiet for longer than 30 s while the brokers are down
     ///   (a server sends the response headers only with its first event);
-    /// - the producer's blocking RPCs (`MultilanguageProducer`), which set a
-    ///   deadline of their own, derived from the producer's config.
+    /// - the producer's blocking RPCs (`MultilanguageProducer`) and the
+    ///   consumer's calls that wait on the broker (`MultilanguageConsumer`),
+    ///   which set a deadline of their own, derived from the client's config.
     pub async fn untimed_channel(&self) -> Channel {
         self.connect(None).await
     }

@@ -92,7 +92,7 @@ internal sealed class AsyncConsumerServiceImpl
         }
     }
 
-    public override Task<Proto.CreateConsumerResponse> CreateConsumer(Proto.CreateConsumerRequest request, ServerCallContext context)
+    public override async Task<Proto.CreateConsumerResponse> CreateConsumer(Proto.CreateConsumerRequest request, ServerCallContext context)
     {
         IAsyncConsumer<byte[], byte[]> consumer;
         try
@@ -100,21 +100,23 @@ internal sealed class AsyncConsumerServiceImpl
             // An empty or all-blank config selects an AsyncMockConsumer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
+                consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), "earliest");
             }
             else
             {
-                consumer = new AsyncKafkaConsumer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+                consumer = await AsyncKafkaConsumer<byte[], byte[]>
+                    .Create(Translate.ConfigsFromProto(request.Config), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer())
+                    .ConfigureAwait(false);
             }
         }
         catch (Exception ex) when (Translate.IsBindingError(ex))
         {
-            return Task.FromResult(new Proto.CreateConsumerResponse { ConsumerId = 0, Error = Translate.ToProto(ex) });
+            return new Proto.CreateConsumerResponse { ConsumerId = 0, Error = Translate.ToProto(ex) };
         }
 
         ulong id = (ulong)Interlocked.Increment(ref _nextId);
         _consumers[id] = new ConsumerEntry(consumer);
-        return Task.FromResult(new Proto.CreateConsumerResponse { ConsumerId = id });
+        return new Proto.CreateConsumerResponse { ConsumerId = id };
     }
 
     // Without with_listener the plain Subscribe replaces, and so releases, a listener an earlier subscribe

@@ -66,7 +66,7 @@ public sealed class PublicProducerSendClosedCheckTests
     {
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
-        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(RealConfig(), key, value);
+        KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(RealConfig(), key, value);
         TestTimeout.Dispose(producer);
 
         Assert.Throws<IllegalStateException>(() => producer.Send(Record()));
@@ -79,7 +79,7 @@ public sealed class PublicProducerSendClosedCheckTests
     {
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key, value);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key.AsAsync(), value.AsAsync());
         TestTimeout.Dispose(producer);
 
         // Send throws synchronously (not an async method), so Assert.Throws is the overload.
@@ -89,11 +89,11 @@ public sealed class PublicProducerSendClosedCheckTests
     }
 
     [Fact]
-    public void AsyncRealSend_AfterDispose_DoesNotInvokeSerializers()
+    public async Task AsyncRealSend_AfterDispose_DoesNotInvokeSerializers()
     {
         RecordingSerializer<byte[]> key = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
         RecordingSerializer<byte[]> value = new RecordingSerializer<byte[]>(Serdes.ByteArray().Serializer());
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(RealConfig(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(RealConfig(), key.AsAsync(), value.AsAsync());
         TestTimeout.Dispose(producer);
 
         Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record()); });
@@ -116,7 +116,7 @@ public sealed class PublicProducerSendClosedCheckTests
     public void AsyncSend_AfterDispose_WithThrowingSerializer_SurfacesIllegalState()
     {
         ThrowingSerializer<byte[]> key = new ThrowingSerializer<byte[]>();
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key, Serdes.ByteArray().Serializer());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(key.AsAsync(), new AsyncByteArraySerializer());
         TestTimeout.Dispose(producer);
 
         Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record()); });
@@ -136,13 +136,15 @@ public sealed class PublicProducerSendClosedCheckTests
     }
 
     [Fact]
-    public void EverySend_NullArgumentsOnClosedProducer_ThrowIllegalState_OnAllFourProducers()
+    public async Task EverySend_NullArgumentsOnClosedProducer_ThrowIllegalState_OnAllFourProducers()
     {
         ISerializer<byte[]> bytes = Serdes.ByteArray().Serializer();
+        IAsyncSerializer<byte[]> asyncBytes = new AsyncByteArraySerializer();
         MockProducer<byte[], byte[]> mock = new MockProducer<byte[], byte[]>(bytes, bytes);
-        AsyncMockProducer<byte[], byte[]> asyncMock = new AsyncMockProducer<byte[], byte[]>(bytes, bytes);
-        KafkaProducer<byte[], byte[]> real = new KafkaProducer<byte[], byte[]>(RealConfig(), bytes, bytes);
-        AsyncKafkaProducer<byte[], byte[]> asyncReal = new AsyncKafkaProducer<byte[], byte[]>(RealConfig(), bytes, bytes);
+        AsyncMockProducer<byte[], byte[]> asyncMock = new AsyncMockProducer<byte[], byte[]>(asyncBytes, asyncBytes);
+        KafkaProducer<byte[], byte[]> real = KafkaProducer<byte[], byte[]>.Create(RealConfig(), bytes, bytes);
+        AsyncKafkaProducer<byte[], byte[]> asyncReal =
+            await AsyncKafkaProducer<byte[], byte[]>.Create(RealConfig(), asyncBytes, asyncBytes);
         TestTimeout.Dispose(mock);
         TestTimeout.Dispose(asyncMock);
         TestTimeout.Dispose(real);
@@ -164,8 +166,9 @@ public sealed class PublicProducerSendClosedCheckTests
     public async Task EverySend_NullArgumentsOnAFencedMock_ReportTheFenceFirst()
     {
         ISerializer<byte[]> bytes = Serdes.ByteArray().Serializer();
+        IAsyncSerializer<byte[]> asyncBytes = new AsyncByteArraySerializer();
         MockProducer<byte[], byte[]> mock = new MockProducer<byte[], byte[]>(bytes, bytes);
-        AsyncMockProducer<byte[], byte[]> asyncMock = new AsyncMockProducer<byte[], byte[]>(bytes, bytes);
+        AsyncMockProducer<byte[], byte[]> asyncMock = new AsyncMockProducer<byte[], byte[]>(asyncBytes, asyncBytes);
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         using IDisposable asyncMockDisposal = TestTimeout.Disposal(asyncMock);
         mock.InitTransactions();
@@ -188,8 +191,9 @@ public sealed class PublicProducerSendClosedCheckTests
     public async Task EverySend_NullArgumentsWithAnInjectedSendException_ThrowThatException()
     {
         ISerializer<byte[]> bytes = Serdes.ByteArray().Serializer();
+        IAsyncSerializer<byte[]> asyncBytes = new AsyncByteArraySerializer();
         MockProducer<byte[], byte[]> mock = new MockProducer<byte[], byte[]>(bytes, bytes);
-        AsyncMockProducer<byte[], byte[]> asyncMock = new AsyncMockProducer<byte[], byte[]>(bytes, bytes);
+        AsyncMockProducer<byte[], byte[]> asyncMock = new AsyncMockProducer<byte[], byte[]>(asyncBytes, asyncBytes);
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         using IDisposable asyncMockDisposal = TestTimeout.Disposal(asyncMock);
         KafkaException injected = new KafkaException("injected");

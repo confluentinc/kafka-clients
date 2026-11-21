@@ -94,7 +94,7 @@ public sealed class CommittedNullEntryTests
     public async Task AsyncMockConsumer_Committed_ReportsOnlyCommittedPartitions_AndZeroWhenUnassigned()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
+            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), "earliest");
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0, s_tp1 }), s_deadline);

@@ -289,7 +289,7 @@ internal sealed class VerifiableConsumer : IOffsetCommitCallback, IConsumerRebal
     internal static VerifiableConsumer CreateFromArgs(ArgumentParser parser, IReadOnlyList<string> args, JsonOutput output)
     {
         (Namespace res, Dictionary<string, object?> props) = ParseArgs(parser, args, output);
-        var consumer = new KafkaConsumer<string, string>(props, new StringDeserializer(), new StringDeserializer());
+        var consumer = KafkaConsumer<string, string>.Create(props, new StringDeserializer(), new StringDeserializer());
         return new VerifiableConsumer(
             consumer,
             output,

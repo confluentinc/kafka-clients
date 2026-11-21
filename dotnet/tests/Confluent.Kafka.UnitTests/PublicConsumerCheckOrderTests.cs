@@ -102,7 +102,7 @@ public sealed class PublicConsumerCheckOrderTests
     [MemberData(nameof(RealConsumers))]
     public async Task WhileAnotherThreadIsInside_ATimedOverload_ReportsTheConcurrentAccessBeforeItsTimeout(string kind)
     {
-        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(Create(kind, groupId: true), consumer =>
+        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(await Create(kind, groupId: true), consumer =>
             Calls(consumer, new Dictionary<string, (Action<IConsumer<byte[], byte[]>>, Func<IAsyncConsumer<byte[], byte[]>, Task>)>
             {
                 ["Commit"] = (c => c.Commit(s_negative), c => c.Commit(s_negative)),
@@ -127,7 +127,7 @@ public sealed class PublicConsumerCheckOrderTests
     [MemberData(nameof(RealConsumers))]
     public async Task WhileAnotherThreadIsInside_ANullArgument_IsReportedAfterTheConcurrentAccess_UnlessJavaChecksItBeforeAcquire(string kind)
     {
-        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(Create(kind, groupId: true), consumer =>
+        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(await Create(kind, groupId: true), consumer =>
             AsyncOnly(consumer, NullArgumentCalls(consumer), NullAsyncCallbackCalls()));
 
         Dictionary<string, (Type Type, string Detail)> before = new Dictionary<string, (Type, string)>
@@ -163,7 +163,7 @@ public sealed class PublicConsumerCheckOrderTests
     [MemberData(nameof(RealConsumers))]
     public async Task WhileAnotherThreadIsInside_ANegativePartition_ReportsTheConcurrentAccess_ButANegativeOffsetComesFirst(string kind)
     {
-        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(Create(kind, groupId: true), consumer =>
+        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(await Create(kind, groupId: true), consumer =>
             Calls(consumer, NegativePartitionCalls()));
 
         // The binding makes no partition check: the core answers a negative partition after the owner check, as Java
@@ -186,7 +186,7 @@ public sealed class PublicConsumerCheckOrderTests
     [Fact]
     public async Task OnTheAsyncMock_WhileARebalanceRefusesOtherThreads_ANullArgument_IsReportedAfterTheRefusal()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             Dictionary<string, Exception?> seen = new Dictionary<string, Exception?>();
@@ -242,7 +242,7 @@ public sealed class PublicConsumerCheckOrderTests
     public async Task WhileAnotherThreadIsInside_GroupMetadataWithoutAGroupId_ReportsTheConcurrentAccessFirst(string kind)
     {
         IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(
-            Create(kind, groupId: false),
+            await Create(kind, groupId: false),
             consumer => new Dictionary<string, Exception?>
             {
                 ["GroupMetadata"] = Record.Exception(() => ((IConsumerCommon)consumer).GroupMetadata()),
@@ -253,9 +253,9 @@ public sealed class PublicConsumerCheckOrderTests
 
     [Theory]
     [MemberData(nameof(RealConsumers))]
-    public void WithoutAGroupId_ACommitOrCommittedWithANegativeTimeout_ReportsTheGroupIdFirst(string kind)
+    public async Task WithoutAGroupId_ACommitOrCommittedWithANegativeTimeout_ReportsTheGroupIdFirst(string kind)
     {
-        object consumer = Create(kind, groupId: false);
+        object consumer = await Create(kind, groupId: false);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         AssertGroupIdNotDefined(Thrown(consumer, c => c.Commit(s_negative), c => c.Commit(s_negative)));
@@ -270,9 +270,9 @@ public sealed class PublicConsumerCheckOrderTests
     // Java's subscribeInternal runs throwIfGroupIdNotDefined() before it checks the topics.
     [Theory]
     [MemberData(nameof(RealConsumers))]
-    public void WithoutAGroupId_SubscribeToANullCollectionOrTopic_ReportsTheGroupIdFirst(string kind)
+    public async Task WithoutAGroupId_SubscribeToANullCollectionOrTopic_ReportsTheGroupIdFirst(string kind)
     {
-        object consumer = Create(kind, groupId: false);
+        object consumer = await Create(kind, groupId: false);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         AssertGroupIdNotDefined(Thrown(consumer, c => c.Subscribe((IReadOnlyCollection<string>)null!), c => c.Subscribe((IReadOnlyCollection<string>)null!)));
@@ -283,9 +283,9 @@ public sealed class PublicConsumerCheckOrderTests
     // Java's subscribeToRegex runs throwIfGroupIdNotDefined() before it checks the pattern.
     [Theory]
     [MemberData(nameof(RealConsumers))]
-    public void WithoutAGroupId_SubscribeToANullPattern_ReportsTheGroupIdFirst(string kind)
+    public async Task WithoutAGroupId_SubscribeToANullPattern_ReportsTheGroupIdFirst(string kind)
     {
-        object consumer = Create(kind, groupId: false);
+        object consumer = await Create(kind, groupId: false);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         Dictionary<string, Exception?> seen = AsyncOnly(consumer, NullPatternCalls(consumer), NullAsyncPatternCalls());
@@ -299,9 +299,9 @@ public sealed class PublicConsumerCheckOrderTests
 
     [Theory]
     [MemberData(nameof(RealConsumers))]
-    public void WithoutAGroupId_CommittedOfANullCollection_ReportsTheGroupIdFirst(string kind)
+    public async Task WithoutAGroupId_CommittedOfANullCollection_ReportsTheGroupIdFirst(string kind)
     {
-        object consumer = Create(kind, groupId: false);
+        object consumer = await Create(kind, groupId: false);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         AssertGroupIdNotDefined(Thrown(consumer, c => c.Committed(null!), c => c.Committed(null!)));
@@ -311,9 +311,9 @@ public sealed class PublicConsumerCheckOrderTests
 
     [Theory]
     [MemberData(nameof(RealConsumers))]
-    public void WithAGroupId_CommittedOfANullCollection_ReportsANegativeTimeoutFirst(string kind)
+    public async Task WithAGroupId_CommittedOfANullCollection_ReportsANegativeTimeoutFirst(string kind)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         AssertNegative(
@@ -326,9 +326,9 @@ public sealed class PublicConsumerCheckOrderTests
 
     [Theory]
     [MemberData(nameof(RealConsumers))]
-    public void PartitionsForANullTopic_TimesOutAtOnceWithAZeroTimeout_AfterANegativeTimeoutCheck(string kind)
+    public async Task PartitionsForANullTopic_TimesOutAtOnceWithAZeroTimeout_AfterANegativeTimeoutCheck(string kind)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         KafkaTimeoutException zero = Assert.IsType<KafkaTimeoutException>(
@@ -348,11 +348,11 @@ public sealed class PublicConsumerCheckOrderTests
     }
 
     [Fact]
-    public void OnTheMocks_PartitionsForANullTopic_WithAZeroTimeout_ThrowsArgumentNull()
+    public async Task OnTheMocks_PartitionsForANullTopic_WithAZeroTimeout_ThrowsArgumentNull()
     {
         foreach (string kind in new[] { "MockConsumer", "AsyncMockConsumer" })
         {
-            object consumer = Create(kind, groupId: true);
+            object consumer = await Create(kind, groupId: true);
             using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
             Assert.Equal(
@@ -363,9 +363,9 @@ public sealed class PublicConsumerCheckOrderTests
 
     [Theory]
     [MemberData(nameof(AllConsumers))]
-    public void OnAClosedConsumer_AnInvalidArgument_ReportsTheClosedConsumerFirst(string kind)
+    public async Task OnAClosedConsumer_AnInvalidArgument_ReportsTheClosedConsumerFirst(string kind)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         TestTimeout.Dispose((IDisposable)consumer);
 
         Dictionary<string, Exception?> seen = Calls(consumer, new Dictionary<string, (Action<IConsumer<byte[], byte[]>>, Func<IAsyncConsumer<byte[], byte[]>, Task>)>
@@ -441,9 +441,9 @@ public sealed class PublicConsumerCheckOrderTests
 
     [Theory]
     [MemberData(nameof(AllConsumers))]
-    public void OnAClosedConsumer_ANullSubscribeOrAssign_ReportsTheClosedConsumer(string kind)
+    public async Task OnAClosedConsumer_ANullSubscribeOrAssign_ReportsTheClosedConsumer(string kind)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         TestTimeout.Dispose((IDisposable)consumer);
 
         Dictionary<string, Exception?> seen = AsyncOnly(consumer, NullSubscribeAndAssignCalls(consumer), NullAsyncSubscribeCalls());
@@ -459,9 +459,9 @@ public sealed class PublicConsumerCheckOrderTests
 
     [Theory]
     [MemberData(nameof(RealConsumers))]
-    public void OnAClosedConsumer_ANullPattern_ReportsTheClosedConsumerFirst(string kind)
+    public async Task OnAClosedConsumer_ANullPattern_ReportsTheClosedConsumerFirst(string kind)
     {
-        object consumer = Create(kind, groupId: true);
+        object consumer = await Create(kind, groupId: true);
         TestTimeout.Dispose((IDisposable)consumer);
 
         Dictionary<string, Exception?> seen = AsyncOnly(consumer, NullPatternCalls(consumer), NullAsyncPatternCalls());
@@ -477,7 +477,7 @@ public sealed class PublicConsumerCheckOrderTests
     [MemberData(nameof(RealConsumers))]
     public async Task WhileAnotherThreadIsInside_ANullPattern_ReportsTheConcurrentAccess(string kind)
     {
-        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(Create(kind, groupId: true), consumer =>
+        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(await Create(kind, groupId: true), consumer =>
             AsyncOnly(consumer, NullPatternCalls(consumer), NullAsyncPatternCalls()));
 
         Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 9 : 6, seen.Count);
@@ -491,7 +491,7 @@ public sealed class PublicConsumerCheckOrderTests
     [MemberData(nameof(RealConsumers))]
     public async Task WhileAnotherThreadIsInside_ANullSubscribeOrAssign_ReportsTheConcurrentAccess(string kind)
     {
-        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(Create(kind, groupId: true), consumer =>
+        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(await Create(kind, groupId: true), consumer =>
             AsyncOnly(consumer, NullSubscribeAndAssignCalls(consumer), NullAsyncSubscribeCalls()));
 
         Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 6 : 5, seen.Count);
@@ -504,7 +504,7 @@ public sealed class PublicConsumerCheckOrderTests
     [Fact]
     public void InsideACallback_WithoutAGroupId_GroupMetadataAndCommitted_ReportTheGroupIdBeforeTheRoute()
     {
-        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(Config(groupId: false), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        KafkaConsumer<byte[], byte[]> consumer = KafkaConsumer<byte[], byte[]>.Create(Config(groupId: false), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable disposal = TestTimeout.Disposal(consumer);
         ConsumerCallbackReporter reporter = Reporter(consumer);
         Dictionary<string, Exception?> seen = new Dictionary<string, Exception?>();
@@ -675,12 +675,12 @@ public sealed class PublicConsumerCheckOrderTests
     private static NativeConsumer Native(object consumer) =>
         (NativeConsumer)consumer.GetType().GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(consumer)!;
 
-    private static object Create(string kind, bool groupId) => kind switch
+    private static async Task<object> Create(string kind, bool groupId) => kind switch
     {
-        "KafkaConsumer" => new KafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
-        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<byte[], byte[]>(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        "KafkaConsumer" => KafkaConsumer<byte[], byte[]>.Create(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        "AsyncKafkaConsumer" => await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(groupId), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
         "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
-        _ => new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        _ => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
     };
 
     private static Dictionary<string, object?> Config(bool groupId)

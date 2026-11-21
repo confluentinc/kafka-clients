@@ -20,6 +20,7 @@ using System.Text;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal.Interop;
@@ -30,7 +31,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// <see cref="ConsumerRecordsMarshal"/>'s next offsets over native batches built in a fixed partition order: a batch
-/// with next offsets and no records, and the next offsets of a batch cut short by a failing deserializer.
+/// with next offsets and no records, and the next offsets of a batch cut short by a failing deserializer. Also when
+/// a copy-out creates the handle that keeps the native batch alive: only for a deserializer's memory form.
 /// </summary>
 public sealed class ConsumerRecordsMarshalNextOffsetsTests
 {
@@ -164,6 +166,46 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
         Assert.Equal(new OffsetAndMetadata(400, CoreEpoch, CoreMetadata), records.NextOffsets()[s_c0]);
     }
 
+    [Fact]
+    public void ACopyOutWithNoMemoryForm_CreatesNoBatchHandle_AndLeavesTheNativeBatchToItsCaller()
+    {
+        using NativeBatch batch = new NativeBatch();
+        batch.Partition(s_a0, (0, 3, "a"), (1, 3, "b"));
+        batch.Partition(s_b0, (5, 4, "c"));
+
+        ConsumerRecords<string, string> records = batch.CopyOut(
+            new FailingDeserializer("bad"), out SafeConsumerRecordsHandle? handle);
+
+        Assert.Null(handle);
+        Assert.Equal(new[] { "a", "b", "c" }, records.Select(r => r.Value()).ToArray());
+    }
+
+    [Fact]
+    public void ACopyOutWithAMemoryForm_CreatesTheBatchHandle_AndGivesEachValueThroughItsOwnManager()
+    {
+        using NativeBatch batch = new NativeBatch();
+        batch.Partition(s_a0, (0, 3, "a"), (1, 3, "b"));
+        MemoryFormDeserializer deserializer = new MemoryFormDeserializer();
+
+        ConsumerRecords<string, string> records = batch.CopyOut(deserializer, out SafeConsumerRecordsHandle? handle);
+        try
+        {
+            Assert.NotNull(handle);
+            Assert.True(handle!.HandedOut);
+            Assert.Equal(new[] { "a", "b" }, records.Select(r => r.Value()).ToArray());
+            Assert.Equal(0, deserializer.SpanCalls);
+            Assert.Equal(2, deserializer.Given.Count);
+            Assert.True(MemoryMarshal.TryGetMemoryManager(deserializer.Given[0], out BytesMemoryManager? first));
+            Assert.True(MemoryMarshal.TryGetMemoryManager(deserializer.Given[1], out BytesMemoryManager? second));
+            Assert.NotNull(first);
+            Assert.NotSame(first, second);
+        }
+        finally
+        {
+            handle?.Dispose();
+        }
+    }
+
     /// <summary>
     /// The inputs of one native batch, built through <c>kafka_consumer_ConsumerRecords_with_next_offsets</c> in the
     /// order they are added; it frees them after the batch, whose records borrow the key and value bytes.
@@ -224,6 +266,35 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
             finally
             {
                 ConsumerRecordsMarshal.Destroy(records);
+            }
+        }
+
+        internal ConsumerRecords<string, string> CopyOut(
+            IDeserializer<string> valueDeserializer, out SafeConsumerRecordsHandle? handle)
+        {
+            IntPtr records = Call((ref IntPtr outErr) =>
+                Native.ConsumerRecordsWithNextOffsets(_recordsMap, _nextOffsetsMap, ref outErr));
+            handle = null;
+            try
+            {
+                return ConsumerRecordsMarshal.CopyOut(
+                    records,
+                    Serdes.String().Deserializer(),
+                    null,
+                    null,
+                    valueDeserializer,
+                    null,
+                    valueDeserializer as IDeserializerWithReadOnlyMemory<string>,
+                    ref handle,
+                    out _,
+                    out _);
+            }
+            finally
+            {
+                if (handle is null)
+                {
+                    ConsumerRecordsMarshal.Destroy(records);
+                }
             }
         }
 
@@ -358,6 +429,26 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
         {
             string text = Encoding.UTF8.GetString(data.ToArray());
             return text == _failOn ? throw new FormatException("bad " + text) : text;
+        }
+    }
+
+    /// <summary>A UTF-8 deserializer with the memory form that keeps each memory it is given.</summary>
+    private sealed class MemoryFormDeserializer : IDeserializerWithReadOnlyMemory<string>
+    {
+        internal List<ReadOnlyMemory<byte>> Given { get; } = new List<ReadOnlyMemory<byte>>();
+
+        internal int SpanCalls { get; private set; }
+
+        public string? Deserialize(string topic, ReadOnlySpan<byte> data)
+        {
+            SpanCalls++;
+            return Encoding.UTF8.GetString(data.ToArray());
+        }
+
+        public string? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data)
+        {
+            Given.Add(data);
+            return Encoding.UTF8.GetString(data.ToArray());
         }
     }
 

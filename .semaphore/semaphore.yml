@@ -38,11 +38,12 @@ name: build-test-release
 #   2. "Verify Rust and language bindings (macOS arm64)" -- native Rust unit +
 #      integration + perf on s1-macos-15-arm64-8, and verify-c (ctest),
 #      verify-python (pytest test/unit) and verify-dotnet (dotnet test, net8.0 +
-#      net10.0), each followed by the gRPC multilanguage arm with the gRPC
-#      server running as a native host process (MULTILANG_BACKEND_MODE=native),
-#      which tests the macOS build of each binding; a second .NET job runs the
-#      Native AOT check and the .NET arms against a Native AOT build of the
-#      server. dependencies-macos.sh brings
+#      net10.0, and the package check), the C and Python jobs followed by the
+#      gRPC multilanguage arm with the gRPC server running as a native host
+#      process (MULTILANG_BACKEND_MODE=native), which tests the macOS build of
+#      each binding; the .NET arm runs in a job of its own, and a third .NET job
+#      runs the Native AOT check and the .NET arms against a Native AOT build of
+#      the server. dependencies-macos.sh brings
 #      up Docker via Colima for the broker. The native .NET server is the
 #      net10.0 build; Grpc.Tools has no macOS arm64 protoc and runs its
 #      macosx_x64 one under Rosetta 2, which is unaffected by the linux_arm64
@@ -391,24 +392,25 @@ blocks:
 
   - name: "Verify Rust and language bindings (macOS arm64)"
     # verify-rust runs the native Rust unit, integration and perf tests
-    # (`make -C rust verify-macos`). verify-c runs the C ctest suite;
-    # verify-python runs pytest test/unit; verify-dotnet runs the .NET unit
-    # tests. Each binding job then runs its binding's gRPC multilanguage arm
-    # (__grpc_c / __grpc_python / __grpc_dotnet) with the gRPC server as a
-    # native host process rather than a container. Containers on macOS run
-    # Linux, so a container would only test the Linux build of the binding.
-    # The broker runs in Docker via Colima. The verify-dotnet job sets
-    # MACOS_ENSURE_ROSETTA, because building the native .NET server runs
-    # Grpc.Tools' macosx_x64 protoc under Rosetta 2. It also packs the NuGet
-    # package with this machine's native library and installs it into a fresh
-    # project (make package-check-dotnet), which needs no Docker.
-    # "verify-dotnet (macOS arm64) — Native AOT" runs the Native AOT check
-    # (make -C dotnet test-aot-dotnet), then the .NET arms against a Native AOT
-    # build of the server and binding (make -C dotnet
-    # test-integration-native-aot), with MACOS_ENSURE_ROSETTA for the server's
-    # build. It is a job of its own because verify-dotnet has no room for a
-    # second pass of the arms: on 2026-11-19 it took 25 of its 30 minutes, 14 of
-    # them for the 724 arms.
+    # (`make -C rust verify-macos`). verify-c runs the C ctest suite and
+    # verify-python pytest test/unit, each followed by its binding's gRPC
+    # multilanguage arm (__grpc_c / __grpc_python); the jobs are named after the
+    # arm. "verify-dotnet (macOS arm64)" runs the .NET unit tests, then packs
+    # the NuGet package with this machine's native library and installs it
+    # into a fresh project (make package-check-dotnet); neither needs Docker, so
+    # the job skips Colima. "verify-dotnet (macOS arm64) — plaintext gRPC arm"
+    # runs the .NET arm (__grpc_dotnet, make -C dotnet test-integration-native).
+    # The arms run the gRPC server as a native host process rather than a
+    # container. Containers on macOS run Linux, so a container would only test
+    # the Linux build of the binding. The broker runs in Docker via Colima. The
+    # .NET gRPC-arm jobs set MACOS_ENSURE_ROSETTA, because building the native
+    # .NET server runs Grpc.Tools' macosx_x64 protoc under Rosetta 2.
+    # "verify-dotnet (macOS arm64) — plaintext Native AOT gRPC arm" runs the
+    # Native AOT check (make -C dotnet test-aot-dotnet), then the .NET arms
+    # against a Native AOT build of the server and binding (make -C dotnet
+    # test-integration-native-aot). It is a job of its own because the .NET
+    # job had no room for a second pass of the arms: on 2026-11-19 it took 25
+    # of its 30 minutes, 14 of them for the 724 arms.
     #
     # The binding jobs use PLAINTEXT only. The SSL and SASL_SSL variants of
     # their arm run on Linux. The TLS and SASL code paths are in the Rust
@@ -418,9 +420,9 @@ blocks:
     # The block's 45 minutes is the verify-rust job's limit; each binding job
     # sets 30 minutes of its own (a job's limit may not exceed its block's),
     # and the Native AOT job 45, as the Linux gRPC-arm jobs do: it builds the
-    # library, AotSmoke and the AOT server before its arms. verify-dotnet took
-    # 10 minutes on 2026-10-01, before the package check, which takes about a
-    # minute.
+    # library, AotSmoke and the AOT server before its arms. The .NET unit tests
+    # and the .NET arm took 10 minutes together on 2026-10-01, before the
+    # package check, which takes about a minute.
     dependencies: []
     execution_time_limit:
       minutes: 45
@@ -459,7 +461,7 @@ blocks:
             # Kafka tags pinned in xtask and fails without them.
             - (cd rust && cargo xtask fetch-java-refs)
             - make -C rust verify-macos
-        - name: "verify-c (macOS arm64)"
+        - name: "verify-c (macOS arm64) — plaintext gRPC arm"
           execution_time_limit:
             minutes: 30
           env_vars:
@@ -468,7 +470,7 @@ blocks:
               value: "true"
           commands:
             - make -C c verify-macos
-        - name: "verify-python (macOS arm64)"
+        - name: "verify-python (macOS arm64) — plaintext gRPC arm"
           execution_time_limit:
             minutes: 30
           commands:
@@ -477,12 +479,8 @@ blocks:
           execution_time_limit:
             minutes: 30
           env_vars:
-            # Installs Rosetta 2 if it is missing, for Grpc.Tools' macosx_x64 protoc.
-            - name: MACOS_ENSURE_ROSETTA
-              value: "true"
-            # The .NET unit and soak tests need no Docker, so the prologue skips Colima and the job
-            # starts it after them: its 6-CPU, 12 GB VM then does not share the agent with the unit
-            # tests. The commands below are dependencies-macos.sh's Colima bring-up.
+            # The .NET unit and soak tests and the package check need no Docker, so the prologue skips
+            # Colima.
             - name: MACOS_SKIP_COLIMA
               value: "true"
             # Temporary, until the cause of the macOS teardown stalls is found: a .NET unit test whose TestTimeout
@@ -492,27 +490,26 @@ blocks:
               value: /tmp/confluent-kafka-dotnet-hangs
           commands:
             - ./.semaphore/install-dotnet.sh
-            - export DOTNET_ROOT="$HOME/.dotnet"
-            - export PATH="$HOME/.dotnet:$PATH"
-            - export DOTNET_MULTILEVEL_LOOKUP=0
-            - which dotnet
-            - dotnet --list-runtimes
-            - make -C dotnet test-dotnet-macos
-            # The release blocks test the release package; this checks, on every build, that the
-            # package can be packed and installed. Set on make's command line for the reason given
-            # below.
-            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make -C dotnet package-check-dotnet
-            - command -v colima >/dev/null 2>&1 || brew install colima
-            - colima status &>/dev/null || colima start --cpu 6 --memory 12 --disk 50
-            - 'docker_wait=90; until docker info >/dev/null 2>&1; do if [ "$docker_wait" -le 0 ]; then echo "ERROR: Docker failed to start within 90 seconds"; colima status || true; exit 1; fi; sleep 3; docker_wait=$((docker_wait - 3)); done'
-            - export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
-            - export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
-            - export TESTCONTAINERS_RYUK_DISABLED=false
             # The agent's mise shell hook can reset DOTNET_ROOT and PATH to mise's .NET 9 between
-            # commands (it did after the Colima bring-up), so the .NET 10 environment is set again
-            # on the make's own command line.
+            # commands, so the .NET 10 environment is set on each make's own command line.
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && dotnet --list-runtimes
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make -C dotnet test-dotnet-macos
+            # The release blocks test the release package; this checks, on every build, that the
+            # package can be packed and installed.
+            - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && make -C dotnet package-check-dotnet
+        - name: "verify-dotnet (macOS arm64) — plaintext gRPC arm"
+          execution_time_limit:
+            minutes: 30
+          env_vars:
+            # Installs Rosetta 2 if it is missing, for Grpc.Tools' macosx_x64 protoc.
+            - name: MACOS_ENSURE_ROSETTA
+              value: "true"
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            # The .NET 10 environment is set on the make's own command line, for the reason given in
+            # "verify-dotnet (macOS arm64)". The .NET arm over the Colima broker the prologue starts.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make -C dotnet test-integration-native
-        - name: "verify-dotnet (macOS arm64) — Native AOT"
+        - name: "verify-dotnet (macOS arm64) — plaintext Native AOT gRPC arm"
           execution_time_limit:
             minutes: 45
           env_vars:
@@ -523,7 +520,7 @@ blocks:
           commands:
             - ./.semaphore/install-dotnet.sh
             # The .NET 10 environment is set on each make's own command line, for the reason given in
-            # verify-dotnet. The Native AOT check: publishes a net8.0 and a net10.0 Native AOT
+            # "verify-dotnet (macOS arm64)". The Native AOT check: publishes a net8.0 and a net10.0 Native AOT
             # executable with the whole library rooted, so a trim or AOT warning fails the job, then
             # runs them.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make -C dotnet test-aot-dotnet

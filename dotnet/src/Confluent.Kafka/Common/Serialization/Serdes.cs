@@ -153,14 +153,14 @@ public static class Serdes
     }
 
     /// <summary>
-    /// Java's <c>Serdes.ByteBufferSerde</c>: a <see cref="ByteBufferSerializer"/> and a
-    /// <see cref="ByteBufferDeserializer"/>.
+    /// Java's <c>Serdes.ByteBufferSerde</c>, named after the .NET type that stands for Java's <c>ByteBuffer</c>: a
+    /// <see cref="ReadOnlyMemorySerializer"/> and a <see cref="ReadOnlyMemoryDeserializer"/>.
     /// </summary>
-    public sealed class ByteBufferSerde : WrapperSerde<ReadOnlyMemory<byte>?>
+    public sealed class ReadOnlyMemorySerde : WrapperSerde<ReadOnlyMemory<byte>?>
     {
         /// <summary>Creates the serde over a new serializer and deserializer.</summary>
-        public ByteBufferSerde()
-            : base(new ByteBufferSerializer(), new ByteBufferDeserializer())
+        public ReadOnlyMemorySerde()
+            : base(new ReadOnlyMemorySerializer(), new ReadOnlyMemoryDeserializer())
         {
         }
     }
@@ -250,7 +250,7 @@ public static class Serdes
 
         if (type == typeof(ReadOnlyMemory<byte>?))
         {
-            return (ISerde<T>)(object)ByteBuffer();
+            return (ISerde<T>)(object)ReadOnlyMemory();
         }
 
         if (type == typeof(Guid?))
@@ -321,11 +321,12 @@ public static class Serdes
     public static ISerde<string> String() => new StringSerde();
 
     /// <summary>
-    /// A new serde of byte memory for Java's nullable <c>ByteBuffer</c>: serializing sends the memory as given, and
-    /// deserializing copies the bytes into a new array.
+    /// A new serde of byte memory for Java's nullable <c>ByteBuffer</c>, Java's <c>Serdes.ByteBuffer()</c>: serializing
+    /// sends the memory as given, and deserializing gives a consumer's bytes without a copy through
+    /// <see cref="IDeserializerWithReadOnlyMemory{T}"/>, and a copy of them through the span form.
     /// </summary>
-    /// <returns>A new <see cref="ByteBufferSerde"/>.</returns>
-    public static ISerde<ReadOnlyMemory<byte>?> ByteBuffer() => new ByteBufferSerde();
+    /// <returns>A new <see cref="ReadOnlyMemorySerde"/>.</returns>
+    public static ISerde<ReadOnlyMemory<byte>?> ReadOnlyMemory() => new ReadOnlyMemorySerde();
 
     /// <summary>
     /// A new serde of UUIDs as the bytes of their hyphenated string form, not their 16 raw bytes, for Java's nullable

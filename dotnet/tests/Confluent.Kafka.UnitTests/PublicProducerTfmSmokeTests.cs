@@ -37,7 +37,7 @@ public sealed class PublicProducerTfmSmokeTests
     [Fact]
     public async Task MockProducer_FlushPartitionsForClose_RoundTrips()
     {
-        IAsyncProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        IAsyncProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         try
         {
             await TestTimeout.Run(() => producer.Flush(), s_deadline);
@@ -58,7 +58,7 @@ public sealed class PublicProducerTfmSmokeTests
     [Fact]
     public void MockProducer_FlushClose_ViaSyncDispose_RoundTrips()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
         TestTimeout.Run(producer.Dispose, s_deadline);
     }
@@ -66,10 +66,10 @@ public sealed class PublicProducerTfmSmokeTests
     [Fact]
     public async Task RealProducer_CreateDisposeAsync_RoundTrips()
     {
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
-            Serdes.ByteArray().Serializer(),
-            Serdes.ByteArray().Serializer());
+            new AsyncByteArraySerializer(),
+            new AsyncByteArraySerializer());
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
     }

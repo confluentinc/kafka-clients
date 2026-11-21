@@ -300,10 +300,10 @@ public sealed class ChaosProducerTests
     {
         // The flavour's own real client, built the way its servicer builds it.
         ConfigException expected = flavour == ChaosFlavour.Async
-            ? Assert.Throws<ConfigException>(
-                () => new AsyncKafkaProducer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
+            ? await Assert.ThrowsAsync<ConfigException>(
+                async () => await AsyncKafkaProducer<byte[], byte[]>.Create(new Dictionary<string, object?>(), new AsyncByteArraySerializer(), new AsyncByteArraySerializer()))
             : Assert.Throws<ConfigException>(
-                () => new KafkaProducer<byte[], byte[]>(new Dictionary<string, object?>(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()));
+                () => KafkaProducer<byte[], byte[]>.Create(new Dictionary<string, object?>(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()));
         using ChaosHarness harness = ChaosHarness.CreateReal(flavour);
         Proto.RunProducerRequest request = ChaosHarness.ProducerRequest("p-real");
         request.Config.Clear();

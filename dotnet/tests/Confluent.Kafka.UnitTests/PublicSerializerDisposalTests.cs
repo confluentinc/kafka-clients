@@ -75,7 +75,7 @@ public sealed class PublicSerializerDisposalTests
     {
         DisposableSerializer key = new DisposableSerializer("key");
         DisposableSerializer value = new DisposableSerializer("value");
-        object producer = Producer(flavor, Unreachable(), key, value);
+        object producer = await Producer(flavor, Unreachable(), key, value);
         DestroyLog destroys = WatchDestroy(producer);
         key.OnDispose = () => key.DestroysSeen = destroys.Destroys().Count;
         try
@@ -113,7 +113,7 @@ public sealed class PublicSerializerDisposalTests
     {
         DisposableSerializer key = new DisposableSerializer("key");
         DisposableSerializer value = new DisposableSerializer("value");
-        object producer = Producer(flavor, Unreachable(), key, value);
+        object producer = await Producer(flavor, Unreachable(), key, value);
         try
         {
             _ = await CloseBy(producer, CloseHow);
@@ -132,7 +132,7 @@ public sealed class PublicSerializerDisposalTests
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
-    public void TestKafkaProducer_test_a_failed_construction_closes_the_serializers_built_AnUnresolvableBootstrap_DisposesBoth(
+    public async Task TestKafkaProducer_test_a_failed_construction_closes_the_serializers_built_AnUnresolvableBootstrap_DisposesBoth(
         string flavor)
     {
         DisposableSerializer key = new DisposableSerializer("key");
@@ -142,7 +142,7 @@ public sealed class PublicSerializerDisposalTests
             ["bootstrap.servers"] = UnresolvableBootstrap,
         };
 
-        KafkaException failure = Assert.ThrowsAny<KafkaException>(() => Producer(flavor, configs, key, value));
+        KafkaException failure = await Assert.ThrowsAnyAsync<KafkaException>(async () => await Producer(flavor, configs, key, value));
 
         Assert.Equal("Failed to construct kafka producer", failure.Message);
         Assert.Equal(1, key.Disposals);
@@ -161,11 +161,11 @@ public sealed class PublicSerializerDisposalTests
         Dictionary<string, object?> configs = Unreachable();
         configs["batch.size"] = "hello";
 
-        ConfigException failure = Assert.Throws<ConfigException>(() => Producer(flavor, configs, key, value));
+        ConfigException failure = await Assert.ThrowsAsync<ConfigException>(async () => await Producer(flavor, configs, key, value));
 
         Assert.Equal("Invalid value hello for configuration batch.size: Not a number of type INT", failure.Message);
         Assert.Empty(log);
-        object producer = Producer(flavor, Unreachable(), key, value);
+        object producer = await Producer(flavor, Unreachable(), key, value);
         _ = await CloseBy(producer, DisposeHow);
         Assert.Equal(new[] { "key", "value" }, log.ToArray());
     }
@@ -175,7 +175,7 @@ public sealed class PublicSerializerDisposalTests
     {
         DisposableSerializer key = new DisposableSerializer("key");
         DisposableSerializer value = new DisposableSerializer("value");
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(Unreachable(), key.AsAsync(), value.AsAsync());
         try
         {
             await TestTimeout.Run(() => producer.Close(), Deadline);
@@ -233,7 +233,7 @@ public sealed class PublicSerializerDisposalTests
     {
         DisposableSerializer key = new DisposableSerializer("key");
         DisposableSerializer value = new DisposableSerializer("value");
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(Unreachable(), key.AsAsync(), value.AsAsync());
         DestroyLog destroys = WatchDestroy(producer);
         using ManualResetEventSlim release = new ManualResetEventSlim();
         using ManualResetEventSlim entered = new ManualResetEventSlim();
@@ -287,7 +287,7 @@ public sealed class PublicSerializerDisposalTests
     {
         DisposableSerializer key = new DisposableSerializer("key");
         DisposableSerializer value = new DisposableSerializer("value");
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(Unreachable(), key.AsAsync(), value.AsAsync());
         try
         {
             using CancellationTokenSource token = new CancellationTokenSource();
@@ -314,14 +314,14 @@ public sealed class PublicSerializerDisposalTests
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
-    public void AConfigurationValueTheBindingRefuses_DisposesNothing(string flavor)
+    public async Task AConfigurationValueTheBindingRefuses_DisposesNothing(string flavor)
     {
         DisposableSerializer key = new DisposableSerializer("key");
         DisposableSerializer value = new DisposableSerializer("value");
         Dictionary<string, object?> configs = Unreachable();
         configs["batch.size"] = true;
 
-        ConfigException failure = Assert.Throws<ConfigException>(() => Producer(flavor, configs, key, value));
+        ConfigException failure = await Assert.ThrowsAsync<ConfigException>(async () => await Producer(flavor, configs, key, value));
 
         Assert.Equal(
             "Invalid value true for configuration batch.size: " +
@@ -334,36 +334,36 @@ public sealed class PublicSerializerDisposalTests
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
-    public void ANullConfigs_IsRefusedBeforeANullSerializer_AndANullKeySerializerBeforeANullValueSerializer(
+    public async Task ANullConfigs_IsRefusedBeforeANullSerializer_AndANullKeySerializerBeforeANullValueSerializer(
         string flavor)
     {
         DisposableSerializer value = new DisposableSerializer("value");
 
-        Assert.Equal("configs", Assert.Throws<ArgumentNullException>(() => Producer(flavor, null!, null!, null!)).ParamName);
+        Assert.Equal("configs", (await Assert.ThrowsAsync<ArgumentNullException>(async () => await Producer(flavor, null!, null!, null!))).ParamName);
         Assert.Equal(
             NullSerializer("key.serializer"),
-            Assert.Throws<ConfigException>(() => Producer(flavor, Unreachable(), null!, null!)).Message);
+            (await Assert.ThrowsAsync<ConfigException>(async () => await Producer(flavor, Unreachable(), null!, null!))).Message);
         Assert.Equal(
             NullSerializer("key.serializer"),
-            Assert.Throws<ConfigException>(() => Producer(flavor, Unreachable(), null!, value)).Message);
+            (await Assert.ThrowsAsync<ConfigException>(async () => await Producer(flavor, Unreachable(), null!, value))).Message);
         Assert.Equal(0, value.Disposals);
     }
 
     [Theory]
     [InlineData(SyncFlavor)]
     [InlineData(AsyncFlavor)]
-    public void ANullArgument_DisposesNothing(string flavor)
+    public async Task ANullArgument_DisposesNothing(string flavor)
     {
         DisposableSerializer key = new DisposableSerializer("key");
         DisposableSerializer value = new DisposableSerializer("value");
 
-        Assert.Equal("configs", Assert.Throws<ArgumentNullException>(() => Producer(flavor, null!, key, value)).ParamName);
+        Assert.Equal("configs", (await Assert.ThrowsAsync<ArgumentNullException>(async () => await Producer(flavor, null!, key, value))).ParamName);
         Assert.Equal(
             NullSerializer("key.serializer"),
-            Assert.Throws<ConfigException>(() => Producer(flavor, Unreachable(), null!, value)).Message);
+            (await Assert.ThrowsAsync<ConfigException>(async () => await Producer(flavor, Unreachable(), null!, value))).Message);
         Assert.Equal(
             NullSerializer("value.serializer"),
-            Assert.Throws<ConfigException>(() => Producer(flavor, Unreachable(), key, null!)).Message);
+            (await Assert.ThrowsAsync<ConfigException>(async () => await Producer(flavor, Unreachable(), key, null!))).Message);
 
         Assert.Equal(0, key.Disposals);
         Assert.Equal(0, value.Disposals);
@@ -375,7 +375,7 @@ public sealed class PublicSerializerDisposalTests
     public async Task OneInstanceGivenAsKeyAndValue_IsDisposedTwice(string flavor)
     {
         DisposableSerializer both = new DisposableSerializer("both");
-        object producer = Producer(flavor, Unreachable(), both, both);
+        object producer = await Producer(flavor, Unreachable(), both, both);
         try
         {
             _ = await CloseBy(producer, CloseHow);
@@ -396,7 +396,7 @@ public sealed class PublicSerializerDisposalTests
     public async Task TheKeyIsDisposedBeforeTheValue(string flavor, string how)
     {
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
-        object producer = Producer(
+        object producer = await Producer(
             flavor, Unreachable(), new DisposableSerializer("key", log), new DisposableSerializer("value", log));
         try
         {
@@ -418,7 +418,7 @@ public sealed class PublicSerializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableSerializer key = new DisposableSerializer("key", log);
         DisposableSerializer value = new DisposableSerializer("value", log);
-        object producer = Producer(flavor, Unreachable(), key, value);
+        object producer = await Producer(flavor, Unreachable(), key, value);
         DestroyLog destroys = WatchDestroy(producer);
         key.OnDispose = () => key.DestroysSeen = destroys.Destroys().Count;
         int disposalsWhenCloseReturned = -1;
@@ -466,7 +466,7 @@ public sealed class PublicSerializerDisposalTests
     {
         AsyncOnlySerializer key = new AsyncOnlySerializer();
         AsyncOnlySerializer value = new AsyncOnlySerializer();
-        object producer = Producer(flavor, Unreachable(), key, value);
+        object producer = await Producer(flavor, Unreachable(), key, value);
         try
         {
             _ = await CloseBy(producer, how);
@@ -494,7 +494,7 @@ public sealed class PublicSerializerDisposalTests
         DisposableSerializer value = new DisposableSerializer("value");
         object producer = flavor == SyncFlavor
             ? new MockProducer<byte[], byte[]>(key, value)
-            : new AsyncMockProducer<byte[], byte[]>(key, value);
+            : new AsyncMockProducer<byte[], byte[]>(key.AsAsync(), value.AsAsync());
         try
         {
             _ = await CloseBy(producer, how);
@@ -525,7 +525,7 @@ public sealed class PublicSerializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableSerializer key = new DisposableSerializer("key", log);
         ApiFailingSerializer value = new ApiFailingSerializer("value", log);
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(Unreachable(), key.AsAsync(), value.AsAsync());
         using ManualResetEventSlim afterDestroy = SignalAfterDestroy(producer);
         HeldAsyncCallback callback = new HeldAsyncCallback();
         try
@@ -582,7 +582,7 @@ public sealed class PublicSerializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableSerializer key = new DisposableSerializer("key", log);
         ApiFailingSerializer value = new ApiFailingSerializer("value", log);
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(Unreachable(), key.AsAsync(), value.AsAsync());
         using ManualResetEventSlim afterDestroy = SignalAfterDestroy(producer);
         HeldAsyncCallback held = new HeldAsyncCallback();
         ClosingAsyncCallback closing = new ClosingAsyncCallback(producer, how, beforeItsFirstAwait);
@@ -659,7 +659,7 @@ public sealed class PublicSerializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableSerializer key = new DisposableSerializer("key", log);
         ApiFailingSerializer value = new ApiFailingSerializer("value", log);
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(Unreachable(), key, value);
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(Unreachable(), key.AsAsync(), value.AsAsync());
         HeldAsyncCallback held = new HeldAsyncCallback();
         ProducerCallingListener listener = new ProducerCallingListener(producer, how, key, value);
         try
@@ -703,14 +703,14 @@ public sealed class PublicSerializerDisposalTests
         Assert.Equal(1, value.Disposals);
     }
 
-    private static object Producer(
+    private static async Task<object> Producer(
         string flavor,
         IReadOnlyDictionary<string, object?> configs,
         ISerializer<byte[]> key,
         ISerializer<byte[]> value) =>
         flavor == SyncFlavor
-            ? new KafkaProducer<byte[], byte[]>(configs, key, value)
-            : new AsyncKafkaProducer<byte[], byte[]>(configs, key, value);
+            ? KafkaProducer<byte[], byte[]>.Create(configs, key, value)
+            : await AsyncKafkaProducer<byte[], byte[]>.Create(configs, key.AsAsync(), value.AsAsync());
 
     private static string NullSerializer(string key) =>
         "Invalid value null for configuration " + key + ": must be non-null.";
@@ -813,7 +813,7 @@ public sealed class PublicSerializerDisposalTests
         CloseCapturingTheTrace(string flavor, string id, DisposableSerializer key, DisposableSerializer value)
     {
         using TraceCapture trace = new TraceCapture(id);
-        object producer = Producer(flavor, Unreachable(), key, value);
+        object producer = await Producer(flavor, Unreachable(), key, value);
         try
         {
             _ = await CloseBy(producer, CloseHow);
