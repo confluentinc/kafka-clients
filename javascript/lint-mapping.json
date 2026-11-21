@@ -83,7 +83,16 @@
     "KafkaPrincipal.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "DelegationToken.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "TokenInformation.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
-    "src/common/quota/client_quota_entity_map.ts:ClientQuotaEntityMap": "the map keyed by ClientQuotaEntity for Java's Map<ClientQuotaEntity, V>: JavaScript has no value equality for map keys (root CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; design/current/javascript-admin/PLAN.md, D2)"
+    "src/common/quota/client_quota_entity_map.ts:ClientQuotaEntityMap": "the map keyed by ClientQuotaEntity for Java's Map<ClientQuotaEntity, V>: JavaScript has no value equality for map keys (root CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; design/current/javascript-admin/PLAN.md, D2)",
+    "AbortTransactionSpec.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
+    "ProducerState.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
+    "TransactionDescription.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
+    "TransactionListing.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
+    "TransactionState.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "FeatureMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
+    "FeatureUpdate.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "FinalizedVersionRange.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "SupportedVersionRange.toJSON": "toJSON() on value classes, JavaScript's JSON protocol"
   },
   "javaTargets": {
     "Header.constructor": "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader",

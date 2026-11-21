@@ -116,6 +116,26 @@ import type { RenewDelegationTokenResult } from './renew_delegation_token_result
 import type { UserScramCredentialAlteration } from './user_scram_credential_alteration';
 import type { ClientQuotaAlteration } from '../common/quota/client_quota_alteration';
 import type { ClientQuotaFilter } from '../common/quota/client_quota_filter';
+import type { AbortTransactionOptions } from './abort_transaction_options';
+import type { AbortTransactionResult } from './abort_transaction_result';
+import type { AbortTransactionSpec } from './abort_transaction_spec';
+import type { DescribeProducersOptions } from './describe_producers_options';
+import type { DescribeProducersResult } from './describe_producers_result';
+import type { DescribeTransactionsOptions } from './describe_transactions_options';
+import type { DescribeTransactionsResult } from './describe_transactions_result';
+import type { FenceProducersOptions } from './fence_producers_options';
+import type { FenceProducersResult } from './fence_producers_result';
+import type { ListTransactionsOptions } from './list_transactions_options';
+import type { ListTransactionsResult } from './list_transactions_result';
+import type { TerminateTransactionOptions } from './terminate_transaction_options';
+import type { TerminateTransactionResult } from './terminate_transaction_result';
+import type { DescribeFeaturesOptions } from './describe_features_options';
+import type { DescribeFeaturesResult } from './describe_features_result';
+import type { FeatureUpdate } from './feature_update';
+import type { UnregisterControllerOptions } from './unregister_controller_options';
+import type { UnregisterControllerResult } from './unregister_controller_result';
+import type { UpdateFeaturesOptions } from './update_features_options';
+import type { UpdateFeaturesResult } from './update_features_result';
 
 const CREATE_FORMS = new JavaForms('create', [['configs']], {
   bareIsPlainObject: true,
@@ -397,7 +417,7 @@ export interface Admin {
    * @param newPartitions - The topics which should have new partitions created, and corresponding parameters for the created partitions.
    * @returns The CreatePartitionsResult.
    */
-  createPartitions(newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>): CreatePartitionsResult;
+  createPartitions(newPartitions: ReadonlyMap<string, NewPartitions>): CreatePartitionsResult;
   /**
    * The same as `createPartitions(newPartitions)`, the newPartitions given by name.
    *
@@ -1590,6 +1610,336 @@ export interface Admin {
     /** The options to use. */
     options: AlterUserScramCredentialsOptions;
   }): AlterUserScramCredentialsResult;
+
+  /**
+   * Describe producer state on a set of topic partitions. See `describeProducers({ partitions, options })`
+   * for more details.
+   *
+   * @param partitions - The set of partitions to query
+   * @returns The DescribeProducersResult.
+   */
+  describeProducers(partitions: Iterable<TopicPartition>): DescribeProducersResult;
+  /**
+   * The same as `describeProducers(partitions)`, the partitions given by name.
+   *
+   * @param args - the partitions
+   * @returns The DescribeProducersResult.
+   */
+  describeProducers(args: {
+    /** The set of partitions to query */
+    partitions: Iterable<TopicPartition>;
+    options?: never;
+  }): DescribeProducersResult;
+  /**
+   * Describe active producer state on a set of topic partitions. Unless a specific broker is requested
+   * through `DescribeProducersOptions.brokerId(brokerId)`, this will query the partition leader to find the
+   * producer state.
+   *
+   * @param args - the partitions, and the options to use
+   * @returns The DescribeProducersResult.
+   */
+  describeProducers(args: {
+    /** The set of partitions to query */
+    partitions: Iterable<TopicPartition>;
+    /** The options to use. */
+    options: DescribeProducersOptions;
+  }): DescribeProducersResult;
+
+  /**
+   * Describe the state of a set of transactional IDs. See `describeTransactions({ transactionalIds, options
+   * })` for more details.
+   *
+   * @param transactionalIds - The set of transactional IDs to query
+   * @returns The DescribeTransactionsResult.
+   */
+  describeTransactions(transactionalIds: Iterable<string>): DescribeTransactionsResult;
+  /**
+   * The same as `describeTransactions(transactionalIds)`, the transactionalIds given by name.
+   *
+   * @param args - the transactionalIds
+   * @returns The DescribeTransactionsResult.
+   */
+  describeTransactions(args: {
+    /** The set of transactional IDs to query */
+    transactionalIds: Iterable<string>;
+    options?: never;
+  }): DescribeTransactionsResult;
+  /**
+   * Describe the state of a set of transactional IDs from the respective transaction coordinators, which are
+   * dynamically discovered.
+   *
+   * @param args - the transactionalIds, and the options to use
+   * @returns The DescribeTransactionsResult.
+   */
+  describeTransactions(args: {
+    /** The set of transactional IDs to query */
+    transactionalIds: Iterable<string>;
+    /** The options to use. */
+    options: DescribeTransactionsOptions;
+  }): DescribeTransactionsResult;
+
+  /**
+   * Forcefully abort a transaction which is open on a topic partition. See `abortTransaction({ spec, options
+   * })` for more details.
+   *
+   * @param spec - The transaction specification including topic partition and producer details
+   * @returns The AbortTransactionResult.
+   */
+  abortTransaction(spec: AbortTransactionSpec): AbortTransactionResult;
+  /**
+   * The same as `abortTransaction(spec)`, the spec given by name.
+   *
+   * @param args - the spec
+   * @returns The AbortTransactionResult.
+   */
+  abortTransaction(args: {
+    /** The transaction specification including topic partition and producer details */
+    spec: AbortTransactionSpec;
+    options?: never;
+  }): AbortTransactionResult;
+  /**
+   * Forcefully abort a transaction which is open on a topic partition. This will send a `WriteTxnMarkers`
+   * request to the partition leader in order to abort the transaction. This requires administrative
+   * privileges.
+   *
+   * @param args - the spec, and the options to use
+   * @returns The AbortTransactionResult.
+   */
+  abortTransaction(args: {
+    /** The transaction specification including topic partition and producer details */
+    spec: AbortTransactionSpec;
+    /** The options to use. */
+    options: AbortTransactionOptions;
+  }): AbortTransactionResult;
+
+  /**
+   * List active transactions in the cluster. See `listTransactions({ options })` for more details.
+   *
+   * @returns The ListTransactionsResult.
+   */
+  listTransactions(): ListTransactionsResult;
+  /**
+   * List active transactions in the cluster. This will query all potential transaction coordinators in the
+   * cluster and collect the state of all transactions. Users should typically attempt to reduce the size of
+   * the result set using `ListTransactionsOptions.filterProducerIds(producerIdFilters)` or
+   * `ListTransactionsOptions.filterStates(states)` or `ListTransactionsOptions.filterOnDuration(durationMs)`.
+   *
+   * @param args - the options to use
+   * @returns The ListTransactionsResult.
+   */
+  listTransactions(args: {
+    /** The options to use. */
+    options: ListTransactionsOptions;
+  }): ListTransactionsResult;
+  /**
+   * The same as `listTransactions({ options })`: the options on their own.
+   *
+   * @param options - the options to use
+   * @returns The ListTransactionsResult.
+   */
+  listTransactions(options: ListTransactionsOptions): ListTransactionsResult;
+
+  /**
+   * Fence out all active producers that use any of the provided transactional IDs, with the default options.
+   *
+   * This is a convenience method for `fenceProducers({ transactionalIds, options })` with default options.
+   * See the overload for more details.
+   *
+   * @param transactionalIds - The IDs of the producers to fence.
+   * @returns The FenceProducersResult.
+   */
+  fenceProducers(transactionalIds: Iterable<string>): FenceProducersResult;
+  /**
+   * The same as `fenceProducers(transactionalIds)`, the transactionalIds given by name.
+   *
+   * @param args - the transactionalIds
+   * @returns The FenceProducersResult.
+   */
+  fenceProducers(args: {
+    /** The IDs of the producers to fence. */
+    transactionalIds: Iterable<string>;
+    options?: never;
+  }): FenceProducersResult;
+  /**
+   * Fence out all active producers that use any of the provided transactional IDs.
+   *
+   * @param args - the transactionalIds, and the options to use
+   * @returns The FenceProducersResult.
+   */
+  fenceProducers(args: {
+    /** The IDs of the producers to fence. */
+    transactionalIds: Iterable<string>;
+    /** The options to use. */
+    options: FenceProducersOptions;
+  }): FenceProducersResult;
+
+  /**
+   * Force terminate a transaction for the given transactional ID with the default options.
+   *
+   * This is a convenience method for `forceTerminateTransaction({ transactionalId, options })` with default
+   * options.
+   *
+   * @param transactionalId - The ID of the transaction to terminate.
+   * @returns The TerminateTransactionResult.
+   */
+  forceTerminateTransaction(transactionalId: string): TerminateTransactionResult;
+  /**
+   * The same as `forceTerminateTransaction(transactionalId)`, the transactionalId given by name.
+   *
+   * @param args - the transactionalId
+   * @returns The TerminateTransactionResult.
+   */
+  forceTerminateTransaction(args: {
+    /** The ID of the transaction to terminate. */
+    transactionalId: string;
+    options?: never;
+  }): TerminateTransactionResult;
+  /**
+   * Force terminate a transaction for the given transactional ID. This operation aborts any ongoing
+   * transaction associated with the transactional ID. It's similar to fenceProducers but only targets a
+   * single transactional ID to handle long-running transactions when 2PC is enabled.
+   *
+   * @param args - the transactionalId, and the options to use
+   * @returns The TerminateTransactionResult.
+   */
+  forceTerminateTransaction(args: {
+    /** The ID of the transaction to terminate. */
+    transactionalId: string;
+    /** The options to use. */
+    options: TerminateTransactionOptions;
+  }): TerminateTransactionResult;
+
+  /**
+   * Describes finalized as well as supported features.
+   *
+   * This is a convenience method for `describeFeatures({ options })` with default options. See the overload
+   * for more details.
+   *
+   * @returns The DescribeFeaturesResult.
+   */
+  describeFeatures(): DescribeFeaturesResult;
+  /**
+   * Describes finalized as well as supported features. The request is issued to any random broker.
+   *
+   * The following errors can be anticipated when calling `get()` on the future from the returned
+   * `DescribeFeaturesResult`: `TimeoutError` (from `common/errors`), if the request timed out before the
+   * describe operation could finish.
+   *
+   * @param args - the options to use
+   * @returns The DescribeFeaturesResult.
+   */
+  describeFeatures(args: {
+    /** The options to use. */
+    options: DescribeFeaturesOptions;
+  }): DescribeFeaturesResult;
+  /**
+   * The same as `describeFeatures({ options })`: the options on their own.
+   *
+   * @param options - the options to use
+   * @returns The DescribeFeaturesResult.
+   */
+  describeFeatures(options: DescribeFeaturesOptions): DescribeFeaturesResult;
+
+  /**
+   * Applies specified updates to finalized features.
+   *
+   * This is a convenience method for `updateFeatures({ featureUpdates, options })` with default options. See
+   * the overload for more details.
+   *
+   * @param featureUpdates - the map of finalized feature name to `FeatureUpdate`
+   * @returns The UpdateFeaturesResult.
+   */
+  updateFeatures(featureUpdates: ReadonlyMap<string, FeatureUpdate>): UpdateFeaturesResult;
+  /**
+   * The same as `updateFeatures(featureUpdates)`, the featureUpdates given by name.
+   *
+   * @param args - the featureUpdates
+   * @returns The UpdateFeaturesResult.
+   */
+  updateFeatures(args: {
+    /** the map of finalized feature name to `FeatureUpdate` */
+    featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
+    options?: never;
+  }): UpdateFeaturesResult;
+  /**
+   * Applies specified updates to finalized features. This operation is not transactional so some updates may
+   * succeed while the rest may fail.
+   *
+   * The API takes in a map of finalized feature names to `FeatureUpdate` that needs to be applied. Each entry
+   * in the map specifies the finalized feature to be added or updated or deleted, along with the new max
+   * feature version level value. This request is issued only to the controller since the API is only served
+   * by the controller. The return value contains an error code for each supplied `FeatureUpdate`, and the
+   * code indicates if the update succeeded or failed in the controller.
+   *
+   * Downgrading a feature version level is not a common operation and should only be performed when
+   * necessary. It is permitted only if the `FeatureUpdate` specifies the `upgradeType` as either
+   * `FeatureUpdate.UpgradeType.SAFE_DOWNGRADE` (downgrades that do not lead to metadata loss) or
+   * `FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE` (downgrades that might result in metadata loss). Note that
+   * even with these settings, certain downgrades may still be rejected by the controller if they are
+   * considered unsafe or impossible. To delete a feature, set the `maxVersionLevel` to zero and specify the
+   * `upgradeType` as either of those. The `FeatureUpdate.UpgradeType.UPGRADE` type cannot be used when the
+   * `maxVersionLevel` is zero: attempting to do so will result in an `IllegalArgumentError`.
+   *
+   * The following errors can be anticipated when calling `get()` on the futures obtained from the returned
+   * `UpdateFeaturesResult`: `ClusterAuthorizationError`, if the authenticated user didn't have alter access
+   * to the cluster; `InvalidRequestError`, if the request details are invalid, e.g., a non-existing finalized
+   * feature is attempted to be deleted or downgraded; `TimeoutError`, if the request timed out before the
+   * updates could finish (it cannot be guaranteed whether the updates succeeded or not);
+   * `FeatureUpdateFailedError`, an unexpected error encountered when the update was applied on the controller
+   * (there is no guarantee on whether the update succeeded or failed; the best way to find out is to issue a
+   * `describeFeatures({ options })` request).
+   *
+   * This operation is supported by brokers with version 2.7.0 or higher.
+   *
+   * @param args - the featureUpdates, and the options to use
+   * @returns The UpdateFeaturesResult.
+   */
+  updateFeatures(args: {
+    /** the map of finalized feature name to `FeatureUpdate` */
+    featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
+    /** The options to use. */
+    options: UpdateFeaturesOptions;
+  }): UpdateFeaturesResult;
+
+  /**
+   * Unregister a controller.
+   *
+   * This is a convenience method for `unregisterController({ controllerId, options })`.
+   *
+   * @param controllerId - the controller id to unregister.
+   * @returns The UnregisterControllerResult.
+   */
+  unregisterController(controllerId: number): UnregisterControllerResult;
+  /**
+   * The same as `unregisterController(controllerId)`, the controllerId given by name.
+   *
+   * @param args - the controllerId
+   * @returns The UnregisterControllerResult.
+   */
+  unregisterController(args: {
+    /** the controller id to unregister. */
+    controllerId: number;
+    options?: never;
+  }): UnregisterControllerResult;
+  /**
+   * Unregister a controller.
+   *
+   * The following errors can be anticipated when calling `get()` on the future from the returned
+   * `UnregisterControllerResult`: `TimeoutError`, if the request timed out before the unregister operation
+   * could finish; `UnsupportedVersionError`, if the software is too old to support the unregistration API;
+   * `ControllerIdNotRegisteredError`, if the requested controller id is not currently registered;
+   * `NotControllerError`, if the request does not arrive at the active controller; `InvalidRequestError`, if
+   * the request tries to unregister the current active controller id.
+   *
+   * @param args - the controllerId, and the options to use
+   * @returns The UnregisterControllerResult.
+   */
+  unregisterController(args: {
+    /** the controller id to unregister. */
+    controllerId: number;
+    /** The options to use. */
+    options: UnregisterControllerOptions;
+  }): UnregisterControllerResult;
 }
 
 /**
