@@ -13,9 +13,18 @@
 // limitations under the License.
 
 // The public classes of Java's org.apache.kafka.common.acl this client has:
-// AclOperation, which the admin client's descriptions hold.
+// the ACL bindings and filters the admin client's ACL calls take and return,
+// and AclOperation, which its descriptions hold. AclBindingMap and
+// AclBindingFilterMap are js-only: Java's maps keyed by them.
 
+export { AccessControlEntry } from './access_control_entry';
+export { AccessControlEntryFilter } from './access_control_entry_filter';
+export { AclBinding } from './acl_binding';
+export { AclBindingFilter } from './acl_binding_filter';
+export { AclBindingFilterMap } from './acl_binding_filter_map';
+export { AclBindingMap } from './acl_binding_map';
 export { AclOperation } from './acl_operation';
+export { AclPermissionType } from './acl_permission_type';
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import
 // under `esModuleInterop` is a compile error rather than `undefined` (import by

@@ -30,6 +30,10 @@ const CALLERS = [
   ['src/common/serialization/', "the string serializer's keys and values"],
   ['src/common/header/', 'header keys'],
   ['src/internal/config.ts', 'config keys and values, group IDs among them'],
+  [
+    'src/admin/user_scram_credential_upsertion.ts',
+    "a SCRAM password given as a string, Java's UserScramCredentialUpsertion(String, ScramCredentialInfo, String) password.getBytes(UTF_8)",
+  ],
 ];
 
 module.exports = {
@@ -38,7 +42,8 @@ module.exports = {
   needs: ['program'],
   CALLERS,
   hint:
-    'Leave strings to the string serializer, the headers code and the config code: only they call encodeLikeJava ' +
+    'Leave strings to the string serializer, the headers code, the config code and the SCRAM upsertion: only they call ' +
+    'encodeLikeJava ' +
     '(javascript/CLAUDE.md, JavaScript Binding Conventions, Types, Q24, and Class family, Q27).',
   check(ctx) {
     const { ts, checker, sourceFiles } = ctx.program();
@@ -65,7 +70,7 @@ module.exports = {
             findings.push({
               kind: 'encode-caller',
               subject: `${rel}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`,
-              message: `uses ${ENCODE_FUNCTION}: only the string serializer, the headers code and the config code turn strings into bytes`,
+              message: `uses ${ENCODE_FUNCTION}: only the string serializer, the headers code, the config code and a SCRAM upsertion password turn strings into bytes`,
             });
           }
         }

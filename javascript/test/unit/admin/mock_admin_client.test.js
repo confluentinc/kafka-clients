@@ -1806,3 +1806,197 @@ test('list_topics_and_describe_configs_count_down_the_same_counter', async () =>
   assert.deepEqual([...(await mock.listTopics().names().get())], ['t'], 'the counter reached zero');
   await mock.close();
 });
+
+// ---- the ACL calls ------------------------------------------------------------------------
+//
+// Java's MockAdminClient throws UnsupportedOperationException ("Not implemented
+// yet") from createAcls, describeAcls and deleteAcls; the core's mock fails
+// each future with it instead (the Rust core's mock_admin_client.rs), one per
+// distinct binding or filter, so the mock's Result keeps Java's keys.
+
+const acl = require('@confluentinc/kafka-javascript/common/acl');
+const res = require('@confluentinc/kafka-javascript/common/resource');
+
+test("the ACL calls Java's mock does not implement fail their futures with UnsupportedOperationError", async () => {
+  const mock = new MockAdminClient();
+  const binding = new acl.AclBinding({
+    pattern: new res.ResourcePattern({
+      resourceType: res.ResourceType.TOPIC,
+      name: 't',
+      patternType: res.PatternType.LITERAL,
+    }),
+    entry: new acl.AccessControlEntry({
+      principal: 'User:a',
+      host: '*',
+      operation: acl.AclOperation.READ,
+      permissionType: acl.AclPermissionType.ALLOW,
+    }),
+  });
+  const created = mock.createAcls([binding, binding]);
+  assert.equal(created.values().size(), 1);
+  const deleted = mock.deleteAcls([acl.AclBindingFilter.ANY, binding.toFilter()]);
+  assert.equal(deleted.values().size(), 2);
+  const futures = [
+    created.values().get(binding),
+    created.all(),
+    mock.describeAcls(acl.AclBindingFilter.ANY).values(),
+    deleted.values().get(acl.AclBindingFilter.ANY),
+    deleted.all(),
+  ];
+  for (const future of futures) {
+    assert.ok(future);
+    const cause = await failure(future);
+    assert.ok(cause instanceof UnsupportedOperationError, String(cause));
+    assert.equal(cause.message, 'Not implemented yet');
+  }
+  await mock.close();
+});
+
+// ---- the quota, SCRAM and delegation-token calls ---------------------------------------------
+//
+// Java's MockAdminClient throws UnsupportedOperationException from
+// describeClientQuotas and alterClientQuotas ("Not implement yet", Java's
+// text) and from describeUserScramCredentials and alterUserScramCredentials
+// ("Not implemented yet"); the core's mock fails each future with it instead,
+// as for the ACL calls. Java's mock implements the delegation-token calls,
+// which Java's MockAdminClientTest does not test: these translate the Rust
+// core's tests of its mock's (rust/src/admin/mock_admin_client.rs).
+
+const quota = require('@confluentinc/kafka-javascript/common/quota');
+const { KafkaPrincipal } = require('@confluentinc/kafka-javascript/common/security/auth');
+const { DelegationTokenNotFoundError, InvalidPrincipalTypeError } = require('@confluentinc/kafka-javascript/common/errors');
+
+test("the quota and SCRAM calls Java's mock does not implement fail their futures with UnsupportedOperationError", async () => {
+  const mock = new MockAdminClient();
+  const A = require('@confluentinc/kafka-javascript/admin');
+  const entity = new quota.ClientQuotaEntity(new Map([['user', 'a']]));
+  const quotas = mock.alterClientQuotas([
+    new quota.ClientQuotaAlteration({ entity, ops: [new quota.ClientQuotaAlteration.Op({ key: 'k', value: 1 })] }),
+  ]);
+  const quotaFutures = quotas.values();
+  assert.ok(quotaFutures);
+  assert.equal(quotaFutures.size(), 1);
+  const scram = mock.describeUserScramCredentials(['u']);
+  const altered = mock.alterUserScramCredentials([
+    new A.UserScramCredentialDeletion({ user: 'u', mechanism: A.ScramMechanism.SCRAM_SHA_256 }),
+  ]);
+  /** @type {Array<[import('@confluentinc/kafka-javascript/common').KafkaFuture<unknown> | null, string]>} */
+  const futures = [
+    [mock.describeClientQuotas(quota.ClientQuotaFilter.all()).entities(), 'Not implement yet'],
+    [quotaFutures.get(entity), 'Not implement yet'],
+    [quotas.all(), 'Not implement yet'],
+    [scram.all(), 'Not implemented yet'],
+    [scram.users(), 'Not implemented yet'],
+    [scram.description('u'), 'Not implemented yet'],
+    [altered.values().get('u') ?? null, 'Not implemented yet'],
+    [altered.all(), 'Not implemented yet'],
+  ];
+  for (const [future, message] of futures) {
+    assert.ok(future);
+    const cause = await failure(future);
+    assert.ok(cause instanceof UnsupportedOperationError, String(cause));
+    assert.equal(cause.message, message);
+  }
+  await mock.close();
+});
+
+/** @param {string} name */
+const user = (name) => new KafkaPrincipal({ principalType: KafkaPrincipal.USER_TYPE, name });
+
+test('create_delegation_token_rejects_non_user_renewer', async () => {
+  const mock = track(new MockAdminClient());
+  const options = new (require('@confluentinc/kafka-javascript/admin').CreateDelegationTokenOptions)().renewers([
+    new KafkaPrincipal({ principalType: 'Group', name: 'admins' }),
+  ]);
+  const cause = await failure(mock.createDelegationToken(options).delegationToken());
+  assert.ok(cause instanceof InvalidPrincipalTypeError, String(cause));
+  assert.equal(cause.message, '');
+});
+
+test('create_delegation_token_without_a_renewer_reports_an_error', async () => {
+  // Java's options.renewers().get(0) throws IndexOutOfBoundsException; the
+  // core's mock fails the future instead, with its own message.
+  const mock = track(new MockAdminClient());
+  const cause = await failure(mock.createDelegationToken().delegationToken());
+  assert.ok(cause instanceof IllegalArgumentError, String(cause));
+  assert.equal(cause.message, 'createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner');
+  assert.deepEqual(await mock.describeDelegationToken().delegationTokens().get(), []);
+});
+
+test('create_then_describe_lists_token', async () => {
+  const { CreateDelegationTokenOptions } = require('@confluentinc/kafka-javascript/admin');
+  const mock = track(new MockAdminClient());
+  const token = await mock
+    .createDelegationToken(new CreateDelegationTokenOptions({ renewers: [user('alice')], maxLifetimeMs: 1000 }))
+    .delegationToken()
+    .get();
+  assert.ok(token.tokenInfo().owner().equals(user('alice')));
+  assert.equal(token.tokenInfo().maxTimestamp(), 1000n);
+  assert.equal(token.tokenInfo().expiryTimestamp(), -1n);
+  assert.deepEqual([...token.hmac()], [...Buffer.from(token.tokenInfo().tokenId(), 'utf8')]);
+  const listed = await mock.describeDelegationToken().delegationTokens().get();
+  assert.equal(listed.length, 1);
+  assert.ok(listed[0].equals(token));
+});
+
+test('renew_delegation_token_found_and_not_found', async () => {
+  const { CreateDelegationTokenOptions, RenewDelegationTokenOptions } = require('@confluentinc/kafka-javascript/admin');
+  const mock = track(new MockAdminClient());
+  const unknown = await failure(
+    mock
+      .renewDelegationToken({ hmac: Buffer.from('nope'), options: new RenewDelegationTokenOptions({ renewTimePeriodMs: 10 }) })
+      .expiryTimestamp(),
+  );
+  assert.ok(unknown instanceof DelegationTokenNotFoundError, String(unknown));
+  assert.equal(unknown.message, '');
+  const token = await mock
+    .createDelegationToken(new CreateDelegationTokenOptions({ renewers: [user('alice')] }))
+    .delegationToken()
+    .get();
+  const expiry = await mock
+    .renewDelegationToken({ hmac: token.hmac(), options: new RenewDelegationTokenOptions({ renewTimePeriodMs: 4242n }) })
+    .expiryTimestamp()
+    .get();
+  assert.equal(expiry, 4242n);
+});
+
+test('expire_delegation_token_not_found', async () => {
+  const mock = track(new MockAdminClient());
+  const cause = await failure(mock.expireDelegationToken(Buffer.from('nope')).expiryTimestamp());
+  assert.ok(cause instanceof DelegationTokenNotFoundError, String(cause));
+  assert.equal(cause.message, '');
+});
+
+test('expire_delegation_token_negative_one_removes_token', async () => {
+  const { CreateDelegationTokenOptions, ExpireDelegationTokenOptions } = require('@confluentinc/kafka-javascript/admin');
+  const mock = track(new MockAdminClient());
+  const token = await mock
+    .createDelegationToken(new CreateDelegationTokenOptions({ renewers: [user('alice')] }))
+    .delegationToken()
+    .get();
+  const expiry = await mock
+    .expireDelegationToken({ hmac: token.hmac(), options: new ExpireDelegationTokenOptions({ expiryTimePeriodMs: -1 }) })
+    .expiryTimestamp()
+    .get();
+  assert.equal(expiry, -1n);
+  assert.deepEqual(await mock.describeDelegationToken().delegationTokens().get(), []);
+});
+
+test('describe_delegation_token_owners_filter', async () => {
+  const { CreateDelegationTokenOptions, DescribeDelegationTokenOptions } = require('@confluentinc/kafka-javascript/admin');
+  const mock = track(new MockAdminClient());
+  const alice = await mock
+    .createDelegationToken(new CreateDelegationTokenOptions({ renewers: [user('alice')] }))
+    .delegationToken()
+    .get();
+  await mock
+    .createDelegationToken(new CreateDelegationTokenOptions({ renewers: [user('bob')] }))
+    .delegationToken()
+    .get();
+  const listed = await mock
+    .describeDelegationToken(new DescribeDelegationTokenOptions({ owners: [user('alice')] }))
+    .delegationTokens()
+    .get();
+  assert.equal(listed.length, 1);
+  assert.ok(listed[0].equals(alice));
+});
