@@ -15,25 +15,27 @@
 
 'use strict';
 
-// gRPC server exposing the Node.js producer (dist/producer, compiled from
-// src/producer) over the ProducerService of
+// gRPC server exposing the Node.js clients over the services of
 // rust/multilanguage-test-server/proto, the JavaScript twin of
-// python/grpc_server_async.py's ProducerService: the Rust multilanguage
-// integration tests run each producer test body against a `__grpc_js` backend
-// that tunnels every Producer call to this server (rust/tests/common/
-// backend_pool.rs, BackendKind::Js).
+// python/grpc_server_async.py: the Rust multilanguage integration tests run
+// each producer and admin test body against a `__grpc_js` backend that tunnels
+// every call to this server (rust/tests/common/backend_pool.rs,
+// BackendKind::Js).
 //
-// Only ProducerService is registered: the binding has no consumer or admin
-// client yet. Within it, the RPCs for what the JS producer does not have yet
-// are deliberately left out, so grpc-js answers them with UNIMPLEMENTED rather
-// than this server inventing a result: InitTransactions, BeginTransaction,
-// CommitTransaction, AbortTransaction and SendOffsetsToTransaction, as there
-// is no transaction surface.
+// ProducerService serves the producer (dist/producer, compiled from
+// src/producer), AdminService the admin client (dist/admin, grpc_admin.js),
+// and ChaosWorkloadService the chaos harness. ConsumerService is not
+// registered: the binding has no consumer yet. Within ProducerService, the RPCs
+// for what the JS producer does not have yet are deliberately left out, so
+// grpc-js answers them with UNIMPLEMENTED rather than this server inventing a
+// result: InitTransactions, BeginTransaction, CommitTransaction,
+// AbortTransaction and SendOffsetsToTransaction, as there is no transaction
+// surface.
 // The tests needing them are skipped for this backend only, by JS_GRPC_SKIPS in
 // rust/Makefile, each with the condition for removing its skip.
 //
 // Everything runs on the one JS thread (the delivery callbacks too), so the
-// producer map and the callback log need no lock; ids are allocated without an
+// client maps and the callback log need no lock; ids are allocated without an
 // intervening await.
 //
 // Environment:
@@ -68,12 +70,13 @@ const {
   serverError,
   unknownProducer,
 } = require('./grpc_translate');
+const { AdminService } = require('./grpc_admin');
 const { ChaosWorkloadService } = require('../verifiable_clients/chaos_workload');
 
 const PROTO_FILES = ['producer_service.proto', 'consumer_service.proto', 'admin_service.proto', 'chaos_service.proto'];
 // How long Send waits for a record's future, as python's servers do.
 const SEND_TIMEOUT_MS = 120_000;
-// How long a shutdown waits for each producer still open to close.
+// How long a shutdown waits for each client still open to close.
 const SHUTDOWN_CLOSE_TIMEOUT_MS = 5_000;
 
 function log(message) {
@@ -355,6 +358,8 @@ function main() {
   const chaos = new ChaosWorkloadService({ errorToProto: kafkaErrorToProto });
   const server = new grpc.Server();
   server.addService(pkg.ProducerService.service, service.handlers());
+  const admin = new AdminService();
+  server.addService(pkg.AdminService.service, admin.handlers());
   server.addService(pkg.ChaosWorkloadService.service, chaos.handlers());
 
   server.bindAsync(`${host}:${port}`, grpc.ServerCredentials.createInsecure(), (err, boundPort) => {
@@ -369,11 +374,11 @@ function main() {
   const shutdown = (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    log(`${signal}: closing producers and shutting down`);
+    log(`${signal}: closing the clients and shutting down`);
     // The chaos workloads stop first, before the producers close.
     chaos
       .stopAll()
-      .then(() => service.closeAll(SHUTDOWN_CLOSE_TIMEOUT_MS))
+      .then(() => Promise.all([service.closeAll(SHUTDOWN_CLOSE_TIMEOUT_MS), admin.closeAll(SHUTDOWN_CLOSE_TIMEOUT_MS)]))
       .finally(() => {
         // In-flight calls (a Send awaiting delivery) would hold tryShutdown open.
         setTimeout(() => {
@@ -391,4 +396,4 @@ function main() {
 // the service, whose handlers the tests call in-process.
 if (require.main === module) main();
 
-module.exports = { ProducerService, clampedTimeout, selectsMock };
+module.exports = { ProducerService, clampedTimeout, loadProtos, selectsMock };
