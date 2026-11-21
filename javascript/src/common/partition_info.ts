@@ -289,6 +289,25 @@ export class PartitionInfo {
   }
 
   /**
+   * The partition as JSON: its topic, partition, leader and replica lists.
+   *
+   * @returns the fields
+   *
+   * @remarks *(js-only)* JavaScript's JSON protocol, whose output is frozen
+   * once released.
+   */
+  toJSON(): Record<string, unknown> {
+    return {
+      topic: this.#topic,
+      partition: this.#partition,
+      leader: this.#leader,
+      replicas: this.#replicas,
+      inSyncReplicas: this.#inSyncReplicas,
+      offlineReplicas: this.#offlineReplicas,
+    };
+  }
+
+  /**
    * The partition as Java writes it: `Partition(topic = <topic>, partition =
    * <partition>, leader = <the leader's id, or none>, replicas = [<ids>], isr
    * = [<ids>], offlineReplicas = [<ids>])`.
