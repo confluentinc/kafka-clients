@@ -1363,3 +1363,671 @@ napi_value js_mock_admin_set_fetches_remaining_until_visible(napi_env env, napi_
     if (err != NULL) error_throw_owned(env, err);
     return NULL;
 }
+
+// ---- configs and log dirs: shared values ---------------------------------------------
+
+static void config_resource_item_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_config_ConfigResource_destroy_err((kafka_common_config_ConfigResource_t*)item, out_err);
+}
+
+static void tpr_item_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_TopicPartitionReplica_destroy_err((kafka_common_TopicPartitionReplica_t*)item, out_err);
+}
+
+static void alter_config_op_item_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_admin_AlterConfigOp_destroy_err((kafka_admin_AlterConfigOp_t*)item, out_err);
+}
+
+static void alter_config_op_list_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_List_t* list = (kafka_List_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t n = 0;
+    kafka_common_Error_t* err = FFI_SET(n, kafka_List_size_err(list, &ffi_err));
+    for (int32_t i = 0; err == NULL && i < n; i++) {
+        void* op = NULL;
+        err = FFI_SET(op, kafka_List_get_err(list, i, &ffi_err));
+        if (err == NULL && op != NULL) err = FFI_ERR(alter_config_op_item_destroy(op, &ffi_err));
+    }
+    error_discard(err);
+    kafka_List_destroy_err(list, out_err);
+}
+
+// Frees a map whose keys and values were made for a call: each key through
+// `key_destroy` and each value through `value_destroy` (`free` when NULL),
+// then the map.
+static void map_free_with(napi_env env, kafka_Map_t* map, void (*key_destroy)(void*, kafka_common_Error_t**),
+                          void (*value_destroy)(void*, kafka_common_Error_t**)) {
+    if (map == NULL) return;
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t n = 0;
+    kafka_common_Error_t* err = FFI_SET(n, kafka_Map_size_err(map, &ffi_err));
+    for (int32_t i = 0; err == NULL && i < n; i++) {
+        void* k = NULL;
+        void* v = NULL;
+        err = FFI_SET(k, kafka_Map_key_err(map, i, &ffi_err));
+        if (err == NULL) err = FFI_SET(v, kafka_Map_value_err(map, i, &ffi_err));
+        if (err != NULL) break;
+        if (k != NULL) err = FFI_ERR(key_destroy(k, &ffi_err));
+        if (v != NULL) {
+            if (value_destroy == NULL) free(v);
+            else error_warn(env, 1, FFI_ERR(value_destroy(v, &ffi_err)));
+        }
+    }
+    error_warn(env, 1, err);
+    error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(map, &ffi_err)));
+}
+
+static int32_t int32_of(napi_env env, napi_value v, const char* what, int* ok) {
+    int32_t n = 0;
+    if (v == NULL || napi_get_value_int32(env, v, &n) != napi_ok) {
+        *ok = 0;
+        napi_throw_type_error(env, NULL, what);
+    }
+    return n;
+}
+
+// A JS [typeId, name] as an owned ConfigResource (the type from Java's byte
+// id), or NULL with a JS exception pending.
+static kafka_common_config_ConfigResource_t* config_resource_from_js(napi_env env, napi_value pair) {
+    int ok = 1;
+    napi_value t = element(env, pair, 0);
+    napi_value n = t == NULL ? NULL : element(env, pair, 1);
+    int32_t id = int32_of(env, t, "a resource's type id", &ok);
+    if (!ok || n == NULL) return NULL;
+    char* name = js_string_dup(env, n, "a resource's name must be a string");
+    if (name == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_common_config_ConfigResource_Type_t* type = NULL;
+    kafka_common_config_ConfigResource_t* resource = NULL;
+    kafka_common_Error_t* err = FFI_SET(type, kafka_common_config_ConfigResource_Type_for_id_err((int8_t)id, &ffi_err));
+    if (err == NULL) err = FFI_SET(resource, kafka_common_config_ConfigResource_new_err(type, name, &ffi_err));
+    free(name);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return resource;
+}
+
+// A JS [topic, partition, brokerId] as an owned TopicPartitionReplica, or NULL
+// with a JS exception pending.
+static kafka_common_TopicPartitionReplica_t* tpr_from_js(napi_env env, napi_value triple) {
+    int ok = 1;
+    napi_value t = element(env, triple, 0);
+    napi_value p = t == NULL ? NULL : element(env, triple, 1);
+    napi_value b = p == NULL ? NULL : element(env, triple, 2);
+    if (b == NULL) return NULL;
+    int32_t partition = int32_of(env, p, "a replica's partition", &ok);
+    int32_t broker = ok ? int32_of(env, b, "a replica's broker id", &ok) : 0;
+    if (!ok) return NULL;
+    char* topic = js_string_dup(env, t, "a replica's topic must be a string");
+    if (topic == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_TopicPartitionReplica_t* replica = NULL;
+    kafka_common_Error_t* err = FFI_SET(replica, kafka_common_TopicPartitionReplica_new_err(topic, partition, broker, &ffi_err));
+    free(topic);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return replica;
+}
+
+// An array of `from_js` items as an owned list of owned handles, each freed
+// through `destroy` on failure, or NULL with a JS exception pending.
+static kafka_List_t* handle_list(napi_env env, napi_value array, void* (*from_js)(napi_env, napi_value),
+                                 void (*destroy)(void*, kafka_common_Error_t**)) {
+    int ok = 0;
+    uint32_t n = length_of(env, array, &ok);
+    if (!ok) return NULL;
+    kafka_List_t* list = list_new(env);
+    if (list == NULL) return NULL;
+    for (uint32_t i = 0; i < n; i++) {
+        napi_value v = element(env, array, i);
+        void* item = v == NULL ? NULL : from_js(env, v);
+        if (item == NULL || list_add(env, list, item, destroy) < 0) {
+            admin_list_free(env, list, destroy);
+            return NULL;
+        }
+    }
+    return list;
+}
+
+static void* config_resource_from_js_item(napi_env env, napi_value v) {
+    return config_resource_from_js(env, v);
+}
+
+static void* tpr_from_js_item(napi_env env, napi_value v) {
+    return tpr_from_js(env, v);
+}
+
+// A borrowed ConfigResource as [typeOrdinal, name].
+static napi_value config_resource_to_js(napi_env env, const kafka_common_config_ConfigResource_t* r) {
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_common_config_ConfigResource_Type_t* type = NULL;
+    const char* name = NULL;
+    int ordinal = 0;
+    kafka_common_Error_t* err = FFI_SET(type, kafka_common_config_ConfigResource_type_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(ordinal, (int)kafka_common_config_ConfigResource_Type__enum_err(type, &ffi_err));
+    if (err == NULL) err = FFI_SET(name, kafka_common_config_ConfigResource_name_err(r, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value pair;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 2, &pair), NULL);
+    napi_value o = js_int32(env, ordinal), s = js_string_or_null(env, name);
+    if (o == NULL || s == NULL) return NULL;
+    NAPI_CHECK(env, napi_set_element(env, pair, 0, o), NULL);
+    NAPI_CHECK(env, napi_set_element(env, pair, 1, s), NULL);
+    return pair;
+}
+
+static napi_value key_config_resource(napi_env env, const void* k) {
+    return config_resource_to_js(env, (const kafka_common_config_ConfigResource_t*)k);
+}
+
+static napi_value item_config_resource(napi_env env, const void* item) {
+    return config_resource_to_js(env, (const kafka_common_config_ConfigResource_t*)item);
+}
+
+// A list of ConfigResource as an array of [typeOrdinal, name].
+static napi_value conv_config_resources(napi_env env, void* v) {
+    return admin_list_to_js(env, (const kafka_List_t*)v, item_config_resource, 0);
+}
+
+// A borrowed int32_t broker id.
+static napi_value key_broker_id(napi_env env, const void* k) {
+    return js_int32(env, *(const int32_t*)k);
+}
+
+// A borrowed TopicPartitionReplica as [topic, partition, brokerId].
+static napi_value key_tpr(napi_env env, const void* k) {
+    const kafka_common_TopicPartitionReplica_t* r = (const kafka_common_TopicPartitionReplica_t*)k;
+    kafka_common_Error_t* ffi_err = NULL;
+    const char* topic = NULL;
+    int32_t partition = 0, broker = 0;
+    kafka_common_Error_t* err = FFI_SET(topic, kafka_common_TopicPartitionReplica_topic_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(partition, kafka_common_TopicPartitionReplica_partition_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(broker, kafka_common_TopicPartitionReplica_broker_id_err(r, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value triple;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 3, &triple), NULL);
+    napi_value t = js_string_or_null(env, topic), p = js_int32(env, partition), b = js_int32(env, broker);
+    if (t == NULL || p == NULL || b == NULL) return NULL;
+    NAPI_CHECK(env, napi_set_element(env, triple, 0, t), NULL);
+    NAPI_CHECK(env, napi_set_element(env, triple, 1, p), NULL);
+    NAPI_CHECK(env, napi_set_element(env, triple, 2, b), NULL);
+    return triple;
+}
+
+static napi_value js_int64(napi_env env, int64_t n) {
+    napi_value v = NULL;
+    if (napi_create_bigint_int64(env, n, &v) != napi_ok) js_throw_last_napi_error(env, "napi_create_bigint_int64");
+    return v;
+}
+
+// A ReplicaInfo as { size, offsetLag, isFuture }.
+static napi_value item_replica_info(napi_env env, const void* item) {
+    const kafka_admin_ReplicaInfo_t* r = (const kafka_admin_ReplicaInfo_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    int64_t size = 0, lag = 0;
+    int8_t future = 0;
+    kafka_common_Error_t* err = FFI_SET(size, kafka_admin_ReplicaInfo_size_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(lag, kafka_admin_ReplicaInfo_offset_lag_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(future, kafka_admin_ReplicaInfo_is_future_err(r, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "size", js_int64(env, size)) < 0 || set(env, obj, "offsetLag", js_int64(env, lag)) < 0
+        || set(env, obj, "isFuture", js_bool(env, future)) < 0)
+        return NULL;
+    return obj;
+}
+
+// A LogDirDescription as { error, replicaInfos, totalBytes, usableBytes,
+// isCordoned }: the error its JS error (null for none; it is borrowed from the
+// description), the replicas an array of [[topic, partition], replica], each
+// size a bigint, -1 for Java's empty OptionalLong.
+static napi_value item_log_dir_description(napi_env env, const void* item) {
+    const kafka_admin_LogDirDescription_t* d = (const kafka_admin_LogDirDescription_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_common_Error_t* error = NULL;
+    kafka_Map_t* infos = NULL;
+    int64_t total = 0, usable = 0;
+    int8_t cordoned = 0;
+    kafka_common_Error_t* err = FFI_SET(error, kafka_admin_LogDirDescription_error_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(infos, kafka_admin_LogDirDescription_replica_infos_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(total, kafka_admin_LogDirDescription_total_bytes_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(usable, kafka_admin_LogDirDescription_usable_bytes_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(cordoned, kafka_admin_LogDirDescription_is_cordoned_err(d, &ffi_err));
+    // The map is owned, its entries with it: converted, then destroyed.
+    napi_value replicas = err == NULL ? admin_map_to_js(env, infos, key_topic_partition, item_replica_info) : NULL;
+    if (infos != NULL) error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(infos, &ffi_err)));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    if (replicas == NULL) return NULL;
+    napi_value js_error = error == NULL ? js_null(env) : error_to_js(env, error);
+    if (js_error == NULL) return NULL;
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "error", js_error) < 0 || set(env, obj, "replicaInfos", replicas) < 0
+        || set(env, obj, "totalBytes", js_int64(env, total)) < 0 || set(env, obj, "usableBytes", js_int64(env, usable)) < 0
+        || set(env, obj, "isCordoned", js_bool(env, cordoned)) < 0)
+        return NULL;
+    return obj;
+}
+
+// A broker's log directories: [[path, description]], sorted by path.
+static napi_value conv_log_dir_descriptions(napi_env env, void* v) {
+    return admin_map_to_js(env, (const kafka_Map_t*)v, admin_item_string, item_log_dir_description);
+}
+
+// A ReplicaLogDirInfo as { currentReplicaLogDir, currentReplicaOffsetLag,
+// futureReplicaLogDir, futureReplicaOffsetLag }, the dirs null for Java's
+// null.
+static napi_value conv_replica_log_dir_info(napi_env env, void* v) {
+    if (v == NULL) return js_null(env);
+    const kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t* i =
+        (const kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_t*)v;
+    kafka_common_Error_t* ffi_err = NULL;
+    const char *current = NULL, *future = NULL;
+    int64_t current_lag = 0, future_lag = 0;
+    kafka_common_Error_t* err =
+        FFI_SET(current, kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_current_replica_log_dir_err(i, &ffi_err));
+    if (err == NULL)
+        err = FFI_SET(current_lag, kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_current_replica_offset_lag_err(i, &ffi_err));
+    if (err == NULL) err = FFI_SET(future, kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_future_replica_log_dir_err(i, &ffi_err));
+    if (err == NULL)
+        err = FFI_SET(future_lag, kafka_admin_DescribeReplicaLogDirsResult_ReplicaLogDirInfo_future_replica_offset_lag_err(i, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "currentReplicaLogDir", js_string_or_null(env, current)) < 0
+        || set(env, obj, "currentReplicaOffsetLag", js_int64(env, current_lag)) < 0
+        || set(env, obj, "futureReplicaLogDir", js_string_or_null(env, future)) < 0
+        || set(env, obj, "futureReplicaOffsetLag", js_int64(env, future_lag)) < 0)
+        return NULL;
+    return obj;
+}
+
+// ---- describeConfigs --------------------------------------------------------------------
+
+#define ADMIN_RPC DescribeConfigs
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeConfigsOptions_set_timeout_ms_err)
+ADMIN_OPT_BOOL(includeSynonyms, kafka_admin_DescribeConfigsOptions_set_include_synonyms_err)
+ADMIN_OPT_BOOL(includeDocumentation, kafka_admin_DescribeConfigsOptions_set_include_documentation_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeConfigsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeConfigsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(includeSynonyms), ADMIN_SETTER(includeDocumentation), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeConfigsResult_destroy_err),
+    {ADMIN_ACC_MAP(values, kafka_admin_DescribeConfigsResult_values_err, key_config_resource, conv_config), ADMIN_ACC_END},
+};
+
+// adminDescribeConfigs(handle, resources, options): each resource as
+// [typeId, name]; the result's futures are `values` (a map keyed by
+// [typeOrdinal, name]).
+napi_value js_admin_describe_configs(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* resources = handle_list(env, argv[1], config_resource_from_js_item, config_resource_item_destroy);
+    if (resources == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, resources, config_resource_item_destroy);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = FFI_SET(
+        r, kafka_admin_Admin_describe_configs_with_options_err(a->view, resources, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, resources, config_resource_item_destroy);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeConfigsOptions_desc DescribeConfigsResult_desc
+
+// ---- incrementalAlterConfigs ----------------------------------------------------------
+
+#define ADMIN_RPC AlterConfigs
+
+ADMIN_OPT_TIMEOUT(kafka_admin_AlterConfigsOptions_set_timeout_ms_err)
+ADMIN_OPT_BOOL(validateOnly, kafka_admin_AlterConfigsOptions_set_validate_only_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_AlterConfigsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_AlterConfigsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(validateOnly), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_AlterConfigsResult_destroy_err),
+    {ADMIN_ACC_MAP(values, kafka_admin_AlterConfigsResult_values_err, key_config_resource, NULL), ADMIN_ACC_END},
+};
+
+// A JS [opId, name, value] as an owned AlterConfigOp over a new
+// ConfigEntry(name, value) (value null for Java's null), or NULL with a JS
+// exception pending.
+static kafka_admin_AlterConfigOp_t* alter_config_op_from_js(napi_env env, napi_value triple) {
+    int ok = 1;
+    napi_value t = element(env, triple, 0);
+    napi_value n = t == NULL ? NULL : element(env, triple, 1);
+    napi_value v = n == NULL ? NULL : element(env, triple, 2);
+    if (v == NULL) return NULL;
+    int32_t id = int32_of(env, t, "an operation's type id", &ok);
+    if (!ok) return NULL;
+    char* name = js_string_dup(env, n, "a config name must be a string");
+    if (name == NULL) return NULL;
+    char* value = string_or_null(env, v, "a config value must be a string or null", &ok);
+    if (!ok) {
+        free(name);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_admin_AlterConfigOp_OpType_t* type = NULL;
+    kafka_admin_ConfigEntry_t* entry = NULL;
+    kafka_admin_AlterConfigOp_t* op = NULL;
+    kafka_common_Error_t* err = FFI_SET(type, kafka_admin_AlterConfigOp_OpType_for_id_err((int8_t)id, &ffi_err));
+    if (err == NULL && type == NULL) {
+        free(name);
+        free(value);
+        napi_throw_type_error(env, NULL, "an operation's type id has no OpType");
+        return NULL;
+    }
+    if (err == NULL) err = FFI_SET(entry, kafka_admin_ConfigEntry_new_err(name, value, &ffi_err));
+    free(name);
+    free(value);
+    if (err == NULL) err = FFI_SET(op, kafka_admin_AlterConfigOp_new_err(entry, type, &ffi_err));
+    // The entry is copied into the operation.
+    if (entry != NULL) error_warn(env, 1, FFI_ERR(kafka_admin_ConfigEntry_destroy_err(entry, &ffi_err)));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return op;
+}
+
+static void* alter_config_op_from_js_item(napi_env env, napi_value v) {
+    return alter_config_op_from_js(env, v);
+}
+
+// adminIncrementalAlterConfigs(handle, configs, options): configs an array of
+// [[typeId, name], [[opId, name, value]]]; the result's futures are `values`
+// (a map keyed by [typeOrdinal, name]).
+napi_value js_admin_incremental_alter_configs(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    int ok = 0;
+    uint32_t n = length_of(env, argv[1], &ok);
+    if (!ok) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* map = NULL;
+    kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
+    for (uint32_t i = 0; err == NULL && ok && i < n; i++) {
+        napi_value pair = element(env, argv[1], i);
+        napi_value k = pair == NULL ? NULL : element(env, pair, 0);
+        napi_value v = k == NULL ? NULL : element(env, pair, 1);
+        kafka_common_config_ConfigResource_t* resource = v == NULL ? NULL : config_resource_from_js(env, k);
+        kafka_List_t* ops = resource == NULL ? NULL : handle_list(env, v, alter_config_op_from_js_item, alter_config_op_item_destroy);
+        if (ops == NULL) {
+            if (resource != NULL) FFI_DISCARD(kafka_common_config_ConfigResource_destroy_err(resource, &ffi_err));
+            ok = 0;
+            break;
+        }
+        err = FFI_ERR(kafka_Map_put_err(map, resource, ops, &ffi_err));
+        if (err != NULL) {
+            FFI_DISCARD(kafka_common_config_ConfigResource_destroy_err(resource, &ffi_err));
+            FFI_DISCARD(alter_config_op_list_destroy(ops, &ffi_err));
+        }
+    }
+    void* o = err == NULL && ok ? admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]) : NULL;
+    ADMIN_RESULT_T* r = NULL;
+    if (o != NULL)
+        err = FFI_SET(r, kafka_admin_Admin_incremental_alter_configs_with_options_err(a->view, map, (ADMIN_OPTIONS_T*)admin_opts(o),
+                                                                                    &ffi_err));
+    // The map's resources and operations are copied by the call: freed here.
+    map_free_with(env, map, config_resource_item_destroy, alter_config_op_list_destroy);
+    if (o == NULL) {
+        if (err != NULL) error_throw_owned(env, err);
+        return NULL;
+    }
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison AlterConfigsOptions_desc AlterConfigsResult_desc
+
+// ---- listConfigResources -----------------------------------------------------------------
+
+#define ADMIN_RPC ListConfigResources
+
+ADMIN_OPT_TIMEOUT(kafka_admin_ListConfigResourcesOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_ListConfigResourcesOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_ListConfigResourcesOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_ListConfigResourcesResult_destroy_err),
+    {ADMIN_ACC_ONE(all, kafka_admin_ListConfigResourcesResult_all_err, conv_config_resources), ADMIN_ACC_END},
+};
+
+// adminListConfigResources(handle, typeIds, options): the types as Java's
+// byte ids (an empty array lists every type); the result's one future is
+// `all`, the resources as [typeOrdinal, name].
+napi_value js_admin_list_config_resources(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    int ok = 0;
+    uint32_t n = length_of(env, argv[1], &ok);
+    if (!ok) return NULL;
+    kafka_List_t* types = list_new(env);
+    if (types == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    // The types are borrowed singletons: the list is freed without them.
+    for (uint32_t i = 0; i < n; i++) {
+        napi_value v = element(env, argv[1], i);
+        int32_t id = int32_of(env, v, "a resource type's id", &ok);
+        const kafka_common_config_ConfigResource_Type_t* type = NULL;
+        kafka_common_Error_t* err = ok ? FFI_SET(type, kafka_common_config_ConfigResource_Type_for_id_err((int8_t)id, &ffi_err)) : NULL;
+        if (err != NULL) error_throw_owned(env, err);
+        if (!ok || err != NULL || list_add(env, types, (void*)type, NULL) < 0) {
+            admin_list_free(env, types, NULL);
+            return NULL;
+        }
+    }
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, types, NULL);
+        return NULL;
+    }
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = FFI_SET(
+        r, kafka_admin_Admin_list_config_resources_with_options_err(a->view, types, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, types, NULL);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison ListConfigResourcesOptions_desc ListConfigResourcesResult_desc
+
+// ---- describeLogDirs -------------------------------------------------------------------
+
+#define ADMIN_RPC DescribeLogDirs
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeLogDirsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeLogDirsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeLogDirsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeLogDirsResult_destroy_err),
+    {ADMIN_ACC_MAP(descriptions, kafka_admin_DescribeLogDirsResult_descriptions_err, key_broker_id, conv_log_dir_descriptions),
+     ADMIN_ACC_END},
+};
+
+// adminDescribeLogDirs(handle, brokers, options): the broker ids; the
+// result's futures are `descriptions` (a map keyed by broker id).
+napi_value js_admin_describe_log_dirs(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* brokers = int_list(env, argv[1]);
+    if (brokers == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, brokers, free_item);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = FFI_SET(
+        r, kafka_admin_Admin_describe_log_dirs_with_options_err(a->view, brokers, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, brokers, free_item);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeLogDirsOptions_desc DescribeLogDirsResult_desc
+
+// ---- alterReplicaLogDirs -----------------------------------------------------------------
+
+#define ADMIN_RPC AlterReplicaLogDirs
+
+ADMIN_OPT_TIMEOUT(kafka_admin_AlterReplicaLogDirsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_AlterReplicaLogDirsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_AlterReplicaLogDirsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_AlterReplicaLogDirsResult_destroy_err),
+    {ADMIN_ACC_MAP(values, kafka_admin_AlterReplicaLogDirsResult_values_err, key_tpr, NULL), ADMIN_ACC_END},
+};
+
+// adminAlterReplicaLogDirs(handle, replicaAssignment, options): an array of
+// [[topic, partition, brokerId], logDir], the log dir null for Java's null;
+// the result's futures are `values` (a map keyed by [topic, partition,
+// brokerId]).
+napi_value js_admin_alter_replica_log_dirs(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    int ok = 0;
+    uint32_t n = length_of(env, argv[1], &ok);
+    if (!ok) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* map = NULL;
+    kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
+    for (uint32_t i = 0; err == NULL && ok && i < n; i++) {
+        napi_value pair = element(env, argv[1], i);
+        napi_value k = pair == NULL ? NULL : element(env, pair, 0);
+        napi_value v = k == NULL ? NULL : element(env, pair, 1);
+        kafka_common_TopicPartitionReplica_t* replica = v == NULL ? NULL : tpr_from_js(env, k);
+        if (replica == NULL) {
+            ok = 0;
+            break;
+        }
+        char* dir = string_or_null(env, v, "a log directory must be a string or null", &ok);
+        if (!ok) {
+            FFI_DISCARD(kafka_common_TopicPartitionReplica_destroy_err(replica, &ffi_err));
+            break;
+        }
+        err = FFI_ERR(kafka_Map_put_err(map, replica, dir, &ffi_err));
+        if (err != NULL) {
+            FFI_DISCARD(kafka_common_TopicPartitionReplica_destroy_err(replica, &ffi_err));
+            free(dir);
+        }
+    }
+    void* o = err == NULL && ok ? admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]) : NULL;
+    ADMIN_RESULT_T* r = NULL;
+    if (o != NULL)
+        err = FFI_SET(r, kafka_admin_Admin_alter_replica_log_dirs_with_options_err(a->view, map, (ADMIN_OPTIONS_T*)admin_opts(o),
+                                                                                 &ffi_err));
+    // The map's replicas and directories are copied by the call: freed here.
+    map_free_with(env, map, tpr_item_destroy, NULL);
+    if (o == NULL) {
+        if (err != NULL) error_throw_owned(env, err);
+        return NULL;
+    }
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison AlterReplicaLogDirsOptions_desc AlterReplicaLogDirsResult_desc
+
+// ---- describeReplicaLogDirs --------------------------------------------------------------
+
+#define ADMIN_RPC DescribeReplicaLogDirs
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeReplicaLogDirsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeReplicaLogDirsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeReplicaLogDirsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeReplicaLogDirsResult_destroy_err),
+    {ADMIN_ACC_MAP(values, kafka_admin_DescribeReplicaLogDirsResult_values_err, key_tpr, conv_replica_log_dir_info), ADMIN_ACC_END},
+};
+
+// adminDescribeReplicaLogDirs(handle, replicas, options): each replica as
+// [topic, partition, brokerId]; the result's futures are `values` (a map
+// keyed by [topic, partition, brokerId]).
+napi_value js_admin_describe_replica_log_dirs(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* replicas = handle_list(env, argv[1], tpr_from_js_item, tpr_item_destroy);
+    if (replicas == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, replicas, tpr_item_destroy);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = FFI_SET(
+        r, kafka_admin_Admin_describe_replica_log_dirs_with_options_err(a->view, replicas, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, replicas, tpr_item_destroy);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeReplicaLogDirsOptions_desc DescribeReplicaLogDirsResult_desc
