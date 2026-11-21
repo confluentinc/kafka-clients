@@ -159,7 +159,7 @@ build-javascript:
 	$(MAKE) -C rust build-all-features
 	$(MAKE) -C javascript build
 
-# Just the JavaScript gRPC image (producer only). Like the C image it needs only
+# Just the JavaScript gRPC image (producer and admin client). Like the C image it needs only
 # the Rust release artifacts: javascript/Dockerfile.grpc builds the addon itself
 # against the copied libconfluent_kafka.so. Not part of `build-grpc-images`,
 # as the JavaScript client is not yet part of `build` either.
@@ -213,7 +213,7 @@ verify-javascript: test-javascript lint-javascript
 verify-javascript-macos-docker: test-javascript-macos-docker
 	$(MAKE) test-integration-javascript-native
 
-# The producer-only `__grpc_js` arm. Self-skips off Linux, like the Python and C
+# The `__grpc_js` arm, the producer and admin scenarios. Self-skips off Linux, like the Python and C
 # arms (the image copies the host-built Linux libconfluent_kafka.so); use
 # `test-integration-javascript-native` there. Part of `verify-javascript`
 # (through javascript/'s `test`), not of `verify`.
