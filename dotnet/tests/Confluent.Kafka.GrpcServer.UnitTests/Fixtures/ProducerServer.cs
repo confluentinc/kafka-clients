@@ -79,7 +79,7 @@ internal sealed class ProducerServer : IDisposable
     {
         _pending = _servicer is ProducerServiceImpl
             ? new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false)
-            : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            : new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
         return Register(_pending);
     }
 
@@ -88,7 +88,7 @@ internal sealed class ProducerServer : IDisposable
     {
         _pending = _servicer is ProducerServiceImpl
             ? new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
-            : new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            : new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         return Register(_pending);
     }
 

@@ -26,10 +26,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The eight clients that take a serializer or deserializer refuse, when they are built, one with a public method they
-/// would never call: a headers form without the interface that makes them call it, or, on the four that dispose their
-/// serdes, a <c>Close()</c> without <see cref="IDisposable"/>. Nothing is disposed on that refusal. A serde that
-/// implements the interface, or <see cref="IDisposable"/>, is taken.
+/// The clients that take a synchronous serializer or deserializer refuse, when they are built, one with a public
+/// method they would never call: a headers form, or a deserializer's memory form, without the interface that makes
+/// them call it, or, on those that dispose their serdes, a <c>Close()</c> without <see cref="IDisposable"/>. Nothing
+/// is disposed on that refusal. A serde that implements the interface, or <see cref="IDisposable"/>, is taken.
 /// </summary>
 public sealed class SerdeGuardTests
 {
@@ -41,27 +41,31 @@ public sealed class SerdeGuardTests
     private const string StrayDeserializerMessage = Prefix + "StrayDeserializer declares Deserialize(string, Headers, "
         + "ReadOnlySpan<byte>) but does not implement IDeserializerWithHeaders<string>, so the consumer would never call it.";
 
+    private const string StrayMemoryDeserializerMessage = Prefix + "StrayMemoryDeserializer declares "
+        + "Deserialize(string, Headers, ReadOnlyMemory<byte>) but does not implement "
+        + "IDeserializerWithReadOnlyMemory<string>, so the consumer would never call it.";
+
     private const string ClosingSerializerMessage = Prefix + "ClosingSerializer declares Close() but does not implement "
         + "IDisposable, so the producer would never call it.";
 
     private const string ClosingDeserializerMessage = Prefix + "ClosingDeserializer declares Close() but does not "
         + "implement IDisposable, so the consumer would never call it.";
 
-    private static readonly string[] s_producers = { "KafkaProducer", "AsyncKafkaProducer", "MockProducer", "AsyncMockProducer" };
+    private static readonly string[] s_producers = { "KafkaProducer", "MockProducer" };
 
-    private static readonly string[] s_consumers = { "KafkaConsumer", "AsyncKafkaConsumer", "MockConsumer", "AsyncMockConsumer" };
+    private static readonly string[] s_consumers = { "KafkaConsumer", "MockConsumer" };
 
     public static TheoryData<string, bool> Producers => Cases(s_producers);
 
     public static TheoryData<string, bool> Consumers => Cases(s_consumers);
 
-    public static TheoryData<string, bool> RealProducers => Cases(new[] { "KafkaProducer", "AsyncKafkaProducer" });
+    public static TheoryData<string, bool> RealProducers => Cases(new[] { "KafkaProducer" });
 
-    public static TheoryData<string, bool> RealConsumers => Cases(new[] { "KafkaConsumer", "AsyncKafkaConsumer" });
+    public static TheoryData<string, bool> RealConsumers => Cases(new[] { "KafkaConsumer" });
 
-    public static TheoryData<string> MockProducers => new TheoryData<string> { "MockProducer", "AsyncMockProducer" };
+    public static TheoryData<string> MockProducers => new TheoryData<string> { "MockProducer" };
 
-    public static TheoryData<string> MockConsumers => new TheoryData<string> { "MockConsumer", "AsyncMockConsumer" };
+    public static TheoryData<string> MockConsumers => new TheoryData<string> { "MockConsumer" };
 
     [Theory]
     [MemberData(nameof(Producers))]
@@ -88,6 +92,28 @@ public sealed class SerdeGuardTests
         Assert.Equal(StrayDeserializerMessage, e.Message);
         Assert.Equal(0, other.Disposals);
     }
+
+    [Theory]
+    [MemberData(nameof(Consumers))]
+    public void AConsumer_RefusesADeserializerWithAMemoryFormItWouldNeverCall_DisposingNothing(string consumer, bool asKey)
+    {
+        DisposableDeserializer other = new DisposableDeserializer();
+
+        IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
+            () => Consumer(
+                consumer, asKey ? new StrayMemoryDeserializer() : other, asKey ? other : new StrayMemoryDeserializer()));
+
+        Assert.Equal(StrayMemoryDeserializerMessage, e.Message);
+        Assert.Equal(0, other.Disposals);
+    }
+
+    [Theory]
+    [MemberData(nameof(Consumers))]
+    public async Task AConsumer_TakesADeserializerWithTheMemoryInterface(string consumer, bool asKey) =>
+        await DisposeBounded(Consumer(
+            consumer,
+            asKey ? new MemoryDeserializer() : new HeadersDeserializer(),
+            asKey ? new HeadersDeserializer() : new MemoryDeserializer()));
 
     [Theory]
     [MemberData(nameof(RealProducers))]
@@ -184,18 +210,14 @@ public sealed class SerdeGuardTests
 
     private static object Producer(string producer, ISerializer<string> key, ISerializer<string> value) => producer switch
     {
-        "KafkaProducer" => new KafkaProducer<string, string>(ProducerConfigs(), key, value),
-        "AsyncKafkaProducer" => new AsyncKafkaProducer<string, string>(ProducerConfigs(), key, value),
-        "MockProducer" => new MockProducer<string, string>(key, value),
-        _ => new AsyncMockProducer<string, string>(key, value),
+        "KafkaProducer" => KafkaProducer<string, string>.Create(ProducerConfigs(), key, value),
+        _ => new MockProducer<string, string>(key, value),
     };
 
     private static object Consumer(string consumer, IDeserializer<string> key, IDeserializer<string> value) => consumer switch
     {
-        "KafkaConsumer" => new KafkaConsumer<string, string>(ConsumerConfigs(), key, value),
-        "AsyncKafkaConsumer" => new AsyncKafkaConsumer<string, string>(ConsumerConfigs(), key, value),
-        "MockConsumer" => new MockConsumer<string, string>(key, value),
-        _ => new AsyncMockConsumer<string, string>(key, value),
+        "KafkaConsumer" => KafkaConsumer<string, string>.Create(ConsumerConfigs(), key, value),
+        _ => new MockConsumer<string, string>(key, value),
     };
 
     private static Task DisposeBounded(object client) =>
@@ -300,6 +322,22 @@ public sealed class SerdeGuardTests
         public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
 
         public string? Deserialize(string topic, Headers headers, ReadOnlySpan<byte> data) => null;
+    }
+
+    /// <summary>A deserializer with a public memory form but not the interface that makes a consumer call it.</summary>
+    private sealed class StrayMemoryDeserializer : IDeserializer<string>
+    {
+        public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
+
+        public string? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data) => null;
+    }
+
+    /// <summary>A deserializer that implements the memory interface.</summary>
+    private sealed class MemoryDeserializer : IDeserializerWithReadOnlyMemory<string>
+    {
+        public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
+
+        public string? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data) => null;
     }
 
     /// <summary>A deserializer with a public close that is also IDisposable, counting its disposals.</summary>

@@ -474,7 +474,7 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void ByteBuffer_Serialize_ReturnsTheMemoryAsGiven_AnArrayASliceOrNativeMemory()
+    public void ReadOnlyMemory_Serialize_ReturnsTheMemoryAsGiven_AnArrayASliceOrNativeMemory()
     {
         byte[] array = { 0x00, 0x01, 0xFE, 0xFF };
         ReadOnlyMemory<byte> whole = array;
@@ -484,27 +484,27 @@ public sealed class SerdesTests
 
         foreach (ReadOnlyMemory<byte> memory in new[] { whole, slice, nativeMemory })
         {
-            ReadOnlyMemory<byte>? serialized = Serdes.ByteBuffer().Serializer().Serialize(Topic, memory);
+            ReadOnlyMemory<byte>? serialized = Serdes.ReadOnlyMemory().Serializer().Serialize(Topic, memory);
             Assert.True(serialized.HasValue);
             Assert.True(memory.Equals(serialized.GetValueOrDefault()));
         }
     }
 
     [Fact]
-    public void ByteBuffer_SerializeNull_ReturnsNull_AndEmptyStaysEmpty()
+    public void ReadOnlyMemory_SerializeNull_ReturnsNull_AndEmptyStaysEmpty()
     {
-        Assert.Null(Serdes.ByteBuffer().Serializer().Serialize(Topic, null));
-        ReadOnlyMemory<byte>? empty = Serdes.ByteBuffer().Serializer().Serialize(Topic, ReadOnlyMemory<byte>.Empty);
+        Assert.Null(Serdes.ReadOnlyMemory().Serializer().Serialize(Topic, null));
+        ReadOnlyMemory<byte>? empty = Serdes.ReadOnlyMemory().Serializer().Serialize(Topic, ReadOnlyMemory<byte>.Empty);
         Assert.True(empty.HasValue);
         Assert.Equal(0, empty.GetValueOrDefault().Length);
     }
 
     [Fact]
-    public void ByteBuffer_Deserialize_CopiesTheBytesIntoANewArray()
+    public void ReadOnlyMemory_Deserialize_CopiesTheBytesIntoANewArray()
     {
         byte[] data = { 0x00, 0x01, 0xFE, 0xFF };
 
-        ReadOnlyMemory<byte>? decoded = Serdes.ByteBuffer().Deserializer().Deserialize(Topic, data);
+        ReadOnlyMemory<byte>? decoded = Serdes.ReadOnlyMemory().Deserializer().Deserialize(Topic, data);
 
         Assert.True(decoded.HasValue);
         Assert.Equal(data, decoded.GetValueOrDefault().ToArray());
@@ -517,9 +517,9 @@ public sealed class SerdesTests
     }
 
     [Fact]
-    public void ByteBuffer_DeserializeEmpty_ReturnsAnEmptyMemoryNotNull()
+    public void ReadOnlyMemory_DeserializeEmpty_ReturnsAnEmptyMemoryNotNull()
     {
-        ReadOnlyMemory<byte>? decoded = Serdes.ByteBuffer().Deserializer().Deserialize(Topic, ReadOnlySpan<byte>.Empty);
+        ReadOnlyMemory<byte>? decoded = Serdes.ReadOnlyMemory().Deserializer().Deserialize(Topic, ReadOnlySpan<byte>.Empty);
         Assert.True(decoded.HasValue);
         Assert.Equal(0, decoded.GetValueOrDefault().Length);
     }

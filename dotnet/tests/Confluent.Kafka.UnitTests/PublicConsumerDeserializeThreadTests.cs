@@ -59,7 +59,7 @@ public sealed class PublicConsumerDeserializeThreadTests
     {
         RecordingDeserializer<byte[]> valueDeserializer = new RecordingDeserializer<byte[]>(Serdes.ByteArray().Deserializer());
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), valueDeserializer);
+            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), valueDeserializer.AsAsync());
         try
         {
             await TestTimeout.Run(

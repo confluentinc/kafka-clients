@@ -19,6 +19,7 @@ using System.Globalization;
 using System.Reflection;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
@@ -45,13 +46,13 @@ internal static class UnreachableProducers
         Sync((object)maxBlockMs.ToString(CultureInfo.InvariantCulture));
 
     internal static KafkaProducer<byte[], byte[]> Sync(object maxBlockMs) =>
-        new KafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        KafkaProducer<byte[], byte[]>.Create(Config(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
-    internal static AsyncKafkaProducer<byte[], byte[]> Async(int maxBlockMs) =>
-        Async((object)maxBlockMs.ToString(CultureInfo.InvariantCulture));
+    internal static async Task<AsyncKafkaProducer<byte[], byte[]>> Async(int maxBlockMs) =>
+        await Async((object)maxBlockMs.ToString(CultureInfo.InvariantCulture));
 
-    internal static AsyncKafkaProducer<byte[], byte[]> Async(object maxBlockMs) =>
-        new AsyncKafkaProducer<byte[], byte[]>(Config(maxBlockMs), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+    internal static async Task<AsyncKafkaProducer<byte[], byte[]>> Async(object maxBlockMs) =>
+        await AsyncKafkaProducer<byte[], byte[]>.Create(Config(maxBlockMs), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
     internal static string Topic(string prefix) => prefix + "-" + Guid.NewGuid().ToString("N");
 

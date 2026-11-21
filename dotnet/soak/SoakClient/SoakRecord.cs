@@ -15,6 +15,8 @@
 using System;
 using System.Globalization;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Confluent.Kafka.Common.Serialization;
 
 namespace Confluent.Kafka.Soak;
@@ -70,7 +72,7 @@ internal sealed class SoakRecord
 /// Encodes a <see cref="SoakRecord"/>, padded to the profile's target size (a longer record stays
 /// unpadded); the target is per-instance state, where Python keeps it on the class.
 /// </summary>
-internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
+internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>, IAsyncSerializer<SoakRecord>
 {
     private static readonly byte[] s_padUnit = Encoding.ASCII.GetBytes(" SoakRecord nr #0");
 
@@ -91,6 +93,11 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
 
         _padSource = pad;
     }
+
+    // The async producer's form: the record is encoded before the call returns.
+    public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+        string topic, SoakRecord? data, CancellationToken cancellationToken) =>
+        new ValueTask<ReadOnlyMemory<byte>?>(Serialize(topic, data));
 
     public ReadOnlyMemory<byte>? Serialize(string topic, SoakRecord? data)
     {
@@ -126,9 +133,14 @@ internal sealed class SoakRecordSerializer : ISerializer<SoakRecord>
 /// decodes to a marked record, which the consume loop counts and keeps out of the duplicate and gap
 /// accounting, as Python's soak counts its per-record <c>ValueError</c>.
 /// </summary>
-internal sealed class SoakRecordDeserializer : IDeserializer<SoakRecord>
+internal sealed class SoakRecordDeserializer : IDeserializer<SoakRecord>, IAsyncDeserializer<SoakRecord>
 {
     private const int PreviewBytes = 64;
+
+    // The async consumer's form: it parses the bytes it is lent before the call completes, copying none.
+    public ValueTask<SoakRecord?> Deserialize(
+        string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        new ValueTask<SoakRecord?>(Deserialize(topic, data.Span));
 
     // Total, where Python parses a memoryview in the loop: a throw would make Poll seek back to
     // this record and throw on it on every poll, and a byte[] value would copy every record.

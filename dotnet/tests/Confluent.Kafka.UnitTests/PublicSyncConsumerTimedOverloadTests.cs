@@ -301,7 +301,7 @@ public sealed class PublicSyncConsumerTimedOverloadTests
         ? new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer())
         : Real(defaultApiTimeoutMs: 60_000);
 
-    private static KafkaConsumer<byte[], byte[]> Real(int defaultApiTimeoutMs) => new KafkaConsumer<byte[], byte[]>(
+    private static KafkaConsumer<byte[], byte[]> Real(int defaultApiTimeoutMs) => KafkaConsumer<byte[], byte[]>.Create(
         new Dictionary<string, object?>
         {
             ["bootstrap.servers"] = "localhost:1",

@@ -265,7 +265,7 @@ public sealed class TransactionalBenchmark
         ITransactionalProducer? producer = null;
         try
         {
-            producer = _factory.CreateProducer(_config.TransactionalId + "-warmup");
+            producer = await _factory.CreateProducer(_config.TransactionalId + "-warmup").ConfigureAwait(false);
             await producer.InitTransactions().ConfigureAwait(false);
             long end = Stopwatch.GetTimestamp() + (long)_producer.WarmupSeconds * Stopwatch.Frequency;
             long i = 0;
@@ -313,7 +313,7 @@ public sealed class TransactionalBenchmark
         ITransactionalProducer producer;
         try
         {
-            producer = _factory.CreateProducer($"{_config.TransactionalId}-{index}");
+            producer = await _factory.CreateProducer($"{_config.TransactionalId}-{index}").ConfigureAwait(false);
         }
         catch (Exception e)
         {
@@ -386,7 +386,7 @@ public sealed class TransactionalBenchmark
         ITransactionalProducer producer;
         try
         {
-            producer = _factory.CreateProducer($"{_config.TransactionalId}-{index}");
+            producer = await _factory.CreateProducer($"{_config.TransactionalId}-{index}").ConfigureAwait(false);
         }
         catch (Exception e)
         {

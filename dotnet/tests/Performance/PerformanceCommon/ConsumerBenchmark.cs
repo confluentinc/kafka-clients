@@ -55,9 +55,14 @@ public sealed class ConsumerBenchmarkResult
 /// </summary>
 public static class ConsumerBenchmark
 {
-    public static ConsumerBenchmarkResult Run(ConsumerBenchmarkConfig config, IConsumerBackend backend, Metrics metrics)
+    /// <summary>
+    /// Runs the sync engine. <paramref name="verifier"/> is the one the backend feeds under <c>DO_VERIFY=True</c>,
+    /// reported in the summary and in the results file; <c>null</c> when the backend verifies nothing.
+    /// </summary>
+    public static ConsumerBenchmarkResult Run(
+        ConsumerBenchmarkConfig config, IConsumerBackend backend, Metrics metrics, PolledRecordVerifier? verifier = null)
     {
-        PrintHeader(config);
+        PrintHeader(config, verifier);
         backend.Subscribe(config.Topic);
         Func<IReadOnlyList<PolledRecord>> poll = config.PollSingle ? backend.PollSingle : backend.PollBatch;
 
@@ -121,7 +126,7 @@ public static class ConsumerBenchmark
             }
 
             // Before the close, so a failing close cannot discard the results.
-            return Summarize(config, measurement, measuredDuration, metrics);
+            return Summarize(config, measurement, measuredDuration, metrics, verifier);
         }
         finally
         {
@@ -131,9 +136,11 @@ public static class ConsumerBenchmark
         }
     }
 
-    public static async Task<ConsumerBenchmarkResult> RunAsync(ConsumerBenchmarkConfig config, IAsyncConsumerBackend backend, Metrics metrics)
+    /// <summary>Runs the async engine; <paramref name="verifier"/> as for <see cref="Run"/>.</summary>
+    public static async Task<ConsumerBenchmarkResult> RunAsync(
+        ConsumerBenchmarkConfig config, IAsyncConsumerBackend backend, Metrics metrics, PolledRecordVerifier? verifier = null)
     {
-        PrintHeader(config);
+        PrintHeader(config, verifier);
         await backend.Subscribe(config.Topic).ConfigureAwait(false);
         Func<Task<IReadOnlyList<PolledRecord>>> poll = config.PollSingle ? backend.PollSingle : backend.PollBatch;
 
@@ -198,7 +205,7 @@ public static class ConsumerBenchmark
             }
 
             // Before the close, so a failing close cannot discard the results.
-            return Summarize(config, measurement, measuredDuration, metrics);
+            return Summarize(config, measurement, measuredDuration, metrics, verifier);
         }
         finally
         {
@@ -290,7 +297,7 @@ public static class ConsumerBenchmark
         }
     }
 
-    private static void PrintHeader(ConsumerBenchmarkConfig config)
+    private static void PrintHeader(ConsumerBenchmarkConfig config, PolledRecordVerifier? verifier)
     {
         string mode = config.AsyncMode ? "async" : "sync";
         string pollMode = config.PollSingle ? "single" : "batch";
@@ -299,11 +306,12 @@ public static class ConsumerBenchmark
         Console.WriteLine(new string('=', 72));
         Console.WriteLine($"Bootstrap: {config.BootstrapServers}  Topic: {config.Topic}  Group: {config.GroupId}");
         Console.WriteLine($"Warmup: {config.WarmupSeconds}s  Measure: {config.TestDurationSeconds}s  Interval: {config.IntervalSeconds}s  Poll: {config.PollTimeoutMs}ms");
+        Console.WriteLine($"Verify: {verifier is not null}");
         Console.WriteLine(new string('=', 72));
     }
 
     private static ConsumerBenchmarkResult Summarize(
-        ConsumerBenchmarkConfig config, Measurement m, double duration, Metrics metrics)
+        ConsumerBenchmarkConfig config, Measurement m, double duration, Metrics metrics, PolledRecordVerifier? verifier)
     {
         long[] hist = m.LatencyHist;
         long p50 = LatencyHistogram.PercentileFromHist(hist, 0.50);
@@ -340,6 +348,12 @@ public static class ConsumerBenchmark
             Console.WriteLine($"RSS (MB):          avg={rssMb:F1}");
         }
 
+        // Every record polled, the warmup's included: the backend verifies before the engine sees the record.
+        if (verifier is not null)
+        {
+            Console.WriteLine($"Verified records:  {verifier.Records} polled  (bits set: {verifier.Ones}, failed: {verifier.Failed})");
+        }
+
         Console.WriteLine(new string('=', 72));
 
         // Not written when nothing was measured, as Python: zeros would read as a result.
@@ -371,8 +385,17 @@ public static class ConsumerBenchmark
             // all three are written, 0 without a sample.
             json.Append("  \"rss_avg_mb\": ").Append(PerfFormat.JsonFloat(rssMb)).Append(",\n");
             json.Append("  \"cpu_avg_pct\": ").Append(PerfFormat.JsonFloat(cpu)).Append(",\n");
-            json.Append("  \"rss_avg_kib\": ").Append(PerfFormat.JsonFloat(rssMb * 1024.0)).Append('\n');
-            json.Append('}');
+            json.Append("  \"rss_avg_kib\": ").Append(PerfFormat.JsonFloat(rssMb * 1024.0));
+            if (verifier is not null)
+            {
+                json.Append(",\n  \"verify\": {\n");
+                json.Append("    \"records\": ").Append(PerfFormat.Num(verifier.Records)).Append(",\n");
+                json.Append("    \"ones\": ").Append(PerfFormat.Num(verifier.Ones)).Append(",\n");
+                json.Append("    \"failed\": ").Append(PerfFormat.Num(verifier.Failed)).Append('\n');
+                json.Append("  }");
+            }
+
+            json.Append("\n}");
 
             writeFailed = !TryWriteResults(config.ResultsFile, json.ToString());
         }

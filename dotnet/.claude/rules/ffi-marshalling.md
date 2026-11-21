@@ -1551,7 +1551,7 @@ is the core's, so the binding adds none there.
 | `KafkaConsumer_t` / `MockConsumer_t` (class) and its `Consumer_t` view | 1 — client (`SafeConsumerHandle` over the view, the class pointer in a field; decision 6) | `Close` / `Dispose`: see the path list below. `KafkaConsumer_destroy_err` / `MockConsumer_destroy_err` with the class pointer, on the closing thread (BH:33170, BH:33218 at `3f8a5bc6`). The view is never destroyed (BH:33131-33134 at `3f8a5bc6`) |
 | `ConsumerConfig_t`, and the `kafka_Map_t` built for it | 1 — config (short-lived) | the binding: the map after `ConsumerConfig_new`, which leaves it the caller's; the config after `KafkaConsumer_new`, which copies it (BH:30835-30838, BH:33114 at `3f8a5bc6`) |
 | `kafka_common_Error_t` (any `out_err`, a `_cb` completion's `error`) | 2 — flat transient | reader: read the accessors, then `Error_destroy_err` |
-| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §6.4), keep-alive deferred; `ConsumerRecords_destroy_err` |
+| `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §6.4), keep-alive for the memory-form deserializers; `ConsumerRecords_destroy_err` |
 | a `kafka_List_t` / `kafka_Map_t` a query returns (`assignment`, `committed`, `partitions_for`, `list_topics`, `offsets_for_times`, `beginning_offsets`, …), `ConsumerGroupMetadata_t`, any other owned value type | 3 — owned result | caller: read and marshal into managed types, then `kafka_List_destroy_err` / `kafka_Map_destroy_err` / the type's `_destroy`. A container's destroy frees the elements it owns too (BH:40285-40295, BH:40401-40412 at `3f8a5bc6`); the list `ConsumerRecords_records_with_partition_err` returns is owned, its records borrowed (BH:32964-32966 at `3f8a5bc6`) |
 | a `ConsumerRecord_t` from a records handle, `Node_t`, every `kafka_List_get_err` / `kafka_Map_key_err` / `kafka_Map_value_err` / `kafka_Map_get_err` element, a borrowed `const char*`, and the partitions, offsets and error a listener or `onComplete` receives | 4 — borrowed view | **nobody**: it dies with its owner, or when the callback returns; never `_destroy` |
 | `ConsumerRebalanceListener_t` | 5 — registration copied by the callee | the **binding**, right after the `subscribe_*` call returns (success or error), or when no call was made (`ConsumerRebalanceListener_destroy_err`); `self_` follows §B6 (decision 23) |
@@ -1696,8 +1696,9 @@ const-ness and its header text decide, not the type name:
     **Default: copy-out**: copy each element or byte into an owned managed type,
     then `_destroy`. Metadata collections are always copy-out (small), and typed
     deserialization reads a transient span → owned `T` (copy-out too).
-    **Keep-alive** (hold the root, expose zero-copy views, `_destroy` at `Dispose`)
-    is a **deferred** option for the raw-byte surface only; see CLAUDE.md §6.4.
+    **Keep-alive** (hold the root in a `SafeConsumerRecordsHandle`, hand out views through
+    `BytesMemoryManager`, destroy when the GC releases the handle and no pin is open) is used
+    for the memory-form deserializers only; see CLAUDE.md §6.4.
   - **Category 4 — borrowed view.** A `ConsumerRecord_t` in a batch, `Node_t`, list
     and map elements, borrowed strings and what a callback receives are never passed
     to a `_destroy`, even where their type has one ("a record borrowed from a records
@@ -1900,22 +1901,15 @@ bytes are **copy-out by default**.
   - **"Buffer lifetime"** here is the *native* buffer's validity window
     (batch-scoped, until `_destroy`).
 
-**Raw bytes are the one copy-out case — and why.** The typed path is zero-copy:
-`IDeserializer<T>.Deserialize(ReadOnlySpan<byte>)` reads a span **directly over the
-native bytes** and returns an owned `T`; a ref-struct `Span` can't be stored or
-awaited, so it can't outlive the batch (safe). But the **raw-byte surface**
-(`ConsumerRecord.Value()` as bytes) is **copy-out by default** — the single place we
-copy on receive — because the only zero-copy alternative is a native-backed
-`ReadOnlyMemory<byte>` coupled to the batch lifetime, and in .NET a stored
-`ReadOnlyMemory` over native memory is a use-after-`Dispose` footgun (Python is
-safe only via its refcounted `memoryview`). So for raw bytes we trade one gen-0
-copy for safety + the Java owned-`ConsumerRecord` shape; keep-alive zero-copy is
-deferred (CLAUDE.md §6.4).
+Raw bytes are copy-out through a span deserializer or `ByteArrayDeserializer`, and zero-copy through a
+memory-form deserializer, whose `ReadOnlyMemory<byte>` is backed by a `BytesMemoryManager` that keeps the
+batch alive (CLAUDE.md §6.4).
 
 **Anti-patterns:**
 
-  - A stored `ReadOnlyMemory<byte>` over native batch memory (use-after-`Dispose`);
-    eager copies where a `ReadOnlySpan<byte>` deserialize read would do.
+  - A stored `ReadOnlyMemory<byte>` over native batch memory that is not backed by a
+    `BytesMemoryManager` (use-after-free); a span kept past its `MemoryHandle`; eager copies
+    where a `ReadOnlySpan<byte>` deserialize read would do.
   - Reading a borrowed key/value/topic slice after its batch is destroyed.
 
 **Tests required:**

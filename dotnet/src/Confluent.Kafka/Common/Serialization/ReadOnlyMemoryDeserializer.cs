@@ -14,16 +14,22 @@
 
 using System;
 
+using Confluent.Kafka.Common.Header;
+
 namespace Confluent.Kafka.Common.Serialization;
 
 /// <summary>
-/// Java's <c>ByteBufferDeserializer</c>, over <see cref="ReadOnlyMemory{T}"/> for Java's <c>ByteBuffer</c>: the bytes,
-/// copied into a new array, an empty one included. Java's wraps the given bytes without a copy; here they are valid only
-/// during the call (a consumer passes a view of the fetched batch), and a memory over them could not outlive it.
+/// Java's <c>ByteBufferDeserializer</c>, named after <see cref="ReadOnlyMemory{T}"/>, the .NET type that stands for
+/// Java's <c>ByteBuffer</c>. The memory form, which a consumer calls, returns the bytes as given, without a copy, as
+/// Java's wraps the given bytes. The span form, whose bytes are valid only during the call, copies them into a new
+/// array, an empty one included.
 /// </summary>
-public sealed class ByteBufferDeserializer : IDeserializer<ReadOnlyMemory<byte>?>
+public sealed class ReadOnlyMemoryDeserializer : IDeserializerWithReadOnlyMemory<ReadOnlyMemory<byte>?>
 {
     /// <inheritdoc/>
     public ReadOnlyMemory<byte>? Deserialize(string topic, ReadOnlySpan<byte> data) =>
         new ReadOnlyMemory<byte>(data.ToArray());
+
+    /// <inheritdoc/>
+    public ReadOnlyMemory<byte>? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data) => data;
 }

@@ -105,7 +105,7 @@ public sealed class PublicConsumerRecordAccessorTests
     public async Task AsyncPoll_Accessors_MockReachableContract()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             await TestTimeout.Run(

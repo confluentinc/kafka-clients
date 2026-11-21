@@ -254,12 +254,12 @@ internal sealed class SoakClient : IDisposable
             // Both clients are constructed before either loop starts, so a failure here
             // cannot leave a producer running with no consumer.
             logger.Info("producer: using client.id " + pconf["client.id"]);
-            var producer = new AsyncKafkaProducer<byte[], SoakRecord>(
-                SoakConfig.ClientConfigs(pconf), Serdes.ByteArray().Serializer(), new SoakRecordSerializer(options.PayloadSize));
+            var producer = await AsyncKafkaProducer<byte[], SoakRecord>.Create(
+                SoakConfig.ClientConfigs(pconf), new AsyncByteArraySerializer(), new SoakRecordSerializer(options.PayloadSize));
 
             logger.Info("consumer: using group.id " + (cconf.TryGetValue("group.id", out string? groupId) ? groupId : "<unset>"));
-            var consumer = new AsyncKafkaConsumer<byte[], SoakRecord>(
-                SoakConfig.ClientConfigs(cconf), Serdes.ByteArray().Deserializer(), new SoakRecordDeserializer());
+            var consumer = await AsyncKafkaConsumer<byte[], SoakRecord>.Create(
+                SoakConfig.ClientConfigs(cconf), new AsyncByteArrayDeserializer(), new SoakRecordDeserializer());
 
             var resources = new ProcessResourceSampler();
 

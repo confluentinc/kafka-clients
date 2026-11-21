@@ -270,7 +270,7 @@ public sealed class PublicProducerInCallbackTests
         object? maxBlockMs = null)
     {
         object maxBlock = maxBlockMs ?? MaxBlockMs.ToString(CultureInfo.InvariantCulture);
-        object producer = flavor == SyncFlavor ? Sync(maxBlock) : Async(maxBlock);
+        object producer = flavor == SyncFlavor ? Sync(maxBlock) : await Async(maxBlock);
         ProbeCallback callback = new ProbeCallback((_, _) => inCallback(producer));
         try
         {

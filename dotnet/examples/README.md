@@ -132,6 +132,11 @@ docker run -d --rm --name kafka -p 9092:9092 -p 9094:9094 \
 - **Send future.** `Send()` returns a `KafkaFuture` of the delivery: `producer.Send(record).Get()`
   gives the `RecordMetadata`. On `AsyncKafkaProducer`, awaiting `Send()` waits for buffer space and
   returns an `AsyncKafkaFuture`, so `await (await producer.Send(record)).Get()` gives it.
+- **Serializers.** The blocking clients take an `ISerializer<T>` or an `IDeserializer<T>`
+  (`StringSerializer`, `StringDeserializer`). The async clients take an `IAsyncSerializer<T>` or an
+  `IAsyncDeserializer<T>`, so `AsyncProducer` and `AsyncConsumer` pass the `Async` class of the same
+  built-in (`AsyncStringSerializer`, `AsyncStringDeserializer`), which the client calls without
+  awaiting. The package README describes serializers of one's own.
 - **Rebalance listener.** On `KafkaConsumer` its methods run on the thread calling `Poll()`; on
   `AsyncKafkaConsumer` they run on the consumer's own thread while `Poll()` runs. Either way the
   rebalance waits for them to return (for the async listener, for its `Task` to end). With the
