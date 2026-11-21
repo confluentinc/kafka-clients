@@ -162,7 +162,75 @@ function topicResultFactories(cls) {
   );
 }
 
+/**
+ * Java's package-private `DeleteConsumerGroupOffsetsResult(future,
+ * partitions)`, the library's `internalCreate`, the errors null for Java's
+ * `Errors.NONE` (src/admin/delete_consumer_group_offsets_result.ts).
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<import('@confluentinc/kafka-javascript/common').TopicPartitionMap<Error | null>>} future the future of each partition's error
+ * @param {import('@confluentinc/kafka-javascript/common').TopicPartitionSet} partitions the partitions of the request
+ * @returns {import('@confluentinc/kafka-javascript/admin').DeleteConsumerGroupOffsetsResult} the result
+ */
+function deleteConsumerGroupOffsetsResult(future, partitions) {
+  const { DeleteConsumerGroupOffsetsResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory =
+    /** @type {{ internalCreate(f: typeof future, p: typeof partitions): import('@confluentinc/kafka-javascript/admin').DeleteConsumerGroupOffsetsResult }} */ (
+      /** @type {unknown} */ (DeleteConsumerGroupOffsetsResult)
+    );
+  return factory.internalCreate(future, partitions);
+}
+
+/**
+ * Java's package-private `RemoveMembersFromConsumerGroupResult(future,
+ * memberInfos)`, the library's `internalCreate`, the errors keyed by group
+ * instance id and null for Java's `Errors.NONE`
+ * (src/admin/remove_members_from_consumer_group_result.ts).
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<Map<string | null, Error | null>>} future the future of each member's error
+ * @param {import('@confluentinc/kafka-javascript/admin').MemberToRemoveSet} memberInfos the members of the request
+ * @returns {import('@confluentinc/kafka-javascript/admin').RemoveMembersFromConsumerGroupResult} the result
+ */
+function removeMembersResult(future, memberInfos) {
+  const { RemoveMembersFromConsumerGroupResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory =
+    /** @type {{ internalCreate(f: typeof future, m: typeof memberInfos): import('@confluentinc/kafka-javascript/admin').RemoveMembersFromConsumerGroupResult }} */ (
+      /** @type {unknown} */ (RemoveMembersFromConsumerGroupResult)
+    );
+  return factory.internalCreate(future, memberInfos);
+}
+
+/**
+ * Java's package-private `ListGroupsResult(future)`, the library's
+ * `internalCreate` (src/admin/list_groups_result.ts).
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<Iterable<unknown>>} future the listings and errors
+ * @returns {import('@confluentinc/kafka-javascript/admin').ListGroupsResult} the result
+ */
+function listGroupsResult(future) {
+  const { ListGroupsResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory = /** @type {{ internalCreate(f: typeof future): import('@confluentinc/kafka-javascript/admin').ListGroupsResult }} */ (
+    /** @type {unknown} */ (ListGroupsResult)
+  );
+  return factory.internalCreate(future);
+}
+
+/**
+ * Java's package-private `ElectLeadersResult(electionFuture)`, the library's
+ * `internalCreate` (src/admin/elect_leaders_result.ts).
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<import('@confluentinc/kafka-javascript/common').TopicPartitionMap<unknown>>} future the election's outcome by partition
+ * @returns {import('@confluentinc/kafka-javascript/admin').ElectLeadersResult} the result
+ */
+function electLeadersResult(future) {
+  const { ElectLeadersResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory = /** @type {{ internalCreate(f: typeof future): import('@confluentinc/kafka-javascript/admin').ElectLeadersResult }} */ (
+    /** @type {unknown} */ (ElectLeadersResult)
+  );
+  return factory.internalCreate(future);
+}
+
 module.exports = {
+  electLeadersResult,
   createFuture,
   internalFuture,
   internalHeaders,
@@ -171,4 +239,7 @@ module.exports = {
   ffiId,
   internalNewTopic,
   topicResultFactories,
+  deleteConsumerGroupOffsetsResult,
+  removeMembersResult,
+  listGroupsResult,
 };

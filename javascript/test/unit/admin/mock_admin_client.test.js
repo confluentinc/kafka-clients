@@ -703,6 +703,14 @@ test('deleteTopics by id, and the forms of the topic RPCs', async () => {
 });
 
 test('the forms of the constructors and the methods', () => {
+  // A method of no parameter refuses an argument with the form error.
+  // @ts-expect-error a wrong argument: create() takes none
+  assert.throws(() => MockAdminClient.create(1), { name: 'IllegalArgumentError', message: 'create() takes one of (); got a number' });
+  // @ts-expect-error a wrong argument: build() takes none
+  assert.throws(() => MockAdminClient.create().build(1), {
+    name: 'IllegalArgumentError',
+    message: 'build() takes one of (); got a number',
+  });
   // @ts-expect-error a controller without brokers: the form check throws IllegalArgumentError
   assert.throws(() => new MockAdminClient({ controller: node(0) }), {
     name: 'IllegalArgumentError',
@@ -1012,7 +1020,11 @@ test("describeLogDirs: each broker asked for, its topics' replicas in their firs
   );
 });
 
-test("alterReplicaLogDirs: a known directory moves the replica, others fail as Java's mock fails them", async () => {
+// The core's mock answers each replica on its own; for broker 5 Java's
+// MockAdminClient#alterReplicaLogDirs calls brokerLogDirs.get(5) and throws
+// IndexOutOfBoundsException from the call, where the core's fails that
+// replica's future with ReplicaNotAvailableError.
+test("alterReplicaLogDirs: a known directory moves the replica, the others fail with the core's per-replica errors", async () => {
   const client = track(
     new MockAdminClient.Builder()
       .numBrokers(1)
@@ -1216,7 +1228,7 @@ test('listPartitionReassignments for given partitions answers only those reassig
   assert.equal(none.size(), 0);
 });
 
-test("alterPartitionReassignments fails a partition the mock has not with UnknownTopicOrPartitionError, as Java's mock does", async () => {
+test("alterPartitionReassignments fails a partition the mock has not with the core's UnknownTopicOrPartitionError", async () => {
   const client = admin();
   await client
     .createTopics([new NewTopic({ name: 't', numPartitions: 1, replicationFactor: 1 })])
@@ -1234,10 +1246,13 @@ test("alterPartitionReassignments fails a partition the mock has not with Unknow
   assert.equal(await values.get(tp('t', 0))?.get(), null);
   const out = values.get(tp('t', 5));
   assert.ok(out);
-  assert.ok((await failure(out)) instanceof UnknownTopicOrPartitionError);
-  const absent = values.get(tp('absent', 0));
-  assert.ok(absent);
-  assert.ok((await failure(absent)) instanceof UnknownTopicOrPartitionError);
+  // The core's message (Java's mock throws new UnknownTopicOrPartitionException(), whose message is null).
+  for (const future of [out, values.get(tp('absent', 0))]) {
+    assert.ok(future);
+    const cause = await failure(future);
+    assert.ok(cause instanceof UnknownTopicOrPartitionError);
+    assert.equal(cause.message, 'This server does not host this topic-partition.');
+  }
 });
 
 test('listOffsets answers the seeded beginning offset for earliest and the end offset for the other specs', async () => {
@@ -1292,6 +1307,18 @@ test('listOffsets answers the seeded beginning offset for earliest and the end o
     ).offset(),
     60n,
   );
+});
+
+test("listOffsets reads a null spec as Java's getOffsetFromSpec does: the latest offset", async () => {
+  const client = admin();
+  client.updateEndOffsets(new TopicPartitionMap([[tp('t', 0), 70n]]));
+  const info = await client
+    // @ts-expect-error a null the types forbid: Java's instanceof chain falls through to the latest offset
+    .listOffsets(new TopicPartitionMap([[tp('t', 0), null]]))
+    .partitionResult(tp('t', 0))
+    .get();
+  assert.equal(info.offset(), 70n);
+  await client.close();
 });
 
 test("listOffsets fails a TimestampSpec with Java's mock's UnsupportedOperationError, its isolation level aside", async () => {
@@ -1356,9 +1383,9 @@ test("the leader, reassignment and offset calls' arguments: Java's nulls as Type
     message: 'reassignments must not contain a null key',
   });
   assert.throws(
-    // @ts-expect-error a null value the types forbid: Java's OffsetSpec is dereferenced
-    () => client.listOffsets(new TopicPartitionMap([[tp('t', 0), null]])),
-    { name: 'TypeError', message: 'topicPartitionOffsets must not contain null' },
+    // @ts-expect-error a null the types forbid: Java's (Set) form calls Optional.of(partitions)
+    () => client.listPartitionReassignments({ partitions: null }),
+    { name: 'TypeError', message: 'partitions must not be null' },
   );
   assert.throws(
     () => client.listOffsets({ topicPartitionOffsets: new TopicPartitionMap(), options: new ListOffsetsOptions({ isolationLevel: null }) }),
@@ -1369,6 +1396,19 @@ test("the leader, reassignment and offset calls' arguments: Java's nulls as Type
     () => client.updateEndOffsets(null),
     { name: 'TypeError', message: 'newOffsets must not be null' },
   );
+  for (const update of [
+    // @ts-expect-error a wrong argument: Java's Map<TopicPartition, Long> is a TopicPartitionMap
+    () => client.updateEndOffsets(new Map([[tp('t', 0), 5n]])),
+    // @ts-expect-error a wrong argument: Java's Map<TopicPartition, Long> is a TopicPartitionMap
+    () => client.updateBeginningOffsets(new Map()),
+    // @ts-expect-error a wrong argument: Java's Map<TopicPartition, Long> is a TopicPartitionMap
+    () => client.updateConsumerGroupOffsets(new Map()),
+  ]) {
+    assert.throws(update, {
+      name: 'TypeError',
+      message: 'newOffsets must be a TopicPartitionMap, not a Map: build one with new TopicPartitionMap()',
+    });
+  }
   assert.throws(
     // @ts-expect-error a null value the types forbid: the C API takes each offset as a long
     () => client.updateBeginningOffsets(new TopicPartitionMap([[tp('t', 0), null]])),
@@ -1420,4 +1460,349 @@ test("the leader, reassignment and offset Results' readers only read", () => {
   ])) {
     assert.throws(call, { name: 'TypeError', message: `${name}() only reads: it takes no argument` });
   }
+});
+
+// ---- the group calls ----------------------------------------------------------------------
+//
+// The Rust core's mock tests of listConsumerGroupOffsets
+// (mock_list_consumer_group_offsets_rejects_a_negative_seeded_offset,
+// mock_list_consumer_group_offsets_negative_offset_outside_the_selection_is_ignored),
+// then what Java's mock does for the other group calls: listGroups lists one
+// group per seeded group config (none here), and describeConsumerGroups,
+// describeClassicGroups, deleteConsumerGroups, deleteConsumerGroupOffsets,
+// removeMembersFromConsumerGroup and alterConsumerGroupOffsets throw Java's
+// UnsupportedOperationException ("Not implemented yet"; "Not implement yet",
+// sic, for alterConsumerGroupOffsets), which the core's mock reports on the
+// futures.
+
+const {
+  MemberToRemove,
+  ListConsumerGroupOffsetsSpec,
+  RemoveMembersFromConsumerGroupOptions,
+} = require('@confluentinc/kafka-javascript/admin');
+const { OffsetAndMetadata } = require('@confluentinc/kafka-javascript/consumer');
+
+const groupTp = new TopicPartition({ topic: 'topic', partition: 0 });
+
+test('mock_list_consumer_group_offsets_rejects_a_negative_seeded_offset', async () => {
+  const mock = new MockAdminClient();
+  mock.updateConsumerGroupOffsets(new TopicPartitionMap([[groupTp, -1]]));
+  const specs = new Map([['group', new ListConsumerGroupOffsetsSpec()]]);
+  const cause = await failure(mock.listConsumerGroupOffsets(specs).partitionsToOffsetAndMetadata());
+  assert.ok(cause instanceof IllegalArgumentError);
+  assert.equal(cause.message, 'Invalid negative offset');
+  // The mock is still usable afterwards.
+  mock.updateConsumerGroupOffsets({ newOffsets: new TopicPartitionMap([[groupTp, 7n]]) });
+  const offsets = await mock.listConsumerGroupOffsets(specs).partitionsToOffsetAndMetadata().get();
+  assert.equal(offsets.get(groupTp)?.offset, 7n);
+  await mock.close();
+});
+
+test('mock_list_consumer_group_offsets_negative_offset_outside_the_selection_is_ignored', async () => {
+  const mock = new MockAdminClient();
+  const other = new TopicPartition({ topic: 'topic', partition: 1 });
+  mock.updateConsumerGroupOffsets(
+    new TopicPartitionMap([
+      [groupTp, 5n],
+      [other, -1n],
+    ]),
+  );
+  const specs = new Map([['group', new ListConsumerGroupOffsetsSpec({ topicPartitions: [groupTp] })]]);
+  const offsets = await mock.listConsumerGroupOffsets(specs).partitionsToOffsetAndMetadata().get();
+  assert.equal(offsets.size(), 1);
+  assert.equal(offsets.get(groupTp)?.offset, 5n);
+  await mock.close();
+});
+
+// The core's mock answers every seeded offset for one group; Java 4.4.0's
+// default spec has null topicPartitions, which Java's mock dereferences
+// (NullPointerException).
+test("listConsumerGroupOffsets: the core's mock answers every seeded offset for one group; several groups not implemented", async () => {
+  const mock = new MockAdminClient();
+  mock.updateConsumerGroupOffsets(new TopicPartitionMap([[groupTp, 3n]]));
+  const result = mock.listConsumerGroupOffsets('any');
+  const all = await result.all().get();
+  assert.deepEqual([...all.keys()], ['any']);
+  const offsets = all.get('any');
+  assert.ok(offsets);
+  const committed = offsets.get(groupTp);
+  assert.ok(committed instanceof OffsetAndMetadata);
+  assert.equal(String(committed), "OffsetAndMetadata{offset=3, leaderEpoch=null, metadata=''}");
+  const two = mock.listConsumerGroupOffsets({
+    groupSpecs: { a: new ListConsumerGroupOffsetsSpec(), b: new ListConsumerGroupOffsetsSpec() },
+  });
+  const cause = await failure(two.partitionsToOffsetAndMetadata('a'));
+  assert.ok(cause instanceof UnsupportedOperationError);
+  assert.equal(cause.message, 'Not implemented yet');
+  await mock.close();
+});
+
+test("listGroups lists one CONSUMER / consumer / STABLE group per seeded group config, as Java's mock does", async () => {
+  const { GroupListing } = require('@confluentinc/kafka-javascript/admin');
+  const { ConfigResource, ConfigResourceMap } = require('@confluentinc/kafka-javascript/common/config');
+  const { GroupState, GroupType } = require('@confluentinc/kafka-javascript/common');
+  const mock = new MockAdminClient();
+  const resource = new ConfigResource({ type: ConfigResource.Type.GROUP, name: 'g1' });
+  const op = new AlterConfigOp({
+    configEntry: new ConfigEntry({ name: 'consumer.session.timeout.ms', value: '45000' }),
+    operationType: AlterConfigOp.OpType.SET,
+  });
+  await mock
+    .incrementalAlterConfigs(new ConfigResourceMap([[resource, [op]]]))
+    .all()
+    .get();
+  const [listing, ...rest] = await mock.listGroups().all().get();
+  assert.deepEqual(rest, []);
+  assert.ok(listing instanceof GroupListing);
+  assert.equal(listing.groupId(), 'g1');
+  assert.equal(listing.type(), GroupType.CONSUMER);
+  assert.equal(listing.protocol(), 'consumer');
+  assert.equal(listing.groupState(), GroupState.STABLE);
+  assert.equal(listing.isSimpleConsumerGroup(), false);
+  assert.equal(String(listing), "(groupId='g1', type=Consumer, protocol='consumer', groupState=Stable)");
+  assert.deepEqual(await mock.listGroups().valid().get(), [listing]);
+  assert.deepEqual(await mock.listGroups().errors().get(), []);
+  await mock.close();
+});
+
+test("listGroups: one listing per seeded group config, none here; Java's three futures", async () => {
+  const mock = new MockAdminClient();
+  const result = mock.listGroups();
+  assert.deepEqual(await result.all().get(), []);
+  assert.deepEqual(await result.valid().get(), []);
+  assert.deepEqual(await result.errors().get(), []);
+  await mock.close();
+});
+
+test("a client's RemoveMembersFromConsumerGroupResult runs Java's two checks for a null member, or one with a null group instance id", async () => {
+  const mock = new MockAdminClient();
+  const some = mock.removeMembersFromConsumerGroup({
+    groupId: 'g',
+    options: new RemoveMembersFromConsumerGroupOptions([new MemberToRemove('i')]),
+  });
+  // @ts-expect-error a null the types forbid: Java's HashSet holds none
+  assert.throws(() => some.memberResult(null), {
+    name: 'IllegalArgumentError',
+    message: 'Member null was not included in the original request',
+  });
+  const all = mock.removeMembersFromConsumerGroup({ groupId: 'g', options: new RemoveMembersFromConsumerGroupOptions() });
+  // @ts-expect-error a null the types forbid: the removeAll check comes first
+  assert.throws(() => all.memberResult(null), {
+    name: 'IllegalArgumentError',
+    message: "The method: memberResult is not applicable in 'removeAll' mode",
+  });
+  // A member whose group instance id is null is in no request either: Java's
+  // Object.toString() of it, Objects.hash(null) being 31 (0x1f).
+  const noId = new MemberToRemove(null);
+  assert.throws(() => some.memberResult(noId), {
+    name: 'IllegalArgumentError',
+    message: 'Member org.apache.kafka.clients.admin.MemberToRemove@1f was not included in the original request',
+  });
+  assert.throws(() => all.memberResult(noId), {
+    name: 'IllegalArgumentError',
+    message: "The method: memberResult is not applicable in 'removeAll' mode",
+  });
+  await mock.close();
+});
+
+test("the group calls Java's mock does not implement fail their futures with UnsupportedOperationError", async () => {
+  const mock = new MockAdminClient();
+  const member = new MemberToRemove('i');
+  /** @type {Array<[import('@confluentinc/kafka-javascript/common').KafkaFuture<unknown>, string]>} */
+  const futures = [
+    [mock.describeConsumerGroups(['g']).all(), 'Not implemented yet'],
+    [mock.describeClassicGroups(['g']).all(), 'Not implemented yet'],
+    [mock.deleteConsumerGroups(['g']).all(), 'Not implemented yet'],
+    [mock.deleteConsumerGroupOffsets({ groupId: 'g', partitions: [groupTp] }).partitionResult(groupTp), 'Not implemented yet'],
+    [mock.deleteConsumerGroupOffsets({ groupId: 'g', partitions: [groupTp] }).all(), 'Not implemented yet'],
+    [
+      mock
+        .removeMembersFromConsumerGroup({ groupId: 'g', options: new RemoveMembersFromConsumerGroupOptions([member]) })
+        .memberResult(member),
+      'Not implemented yet',
+    ],
+    [
+      mock.removeMembersFromConsumerGroup({ groupId: 'g', options: new RemoveMembersFromConsumerGroupOptions() }).all(),
+      'Not implemented yet',
+    ],
+    [
+      mock
+        .alterConsumerGroupOffsets({ groupId: 'g', offsets: new TopicPartitionMap([[groupTp, new OffsetAndMetadata(1n)]]) })
+        .partitionResult(groupTp),
+      'Not implement yet',
+    ],
+  ];
+  for (const [future, message] of futures) {
+    const cause = await failure(future);
+    assert.ok(cause instanceof UnsupportedOperationError, String(cause));
+    assert.equal(cause.message, message);
+  }
+  await mock.close();
+});
+
+test("updateConsumerGroupOffsets' forms: a TopicPartitionMap of offsets only", async () => {
+  const mock = new MockAdminClient();
+  // @ts-expect-error a plain Map where Java takes Map<TopicPartition, Long>
+  assert.throws(() => mock.updateConsumerGroupOffsets(new Map()), {
+    name: 'TypeError',
+    message: 'newOffsets must be a TopicPartitionMap, not a Map: build one with new TopicPartitionMap()',
+  });
+  assert.throws(
+    // @ts-expect-error a null offset
+    () => mock.updateConsumerGroupOffsets(new TopicPartitionMap([[groupTp, null]])),
+    { name: 'TypeError' },
+  );
+  await mock.close();
+});
+
+test('removeMembersFromConsumerGroup in several worker threads: each call carries its own members', () => {
+  // The addon is loaded once per process and shared by every worker, so the
+  // members the native options are built from must stay the calling thread's.
+  const { spawnSync } = require('node:child_process');
+  const path = require('node:path');
+  const script = `
+    const { Worker } = require('node:worker_threads');
+    const body = \`
+      const { parentPort, workerData } = require('node:worker_threads');
+      const { MemberToRemove, MockAdminClient, RemoveMembersFromConsumerGroupOptions } = require('@confluentinc/kafka-javascript/admin');
+      (async () => {
+        const mock = new MockAdminClient();
+        const mine = new MemberToRemove(workerData);
+        let wrong = 0;
+        for (let i = 0; i < 5000; i++) {
+          const r = mock.removeMembersFromConsumerGroup({ groupId: 'g', options: new RemoveMembersFromConsumerGroupOptions([mine]) });
+          try { r.memberResult(mine); } catch (e) { wrong += 1; }
+        }
+        await mock.close();
+        parentPort.postMessage(wrong);
+      })();
+    \`;
+    Promise.all(['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta'].map((name) => new Promise((res, rej) => {
+      const w = new Worker(body, { eval: true, workerData: name });
+      w.once('message', res);
+      w.once('error', rej);
+    }))).then((wrong) => console.log(JSON.stringify(wrong)), (e) => { console.error(e); process.exit(1); });
+  `;
+  const r = spawnSync(process.execPath, ['--no-warnings', '-e', script], {
+    cwd: path.join(__dirname, '..', '..', '..'),
+    encoding: 'utf8',
+    timeout: 120000,
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, '[0,0,0,0,0,0,0,0]\n');
+}, 150000);
+
+test("the checks run in Java's order: options first, where Java's body reads them before the arguments it only stores", async () => {
+  const mock = new MockAdminClient();
+  for (const call of [
+    // @ts-expect-error nulls the types forbid: Java's first statement is options.reason()
+    () => mock.removeMembersFromConsumerGroup({ groupId: null, options: null }),
+    // @ts-expect-error nulls the types forbid: Java's handler stores the partitions, then reads options.timeoutMs()
+    () => mock.deleteConsumerGroupOffsets({ groupId: 'g', partitions: null, options: null }),
+    // @ts-expect-error nulls the types forbid: Java's handler stores the offsets, then reads options.timeoutMs()
+    () => mock.alterConsumerGroupOffsets({ groupId: null, offsets: null, options: null }),
+    // @ts-expect-error nulls the types forbid: Java reads options.requireStable() first
+    () => mock.listConsumerGroupOffsets({ groupId: null, options: null }),
+    // @ts-expect-error nulls the types forbid: Java reads options.timeoutMs() before the election type
+    () => mock.electLeaders({ electionType: null, partitions: null, options: null }),
+    // @ts-expect-error nulls the types forbid: Java reads options.timeoutMs() before the types
+    () => mock.listConfigResources({ configResourceTypes: null, options: null }),
+  ]) {
+    assert.throws(call, { name: 'TypeError', message: 'options must not be null' });
+  }
+  const tpNullTopic = new TopicPartition({ topic: null, partition: 0 });
+  for (const call of [
+    // @ts-expect-error nulls the types forbid: Java iterates the ids, storing a null one, before options.includeAuthorizedOperations()
+    () => mock.describeConsumerGroups({ groupIds: [null], options: null }),
+    // @ts-expect-error nulls the types forbid: likewise for the classic groups
+    () => mock.describeClassicGroups({ groupIds: [null], options: null }),
+    // @ts-expect-error nulls the types forbid: Java reads options.timeoutMs() before it uses the ids
+    () => mock.deleteConsumerGroups({ groupIds: [null], options: null }),
+    // @ts-expect-error nulls the types forbid: Java reads options.timeoutMs() for each broker's call before it unboxes the id
+    () => mock.describeLogDirs({ brokers: [null], options: null }),
+    // @ts-expect-error nulls the types forbid: Java reads the operations only when it builds the request
+    () => mock.incrementalAlterConfigs({ configs: new ConfigResourceMap([[resource(Type.TOPIC, 't'), null]]), options: null }),
+    // @ts-expect-error nulls the types forbid: Java reads a key's topic only when it builds the request
+    () => mock.listOffsets({ topicPartitionOffsets: new TopicPartitionMap([[tpNullTopic, OffsetSpec.latest()]]), options: null }),
+  ]) {
+    assert.throws(call, { name: 'TypeError', message: 'options must not be null' });
+  }
+  // A null collection or key Java dereferences first.
+  assert.throws(
+    // @ts-expect-error nulls the types forbid: Java iterates the ids first
+    () => mock.describeConsumerGroups({ groupIds: null, options: null }),
+    { name: 'TypeError', message: 'groupIds must not be null' },
+  );
+  assert.throws(
+    // @ts-expect-error nulls the types forbid: Java's unmodifiable map refuses a null key first
+    () => mock.listOffsets({ topicPartitionOffsets: new TopicPartitionMap([[null, OffsetSpec.latest()]]), options: null }),
+    { name: 'TypeError', message: 'topicPartitionOffsets must not contain a null key' },
+  );
+  assert.throws(
+    // @ts-expect-error nulls the types forbid: Java's nodeFor dereferences each resource first
+    () => mock.incrementalAlterConfigs({ configs: new ConfigResourceMap([[null, []]]), options: null }),
+    { name: 'TypeError', message: 'configs must not contain a null key' },
+  );
+  // The (Map, options) form reads groupSpecs.keySet() before the options.
+  // @ts-expect-error nulls the types forbid: Java's first dereference is groupSpecs
+  assert.throws(() => mock.listConsumerGroupOffsets({ groupSpecs: null, options: null }), {
+    name: 'TypeError',
+    message: 'groupSpecs must not be null',
+  });
+  // A null spec is read only when the request is built: the options first.
+  // @ts-expect-error nulls the types forbid: Java reads options.requireStable() before the specs
+  assert.throws(() => mock.listConsumerGroupOffsets({ groupSpecs: { g: null }, options: null }), {
+    name: 'TypeError',
+    message: 'options must not be null',
+  });
+  await mock.close();
+});
+
+test("the R2 RPCs' one-parameter forms by name work as their bare forms", async () => {
+  const A = require('@confluentinc/kafka-javascript/admin');
+  const C = require('@confluentinc/kafka-javascript/common');
+  const { ConfigResource } = require('@confluentinc/kafka-javascript/common/config');
+  const mock = new MockAdminClient();
+  const p = new C.TopicPartition({ topic: 't', partition: 0 });
+  const replica = new C.TopicPartitionReplica({ topic: 't', partition: 0, brokerId: 0 });
+  /** @type {Array<[unknown, Function]>} */
+  const calls = [
+    [mock.describeConfigs({ resources: [new ConfigResource({ type: ConfigResource.Type.TOPIC, name: 't' })] }), A.DescribeConfigsResult],
+    [mock.alterReplicaLogDirs({ replicaAssignment: new C.TopicPartitionReplicaMap([[replica, '/tmp']]) }), A.AlterReplicaLogDirsResult],
+    [mock.describeLogDirs({ brokers: [0] }), A.DescribeLogDirsResult],
+    [mock.describeReplicaLogDirs({ replicas: [replica] }), A.DescribeReplicaLogDirsResult],
+    [
+      mock.alterPartitionReassignments({ reassignments: new C.TopicPartitionMap([[p, new A.NewPartitionReassignment([0])]]) }),
+      A.AlterPartitionReassignmentsResult,
+    ],
+    [mock.listOffsets({ topicPartitionOffsets: new C.TopicPartitionMap([[p, A.OffsetSpec.latest()]]) }), A.ListOffsetsResult],
+    [mock.describeConsumerGroups({ groupIds: ['g'] }), A.DescribeConsumerGroupsResult],
+    [mock.describeClassicGroups({ groupIds: ['g'] }), A.DescribeClassicGroupsResult],
+    [mock.deleteConsumerGroups({ groupIds: ['g'] }), A.DeleteConsumerGroupsResult],
+    [mock.listPartitionReassignments({ options: new A.ListPartitionReassignmentsOptions() }), A.ListPartitionReassignmentsResult],
+    [mock.listGroups({ options: new A.ListGroupsOptions() }), A.ListGroupsResult],
+    [mock.listConsumerGroupOffsets({ groupId: 'g' }), A.ListConsumerGroupOffsetsResult],
+  ];
+  for (const [result, cls] of calls) assert.ok(result instanceof cls, cls.name);
+  mock.updateBeginningOffsets({ newOffsets: new C.TopicPartitionMap([[p, 0n]]) });
+  await mock.close();
+});
+
+test('list_topics_and_describe_configs_count_down_the_same_counter', async () => {
+  const { ConfigResource } = require('@confluentinc/kafka-javascript/common/config');
+  const mock = new MockAdminClient.Builder().numBrokers(3).build();
+  await mock
+    .createTopics([new NewTopic({ name: 't', numPartitions: 1, replicationFactor: 1 })])
+    .all()
+    .get();
+  mock.setFetchesRemainingUntilVisible({ topicName: 't', fetchesRemainingUntilVisible: 2 });
+  assert.deepEqual([...(await mock.listTopics().names().get())], [], 'the first fetch hides t');
+  const resource = new ConfigResource({ type: ConfigResource.Type.TOPIC, name: 't' });
+  const future = mock.describeConfigs([resource]).values().get(resource);
+  assert.ok(future);
+  const cause = await failure(future);
+  assert.ok(cause instanceof UnknownTopicOrPartitionError, 'the second fetch hides t');
+  assert.equal(cause.message, "Resource ConfigResource(type=TOPIC, name='t') not found.");
+  assert.deepEqual([...(await mock.listTopics().names().get())], ['t'], 'the counter reached zero');
+  await mock.close();
 });

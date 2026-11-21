@@ -177,8 +177,56 @@ const ALLOWED = [
     reason: "the entries of Java's Map<TopicPartitionReplica, V> the caller builds or a call returns, not a store of records",
   },
   {
+    key: 'MemberToRemoveSet.#members',
+    reason: "the members of Java's Set<MemberToRemove> an options object holds, not a store of records",
+  },
+  {
     key: 'DescribeLogDirsResult.#futures',
     reason: "one call's futures by broker id (Java's Map<Integer, KafkaFuture<...>>), not a store of records",
+  },
+  {
+    key: 'DeleteConsumerGroupsResult.#futures',
+    reason: "one call's futures by group id (Java's Map<String, KafkaFuture<Void>>), not a store of records",
+  },
+  {
+    key: 'DescribeClassicGroupsResult.#futures',
+    reason: "one call's futures by group id (Java's Map<String, KafkaFuture<ClassicGroupDescription>>), not a store of records",
+  },
+  {
+    key: 'DescribeConsumerGroupsResult.#futures',
+    reason: "one call's futures by group id (Java's Map<String, KafkaFuture<ConsumerGroupDescription>>), not a store of records",
+  },
+  {
+    key: 'ListConsumerGroupOffsetsResult.#futures',
+    reason: "one call's futures by group id (Java's Map<CoordinatorKey, KafkaFuture<...>>), not a store of records",
+  },
+  {
+    key: 'ClassicGroupDescription.members',
+    reason: "one group's members (Java's Collection<MemberDescription>), not a store of records",
+  },
+  {
+    key: 'ConsumerGroupDescription.members',
+    reason: "one group's members (Java's Collection<MemberDescription>), not a store of records",
+  },
+  {
+    key: 'ListConsumerGroupOffsetsSpec.#topicPartitions',
+    reason: "one group's partitions to list (Java's Collection<TopicPartition>), not a store of records",
+  },
+  {
+    key: 'ListGroupsOptions.#groupStates',
+    reason: "the group states to list (Java's Set<GroupState>), not a store of records",
+  },
+  {
+    key: 'ListGroupsOptions.#types',
+    reason: "the group types to list (Java's Set<GroupType>), not a store of records",
+  },
+  {
+    key: 'ListGroupsOptions.#protocolTypes',
+    reason: "the protocol types to list (Java's Set<String>), not a store of records",
+  },
+  {
+    key: 'RemoveMembersFromConsumerGroupOptions.#members',
+    reason: "the members to remove (Java's Set<MemberToRemove>), not a store of records",
   },
   {
     key: 'NewPartitionReassignment.#targetReplicas',

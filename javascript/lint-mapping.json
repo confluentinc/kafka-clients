@@ -48,7 +48,18 @@
     "NewPartitionReassignment.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "PartitionReassignment.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "ElectionType.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name",
-    "IsolationLevel.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name"
+    "IsolationLevel.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name",
+    "src/admin/member_to_remove_set.ts:MemberToRemoveSet": "the set of MemberToRemove for Java's Set<MemberToRemove>: JavaScript has no value equality for set members (root CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; design/current/javascript-admin/PLAN.md, D2)",
+    "GroupListing.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "MemberAssignment.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "MemberToRemove.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "MemberDescription.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "ConsumerGroupDescription.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "ClassicGroupDescription.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "ListConsumerGroupOffsetsSpec.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "GroupState.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name",
+    "GroupType.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name",
+    "ClassicGroupState.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name"
   },
   "javaTargets": {
     "Header.constructor": "org.apache.kafka.common.header.internals.RecordHeader#RecordHeader",
