@@ -173,6 +173,16 @@ export class Node {
     static noNode(): Node;
     readonly port: number;
     readonly rack: string | null;
+    toJSON(): {
+        id: number;
+        idString: string;
+        host: string | null;
+        port: number;
+        hasRack: boolean;
+        rack: string | null;
+        isFenced: boolean;
+        isEmpty: boolean;
+    };
     toString(): string;
 }
 
@@ -204,6 +214,7 @@ export class PartitionInfo {
     offlineReplicas(): Node[] | null;
     partition(): number;
     replicas(): Node[] | null;
+    toJSON(): Record<string, unknown>;
     topic(): string | null;
     toString(): string;
 }
