@@ -59,6 +59,18 @@ import type { ConfigResource } from '../common/config/config_resource';
 import type { ConfigResourceMap } from '../common/config/config_resource_map';
 import type { TopicPartitionReplica } from '../common/topic_partition_replica';
 import type { TopicPartitionReplicaMap } from '../common/topic_partition_replica_map';
+import type { AlterPartitionReassignmentsOptions } from './alter_partition_reassignments_options';
+import type { AlterPartitionReassignmentsResult } from './alter_partition_reassignments_result';
+import type { ElectLeadersOptions } from './elect_leaders_options';
+import type { ElectLeadersResult } from './elect_leaders_result';
+import type { ListOffsetsOptions } from './list_offsets_options';
+import type { ListOffsetsResult } from './list_offsets_result';
+import type { ListPartitionReassignmentsOptions } from './list_partition_reassignments_options';
+import type { ListPartitionReassignmentsResult } from './list_partition_reassignments_result';
+import type { NewPartitionReassignment } from './new_partition_reassignment';
+import type { OffsetSpec } from './offset_spec';
+import type { ElectionType } from '../common/election_type';
+import type { TopicPartition } from '../common/topic_partition';
 
 const CREATE_FORMS = new JavaForms('create', [['configs']], {
   bareIsPlainObject: true,
@@ -638,6 +650,213 @@ export interface Admin {
     /** The options to use when listing the configuration resources. */
     options: ListConfigResourcesOptions;
   }): ListConfigResourcesResult;
+
+  /**
+   * Elect a replica as leader for topic partitions.
+   *
+   * This is a convenience method for `electLeaders({ electionType, partitions, options })` with default
+   * options.
+   *
+   * @param args - the electionType, partitions
+   * @returns The ElectLeadersResult.
+   */
+  electLeaders(args: {
+    /** The type of election to conduct. */
+    electionType: ElectionType;
+    /** The topics and partitions for which to conduct elections, or null for all of them. */
+    partitions: Iterable<TopicPartition> | null;
+    options?: never;
+  }): ElectLeadersResult;
+  /**
+   * Elect a replica as leader for the given `partitions`, or for all partitions if the argument to
+   * `partitions` is null.
+   *
+   * This operation is not transactional so it may succeed for some partitions while fail for others.
+   *
+   * It may take several seconds after this method returns success for all the brokers in the cluster to
+   * become aware that the partitions have new leaders. During this time, `describeTopics()` may not return
+   * information about the partitions' new leaders.
+   *
+   * This operation is supported by brokers with version 2.2.0 or later if preferred election is use;
+   * otherwise the brokers most be 2.4.0 or higher.
+   *
+   * The following errors can be anticipated when calling `get()` on the future obtained from the returned
+   * `ElectLeadersResult`: `ClusterAuthorizationError` if the authenticated user didn't have alter access to
+   * the cluster; `UnknownTopicOrPartitionError` if the topic or partition did not exist within the cluster;
+   * `InvalidTopicError` if the topic was already queued for deletion; `NotControllerError` if the request was
+   * sent to a broker that was not the controller for the cluster; `TimeoutError` if the request timed out
+   * before the election was complete; `LeaderNotAvailableError` if the preferred leader was not alive or not
+   * in the ISR.
+   *
+   * @param args - the electionType, partitions, and the options to use
+   * @returns The ElectLeadersResult.
+   */
+  electLeaders(args: {
+    /** The type of election to conduct. */
+    electionType: ElectionType;
+    /** The topics and partitions for which to conduct elections, or null for all of them. */
+    partitions: Iterable<TopicPartition> | null;
+    /** The options to use. */
+    options: ElectLeadersOptions;
+  }): ElectLeadersResult;
+
+  /**
+   * Change the reassignments for one or more partitions. Providing null will revert the reassignment for the
+   * associated partition.
+   *
+   * This is a convenience method for `alterPartitionReassignments({ reassignments, options })` with default
+   * options. See the overload for more details.
+   *
+   * @param reassignments - The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`.
+   * @returns The AlterPartitionReassignmentsResult.
+   */
+  alterPartitionReassignments(reassignments: TopicPartitionMap<NewPartitionReassignment | null>): AlterPartitionReassignmentsResult;
+  /**
+   * The same as `alterPartitionReassignments(reassignments)`, the reassignments given by name.
+   *
+   * @param args - the reassignments
+   * @returns The AlterPartitionReassignmentsResult.
+   */
+  alterPartitionReassignments(args: {
+    /** The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`. */
+    reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
+    options?: never;
+  }): AlterPartitionReassignmentsResult;
+  /**
+   * Change the reassignments for one or more partitions. Providing null will revert the reassignment for the
+   * associated partition.
+   *
+   * The following errors can be anticipated when calling `get()` on the futures obtained from the returned
+   * `AlterPartitionReassignmentsResult`: `ClusterAuthorizationError` If the authenticated user didn't have
+   * alter access to the cluster; `UnknownTopicOrPartitionError` If the topic or partition does not exist
+   * within the cluster; `TimeoutError` if the request timed out before the controller could record the new
+   * assignments; `InvalidReplicaAssignmentError` If the specified assignment was not valid;
+   * `InvalidReplicationFactorError` If the replication factor was changed in an invalid way, only thrown when
+   * `AlterPartitionReassignmentsOptions.allowReplicationFactorChange()` is set to false and the request is
+   * attempting to alter reassignments (not cancel); `UnsupportedVersionError` If
+   * `AlterPartitionReassignmentsOptions.allowReplicationFactorChange()` was changed outside the default and
+   * the server does not support the option (e.g due to an old Kafka version); `NoReassignmentInProgressError`
+   * If there was an attempt to cancel a reassignment for a partition which was not being reassigned.
+   *
+   * @param args - the reassignments, and the options to use
+   * @returns The AlterPartitionReassignmentsResult.
+   */
+  alterPartitionReassignments(args: {
+    /** The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`. */
+    reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
+    /** The options to use. */
+    options: AlterPartitionReassignmentsOptions;
+  }): AlterPartitionReassignmentsResult;
+
+  /**
+   * List all of the current partition reassignments.
+   *
+   * This is a convenience method for `listPartitionReassignments({ options })`
+   * with default options. See the overload for more details.
+   *
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(): ListPartitionReassignmentsResult;
+  /**
+   * List the current reassignments for the given partitions.
+   *
+   * This is a convenience method for `listPartitionReassignments({
+   * partitions, options })` with default options. See the overload for more
+   * details.
+   *
+   * @param partitions - The topic partitions to list reassignments for.
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(partitions: Iterable<TopicPartition>): ListPartitionReassignmentsResult;
+  /**
+   * The same as `listPartitionReassignments(partitions)`, the partitions given by name.
+   *
+   * @param args - the partitions
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(args: {
+    /** The topic partitions to list reassignments for. */
+    partitions: Iterable<TopicPartition>;
+    options?: never;
+  }): ListPartitionReassignmentsResult;
+  /**
+   * List the current reassignments for the given partitions, or for all
+   * partitions when `partitions` is null (Java's empty `Optional`).
+   *
+   * The following errors can be anticipated when calling `get()` on the futures obtained from the
+   * returned `ListPartitionReassignmentsResult`: `ClusterAuthorizationError` If the authenticated user
+   * doesn't have alter access to the cluster; `UnknownTopicOrPartitionError` If a given topic or
+   * partition does not exist; `TimeoutError` If the request timed out before the controller could list
+   * the current reassignments.
+   *
+   * @param args - the partitions, and the options to use
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(args: {
+    /** The topic partitions to list reassignments for, or null for all of them. */
+    partitions: Iterable<TopicPartition> | null;
+    /** The options to use. */
+    options: ListPartitionReassignmentsOptions;
+  }): ListPartitionReassignmentsResult;
+  /**
+   * List all of the current partition reassignments.
+   *
+   * The following errors can be anticipated when calling `get()` on the futures obtained from the
+   * returned `ListPartitionReassignmentsResult`: `ClusterAuthorizationError` If the authenticated user
+   * doesn't have alter access to the cluster; `UnknownTopicOrPartitionError` If a given topic or
+   * partition does not exist; `TimeoutError` If the request timed out before the controller could list
+   * the current reassignments.
+   *
+   * @param args - the options to use
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(args: {
+    /** The options to use. */
+    options: ListPartitionReassignmentsOptions;
+    partitions?: never;
+  }): ListPartitionReassignmentsResult;
+  /**
+   * The same as `listPartitionReassignments({ options })`: the options on their own.
+   *
+   * @param options - the options to use
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(options: ListPartitionReassignmentsOptions): ListPartitionReassignmentsResult;
+
+  /**
+   * List offset for the specified partitions and OffsetSpec. This operation enables to find the beginning
+   * offset, end offset as well as the offset matching a timestamp in partitions.
+   *
+   * This is a convenience method for `listOffsets({ topicPartitionOffsets, options })`.
+   *
+   * @param topicPartitionOffsets - The mapping from partition to the OffsetSpec to look up.
+   * @returns The ListOffsetsResult.
+   */
+  listOffsets(topicPartitionOffsets: TopicPartitionMap<OffsetSpec>): ListOffsetsResult;
+  /**
+   * The same as `listOffsets(topicPartitionOffsets)`, the topicPartitionOffsets given by name.
+   *
+   * @param args - the topicPartitionOffsets
+   * @returns The ListOffsetsResult.
+   */
+  listOffsets(args: {
+    /** The mapping from partition to the OffsetSpec to look up. */
+    topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
+    options?: never;
+  }): ListOffsetsResult;
+  /**
+   * List offset for the specified partitions. This operation enables to find the beginning offset, end offset
+   * as well as the offset matching a timestamp in partitions.
+   *
+   * @param args - the topicPartitionOffsets, and the options to use
+   * @returns The ListOffsetsResult.
+   */
+  listOffsets(args: {
+    /** The mapping from partition to the OffsetSpec to look up. */
+    topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
+    /** The options to use. */
+    options: ListOffsetsOptions;
+  }): ListOffsetsResult;
 }
 
 /**

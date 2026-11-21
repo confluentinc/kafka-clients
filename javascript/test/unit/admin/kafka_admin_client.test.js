@@ -35,7 +35,11 @@
 // assertions (testDescribeLogDirsWithCordonedDir and assertDescriptionContains)
 // are ported as Python ports them, over the conversion of the addon's rows
 // (test/unit/internal/admin_config_calls.test.js); the rest of those calls'
-// Java tests need MockClient.
+// Java tests need MockClient. KafkaAdminClientTest#testElectLeaders,
+// #testListPartitionReassignments and #testListOffsets drive MockClient too
+// (core: test_elect_leaders, test_list_partition_reassignments,
+// test_list_offsets); their calls are ported as Python ports them, timing out
+// against the unreachable address with the core's message.
 // Then the binding's own: the forms, liveness and the native objects'
 // lifetimes, each in a child process.
 
@@ -46,14 +50,20 @@ const path = require('node:path');
 const { ExecutionError, IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
 const {
   Admin,
+  AlterPartitionReassignmentsOptions,
   CreateTopicsOptions,
   DescribeClusterOptions,
   DescribeTopicsOptions,
+  ElectLeadersOptions,
   KafkaAdminClient,
+  ListOffsetsOptions,
+  ListPartitionReassignmentsOptions,
   ListTopicsOptions,
+  NewPartitionReassignment,
   NewTopic,
+  OffsetSpec,
 } = require('@confluentinc/kafka-javascript/admin');
-const { KafkaError } = require('@confluentinc/kafka-javascript/common');
+const { ElectionType, KafkaError, TopicPartition, TopicPartitionMap } = require('@confluentinc/kafka-javascript/common');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { BootstrapResolutionError, InvalidTopicError, TimeoutError } = require('@confluentinc/kafka-javascript/common/errors');
 
@@ -212,6 +222,57 @@ test("a call that finds no node times out with the core's TimeoutError", async (
     const cause = await failure(client.describeCluster(new DescribeClusterOptions({ timeoutMs: 500 })).nodes());
     assert.ok(cause instanceof TimeoutError);
     assert.match(/** @type {Error} */ (cause).message, /^Timed out waiting for a node assignment\. Call: /);
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test("the leader, reassignment and offset calls return at once and time out with the core's message naming Java's call", async () => {
+  const client = admin();
+  const tp = new TopicPartition({ topic: 't', partition: 0 });
+  /** @type {Array<[string, () => KafkaFuture<unknown>]>} */
+  const calls = [
+    [
+      'electLeaders',
+      () =>
+        client
+          .electLeaders({ electionType: ElectionType.PREFERRED, partitions: [tp], options: new ElectLeadersOptions({ timeoutMs: 300 }) })
+          .partitions(),
+    ],
+    [
+      'alterPartitionReassignments',
+      () =>
+        client
+          .alterPartitionReassignments({
+            reassignments: new TopicPartitionMap([[tp, new NewPartitionReassignment([1])]]),
+            options: new AlterPartitionReassignmentsOptions({ timeoutMs: 300 }),
+          })
+          .all(),
+    ],
+    [
+      'listPartitionReassignments',
+      () => client.listPartitionReassignments(new ListPartitionReassignmentsOptions({ timeoutMs: 300 })).reassignments(),
+    ],
+    [
+      'listOffsets(api=METADATA)',
+      () =>
+        client
+          .listOffsets({
+            topicPartitionOffsets: new TopicPartitionMap([[tp, OffsetSpec.latest()]]),
+            options: new ListOffsetsOptions().timeoutMs(300),
+          })
+          .all(),
+    ],
+  ];
+  try {
+    for (const [call, run] of calls) {
+      const started = Date.now();
+      const future = run();
+      assert.ok(Date.now() - started < 1000, call);
+      const cause = await failure(future);
+      assert.ok(cause instanceof TimeoutError, call);
+      assert.equal(cause.message, `Timed out waiting for a node assignment. Call: ${call}`);
+    }
   } finally {
     await client.close({ timeout: 0 });
   }
@@ -420,8 +481,8 @@ test('the native objects are freed: the client once closed and collected, each r
   const r = runNode(
     `
     const native = require('./dist/internal/native.js');
-    const { Admin, AlterConfigOp, ConfigEntry, MockAdminClient, NewTopic } = require('@confluentinc/kafka-javascript/admin');
-    const { TopicCollection, TopicPartitionReplica, TopicPartitionReplicaMap } = require('@confluentinc/kafka-javascript/common');
+    const { Admin, AlterConfigOp, ConfigEntry, MockAdminClient, NewPartitionReassignment, NewTopic, OffsetSpec } = require('@confluentinc/kafka-javascript/admin');
+    const { ElectionType, TopicCollection, TopicPartition, TopicPartitionMap, TopicPartitionReplica, TopicPartitionReplicaMap } = require('@confluentinc/kafka-javascript/common');
     const { ConfigResource, ConfigResourceMap } = require('@confluentinc/kafka-javascript/common/config');
     (async () => {
       const before = native.adminStats();
@@ -458,6 +519,15 @@ test('the native objects are freed: the client once closed and collected, each r
         const replica = new TopicPartitionReplica({ topic: 't', partition: 0, brokerId: 0 });
         await t.alterReplicaLogDirs(new TopicPartitionReplicaMap([[replica, '/tmp/kafka-logs']])).all().get();
         await t.describeReplicaLogDirs([replica]).all().get();
+        // The leader, reassignment and offset calls: a map of futures keyed by
+        // TopicPartition, the partition_result futures, and one future each.
+        const tp = new TopicPartition({ topic: 't', partition: 0 });
+        t.updateEndOffsets(new TopicPartitionMap([[tp, 3n]]));
+        await t.listOffsets(new TopicPartitionMap([[tp, OffsetSpec.latest()], [new TopicPartition({ topic: 't', partition: 9 }), OffsetSpec.forTimestamp(1)]])).partitionResult(tp).get();
+        await t.alterPartitionReassignments(new TopicPartitionMap([[tp, new NewPartitionReassignment([0])]])).all().get();
+        await t.listPartitionReassignments().reassignments().get();
+        t.listPartitionReassignments([tp]);
+        await t.electLeaders({ electionType: ElectionType.PREFERRED, partitions: null }).all().get().catch(() => {});
         await t.deleteTopics(['t']).all().get();
         await t.close();
       }
