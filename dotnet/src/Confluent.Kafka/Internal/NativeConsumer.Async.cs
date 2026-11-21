@@ -179,16 +179,25 @@ internal sealed partial class NativeConsumer
             pattern, () => ListenerRegistration.Root(listener, _reporter), cancellationToken);
     }
 
-    internal Task RebalanceWithCallback(IReadOnlyCollection<TopicPartition> newAssignment) =>
+    internal Task RebalanceWithCallback(
+        IReadOnlyCollection<TopicPartition> newAssignment,
+        CancellationToken cancellationToken = default) =>
         RunMockPartitions(
-            newAssignment, nameof(newAssignment), NativeMethods.MockConsumerRebalanceCb, AsyncOperation.Rebalance);
+            newAssignment,
+            nameof(newAssignment),
+            NativeMethods.MockConsumerRebalanceCb,
+            AsyncOperation.Rebalance,
+            cancellationToken);
 
-    internal Task LosePartitionsWithCallback(IReadOnlyCollection<TopicPartition> partitionsLost) =>
+    internal Task LosePartitionsWithCallback(
+        IReadOnlyCollection<TopicPartition> partitionsLost,
+        CancellationToken cancellationToken = default) =>
         RunMockPartitions(
             partitionsLost,
             nameof(partitionsLost),
             NativeMethods.MockConsumerLosePartitionsCb,
-            AsyncOperation.LosePartitions);
+            AsyncOperation.LosePartitions,
+            cancellationToken);
 
     private Task SubscribeWithRegistration(
         IReadOnlyCollection<string> topics,
@@ -266,11 +275,12 @@ internal sealed partial class NativeConsumer
         IReadOnlyCollection<TopicPartition> partitions,
         string paramName,
         NativeMockPartitionsCb call,
-        AsyncOperation operation)
+        AsyncOperation operation,
+        CancellationToken cancellationToken)
     {
         (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions, paramName: paramName);
         return Finish(
-            Submit(CancellationToken.None, s_void, (arguments, opaque) =>
+            Submit(cancellationToken, s_void, (arguments, opaque) =>
             {
                 bool added = false;
                 try
@@ -291,7 +301,7 @@ internal sealed partial class NativeConsumer
             },
             refusesOtherThreads: true),
             operation,
-            CancellationToken.None);
+            cancellationToken);
     }
 
     internal Task UnsubscribeWithCallback(CancellationToken cancellationToken = default)

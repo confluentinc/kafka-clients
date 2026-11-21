@@ -342,7 +342,7 @@ public sealed class ZeroCopyDeserializationTests
     {
         internal List<string> Forms { get; } = new List<string>();
 
-        internal Headers? Headers { get; private set; }
+        internal IHeaders? Headers { get; private set; }
 
         public string? Deserialize(string topic, ReadOnlySpan<byte> data)
         {
@@ -350,13 +350,13 @@ public sealed class ZeroCopyDeserializationTests
             return Encoding.UTF8.GetString(data.ToArray());
         }
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlySpan<byte> data)
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlySpan<byte> data)
         {
             Forms.Add("headers");
             return Encoding.UTF8.GetString(data.ToArray());
         }
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data)
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlyMemory<byte> data)
         {
             Forms.Add("memory");
             Headers = headers;
@@ -375,7 +375,7 @@ public sealed class ZeroCopyDeserializationTests
             return Encoding.UTF8.GetString(data.ToArray());
         }
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlySpan<byte> data)
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlySpan<byte> data)
         {
             Forms.Add("headers");
             return Encoding.UTF8.GetString(data.ToArray());
@@ -409,7 +409,7 @@ public sealed class ZeroCopyDeserializationTests
         public ReadOnlyMemory<byte>? Deserialize(string topic, ReadOnlySpan<byte> data) =>
             throw new InvalidOperationException("The consumer calls the memory form.");
 
-        public ReadOnlyMemory<byte>? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data)
+        public ReadOnlyMemory<byte>? Deserialize(string topic, IHeaders headers, ReadOnlyMemory<byte> data)
         {
             if (Encoding.UTF8.GetString(data.ToArray()) == _failOn)
             {

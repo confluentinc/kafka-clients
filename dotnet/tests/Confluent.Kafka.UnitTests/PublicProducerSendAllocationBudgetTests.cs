@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -52,11 +53,11 @@ public sealed class PublicProducerSendAllocationBudgetTests
 
     // The absolute per-send budget, which the marginal budget cannot see: the measured 472 B (net8.0, net10.0; the
     // delivery state, its KafkaFutureImpl with the field that caches the Get() task, the delivery task, the record and
-    // the record's Headers) plus 8 B, less than one more object.
+    // the record's RecordHeaders) plus 8 B, less than one more object.
     private const long FastPathPerSendBudgetBytes = 480;
 
     // The same send through two serializers that are not built-ins and complete at once, so the awaited path runs with
-    // no wait: the measured 536 B (net8.0, net10.0; the fast path's 472 B and the mock's new Headers for each of the
+    // no wait: the measured 536 B (net8.0, net10.0; the fast path's 472 B and the mock's new RecordHeaders for each of the
     // two awaited serializers) plus 8 B.
     private const long AwaitedPathPerSendBudgetBytes = 544;
 

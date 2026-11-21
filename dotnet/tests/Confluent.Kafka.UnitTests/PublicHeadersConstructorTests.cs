@@ -16,27 +16,28 @@ using System;
 using System.Collections.Generic;
 
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
-/// <summary><see cref="Headers"/>'s public constructors, Java's <c>RecordHeaders</c> constructors.</summary>
+/// <summary><see cref="RecordHeaders"/>'s public constructors, Java's <c>RecordHeaders</c> constructors.</summary>
 public sealed class PublicHeadersConstructorTests
 {
     [Fact]
     public void TheConstructors_CopyTheirInput()
     {
-        Header header = new Header("key", new byte[] { (byte)'v' });
-        List<Header> source = new List<Header> { header };
-        Headers headers = new Headers(source);
-        source.Add(new Header("key", new byte[] { (byte)'w' }));
+        RecordHeader header = new RecordHeader("key", new byte[] { (byte)'v' });
+        List<RecordHeader> source = new List<RecordHeader> { header };
+        RecordHeaders headers = new RecordHeaders(source);
+        source.Add(new RecordHeader("key", new byte[] { (byte)'w' }));
 
         Assert.Same(header, Assert.Single(headers));
 
-        List<Header> backing = new List<Header> { header };
-        Headers original = Headers.Wrap(backing);
-        Headers copy = new Headers(original);
-        backing.Add(new Header("key", new byte[] { (byte)'w' }));
+        List<IHeader> backing = new List<IHeader> { header };
+        RecordHeaders original = RecordHeaders.Wrap(backing);
+        RecordHeaders copy = new RecordHeaders(original);
+        backing.Add(new RecordHeader("key", new byte[] { (byte)'w' }));
 
         Assert.NotSame(original, copy);
         Assert.Equal(2, original.ToArray().Length);
@@ -46,16 +47,16 @@ public sealed class PublicHeadersConstructorTests
     [Fact]
     public void ANullHeader_ThrowsWithJavasMessage()
     {
-        AssertJavasNullHeader(Assert.Throws<ArgumentNullException>(() => new Headers(new Header[1])));
-        AssertJavasNullHeader(Assert.Throws<ArgumentNullException>(() => new Headers(new List<Header> { null! })));
+        AssertJavasNullHeader(Assert.Throws<ArgumentNullException>(() => new RecordHeaders(new RecordHeader[1])));
+        AssertJavasNullHeader(Assert.Throws<ArgumentNullException>(() => new RecordHeaders(new List<RecordHeader> { null! })));
     }
 
     [Fact]
     public void NoArgumentOrNull_GivesEmptyHeaders()
     {
-        Assert.Empty(new Headers());
-        Assert.Empty(new Headers(null));
-        Assert.Empty(new Headers((IEnumerable<Header>?)null));
+        Assert.Empty(new RecordHeaders());
+        Assert.Empty(new RecordHeaders(null));
+        Assert.Empty(new RecordHeaders((IEnumerable<RecordHeader>?)null));
     }
 
     private static void AssertJavasNullHeader(ArgumentNullException exception)

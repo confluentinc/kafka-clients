@@ -41,7 +41,7 @@ internal sealed class AsyncSerializerOver<T> : IAsyncSerializerWithHeaders<T>, I
         new ValueTask<ReadOnlyMemory<byte>?>(_inner.Serialize(topic, data));
 
     public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-        string topic, Headers headers, T? data, CancellationToken cancellationToken) =>
+        string topic, IHeaders headers, T? data, CancellationToken cancellationToken) =>
         new ValueTask<ReadOnlyMemory<byte>?>(_withHeaders is null
             ? _inner.Serialize(topic, data)
             : _withHeaders.Serialize(topic, headers, data));

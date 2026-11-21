@@ -19,6 +19,7 @@ using System.Reflection;
 using System.Text;
 
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -65,7 +66,7 @@ public sealed class PublicProducerRecordTests
     [Fact]
     public void Ctor_TopicPartitionTimestampKeyValueHeaders_KeepsEveryField()
     {
-        Header header = new Header("h", Bytes("x"));
+        RecordHeader header = new RecordHeader("h", Bytes("x"));
         ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", 3, 42L, "k", "v", new[] { header });
 
         Assert.Equal("t", record.Topic());
@@ -92,7 +93,7 @@ public sealed class PublicProducerRecordTests
     [Fact]
     public void Ctor_TopicPartitionKeyValueHeaders_HasNoTimestamp()
     {
-        Header header = new Header("h", Bytes("x"));
+        RecordHeader header = new RecordHeader("h", Bytes("x"));
         ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", 3, "k", "v", new[] { header });
 
         Assert.Equal("t", record.Topic());
@@ -153,7 +154,7 @@ public sealed class PublicProducerRecordTests
         (Type Type, string Name) timestamp = (typeof(long?), "timestamp");
         (Type Type, string Name) keyParameter = (key, "key");
         (Type Type, string Name) valueParameter = (value, "value");
-        (Type Type, string Name) headers = (typeof(IEnumerable<Header>), "headers");
+        (Type Type, string Name) headers = (typeof(IEnumerable<IHeader>), "headers");
         List<(Type Type, string Name)[]> expected = new List<(Type Type, string Name)[]>
         {
             new[] { topic, partition, timestamp, keyParameter, valueParameter, headers },
@@ -305,7 +306,7 @@ public sealed class PublicProducerRecordTests
     public void ToString_RendersTheHeaders()
     {
         ProducerRecord<string, string> record = new ProducerRecord<string, string>(
-            Topic, value: "v", key: "k", headers: new[] { new Header("h", new byte[] { 0x01, 0xff }), new Header("n", null) }, partition: null);
+            Topic, value: "v", key: "k", headers: new[] { new RecordHeader("h", new byte[] { 0x01, 0xff }), new RecordHeader("n", null) }, partition: null);
 
         Assert.Equal(
             "ProducerRecord(topic=record-topic, partition=null, headers=RecordHeaders(headers = "
@@ -346,17 +347,17 @@ public sealed class PublicProducerRecordTests
     public void Equals_ComparesTheHeadersAndTimestamp_AndAByteArrayByReference()
     {
         ProducerRecord<string, string> record = new ProducerRecord<string, string>(
-            "t", value: "v", key: "k", timestamp: 5L, headers: new[] { new Header("k", Bytes("v")) }, partition: null);
+            "t", value: "v", key: "k", timestamp: 5L, headers: new[] { new RecordHeader("k", Bytes("v")) }, partition: null);
 
         ProducerRecord<string, string> equalHeaders = new ProducerRecord<string, string>(
-            "t", value: "v", key: "k", timestamp: 5L, headers: new[] { new Header("k", Bytes("v")) }, partition: null);
+            "t", value: "v", key: "k", timestamp: 5L, headers: new[] { new RecordHeader("k", Bytes("v")) }, partition: null);
         Assert.Equal(record, equalHeaders);
         Assert.Equal(record.GetHashCode(), equalHeaders.GetHashCode());
 
         Assert.NotEqual(record, new ProducerRecord<string, string>("t", value: "v", key: "k", timestamp: 5L, partition: null));
         Assert.NotEqual(
             record,
-            new ProducerRecord<string, string>("t", value: "v", key: "k", timestamp: 6L, headers: new[] { new Header("k", Bytes("v")) }, partition: null));
+            new ProducerRecord<string, string>("t", value: "v", key: "k", timestamp: 6L, headers: new[] { new RecordHeader("k", Bytes("v")) }, partition: null));
         Assert.False(record.Equals(null));
 
         byte[] value = Bytes("v");
@@ -514,14 +515,14 @@ public sealed class PublicProducerRecordTests
         Assert.Null(r.Timestamp());
         Assert.Null(r.Key());
         Assert.Equal(Bytes("v"), r.Value());
-        Assert.Equal(new Headers(), r.Headers());
+        Assert.Equal(new RecordHeaders(), r.Headers());
         Assert.Empty(r.Headers().ToArray());
 
         byte[] raw = Bytes("h");
         ProducerRecord<byte[], byte[]> tombstone = new ProducerRecord<byte[], byte[]>(
-            "t", value: null, key: Bytes("k"), partition: null, headers: new[] { new Header("a", raw), new Header("b", null) });
+            "t", value: null, key: Bytes("k"), partition: null, headers: new[] { new RecordHeader("a", raw), new RecordHeader("b", null) });
         Assert.Null(tombstone.Value());
-        Header[] headers = tombstone.Headers().ToArray();
+        IHeader[] headers = tombstone.Headers().ToArray();
         Assert.Equal(2, headers.Length);
         Assert.Equal("a", headers[0].Key());
         Assert.Equal("b", headers[1].Key());
@@ -545,18 +546,18 @@ public sealed class PublicProducerRecordTests
         ProducerRecord<byte[], byte[]> nullTimestamp = new ProducerRecord<byte[], byte[]>(
             "t", value: Bytes("v"), key: Bytes("k"), partition: 0, timestamp: null);
         Assert.Null(nullTimestamp.Timestamp());
-        Assert.Equal(new Headers(), nullTimestamp.Headers());
+        Assert.Equal(new RecordHeaders(), nullTimestamp.Headers());
 
         ProducerRecord<byte[], byte[]> emptyHeaders = new ProducerRecord<byte[], byte[]>(
-            "t", value: Bytes("v"), key: null, partition: null, headers: Array.Empty<Header>());
+            "t", value: Bytes("v"), key: null, partition: null, headers: Array.Empty<RecordHeader>());
         Assert.Null(emptyHeaders.Timestamp());
-        Assert.Equal(new Headers(), emptyHeaders.Headers());
+        Assert.Equal(new RecordHeaders(), emptyHeaders.Headers());
     }
 
     [Fact]
     public void Ctor_NullHeader_ThrowsArgumentNull_AfterTheOtherChecks()
     {
-        Header[] withNull = { new Header("k", null), null! };
+        RecordHeader[] withNull = { new RecordHeader("k", null), null! };
 
         ArgumentNullException nullHeader = Assert.Throws<ArgumentNullException>(
             () => new ProducerRecord<string, string>("t", value: "v", headers: withNull, key: null, partition: null));
@@ -580,8 +581,8 @@ public sealed class PublicProducerRecordTests
     [Fact]
     public void Ctor_HeadersArgument_IsCopied_NotSharedOrSealed()
     {
-        Header given = new Header("k", Bytes("v"));
-        Headers source = new Headers(new[] { given });
+        RecordHeader given = new RecordHeader("k", Bytes("v"));
+        RecordHeaders source = new RecordHeaders(new[] { given });
         source.SetReadOnly();
 
         ProducerRecord<string, string> record = new ProducerRecord<string, string>("t", value: "v", key: "k", headers: source, partition: null);
@@ -589,21 +590,21 @@ public sealed class PublicProducerRecordTests
         Assert.Equal(source, record.Headers());
         Assert.Same(record.Headers(), record.Headers());
         Assert.Same(given, record.Headers().ToArray()[0]);
-        Assert.False(record.Headers().IsReadOnly);
-        Assert.True(source.IsReadOnly);
+        Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
+        Assert.True(source.IsReadOnly());
 
         record.Headers().Add("more", null);
         Assert.Equal(2, record.Headers().ToArray().Length);
         Assert.Single(source.ToArray());
 
-        Headers writable = new Headers(new[] { given });
+        RecordHeaders writable = new RecordHeaders(new[] { given });
         ProducerRecord<string, string> fromHeaders = new ProducerRecord<string, string>("t", value: "v", headers: writable, key: null, partition: null);
         writable.Add("later", null);
         Assert.Single(fromHeaders.Headers().ToArray());
 
-        List<Header> list = new List<Header> { given };
+        List<RecordHeader> list = new List<RecordHeader> { given };
         ProducerRecord<string, string> fromList = new ProducerRecord<string, string>("t", value: "v", headers: list, key: null, partition: null);
-        list.Add(new Header("later", null));
+        list.Add(new RecordHeader("later", null));
         fromList.Headers().Add("own", null);
         Assert.Equal(new[] { "k", "own" }, Keys(fromList.Headers()));
         Assert.Equal(2, list.Count);
@@ -628,10 +629,10 @@ public sealed class PublicProducerRecordTests
         return content;
     }
 
-    private static List<string> Keys(Headers headers)
+    private static List<string> Keys(IHeaders headers)
     {
         List<string> keys = new List<string>();
-        foreach (Header header in headers)
+        foreach (IHeader header in headers)
         {
             keys.Add(header.Key());
         }

@@ -758,6 +758,90 @@ public sealed class PublicConsumerRebalanceListenerTests
             exception.Message);
     }
 
+    [Fact]
+    public async Task AsyncMock_Rebalance_WithACanceledToken_ThrowsAndRebalancesNothing()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        AsyncRecordingListener listener = new AsyncRecordingListener();
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, listener), s_deadline);
+        using CancellationTokenSource cancel = new CancellationTokenSource();
+        cancel.Cancel();
+
+        OperationCanceledException exception = await Assert.ThrowsAsync<OperationCanceledException>(
+            () => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }, cancel.Token));
+
+        Assert.Equal(cancel.Token, exception.CancellationToken);
+        Assert.Empty(consumer.Assignment());
+        Assert.Empty(listener.Assigned);
+    }
+
+    [Fact]
+    public async Task AsyncMock_Rebalance_CanceledWhileItsListenerRuns_EndsCanceledOnceTheRebalanceHasEnded()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        TaskCompletionSource<bool> release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using ManualResetEventSlim entered = new ManualResetEventSlim(false);
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, new PendingAsyncListener(entered, release.Task)), s_deadline);
+        using CancellationTokenSource cancel = new CancellationTokenSource();
+
+        Task rebalance = consumer.Rebalance(new[] { tp0 }, cancel.Token);
+        Assert.True(entered.Wait(s_deadline), "the listener callback never fired");
+        cancel.Cancel();
+        await Task.WhenAny(rebalance, Task.Delay(s_notYetWindow));
+        Assert.False(rebalance.IsCompleted, "Rebalance ended while its listener's Task was still pending.");
+        release.SetResult(true);
+
+        OperationCanceledException exception = await Assert.ThrowsAsync<OperationCanceledException>(
+            () => TestTimeout.Run(() => rebalance, s_deadline));
+        Assert.Equal(cancel.Token, exception.CancellationToken);
+        Assert.Equal(new[] { tp0 }, consumer.Assignment().ToArray());
+    }
+
+    [Fact]
+    public async Task AsyncMock_LosePartitions_WithACanceledToken_ThrowsAndLosesNothing()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        AsyncRecordingListener listener = new AsyncRecordingListener();
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, listener), s_deadline);
+        await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0 }), s_deadline);
+        using CancellationTokenSource cancel = new CancellationTokenSource();
+        cancel.Cancel();
+
+        OperationCanceledException exception = await Assert.ThrowsAsync<OperationCanceledException>(
+            () => consumer.LosePartitions(new[] { tp0 }, cancel.Token));
+
+        Assert.Equal(cancel.Token, exception.CancellationToken);
+        Assert.Equal(new[] { tp0 }, consumer.Assignment().ToArray());
+        Assert.Empty(listener.Lost);
+    }
+
+    [Fact]
+    public async Task AsyncMock_LosePartitions_CanceledByItsListener_EndsCanceledWithThePartitionsLost()
+    {
+        TopicPartition tp0 = new TopicPartition(Topic, 0);
+        using CancellationTokenSource cancel = new CancellationTokenSource();
+        AsyncMockConsumer<byte[], byte[]> consumer = NewAsyncMock();
+        await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
+        AsyncDelegateListener listener = new AsyncDelegateListener(lost: _ =>
+        {
+            cancel.Cancel();
+            return Task.CompletedTask;
+        });
+        await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }, listener), s_deadline);
+        await TestTimeout.Run(() => consumer.Rebalance(new[] { tp0 }), s_deadline);
+
+        OperationCanceledException exception = await Assert.ThrowsAsync<OperationCanceledException>(
+            () => TestTimeout.Run(() => consumer.LosePartitions(new[] { tp0 }, cancel.Token), s_deadline));
+
+        Assert.Equal(cancel.Token, exception.CancellationToken);
+        Assert.Empty(consumer.Assignment());
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]

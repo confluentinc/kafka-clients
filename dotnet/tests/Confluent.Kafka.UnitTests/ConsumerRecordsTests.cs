@@ -18,6 +18,7 @@ using System.Globalization;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Consumer;
 
@@ -164,7 +165,7 @@ public sealed class ConsumerRecordsTests
         int emptyPartitionIndex = 2;
         TopicPartition topicPartition = new TopicPartition(topic, 0);
         ConsumerRecord<int?, string> newRecord = new ConsumerRecord<int?, string>(
-            topic, 0, 0, 0L, TimestampType.CREATE_TIME, 0, 0, 0, "0", new Headers(), null);
+            topic, 0, 0, 0L, TimestampType.CREATE_TIME, 0, 0, 0, "0", new RecordHeaders(), null);
         ConsumerRecords<int?, string> records =
             BuildTopicTestRecords(recordSize, partitionSize, emptyPartitionIndex, new[] { topic });
         ConsumerRecords<int?, string> emptyRecords = ConsumerRecords<int?, string>.Empty();
@@ -368,7 +369,7 @@ public sealed class ConsumerRecordsTests
                     {
                         records.Add(new ConsumerRecord<int?, string>(
                             topic, i, j, 0L, TimestampType.CREATE_TIME, 0, 0, j,
-                            j.ToString(CultureInfo.InvariantCulture), new Headers(), null));
+                            j.ToString(CultureInfo.InvariantCulture), new RecordHeaders(), null));
                     }
                 }
 

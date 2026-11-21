@@ -25,7 +25,7 @@ namespace Confluent.Kafka.Common.Serialization;
 /// Converts a <typeparamref name="T"/> to the bytes of a record key or value without blocking a thread: the form of
 /// Java's <c>Serializer&lt;T&gt;</c> that an asynchronous producer takes, for a serializer that waits, as one that
 /// reads a schema registry does. Its headers overload is
-/// <see cref="AsyncSerializerExtensions.Serialize{T}(IAsyncSerializer{T}, string, Headers, T, CancellationToken)"/>, which a
+/// <see cref="AsyncSerializerExtensions.Serialize{T}(IAsyncSerializer{T}, string, IHeaders, T, CancellationToken)"/>, which a
 /// serializer replaces by implementing <see cref="IAsyncSerializerWithHeaders{T}"/>, and its <c>configure</c> is
 /// <see cref="AsyncSerializerExtensions.Configure{T}(IAsyncSerializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
 /// which a serializer replaces by implementing <see cref="IAsyncSerializerWithConfigure{T}"/>. Java's <c>close</c> is
@@ -79,7 +79,7 @@ public interface IAsyncSerializer<T>
 /// </summary>
 /// <remarks>
 /// An asynchronous producer refuses, when it is built, a serializer that declares a public
-/// <c>Serialize(string, Headers, T, CancellationToken)</c> but does not implement this interface, since it would never
+/// <c>Serialize(string, IHeaders, T, CancellationToken)</c> but does not implement this interface, since it would never
 /// call that method. The check reads the type's metadata, so under trimming or Native AOT, which can remove a method
 /// nothing calls, it is best effort.
 /// </remarks>
@@ -103,7 +103,7 @@ public interface IAsyncSerializerWithHeaders<T> : IAsyncSerializer<T>
     /// <returns>The bytes, or <see langword="null"/>, as
     /// <see cref="IAsyncSerializer{T}.Serialize(string, T, CancellationToken)"/> returns them.</returns>
     ValueTask<ReadOnlyMemory<byte>?> Serialize(
-        string topic, Headers headers, T? data, CancellationToken cancellationToken = default);
+        string topic, IHeaders headers, T? data, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -139,7 +139,7 @@ public static class AsyncSerializerExtensions
 {
     /// <summary>
     /// Encodes <paramref name="data"/> with the record's headers, Java's <c>Serializer.serialize(String, Headers, T)</c>:
-    /// <see cref="IAsyncSerializerWithHeaders{T}.Serialize(string, Headers, T, CancellationToken)"/> when
+    /// <see cref="IAsyncSerializerWithHeaders{T}.Serialize(string, IHeaders, T, CancellationToken)"/> when
     /// <paramref name="serializer"/> implements it, and otherwise
     /// <see cref="IAsyncSerializer{T}.Serialize(string, T, CancellationToken)"/>, the headers unused.
     /// </summary>
@@ -154,7 +154,7 @@ public static class AsyncSerializerExtensions
     public static ValueTask<ReadOnlyMemory<byte>?> Serialize<T>(
         this IAsyncSerializer<T> serializer,
         string topic,
-        Headers headers,
+        IHeaders headers,
         T? data,
         CancellationToken cancellationToken = default)
     {

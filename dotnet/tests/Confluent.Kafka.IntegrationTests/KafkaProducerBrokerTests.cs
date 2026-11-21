@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Performance.Tests;
@@ -36,7 +37,8 @@ namespace Confluent.Kafka.IntegrationTests;
 /// <summary>
 /// The producer's send against a broker: a record taken on the calling thread once its topic's metadata is
 /// cached, a record taken at once while another waits for a partition the topic does not have yet, the
-/// serialized sizes and timestamp a delivery reports, the record headers the broker receives, and the bytes a
+/// serialized sizes and timestamp a delivery reports, the record headers the broker receives, header classes of the
+/// user's own included, and the bytes a
 /// serializer's memory gives: an array slice, native memory freed once the record is taken, and an empty key or value
 /// kept apart from a null one.
 /// </summary>
@@ -58,6 +60,13 @@ public sealed class KafkaProducerBrokerTests
         ("trace", Encoding.UTF8.GetBytes("abc")),
         ("empty", Array.Empty<byte>()),
         ("null", null),
+    };
+
+    private static readonly (string Key, byte[]? Value)[] s_userHeaders =
+    {
+        ("given", Encoding.UTF8.GetBytes("1")),
+        ("added", null),
+        ("schema-id", Encoding.UTF8.GetBytes("7")),
     };
 
     private readonly KafkaBrokerFixture _broker;
@@ -192,7 +201,7 @@ public sealed class KafkaProducerBrokerTests
             KafkaProducer<byte[], byte[]>.Create(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
         {
             ProducerRecord<byte[], byte[]> record =
-                HeadersRecord(topic, new[] { new Header("given", Encoding.UTF8.GetBytes("1")) });
+                HeadersRecord(topic, new[] { new RecordHeader("given", Encoding.UTF8.GetBytes("1")) });
             record.Headers().Add("added", null);
             Assert.Equal(0L, producer.Send(record).Get(s_get).Offset());
 
@@ -218,6 +227,33 @@ public sealed class KafkaProducerBrokerTests
         }
 
         AssertHeaders(s_headers, ConsumedHeaders(topic));
+    }
+
+    [SkippableFact]
+    public async Task Send_DeliversUserHeadersGivenAddedAndAddedByTheSerializer()
+    {
+        string topic = await TopicAsync();
+        using (KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
+            Configs(), new UserHeaderAddingSerializer(), Serdes.ByteArray().Serializer()))
+        {
+            Assert.Equal(0L, producer.Send(UserHeadersRecord(topic)).Get(s_get).Offset());
+        }
+
+        AssertHeaders(s_userHeaders, ConsumedHeaders(topic));
+    }
+
+    [SkippableFact]
+    public async Task AsyncSend_DeliversUserHeadersGivenAddedAndAddedByTheSerializer()
+    {
+        string topic = await TopicAsync();
+        await using (AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(
+            Configs(), new UserHeaderAddingSerializer(), new AsyncByteArraySerializer()))
+        {
+            AsyncKafkaFuture<RecordMetadata> future = await producer.Send(UserHeadersRecord(topic));
+            Assert.Equal(0L, (await future.Get(s_get)).Offset());
+        }
+
+        AssertHeaders(s_userHeaders, ConsumedHeaders(topic));
     }
 
     [SkippableFact]
@@ -360,12 +396,24 @@ public sealed class KafkaProducerBrokerTests
         }
     }
 
-    private static Header[] HeadersOf((string Key, byte[]? Value)[] headers) =>
-        Array.ConvertAll(headers, header => new Header(header.Key, header.Value));
+    private static RecordHeader[] HeadersOf((string Key, byte[]? Value)[] headers) =>
+        Array.ConvertAll(headers, header => new RecordHeader(header.Key, header.Value));
 
-    private static ProducerRecord<byte[], byte[]> HeadersRecord(string topic, Header[] headers) =>
+    private static ProducerRecord<byte[], byte[]> HeadersRecord(string topic, RecordHeader[] headers) =>
         new ProducerRecord<byte[], byte[]>(
             topic, value: Encoding.UTF8.GetBytes("v"), key: Encoding.UTF8.GetBytes("k"), partition: 0, headers: headers);
+
+    private static ProducerRecord<byte[], byte[]> UserHeadersRecord(string topic)
+    {
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(
+            topic,
+            value: Encoding.UTF8.GetBytes("v"),
+            key: Encoding.UTF8.GetBytes("k"),
+            partition: 0,
+            headers: new IHeader[] { new UserHeader("given", Encoding.UTF8.GetBytes("1")) });
+        record.Headers().Add(new UserHeader("added", null));
+        return record;
+    }
 
     private static ProducerRecord<byte[], byte[]> SizedRecord(string topic) =>
         new ProducerRecord<byte[], byte[]>(
@@ -479,6 +527,47 @@ public sealed class KafkaProducerBrokerTests
             consumer.Dispose();
             throw;
         }
+    }
+
+    /// <summary>A header of the user's own.</summary>
+    private sealed class UserHeader : IHeader
+    {
+        private readonly string _key;
+        private readonly byte[]? _value;
+
+        internal UserHeader(string key, byte[]? value)
+        {
+            _key = key;
+            _value = value;
+        }
+
+        public string Key() => _key;
+
+        public byte[]? Value() => _value;
+    }
+
+    /// <summary>
+    /// A bytes serializer whose headers form adds a header of the user's own to the record's headers. The async forms
+    /// do the same.
+    /// </summary>
+    private sealed class UserHeaderAddingSerializer : ISerializerWithHeaders<byte[]>, IAsyncSerializerWithHeaders<byte[]>
+    {
+        public ReadOnlyMemory<byte>? Serialize(string topic, byte[]? data) =>
+            data is null ? (ReadOnlyMemory<byte>?)null : data;
+
+        public ReadOnlyMemory<byte>? Serialize(string topic, IHeaders headers, byte[]? data)
+        {
+            headers.Add(new UserHeader("schema-id", Encoding.UTF8.GetBytes("7")));
+            return Serialize(topic, data);
+        }
+
+        public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, byte[]? data, CancellationToken cancellationToken) =>
+            new ValueTask<ReadOnlyMemory<byte>?>(Serialize(topic, data));
+
+        public ValueTask<ReadOnlyMemory<byte>?> Serialize(
+            string topic, IHeaders headers, byte[]? data, CancellationToken cancellationToken) =>
+            new ValueTask<ReadOnlyMemory<byte>?>(Serialize(topic, headers, data));
     }
 
     /// <summary>Returns the memory it is given unchanged, <see langword="null"/> included.</summary>

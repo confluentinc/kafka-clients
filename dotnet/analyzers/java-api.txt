@@ -1,12 +1,13 @@
 # The public API of the Java client, read from the `kafka` submodule by `cargo xtask java-api <file>`,
 # for the bindings' Java-name checks. Do not edit; rerun the command.
 # A type is listed when its top-level class is in design/current/interface-audience-public-4.4.txt,
-# is MockAdminClient (from the test jar) or is an exception class the error generator makes a class
-# for, and every class on its path is public; only public members are listed, and nothing in
-# design/current/java-deprecated.txt. The Java built-in exceptions the bindings translate are listed
-# with their Java 11 constructors. Members Java declares implicitly are listed too: a class's default
-# constructor, and an enum's name(), ordinal(), values() and valueOf(String); a parameter whose name
-# the source does not spell is `?`.
+# is MockAdminClient (from the test jar), is RecordHeader or RecordHeaders (not Public in Java, but
+# public in the Rust core, as users build headers with them), or is an exception class the error
+# generator makes a class for, and every class on its path is public; only public members are
+# listed, and nothing in design/current/java-deprecated.txt. The Java built-in exceptions the
+# bindings translate are listed with their Java 11 constructors. Members Java declares implicitly
+# are listed too: a class's default constructor, and an enum's name(), ordinal(), values() and
+# valueOf(String); a parameter whose name the source does not spell is `?`.
 # One tab-separated line per item; a nested class is Outer$Inner:
 #   type      <class>  <class|abstract class|interface|enum|record>  <supertypes, comma-separated, or ->
 #   ctor      <class>  <Name(Type name, ...)>
@@ -3654,6 +3655,30 @@ method	org.apache.kafka.common.header.Headers	instance	headers(String key)
 method	org.apache.kafka.common.header.Headers	instance	lastHeader(String key)
 method	org.apache.kafka.common.header.Headers	instance	remove(String key)
 method	org.apache.kafka.common.header.Headers	instance	toArray()
+type	org.apache.kafka.common.header.internals.RecordHeader	class	org.apache.kafka.common.header.Header
+ctor	org.apache.kafka.common.header.internals.RecordHeader	RecordHeader(ByteBuffer keyBuffer, ByteBuffer valueBuffer)
+ctor	org.apache.kafka.common.header.internals.RecordHeader	RecordHeader(String key, byte[] value)
+method	org.apache.kafka.common.header.internals.RecordHeader	instance	equals(Object o)
+method	org.apache.kafka.common.header.internals.RecordHeader	instance	hashCode()
+method	org.apache.kafka.common.header.internals.RecordHeader	instance	key()
+method	org.apache.kafka.common.header.internals.RecordHeader	instance	toString()
+method	org.apache.kafka.common.header.internals.RecordHeader	instance	value()
+type	org.apache.kafka.common.header.internals.RecordHeaders	class	org.apache.kafka.common.header.Headers
+ctor	org.apache.kafka.common.header.internals.RecordHeaders	RecordHeaders()
+ctor	org.apache.kafka.common.header.internals.RecordHeaders	RecordHeaders(Header[] headers)
+ctor	org.apache.kafka.common.header.internals.RecordHeaders	RecordHeaders(Iterable headers)
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	add(Header header)
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	add(String key, byte[] value)
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	equals(Object o)
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	hashCode()
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	headers(String key)
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	isReadOnly()
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	iterator()
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	lastHeader(String key)
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	remove(String key)
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	setReadOnly()
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	toArray()
+method	org.apache.kafka.common.header.internals.RecordHeaders	instance	toString()
 type	org.apache.kafka.common.metrics.CompoundStat	interface	org.apache.kafka.common.metrics.Stat
 method	org.apache.kafka.common.metrics.CompoundStat	instance	stats()
 type	org.apache.kafka.common.metrics.CompoundStat$NamedMeasurable	class	-

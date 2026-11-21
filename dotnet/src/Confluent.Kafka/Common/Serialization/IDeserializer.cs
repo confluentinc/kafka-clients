@@ -23,7 +23,7 @@ namespace Confluent.Kafka.Common.Serialization;
 /// <summary>
 /// Converts the bytes of a record key or value to a <typeparamref name="T"/>: Java's
 /// <c>Deserializer&lt;T&gt;</c>. Its headers overloads are
-/// <see cref="DeserializerExtensions.Deserialize{T}(IDeserializer{T}, string, Headers, ReadOnlySpan{byte})"/>, which a
+/// <see cref="DeserializerExtensions.Deserialize{T}(IDeserializer{T}, string, IHeaders, ReadOnlySpan{byte})"/>, which a
 /// deserializer replaces by implementing <see cref="IDeserializerWithHeaders{T}"/>, and its <c>configure</c> is
 /// <see cref="DeserializerExtensions.Configure{T}(IDeserializer{T}, IReadOnlyDictionary{string, object}, bool)"/>, which
 /// a deserializer replaces by implementing <see cref="IDeserializerWithConfigure{T}"/>. Java's <c>close</c> is
@@ -57,7 +57,7 @@ public interface IDeserializer<T>
 /// Java's two overloads are one form here: the bytes are a <see cref="ReadOnlySpan{T}"/>, for Java's <c>byte[]</c> and
 /// <c>ByteBuffer</c> alike; <see cref="IDeserializerWithReadOnlyMemory{T}"/> is the form that may keep the bytes. A
 /// consumer refuses, when it is built, a deserializer that declares a public
-/// <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does not implement this interface, since it would
+/// <c>Deserialize(string, IHeaders, ReadOnlySpan&lt;byte&gt;)</c> but does not implement this interface, since it would
 /// never call that method. The check reads the type's metadata, so under trimming or Native AOT, which can remove a
 /// method nothing calls, it is best effort.
 /// </remarks>
@@ -74,7 +74,7 @@ public interface IDeserializerWithHeaders<T> : IDeserializer<T>
     /// <returns>The decoded value; may be <see langword="null"/>. A consumer does not call the deserializer for an
     /// absent key or value: the record's field is then <see langword="default"/>.</returns>
     /// <exception cref="SerializationException">The bytes are not a valid <typeparamref name="T"/>.</exception>
-    T? Deserialize(string topic, Headers headers, ReadOnlySpan<byte> data);
+    T? Deserialize(string topic, IHeaders headers, ReadOnlySpan<byte> data);
 }
 
 /// <summary>
@@ -94,7 +94,7 @@ public interface IDeserializerWithHeaders<T> : IDeserializer<T>
 /// </para>
 /// <para>
 /// A consumer refuses, when it is built, a deserializer that declares a public
-/// <c>Deserialize(string, Headers, ReadOnlyMemory&lt;byte&gt;)</c> but does not implement this interface, since it would
+/// <c>Deserialize(string, IHeaders, ReadOnlyMemory&lt;byte&gt;)</c> but does not implement this interface, since it would
 /// never call that method. The check reads the type's metadata, so under trimming or Native AOT, which can remove a
 /// method nothing calls, it is best effort.
 /// </para>
@@ -113,7 +113,7 @@ public interface IDeserializerWithReadOnlyMemory<T> : IDeserializer<T>
     /// <returns>The decoded value; may be <see langword="null"/>. A consumer does not call the deserializer for an
     /// absent key or value: the record's field is then <see langword="default"/>.</returns>
     /// <exception cref="SerializationException">The bytes are not a valid <typeparamref name="T"/>.</exception>
-    T? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data);
+    T? Deserialize(string topic, IHeaders headers, ReadOnlyMemory<byte> data);
 }
 
 /// <summary>
@@ -143,7 +143,7 @@ public static class DeserializerExtensions
     /// <summary>
     /// Decodes <paramref name="data"/> with the record's headers, Java's
     /// <c>Deserializer.deserialize(String, Headers, byte[])</c> and <c>deserialize(String, Headers, ByteBuffer)</c>:
-    /// <see cref="IDeserializerWithHeaders{T}.Deserialize(string, Headers, ReadOnlySpan{byte})"/> when
+    /// <see cref="IDeserializerWithHeaders{T}.Deserialize(string, IHeaders, ReadOnlySpan{byte})"/> when
     /// <paramref name="deserializer"/> implements it, and otherwise
     /// <see cref="IDeserializer{T}.Deserialize(string, ReadOnlySpan{byte})"/>, the headers unused.
     /// </summary>
@@ -155,7 +155,7 @@ public static class DeserializerExtensions
     /// <returns>The decoded value; may be <see langword="null"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="deserializer"/> is null.</exception>
     /// <exception cref="SerializationException">The bytes are not a valid <typeparamref name="T"/>.</exception>
-    public static T? Deserialize<T>(this IDeserializer<T> deserializer, string topic, Headers headers, ReadOnlySpan<byte> data)
+    public static T? Deserialize<T>(this IDeserializer<T> deserializer, string topic, IHeaders headers, ReadOnlySpan<byte> data)
     {
         if (deserializer is null)
         {

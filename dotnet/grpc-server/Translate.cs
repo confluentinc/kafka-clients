@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
 using Google.Protobuf;
@@ -437,7 +438,7 @@ internal static class Translate
             proto.LeaderEpoch = le;
         }
 
-        foreach (Header header in record.Headers())
+        foreach (IHeader header in record.Headers())
         {
             proto.Headers.Add(new Proto.Header
             {
@@ -457,14 +458,14 @@ internal static class Translate
         long? timestamp = proto.HasTimestamp ? proto.Timestamp : (long?)null;
 
         // A proto header's value is never null, so an empty value is sent empty.
-        Header[]? headers = null;
+        RecordHeader[]? headers = null;
         if (proto.Headers.Count > 0)
         {
-            headers = new Header[proto.Headers.Count];
+            headers = new RecordHeader[proto.Headers.Count];
             for (int i = 0; i < headers.Length; i++)
             {
                 Proto.Header header = proto.Headers[i];
-                headers[i] = new Header(header.Key, header.Value.ToByteArray());
+                headers[i] = new RecordHeader(header.Key, header.Value.ToByteArray());
             }
         }
 

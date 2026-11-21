@@ -55,7 +55,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
 
     // The absolute per-send budget of the callback overload: the measured 472 B (net8.0, net10.0; the delivery
     // state, which holds the callback, its KafkaFutureImpl with the field that caches the Get() task, the delivery
-    // task, the record and the record's Headers) plus 8 B, less than one more object (24 B).
+    // task, the record and the record's RecordHeaders) plus 8 B, less than one more object (24 B).
     private const long CallbackFastPathPerSendBudgetBytes = 480;
 
     // More attempts than the paired tests, as an absolute figure has no matched pair to cancel a one-off allocation.
