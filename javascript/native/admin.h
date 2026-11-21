@@ -121,6 +121,12 @@ typedef struct {
 #define ADMIN_ACC_ONE(acc, fn, conv)                                                                                   \
     {#acc, NULL, (admin_one_acc_fn)ADMIN_CHECKED(kafka_common_KafkaFuture_t * (*)(const ADMIN_RESULT_T*, kafka_common_Error_t**), fn), \
      NULL, NULL, NULL, (conv), 0}
+// A future the result lends out (`const`): it is not destroyed with the
+// context, which keeps the result's box alive instead.
+#define ADMIN_ACC_ONE_BORROWED(acc, fn, conv)                                                                               \
+    {#acc, NULL,                                                                                                            \
+     (admin_one_acc_fn)ADMIN_CHECKED(const kafka_common_KafkaFuture_t * (*)(const ADMIN_RESULT_T*, kafka_common_Error_t**), fn), \
+     NULL, NULL, NULL, (conv), 1}
 #define ADMIN_ACC_MAP(acc, fn, keyfn, conv)                                                                  \
     {#acc, (admin_map_acc_fn)ADMIN_CHECKED(kafka_Map_t * (*)(const ADMIN_RESULT_T*, kafka_common_Error_t**), fn), \
      NULL, NULL, NULL, (keyfn), (conv), 0}
@@ -168,6 +174,7 @@ static inline void* admin_opts(void* options) {
 int admin_option_timeout(napi_env env, napi_value value, int32_t* out);
 int admin_option_bool(napi_env env, napi_value value, int8_t* out);
 int admin_option_int32(napi_env env, napi_value value, int32_t* out);
+int admin_option_int64(napi_env env, napi_value value, int64_t* out);
 #define ADMIN_SETTER_FN(js) ADMIN_CAT(ADMIN_CAT(ADMIN_RPC, Options__), js)
 #define ADMIN_OPT_TIMEOUT(fn)                                                                               \
     static int ADMIN_SETTER_FN(timeoutMs)(napi_env env, void* o, napi_value v, kafka_common_Error_t** e) { \
@@ -187,6 +194,13 @@ int admin_option_int32(napi_env env, napi_value value, int32_t* out);
     static int ADMIN_SETTER_FN(js)(napi_env env, void* o, napi_value v, kafka_common_Error_t** e) { \
         int32_t i;                                                                                   \
         if (admin_option_int32(env, v, &i) < 0) return -1;                                           \
+        fn((ADMIN_OPTIONS_T*)o, i, e);                                                               \
+        return 0;                                                                                    \
+    }
+#define ADMIN_OPT_INT64(js, fn)                                                                      \
+    static int ADMIN_SETTER_FN(js)(napi_env env, void* o, napi_value v, kafka_common_Error_t** e) { \
+        int64_t i;                                                                                   \
+        if (admin_option_int64(env, v, &i) < 0) return -1;                                           \
         fn((ADMIN_OPTIONS_T*)o, i, e);                                                               \
         return 0;                                                                                    \
     }

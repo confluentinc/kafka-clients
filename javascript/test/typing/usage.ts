@@ -1222,3 +1222,110 @@ async function adminConfigsOffsetsGroups(): Promise<void> {
   await mock.close();
 }
 void adminConfigsOffsetsGroups;
+
+// R3, the security calls: each Result accessor's type, and each RPC's forms
+// by name and bare.
+async function adminSecurity(): Promise<void> {
+  const admin = await import('@confluentinc/kafka-javascript/admin');
+  const acl = await import('@confluentinc/kafka-javascript/common/acl');
+  const res = await import('@confluentinc/kafka-javascript/common/resource');
+  type KafkaFutureOf<T> = import('@confluentinc/kafka-javascript/common').KafkaFuture<T>;
+  type AclBindingType = import('@confluentinc/kafka-javascript/common/acl').AclBinding;
+  type AclBindingMapOf<V> = import('@confluentinc/kafka-javascript/common/acl').AclBindingMap<V>;
+  type AclBindingFilterMapOf<V> = import('@confluentinc/kafka-javascript/common/acl').AclBindingFilterMap<V>;
+  type FilterResultsType = import('@confluentinc/kafka-javascript/admin').DeleteAclsResult.FilterResults;
+  type FilterResultType = import('@confluentinc/kafka-javascript/admin').DeleteAclsResult.FilterResult;
+  type ApiErrorType = import('@confluentinc/kafka-javascript/common/errors').ApiError;
+  const mock = new admin.MockAdminClient();
+  const binding = new acl.AclBinding({
+    pattern: new res.ResourcePattern({ resourceType: res.ResourceType.TOPIC, name: 't', patternType: res.PatternType.LITERAL }),
+    entry: new acl.AccessControlEntry({
+      principal: 'User:a',
+      host: '*',
+      operation: acl.AclOperation.READ,
+      permissionType: acl.AclPermissionType.ALLOW,
+    }),
+  });
+
+  const created = mock.createAcls([binding]);
+  expectTypeOf(created.values()).toEqualTypeOf<AclBindingMapOf<KafkaFutureOf<void>>>();
+  expectTypeOf(created.all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  void mock.createAcls({ acls: new Set([binding]), options: new admin.CreateAclsOptions({ timeoutMs: 1 }) });
+  const described = mock.describeAcls(acl.AclBindingFilter.ANY);
+  expectTypeOf(described.values()).toEqualTypeOf<KafkaFutureOf<AclBindingType[]>>();
+  void mock.describeAcls({ filter: binding.toFilter(), options: new admin.DescribeAclsOptions() });
+  const deleted = mock.deleteAcls({ filters: [acl.AclBindingFilter.ANY] });
+  expectTypeOf(deleted.values()).toEqualTypeOf<AclBindingFilterMapOf<KafkaFutureOf<FilterResultsType>>>();
+  expectTypeOf(deleted.all()).toEqualTypeOf<KafkaFutureOf<AclBindingType[]>>();
+  const results = await deleted.values().get(acl.AclBindingFilter.ANY)?.get();
+  if (results !== undefined) {
+    expectTypeOf(results.values()).toEqualTypeOf<FilterResultType[]>();
+    expectTypeOf(results.values()[0].binding()).toEqualTypeOf<AclBindingType | null>();
+    expectTypeOf(results.values()[0].exception()).toEqualTypeOf<ApiErrorType | null>();
+  }
+  expectTypeOf(acl.AccessControlEntryFilter.ANY.principal()).toEqualTypeOf<string | null>();
+  expectTypeOf(res.ResourcePatternFilter.ANY.name()).toEqualTypeOf<string | null>();
+  expectTypeOf(res.PatternType.fromString(null)).toEqualTypeOf<import('@confluentinc/kafka-javascript/common/resource').PatternType>();
+  // @ts-expect-error describeAcls takes one filter, not a collection
+  mock.describeAcls([acl.AclBindingFilter.ANY]);
+  // @ts-expect-error createAcls takes bindings, not filters
+  mock.createAcls([acl.AclBindingFilter.ANY]);
+  // @ts-expect-error a ResourcePattern's name is not null
+  new res.ResourcePattern({ resourceType: res.ResourceType.TOPIC, name: null, patternType: res.PatternType.LITERAL });
+
+  // Quotas, SCRAM credentials and delegation tokens.
+  const quota = await import('@confluentinc/kafka-javascript/common/quota');
+  const auth = await import('@confluentinc/kafka-javascript/common/security/auth');
+  type ClientQuotaEntityMapOf<V> = import('@confluentinc/kafka-javascript/common/quota').ClientQuotaEntityMap<V>;
+  type DescriptionType = import('@confluentinc/kafka-javascript/admin').UserScramCredentialsDescription;
+  type DelegationTokenType = import('@confluentinc/kafka-javascript/common/security/token/delegation').DelegationToken;
+  const entity = new quota.ClientQuotaEntity(new Map([[quota.ClientQuotaEntity.USER, 'a']]));
+  const quotas = mock.describeClientQuotas(quota.ClientQuotaFilter.all());
+  expectTypeOf(quotas.entities()).toEqualTypeOf<KafkaFutureOf<ClientQuotaEntityMapOf<Map<string, number>>> | null>();
+  void mock.describeClientQuotas({
+    filter: quota.ClientQuotaFilter.containsOnly([quota.ClientQuotaFilterComponent.ofEntityType('user')]),
+    options: new admin.DescribeClientQuotasOptions(),
+  });
+  const altered = mock.alterClientQuotas([
+    new quota.ClientQuotaAlteration({ entity, ops: [new quota.ClientQuotaAlteration.Op({ key: 'k', value: null })] }),
+  ]);
+  expectTypeOf(altered.values()).toEqualTypeOf<ClientQuotaEntityMapOf<KafkaFutureOf<void>> | null>();
+  expectTypeOf(altered.all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  void mock.alterClientQuotas({ entries: [], options: new admin.AlterClientQuotasOptions({ validateOnly: true }) });
+  const scram = mock.describeUserScramCredentials();
+  expectTypeOf(scram.all()).toEqualTypeOf<KafkaFutureOf<Map<string, DescriptionType>>>();
+  expectTypeOf(scram.users()).toEqualTypeOf<KafkaFutureOf<string[]>>();
+  expectTypeOf(scram.description('u')).toEqualTypeOf<KafkaFutureOf<DescriptionType>>();
+  void mock.describeUserScramCredentials(['u']);
+  void mock.describeUserScramCredentials({ users: null, options: new admin.DescribeUserScramCredentialsOptions() });
+  const info = new admin.ScramCredentialInfo({ mechanism: admin.ScramMechanism.SCRAM_SHA_256, iterations: 4096 });
+  const scramAltered = mock.alterUserScramCredentials([
+    new admin.UserScramCredentialUpsertion({ user: 'u', credentialInfo: info, password: 'p' }),
+    new admin.UserScramCredentialUpsertion({ user: 'u', credentialInfo: info, password: new Uint8Array(1), salt: new Uint8Array(1) }),
+    new admin.UserScramCredentialDeletion({ user: 'u', mechanism: admin.ScramMechanism.SCRAM_SHA_512 }),
+  ]);
+  expectTypeOf(scramAltered.values()).toEqualTypeOf<Map<string, KafkaFutureOf<void>>>();
+  expectTypeOf(scramAltered.all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  const principal = new auth.KafkaPrincipal({ principalType: auth.KafkaPrincipal.USER_TYPE, name: 'a' });
+  const created2 = mock.createDelegationToken(
+    new admin.CreateDelegationTokenOptions({ renewers: [principal], owner: null, maxLifetimeMs: 1n }),
+  );
+  expectTypeOf(created2.delegationToken()).toEqualTypeOf<KafkaFutureOf<DelegationTokenType>>();
+  expectTypeOf(mock.renewDelegationToken(new Uint8Array(1)).expiryTimestamp()).toEqualTypeOf<KafkaFutureOf<bigint>>();
+  expectTypeOf(
+    mock.expireDelegationToken({ hmac: new Uint8Array(1), options: new admin.ExpireDelegationTokenOptions() }).expiryTimestamp(),
+  ).toEqualTypeOf<KafkaFutureOf<bigint>>();
+  expectTypeOf(mock.describeDelegationToken().delegationTokens()).toEqualTypeOf<KafkaFutureOf<DelegationTokenType[]>>();
+  const token = await created2.delegationToken().get();
+  expectTypeOf(token.hmac()).toEqualTypeOf<Buffer>();
+  expectTypeOf(token.tokenInfo().expiryTimestamp()).toEqualTypeOf<bigint>();
+  expectTypeOf(new admin.CreateDelegationTokenOptions().owner()).toEqualTypeOf<
+    import('@confluentinc/kafka-javascript/common/security/auth').KafkaPrincipal | null
+  >();
+  // @ts-expect-error describeUserScramCredentials has no (options) form
+  mock.describeUserScramCredentials({ options: new admin.DescribeUserScramCredentialsOptions() });
+  // @ts-expect-error a salt only with a byte password... and a ScramCredentialInfo is required
+  new admin.UserScramCredentialUpsertion({ user: 'u', password: 'p' });
+  await mock.close();
+}
+void adminSecurity;

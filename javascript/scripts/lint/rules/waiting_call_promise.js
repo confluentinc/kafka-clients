@@ -73,6 +73,13 @@ const DEPENDANTS = [
   { key: 'DescribeClassicGroupsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
   { key: 'DescribeConsumerGroupsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
   { key: 'ListConsumerGroupOffsetsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'CreateAclsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  {
+    key: 'DeleteAclsResult.all',
+    reason: "Java's KafkaFuture.allOf over the Result's futures, then the bindings their FilterResults hold",
+  },
+  { key: 'AlterClientQuotasResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'AlterUserScramCredentialsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
 ];
 
 /**
