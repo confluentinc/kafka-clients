@@ -667,6 +667,10 @@ test('the native objects are freed: the client once closed and collected, each r
     const { OffsetAndMetadata } = require('@confluentinc/kafka-javascript/consumer');
     const { ElectionType, TopicCollection, TopicPartition, TopicPartitionMap, TopicPartitionReplica, TopicPartitionReplicaMap } = require('@confluentinc/kafka-javascript/common');
     const { ConfigResource, ConfigResourceMap } = require('@confluentinc/kafka-javascript/common/config');
+    const { CreateDelegationTokenOptions } = require('@confluentinc/kafka-javascript/admin');
+    const { AclBindingFilter } = require('@confluentinc/kafka-javascript/common/acl');
+    const { ClientQuotaFilter } = require('@confluentinc/kafka-javascript/common/quota');
+    const { KafkaPrincipal } = require('@confluentinc/kafka-javascript/common/security/auth');
     (async () => {
       const before = native.adminStats();
       // One function per round, so no client stays in a frame after it.
@@ -727,13 +731,28 @@ test('the native objects are freed: the client once closed and collected, each r
         await removed.memberResult(member).get().catch(() => {});
         removed.all();
         await g.close();
+        // The security calls' futures the result lends (its box held by each):
+        // the ACLs, the quota entities and the four token calls, read and
+        // unread.
+        const s = new MockAdminClient();
+        await s.describeAcls(AclBindingFilter.ANY).values().get().catch(() => {});
+        s.describeAcls(AclBindingFilter.ANY);
+        await s.describeClientQuotas(ClientQuotaFilter.all()).entities().get().catch(() => {});
+        const renewer = new KafkaPrincipal({ principalType: KafkaPrincipal.USER_TYPE, name: 'r' });
+        const token = await s.createDelegationToken(new CreateDelegationTokenOptions({ renewers: [renewer] })).delegationToken().get();
+        await s.renewDelegationToken(token.hmac()).expiryTimestamp().get();
+        await s.describeDelegationToken().delegationTokens().get();
+        s.describeDelegationToken();
+        await s.expireDelegationToken(token.hmac()).expiryTimestamp().get();
+        s.renewDelegationToken(token.hmac());
+        await s.close();
         await t.deleteTopics(['t']).all().get();
         await t.close();
       }
       for (let i = 0; i < 3; i++) await round();
       await new Promise((r) => setTimeout(r, 50));
       let after = native.adminStats();
-      for (let i = 0; i < 100 && after.adminsFreed - before.adminsFreed < 12; i++) {
+      for (let i = 0; i < 100 && after.adminsFreed - before.adminsFreed < 15; i++) {
         global.gc();
         await new Promise((r) => setTimeout(r, 20));
         after = native.adminStats();
@@ -746,7 +765,7 @@ test('the native objects are freed: the client once closed and collected, each r
     ['--expose-gc'],
   );
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, '[12,12,true,true,true]\n');
+  assert.equal(r.stdout, '[15,15,true,true,true]\n');
 });
 
 test('the admin client emits the preview notice once; the mock emits none', () => {
@@ -771,11 +790,12 @@ test('the admin client emits the preview notice once; the mock emits none', () =
 // what Python's test_admin_client_security.py checks of them. Each call
 // returns its Result at once, as Java's does, and every future of it fails
 // with Java's message for a call that found no node; the forms and the null
-// arguments are refused as Java refuses them. Java's KafkaAdminClientTest
-// cases of these RPCs (testDescribeAcls, testCreateAcls, testDeleteAcls and
-// the rest) script broker responses through Java's MockClient, which the
-// binding cannot inject (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Tests); the Rust core translates them.
+// arguments are refused as Java refuses them. Java's KafkaAdminClientConfigTest
+// cases of these RPCs (testDescribeAcls, testCreateAcls, testDeleteAcls,
+// testCreateAclsToController and testDeleteAclsToController) script broker
+// responses through Java's MockClient, which the binding cannot inject
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Tests); the Rust core translates
+// them.
 
 const { CreateAclsOptions, DeleteAclsOptions, DescribeAclsOptions } = require('@confluentinc/kafka-javascript/admin');
 const {
@@ -951,12 +971,13 @@ test("the ACL calls' forms and null arguments: TypeError naming the RPC's own pa
 
 // The quota, SCRAM and delegation-token calls, as Python's
 // test_admin_client_security.py checks them over an unreachable bootstrap
-// address. Java's KafkaAdminClientTest cases of these RPCs
+// address. Java's KafkaAdminClientConfigTest cases of these RPCs
 // (testDescribeClientQuotas, testAlterClientQuotas,
-// testDescribeUserScramCredentials, testAlterUserScramCredentials* and the
-// delegation-token ones) script broker responses through Java's MockClient,
-// which the binding cannot inject (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Tests); the Rust core translates them.
+// testDescribeUserScramCredentials and testAlterUserScramCredentials*) script
+// broker responses through Java's MockClient, which the binding cannot inject
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Tests); the Rust core
+// translates them. Java's client tests have none of the delegation-token
+// calls.
 
 const {
   AlterClientQuotasOptions,
@@ -1171,6 +1192,7 @@ test("the quota, SCRAM and token calls' forms and null arguments: TypeError nami
     });
     // @ts-expect-error a null filter
     assert.throws(() => client.describeClientQuotas(null), { name: 'TypeError', message: 'filter must not be null' });
+    // @ts-expect-error a null the types forbid: Java stores it
     assert.throws(() => client.describeClientQuotas(ClientQuotaFilter.contains(null)), {
       name: 'TypeError',
       message: 'filter must not be a ClientQuotaFilter with null components',
@@ -1197,14 +1219,17 @@ test("the quota, SCRAM and token calls' forms and null arguments: TypeError nami
       name: 'TypeError',
       message: 'options must not be null',
     });
+    // @ts-expect-error a null the types forbid: Java stores it
     assert.throws(() => client.alterClientQuotas([new ClientQuotaAlteration({ entity: null, ops: [] })]), {
       name: 'TypeError',
       message: 'entries must not contain a ClientQuotaAlteration with a null entity',
     });
+    // @ts-expect-error a null the types forbid: Java stores it
     assert.throws(() => client.alterClientQuotas([new ClientQuotaAlteration({ entity: QUOTA_ENTITY, ops: null })]), {
       name: 'TypeError',
       message: 'entries must not contain a ClientQuotaAlteration with null ops',
     });
+    // @ts-expect-error a null the types forbid: Java stores it
     assert.throws(() => client.alterClientQuotas([new ClientQuotaAlteration({ entity: new ClientQuotaEntity(null), ops: [] })]), {
       name: 'TypeError',
       message: 'entries must not be a ClientQuotaEntity with null entries',
@@ -1253,6 +1278,7 @@ test("the quota, SCRAM and token calls' forms and null arguments: TypeError nami
 
     // createDelegationToken: Java's first read is the renewers, each
     // dereferenced, at the call.
+    // @ts-expect-error a null the types forbid: Java stores it
     assert.throws(() => client.createDelegationToken(new CreateDelegationTokenOptions({ renewers: null })), {
       name: 'TypeError',
       message: 'CreateDelegationTokenOptions.renewers must not be null',
@@ -1285,6 +1311,350 @@ test("the quota, SCRAM and token calls' forms and null arguments: TypeError nami
       () => client.describeDelegationToken(new DescribeDelegationTokenOptions({ owners: [null] })),
       { name: 'TypeError', message: 'DescribeDelegationTokenOptions.owners must not contain null' },
     );
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+// The transaction and producer calls, as Python's test_admin_client_security.py
+// checks them over an unreachable bootstrap address. Java's KafkaAdminClientTransactionTest (testDescribeProducers*,
+// testDescribeTransactions*, testAbortTransaction*,
+// testForceTerminateTransaction*, testListTransactions*, testFenceProducers*)
+// scripts broker responses through Java's MockClient, which the binding
+// cannot inject (javascript/CLAUDE.md, JavaScript Binding Conventions, Tests); the
+// Rust core translates them (kafka_admin_client.rs, test_describe_producers,
+// test_force_terminate_transaction and the rest).
+
+const {
+  AbortTransactionOptions,
+  AbortTransactionSpec,
+  DescribeProducersOptions,
+  DescribeTransactionsOptions,
+  FenceProducersOptions,
+  ListTransactionsOptions,
+  TerminateTransactionOptions,
+  TransactionState,
+} = require('@confluentinc/kafka-javascript/admin');
+
+test("the transaction and producer calls return at once and time out with the core's message naming Java's call", async () => {
+  const client = admin({ 'default.api.timeout.ms': 300, 'request.timeout.ms': 100 });
+  const tp = new TopicPartition({ topic: 't', partition: 0 });
+  const timedOut = (/** @type {string} */ call, /** @type {string} */ api) =>
+    `Timed out waiting for a node assignment. Call: ${call}(api=${api})`;
+  /** @param {KafkaFuture<unknown> | undefined} future */
+  const message = async (future) => {
+    assert.ok(future);
+    const cause = await failure(future);
+    assert.ok(cause instanceof TimeoutError, String(cause));
+    return cause.message;
+  };
+  try {
+    const started = Date.now();
+    const producers = client.describeProducers({ partitions: [tp, tp], options: new DescribeProducersOptions({ timeoutMs: 300 }) });
+    const toBroker = client.describeProducers({ partitions: [tp], options: new DescribeProducersOptions({ timeoutMs: 300, brokerId: 1 }) });
+    const described = client.describeTransactions({
+      transactionalIds: ['a', 'a'],
+      options: new DescribeTransactionsOptions({ timeoutMs: 300 }),
+    });
+    const spec = new AbortTransactionSpec({ topicPartition: tp, producerId: 1n, producerEpoch: 0, coordinatorEpoch: 0 });
+    const aborted = client.abortTransaction({ spec, options: new AbortTransactionOptions({ timeoutMs: 300 }) });
+    const terminated = client.forceTerminateTransaction({
+      transactionalId: 'a',
+      options: new TerminateTransactionOptions({ timeoutMs: 300 }),
+    });
+    const listed = client.listTransactions(
+      new ListTransactionsOptions({
+        timeoutMs: 300,
+        filteredStates: [TransactionState.ONGOING],
+        filteredProducerIds: [1n],
+        filteredDuration: 5n,
+        filteredTransactionalIdPattern: 'a.*',
+      }),
+    );
+    const fenced = client.fenceProducers({ transactionalIds: ['a'], options: new FenceProducersOptions({ timeoutMs: 300 }) });
+    assert.ok(Date.now() - started < 1000);
+    assert.equal(await message(producers.partitionResult(tp)), timedOut('describeProducers', 'METADATA'));
+    assert.equal(await message(producers.all()), timedOut('describeProducers', 'METADATA'));
+    // With a broker id, Java's StaticBrokerStrategy skips the leader lookup.
+    assert.equal(await message(toBroker.all()), timedOut('describeProducers', 'DESCRIBE_PRODUCERS'));
+    assert.equal(await message(described.description('a')), timedOut('describeTransactions', 'FIND_COORDINATOR'));
+    assert.equal(await message(described.all()), timedOut('describeTransactions', 'FIND_COORDINATOR'));
+    assert.equal(await message(aborted.all()), timedOut('abortTransaction', 'METADATA'));
+    // Java's forceTerminateTransaction runs fenceProducers, whose handler names the call.
+    assert.equal(await message(terminated.result()), timedOut('fenceProducer', 'FIND_COORDINATOR'));
+    for (const future of [listed.all(), listed.byBrokerId(), listed.allByBrokerId()])
+      assert.equal(await message(future), timedOut('listTransactions', 'METADATA'));
+    for (const future of [fenced.producerId('a'), fenced.epochId('a'), fenced.all(), fenced.fencedProducers().get('a')])
+      assert.equal(await message(future), timedOut('fenceProducer', 'FIND_COORDINATOR'));
+    assert.throws(() => producers.partitionResult(new TopicPartition({ topic: 't', partition: 1 })), {
+      name: 'IllegalArgumentError',
+      message: 'Topic partition t-1 was not included in the request',
+    });
+    assert.throws(() => fenced.producerId('b'), {
+      name: 'IllegalArgumentError',
+      message: 'TransactionalId `b` was not included in the request',
+    });
+    assert.equal((await client.describeTransactions([]).all().get()).size, 0);
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test("the transaction and producer calls' forms and null arguments: TypeError naming the RPC's own parameter, in Java's order", async () => {
+  const client = admin();
+  const tp = new TopicPartition({ topic: 't', partition: 0 });
+  const spec = new AbortTransactionSpec({ topicPartition: tp, producerId: 1n, producerEpoch: 0, coordinatorEpoch: 0 });
+  try {
+    // A string is an Iterable<string> to tsc: only the run time refuses it.
+    assert.throws(() => client.describeTransactions('a'), {
+      name: 'TypeError',
+      message: 'transactionalIds must be an iterable of strings, not string',
+    });
+    assert.throws(() => client.fenceProducers('a'), {
+      name: 'TypeError',
+      message: 'transactionalIds must be an iterable of strings, not string',
+    });
+    // @ts-expect-error Java's null collection: its first dereference
+    assert.throws(() => client.describeProducers({ partitions: null, options: null }), {
+      name: 'TypeError',
+      message: 'partitions must not be null',
+    });
+    // @ts-expect-error a null partition: Java's unmodifiable map refuses it at the call
+    assert.throws(() => client.describeProducers([null]), { name: 'TypeError', message: 'partitions must not contain null' });
+    // @ts-expect-error the options next, before a null topic Java reads only when it sends
+    assert.throws(() => client.describeProducers({ partitions: [new TopicPartition({ topic: null, partition: 0 })], options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
+    assert.throws(() => client.describeProducers([new TopicPartition({ topic: null, partition: 0 })]), {
+      name: 'TypeError',
+      message: 'partitions must not contain a TopicPartition with a null topic',
+    });
+    // @ts-expect-error the options before a null id, which Java stores
+    assert.throws(() => client.describeTransactions({ transactionalIds: [null], options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
+    // @ts-expect-error a null id, which the C API cannot carry
+    assert.throws(() => client.describeTransactions([null]), { name: 'TypeError', message: 'transactionalIds must not contain null' });
+    // @ts-expect-error a null id, which the C API cannot carry
+    assert.throws(() => client.fenceProducers([null]), { name: 'TypeError', message: 'transactionalIds must not contain null' });
+    // @ts-expect-error a null spec
+    assert.throws(() => client.abortTransaction(null), { name: 'TypeError', message: 'spec must not be null' });
+    const nullPartition = new AbortTransactionSpec({ topicPartition: null, producerId: 1n, producerEpoch: 0, coordinatorEpoch: 0 });
+    // @ts-expect-error a spec with a null partition, before the options
+    assert.throws(() => client.abortTransaction({ spec: nullPartition, options: null }), {
+      name: 'TypeError',
+      message: 'spec must not be an AbortTransactionSpec with a null topicPartition',
+    });
+    // @ts-expect-error the options before the id, which Java stores
+    assert.throws(() => client.forceTerminateTransaction({ transactionalId: null, options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
+    // @ts-expect-error a null id, which the C API cannot carry
+    assert.throws(() => client.forceTerminateTransaction(null), { name: 'TypeError', message: 'transactionalId must not be null' });
+    // @ts-expect-error a state Java's request builder dereferences
+    const nullState = new ListTransactionsOptions({ filteredStates: [null] });
+    assert.throws(() => client.listTransactions(nullState), {
+      name: 'TypeError',
+      message: 'ListTransactionsOptions.filteredStates must not contain null',
+    });
+    // @ts-expect-error a producer id Java's request builder dereferences
+    const nullId = new ListTransactionsOptions({ filteredProducerIds: [null] });
+    assert.throws(() => client.listTransactions(nullId), {
+      name: 'TypeError',
+      message: 'ListTransactionsOptions.filteredProducerIds must not contain null',
+    });
+    // @ts-expect-error Java's null options
+    assert.throws(() => client.listTransactions({ options: null }), { name: 'TypeError', message: 'options must not be null' });
+    assert.throws(
+      // @ts-expect-error an argument Java's listTransactions() has not
+      () => client.listTransactions({ options: new ListTransactionsOptions(), spec }),
+      { name: 'IllegalArgumentError', message: 'listTransactions() takes one of (), (options); got (options, spec)' },
+    );
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+// The feature and controller calls, as Python's test_admin_client_security.py
+// and test_admin_java_ports.py check them over an unreachable bootstrap
+// address. Java's KafkaAdminClientTest
+// testUpdateFeaturesShouldFailRequestForEmptyUpdates,
+// testUpdateFeaturesShouldFailRequestForInvalidFeatureName and
+// testUpdateFeaturesShouldFailRequestInClientWhenDowngradeFlagIsNotSetDuringDeletion
+// need no scripted broker and are translated here, and so is
+// testUnregisterControllerTimeoutMaxWait, the unreachable bootstrap address
+// standing for the MockClient that never answers, as in Python; its other
+// testUpdateFeatures*, testDescribeFeatures* and testUnregisterController*
+// script broker responses through Java's MockClient, which the binding cannot
+// inject (javascript/CLAUDE.md, JavaScript Binding Conventions, Tests); the Rust
+// core translates them (kafka_admin_client.rs).
+
+const {
+  DescribeFeaturesOptions,
+  FeatureUpdate,
+  UnregisterControllerOptions,
+  UpdateFeaturesOptions,
+} = require('@confluentinc/kafka-javascript/admin');
+
+const upgradeTo = (/** @type {number} */ level) =>
+  new FeatureUpdate({ maxVersionLevel: level, upgradeType: FeatureUpdate.UpgradeType.UPGRADE });
+
+test('testUnregisterControllerTimeoutMaxWait', async () => {
+  const client = admin({});
+  try {
+    const result = client.unregisterController({ controllerId: 1, options: new UnregisterControllerOptions({ timeoutMs: 10 }) });
+    const cause = await failure(result.all());
+    assert.ok(cause instanceof TimeoutError, String(cause));
+    assert.equal(cause.message, 'Timed out waiting for a node assignment. Call: unregisterController');
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test("the feature and controller calls return at once and time out with the core's message naming Java's call", async () => {
+  const client = admin({ 'default.api.timeout.ms': 300, 'request.timeout.ms': 100 });
+  // Each is a plain Java Call, whose name the message carries without an api.
+  const timedOut = (/** @type {string} */ call) => `Timed out waiting for a node assignment. Call: ${call}`;
+  /** @param {KafkaFuture<unknown> | undefined} future */
+  const message = async (future) => {
+    assert.ok(future);
+    const cause = await failure(future);
+    assert.ok(cause instanceof TimeoutError, String(cause));
+    return cause.message;
+  };
+  try {
+    const started = Date.now();
+    const described = client.describeFeatures(new DescribeFeaturesOptions({ timeoutMs: 300 }));
+    const toNode = client.describeFeatures({ options: new DescribeFeaturesOptions({ timeoutMs: 300, nodeId: 1 }) });
+    const updated = client.updateFeatures({
+      featureUpdates: { 'metadata.version': upgradeTo(2), other: upgradeTo(1) },
+      options: new UpdateFeaturesOptions({ timeoutMs: 300, validateOnly: true }),
+    });
+    const unregistered = client.unregisterController({ controllerId: 1, options: new UnregisterControllerOptions({ timeoutMs: 300 }) });
+    assert.ok(Date.now() - started < 1000);
+    assert.equal(await message(described.featureMetadata()), timedOut('describeFeatures'));
+    assert.equal(await message(toNode.featureMetadata()), timedOut('describeFeatures'));
+    assert.deepEqual([...updated.values().keys()], ['metadata.version', 'other']);
+    for (const future of [...updated.values().values(), updated.all()]) assert.equal(await message(future), timedOut('updateFeatures'));
+    assert.equal(await message(unregistered.all()), timedOut('unregisterController'));
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test('testUpdateFeaturesShouldFailRequestForEmptyUpdates and ForInvalidFeatureName: the core throws at the call', async () => {
+  const client = admin();
+  try {
+    assert.throws(() => client.updateFeatures(new Map()), {
+      name: 'IllegalArgumentError',
+      message: 'Feature updates can not be null or empty.',
+    });
+    assert.throws(() => client.updateFeatures({ featureUpdates: {} }), {
+      name: 'IllegalArgumentError',
+      message: 'Feature updates can not be null or empty.',
+    });
+    // Neither a Map nor a plain object: Java's Map<String, FeatureUpdate>.
+    // @ts-expect-error a FeatureUpdate where the map goes
+    assert.throws(() => client.updateFeatures({ featureUpdates: upgradeTo(2) }), {
+      name: 'TypeError',
+      message: 'featureUpdates must be a Map or a plain object, not a FeatureUpdate',
+    });
+    // @ts-expect-error a Set where the map goes
+    assert.throws(() => client.updateFeatures({ featureUpdates: new Set() }), {
+      name: 'TypeError',
+      message: 'featureUpdates must be a Map or a plain object, not a Set',
+    });
+    assert.throws(
+      () =>
+        client.updateFeatures(
+          new Map([
+            ['feature', upgradeTo(2)],
+            ['', upgradeTo(2)],
+          ]),
+        ),
+      {
+        name: 'IllegalArgumentError',
+        message: 'Provided feature can not be empty.',
+      },
+    );
+    // Java's Utils.isBlank(null) is true: a null name is a blank one.
+    // @ts-expect-error a null feature name, which a Map can hold
+    assert.throws(() => client.updateFeatures(new Map([[null, upgradeTo(2)]])), {
+      name: 'IllegalArgumentError',
+      message: 'Provided feature can not be empty.',
+    });
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test('testUpdateFeaturesShouldFailRequestInClientWhenDowngradeFlagIsNotSetDuringDeletion', () => {
+  assert.throws(() => upgradeTo(0), {
+    name: 'IllegalArgumentError',
+    message: 'The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE when the provided maxVersionLevel:0 is < 1.',
+  });
+});
+
+test("the feature and controller calls' forms and null arguments: TypeError naming the RPC's own parameter, in Java's order", async () => {
+  const client = admin();
+  try {
+    // @ts-expect-error Java's null options, its first dereference
+    assert.throws(() => client.describeFeatures({ options: null }), { name: 'TypeError', message: 'options must not be null' });
+    assert.throws(
+      // @ts-expect-error an argument Java's describeFeatures() has not
+      () => client.describeFeatures({ options: new DescribeFeaturesOptions(), nodeId: 1 }),
+      { name: 'IllegalArgumentError', message: 'describeFeatures() takes one of (), (options); got (options, nodeId)' },
+    );
+    // @ts-expect-error Java's null map, its first dereference
+    assert.throws(() => client.updateFeatures({ featureUpdates: null }), { name: 'TypeError', message: 'featureUpdates must not be null' });
+    // A plain object given alone is the options object (javascript/CLAUDE.md,
+    // JavaScript Binding Conventions, Signatures, Q15): the map goes by name.
+    // @ts-expect-error a plain object of updates given alone
+    assert.throws(() => client.updateFeatures({ 'metadata.version': upgradeTo(2) }), {
+      name: 'IllegalArgumentError',
+      message: 'updateFeatures() takes one of (featureUpdates), (featureUpdates, options); got (metadata.version)',
+    });
+    // @ts-expect-error a null update, which Java's request builder reads and the C API cannot carry
+    assert.throws(() => client.updateFeatures(new Map([['f', null]])), {
+      name: 'TypeError',
+      message: 'featureUpdates must not contain null',
+    });
+    // @ts-expect-error a value of another class
+    assert.throws(() => client.updateFeatures(new Map([['f', 2]])), {
+      name: 'TypeError',
+      message: 'featureUpdates must hold only FeatureUpdates, not a number',
+    });
+    // Plain JavaScript can give the constructor a null type, which Java stores.
+    // @ts-expect-error a null upgrade type
+    const nullType = new FeatureUpdate({ maxVersionLevel: 2, upgradeType: null });
+    assert.throws(() => client.updateFeatures(new Map([['f', nullType]])), {
+      name: 'TypeError',
+      message: 'featureUpdates must not contain a FeatureUpdate with a null upgradeType',
+    });
+    // @ts-expect-error Java's null options: the FFI's error
+    assert.throws(() => client.updateFeatures({ featureUpdates: new Map([['f', upgradeTo(2)]]), options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
+    // @ts-expect-error Java's int cannot be null
+    assert.throws(() => client.unregisterController(null), { name: 'TypeError', message: 'controllerId must be an integer' });
+    // @ts-expect-error Java's int cannot be null
+    assert.throws(() => client.unregisterController({ controllerId: null }), {
+      name: 'TypeError',
+      message: 'controllerId must be an integer',
+    });
+    assert.throws(() => client.unregisterController(2 ** 31), {
+      name: 'RangeError',
+      message: 'controllerId must be from -2147483648 to 2147483647',
+    });
+    // @ts-expect-error Java's null options, its first dereference
+    assert.throws(() => client.unregisterController({ controllerId: 1, options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
   } finally {
     await client.close({ timeout: 0 });
   }

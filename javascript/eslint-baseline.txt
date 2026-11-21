@@ -145,33 +145,3 @@ missing clients.admin.MockAdminClient#injectTimeoutException
 missing clients.admin.MockAdminClient#setClientInstanceId
 missing clients.admin.MockAdminClient#setMockMetrics
 overload-missing MockAdminClient.addTopic/addTopic(boolean,String,List,Map,boolean)
-# The admin RPCs, and the mock's methods of their families, not translated
-# yet: each family comes with its own commit of the admin client's branch,
-# which removes its lines here.
-missing clients.admin.Admin#abortTransaction
-missing clients.admin.Admin#describeFeatures
-missing clients.admin.Admin#describeProducers
-missing clients.admin.Admin#describeTransactions
-missing clients.admin.Admin#fenceProducers
-missing clients.admin.Admin#forceTerminateTransaction
-missing clients.admin.Admin#listTransactions
-missing clients.admin.Admin#unregisterController
-missing clients.admin.Admin#updateFeatures
-missing clients.admin.KafkaAdminClient#abortTransaction
-missing clients.admin.KafkaAdminClient#describeFeatures
-missing clients.admin.KafkaAdminClient#describeProducers
-missing clients.admin.KafkaAdminClient#describeTransactions
-missing clients.admin.KafkaAdminClient#fenceProducers
-missing clients.admin.KafkaAdminClient#forceTerminateTransaction
-missing clients.admin.KafkaAdminClient#listTransactions
-missing clients.admin.KafkaAdminClient#unregisterController
-missing clients.admin.KafkaAdminClient#updateFeatures
-missing clients.admin.MockAdminClient#abortTransaction
-missing clients.admin.MockAdminClient#describeFeatures
-missing clients.admin.MockAdminClient#describeProducers
-missing clients.admin.MockAdminClient#describeTransactions
-missing clients.admin.MockAdminClient#fenceProducers
-missing clients.admin.MockAdminClient#forceTerminateTransaction
-missing clients.admin.MockAdminClient#listTransactions
-missing clients.admin.MockAdminClient#unregisterController
-missing clients.admin.MockAdminClient#updateFeatures
