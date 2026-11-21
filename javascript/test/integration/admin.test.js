@@ -568,3 +568,224 @@ async function retryUntil(call, accept) {
   },
   60000,
 );
+
+// ---- the ACL calls ---------------------------------------------------------------------------
+//
+// ACLs need an authorizer, which the scratch broker of `make test-integration`
+// has not: there every ACL call fails with the broker's
+// SecurityDisabledException, which this test checks. With an authorizer (P8's
+// harness clusters), it creates, describes and deletes a binding instead.
+
+const acl = require('@confluentinc/kafka-javascript/common/acl');
+const res = require('@confluentinc/kafka-javascript/common/resource');
+const { SecurityDisabledError } = require('@confluentinc/kafka-javascript/common/errors');
+
+(SKIP ? test.skip : test)(
+  'createAcls, describeAcls and deleteAcls: the binding round trip, or the broker refusing them without an authorizer',
+  async () => {
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    const name = `js-acl-${process.pid}-${Date.now()}`;
+    const binding = new acl.AclBinding({
+      pattern: new res.ResourcePattern({ resourceType: res.ResourceType.TOPIC, name, patternType: res.PatternType.LITERAL }),
+      entry: new acl.AccessControlEntry({
+        principal: 'User:js-test',
+        host: '*',
+        operation: acl.AclOperation.READ,
+        permissionType: acl.AclPermissionType.ALLOW,
+      }),
+    });
+    const filter = binding.toFilter();
+    try {
+      let described;
+      try {
+        described = await admin.describeAcls(filter).values().get();
+      } catch (error) {
+        const cause = /** @type {Error} */ (error).cause;
+        assert.ok(cause instanceof SecurityDisabledError, String(cause));
+        assert.equal(cause.message, 'No Authorizer is configured on the broker');
+        const created = admin.createAcls([binding]);
+        await assert.rejects(created.all().get(), (e) => {
+          const c = /** @type {Error} */ (e).cause;
+          return c instanceof SecurityDisabledError && c.message === 'No Authorizer is configured.';
+        });
+        const deleted = admin.deleteAcls([filter]);
+        await assert.rejects(deleted.all().get(), (e) => {
+          const c = /** @type {Error} */ (e).cause;
+          return c instanceof SecurityDisabledError && c.message === 'No Authorizer is configured.';
+        });
+        console.log('the broker has no authorizer: the ACL round trip is skipped, its SecurityDisabledError checked');
+        return;
+      }
+      assert.deepEqual(described, []);
+      const created = admin.createAcls([binding]);
+      assert.equal(await created.all().get(), null);
+      const createdFuture = created.values().get(binding);
+      assert.ok(createdFuture);
+      assert.equal(await createdFuture.get(), null);
+      let found = /** @type {Array<import('@confluentinc/kafka-javascript/common/acl').AclBinding>} */ ([]);
+      for (let i = 0; i < 20 && found.length === 0; i++) {
+        found = await admin.describeAcls(filter).values().get();
+        if (found.length === 0) await new Promise((r) => setTimeout(r, 250));
+      }
+      assert.equal(found.length, 1);
+      assert.ok(found[0].equals(binding), String(found[0]));
+      const deleted = admin.deleteAcls([filter]);
+      const results = deleted.values().get(filter);
+      assert.ok(results);
+      const values = (await results.get()).values();
+      assert.equal(values.length, 1);
+      assert.equal(values[0].exception(), null);
+      assert.ok(values[0].binding()?.equals(binding));
+      assert.deepEqual((await deleted.all().get()).map(String), [String(binding)]);
+    } finally {
+      await admin.close();
+    }
+  },
+  60000,
+);
+
+// ---- the quota, SCRAM and delegation-token calls ---------------------------------------------
+//
+// Client quotas and SCRAM credentials work on a plain KRaft broker; the
+// round trips alter, describe and remove them. Delegation tokens need a
+// token secret and a SASL listener, which the scratch broker has not: there
+// the broker refuses the calls, which the test checks with the broker's
+// error, and with them (P8's harness clusters) it creates, describes, renews
+// and expires a token.
+
+const quotaPkg = require('@confluentinc/kafka-javascript/common/quota');
+const { KafkaPrincipal: Principal } = require('@confluentinc/kafka-javascript/common/security/auth');
+const securityAdmin = require('@confluentinc/kafka-javascript/admin');
+
+(SKIP ? test.skip : test)(
+  'alterClientQuotas and describeClientQuotas: set, read back and remove a quota',
+  async () => {
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    const user = `js-quota-${process.pid}-${Date.now()}`;
+    const entity = new quotaPkg.ClientQuotaEntity(new Map([[quotaPkg.ClientQuotaEntity.USER, user]]));
+    const filter = quotaPkg.ClientQuotaFilter.containsOnly([
+      quotaPkg.ClientQuotaFilterComponent.ofEntity({ entityType: 'user', entityName: user }),
+    ]);
+    try {
+      const op = (/** @type {number | null} */ value) => new quotaPkg.ClientQuotaAlteration.Op({ key: 'producer_byte_rate', value });
+      const altered = admin.alterClientQuotas([new quotaPkg.ClientQuotaAlteration({ entity, ops: [op(1024)] })]);
+      assert.equal(await altered.all().get(), null);
+      /** @type {Map<string, number> | null} */
+      let quotas = null;
+      for (let i = 0; i < 20 && quotas === null; i++) {
+        const entities = admin.describeClientQuotas(filter).entities();
+        assert.ok(entities);
+        quotas = (await entities.get()).get(entity);
+        if (quotas === null) await new Promise((r) => setTimeout(r, 250));
+      }
+      assert.ok(quotas, 'the quota was not described');
+      assert.deepEqual([...quotas], [['producer_byte_rate', 1024]]);
+      // validateOnly alters nothing; a null value removes the quota.
+      const validated = admin.alterClientQuotas({
+        entries: [new quotaPkg.ClientQuotaAlteration({ entity, ops: [op(1)] })],
+        options: new securityAdmin.AlterClientQuotasOptions({ validateOnly: true }),
+      });
+      assert.equal(await validated.all().get(), null);
+      assert.equal(
+        await admin
+          .alterClientQuotas([new quotaPkg.ClientQuotaAlteration({ entity, ops: [op(null)] })])
+          .all()
+          .get(),
+        null,
+      );
+      let removed = false;
+      for (let i = 0; i < 20 && !removed; i++) {
+        const entities = admin.describeClientQuotas(filter).entities();
+        assert.ok(entities);
+        removed = (await entities.get()).size() === 0;
+        if (!removed) await new Promise((r) => setTimeout(r, 250));
+      }
+      assert.ok(removed, 'the quota was not removed');
+    } finally {
+      await admin.close();
+    }
+  },
+  60000,
+);
+
+(SKIP ? test.skip : test)(
+  'alterUserScramCredentials and describeUserScramCredentials: upsert, read back and delete a credential',
+  async () => {
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    const user = `js-scram-${process.pid}-${Date.now()}`;
+    const info = new securityAdmin.ScramCredentialInfo({ mechanism: securityAdmin.ScramMechanism.SCRAM_SHA_256, iterations: 8192 });
+    try {
+      const upserted = admin.alterUserScramCredentials([
+        new securityAdmin.UserScramCredentialUpsertion({ user, credentialInfo: info, password: 'secret' }),
+      ]);
+      assert.deepEqual([...upserted.values().keys()], [user]);
+      assert.equal(await upserted.all().get(), null);
+      /** @type {import('@confluentinc/kafka-javascript/admin').UserScramCredentialsDescription | null} */
+      let description = null;
+      for (let i = 0; i < 20 && description === null; i++) {
+        try {
+          description = await admin.describeUserScramCredentials([user]).description(user).get();
+        } catch {
+          await new Promise((r) => setTimeout(r, 250));
+        }
+      }
+      assert.ok(description, 'the credential was not described');
+      assert.equal(description.name, user);
+      assert.equal(description.credentialInfos.length, 1);
+      assert.ok(description.credentialInfos[0].equals(info), String(description.credentialInfos[0]));
+      const result = admin.describeUserScramCredentials([user]);
+      assert.deepEqual(await result.users().get(), [user]);
+      assert.ok((await result.all().get()).get(user)?.equals(description));
+      // A user that is not part of the request: Java's ResourceNotFoundException.
+      await assert.rejects(result.description('nobody').get(), (e) => {
+        const c = /** @type {Error} */ (e).cause;
+        return c instanceof Error && c.name === 'ResourceNotFoundError';
+      });
+      const deleted = admin.alterUserScramCredentials([
+        new securityAdmin.UserScramCredentialDeletion({ user, mechanism: securityAdmin.ScramMechanism.SCRAM_SHA_256 }),
+      ]);
+      assert.equal(await deleted.all().get(), null);
+    } finally {
+      await admin.close();
+    }
+  },
+  60000,
+);
+
+(SKIP ? test.skip : test)(
+  'the delegation-token calls: the round trip, or the broker refusing them without a token secret or SASL',
+  async () => {
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    const owner = new Principal({ principalType: Principal.USER_TYPE, name: 'js-token' });
+    try {
+      let token;
+      try {
+        token = await admin
+          .createDelegationToken(new securityAdmin.CreateDelegationTokenOptions({ renewers: [owner] }))
+          .delegationToken()
+          .get();
+      } catch (error) {
+        const cause = /** @type {Error} */ (error).cause;
+        // Over PLAINTEXT the broker refuses the call before it checks for a
+        // token secret: Java's UnsupportedByAuthenticationException.
+        assert.ok(cause instanceof Error, String(cause));
+        assert.ok(['UnsupportedByAuthenticationError', 'DelegationTokenDisabledError'].includes(cause.name), String(cause));
+        await assert.rejects(admin.describeDelegationToken().delegationTokens().get(), (e) => {
+          const c = /** @type {Error} */ (e).cause;
+          return c instanceof Error && c.name === cause.name;
+        });
+        console.log(`the broker refuses delegation tokens (${cause.name}: ${cause.message}): the token round trip is skipped`);
+        return;
+      }
+      const listed = await admin.describeDelegationToken().delegationTokens().get();
+      assert.ok(listed.some((t) => t.equals(token)));
+      const renewed = await admin.renewDelegationToken(token.hmac()).expiryTimestamp().get();
+      assert.equal(typeof renewed, 'bigint');
+      const expired = await admin.expireDelegationToken(token.hmac()).expiryTimestamp().get();
+      assert.equal(typeof expired, 'bigint');
+    } finally {
+      await admin.close();
+    }
+  },
+  60000,
+);

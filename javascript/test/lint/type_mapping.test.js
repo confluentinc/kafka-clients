@@ -302,6 +302,39 @@ test('a Java parameter named check is compared, as any other: only a BareCheck r
   }
 });
 
+test("an options signature whose keys are exactly some forms' names is checked against those forms only", () => {
+  // Java's upsert(String user, String password), upsert(String user, byte[]
+  // password) and upsert(String user, byte[] password, byte[] salt), as
+  // UserScramCredentialUpsertion's constructors: the salt form's password is
+  // bytes only, while the two-key signature takes the union of its two forms.
+  const cls = javaClass('clients.producer.Upserting', {
+    overloads: [
+      method('upsert', ['String', 'String'], { return_type: 'void', param_names: ['user', 'password'] }),
+      method('upsert', ['String', 'byte[]'], { return_type: 'void', param_names: ['user', 'password'] }),
+      method('upsert', ['String', 'byte[]', 'byte[]'], { return_type: 'void', param_names: ['user', 'password', 'salt'] }),
+    ],
+  });
+  /** @param {string} saltPassword the salt signature's password type */
+  const files = (saltPassword) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...CLASSES, cls]),
+      ...FILES,
+      ...LIB,
+      'src/producer/upserting.ts':
+        'export class Upserting {\n' +
+        '  upsert(options: { user: string; password: string | Uint8Array; salt?: never }): void;\n' +
+        `  upsert(options: { user: string; password: ${saltPassword}; salt: Uint8Array }): void;\n` +
+        '  upsert(options: unknown): void { void options; }\n}\n',
+    });
+  let r = lint(files('Uint8Array'), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  r = lint(files('string | Uint8Array'), [RULE]);
+  assert.deepEqual(findings(r), [
+    'Upserting.upsert#2: option password: Java byte[] is not TypeScript string | Uint8Array<ArrayBufferLike>',
+  ]);
+});
+
 test('cannot run without the Java index', () => {
   const r = lint(project({ 'tsconfig.json': TSCONFIG, ...LIB }), [RULE]);
   assert.match(r.err[1], /^❌ check-type-mapping: cannot run, no Java index/);
@@ -409,7 +442,7 @@ test("a serializer's serialize may also return a Promise of the bytes it takes (
   assert.match(findings(r)[0], /^Serializer\.serialize: return: Java byte\[\] is not TypeScript /);
 });
 
-test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition, MetricName, Uuid, ConfigResource, TopicPartitionReplica and MemberToRemove collections; integer keys are a Map of numbers; an OptionalLong is a bigint or null', () => {
+test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition, MetricName, Uuid, ConfigResource, TopicPartitionReplica, AclBinding, AclBindingFilter, ClientQuotaEntity and MemberToRemove collections; integer keys are a Map of numbers; an OptionalLong is a bigint or null', () => {
   const coll = javaClass('clients.producer.Coll', {
     overloads: [
       method('take', ['Node[]'], { param_types: ['Node[]'], return_type: 'void', param_names: ['nodes'] }),
@@ -424,6 +457,9 @@ test('a Java array or collection taken is any iterable; one returned is an array
       method('byId', [], { return_type: 'Map<Uuid, Long>' }),
       method('byResource', [], { return_type: 'Map<ConfigResource, Long>' }),
       method('byReplica', [], { return_type: 'Map<TopicPartitionReplica, String>' }),
+      method('byBinding', [], { return_type: 'Map<AclBinding, KafkaFuture<Void>>' }),
+      method('byFilter', [], { return_type: 'Map<AclBindingFilter, String>' }),
+      method('byEntity', [], { return_type: 'Map<ClientQuotaEntity, Map<String, Double>>' }),
       method('members', [], { return_type: 'Set<MemberToRemove>' }),
       method('total', [], { return_type: 'OptionalLong' }),
       method('assignments', [], { return_type: 'Map<Integer, List<Integer>>' }),
@@ -438,6 +474,9 @@ test('a Java array or collection taken is any iterable; one returned is an array
     javaClass('common.Uuid', {}),
     javaClass('common.config.ConfigResource', {}),
     javaClass('common.TopicPartitionReplica', {}),
+    javaClass('common.acl.AclBinding', {}),
+    javaClass('common.acl.AclBindingFilter', {}),
+    javaClass('common.quota.ClientQuotaEntity', {}),
     javaClass('clients.admin.MemberToRemove', {}),
   ];
   const GOOD = {
@@ -453,13 +492,16 @@ test('a Java array or collection taken is any iterable; one returned is an array
     byId: 'byId(): UuidMap<bigint> { return new UuidMap(); }',
     byResource: 'byResource(): ConfigResourceMap<bigint> { return new ConfigResourceMap(); }',
     byReplica: 'byReplica(): TopicPartitionReplicaMap<string> { return new TopicPartitionReplicaMap(); }',
+    byBinding: 'byBinding(): AclBindingMap<KafkaFuture<void>> { return new AclBindingMap(); }',
+    byFilter: 'byFilter(): AclBindingFilterMap<string> { return new AclBindingFilterMap(); }',
+    byEntity: 'byEntity(): ClientQuotaEntityMap<Map<string, number>> { return new ClientQuotaEntityMap(); }',
     members: 'members(): MemberToRemoveSet { return new MemberToRemoveSet(); }',
     total: 'total(): bigint | null { return null; }',
     assignments: 'assignments(): ReadonlyMap<number, readonly number[]> { return new Map(); }',
   };
   const source = (/** @type {Record<string, string>} */ members) =>
     "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
-    "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport { ConfigResourceMap, MemberToRemoveSet, MetricNameMap, TopicPartitionMap, TopicPartitionReplicaMap, TopicPartitionSet, UuidMap } from './collections';\n" +
+    "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport type { KafkaFuture } from '../common/kafka_future';\nimport { AclBindingFilterMap, AclBindingMap, ClientQuotaEntityMap, ConfigResourceMap, MemberToRemoveSet, MetricNameMap, TopicPartitionMap, TopicPartitionReplicaMap, TopicPartitionSet, UuidMap } from './collections';\n" +
     `void TopicPartition;\nexport class Coll {\n${Object.values(members)
       .map((m) => `  ${m}\n`)
       .join('')}}\n`;
@@ -479,7 +521,9 @@ test('a Java array or collection taken is any iterable; one returned is an array
         'export class TopicPartitionSet { private readonly b = 1; }\nexport class TopicPartitionMap<V> { private readonly v: V | null = null; }\n' +
         'export class MetricNameMap<V> { private readonly v: V | null = null; }\nexport class UuidMap<V> { private readonly v: V | null = null; }\n' +
         'export class ConfigResourceMap<V> { private readonly v: V | null = null; }\nexport class TopicPartitionReplicaMap<V> { private readonly v: V | null = null; }\n' +
-        'export class MemberToRemoveSet { private readonly m = 1; }\n',
+        'export class MemberToRemoveSet { private readonly m = 1; }\n' +
+        'export class AclBindingMap<V> { private readonly v: V | null = null; }\nexport class AclBindingFilterMap<V> { private readonly v: V | null = null; }\n' +
+        'export class ClientQuotaEntityMap<V> { private readonly v: V | null = null; }\n',
       'src/producer/coll.ts': source(members),
     });
   let r = lint(files(GOOD), [RULE]);
@@ -522,6 +566,21 @@ test('a Java array or collection taken is any iterable; one returned is an array
       'byReplica',
       'byReplica(): Map<string, string> { return new Map(); }',
       'Coll.byReplica: return: Java Map<TopicPartitionReplica, String> is not TypeScript Map<string, string>',
+    ],
+    [
+      'byBinding',
+      'byBinding(): AclBindingFilterMap<KafkaFuture<void>> { return new AclBindingFilterMap(); }',
+      'Coll.byBinding: return: Java Map<AclBinding, KafkaFuture<Void>> is not TypeScript AclBindingFilterMap<KafkaFuture<void>>',
+    ],
+    [
+      'byFilter',
+      'byFilter(): Map<string, string> { return new Map(); }',
+      'Coll.byFilter: return: Java Map<AclBindingFilter, String> is not TypeScript Map<string, string>',
+    ],
+    [
+      'byEntity',
+      'byEntity(): ClientQuotaEntityMap<Map<string, string>> { return new ClientQuotaEntityMap(); }',
+      'Coll.byEntity: return: Java Map<ClientQuotaEntity, Map<String, Double>> is not TypeScript ClientQuotaEntityMap<Map<string, string>>',
     ],
     [
       'members',

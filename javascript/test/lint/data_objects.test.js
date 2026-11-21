@@ -104,6 +104,7 @@ test("the shipped list names the data classes the client translates, not RecordH
     'org.apache.kafka.clients.admin.LogDirDescription',
     'org.apache.kafka.clients.admin.MemberDescription',
     'org.apache.kafka.clients.admin.TopicDescription',
+    'org.apache.kafka.clients.admin.UserScramCredentialsDescription',
     'org.apache.kafka.clients.consumer.OffsetAndMetadata',
     'org.apache.kafka.clients.producer.ProducerRecord',
     'org.apache.kafka.clients.producer.RecordMetadata',

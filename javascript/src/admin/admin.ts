@@ -89,6 +89,33 @@ import type { ListGroupsResult } from './list_groups_result';
 import type { RemoveMembersFromConsumerGroupOptions } from './remove_members_from_consumer_group_options';
 import type { RemoveMembersFromConsumerGroupResult } from './remove_members_from_consumer_group_result';
 import type { OffsetAndMetadata } from '../consumer/offset_and_metadata';
+import type { CreateAclsOptions } from './create_acls_options';
+import type { CreateAclsResult } from './create_acls_result';
+import type { DeleteAclsOptions } from './delete_acls_options';
+import type { DeleteAclsResult } from './delete_acls_result';
+import type { DescribeAclsOptions } from './describe_acls_options';
+import type { DescribeAclsResult } from './describe_acls_result';
+import type { AclBinding } from '../common/acl/acl_binding';
+import type { AclBindingFilter } from '../common/acl/acl_binding_filter';
+import type { AlterClientQuotasOptions } from './alter_client_quotas_options';
+import type { AlterClientQuotasResult } from './alter_client_quotas_result';
+import type { AlterUserScramCredentialsOptions } from './alter_user_scram_credentials_options';
+import type { AlterUserScramCredentialsResult } from './alter_user_scram_credentials_result';
+import type { CreateDelegationTokenOptions } from './create_delegation_token_options';
+import type { CreateDelegationTokenResult } from './create_delegation_token_result';
+import type { DescribeClientQuotasOptions } from './describe_client_quotas_options';
+import type { DescribeClientQuotasResult } from './describe_client_quotas_result';
+import type { DescribeDelegationTokenOptions } from './describe_delegation_token_options';
+import type { DescribeDelegationTokenResult } from './describe_delegation_token_result';
+import type { DescribeUserScramCredentialsOptions } from './describe_user_scram_credentials_options';
+import type { DescribeUserScramCredentialsResult } from './describe_user_scram_credentials_result';
+import type { ExpireDelegationTokenOptions } from './expire_delegation_token_options';
+import type { ExpireDelegationTokenResult } from './expire_delegation_token_result';
+import type { RenewDelegationTokenOptions } from './renew_delegation_token_options';
+import type { RenewDelegationTokenResult } from './renew_delegation_token_result';
+import type { UserScramCredentialAlteration } from './user_scram_credential_alteration';
+import type { ClientQuotaAlteration } from '../common/quota/client_quota_alteration';
+import type { ClientQuotaFilter } from '../common/quota/client_quota_filter';
 
 const CREATE_FORMS = new JavaForms('create', [['configs']], {
   bareIsPlainObject: true,
@@ -1154,6 +1181,415 @@ export interface Admin {
     /** The options to carry removing members' information. */
     options: RemoveMembersFromConsumerGroupOptions;
   }): RemoveMembersFromConsumerGroupResult;
+
+  /**
+   * This is a convenience method for `describeAcls({ filter, options })` with default options. See the
+   * overload for more details.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
+   *
+   * @param filter - The filter to use.
+   * @returns The DescribeAclsResult.
+   */
+  describeAcls(filter: AclBindingFilter): DescribeAclsResult;
+  /**
+   * The same as `describeAcls(filter)`, the filter given by name.
+   *
+   * @param args - the filter
+   * @returns The DescribeAclsResult.
+   */
+  describeAcls(args: {
+    /** The filter to use. */
+    filter: AclBindingFilter;
+    options?: never;
+  }): DescribeAclsResult;
+  /**
+   * Lists access control lists (ACLs) according to the supplied filter.
+   *
+   * Note: it may take some time for changes made by `createAcls` or `deleteAcls` to be reflected in the
+   * output of `describeAcls`.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
+   *
+   * @param args - the filter, and the options to use
+   * @returns The DescribeAclsResult.
+   */
+  describeAcls(args: {
+    /** The filter to use. */
+    filter: AclBindingFilter;
+    /** The options to use. */
+    options: DescribeAclsOptions;
+  }): DescribeAclsResult;
+
+  /**
+   * This is a convenience method for `createAcls({ acls, options })` with default options. See the overload
+   * for more details.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
+   *
+   * @param acls - The ACLs to create
+   * @returns The CreateAclsResult.
+   */
+  createAcls(acls: Iterable<AclBinding>): CreateAclsResult;
+  /**
+   * The same as `createAcls(acls)`, the acls given by name.
+   *
+   * @param args - the acls
+   * @returns The CreateAclsResult.
+   */
+  createAcls(args: {
+    /** The ACLs to create */
+    acls: Iterable<AclBinding>;
+    options?: never;
+  }): CreateAclsResult;
+  /**
+   * Creates access control lists (ACLs) which are bound to specific resources.
+   *
+   * This operation is not transactional so it may succeed for some ACLs while fail for others.
+   *
+   * If you attempt to add an ACL that duplicates an existing ACL, no error will be raised, but no changes
+   * will be made.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
+   *
+   * @param args - the acls, and the options to use
+   * @returns The CreateAclsResult.
+   */
+  createAcls(args: {
+    /** The ACLs to create */
+    acls: Iterable<AclBinding>;
+    /** The options to use. */
+    options: CreateAclsOptions;
+  }): CreateAclsResult;
+
+  /**
+   * This is a convenience method for `deleteAcls({ filters, options })` with default options. See the
+   * overload for more details.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
+   *
+   * @param filters - The filters to use.
+   * @returns The DeleteAclsResult.
+   */
+  deleteAcls(filters: Iterable<AclBindingFilter>): DeleteAclsResult;
+  /**
+   * The same as `deleteAcls(filters)`, the filters given by name.
+   *
+   * @param args - the filters
+   * @returns The DeleteAclsResult.
+   */
+  deleteAcls(args: {
+    /** The filters to use. */
+    filters: Iterable<AclBindingFilter>;
+    options?: never;
+  }): DeleteAclsResult;
+  /**
+   * Deletes access control lists (ACLs) according to the supplied filters.
+   *
+   * This operation is not transactional so it may succeed for some ACLs while fail for others.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
+   *
+   * @param args - the filters, and the options to use
+   * @returns The DeleteAclsResult.
+   */
+  deleteAcls(args: {
+    /** The filters to use. */
+    filters: Iterable<AclBindingFilter>;
+    /** The options to use. */
+    options: DeleteAclsOptions;
+  }): DeleteAclsResult;
+
+  /**
+   * Create a Delegation Token.
+   *
+   * This is a convenience method for `createDelegationToken({ options })` with default options. See the
+   * overload for more details.
+   *
+   * @returns The CreateDelegationTokenResult.
+   */
+  createDelegationToken(): CreateDelegationTokenResult;
+  /**
+   * Create a Delegation Token.
+   *
+   * This operation is supported by brokers with version 1.1.0 or higher.
+   *
+   * @param args - the options to use
+   * @returns The CreateDelegationTokenResult.
+   */
+  createDelegationToken(args: {
+    /** The options to use. */
+    options: CreateDelegationTokenOptions;
+  }): CreateDelegationTokenResult;
+  /**
+   * The same as `createDelegationToken({ options })`: the options on their own.
+   *
+   * @param options - the options to use
+   * @returns The CreateDelegationTokenResult.
+   */
+  createDelegationToken(options: CreateDelegationTokenOptions): CreateDelegationTokenResult;
+
+  /**
+   * Renew a Delegation Token.
+   *
+   * This is a convenience method for `renewDelegationToken({ hmac, options })` with default options. See the
+   * overload for more details.
+   *
+   * @param hmac - HMAC of the Delegation token
+   * @returns The RenewDelegationTokenResult.
+   */
+  renewDelegationToken(hmac: Uint8Array): RenewDelegationTokenResult;
+  /**
+   * The same as `renewDelegationToken(hmac)`, the hmac given by name.
+   *
+   * @param args - the hmac
+   * @returns The RenewDelegationTokenResult.
+   */
+  renewDelegationToken(args: {
+    /** HMAC of the Delegation token */
+    hmac: Uint8Array;
+    options?: never;
+  }): RenewDelegationTokenResult;
+  /**
+   * Renew a Delegation Token.
+   *
+   * This operation is supported by brokers with version 1.1.0 or higher.
+   *
+   * @param args - the hmac, and the options to use
+   * @returns The RenewDelegationTokenResult.
+   */
+  renewDelegationToken(args: {
+    /** HMAC of the Delegation token */
+    hmac: Uint8Array;
+    /** The options to use. */
+    options: RenewDelegationTokenOptions;
+  }): RenewDelegationTokenResult;
+
+  /**
+   * Expire a Delegation Token.
+   *
+   * This is a convenience method for `expireDelegationToken({ hmac, options })` with default options. This
+   * will expire the token immediately. See the overload for more details.
+   *
+   * @param hmac - HMAC of the Delegation token
+   * @returns The ExpireDelegationTokenResult.
+   */
+  expireDelegationToken(hmac: Uint8Array): ExpireDelegationTokenResult;
+  /**
+   * The same as `expireDelegationToken(hmac)`, the hmac given by name.
+   *
+   * @param args - the hmac
+   * @returns The ExpireDelegationTokenResult.
+   */
+  expireDelegationToken(args: {
+    /** HMAC of the Delegation token */
+    hmac: Uint8Array;
+    options?: never;
+  }): ExpireDelegationTokenResult;
+  /**
+   * Expire a Delegation Token.
+   *
+   * This operation is supported by brokers with version 1.1.0 or higher.
+   *
+   * @param args - the hmac, and the options to use
+   * @returns The ExpireDelegationTokenResult.
+   */
+  expireDelegationToken(args: {
+    /** HMAC of the Delegation token */
+    hmac: Uint8Array;
+    /** The options to use. */
+    options: ExpireDelegationTokenOptions;
+  }): ExpireDelegationTokenResult;
+
+  /**
+   * Describe the Delegation Tokens.
+   *
+   * This is a convenience method for `describeDelegationToken({ options })` with default options. This will
+   * return all the user owned tokens and tokens where user have Describe permission. See the overload for
+   * more details.
+   *
+   * @returns The DescribeDelegationTokenResult.
+   */
+  describeDelegationToken(): DescribeDelegationTokenResult;
+  /**
+   * Describe the Delegation Tokens.
+   *
+   * This operation is supported by brokers with version 1.1.0 or higher.
+   *
+   * @param args - the options to use
+   * @returns The DescribeDelegationTokenResult.
+   */
+  describeDelegationToken(args: {
+    /** The options to use. */
+    options: DescribeDelegationTokenOptions;
+  }): DescribeDelegationTokenResult;
+  /**
+   * The same as `describeDelegationToken({ options })`: the options on their own.
+   *
+   * @param options - the options to use
+   * @returns The DescribeDelegationTokenResult.
+   */
+  describeDelegationToken(options: DescribeDelegationTokenOptions): DescribeDelegationTokenResult;
+
+  /**
+   * Describes all entities matching the provided filter that have at least one client quota configuration
+   * value defined.
+   *
+   * This is a convenience method for `describeClientQuotas({ filter, options })` with default options. See
+   * the overload for more details.
+   *
+   * This operation is supported by brokers with version 2.6.0 or higher.
+   *
+   * @param filter - the filter to apply to match entities
+   * @returns The DescribeClientQuotasResult.
+   */
+  describeClientQuotas(filter: ClientQuotaFilter): DescribeClientQuotasResult;
+  /**
+   * The same as `describeClientQuotas(filter)`, the filter given by name.
+   *
+   * @param args - the filter
+   * @returns The DescribeClientQuotasResult.
+   */
+  describeClientQuotas(args: {
+    /** the filter to apply to match entities */
+    filter: ClientQuotaFilter;
+    options?: never;
+  }): DescribeClientQuotasResult;
+  /**
+   * Describes all entities matching the provided filter that have at least one client quota configuration
+   * value defined.
+   *
+   * This operation is supported by brokers with version 2.6.0 or higher.
+   *
+   * @param args - the filter, and the options to use
+   * @returns The DescribeClientQuotasResult.
+   */
+  describeClientQuotas(args: {
+    /** the filter to apply to match entities */
+    filter: ClientQuotaFilter;
+    /** The options to use. */
+    options: DescribeClientQuotasOptions;
+  }): DescribeClientQuotasResult;
+
+  /**
+   * Alters client quota configurations with the specified alterations.
+   *
+   * This is a convenience method for `alterClientQuotas({ entries, options })` with default options. See the
+   * overload for more details.
+   *
+   * This operation is supported by brokers with version 2.6.0 or higher.
+   *
+   * @param entries - the alterations to perform
+   * @returns The AlterClientQuotasResult.
+   */
+  alterClientQuotas(entries: Iterable<ClientQuotaAlteration>): AlterClientQuotasResult;
+  /**
+   * The same as `alterClientQuotas(entries)`, the entries given by name.
+   *
+   * @param args - the entries
+   * @returns The AlterClientQuotasResult.
+   */
+  alterClientQuotas(args: {
+    /** the alterations to perform */
+    entries: Iterable<ClientQuotaAlteration>;
+    options?: never;
+  }): AlterClientQuotasResult;
+  /**
+   * Alters client quota configurations with the specified alterations.
+   *
+   * Alterations for a single entity are atomic, but across entities is not guaranteed. The resulting per-
+   * entity error code should be evaluated to resolve the success or failure of all updates.
+   *
+   * This operation is supported by brokers with version 2.6.0 or higher.
+   *
+   * @param args - the entries, and the options to use
+   * @returns The AlterClientQuotasResult.
+   */
+  alterClientQuotas(args: {
+    /** the alterations to perform */
+    entries: Iterable<ClientQuotaAlteration>;
+    /** The options to use. */
+    options: AlterClientQuotasOptions;
+  }): AlterClientQuotasResult;
+
+  /**
+   * Describe all SASL/SCRAM credentials.
+   *
+   * This is a convenience method for `describeUserScramCredentials({ users, options })`.
+   *
+   * @returns The DescribeUserScramCredentialsResult.
+   */
+  describeUserScramCredentials(): DescribeUserScramCredentialsResult;
+  /**
+   * Describe SASL/SCRAM credentials for the given users.
+   *
+   * This is a convenience method for `describeUserScramCredentials({ users, options })`.
+   *
+   * @param users - the users for which credentials are to be described; all users' credentials are
+   *   described if null or empty.
+   * @returns The DescribeUserScramCredentialsResult.
+   */
+  describeUserScramCredentials(users: Iterable<string> | null): DescribeUserScramCredentialsResult;
+  /**
+   * The same as `describeUserScramCredentials(users)`, the users given by name.
+   *
+   * @param args - the users
+   * @returns The DescribeUserScramCredentialsResult.
+   */
+  describeUserScramCredentials(args: {
+    /** The users for which credentials are to be described; all users' credentials are described if null or empty. */
+    users: Iterable<string> | null;
+    options?: never;
+  }): DescribeUserScramCredentialsResult;
+  /**
+   * Describe SASL/SCRAM credentials.
+   *
+   * This operation is supported by brokers with version 2.7.0 or higher.
+   *
+   * @param args - the users, and the options to use
+   * @returns The DescribeUserScramCredentialsResult.
+   */
+  describeUserScramCredentials(args: {
+    /** The users for which credentials are to be described; all users' credentials are described if null or empty. */
+    users: Iterable<string> | null;
+    /** The options to use when describing the credentials. */
+    options: DescribeUserScramCredentialsOptions;
+  }): DescribeUserScramCredentialsResult;
+
+  /**
+   * Alter SASL/SCRAM credentials for the given users.
+   *
+   * This is a convenience method for `alterUserScramCredentials({ alterations, options })`.
+   *
+   * @param alterations - the alterations to be applied
+   * @returns The AlterUserScramCredentialsResult.
+   */
+  alterUserScramCredentials(alterations: Iterable<UserScramCredentialAlteration>): AlterUserScramCredentialsResult;
+  /**
+   * The same as `alterUserScramCredentials(alterations)`, the alterations given by name.
+   *
+   * @param args - the alterations
+   * @returns The AlterUserScramCredentialsResult.
+   */
+  alterUserScramCredentials(args: {
+    /** the alterations to be applied */
+    alterations: Iterable<UserScramCredentialAlteration>;
+    options?: never;
+  }): AlterUserScramCredentialsResult;
+  /**
+   * Alter SASL/SCRAM credentials.
+   *
+   * This operation is supported by brokers with version 2.7.0 or higher.
+   *
+   * @param args - the alterations, and the options to use
+   * @returns The AlterUserScramCredentialsResult.
+   */
+  alterUserScramCredentials(args: {
+    /** the alterations to be applied */
+    alterations: Iterable<UserScramCredentialAlteration>;
+    /** The options to use. */
+    options: AlterUserScramCredentialsOptions;
+  }): AlterUserScramCredentialsResult;
 }
 
 /**
