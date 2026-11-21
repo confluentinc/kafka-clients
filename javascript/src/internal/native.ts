@@ -167,6 +167,11 @@ interface AdminStats {
  */
 type AdminOptionsSetters = Array<[string, unknown]> | null;
 
+// An ACL binding or filter as the addon passes it: [resourceTypeCode, name,
+// patternTypeCode, principal, host, operationCode, permissionTypeCode], each
+// enum as Java's byte code; a filter's name, principal and host may be null.
+type AclFields = [number, string | null, number, string | null, string | null, number, number];
+
 /** The functions the addon registers (native/addon.c). */
 interface Native {
   probe(): boolean;
@@ -401,6 +406,47 @@ interface Native {
     members: string[] | null,
     options: AdminOptionsSetters,
   ): AdminResultBox;
+  // Admin.createAcls: each binding as [resourceTypeCode, name,
+  // patternTypeCode, principal, host, operationCode, permissionTypeCode].
+  adminCreateAcls(handle: AdminHandle, acls: AclFields[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeAcls: the filter as its seven fields, a name, principal or
+  // host null for any.
+  adminDescribeAcls(handle: AdminHandle, filter: AclFields, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.deleteAcls: each filter as its seven fields.
+  adminDeleteAcls(handle: AdminHandle, filters: AclFields[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeClientQuotas: the filter as [strict, [[entityType,
+  // matchKind (0 exact, 1 default, 2 any), name | null], ...]].
+  adminDescribeClientQuotas(
+    handle: AdminHandle,
+    filter: [boolean, Array<[string, number, string | null]>],
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.alterClientQuotas: each alteration as [entityEntries, ops], an
+  // entity's entries [[entityType, name | null], ...], an op [key, value |
+  // null].
+  adminAlterClientQuotas(
+    handle: AdminHandle,
+    entries: Array<[Array<[string, string | null]>, Array<[string, number | null]>]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.describeUserScramCredentials: the users, or null for every user.
+  adminDescribeUserScramCredentials(handle: AdminHandle, users: string[] | null, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.alterUserScramCredentials: an upsertion as [0, user,
+  // mechanismType, iterations, password, salt], a deletion as [1, user,
+  // mechanismType].
+  adminAlterUserScramCredentials(
+    handle: AdminHandle,
+    alterations: Array<[0, string, number, number, Uint8Array, Uint8Array] | [1, string, number]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.createDelegationToken.
+  adminCreateDelegationToken(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.renewDelegationToken: the HMAC, copied during the call.
+  adminRenewDelegationToken(handle: AdminHandle, hmac: Uint8Array, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.expireDelegationToken: the HMAC, copied during the call.
+  adminExpireDelegationToken(handle: AdminHandle, hmac: Uint8Array, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeDelegationToken.
+  adminDescribeDelegationToken(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
   // Java's MockAdminClient() (no argument) or MockAdminClient(brokers,
   // controller).
   mockAdminCreate(...args: [] | [brokers: NodeFields[] | null, controller: NodeFields | null]): AdminHandle;

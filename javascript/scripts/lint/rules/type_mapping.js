@@ -64,6 +64,9 @@
 // | Map<Uuid, V>                                 | UuidMap<V>                              |
 // | Map<ConfigResource, V>                       | ConfigResourceMap<V>                    |
 // | Map<TopicPartitionReplica, V>                | TopicPartitionReplicaMap<V>             |
+// | Map<AclBinding, V>                           | AclBindingMap<V>                        |
+// | Map<AclBindingFilter, V>                     | AclBindingFilterMap<V>                  |
+// | Map<ClientQuotaEntity, V>                    | ClientQuotaEntityMap<V>                 |
 // | Map<Integer, V> (broker ids, partitions)     | Map<number, V>, or a ReadonlyMap (taken, or an unmodifiable view returned) |
 // | Map<String, V>, returned                     | Map<string, V>                          |
 // | Map<String, V>, taken                        | a Map or ReadonlyMap, or a plain object (Record) of string to V |
@@ -85,6 +88,9 @@ const VALUE_KEYED_MAPS = new Map([
   ['Uuid', 'UuidMap'],
   ['ConfigResource', 'ConfigResourceMap'],
   ['TopicPartitionReplica', 'TopicPartitionReplicaMap'],
+  ['AclBinding', 'AclBindingMap'],
+  ['AclBindingFilter', 'AclBindingFilterMap'],
+  ['ClientQuotaEntity', 'ClientQuotaEntityMap'],
 ]);
 /** The sets of a value class returned (D2): the Java member class, and the TypeScript class of its set. */
 const VALUE_KEYED_SETS = new Map([['MemberToRemove', 'MemberToRemoveSet']]);
@@ -571,11 +577,25 @@ module.exports = {
           // An options object (check-overload-shape checks its names): each
           // option against the union of the Java types the forms naming it
           // give; a name closed with `never` is no option of this signature.
+          // When the signature's keys are exactly some forms' parameter
+          // names, only those forms count, so a signature for one Java form
+          // takes only that form's types (UserScramCredentialUpsertion's salt
+          // form: a byte[] password, not the String form's).
+          const isNever = (prop) =>
+            (checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(prop, p0)).flags & ts.TypeFlags.Never) !== 0;
+          const keys = checker
+            .getPropertiesOfType(options)
+            .filter((prop) => !isNever(prop))
+            .map((prop) => prop.name);
+          const exact = forms
+            .map((f, k) => k)
+            .filter((k) => names[k].length === keys.length && keys.every((key) => names[k].includes(key)));
+          const counted = exact.length > 0 ? exact : forms.map((f, k) => k);
           for (const prop of checker.getPropertiesOfType(options)) {
+            if (isNever(prop)) continue;
             const type = checker.getTypeOfSymbolAtLocation(prop, p0);
-            if (checker.getNonNullableType(type).flags & ts.TypeFlags.Never) continue;
             const types = [];
-            forms.forEach((f, k) => names[k].forEach((x, i) => x === prop.name && types.push(f.types[i])));
+            counted.forEach((k) => names[k].forEach((x, i) => x === prop.name && types.push(forms[k].types[i])));
             if (types.length > 0) check(where, `option ${prop.name}`, types, type);
           }
         } else if (sameArity) {
