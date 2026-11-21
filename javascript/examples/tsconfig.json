@@ -1,0 +1,41 @@
+// Copyright 2026 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// The type check of the examples (`make typecheck-examples`,
+// scripts/typecheck_tests.js examples): `tsc --strict` over every example,
+// through `checkJs`, as `node` runs them. The package's own import paths
+// (`@confluentinc/kafka-javascript/...`) resolve, through package.json's
+// exports, to the compiled declarations in dist/, so it runs after `make
+// build-ts`, as an app's code types against them. The settings are the
+// tests' (test/tsconfig.json) with Node's globals only; `include` names every
+// extension, as the script checks.
+{
+  "compilerOptions": {
+    "strict": true,
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "es2022",
+    "lib": ["es2022", "es2024.string"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "moduleDetection": "force",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["**/*.js", "**/*.mjs", "**/*.cjs", "**/*.ts", "**/*.mts", "**/*.cts"]
+}
