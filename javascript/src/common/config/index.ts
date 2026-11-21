@@ -16,6 +16,8 @@
 // org.apache.kafka.common.config this client has. The config classes'
 // constants and ConfigError are generated from the Java sources.
 
+export { ConfigResource } from './config_resource';
+export { ConfigResourceMap } from './config_resource_map';
 export { SslClientAuth } from './ssl_client_auth';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { ConfigError } from './config_error';
