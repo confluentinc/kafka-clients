@@ -293,6 +293,13 @@ blocks:
         - name: "verify-rust (Linux amd64) — sasl_ssl (plain)"
           commands:
             - make -C rust test-all-features-sasl-ssl
+        # The tests gated on a 4.3 or 4.4 broker (kafka_cluster::broker_release()),
+        # which the three jobs above skip on the default 4.2.0 image: the share
+        # consumer suites and the few other gated tests, over PLAINTEXT only
+        # (rust/Makefile's test-integration-broker-4.4 says why).
+        - name: "verify-rust (Linux amd64) — broker 4.4.0 (gated tests)"
+          commands:
+            - make -C rust test-integration-broker-4.4
         - name: "verify-c (Linux amd64) — plaintext"
           execution_time_limit:
             minutes: 30

@@ -385,6 +385,23 @@ added to CLAUDE.md or the DoD:
   proposal, retrying a cluster start whose broker misses the 90 s readiness deadline, was **rejected** (both cases
   were host overload, which a retry only hides) and reverted (`780a04bbf`).
 
+- **D10 — The tests that needed Kafka's test jars, and a CI leg on a 4.4 broker.** **Decided 2026-11-21 (user),
+  after Critic 310 Issues 3 and 4.** (a) Translate `ShareConsumerRackAwareTest` and the two tiered-storage
+  `ShareConsumerDLQTest` cases instead of skipping them: the harness downloads the published 4.4.0 test jars
+  (`kafka-clients-integration-tests:test` for `RackAwareTestAssignor`, `kafka-storage:test-fixtures` for
+  `LocalTieredStorage`, `kafka-clients:test-fixtures` for the `TestUtils` it calls) from Maven Central on first
+  use, caches them under the gitignored `target/test-jars`, checks pinned SHA-256s, and copies them into every node
+  with `INCLUDE_TEST_JARS=true` (`tests/common/test_jars.rs`, `ClusterConfig::broker_libs`); per-broker properties
+  (`broker.rack` per id) through `ClusterConfig::broker_properties`. No jar is committed. The tests are gated on a
+  4.4 broker, the release the jars are built for. (b) Add the CI leg harness-spike §6 item 6 planned, so the tests
+  gated off on the default 4.2.0 image run somewhere: the job `verify-rust (Linux amd64) — broker 4.4.0 (gated
+  tests)` runs `make -C rust test-integration-broker-4.4`, i.e. the share suites plus the other 4.3/4.4-gated
+  integration tests (the consumer max-size bounce arms, the quota-config test) against `apache/kafka:4.4.0`, on
+  the PLAINTEXT listener only. Scope choice: Java gates by broker release, not by protocol, and the whole binary
+  three times over on a second broker version would double the jobs' broker memory (the share suites alone peak at
+  ~6 GiB of containers, §8 "Bugs found by P10"). Verified locally (134 passed); the GitHub/Semaphore run itself was
+  not observable from the agent.
+
 ### 7.2 Which decision gates which phase
 
 | Decision | Needed before | Why |
