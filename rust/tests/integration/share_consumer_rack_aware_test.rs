@@ -277,14 +277,17 @@ async fn wait_for_expected_assignment(
         for consumer in consumers.iter_mut() {
             consumer.poll(Duration::from_millis(1000)).await.expect("poll");
         }
-        let groups = admin
-            .describe_share_groups(&[group_id.to_string()])
-            .all()
-            .get()
-            .await
-            .unwrap_or_else(|e| panic!("describeShareGroups: {e}"));
-        if is_expected_assignment(groups.get(group_id), 3, &expected_assignments) {
-            return;
+        // Java's `assertDoesNotThrow` around the describe throws an
+        // `AssertionError` that `waitForCondition` retries until its deadline
+        // (a group with no member yet is `GroupIdNotFound`), so an error is
+        // "not yet" here too.
+        match admin.describe_share_groups(&[group_id.to_string()]).all().get().await {
+            Ok(groups) => {
+                if is_expected_assignment(groups.get(group_id), 3, &expected_assignments) {
+                    return;
+                }
+            },
+            Err(e) => deadline.record_error(format!("describeShareGroups: {e}")),
         }
         deadline.fail_or_pause().await;
     }
