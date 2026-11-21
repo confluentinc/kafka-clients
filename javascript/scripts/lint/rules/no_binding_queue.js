@@ -180,6 +180,26 @@ const ALLOWED = [
     key: 'DescribeLogDirsResult.#futures',
     reason: "one call's futures by broker id (Java's Map<Integer, KafkaFuture<...>>), not a store of records",
   },
+  {
+    key: 'NewPartitionReassignment.#targetReplicas',
+    reason: "one partition's target replicas (Java's List<Integer>), not a store of records",
+  },
+  {
+    key: 'PartitionReassignment.#replicas',
+    reason: "one partition's replicas (Java's List<Integer>), not a store of records",
+  },
+  {
+    key: 'PartitionReassignment.#addingReplicas',
+    reason: "one partition's replicas being added (Java's List<Integer>), not a store of records",
+  },
+  {
+    key: 'PartitionReassignment.#removingReplicas',
+    reason: "one partition's replicas being removed (Java's List<Integer>), not a store of records",
+  },
+  {
+    key: 'src/admin/offset_spec.ts:MAX_TIMESTAMP_FORMS',
+    reason: "the forms of Java's OffsetSpec#maxTimestamp factory, an offset spec, not a cap on records",
+  },
   { key: 'SslClientAuth.VALUES', reason: "Java's SslClientAuth.VALUES, the enum's constants in order" },
   {
     key: 'src/common/kafka_future.ts:MAX_TIMER_MS',
