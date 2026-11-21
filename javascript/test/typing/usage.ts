@@ -1007,10 +1007,12 @@ async function adminTopics(): Promise<void> {
   void admin.deleteTopics({ topics: TopicCollection.ofTopicIds([] as UuidType[]) });
   void admin.createPartitions({ newPartitions: { t: NewPartitions.increaseTo(2) } });
   void admin.createPartitions(new Map([['t', NewPartitions.increaseTo({ totalCount: 3, newAssignments: [[1], [2]] })]]));
+  // @ts-expect-error a plain object given alone is the options object: the map goes under newPartitions
+  admin.createPartitions({ t: NewPartitions.increaseTo(2) });
   const deleted = admin.deleteRecords(
     new TopicPartitionMap([[new TopicPartition({ topic: 't', partition: 0 }), RecordsToDelete.beforeOffset(5n)]]),
   );
-  expectTypeOf(deleted.lowWatermarks()).toEqualTypeOf<InstanceType<typeof TopicPartitionMap<KafkaFutureOf<DeletedRecordsType>>> | null>();
+  expectTypeOf(deleted.lowWatermarks()).toEqualTypeOf<InstanceType<typeof TopicPartitionMap<KafkaFutureOf<DeletedRecordsType>>>>();
   // @ts-expect-error deleteRecords takes a TopicPartitionMap
   admin.deleteRecords(new Map());
   await admin.close();
@@ -1151,9 +1153,11 @@ async function adminSecurity(): Promise<void> {
   expectTypeOf(created.values()).toEqualTypeOf<AclBindingMapOf<KafkaFutureOf<void>>>();
   expectTypeOf(created.all()).toEqualTypeOf<KafkaFutureOf<void>>();
   void mock.createAcls({ acls: new Set([binding]), options: new admin.CreateAclsOptions({ timeoutMs: 1 }) });
+  void mock.createAcls({ acls: [binding] });
   const described = mock.describeAcls(acl.AclBindingFilter.ANY);
   expectTypeOf(described.values()).toEqualTypeOf<KafkaFutureOf<AclBindingType[]>>();
   void mock.describeAcls({ filter: binding.toFilter(), options: new admin.DescribeAclsOptions() });
+  void mock.describeAcls({ filter: acl.AclBindingFilter.ANY });
   const deleted = mock.deleteAcls({ filters: [acl.AclBindingFilter.ANY] });
   expectTypeOf(deleted.values()).toEqualTypeOf<AclBindingFilterMapOf<KafkaFutureOf<FilterResultsType>>>();
   expectTypeOf(deleted.all()).toEqualTypeOf<KafkaFutureOf<AclBindingType[]>>();
@@ -1181,22 +1185,25 @@ async function adminSecurity(): Promise<void> {
   type DelegationTokenType = import('@confluentinc/kafka-javascript/common/security/token/delegation').DelegationToken;
   const entity = new quota.ClientQuotaEntity(new Map([[quota.ClientQuotaEntity.USER, 'a']]));
   const quotas = mock.describeClientQuotas(quota.ClientQuotaFilter.all());
-  expectTypeOf(quotas.entities()).toEqualTypeOf<KafkaFutureOf<ClientQuotaEntityMapOf<Map<string, number>>> | null>();
+  expectTypeOf(quotas.entities()).toEqualTypeOf<KafkaFutureOf<ClientQuotaEntityMapOf<Map<string, number>>>>();
   void mock.describeClientQuotas({
     filter: quota.ClientQuotaFilter.containsOnly([quota.ClientQuotaFilterComponent.ofEntityType('user')]),
     options: new admin.DescribeClientQuotasOptions(),
   });
+  void mock.describeClientQuotas({ filter: quota.ClientQuotaFilter.all() });
   const altered = mock.alterClientQuotas([
     new quota.ClientQuotaAlteration({ entity, ops: [new quota.ClientQuotaAlteration.Op({ key: 'k', value: null })] }),
   ]);
-  expectTypeOf(altered.values()).toEqualTypeOf<ClientQuotaEntityMapOf<KafkaFutureOf<void>> | null>();
+  expectTypeOf(altered.values()).toEqualTypeOf<ClientQuotaEntityMapOf<KafkaFutureOf<void>>>();
   expectTypeOf(altered.all()).toEqualTypeOf<KafkaFutureOf<void>>();
   void mock.alterClientQuotas({ entries: [], options: new admin.AlterClientQuotasOptions({ validateOnly: true }) });
+  void mock.alterClientQuotas({ entries: [] });
   const scram = mock.describeUserScramCredentials();
   expectTypeOf(scram.all()).toEqualTypeOf<KafkaFutureOf<Map<string, DescriptionType>>>();
   expectTypeOf(scram.users()).toEqualTypeOf<KafkaFutureOf<string[]>>();
   expectTypeOf(scram.description('u')).toEqualTypeOf<KafkaFutureOf<DescriptionType>>();
   void mock.describeUserScramCredentials(['u']);
+  void mock.describeUserScramCredentials({ users: ['u'] });
   void mock.describeUserScramCredentials({ users: null, options: new admin.DescribeUserScramCredentialsOptions() });
   const info = new admin.ScramCredentialInfo({ mechanism: admin.ScramMechanism.SCRAM_SHA_256, iterations: 4096 });
   const scramAltered = mock.alterUserScramCredentials([
@@ -1206,11 +1213,18 @@ async function adminSecurity(): Promise<void> {
   ]);
   expectTypeOf(scramAltered.values()).toEqualTypeOf<Map<string, KafkaFutureOf<void>>>();
   expectTypeOf(scramAltered.all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  void mock.alterUserScramCredentials({
+    alterations: [new admin.UserScramCredentialDeletion({ user: 'u', mechanism: admin.ScramMechanism.SCRAM_SHA_256 })],
+  });
   const principal = new auth.KafkaPrincipal({ principalType: auth.KafkaPrincipal.USER_TYPE, name: 'a' });
   const created2 = mock.createDelegationToken(
     new admin.CreateDelegationTokenOptions({ renewers: [principal], owner: null, maxLifetimeMs: 1n }),
   );
   expectTypeOf(created2.delegationToken()).toEqualTypeOf<KafkaFutureOf<DelegationTokenType>>();
+  void mock.createDelegationToken({ options: new admin.CreateDelegationTokenOptions({ renewers: [principal] }) });
+  void mock.renewDelegationToken({ hmac: new Uint8Array(1) });
+  void mock.expireDelegationToken({ hmac: new Uint8Array(1) });
+  void mock.describeDelegationToken({ options: new admin.DescribeDelegationTokenOptions() });
   expectTypeOf(mock.renewDelegationToken(new Uint8Array(1)).expiryTimestamp()).toEqualTypeOf<KafkaFutureOf<bigint>>();
   expectTypeOf(
     mock.expireDelegationToken({ hmac: new Uint8Array(1), options: new admin.ExpireDelegationTokenOptions() }).expiryTimestamp(),
@@ -1224,8 +1238,119 @@ async function adminSecurity(): Promise<void> {
   >();
   // @ts-expect-error describeUserScramCredentials has no (options) form
   mock.describeUserScramCredentials({ options: new admin.DescribeUserScramCredentialsOptions() });
-  // @ts-expect-error a salt only with a byte password... and a ScramCredentialInfo is required
+  // @ts-expect-error a ScramCredentialInfo is required
   new admin.UserScramCredentialUpsertion({ user: 'u', password: 'p' });
+  new admin.UserScramCredentialUpsertion({ user: 'u', credentialInfo: info, password: new Uint8Array(1), salt: new Uint8Array(1) });
+  // @ts-expect-error a salt only with a byte password: Java has no (String, ScramCredentialInfo, String, byte[]) form
+  new admin.UserScramCredentialUpsertion({ user: 'u', credentialInfo: info, password: 'p', salt: new Uint8Array(1) });
   await mock.close();
 }
 void adminSecurity;
+
+// The R3 transaction and producer calls: every Result accessor's type, and
+// each RPC's forms bare and by name.
+async function adminTransactions(): Promise<void> {
+  const admin = await import('@confluentinc/kafka-javascript/admin');
+  const common = await import('@confluentinc/kafka-javascript/common');
+  type KafkaFutureOf<T> = import('@confluentinc/kafka-javascript/common').KafkaFuture<T>;
+  type TopicPartitionMapOf<V> = import('@confluentinc/kafka-javascript/common').TopicPartitionMap<V>;
+  type PartitionProducerStateType = import('@confluentinc/kafka-javascript/admin').DescribeProducersResult.PartitionProducerState;
+  type ListingType = import('@confluentinc/kafka-javascript/admin').TransactionListing;
+  type DescriptionType = import('@confluentinc/kafka-javascript/admin').TransactionDescription;
+  const mock = new admin.MockAdminClient();
+  const tp = new common.TopicPartition({ topic: 't', partition: 0 });
+
+  const producers = mock.describeProducers([tp]);
+  expectTypeOf(producers.partitionResult(tp)).toEqualTypeOf<KafkaFutureOf<PartitionProducerStateType>>();
+  expectTypeOf(producers.all()).toEqualTypeOf<KafkaFutureOf<TopicPartitionMapOf<PartitionProducerStateType>>>();
+  void mock.describeProducers({ partitions: new Set([tp]), options: new admin.DescribeProducersOptions({ brokerId: 1 }) });
+  void mock.describeProducers({ partitions: [tp] });
+  const state = await producers.partitionResult({ partition: tp }).get();
+  expectTypeOf(state.activeProducers()).toEqualTypeOf<import('@confluentinc/kafka-javascript/admin').ProducerState[] | null>();
+  const producer = (state.activeProducers() ?? [])[0];
+  expectTypeOf(producer.producerId()).toEqualTypeOf<bigint>();
+  expectTypeOf(producer.coordinatorEpoch()).toEqualTypeOf<number | null>();
+  expectTypeOf(producer.currentTransactionStartOffset()).toEqualTypeOf<bigint | null>();
+
+  const described = mock.describeTransactions(['a']);
+  expectTypeOf(described.description('a')).toEqualTypeOf<KafkaFutureOf<DescriptionType>>();
+  expectTypeOf(described.all()).toEqualTypeOf<KafkaFutureOf<Map<string, DescriptionType>>>();
+  void mock.describeTransactions({ transactionalIds: ['a'], options: new admin.DescribeTransactionsOptions() });
+  void mock.describeTransactions({ transactionalIds: ['a'] });
+  const description = await described.description({ transactionalId: 'a' }).get();
+  expectTypeOf(description.transactionStartTimeMs).toEqualTypeOf<bigint | null>();
+  expectTypeOf(description.topicPartitions).toEqualTypeOf<import('@confluentinc/kafka-javascript/common').TopicPartitionSet | null>();
+
+  const spec = new admin.AbortTransactionSpec({ topicPartition: tp, producerId: 1n, producerEpoch: 0, coordinatorEpoch: 0 });
+  expectTypeOf(mock.abortTransaction(spec).all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  void mock.abortTransaction({ spec, options: new admin.AbortTransactionOptions() });
+  void mock.abortTransaction({ spec });
+  expectTypeOf(mock.forceTerminateTransaction('a').result()).toEqualTypeOf<KafkaFutureOf<void>>();
+  void mock.forceTerminateTransaction({ transactionalId: 'a', options: new admin.TerminateTransactionOptions() });
+  void mock.forceTerminateTransaction({ transactionalId: 'a' });
+
+  const listed = mock.listTransactions(new admin.ListTransactionsOptions({ filteredStates: [admin.TransactionState.ONGOING] }));
+  expectTypeOf(listed.all()).toEqualTypeOf<KafkaFutureOf<ListingType[]>>();
+  expectTypeOf(listed.byBrokerId()).toEqualTypeOf<KafkaFutureOf<Map<number, KafkaFutureOf<ListingType[]>>>>();
+  expectTypeOf(listed.allByBrokerId()).toEqualTypeOf<KafkaFutureOf<Map<number, ListingType[]>>>();
+  void mock.listTransactions();
+  void mock.listTransactions({ options: new admin.ListTransactionsOptions() });
+
+  const fenced = mock.fenceProducers(['a']);
+  expectTypeOf(fenced.fencedProducers()).toEqualTypeOf<Map<string, KafkaFutureOf<void>>>();
+  expectTypeOf(fenced.producerId('a')).toEqualTypeOf<KafkaFutureOf<bigint>>();
+  expectTypeOf(fenced.epochId({ transactionalId: 'a' })).toEqualTypeOf<KafkaFutureOf<number>>();
+  expectTypeOf(fenced.all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  void mock.fenceProducers({ transactionalIds: ['a'], options: new admin.FenceProducersOptions() });
+  void mock.fenceProducers({ transactionalIds: ['a'] });
+
+  // @ts-expect-error a Result's constructor is private: instances come from the client
+  void new admin.ListTransactionsResult();
+  // @ts-expect-error describeTransactions takes the ids, not one id
+  void mock.describeTransactions({ transactionalId: 'a' });
+  await mock.close();
+}
+void adminTransactions;
+
+// The R3 feature and controller calls: every Result accessor's type, and
+// each RPC's forms bare and by name.
+async function adminFeatures(): Promise<void> {
+  const admin = await import('@confluentinc/kafka-javascript/admin');
+  type KafkaFutureOf<T> = import('@confluentinc/kafka-javascript/common').KafkaFuture<T>;
+  type FeatureMetadataType = import('@confluentinc/kafka-javascript/admin').FeatureMetadata;
+  type FinalizedType = import('@confluentinc/kafka-javascript/admin').FinalizedVersionRange;
+  type SupportedType = import('@confluentinc/kafka-javascript/admin').SupportedVersionRange;
+  const mock = admin.MockAdminClient.create().usingRaftController(true).build();
+
+  const described = mock.describeFeatures();
+  expectTypeOf(described.featureMetadata()).toEqualTypeOf<KafkaFutureOf<FeatureMetadataType>>();
+  void mock.describeFeatures(new admin.DescribeFeaturesOptions({ nodeId: 1 }));
+  void mock.describeFeatures({ options: new admin.DescribeFeaturesOptions() });
+  const metadata = await described.featureMetadata().get();
+  expectTypeOf(metadata.finalizedFeatures()).toEqualTypeOf<Map<string, FinalizedType>>();
+  expectTypeOf(metadata.finalizedFeaturesEpoch()).toEqualTypeOf<bigint | null>();
+  expectTypeOf(metadata.supportedFeatures()).toEqualTypeOf<Map<string, SupportedType>>();
+  expectTypeOf(new admin.DescribeFeaturesOptions().nodeId()).toEqualTypeOf<number | null>();
+
+  const update = new admin.FeatureUpdate({ maxVersionLevel: 2, upgradeType: admin.FeatureUpdate.UpgradeType.UPGRADE });
+  expectTypeOf(update.upgradeType()).toEqualTypeOf<import('@confluentinc/kafka-javascript/admin').FeatureUpdate.UpgradeType>();
+  const updated = mock.updateFeatures(new Map([['f', update]]));
+  expectTypeOf(updated.values()).toEqualTypeOf<Map<string, KafkaFutureOf<void>>>();
+  expectTypeOf(updated.all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  void mock.updateFeatures({ featureUpdates: { f: update }, options: new admin.UpdateFeaturesOptions({ validateOnly: true }) });
+  void mock.updateFeatures({ featureUpdates: new Map([['f', update]]) });
+  expectTypeOf(new admin.UpdateFeaturesOptions().validateOnly()).toEqualTypeOf<boolean>();
+
+  expectTypeOf(mock.unregisterController(1).all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  void mock.unregisterController({ controllerId: 1, options: new admin.UnregisterControllerOptions() });
+  void mock.unregisterController({ controllerId: 1 });
+
+  // @ts-expect-error a plain object of updates given alone is the options object
+  void mock.updateFeatures({ f: update });
+  // @ts-expect-error a Result's constructor is private: instances come from the client
+  void new admin.UpdateFeaturesResult(new Map());
+  // @ts-expect-error describeFeatures takes no node id of its own: it is an option
+  void mock.describeFeatures({ nodeId: 1 });
+  await mock.close();
+}
+void adminFeatures;

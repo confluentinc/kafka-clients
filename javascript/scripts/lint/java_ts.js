@@ -98,6 +98,7 @@ const DATA_CLASSES = new Set([
   'org.apache.kafka.clients.admin.ClassicGroupDescription',
   'org.apache.kafka.clients.admin.MemberDescription',
   'org.apache.kafka.clients.admin.UserScramCredentialsDescription',
+  'org.apache.kafka.clients.admin.TransactionDescription',
 ]);
 
 /**
