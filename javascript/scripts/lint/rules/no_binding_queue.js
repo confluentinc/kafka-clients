@@ -177,6 +177,54 @@ const ALLOWED = [
     reason: "the entries of Java's Map<TopicPartitionReplica, V> the caller builds or a call returns, not a store of records",
   },
   {
+    key: 'AclBindingMap.#entries',
+    reason: "the entries of Java's Map<AclBinding, V> the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'AclBindingFilterMap.#entries',
+    reason: "the entries of Java's Map<AclBindingFilter, V> the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'src/admin/create_delegation_token_options.ts:MAX_LIFETIME_MS',
+    reason: "the forms of Java's CreateDelegationTokenOptions#maxLifetimeMs getter and setter, a token's lifetime, not a cap on records",
+  },
+  {
+    key: 'src/common/security/token/delegation/token_information.ts:MAX_TIMESTAMP_FORMS',
+    reason: "the forms of Java's TokenInformation#maxTimestamp getter, a token's timestamp, not a cap on records",
+  },
+  {
+    key: 'CreateDelegationTokenOptions.#renewers',
+    reason: "the renewers Java's CreateDelegationTokenOptions holds, an option of one call, not a store of records",
+  },
+  {
+    key: 'DescribeDelegationTokenOptions.#owners',
+    reason: "the owners Java's DescribeDelegationTokenOptions holds, an option of one call, not a store of records",
+  },
+  {
+    key: 'UserScramCredentialsDescription.credentialInfos',
+    reason: "the credential infos of Java's UserScramCredentialsDescription, a value a call returns, not a store of records",
+  },
+  {
+    key: 'ClientQuotaAlteration.#ops',
+    reason: "the ops of Java's ClientQuotaAlteration, a value the caller builds, not a store of records",
+  },
+  {
+    key: 'ClientQuotaEntity.#entries',
+    reason: "the entries of Java's ClientQuotaEntity, a value the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'ClientQuotaFilter.#components',
+    reason: "the components of Java's ClientQuotaFilter, a value the caller builds, not a store of records",
+  },
+  {
+    key: 'TokenInformation.#renewers',
+    reason: "the renewers of Java's TokenInformation, a value a call returns, not a store of records",
+  },
+  {
+    key: 'ClientQuotaEntityMap.#entries',
+    reason: "the entries of Java's Map<ClientQuotaEntity, V> the caller builds or a call returns, not a store of records",
+  },
+  {
     key: 'MemberToRemoveSet.#members',
     reason: "the members of Java's Set<MemberToRemove> an options object holds, not a store of records",
   },
