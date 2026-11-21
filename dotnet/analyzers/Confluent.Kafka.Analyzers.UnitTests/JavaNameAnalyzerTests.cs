@@ -36,6 +36,11 @@ public sealed class JavaNameAnalyzerTests
         + "ctor\torg.apache.kafka.common.Node\tNode()\n"
         + "method\torg.apache.kafka.common.Node\tinstance\thost()\n";
 
+    private const string Header =
+        "type\torg.apache.kafka.common.header.Header\tinterface\t-\n"
+        + "method\torg.apache.kafka.common.header.Header\tinstance\tkey()\n"
+        + "method\torg.apache.kafka.common.header.Header\tinstance\tvalue()\n";
+
     private const string Callback =
         "type\torg.apache.kafka.clients.producer.Callback\tinterface\t-\n"
         + "method\torg.apache.kafka.clients.producer.Callback\tinstance\tonCompletion(RecordMetadata metadata, Exception exception)\n";
@@ -84,6 +89,79 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.common.Node\tinstance\tid()\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
                 + "field\torg.apache.kafka.common.Node\tstatic\tNO_ID\n"));
+
+    [Fact]
+    public Task AJavaInterface_TranslatedAsAnInterface_IsNotReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Header
+            {
+                public interface IHeader
+                {
+                    string Key();
+
+                    byte[] Value();
+                }
+            }
+            """,
+            Files(Header));
+
+    [Fact]
+    public Task AJavaInterface_TranslatedAsAClass_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Header
+            {
+                public sealed class {|#0:Header|}
+                {
+                    private Header()
+                    {
+                    }
+
+                    public string Key() => "";
+
+                    public byte[] Value() => null;
+                }
+            }
+            """,
+            Files(Header),
+            Name(0, "kind T:Confluent.Kafka.Common.Header.Header: translates the Java interface "
+                + "org.apache.kafka.common.header.Header; declare it as the interface IHeader"));
+
+    [Fact]
+    public Task AJavaInterface_TranslatedAsADelegate_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public delegate TB {|#0:BaseFunction|}<in TA, out TB>(TA a);
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.BaseFunction\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.BaseFunction\tinstance\tapply(Object a)\n"),
+            Name(0, "kind T:Confluent.Kafka.Common.BaseFunction`2: translates the Java interface "
+                + "org.apache.kafka.common.BaseFunction; declare it as the interface IBaseFunction"));
+
+    [Fact]
+    public Task AJavaInterface_TranslatedAsAClass_IsNotReportedWhenAllowlisted() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Header
+            {
+                public sealed class Header
+                {
+                    private Header()
+                    {
+                    }
+
+                    public string Key() => "";
+
+                    public byte[] Value() => null;
+                }
+            }
+            """,
+            Files(Header, allowlist: "# Kept on purpose.\nkind T:Confluent.Kafka.Common.Header.Header\n"));
 
     [Fact]
     public Task APropertyWhereJavaHasAMethod_IsReportedOnce() =>

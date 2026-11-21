@@ -24,6 +24,13 @@ unmatched M:Confluent.Kafka.Common.KafkaFuture`1.op_Implicit(Confluent.Kafka.Com
 overload M:Confluent.Kafka.Common.AsyncKafkaFuture.AllOf``1(Confluent.Kafka.Common.AsyncKafkaFuture{``0}[])
 overload M:Confluent.Kafka.Common.KafkaFuture.AllOf``1(Confluent.Kafka.Common.KafkaFuture{``0}[])
 
+# Java's @FunctionalInterface KafkaFuture.BaseFunction and BiConsumer are delegates: a C# lambda converts only to a
+# delegate, so ThenApply and WhenComplete take one as Java's take a lambda. A functional interface keeps exactly one
+# abstract method, and a default method Java adds later can be an extension method on the delegate
+# (dotnet/CLAUDE.md §4, Futures).
+kind T:Confluent.Kafka.Common.KafkaFuture.BaseFunction`2
+kind T:Confluent.Kafka.Common.KafkaFuture.BiConsumer`2
+
 # H1: Java's RecordHeader / RecordHeaders constructors, on the public Header / Headers (Python's deviation,
 # ledger 269).
 overload M:Confluent.Kafka.Common.Header.Header.#ctor(System.String,System.Byte[])
