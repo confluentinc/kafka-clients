@@ -69,6 +69,10 @@ const DEPENDANTS = [
   { key: 'AlterReplicaLogDirsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
   { key: 'ListOffsetsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
   { key: 'AlterPartitionReassignmentsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DeleteConsumerGroupsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DescribeClassicGroupsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'DescribeConsumerGroupsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'ListConsumerGroupOffsetsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
 ];
 
 /**

@@ -26,7 +26,10 @@
  * @packageDocumentation
  */
 
+export { ClassicGroupState } from './classic_group_state';
 export { ElectionType } from './election_type';
+export { GroupState } from './group_state';
+export { GroupType } from './group_type';
 export { IsolationLevel } from './isolation_level';
 export { KafkaFuture } from './kafka_future';
 export type { Metric } from './metric';
