@@ -371,6 +371,36 @@ interface Native {
   ): AdminResultBox;
   // Admin.describeReplicaLogDirs: each replica as [topic, partition, brokerId].
   adminDescribeReplicaLogDirs(handle: AdminHandle, replicas: Array<[string, number, number]>, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.electLeaders: the election type's ordinal, the partitions as
+  // [topic, partition] pairs or null for every partition.
+  adminElectLeaders(
+    handle: AdminHandle,
+    electionType: number,
+    partitions: Array<[string, number]> | null,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.alterPartitionReassignments: [[topic, partition], targetReplicas or
+  // null] pairs, null cancelling.
+  adminAlterPartitionReassignments(
+    handle: AdminHandle,
+    reassignments: Array<[[string, number], number[] | null]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.listPartitionReassignments: the partitions, or null for every one.
+  adminListPartitionReassignments(
+    handle: AdminHandle,
+    partitions: Array<[string, number]> | null,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.listOffsets: [[topic, partition], spec, timestamp] rows (the spec in
+  // the C enum's order), the options from Java's READ_COMMITTED constructor
+  // when readCommitted.
+  adminListOffsets(
+    handle: AdminHandle,
+    topicPartitionOffsets: Array<[[string, number], number, bigint]>,
+    readCommitted: boolean,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
   // Java's MockAdminClient() (no argument) or MockAdminClient(brokers,
   // controller).
   mockAdminCreate(...args: [] | [brokers: NodeFields[] | null, controller: NodeFields | null]): AdminHandle;
@@ -388,6 +418,9 @@ interface Native {
   ): void;
   mockAdminMarkTopicForDeletion(handle: AdminHandle, name: string | null): void;
   mockAdminSetFetchesRemainingUntilVisible(handle: AdminHandle, topicName: string | null, fetchesRemainingUntilVisible: number): void;
+  // Java's MockAdminClient.updateEndOffsets (end) or updateBeginningOffsets:
+  // [[topic, partition], offset] pairs.
+  mockAdminUpdateOffsets(handle: AdminHandle, end: boolean, newOffsets: Array<[[string, number], bigint]>): void;
   // Java's new MockAdminClient.Builder(), its setters, run at once, and build().
   mockAdminBuilderNew(): MockAdminBuilderHandle;
   mockAdminBuilderSet(builder: MockAdminBuilderHandle, setter: string, value: unknown): void;
