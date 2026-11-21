@@ -1160,16 +1160,21 @@ impl ShareConsumerTestBase {
     /// Java's `waitForAssignment`: waits until the members of `group_id` are
     /// assigned every partition of `tps`.
     pub async fn wait_for_assignment(&self, group_id: &str, tps: &[TopicPartition]) {
-        wait_for_condition_with_pause(
-            || async move { self.is_assigned(group_id, tps).await },
-            DEFAULT_MAX_WAIT_MS,
-            1000,
-            "tps not assigned to members",
-        )
-        .await;
+        // Java's condition rethrows a describe failure as a RuntimeException,
+        // which `waitForCondition` retries until its deadline: a group that has
+        // no member yet is `GroupIdNotFound` for a while.
+        let mut deadline = WaitDeadline::new(DEFAULT_MAX_WAIT_MS, 1000, "tps not assigned to members");
+        loop {
+            match self.is_assigned(group_id, tps).await {
+                Ok(true) => return,
+                Ok(false) => {},
+                Err(e) => deadline.record_error(format!("describeShareGroups failed: {e}")),
+            }
+            deadline.fail_or_pause().await;
+        }
     }
 
-    async fn is_assigned(&self, group_id: &str, tps: &[TopicPartition]) -> bool {
+    async fn is_assigned(&self, group_id: &str, tps: &[TopicPartition]) -> Result<bool, Error> {
         let admin = self.create_admin_client();
         let described = admin
             .describe_share_groups_with_options(
@@ -1182,13 +1187,13 @@ impl ShareConsumerTestBase {
             .get()
             .await;
         close_admin(admin).await;
-        let description = described.unwrap_or_else(|e| panic!("describeShareGroups failed: {e}"));
+        let description = described?;
         let assigned: HashSet<&TopicPartition> = description
             .members()
             .iter()
             .flat_map(|member| member.assignment().topic_partitions())
             .collect();
-        tps.iter().all(|tp| assigned.contains(tp))
+        Ok(tps.iter().all(|tp| assigned.contains(tp)))
     }
 
     // -- polling -------------------------------------------------------------
@@ -1495,6 +1500,7 @@ pub struct WaitDeadline {
     max_wait_ms: u64,
     poll_interval: Duration,
     details: String,
+    last_error: Option<String>,
 }
 
 impl WaitDeadline {
@@ -1506,14 +1512,28 @@ impl WaitDeadline {
             max_wait_ms,
             poll_interval: Duration::from_millis(poll_interval_ms.min(max_wait_ms)),
             details: details.to_string(),
+            last_error: None,
         }
+    }
+
+    /// Records the error of an attempt the caller treats as "condition not
+    /// met yet", as Java's `retryOnExceptionWithTimeout` retries a condition
+    /// that throws; the timeout panic reports the last one.
+    pub fn record_error(&mut self, error: String) {
+        self.last_error = Some(error);
     }
 
     /// Called after the condition was not met: fails the test once the
     /// deadline passed, otherwise sleeps the poll interval.
     pub async fn fail_or_pause(&mut self) {
         if Instant::now() >= self.end {
-            panic!("Condition not met within timeout {}. {}", self.max_wait_ms, self.details);
+            match &self.last_error {
+                Some(error) => panic!(
+                    "Condition not met within timeout {}. {} (last error: {error})",
+                    self.max_wait_ms, self.details
+                ),
+                None => panic!("Condition not met within timeout {}. {}", self.max_wait_ms, self.details),
+            }
         }
         tokio::time::sleep(self.poll_interval).await;
     }
