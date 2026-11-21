@@ -1525,8 +1525,6 @@ impl NetworkErrorCallback {
         ))
     }
 
-    /// Java's `assertTrue(callbackCalled.get())`, plus the callback's own
-    /// `assertInstanceOf(NetworkException.class, exception)`.
     /// Java's `assertTrue(callbackCalled.get())`.
     fn assert_called(&self) {
         assert!(self.callback_called.load(Ordering::SeqCst));
