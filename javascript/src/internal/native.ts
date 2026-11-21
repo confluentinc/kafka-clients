@@ -363,6 +363,44 @@ interface Native {
     readCommitted: boolean,
     options: AdminOptionsSetters,
   ): AdminResultBox;
+  // Admin.listGroups: the futures `all`, `valid` and `errors`.
+  adminListGroups(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeConsumerGroups, describeClassicGroups and deleteConsumerGroups:
+  // the group ids.
+  adminDescribeConsumerGroups(handle: AdminHandle, groupIds: string[], options: AdminOptionsSetters): AdminResultBox;
+  adminDescribeClassicGroups(handle: AdminHandle, groupIds: string[], options: AdminOptionsSetters): AdminResultBox;
+  adminDeleteConsumerGroups(handle: AdminHandle, groupIds: string[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.listConsumerGroupOffsets: the group id (Java's (groupId) form) or,
+  // for a null one, the specs as [groupId, [topic, partition] pairs or null].
+  adminListConsumerGroupOffsets(
+    handle: AdminHandle,
+    groupId: string | null,
+    groupSpecs: Array<[string, Array<[string, number]> | null]> | null,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.alterConsumerGroupOffsets: [[topic, partition], offset, leaderEpoch
+  // (-1: none), metadata] rows.
+  adminAlterConsumerGroupOffsets(
+    handle: AdminHandle,
+    groupId: string,
+    offsets: Array<[[string, number], bigint, number, string]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.deleteConsumerGroupOffsets: [topic, partition] pairs.
+  adminDeleteConsumerGroupOffsets(
+    handle: AdminHandle,
+    groupId: string,
+    partitions: Array<[string, number]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.removeMembersFromConsumerGroup: the members' group instance ids, or
+  // null in removeAll mode.
+  adminRemoveMembersFromConsumerGroup(
+    handle: AdminHandle,
+    groupId: string,
+    members: string[] | null,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
   // Java's MockAdminClient() (no argument) or MockAdminClient(brokers,
   // controller).
   mockAdminCreate(...args: [] | [brokers: NodeFields[] | null, controller: NodeFields | null]): AdminHandle;
@@ -383,6 +421,8 @@ interface Native {
   // Java's MockAdminClient.updateEndOffsets (end) or updateBeginningOffsets:
   // [[topic, partition], offset] pairs.
   mockAdminUpdateOffsets(handle: AdminHandle, end: boolean, newOffsets: Array<[[string, number], bigint]>): void;
+  // Java's MockAdminClient.updateConsumerGroupOffsets: [[topic, partition], offset] pairs.
+  mockAdminUpdateConsumerGroupOffsets(handle: AdminHandle, newOffsets: Array<[[string, number], bigint]>): void;
   // Java's new MockAdminClient.Builder(), its setters, run at once, and build().
   mockAdminBuilderNew(): MockAdminBuilderHandle;
   mockAdminBuilderSet(builder: MockAdminBuilderHandle, setter: string, value: unknown): void;
