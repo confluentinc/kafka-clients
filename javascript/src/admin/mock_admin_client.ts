@@ -33,7 +33,7 @@ import native = require('../internal/native');
 import { JavaForms, kind } from '../internal/args';
 import * as calls from '../internal/admin_calls';
 import type { AdminHandle } from '../internal/admin_result';
-import { checkInt } from '../internal/java_number';
+import { checkInt, checkLong } from '../internal/java_number';
 import { applyOptionKeys, checkBoolean, Setter } from '../internal/options';
 import { Node } from '../common/node';
 import { TopicPartitionInfo } from '../common/topic_partition_info';
@@ -53,7 +53,7 @@ import type { NewPartitions } from './new_partitions';
 import type { NewTopic } from './new_topic';
 import type { RecordsToDelete } from './records_to_delete';
 import type { TopicCollection } from '../common/topic_collection';
-import type { TopicPartitionMap } from '../common/topic_partition_map';
+import { TopicPartitionMap } from '../common/topic_partition_map';
 import type { DescribeClusterOptions } from './describe_cluster_options';
 import type { DescribeClusterResult } from './describe_cluster_result';
 import type { CloseArgs } from './kafka_admin_client';
@@ -77,6 +77,19 @@ import type { ConfigResourceMap } from '../common/config/config_resource_map';
 import type { TopicPartitionReplica } from '../common/topic_partition_replica';
 import type { TopicPartitionReplicaMap } from '../common/topic_partition_replica_map';
 import * as configCalls from '../internal/admin_config_calls';
+import type { AlterPartitionReassignmentsOptions } from './alter_partition_reassignments_options';
+import type { AlterPartitionReassignmentsResult } from './alter_partition_reassignments_result';
+import type { ElectLeadersOptions } from './elect_leaders_options';
+import type { ElectLeadersResult } from './elect_leaders_result';
+import type { ListOffsetsOptions } from './list_offsets_options';
+import type { ListOffsetsResult } from './list_offsets_result';
+import type { ListPartitionReassignmentsOptions } from './list_partition_reassignments_options';
+import type { ListPartitionReassignmentsResult } from './list_partition_reassignments_result';
+import type { NewPartitionReassignment } from './new_partition_reassignment';
+import type { OffsetSpec } from './offset_spec';
+import type { ElectionType } from '../common/election_type';
+import type { TopicPartition } from '../common/topic_partition';
+import * as offsetCalls from '../internal/admin_offset_calls';
 
 const CONSTRUCTOR_FORMS = new JavaForms('MockAdminClient', [[], ['brokers', 'controller']]);
 const CREATE_FORMS = new JavaForms('create', [[]]);
@@ -90,6 +103,11 @@ const MARK_TOPIC_FOR_DELETION_FORMS = new JavaForms('markTopicForDeletion', [['n
 const SET_FETCHES_REMAINING_UNTIL_VISIBLE_FORMS = new JavaForms('setFetchesRemainingUntilVisible', [
   ['topicName', 'fetchesRemainingUntilVisible'],
 ]);
+const isTopicPartitionMap = (value: unknown): boolean => value === null || value instanceof TopicPartitionMap;
+const UPDATE_BEGINNING_OFFSETS_FORMS = new JavaForms('updateBeginningOffsets', [['newOffsets']], {
+  bareTypes: { newOffsets: isTopicPartitionMap },
+});
+const UPDATE_END_OFFSETS_FORMS = new JavaForms('updateEndOffsets', [['newOffsets']], { bareTypes: { newOffsets: isTopicPartitionMap } });
 const TIMEOUT_NEXT_REQUEST_FORMS = new JavaForms('timeoutNextRequest', [['numberOfRequest']], {
   bareTypes: { numberOfRequest: (value) => typeof value === 'number' },
 });
@@ -1050,6 +1068,257 @@ export class MockAdminClient implements Admin {
   }
 
   /**
+   * Elect a replica as leader for topic partitions.
+   *
+   * This is a convenience method for `electLeaders({ electionType, partitions, options })` with default
+   * options.
+   *
+   * @param args - the electionType, partitions
+   * @returns The ElectLeadersResult.
+   */
+  electLeaders(args: {
+    /** The type of election to conduct. */
+    electionType: ElectionType;
+    /** The topics and partitions for which to conduct elections, or null for all of them. */
+    partitions: Iterable<TopicPartition> | null;
+    options?: never;
+  }): ElectLeadersResult;
+  /**
+   * Elect a replica as leader for the given `partitions`, or for all partitions if the argument to
+   * `partitions` is null.
+   *
+   * This operation is not transactional so it may succeed for some partitions while fail for others.
+   *
+   * It may take several seconds after this method returns success for all the brokers in the cluster to
+   * become aware that the partitions have new leaders. During this time, `describeTopics()` may not return
+   * information about the partitions' new leaders.
+   *
+   * This operation is supported by brokers with version 2.2.0 or later if preferred election is use;
+   * otherwise the brokers most be 2.4.0 or higher.
+   *
+   * The following errors can be anticipated when calling `get()` on the future obtained from the returned
+   * `ElectLeadersResult`: `ClusterAuthorizationError` if the authenticated user didn't have alter access to
+   * the cluster; `UnknownTopicOrPartitionError` if the topic or partition did not exist within the cluster;
+   * `InvalidTopicError` if the topic was already queued for deletion; `NotControllerError` if the request was
+   * sent to a broker that was not the controller for the cluster; `TimeoutError` if the request timed out
+   * before the election was complete; `LeaderNotAvailableError` if the preferred leader was not alive or not
+   * in the ISR.
+   *
+   * @param args - the electionType, partitions, and the options to use
+   * @returns The ElectLeadersResult.
+   */
+  electLeaders(args: {
+    /** The type of election to conduct. */
+    electionType: ElectionType;
+    /** The topics and partitions for which to conduct elections, or null for all of them. */
+    partitions: Iterable<TopicPartition> | null;
+    /** The options to use. */
+    options: ElectLeadersOptions;
+  }): ElectLeadersResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  electLeaders(args: unknown): ElectLeadersResult {
+    return offsetCalls.electLeaders(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Change the reassignments for one or more partitions. Providing null will revert the reassignment for the
+   * associated partition.
+   *
+   * This is a convenience method for `alterPartitionReassignments({ reassignments, options })` with default
+   * options. See the overload for more details.
+   *
+   * @param reassignments - The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`.
+   * @returns The AlterPartitionReassignmentsResult.
+   */
+  alterPartitionReassignments(reassignments: TopicPartitionMap<NewPartitionReassignment | null>): AlterPartitionReassignmentsResult;
+  /**
+   * The same as `alterPartitionReassignments(reassignments)`, the reassignments given by name.
+   *
+   * @param args - the reassignments
+   * @returns The AlterPartitionReassignmentsResult.
+   */
+  alterPartitionReassignments(args: {
+    /** The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`. */
+    reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
+    options?: never;
+  }): AlterPartitionReassignmentsResult;
+  /**
+   * Change the reassignments for one or more partitions. Providing null will revert the reassignment for the
+   * associated partition.
+   *
+   * The following errors can be anticipated when calling `get()` on the futures obtained from the returned
+   * `AlterPartitionReassignmentsResult`: `ClusterAuthorizationError` If the authenticated user didn't have
+   * alter access to the cluster; `UnknownTopicOrPartitionError` If the topic or partition does not exist
+   * within the cluster; `TimeoutError` if the request timed out before the controller could record the new
+   * assignments; `InvalidReplicaAssignmentError` If the specified assignment was not valid;
+   * `InvalidReplicationFactorError` If the replication factor was changed in an invalid way, only thrown when
+   * `AlterPartitionReassignmentsOptions.allowReplicationFactorChange()` is set to false and the request is
+   * attempting to alter reassignments (not cancel); `UnsupportedVersionError` If
+   * `AlterPartitionReassignmentsOptions.allowReplicationFactorChange()` was changed outside the default and
+   * the server does not support the option (e.g due to an old Kafka version); `NoReassignmentInProgressError`
+   * If there was an attempt to cancel a reassignment for a partition which was not being reassigned.
+   *
+   * @param args - the reassignments, and the options to use
+   * @returns The AlterPartitionReassignmentsResult.
+   */
+  alterPartitionReassignments(args: {
+    /** The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`. */
+    reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
+    /** The options to use. */
+    options: AlterPartitionReassignmentsOptions;
+  }): AlterPartitionReassignmentsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  alterPartitionReassignments(args: unknown): AlterPartitionReassignmentsResult {
+    return offsetCalls.alterPartitionReassignments(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * List all of the current partition reassignments.
+   *
+   * This is a convenience method for `listPartitionReassignments({ options })`
+   * with default options. See the overload for more details.
+   *
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(): ListPartitionReassignmentsResult;
+  /**
+   * List the current reassignments for the given partitions.
+   *
+   * This is a convenience method for `listPartitionReassignments({
+   * partitions, options })` with default options. See the overload for more
+   * details.
+   *
+   * @param partitions - The topic partitions to list reassignments for.
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(partitions: Iterable<TopicPartition>): ListPartitionReassignmentsResult;
+  /**
+   * The same as `listPartitionReassignments(partitions)`, the partitions given by name.
+   *
+   * @param args - the partitions
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(args: {
+    /** The topic partitions to list reassignments for. */
+    partitions: Iterable<TopicPartition>;
+    options?: never;
+  }): ListPartitionReassignmentsResult;
+  /**
+   * List the current reassignments for the given partitions, or for all
+   * partitions when `partitions` is null (Java's empty `Optional`).
+   *
+   * The following errors can be anticipated when calling `get()` on the futures obtained from the
+   * returned `ListPartitionReassignmentsResult`: `ClusterAuthorizationError` If the authenticated user
+   * doesn't have alter access to the cluster; `UnknownTopicOrPartitionError` If a given topic or
+   * partition does not exist; `TimeoutError` If the request timed out before the controller could list
+   * the current reassignments.
+   *
+   * @param args - the partitions, and the options to use
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(args: {
+    /** The topic partitions to list reassignments for, or null for all of them. */
+    partitions: Iterable<TopicPartition> | null;
+    /** The options to use. */
+    options: ListPartitionReassignmentsOptions;
+  }): ListPartitionReassignmentsResult;
+  /**
+   * List all of the current partition reassignments.
+   *
+   * The following errors can be anticipated when calling `get()` on the futures obtained from the
+   * returned `ListPartitionReassignmentsResult`: `ClusterAuthorizationError` If the authenticated user
+   * doesn't have alter access to the cluster; `UnknownTopicOrPartitionError` If a given topic or
+   * partition does not exist; `TimeoutError` If the request timed out before the controller could list
+   * the current reassignments.
+   *
+   * @param args - the options to use
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(args: {
+    /** The options to use. */
+    options: ListPartitionReassignmentsOptions;
+    partitions?: never;
+  }): ListPartitionReassignmentsResult;
+  /**
+   * The same as `listPartitionReassignments({ options })`: the options on their own.
+   *
+   * @param options - the options to use
+   * @returns The ListPartitionReassignmentsResult.
+   */
+  listPartitionReassignments(options: ListPartitionReassignmentsOptions): ListPartitionReassignmentsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  listPartitionReassignments(args?: unknown): ListPartitionReassignmentsResult {
+    return offsetCalls.listPartitionReassignments(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * List offset for the specified partitions and OffsetSpec. This operation enables to find the beginning
+   * offset, end offset as well as the offset matching a timestamp in partitions.
+   *
+   * This is a convenience method for `listOffsets({ topicPartitionOffsets, options })`.
+   *
+   * @param topicPartitionOffsets - The mapping from partition to the OffsetSpec to look up.
+   * @returns The ListOffsetsResult.
+   */
+  listOffsets(topicPartitionOffsets: TopicPartitionMap<OffsetSpec>): ListOffsetsResult;
+  /**
+   * The same as `listOffsets(topicPartitionOffsets)`, the topicPartitionOffsets given by name.
+   *
+   * @param args - the topicPartitionOffsets
+   * @returns The ListOffsetsResult.
+   */
+  listOffsets(args: {
+    /** The mapping from partition to the OffsetSpec to look up. */
+    topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
+    options?: never;
+  }): ListOffsetsResult;
+  /**
+   * List offset for the specified partitions. This operation enables to find the beginning offset, end offset
+   * as well as the offset matching a timestamp in partitions.
+   *
+   * @param args - the topicPartitionOffsets, and the options to use
+   * @returns The ListOffsetsResult.
+   */
+  listOffsets(args: {
+    /** The mapping from partition to the OffsetSpec to look up. */
+    topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
+    /** The options to use. */
+    options: ListOffsetsOptions;
+  }): ListOffsetsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  listOffsets(args: unknown): ListOffsetsResult {
+    return offsetCalls.listOffsets(this.#handle, args, arguments.length);
+  }
+
+  /**
    * Makes a topic visible to `describeTopics` only after the given number of
    * describe calls.
    *
@@ -1073,6 +1342,71 @@ export class MockAdminClient implements Admin {
     );
     native.mockAdminSetFetchesRemainingUntilVisible(this.#handle, topicName, count);
   }
+
+  /**
+   * Seeds the beginning offsets `listOffsets` answers for `OffsetSpec.earliest()`.
+   *
+   * @param newOffsets - the beginning offset of each partition
+   * @throws `TypeError` for a null map, key or offset, or a value of the
+   *   wrong type
+   * @throws `RangeError` for a number beyond 2^53 - 1 or a bigint beyond
+   *   Java's `long`
+   */
+  updateBeginningOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
+  /**
+   * The same as `updateBeginningOffsets(newOffsets)`, the offsets given by name.
+   *
+   * @param options - the beginning offset of each partition
+   */
+  updateBeginningOffsets(options: {
+    /** The beginning offset of each partition. */
+    newOffsets: TopicPartitionMap<bigint | number>;
+  }): void;
+  updateBeginningOffsets(options: unknown): void {
+    UPDATE_BEGINNING_OFFSETS_FORMS.match(options, arguments.length);
+    native.mockAdminUpdateOffsets(this.#handle, false, offsetRows(UPDATE_BEGINNING_OFFSETS_FORMS.value(options, 'newOffsets')));
+  }
+
+  /**
+   * Seeds the end offsets `listOffsets` answers for the other specs.
+   *
+   * @param newOffsets - the end offset of each partition
+   * @throws `TypeError` for a null map, key or offset, or a value of the
+   *   wrong type
+   * @throws `RangeError` for a number beyond 2^53 - 1 or a bigint beyond
+   *   Java's `long`
+   */
+  updateEndOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
+  /**
+   * The same as `updateEndOffsets(newOffsets)`, the offsets given by name.
+   *
+   * @param options - the end offset of each partition
+   */
+  updateEndOffsets(options: {
+    /** The end offset of each partition. */
+    newOffsets: TopicPartitionMap<bigint | number>;
+  }): void;
+  updateEndOffsets(options: unknown): void {
+    UPDATE_END_OFFSETS_FORMS.match(options, arguments.length);
+    native.mockAdminUpdateOffsets(this.#handle, true, offsetRows(UPDATE_END_OFFSETS_FORMS.value(options, 'newOffsets')));
+  }
+}
+
+/**
+ * A `Map<TopicPartition, Long>` given to the mock (a `TopicPartitionMap`), as
+ * `[[topic, partition], offset]` rows for the addon.
+ *
+ * @param value - the map given
+ * @returns the rows
+ * @throws `TypeError` for null, another value, a null key, topic or offset
+ */
+function offsetRows(value: unknown): Array<[[string, number], bigint]> {
+  return offsetCalls.topicPartitionMapEntries(value, 'newOffsets').map(([tp, offset]) => {
+    if (tp === null) throw new TypeError('newOffsets must not contain a null key');
+    if (tp.topic === null) throw new TypeError('newOffsets must not contain a TopicPartition with a null topic');
+    if (offset === null) throw new TypeError('newOffsets must not contain null');
+    return [[tp.topic, tp.partition], checkLong(offset, 'an offset')];
+  });
 }
 
 const isInt = (value: unknown): boolean => typeof value === 'number';
