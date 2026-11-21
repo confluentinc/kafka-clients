@@ -65,6 +65,14 @@
       "types": "./dist/common/requests/index.d.ts",
       "default": "./dist/common/requests/index.js"
     },
+    "./common/quota": {
+      "types": "./dist/common/quota/index.d.ts",
+      "default": "./dist/common/quota/index.js"
+    },
+    "./common/resource": {
+      "types": "./dist/common/resource/index.d.ts",
+      "default": "./dist/common/resource/index.js"
+    },
     "./common/security": {
       "types": "./dist/common/security/index.d.ts",
       "default": "./dist/common/security/index.js"
@@ -72,6 +80,14 @@
     "./common/security/auth": {
       "types": "./dist/common/security/auth/index.d.ts",
       "default": "./dist/common/security/auth/index.js"
+    },
+    "./common/security/token": {
+      "types": "./dist/common/security/token/index.d.ts",
+      "default": "./dist/common/security/token/index.js"
+    },
+    "./common/security/token/delegation": {
+      "types": "./dist/common/security/token/delegation/index.d.ts",
+      "default": "./dist/common/security/token/delegation/index.js"
     },
     "./common/serialization": {
       "types": "./dist/common/serialization/index.d.ts",
@@ -124,11 +140,23 @@
       "common/requests": [
         "dist/common/requests/index.d.ts"
       ],
+      "common/quota": [
+        "dist/common/quota/index.d.ts"
+      ],
+      "common/resource": [
+        "dist/common/resource/index.d.ts"
+      ],
       "common/security": [
         "dist/common/security/index.d.ts"
       ],
       "common/security/auth": [
         "dist/common/security/auth/index.d.ts"
+      ],
+      "common/security/token": [
+        "dist/common/security/token/index.d.ts"
+      ],
+      "common/security/token/delegation": [
+        "dist/common/security/token/delegation/index.d.ts"
       ],
       "common/serialization": [
         "dist/common/serialization/index.d.ts"

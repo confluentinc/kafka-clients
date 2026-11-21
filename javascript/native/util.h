@@ -436,6 +436,17 @@ napi_value js_admin_alter_consumer_group_offsets(napi_env env, napi_callback_inf
 napi_value js_admin_delete_consumer_group_offsets(napi_env env, napi_callback_info info);
 napi_value js_admin_delete_consumer_groups(napi_env env, napi_callback_info info);
 napi_value js_admin_remove_members_from_consumer_group(napi_env env, napi_callback_info info);
+napi_value js_admin_create_acls(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_acls(napi_env env, napi_callback_info info);
+napi_value js_admin_delete_acls(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_client_quotas(napi_env env, napi_callback_info info);
+napi_value js_admin_alter_client_quotas(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_user_scram_credentials(napi_env env, napi_callback_info info);
+napi_value js_admin_alter_user_scram_credentials(napi_env env, napi_callback_info info);
+napi_value js_admin_create_delegation_token(napi_env env, napi_callback_info info);
+napi_value js_admin_renew_delegation_token(napi_env env, napi_callback_info info);
+napi_value js_admin_expire_delegation_token(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_delegation_token(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_update_consumer_group_offsets(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_add_topic(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_mark_topic_for_deletion(napi_env env, napi_callback_info info);
