@@ -259,6 +259,20 @@ test('builder_setters_reach_the_built_mock: the cluster id', async () => {
   assert.equal(await mock.describeCluster().clusterId().get(), 'my-cluster');
 });
 
+test('builder: a string-keyed map given by name is a Map or a plain object, never another object', () => {
+  // A class instance is no map keyed by strings (Q25): it is refused, not read as an empty map.
+  // @ts-expect-error a value the types forbid
+  assert.throws(() => MockAdminClient.create().featureLevels({ featureLevels: new Set([1]) }), {
+    name: 'TypeError',
+    message: 'featureLevels must be a Map or a plain object, not a Set',
+  });
+  // @ts-expect-error a value the types forbid
+  assert.throws(() => MockAdminClient.create().defaultGroupConfigs({ defaultGroupConfigs: new Date(0) }), {
+    name: 'TypeError',
+    message: 'defaultGroupConfigs must be a Map or a plain object, not a Date',
+  });
+});
+
 test('controller_is_always_one_of_the_seeded_nodes', async () => {
   for (let numBrokers = 1; numBrokers <= 3; numBrokers++) {
     const mock = track(MockAdminClient.create().numBrokers(numBrokers).build());
@@ -692,6 +706,12 @@ test('deleteTopics by id, and the forms of the topic RPCs', async () => {
   assert.throws(() => client.createPartitions(new Map([['t', 1]])), {
     name: 'TypeError',
     message: 'newPartitions must hold only NewPartitions, not a number',
+  });
+  // Neither a Map nor a plain object: a class instance is not a map.
+  // @ts-expect-error a NewPartitions where Java's Map<String, NewPartitions> goes
+  assert.throws(() => client.createPartitions({ newPartitions: NewPartitions.increaseTo(2) }), {
+    name: 'TypeError',
+    message: 'newPartitions must be a Map or a plain object, not a NewPartitions',
   });
   // @ts-expect-error a plain Map: only a TopicPartitionMap is taken
   assert.throws(() => client.deleteRecords(new Map()), { name: 'TypeError' });
@@ -1999,4 +2019,195 @@ test('describe_delegation_token_owners_filter', async () => {
     .get();
   assert.equal(listed.length, 1);
   assert.ok(listed[0].equals(alice));
+});
+
+// ---- the transaction and producer calls --------------------------------------------------------
+//
+// Java's MockAdminClient throws UnsupportedOperationException ("Not implemented
+// yet") from describeProducers, describeTransactions, abortTransaction,
+// forceTerminateTransaction, listTransactions and fenceProducers; the core's
+// mock fails each future with it instead (the Rust core's
+// mock_admin_client.rs), one per distinct partition or id, so the mock's
+// Result keeps Java's keys.
+
+test("the transaction and producer calls Java's mock does not implement fail their futures with UnsupportedOperationError", async () => {
+  const { AbortTransactionSpec: Spec, ListTransactionsOptions: ListOptions } = require('@confluentinc/kafka-javascript/admin');
+  const { TopicPartition: Tp } = require('@confluentinc/kafka-javascript/common');
+  const mock = new MockAdminClient();
+  const tp = new Tp({ topic: 't', partition: 0 });
+  const producers = mock.describeProducers([tp, new Tp({ topic: 't', partition: 0 })]);
+  const described = mock.describeTransactions(['a', 'a']);
+  const listed = mock.listTransactions(new ListOptions());
+  const fenced = mock.fenceProducers(['a']);
+  const futures = [
+    producers.partitionResult(tp),
+    producers.all(),
+    described.description('a'),
+    described.all(),
+    mock.abortTransaction(new Spec({ topicPartition: tp, producerId: 1n, producerEpoch: 0, coordinatorEpoch: 0 })).all(),
+    mock.forceTerminateTransaction('a').result(),
+    listed.all(),
+    listed.byBrokerId(),
+    listed.allByBrokerId(),
+    fenced.producerId('a'),
+    fenced.epochId('a'),
+    fenced.all(),
+    fenced.fencedProducers().get('a'),
+  ];
+  for (const future of futures) {
+    assert.ok(future);
+    const cause = await failure(future);
+    assert.ok(cause instanceof UnsupportedOperationError, String(cause));
+    assert.equal(cause.message, 'Not implemented yet');
+  }
+  assert.throws(() => described.description('b'), {
+    name: 'IllegalArgumentError',
+    message: 'TransactionalId `b` was not included in the request',
+  });
+  await mock.close();
+});
+
+// ---- the feature and controller calls ----------------------------------------------------------
+//
+// Java's MockAdminClientTest has no feature or controller test, so these
+// translate the Rust core's tests of its mock (mock_admin_client.rs,
+// mock_describe_features_* , mock_update_features_* and
+// mock_unregister_controller_*), whose mock does what Java's
+// MockAdminClient.describeFeatures, updateFeatures and unregisterController
+// do.
+
+const {
+  DescribeFeaturesOptions: FeaturesOptions,
+  FeatureUpdate,
+  FinalizedVersionRange,
+  SupportedVersionRange,
+  UnregisterControllerOptions: ControllerOptions,
+  UpdateFeaturesOptions: UpdateOptions,
+} = require('@confluentinc/kafka-javascript/admin');
+const { UnsupportedVersionError } = require('@confluentinc/kafka-javascript/common/errors');
+
+/**
+ * A mock seeded with one feature `feature` at level 3, supported over [1, 5].
+ *
+ * @returns {MockAdminClient} the mock
+ */
+function adminWithFeatures() {
+  return MockAdminClient.create()
+    .featureLevels(new Map([['feature', 3]]))
+    .minSupportedFeatureLevels(new Map([['feature', 1]]))
+    .maxSupportedFeatureLevels(new Map([['feature', 5]]))
+    .build();
+}
+
+/**
+ * Updates `feature` to `next` and reads its future's failure, or null.
+ *
+ * @param {MockAdminClient} mock - the mock
+ * @param {number} next - the new level
+ * @param {import('@confluentinc/kafka-javascript/admin').FeatureUpdate.UpgradeType} upgradeType - the kind of update
+ * @returns {Promise<unknown>} the failure's cause, or null
+ */
+async function updateOne(mock, next, upgradeType) {
+  const result = mock.updateFeatures(new Map([['feature', new FeatureUpdate({ maxVersionLevel: next, upgradeType })]]));
+  const future = result.values().get('feature');
+  assert.ok(future);
+  try {
+    await future.get();
+    return null;
+  } catch (e) {
+    assert.ok(e instanceof ExecutionError);
+    return e.cause;
+  }
+}
+
+/**
+ * The finalized range of `feature`.
+ *
+ * @param {MockAdminClient} mock - the mock
+ * @returns {Promise<unknown>} the range
+ */
+async function finalized(mock) {
+  return (await mock.describeFeatures().featureMetadata().get()).finalizedFeatures().get('feature');
+}
+
+test('mock_describe_features_returns_seeded_ranges: the epoch is 123, the ranges the seeded levels', async () => {
+  const mock = adminWithFeatures();
+  const metadata = await mock.describeFeatures(new FeaturesOptions()).featureMetadata().get();
+  assert.equal(metadata.finalizedFeaturesEpoch(), 123n);
+  assert.ok(new FinalizedVersionRange({ minVersionLevel: 3, maxVersionLevel: 3 }).equals(metadata.finalizedFeatures().get('feature')));
+  assert.ok(new SupportedVersionRange({ minVersion: 1, maxVersion: 5 }).equals(metadata.supportedFeatures().get('feature')));
+  await mock.close();
+});
+
+test('mock_update_features_upgrade_succeeds_and_mutates_level', async () => {
+  const mock = adminWithFeatures();
+  assert.equal(await updateOne(mock, 4, FeatureUpdate.UpgradeType.UPGRADE), null);
+  assert.ok(new FinalizedVersionRange({ minVersionLevel: 4, maxVersionLevel: 4 }).equals(await finalized(mock)));
+  await mock.close();
+});
+
+test('mock_update_features_validate_only_does_not_mutate', async () => {
+  const mock = adminWithFeatures();
+  const result = mock.updateFeatures({
+    featureUpdates: { feature: new FeatureUpdate({ maxVersionLevel: 4, upgradeType: FeatureUpdate.UpgradeType.UPGRADE }) },
+    options: new UpdateOptions({ validateOnly: true }),
+  });
+  await result.all().get();
+  assert.ok(new FinalizedVersionRange({ minVersionLevel: 3, maxVersionLevel: 3 }).equals(await finalized(mock)));
+  await mock.close();
+});
+
+test("mock_update_features' refusals: the whole batch fails with Java's InvalidRequestException message", async () => {
+  const { UPGRADE, SAFE_DOWNGRADE, UNKNOWN } = FeatureUpdate.UpgradeType;
+  const cases = /** @type {Array<[number, import('@confluentinc/kafka-javascript/admin').FeatureUpdate.UpgradeType, string]>} */ ([
+    [2, UPGRADE, "Invalid update version 2 for feature feature. Can't upgrade to lower version."],
+    [4, SAFE_DOWNGRADE, "Invalid update version 4 for feature feature. Can't downgrade to newer version."],
+    [6, UPGRADE, "Invalid update version 6 for feature feature. Can't upgrade above 5"],
+    // A deletion (level 0) with SAFE_DOWNGRADE; the minimum is 1.
+    [0, SAFE_DOWNGRADE, "Invalid update version 0 for feature feature. Can't downgrade below 1"],
+    [2, UNKNOWN, 'Invalid update version 2 for feature feature. Invalid upgrade type.'],
+  ]);
+  for (const [next, type, message] of cases) {
+    const mock = adminWithFeatures();
+    const cause = await updateOne(mock, next, type);
+    assert.ok(cause instanceof InvalidRequestError, String(cause));
+    assert.equal(cause.message, message);
+    // The level is left as it was.
+    assert.ok(new FinalizedVersionRange({ minVersionLevel: 3, maxVersionLevel: 3 }).equals(await finalized(mock)));
+    await mock.close();
+  }
+});
+
+test('mock_update_features_unsafe_downgrade_succeeds: the even-level guard is dead code, as in Java', async () => {
+  const mock = adminWithFeatures();
+  assert.equal(await updateOne(mock, 2, FeatureUpdate.UpgradeType.UNSAFE_DOWNGRADE), null);
+  assert.ok(new FinalizedVersionRange({ minVersionLevel: 2, maxVersionLevel: 2 }).equals(await finalized(mock)));
+  await mock.close();
+});
+
+test("updateFeatures on the mock: an empty map is no error, as Java's mock checks none", async () => {
+  const mock = adminWithFeatures();
+  const result = mock.updateFeatures(new Map());
+  assert.equal(result.values().size, 0);
+  await result.all().get();
+  await mock.close();
+});
+
+test("mock_unregister_controller_without_raft_controller_is_unsupported: Java's UnsupportedVersionException('')", async () => {
+  const mock = new MockAdminClient();
+  const cause = await failure(mock.unregisterController(1).all());
+  assert.ok(cause instanceof UnsupportedVersionError, String(cause));
+  assert.equal(cause.message, '');
+  await mock.close();
+});
+
+// Java's future is complete at return; the mock's shows its outcome on a later
+// turn of the event loop (a deviation MockAdminClient's documentation lists), so the test
+// awaits it.
+test('mock_unregister_controller_with_raft_controller_succeeds', async () => {
+  const mock = MockAdminClient.create().usingRaftController(true).build();
+  const result = mock.unregisterController({ controllerId: 1, options: new ControllerOptions() });
+  await result.all().get();
+  assert.equal(result.all().isDone(), true);
+  await mock.close();
 });

@@ -134,6 +134,10 @@ test("a DEPENDANTS entry that matches nothing is a finding; the real tree lists 
       'CreatePartitionsResult.all',
       'CreateTopicsResult.all',
       'DeleteRecordsResult.all',
+      'AbortTransactionResult.all',
+      'DescribeProducersResult.all',
+      'DescribeTransactionsResult.all',
+      'FenceProducersResult.all',
       'DeleteTopicsResult.all',
       'DescribeTopicsResult.allTopicNames',
       'DescribeTopicsResult.allTopicIds',
@@ -152,6 +156,7 @@ test("a DEPENDANTS entry that matches nothing is a finding; the real tree lists 
       'DeleteAclsResult.all',
       'AlterClientQuotasResult.all',
       'AlterUserScramCredentialsResult.all',
+      'UpdateFeaturesResult.all',
     ],
   );
 });

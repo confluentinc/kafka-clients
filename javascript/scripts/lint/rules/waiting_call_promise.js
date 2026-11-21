@@ -56,6 +56,10 @@ const DEPENDANTS = [
   { key: 'CreatePartitionsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
   { key: 'CreateTopicsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
   { key: 'DeleteRecordsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'AbortTransactionResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DescribeProducersResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DescribeTransactionsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'FenceProducersResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
   { key: 'DeleteTopicsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
   { key: 'DescribeTopicsResult.allTopicNames', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
   { key: 'DescribeTopicsResult.allTopicIds', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
@@ -80,6 +84,7 @@ const DEPENDANTS = [
   },
   { key: 'AlterClientQuotasResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
   { key: 'AlterUserScramCredentialsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'UpdateFeaturesResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
 ];
 
 /**
