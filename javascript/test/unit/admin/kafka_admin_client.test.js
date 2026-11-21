@@ -35,11 +35,18 @@
 // assertions (testDescribeLogDirsWithCordonedDir and assertDescriptionContains)
 // are ported as Python ports them, over the conversion of the addon's rows
 // (test/unit/internal/admin_config_calls.test.js); the rest of those calls'
-// Java tests need MockClient. KafkaAdminClientTest#testElectLeaders,
-// #testListPartitionReassignments and #testListOffsets drive MockClient too
-// (core: test_elect_leaders, test_list_partition_reassignments,
-// test_list_offsets); their calls are ported as Python ports them, timing out
-// against the unreachable address with the core's message.
+// Java tests need MockClient. KafkaAdminClientTopicTest#testElectLeaders,
+// #testAlterPartitionReassignments, #testListPartitionReassignments and the
+// #testListOffsets* tests drive MockClient too (core: test_elect_leaders,
+// test_list_partition_reassignments, test_list_offsets); their calls are
+// ported as Python ports them, timing out against the unreachable address
+// with the core's message.
+// The group calls' Java tests (KafkaAdminClientConsumerGroupTest, on
+// KafkaAdminClientTestBase) drive MockClient too (core: the group tests of
+// kafka_admin_client.rs); testListGroupsMetadataFailure and its consumer,
+// share and streams forms are ported as Python ports them (an unreachable
+// bootstrap finds no broker), and each group call times out with the core's
+// message, as python/test/unit/test_admin_client_groups.py checks.
 // Then the binding's own: the forms, liveness and the native objects'
 // lifetimes, each in a child process.
 
@@ -50,19 +57,30 @@ const path = require('node:path');
 const { ExecutionError, IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
 const {
   Admin,
+  AlterConsumerGroupOffsetsOptions,
   AlterPartitionReassignmentsOptions,
   CreateTopicsOptions,
+  DeleteConsumerGroupOffsetsOptions,
+  DeleteConsumerGroupsOptions,
+  DescribeClassicGroupsOptions,
   DescribeClusterOptions,
+  DescribeConsumerGroupsOptions,
   DescribeTopicsOptions,
   ElectLeadersOptions,
   KafkaAdminClient,
+  ListConsumerGroupOffsetsOptions,
+  ListConsumerGroupOffsetsSpec,
+  ListGroupsOptions,
   ListOffsetsOptions,
   ListPartitionReassignmentsOptions,
   ListTopicsOptions,
   NewPartitionReassignment,
+  MemberToRemove,
   NewTopic,
   OffsetSpec,
+  RemoveMembersFromConsumerGroupOptions,
 } = require('@confluentinc/kafka-javascript/admin');
+const { OffsetAndMetadata } = require('@confluentinc/kafka-javascript/consumer');
 const { ElectionType, KafkaError, TopicPartition, TopicPartitionMap } = require('@confluentinc/kafka-javascript/common');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const { BootstrapResolutionError, InvalidTopicError, TimeoutError } = require('@confluentinc/kafka-javascript/common/errors');
@@ -278,6 +296,170 @@ test("the leader, reassignment and offset calls return at once and time out with
   }
 });
 
+test('testListGroupsMetadataFailure and its consumer, share and streams forms: no broker found, the error an element', async () => {
+  const client = admin({ retries: 0 });
+  try {
+    for (const options of [
+      new ListGroupsOptions({ timeoutMs: 300 }),
+      ListGroupsOptions.forConsumerGroups().timeoutMs(300),
+      ListGroupsOptions.forStreamsGroups().timeoutMs(300),
+      ListGroupsOptions.forShareGroups().timeoutMs(300),
+    ]) {
+      const result = client.listGroups(options);
+      const cause = await failure(result.all());
+      assert.ok(cause instanceof KafkaError && cause.constructor === KafkaError, String(cause));
+      assert.equal(cause.message, 'Failed to find brokers to send ListGroups');
+      assert.deepEqual(await result.valid().get(), []);
+      const errors = await result.errors().get();
+      assert.equal(errors.length, 1);
+      const [error] = errors;
+      assert.ok(error instanceof KafkaError);
+      assert.equal(error.message, 'Failed to find brokers to send ListGroups');
+      assert.ok(error.cause instanceof TimeoutError);
+      assert.equal(error.cause.message, 'Timed out waiting for a node assignment. Call: findAllBrokers');
+      // Java's fields: the same future on every call.
+      assert.equal(result.all(), result.all());
+    }
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test("the group calls return at once and time out with the core's message naming Java's call", async () => {
+  const client = admin({ 'default.api.timeout.ms': 300, 'request.timeout.ms': 100 });
+  const tp = new TopicPartition({ topic: 't', partition: 0 });
+  const member = new MemberToRemove('i1');
+  const timedOut = (/** @type {string} */ call) => `Timed out waiting for a node assignment. Call: ${call}(api=FIND_COORDINATOR)`;
+  try {
+    const described = client.describeConsumerGroups({
+      groupIds: ['g1', 'g2'],
+      options: new DescribeConsumerGroupsOptions({ timeoutMs: 300 }),
+    });
+    for (const future of described.describedGroups().values())
+      assert.equal(/** @type {Error} */ (await failure(future)).message, timedOut('describeConsumerGroups'));
+    assert.equal(/** @type {Error} */ (await failure(described.all())).message, timedOut('describeConsumerGroups'));
+    assert.equal((await client.describeConsumerGroups([]).all().get()).size, 0);
+    const classic = client.describeClassicGroups({ groupIds: ['g'], options: new DescribeClassicGroupsOptions({ timeoutMs: 300 }) });
+    const classicFuture = classic.describedGroups().get('g');
+    assert.ok(classicFuture);
+    assert.equal(/** @type {Error} */ (await failure(classicFuture)).message, timedOut('describeClassicGroups'));
+    let offsets = client.listConsumerGroupOffsets({ groupId: 'g', options: new ListConsumerGroupOffsetsOptions({ timeoutMs: 300 }) });
+    assert.equal(/** @type {Error} */ (await failure(offsets.partitionsToOffsetAndMetadata())).message, timedOut('offsetFetch'));
+    offsets = client.listConsumerGroupOffsets({
+      groupSpecs: { a: new ListConsumerGroupOffsetsSpec({ topicPartitions: [tp] }), b: new ListConsumerGroupOffsetsSpec() },
+      options: new ListConsumerGroupOffsetsOptions({ timeoutMs: 300, requireStable: true }),
+    });
+    for (const groupId of ['a', 'b']) {
+      assert.equal(/** @type {Error} */ (await failure(offsets.partitionsToOffsetAndMetadata(groupId))).message, timedOut('offsetFetch'));
+    }
+    assert.throws(() => offsets.partitionsToOffsetAndMetadata('c'), {
+      name: 'IllegalArgumentError',
+      message: "Offsets for consumer group 'c' were not requested.",
+    });
+    assert.throws(() => offsets.partitionsToOffsetAndMetadata(), {
+      name: 'IllegalStateError',
+      message:
+        'Offsets from multiple consumer groups were requested. Use partitionsToOffsetAndMetadata(groupId) instead to get future for a specific group.',
+    });
+    assert.equal((await client.listConsumerGroupOffsets({ groupSpecs: {} }).all().get()).size, 0);
+    const deleted = client.deleteConsumerGroups({ groupIds: ['g'], options: new DeleteConsumerGroupsOptions({ timeoutMs: 300 }) });
+    assert.equal(/** @type {Error} */ (await failure(deleted.all())).message, timedOut('deleteConsumerGroups'));
+    const offsetDelete = client.deleteConsumerGroupOffsets({
+      groupId: 'g',
+      partitions: [tp],
+      options: new DeleteConsumerGroupOffsetsOptions({ timeoutMs: 300 }),
+    });
+    assert.equal(/** @type {Error} */ (await failure(offsetDelete.partitionResult(tp))).message, timedOut('offsetDelete'));
+    assert.equal(/** @type {Error} */ (await failure(offsetDelete.all())).message, timedOut('offsetDelete'));
+    // No partition: the call's own future still times out (the core's all()).
+    const none = client.deleteConsumerGroupOffsets({
+      groupId: 'g',
+      partitions: [],
+      options: new DeleteConsumerGroupOffsetsOptions({ timeoutMs: 300 }),
+    });
+    assert.equal(/** @type {Error} */ (await failure(none.all())).message, timedOut('offsetDelete'));
+    const altered = client.alterConsumerGroupOffsets({
+      groupId: 'g',
+      offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(5n)]]),
+      options: new AlterConsumerGroupOffsetsOptions({ timeoutMs: 300 }),
+    });
+    assert.equal(/** @type {Error} */ (await failure(altered.partitionResult(tp))).message, timedOut('offsetCommit'));
+    assert.equal(/** @type {Error} */ (await failure(altered.all())).message, timedOut('offsetCommit'));
+    const removed = client.removeMembersFromConsumerGroup({ groupId: 'g', options: new RemoveMembersFromConsumerGroupOptions([member]) });
+    assert.equal(/** @type {Error} */ (await failure(removed.memberResult(member))).message, timedOut('leaveGroup'));
+    assert.equal(/** @type {Error} */ (await failure(removed.all())).message, timedOut('leaveGroup'));
+    assert.throws(() => removed.memberResult(new MemberToRemove('other')), {
+      name: 'IllegalArgumentError',
+      message: 'Member other was not included in the original request',
+    });
+    // removeAll mode first describes the group with the default options; the
+    // core writes "error" where Java's message says "exception".
+    const all = await failure(
+      client.removeMembersFromConsumerGroup({ groupId: 'g', options: new RemoveMembersFromConsumerGroupOptions() }).all(),
+    );
+    assert.ok(all instanceof KafkaError);
+    assert.equal(all.message, 'Encounter error when trying to get members from group: g');
+    assert.ok(all.cause instanceof TimeoutError);
+    assert.equal(all.cause.message, timedOut('describeConsumerGroups'));
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test("the group calls' forms and null arguments: TypeError naming the RPC's own parameter", async () => {
+  const client = admin();
+  try {
+    // A string is an Iterable<string> to tsc: only the run time refuses it.
+    assert.throws(() => client.describeConsumerGroups('g'), {
+      name: 'TypeError',
+      message: 'groupIds must be an iterable of strings, not string',
+    });
+    // @ts-expect-error a null id, which the C API cannot carry
+    assert.throws(() => client.deleteConsumerGroups([null]), { name: 'TypeError', message: 'groupIds must not contain null' });
+    // @ts-expect-error a null group id
+    assert.throws(() => client.listConsumerGroupOffsets(null), { name: 'TypeError', message: 'groupId must not be null' });
+    // @ts-expect-error the names of two forms at once
+    assert.throws(() => client.listConsumerGroupOffsets({ groupId: 'g', groupSpecs: new Map() }), {
+      name: 'IllegalArgumentError',
+      message:
+        'listConsumerGroupOffsets() takes one of (groupId), (groupId, options), (groupSpecs), (groupSpecs, options); got (groupId, groupSpecs)',
+    });
+    assert.throws(
+      // @ts-expect-error a null spec
+      () => client.listConsumerGroupOffsets({ groupSpecs: { g: null } }),
+      { name: 'TypeError', message: 'groupSpecs must not contain null' },
+    );
+    assert.throws(
+      // @ts-expect-error a plain Map where Java takes a Map<TopicPartition, OffsetAndMetadata>
+      () => client.alterConsumerGroupOffsets({ groupId: 'g', offsets: new Map() }),
+      { name: 'TypeError', message: 'offsets must be a TopicPartitionMap, not a Map: build one with new TopicPartitionMap()' },
+    );
+    const nullOffset = new TopicPartitionMap([[new TopicPartition({ topic: 't', partition: 0 }), null]]);
+    // @ts-expect-error a null offset
+    assert.throws(() => client.alterConsumerGroupOffsets({ groupId: 'g', offsets: nullOffset }), {
+      name: 'TypeError',
+      message: 'offsets must not contain null',
+    });
+    // @ts-expect-error a null element, which Java's request builder dereferences
+    assert.throws(() => client.deleteConsumerGroupOffsets({ groupId: 'g', partitions: [null] }), {
+      name: 'TypeError',
+      message: 'partitions must not contain null',
+    });
+    assert.throws(
+      // @ts-expect-error the options left out: Java has only the (groupId, options) form
+      () => client.removeMembersFromConsumerGroup({ groupId: 'g' }),
+      { name: 'IllegalArgumentError', message: 'removeMembersFromConsumerGroup() takes one of (groupId, options); got (groupId)' },
+    );
+    const nullMember = new RemoveMembersFromConsumerGroupOptions([new MemberToRemove(null)]);
+    assert.throws(() => client.removeMembersFromConsumerGroup({ groupId: 'g', options: nullMember }), {
+      name: 'TypeError',
+      message: 'RemoveMembersFromConsumerGroupOptions.members must not contain a MemberToRemove with a null groupInstanceId',
+    });
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
 test('a timed get waits through the core, which keeps the time', async () => {
   const client = admin();
   try {
@@ -481,7 +663,8 @@ test('the native objects are freed: the client once closed and collected, each r
   const r = runNode(
     `
     const native = require('./dist/internal/native.js');
-    const { Admin, AlterConfigOp, ConfigEntry, MockAdminClient, NewPartitionReassignment, NewTopic, OffsetSpec } = require('@confluentinc/kafka-javascript/admin');
+    const { Admin, AlterConfigOp, ConfigEntry, MemberToRemove, MockAdminClient, NewPartitionReassignment, NewTopic, OffsetSpec, RemoveMembersFromConsumerGroupOptions } = require('@confluentinc/kafka-javascript/admin');
+    const { OffsetAndMetadata } = require('@confluentinc/kafka-javascript/consumer');
     const { ElectionType, TopicCollection, TopicPartition, TopicPartitionMap, TopicPartitionReplica, TopicPartitionReplicaMap } = require('@confluentinc/kafka-javascript/common');
     const { ConfigResource, ConfigResourceMap } = require('@confluentinc/kafka-javascript/common/config');
     (async () => {
@@ -528,13 +711,29 @@ test('the native objects are freed: the client once closed and collected, each r
         await t.listPartitionReassignments().reassignments().get();
         t.listPartitionReassignments([tp]);
         await t.electLeaders({ electionType: ElectionType.PREFERRED, partitions: null }).all().get().catch(() => {});
+        // The group calls: the map futures keyed by group id, the futures read
+        // by key (by group id, partition and member), and one future each.
+        const g = new MockAdminClient();
+        g.updateConsumerGroupOffsets(new TopicPartitionMap([[tp, 4n]]));
+        await g.listConsumerGroupOffsets('grp').all().get();
+        await g.listGroups().all().get();
+        await g.describeConsumerGroups(['a', 'b']).all().get().catch(() => {});
+        await g.describeClassicGroups(['a']).all().get().catch(() => {});
+        await g.deleteConsumerGroups(['a']).all().get().catch(() => {});
+        await g.deleteConsumerGroupOffsets({ groupId: 'grp', partitions: [tp] }).all().get().catch(() => {});
+        await g.alterConsumerGroupOffsets({ groupId: 'grp', offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(1n)]]) }).partitionResult(tp).get().catch(() => {});
+        const member = new MemberToRemove('m');
+        const removed = g.removeMembersFromConsumerGroup({ groupId: 'grp', options: new RemoveMembersFromConsumerGroupOptions([member]) });
+        await removed.memberResult(member).get().catch(() => {});
+        removed.all();
+        await g.close();
         await t.deleteTopics(['t']).all().get();
         await t.close();
       }
       for (let i = 0; i < 3; i++) await round();
       await new Promise((r) => setTimeout(r, 50));
       let after = native.adminStats();
-      for (let i = 0; i < 100 && after.adminsFreed - before.adminsFreed < 9; i++) {
+      for (let i = 0; i < 100 && after.adminsFreed - before.adminsFreed < 12; i++) {
         global.gc();
         await new Promise((r) => setTimeout(r, 20));
         after = native.adminStats();
@@ -547,7 +746,7 @@ test('the native objects are freed: the client once closed and collected, each r
     ['--expose-gc'],
   );
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, '[9,9,true,true,true]\n');
+  assert.equal(r.stdout, '[12,12,true,true,true]\n');
 });
 
 test('the admin client emits the preview notice once; the mock emits none', () => {
