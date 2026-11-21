@@ -46,7 +46,11 @@
     "AlterConfigOp.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: the type by name",
     "ReplicaInfo.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
     "LogDirDescription.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string, the error as its text",
-    "AclOperation.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name"
+    "AclOperation.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name",
+    "NewPartitionReassignment.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "PartitionReassignment.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "ElectionType.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name",
+    "IsolationLevel.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name"
   },
   "javaTargets": {
     "src/common/header/record_header.ts:RecordHeader": {

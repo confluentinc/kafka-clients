@@ -26,6 +26,8 @@
  * @packageDocumentation
  */
 
+export { ElectionType } from './election_type';
+export { IsolationLevel } from './isolation_level';
 export { KafkaFuture } from './kafka_future';
 export type { Metric } from './metric';
 export { MetricName } from './metric_name';

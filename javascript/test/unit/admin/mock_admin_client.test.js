@@ -27,6 +27,12 @@ const { ExecutionError, IllegalArgumentError, UnsupportedOperationError } = requ
 const {
   AlterConfigOp,
   AlterConfigsOptions,
+  AlterPartitionReassignmentsOptions,
+  ElectLeadersOptions,
+  ListOffsetsOptions,
+  ListPartitionReassignmentsOptions,
+  NewPartitionReassignment,
+  OffsetSpec,
   ConfigEntry,
   CreateTopicsOptions,
   DeleteTopicsOptions,
@@ -42,6 +48,8 @@ const {
   RecordsToDelete,
 } = require('@confluentinc/kafka-javascript/admin');
 const {
+  ElectionType,
+  IsolationLevel,
   Node,
   TopicCollection,
   TopicPartition,
@@ -1102,6 +1110,313 @@ test("the config and log-dir Results' readers only read", () => {
     ['values', () => client.alterReplicaLogDirs(new TopicPartitionReplicaMap()).values(1)],
     // @ts-expect-error an argument given to a reader: it only reads
     ['all', () => client.describeReplicaLogDirs([]).all(1)],
+  ])) {
+    assert.throws(call, { name: 'TypeError', message: `${name}() only reads: it takes no argument` });
+  }
+});
+
+// ---- the leader, reassignment and offset calls ---------------------------------------
+// The Rust core's tests of its mock's reassignments
+// (alter_then_list_partition_reassignments_reports_adding_and_removing and the
+// two list_partition_reassignments regressions), then the calls Java's mock
+// implements without a core test: listOffsets over updateBeginningOffsets and
+// updateEndOffsets, a TimestampSpec and electLeaders, which Java's mock throws
+// UnsupportedOperationException for.
+
+/**
+ * @param {string} topic
+ * @param {number} partition
+ */
+const tp = (topic, partition) => new TopicPartition({ topic, partition });
+
+/**
+ * One topic `rt` and its only partition reassigned to brokers 1 and 2: the
+ * Rust core's admin_with_reassignment.
+ */
+async function adminWithReassignment() {
+  const client = admin();
+  await client
+    .createTopics([new NewTopic({ name: 'rt', numPartitions: 1, replicationFactor: 3 })])
+    .all()
+    .get();
+  await client
+    .alterPartitionReassignments(new TopicPartitionMap([[tp('rt', 0), new NewPartitionReassignment([1, 2])]]))
+    .all()
+    .get();
+  return client;
+}
+
+test('alter_then_list_partition_reassignments_reports_adding_and_removing', async () => {
+  const client = await adminWithReassignment();
+  let listed = await client
+    .listPartitionReassignments({ partitions: null, options: new ListPartitionReassignmentsOptions() })
+    .reassignments()
+    .get();
+  const reassignment = listed.get(tp('rt', 0));
+  assert.ok(reassignment);
+  // The mock seeds every partition with all three brokers as replicas, so
+  // targeting {1, 2} removes broker 0 and adds nothing.
+  assert.deepEqual(reassignment.replicas(), [0, 1, 2]);
+  assert.deepEqual(reassignment.addingReplicas(), []);
+  assert.deepEqual(reassignment.removingReplicas(), [0]);
+  assert.equal(reassignment.toString(), 'PartitionReassignment(replicas=[0, 1, 2], addingReplicas=[], removingReplicas=[0])');
+  // A null value (Java's empty Optional) cancels.
+  await client
+    .alterPartitionReassignments({
+      reassignments: new TopicPartitionMap([[tp('rt', 0), null]]),
+      options: new AlterPartitionReassignmentsOptions(),
+    })
+    .all()
+    .get();
+  listed = await client.listPartitionReassignments().reassignments().get();
+  assert.equal(listed.size(), 0);
+});
+
+test('list_partition_reassignments_after_topic_deletion_fails_the_future', async () => {
+  const client = await adminWithReassignment();
+  await client.deleteTopics(['rt']).all().get();
+  const cause = await failure(client.listPartitionReassignments().reassignments());
+  assert.ok(cause instanceof Error);
+  assert.equal(cause.message, 'Internal MockAdminClient logic error: found reassignment for rt-0, but no TopicMetadata');
+});
+
+test('list_partition_reassignments_after_topic_shrink_fails_the_future', async () => {
+  const client = admin();
+  await client
+    .createTopics([new NewTopic({ name: 'rt2', numPartitions: 2, replicationFactor: 3 })])
+    .all()
+    .get();
+  // Reassign the second partition, so the index survives the topic's removal
+  // but not its recreation.
+  await client
+    .alterPartitionReassignments(new TopicPartitionMap([[tp('rt2', 1), new NewPartitionReassignment([1, 2])]]))
+    .all()
+    .get();
+  await client.deleteTopics(['rt2']).all().get();
+  await client
+    .createTopics([new NewTopic({ name: 'rt2', numPartitions: 1, replicationFactor: 3 })])
+    .all()
+    .get();
+  const cause = await failure(client.listPartitionReassignments().reassignments());
+  assert.ok(cause instanceof Error);
+  assert.equal(cause.message, 'Internal MockAdminClient logic error: found reassignment for rt2-1, but no TopicPartitionInfo');
+});
+
+test('listPartitionReassignments for given partitions answers only those reassigned', async () => {
+  const client = await adminWithReassignment();
+  const only = await client
+    .listPartitionReassignments([tp('rt', 0)])
+    .reassignments()
+    .get();
+  assert.deepEqual([...only.keys()].map(String), ['rt-0']);
+  const none = await client
+    .listPartitionReassignments({ partitions: new Set([tp('other', 0)]) })
+    .reassignments()
+    .get();
+  assert.equal(none.size(), 0);
+});
+
+test("alterPartitionReassignments fails a partition the mock has not with UnknownTopicOrPartitionError, as Java's mock does", async () => {
+  const client = admin();
+  await client
+    .createTopics([new NewTopic({ name: 't', numPartitions: 1, replicationFactor: 1 })])
+    .all()
+    .get();
+  const values = client
+    .alterPartitionReassignments(
+      new TopicPartitionMap([
+        [tp('t', 0), new NewPartitionReassignment([0])],
+        [tp('t', 5), new NewPartitionReassignment([0])],
+        [tp('absent', 0), null],
+      ]),
+    )
+    .values();
+  assert.equal(await values.get(tp('t', 0))?.get(), null);
+  const out = values.get(tp('t', 5));
+  assert.ok(out);
+  assert.ok((await failure(out)) instanceof UnknownTopicOrPartitionError);
+  const absent = values.get(tp('absent', 0));
+  assert.ok(absent);
+  assert.ok((await failure(absent)) instanceof UnknownTopicOrPartitionError);
+});
+
+test('listOffsets answers the seeded beginning offset for earliest and the end offset for the other specs', async () => {
+  const client = admin();
+  client.updateBeginningOffsets(new TopicPartitionMap([[tp('t', 0), 5n]]));
+  client.updateEndOffsets({
+    newOffsets: new TopicPartitionMap(
+      /** @type {Array<[TopicPartition, bigint | number]>} */ ([
+        [tp('t', 0), 50],
+        [tp('t', 1), 7n],
+      ]),
+    ),
+  });
+  const result = client.listOffsets(
+    new TopicPartitionMap([
+      [tp('t', 0), OffsetSpec.earliest()],
+      [tp('t', 1), OffsetSpec.latest()],
+    ]),
+  );
+  const earliest = await result.partitionResult(tp('t', 0)).get();
+  assert.equal(earliest.offset(), 5n);
+  assert.equal(earliest.timestamp(), -1n);
+  assert.equal(earliest.leaderEpoch(), null);
+  assert.equal(earliest.toString(), 'ListOffsetsResultInfo(offset=5, timestamp=-1, leaderEpoch=Optional.empty)');
+  const all = await result.all().get();
+  assert.equal(
+    String(all),
+    '{t-0=ListOffsetsResultInfo(offset=5, timestamp=-1, leaderEpoch=Optional.empty), t-1=ListOffsetsResultInfo(offset=7, timestamp=-1, leaderEpoch=Optional.empty)}',
+  );
+  // Every spec but earliest and a timestamp reads the end offset.
+  for (const spec of [
+    OffsetSpec.maxTimestamp(),
+    OffsetSpec.earliestLocal(),
+    OffsetSpec.latestTiered(),
+    OffsetSpec.earliestPendingUpload(),
+    new OffsetSpec(),
+  ]) {
+    const info = await client
+      .listOffsets(new TopicPartitionMap([[tp('t', 0), spec]]))
+      .partitionResult(tp('t', 0))
+      .get();
+    assert.equal(info.offset(), 50n);
+  }
+  // A later seeding replaces the offset.
+  client.updateEndOffsets(new TopicPartitionMap([[tp('t', 0), 60n]]));
+  assert.equal(
+    (
+      await client
+        .listOffsets(new TopicPartitionMap([[tp('t', 0), OffsetSpec.latest()]]))
+        .partitionResult(tp('t', 0))
+        .get()
+    ).offset(),
+    60n,
+  );
+});
+
+test("listOffsets fails a TimestampSpec with Java's mock's UnsupportedOperationError, its isolation level aside", async () => {
+  const client = admin();
+  const result = client.listOffsets({
+    topicPartitionOffsets: new TopicPartitionMap([[tp('t', 0), OffsetSpec.forTimestamp(1000)]]),
+    options: new ListOffsetsOptions(IsolationLevel.READ_COMMITTED),
+  });
+  const cause = await failure(result.partitionResult(tp('t', 0)));
+  assert.ok(cause instanceof UnsupportedOperationError);
+  // Java's message, as its mock spells it.
+  assert.equal(cause.message, 'Not implement yet');
+  assert.ok((await failure(result.all())) instanceof UnsupportedOperationError);
+  assert.throws(() => result.partitionResult(tp('t', 1)), {
+    name: 'IllegalArgumentError',
+    message: 'List Offsets for partition "t-1" was not attempted',
+  });
+});
+
+test("electLeaders fails with Java's mock's UnsupportedOperationError", async () => {
+  const client = admin();
+  for (const result of [
+    client.electLeaders({ electionType: ElectionType.PREFERRED, partitions: null }),
+    client.electLeaders({ electionType: ElectionType.UNCLEAN, partitions: [tp('t', 0)], options: new ElectLeadersOptions() }),
+  ]) {
+    const cause = await failure(result.partitions());
+    assert.ok(cause instanceof UnsupportedOperationError);
+    assert.equal(cause.message, 'Not implemented yet');
+    assert.ok((await failure(result.all())) instanceof UnsupportedOperationError);
+  }
+});
+
+test("the leader, reassignment and offset calls' arguments: Java's nulls as TypeErrors naming the RPC's parameter", () => {
+  const client = admin();
+  assert.throws(
+    // @ts-expect-error a null the types forbid: Java's request builder dereferences it
+    () => client.electLeaders({ electionType: null, partitions: null }),
+    { name: 'TypeError', message: 'electionType must not be null' },
+  );
+  assert.throws(
+    // @ts-expect-error a wrong argument: a string is no iterable of TopicPartition
+    () => client.electLeaders({ electionType: ElectionType.PREFERRED, partitions: 'abc' }),
+    { name: 'TypeError', message: 'partitions must be an iterable of TopicPartition, not a string' },
+  );
+  assert.throws(
+    // @ts-expect-error a null element the types forbid: Java dereferences it
+    () => client.listPartitionReassignments([null]),
+    { name: 'TypeError', message: 'partitions must not contain null' },
+  );
+  assert.throws(
+    // @ts-expect-error a null the types forbid: Java's map is dereferenced
+    () => client.alterPartitionReassignments(null),
+    { name: 'TypeError', message: 'reassignments must not be null' },
+  );
+  assert.throws(
+    // @ts-expect-error a wrong argument: a Map where Java takes a Map<TopicPartition, ...>
+    () => client.alterPartitionReassignments(new Map()),
+    { name: 'TypeError', message: 'reassignments must be a TopicPartitionMap, not a Map: build one with new TopicPartitionMap()' },
+  );
+  assert.throws(() => client.alterPartitionReassignments(new TopicPartitionMap([[null, null]])), {
+    name: 'TypeError',
+    message: 'reassignments must not contain a null key',
+  });
+  assert.throws(
+    // @ts-expect-error a null value the types forbid: Java's OffsetSpec is dereferenced
+    () => client.listOffsets(new TopicPartitionMap([[tp('t', 0), null]])),
+    { name: 'TypeError', message: 'topicPartitionOffsets must not contain null' },
+  );
+  assert.throws(
+    () => client.listOffsets({ topicPartitionOffsets: new TopicPartitionMap(), options: new ListOffsetsOptions({ isolationLevel: null }) }),
+    { name: 'TypeError', message: 'ListOffsetsOptions.isolationLevel must not be null' },
+  );
+  assert.throws(
+    // @ts-expect-error a null the types forbid: Java's putAll dereferences it
+    () => client.updateEndOffsets(null),
+    { name: 'TypeError', message: 'newOffsets must not be null' },
+  );
+  assert.throws(
+    // @ts-expect-error a null value the types forbid: the C API takes each offset as a long
+    () => client.updateBeginningOffsets(new TopicPartitionMap([[tp('t', 0), null]])),
+    { name: 'TypeError', message: 'newOffsets must not contain null' },
+  );
+});
+
+test("the leader, reassignment and offset calls' forms", () => {
+  const client = admin();
+  assert.throws(
+    // @ts-expect-error a wrong argument: a form Java has not
+    () => client.electLeaders({ electionType: ElectionType.PREFERRED }),
+    {
+      name: 'IllegalArgumentError',
+      message: 'electLeaders() takes one of (electionType, partitions), (electionType, partitions, options); got (electionType)',
+    },
+  );
+  assert.throws(
+    // @ts-expect-error a wrong argument: a form Java has not
+    () => client.listPartitionReassignments({ partitions: [], options: new ListPartitionReassignmentsOptions(), extra: 1 }),
+    {
+      name: 'IllegalArgumentError',
+      message:
+        'listPartitionReassignments() takes one of (), (partitions), (partitions, options), (options); got (partitions, options, extra)',
+    },
+  );
+  // The options on their own, the partitions on their own, and nothing.
+  client.listPartitionReassignments(new ListPartitionReassignmentsOptions());
+  client.listPartitionReassignments(new Set([tp('t', 0)]));
+  client.listPartitionReassignments();
+});
+
+test("the leader, reassignment and offset Results' readers only read", () => {
+  const client = admin();
+  const offsets = new TopicPartitionMap([[tp('t', 0), OffsetSpec.latest()]]);
+  for (const [name, call] of /** @type {Array<[string, () => void]>} */ ([
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['partitions', () => client.electLeaders({ electionType: ElectionType.PREFERRED, partitions: null }).partitions(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['all', () => client.electLeaders({ electionType: ElectionType.PREFERRED, partitions: null }).all(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['values', () => client.alterPartitionReassignments(new TopicPartitionMap()).values(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['all', () => client.alterPartitionReassignments(new TopicPartitionMap()).all(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['reassignments', () => client.listPartitionReassignments().reassignments(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['all', () => client.listOffsets(offsets).all(1)],
   ])) {
     assert.throws(call, { name: 'TypeError', message: `${name}() only reads: it takes no argument` });
   }
