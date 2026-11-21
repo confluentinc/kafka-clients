@@ -94,6 +94,9 @@ const DATA_CLASSES = new Set([
   // The admin client's descriptions (the owner's decision of 2026-11-20).
   'org.apache.kafka.clients.admin.TopicDescription',
   'org.apache.kafka.clients.admin.LogDirDescription',
+  'org.apache.kafka.clients.admin.ConsumerGroupDescription',
+  'org.apache.kafka.clients.admin.ClassicGroupDescription',
+  'org.apache.kafka.clients.admin.MemberDescription',
 ]);
 
 /**
@@ -438,6 +441,7 @@ function javaMember(index, cls, m, { anyStatic = false } = {}) {
     let owner = null;
     const found = [];
     const seen = new Set();
+    const at = new Map();
     for (const c of chain) {
       for (const o of c.overloads) {
         if (
@@ -451,9 +455,19 @@ function javaMember(index, cls, m, { anyStatic = false } = {}) {
         // (`Admin.create(Properties)` is not `MockAdminClient.create()`'s).
         if (owner !== null && owner !== c && o.static) continue;
         const key = o.params.map((p) => (typeof p === 'string' ? p : JSON.stringify(p))).join(',');
-        if (seen.has(key)) continue;
+        if (seen.has(key)) {
+          // A parameter is named by the Java interface declaration when the
+          // method is declared on one (root CLAUDE.md, JavaScript Binding
+          // Conventions, Signatures, as Python's): `Admin#describeConfigs`'
+          // `resources`, not `KafkaAdminClient`'s `configResources`.
+          if (c.kind === 'interface' && o.param_names.some((n) => n !== '')) {
+            found[at.get(key)] = { ...found[at.get(key)], param_names: o.param_names };
+          }
+          continue;
+        }
         seen.add(key);
         if (owner === null) owner = c;
+        at.set(key, found.length);
         found.push(o);
       }
     }

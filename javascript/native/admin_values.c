@@ -2475,28 +2475,17 @@ napi_value js_admin_list_offsets(napi_env env, napi_callback_info info) {
 
 // ---- the mock's offsets -------------------------------------------------------------------
 
-// mockAdminUpdateOffsets(handle, end, newOffsets): Java's
-// MockAdminClient.updateEndOffsets (end) or updateBeginningOffsets, the
-// offsets an array of [[topic, partition], offset].
-napi_value js_mock_admin_update_offsets(napi_env env, napi_callback_info info) {
-    size_t argc = 3;
-    napi_value argv[3];
-    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
-    Admin* a = argc == 3 ? admin_mock_unwrap(env, argv[0]) : NULL;
-    if (a == NULL) return NULL;
-    bool end = false;
-    if (napi_get_value_bool(env, argv[1], &end) != napi_ok) {
-        napi_throw_type_error(env, NULL, "end must be a boolean");
-        return NULL;
-    }
+// An array of [[topic, partition], offset] as an owned map of owned
+// TopicPartitions to malloc'ed int64_t, or NULL with a JS exception pending.
+static kafka_Map_t* offsets_map_from_js(napi_env env, napi_value rows) {
     int ok = 0;
-    uint32_t n = length_of(env, argv[2], &ok);
+    uint32_t n = length_of(env, rows, &ok);
     if (!ok) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
     kafka_Map_t* map = NULL;
     kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
     for (uint32_t i = 0; err == NULL && ok && i < n; i++) {
-        napi_value pair = element(env, argv[2], i);
+        napi_value pair = element(env, rows, i);
         napi_value k = pair == NULL ? NULL : element(env, pair, 0);
         napi_value v = k == NULL ? NULL : element(env, pair, 1);
         int64_t* offset = (int64_t*)malloc(sizeof(int64_t));
@@ -2519,9 +2508,919 @@ napi_value js_mock_admin_update_offsets(napi_env env, napi_callback_info info) {
             free(offset);
         }
     }
-    if (err == NULL && ok)
-        err = end ? FFI_ERR(kafka_admin_MockAdminClient_update_end_offsets_err(a->mock, map, &ffi_err))
-                  : FFI_ERR(kafka_admin_MockAdminClient_update_beginning_offsets_err(a->mock, map, &ffi_err));
+    if (err != NULL || !ok) {
+        map_free_with(env, map, tp_item_destroy, NULL);
+        if (err != NULL) error_throw_owned(env, err);
+        return NULL;
+    }
+    return map;
+}
+
+// mockAdminUpdateOffsets(handle, end, newOffsets): Java's
+// MockAdminClient.updateEndOffsets (end) or updateBeginningOffsets, the
+// offsets an array of [[topic, partition], offset].
+napi_value js_mock_admin_update_offsets(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_mock_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    bool end = false;
+    if (napi_get_value_bool(env, argv[1], &end) != napi_ok) {
+        napi_throw_type_error(env, NULL, "end must be a boolean");
+        return NULL;
+    }
+    kafka_Map_t* map = offsets_map_from_js(env, argv[2]);
+    if (map == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* err = end ? FFI_ERR(kafka_admin_MockAdminClient_update_end_offsets_err(a->mock, map, &ffi_err))
+                                    : FFI_ERR(kafka_admin_MockAdminClient_update_beginning_offsets_err(a->mock, map, &ffi_err));
+    // The map is copied by the call: its keys and offsets are freed here.
+    map_free_with(env, map, tp_item_destroy, NULL);
+    if (err != NULL) error_throw_owned(env, err);
+    return NULL;
+}
+
+// ---- groups: shared values ------------------------------------------------------------------
+
+// A GroupState of Java's ordinal, a singleton.
+static const kafka_common_GroupState_t* group_state_of(int32_t ordinal, kafka_common_Error_t** out_err) {
+    switch (ordinal) {
+        case 1: return kafka_common_GroupState_preparing_rebalance_err(out_err);
+        case 2: return kafka_common_GroupState_completing_rebalance_err(out_err);
+        case 3: return kafka_common_GroupState_stable_err(out_err);
+        case 4: return kafka_common_GroupState_dead_err(out_err);
+        case 5: return kafka_common_GroupState_empty_err(out_err);
+        case 6: return kafka_common_GroupState_assigning_err(out_err);
+        case 7: return kafka_common_GroupState_reconciling_err(out_err);
+        case 8: return kafka_common_GroupState_not_ready_err(out_err);
+        default: return kafka_common_GroupState_unknown_err(out_err);
+    }
+}
+
+// A GroupType of Java's ordinal, a singleton.
+static const kafka_common_GroupType_t* group_type_of(int32_t ordinal, kafka_common_Error_t** out_err) {
+    switch (ordinal) {
+        case 1: return kafka_common_GroupType_consumer_err(out_err);
+        case 2: return kafka_common_GroupType_classic_err(out_err);
+        case 3: return kafka_common_GroupType_share_err(out_err);
+        case 4: return kafka_common_GroupType_streams_err(out_err);
+        default: return kafka_common_GroupType_unknown_err(out_err);
+    }
+}
+
+// An array of ordinals as an owned list of borrowed singletons (`of` each),
+// or NULL with a JS exception pending.
+static kafka_List_t* singleton_list(napi_env env, napi_value array, const void* (*of)(int32_t, kafka_common_Error_t**)) {
+    int ok = 0;
+    uint32_t n = length_of(env, array, &ok);
+    if (!ok) return NULL;
+    kafka_List_t* list = list_new(env);
+    if (list == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    for (uint32_t i = 0; i < n; i++) {
+        napi_value v = element(env, array, i);
+        int32_t ordinal = int32_of(env, v, "an enum's ordinal", &ok);
+        const void* item = NULL;
+        kafka_common_Error_t* err = ok ? FFI_SET(item, of(ordinal, &ffi_err)) : NULL;
+        if (!ok || err != NULL) {
+            admin_list_free(env, list, NULL);
+            if (err != NULL) error_throw_owned(env, err);
+            return NULL;
+        }
+        if (list_add(env, list, (void*)item, NULL) < 0) {
+            admin_list_free(env, list, NULL);
+            return NULL;
+        }
+    }
+    return list;
+}
+
+static const void* group_state_item(int32_t ordinal, kafka_common_Error_t** out_err) {
+    return group_state_of(ordinal, out_err);
+}
+
+static const void* group_type_item(int32_t ordinal, kafka_common_Error_t** out_err) {
+    return group_type_of(ordinal, out_err);
+}
+
+// An ordinal, or -1 for NULL (Java's null or empty Optional), as a number or `null`.
+static napi_value js_ordinal_or_null(napi_env env, int ordinal) {
+    return ordinal < 0 ? js_null(env) : js_int32(env, ordinal);
+}
+
+// A GroupListing as { groupId, type, protocol, groupState }, the type and the
+// state their ordinals, null for Java's empty Optional.
+static napi_value item_group_listing(napi_env env, const void* item) {
+    const kafka_admin_GroupListing_t* g = (const kafka_admin_GroupListing_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    const char *group_id = NULL, *protocol = NULL;
+    const kafka_common_GroupType_t* type = NULL;
+    const kafka_common_GroupState_t* state = NULL;
+    int type_ordinal = -1, state_ordinal = -1;
+    kafka_common_Error_t* err = FFI_SET(group_id, kafka_admin_GroupListing_group_id_err(g, &ffi_err));
+    if (err == NULL) err = FFI_SET(type, kafka_admin_GroupListing_type_err(g, &ffi_err));
+    if (err == NULL && type != NULL) err = FFI_SET(type_ordinal, (int)kafka_common_GroupType__enum_err(type, &ffi_err));
+    if (err == NULL) err = FFI_SET(protocol, kafka_admin_GroupListing_protocol_err(g, &ffi_err));
+    if (err == NULL) err = FFI_SET(state, kafka_admin_GroupListing_group_state_err(g, &ffi_err));
+    if (err == NULL && state != NULL) err = FFI_SET(state_ordinal, (int)kafka_common_GroupState__enum_err(state, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "groupId", js_string_or_null(env, group_id)) < 0 || set(env, obj, "type", js_ordinal_or_null(env, type_ordinal)) < 0
+        || set(env, obj, "protocol", js_string_or_null(env, protocol)) < 0
+        || set(env, obj, "groupState", js_ordinal_or_null(env, state_ordinal)) < 0)
+        return NULL;
+    return obj;
+}
+
+static napi_value conv_group_listings(napi_env env, void* v) {
+    return admin_list_to_js(env, (const kafka_List_t*)v, item_group_listing, 0);
+}
+
+static napi_value item_error(napi_env env, const void* item) {
+    return error_to_js(env, (const kafka_common_Error_t*)item);
+}
+
+// The listing errors: the borrowed errors of the future's list.
+static napi_value conv_errors(napi_env env, void* v) {
+    return admin_list_to_js(env, (const kafka_List_t*)v, item_error, 0);
+}
+
+// A MemberAssignment as its [topic, partition] pairs, `null` for NULL.
+static napi_value member_assignment_to_js(napi_env env, const kafka_admin_MemberAssignment_t* a) {
+    if (a == NULL) return js_null(env);
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_List_t* partitions = NULL;
+    kafka_common_Error_t* err = FFI_SET(partitions, kafka_admin_MemberAssignment_topic_partitions_err(a, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return owned_list_to_js(env, partitions, key_topic_partition, 0);
+}
+
+// A MemberDescription as { memberId, groupInstanceId, rackId, clientId, host,
+// assignment, targetAssignment, memberEpoch, upgraded }, null for each of
+// Java's empty Optionals (-1 for the epoch and the flag).
+static napi_value item_member_description(napi_env env, const void* item) {
+    const kafka_admin_MemberDescription_t* m = (const kafka_admin_MemberDescription_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    const char *member_id = NULL, *instance = NULL, *rack = NULL, *client = NULL, *host = NULL;
+    const kafka_admin_MemberAssignment_t *assignment = NULL, *target = NULL;
+    int32_t epoch = -1;
+    int8_t upgraded = -1;
+    kafka_common_Error_t* err = FFI_SET(member_id, kafka_admin_MemberDescription_consumer_id_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(instance, kafka_admin_MemberDescription_group_instance_id_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(rack, kafka_admin_MemberDescription_rack_id_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(client, kafka_admin_MemberDescription_client_id_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(host, kafka_admin_MemberDescription_host_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(assignment, kafka_admin_MemberDescription_assignment_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(target, kafka_admin_MemberDescription_target_assignment_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(epoch, kafka_admin_MemberDescription_member_epoch_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(upgraded, kafka_admin_MemberDescription_upgraded_err(m, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "memberId", js_string_or_null(env, member_id)) < 0
+        || set(env, obj, "groupInstanceId", js_string_or_null(env, instance)) < 0
+        || set(env, obj, "rackId", js_string_or_null(env, rack)) < 0 || set(env, obj, "clientId", js_string_or_null(env, client)) < 0
+        || set(env, obj, "host", js_string_or_null(env, host)) < 0
+        || set(env, obj, "assignment", member_assignment_to_js(env, assignment)) < 0
+        || set(env, obj, "targetAssignment", member_assignment_to_js(env, target)) < 0
+        || set(env, obj, "memberEpoch", epoch < 0 ? js_null(env) : js_int32(env, epoch)) < 0
+        || set(env, obj, "upgraded", upgraded < 0 ? js_null(env) : js_bool(env, upgraded)) < 0)
+        return NULL;
+    return obj;
+}
+
+// The authorized operations of an OWNED list (NULL: Java's null) as their
+// codes or `null`, the list then destroyed.
+static napi_value owned_acl_operations_to_js(napi_env env, kafka_List_t* operations) {
+    napi_value ops = admin_acl_operations_to_js(env, operations);
+    kafka_common_Error_t* ffi_err = NULL;
+    if (operations != NULL) error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(operations, &ffi_err)));
+    return ops;
+}
+
+// A ConsumerGroupDescription as { groupId, isSimpleConsumerGroup, members,
+// partitionAssignor, type, groupState, coordinator, authorizedOperations,
+// groupEpoch, targetAssignmentEpoch }, the type and state their ordinals (null
+// for Java's null), an epoch null for Java's empty Optional (-1).
+static napi_value conv_consumer_group_description(napi_env env, void* v) {
+    if (v == NULL) return js_null(env);
+    const kafka_admin_ConsumerGroupDescription_t* d = (const kafka_admin_ConsumerGroupDescription_t*)v;
+    kafka_common_Error_t* ffi_err = NULL;
+    const char *group_id = NULL, *assignor = NULL;
+    int8_t simple = 0;
+    kafka_List_t *members = NULL, *operations = NULL;
+    const kafka_common_GroupType_t* type = NULL;
+    const kafka_common_GroupState_t* state = NULL;
+    const kafka_common_Node_t* coordinator = NULL;
+    int type_ordinal = -1, state_ordinal = -1;
+    int32_t group_epoch = -1, target_epoch = -1;
+    kafka_common_Error_t* err = FFI_SET(group_id, kafka_admin_ConsumerGroupDescription_group_id_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(simple, kafka_admin_ConsumerGroupDescription_is_simple_consumer_group_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(members, kafka_admin_ConsumerGroupDescription_members_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(assignor, kafka_admin_ConsumerGroupDescription_partition_assignor_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(type, kafka_admin_ConsumerGroupDescription_type_err(d, &ffi_err));
+    if (err == NULL && type != NULL) err = FFI_SET(type_ordinal, (int)kafka_common_GroupType__enum_err(type, &ffi_err));
+    if (err == NULL) err = FFI_SET(state, kafka_admin_ConsumerGroupDescription_group_state_err(d, &ffi_err));
+    if (err == NULL && state != NULL) err = FFI_SET(state_ordinal, (int)kafka_common_GroupState__enum_err(state, &ffi_err));
+    if (err == NULL) err = FFI_SET(coordinator, kafka_admin_ConsumerGroupDescription_coordinator_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(operations, kafka_admin_ConsumerGroupDescription_authorized_operations_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(group_epoch, kafka_admin_ConsumerGroupDescription_group_epoch_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(target_epoch, kafka_admin_ConsumerGroupDescription_target_assignment_epoch_err(d, &ffi_err));
+    // Each owned list converted, then destroyed, whatever happened before.
+    napi_value js_members = owned_list_to_js(env, members, item_member_description, 0);
+    napi_value ops = owned_acl_operations_to_js(env, operations);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "groupId", js_string_or_null(env, group_id)) < 0 || set(env, obj, "isSimpleConsumerGroup", js_bool(env, simple)) < 0
+        || set(env, obj, "members", js_members) < 0 || set(env, obj, "partitionAssignor", js_string_or_null(env, assignor)) < 0
+        || set(env, obj, "type", js_ordinal_or_null(env, type_ordinal)) < 0
+        || set(env, obj, "groupState", js_ordinal_or_null(env, state_ordinal)) < 0
+        || set(env, obj, "coordinator", node_to_js(env, coordinator)) < 0 || set(env, obj, "authorizedOperations", ops) < 0
+        || set(env, obj, "groupEpoch", group_epoch < 0 ? js_null(env) : js_int32(env, group_epoch)) < 0
+        || set(env, obj, "targetAssignmentEpoch", target_epoch < 0 ? js_null(env) : js_int32(env, target_epoch)) < 0)
+        return NULL;
+    return obj;
+}
+
+// A ClassicGroupDescription as { groupId, protocol, protocolData, members,
+// state, coordinator, authorizedOperations }, the state its ordinal (null for
+// Java's null).
+static napi_value conv_classic_group_description(napi_env env, void* v) {
+    if (v == NULL) return js_null(env);
+    const kafka_admin_ClassicGroupDescription_t* d = (const kafka_admin_ClassicGroupDescription_t*)v;
+    kafka_common_Error_t* ffi_err = NULL;
+    const char *group_id = NULL, *protocol = NULL, *protocol_data = NULL;
+    kafka_List_t *members = NULL, *operations = NULL;
+    const kafka_common_ClassicGroupState_t* state = NULL;
+    const kafka_common_Node_t* coordinator = NULL;
+    int state_ordinal = -1;
+    kafka_common_Error_t* err = FFI_SET(group_id, kafka_admin_ClassicGroupDescription_group_id_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(protocol, kafka_admin_ClassicGroupDescription_protocol_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(protocol_data, kafka_admin_ClassicGroupDescription_protocol_data_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(members, kafka_admin_ClassicGroupDescription_members_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(state, kafka_admin_ClassicGroupDescription_state_err(d, &ffi_err));
+    if (err == NULL && state != NULL) err = FFI_SET(state_ordinal, (int)kafka_common_ClassicGroupState__enum_err(state, &ffi_err));
+    if (err == NULL) err = FFI_SET(coordinator, kafka_admin_ClassicGroupDescription_coordinator_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(operations, kafka_admin_ClassicGroupDescription_authorized_operations_err(d, &ffi_err));
+    napi_value js_members = owned_list_to_js(env, members, item_member_description, 0);
+    napi_value ops = owned_acl_operations_to_js(env, operations);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "groupId", js_string_or_null(env, group_id)) < 0 || set(env, obj, "protocol", js_string_or_null(env, protocol)) < 0
+        || set(env, obj, "protocolData", js_string_or_null(env, protocol_data)) < 0 || set(env, obj, "members", js_members) < 0
+        || set(env, obj, "state", js_ordinal_or_null(env, state_ordinal)) < 0
+        || set(env, obj, "coordinator", node_to_js(env, coordinator)) < 0 || set(env, obj, "authorizedOperations", ops) < 0)
+        return NULL;
+    return obj;
+}
+
+// A borrowed OffsetAndMetadata as { offset, metadata, leaderEpoch }, the epoch
+// null for Java's empty Optional (-1), `null` for NULL (no committed offset).
+static napi_value item_offset_and_metadata(napi_env env, const void* item) {
+    if (item == NULL) return js_null(env);
+    const kafka_consumer_OffsetAndMetadata_t* o = (const kafka_consumer_OffsetAndMetadata_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    int64_t offset = 0;
+    const char* metadata = NULL;
+    int32_t epoch = -1;
+    kafka_common_Error_t* err = FFI_SET(offset, kafka_consumer_OffsetAndMetadata_offset_err(o, &ffi_err));
+    if (err == NULL) err = FFI_SET(metadata, kafka_consumer_OffsetAndMetadata_metadata_err(o, &ffi_err));
+    if (err == NULL) err = FFI_SET(epoch, kafka_consumer_OffsetAndMetadata_leader_epoch_err(o, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "offset", js_int64(env, offset)) < 0 || set(env, obj, "metadata", js_string_or_null(env, metadata)) < 0
+        || set(env, obj, "leaderEpoch", epoch < 0 ? js_null(env) : js_int32(env, epoch)) < 0)
+        return NULL;
+    return obj;
+}
+
+// A group's offsets: [[[topic, partition], offset fields or null]].
+static napi_value conv_group_offsets(napi_env env, void* v) {
+    return admin_map_to_js(env, (const kafka_Map_t*)v, key_topic_partition, item_offset_and_metadata);
+}
+
+// ---- listGroups -------------------------------------------------------------------------------
+
+#define ADMIN_RPC ListGroups
+
+ADMIN_OPT_TIMEOUT(kafka_admin_ListGroupsOptions_set_timeout_ms_err)
+// `inGroupStates` and `withTypes`: the stored set as ordinals, the core's
+// singletons in a list the call copies.
+static int ADMIN_SETTER_FN(inGroupStates)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    kafka_List_t* list = singleton_list(env, v, group_state_item);
+    if (list == NULL) return -1;
+    kafka_admin_ListGroupsOptions_in_group_states_err((ADMIN_OPTIONS_T*)o, list, out_err);
+    admin_list_free(env, list, NULL);
+    return 0;
+}
+static int ADMIN_SETTER_FN(withTypes)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    kafka_List_t* list = singleton_list(env, v, group_type_item);
+    if (list == NULL) return -1;
+    kafka_admin_ListGroupsOptions_with_types_err((ADMIN_OPTIONS_T*)o, list, out_err);
+    admin_list_free(env, list, NULL);
+    return 0;
+}
+// `withProtocolTypes`: the stored set of strings.
+static int ADMIN_SETTER_FN(withProtocolTypes)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    kafka_List_t* list = string_list(env, v);
+    if (list == NULL) return -1;
+    kafka_admin_ListGroupsOptions_with_protocol_types_err((ADMIN_OPTIONS_T*)o, list, out_err);
+    admin_list_free(env, list, free_item);
+    return 0;
+}
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_ListGroupsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_ListGroupsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(inGroupStates), ADMIN_SETTER(withTypes), ADMIN_SETTER(withProtocolTypes), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_ListGroupsResult_destroy_err),
+    {ADMIN_ACC_ONE(all, kafka_admin_ListGroupsResult_all_err, conv_group_listings),
+     ADMIN_ACC_ONE(valid, kafka_admin_ListGroupsResult_valid_err, conv_group_listings),
+     ADMIN_ACC_ONE(errors, kafka_admin_ListGroupsResult_errors_err, conv_errors), ADMIN_ACC_END},
+};
+
+// adminListGroups(handle, options): the result's futures are `all`, `valid`
+// and `errors`.
+napi_value js_admin_list_groups(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 2 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[1]);
+    if (o == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = FFI_SET(r, kafka_admin_Admin_list_groups_with_options_err(a->view, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison ListGroupsOptions_desc ListGroupsResult_desc
+
+// ---- describeConsumerGroups -------------------------------------------------------------------
+
+#define ADMIN_RPC DescribeConsumerGroups
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeConsumerGroupsOptions_set_timeout_ms_err)
+ADMIN_OPT_BOOL(includeAuthorizedOperations, kafka_admin_DescribeConsumerGroupsOptions_set_include_authorized_operations_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeConsumerGroupsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeConsumerGroupsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(includeAuthorizedOperations), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeConsumerGroupsResult_destroy_err),
+    {ADMIN_ACC_MAP(described_groups, kafka_admin_DescribeConsumerGroupsResult_described_groups_err, key_string,
+                   conv_consumer_group_description),
+     ADMIN_ACC_END},
+};
+
+// adminDescribeConsumerGroups(handle, groupIds, options): the result's futures
+// are `described_groups` (a map by group id).
+napi_value js_admin_describe_consumer_groups(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* ids = string_list(env, argv[1]);
+    if (ids == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, ids, free_item);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_describe_consumer_groups_with_options_err(a->view, ids, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, ids, free_item);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeConsumerGroupsOptions_desc DescribeConsumerGroupsResult_desc
+
+// ---- describeClassicGroups --------------------------------------------------------------------
+
+#define ADMIN_RPC DescribeClassicGroups
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeClassicGroupsOptions_set_timeout_ms_err)
+ADMIN_OPT_BOOL(includeAuthorizedOperations, kafka_admin_DescribeClassicGroupsOptions_set_include_authorized_operations_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeClassicGroupsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeClassicGroupsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(includeAuthorizedOperations), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeClassicGroupsResult_destroy_err),
+    {ADMIN_ACC_MAP(described_groups, kafka_admin_DescribeClassicGroupsResult_described_groups_err, key_string,
+                   conv_classic_group_description),
+     ADMIN_ACC_END},
+};
+
+// adminDescribeClassicGroups(handle, groupIds, options): the result's futures
+// are `described_groups` (a map by group id).
+napi_value js_admin_describe_classic_groups(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* ids = string_list(env, argv[1]);
+    if (ids == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, ids, free_item);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_describe_classic_groups_with_options_err(a->view, ids, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, ids, free_item);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeClassicGroupsOptions_desc DescribeClassicGroupsResult_desc
+
+// ---- listConsumerGroupOffsets -----------------------------------------------------------------
+
+#define ADMIN_RPC ListConsumerGroupOffsets
+
+ADMIN_OPT_TIMEOUT(kafka_admin_ListConsumerGroupOffsetsOptions_set_timeout_ms_err)
+ADMIN_OPT_BOOL(requireStable, kafka_admin_ListConsumerGroupOffsetsOptions_set_require_stable_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_ListConsumerGroupOffsetsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_ListConsumerGroupOffsetsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(requireStable), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_ListConsumerGroupOffsetsResult_destroy_err),
+    {ADMIN_ACC_STR(partitions_to_offset_and_metadata_with_group_id,
+                   kafka_admin_ListConsumerGroupOffsetsResult_partitions_to_offset_and_metadata_with_group_id, conv_group_offsets),
+     ADMIN_ACC_END},
+};
+
+static void spec_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_admin_ListConsumerGroupOffsetsSpec_destroy_err((kafka_admin_ListConsumerGroupOffsetsSpec_t*)item, out_err);
+}
+
+// An array of [groupId, [topic, partition] pairs or null] as an owned map of
+// malloc'ed group ids to owned specs (null partitions: every partition of the
+// group), or NULL with a JS exception pending.
+static kafka_Map_t* group_specs_from_js(napi_env env, napi_value rows) {
+    int ok = 0;
+    uint32_t n = length_of(env, rows, &ok);
+    if (!ok) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* map = NULL;
+    kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
+    for (uint32_t i = 0; err == NULL && ok && i < n; i++) {
+        napi_value row = element(env, rows, i);
+        napi_value g = row == NULL ? NULL : element(env, row, 0);
+        napi_value p = g == NULL ? NULL : element(env, row, 1);
+        char* group = p == NULL ? NULL : js_string_dup(env, g, "a group id must be a string");
+        if (group == NULL) {
+            ok = 0;
+            break;
+        }
+        int is_null = 0;
+        kafka_List_t* partitions = tp_list_or_null(env, p, &is_null);
+        if (partitions == NULL && !is_null) {
+            free(group);
+            ok = 0;
+            break;
+        }
+        kafka_admin_ListConsumerGroupOffsetsSpec_t* spec = NULL;
+        err = FFI_SET(spec, kafka_admin_ListConsumerGroupOffsetsSpec_new_err(&ffi_err));
+        if (err == NULL && partitions != NULL)
+            err = FFI_ERR(kafka_admin_ListConsumerGroupOffsetsSpec_set_topic_partitions_err(spec, partitions, &ffi_err));
+        admin_list_free(env, partitions, tp_item_destroy);
+        if (err == NULL) err = FFI_ERR(kafka_Map_put_err(map, group, spec, &ffi_err));
+        if (err != NULL) {
+            free(group);
+            if (spec != NULL) FFI_DISCARD(spec_destroy(spec, &ffi_err));
+        }
+    }
+    if (err != NULL || !ok) {
+        map_free_with(env, map, free_item, spec_destroy);
+        if (err != NULL) error_throw_owned(env, err);
+        return NULL;
+    }
+    return map;
+}
+
+// adminListConsumerGroupOffsets(handle, groupId, groupSpecs, options): Java's
+// (groupId, options) form when groupId is a string (`_with_group_id_options`),
+// else its (groupSpecs, options) form, the specs an array of [groupId,
+// partitions or null] (`_with_group_specs_options`); each requested group's
+// future is `partitions_to_offset_and_metadata_with_group_id`.
+napi_value js_admin_list_consumer_group_offsets(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 4 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    char* group = NULL;
+    kafka_Map_t* specs = NULL;
+    if (type == napi_string) {
+        group = js_string_dup(env, argv[1], "groupId must be a string");
+        if (group == NULL) return NULL;
+    } else if ((specs = group_specs_from_js(env, argv[2])) == NULL) {
+        return NULL;
+    }
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[3]);
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = NULL;
+    if (o != NULL) {
+        ADMIN_OPTIONS_T* opts = (ADMIN_OPTIONS_T*)admin_opts(o);
+        err = group != NULL
+                  ? FFI_SET(r, kafka_admin_Admin_list_consumer_group_offsets_with_group_id_options_err(a->view, group, opts, &ffi_err))
+                  : FFI_SET(r, kafka_admin_Admin_list_consumer_group_offsets_with_group_specs_options_err(a->view, specs, opts, &ffi_err));
+    }
+    free(group);
+    map_free_with(env, specs, free_item, spec_destroy);
+    if (o == NULL) return NULL;
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison ListConsumerGroupOffsetsOptions_desc ListConsumerGroupOffsetsResult_desc
+
+// ---- alterConsumerGroupOffsets ----------------------------------------------------------------
+
+#define ADMIN_RPC AlterConsumerGroupOffsets
+
+ADMIN_OPT_TIMEOUT(kafka_admin_AlterConsumerGroupOffsetsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_AlterConsumerGroupOffsetsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_AlterConsumerGroupOffsetsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+
+// `partition_result(partition)`, the key a [topic, partition] pair.
+static kafka_common_KafkaFuture_t* alter_offsets_partition_result(napi_env env, const void* result, napi_value key,
+                                                                  kafka_common_Error_t** out_err) {
+    kafka_common_TopicPartition_t* tp = tp_from_js(env, key);
+    if (tp == NULL) return NULL;
+    kafka_common_KafkaFuture_t* future = kafka_admin_AlterConsumerGroupOffsetsResult_partition_result_err((const ADMIN_RESULT_T*)result, tp, out_err);
+    kafka_common_Error_t* ffi_err = NULL;
+    error_warn(env, 1, FFI_ERR(kafka_common_TopicPartition_destroy_err(tp, &ffi_err)));
+    return future;
+}
+
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_AlterConsumerGroupOffsetsResult_destroy_err),
+    {ADMIN_ACC_JS(partition_result, alter_offsets_partition_result, NULL),
+     ADMIN_ACC_ONE(all, kafka_admin_AlterConsumerGroupOffsetsResult_all_err, NULL), ADMIN_ACC_END},
+};
+
+static void offset_and_metadata_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_consumer_OffsetAndMetadata_destroy_err((kafka_consumer_OffsetAndMetadata_t*)item, out_err);
+}
+
+// adminAlterConsumerGroupOffsets(handle, groupId, offsets, options): the
+// offsets an array of [[topic, partition], offset, leaderEpoch (-1: none),
+// metadata]; the result's futures are `partition_result(partition)` and `all`.
+napi_value js_admin_alter_consumer_group_offsets(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 4 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    int ok = 0;
+    uint32_t n = length_of(env, argv[2], &ok);
+    if (!ok) return NULL;
+    char* group = js_string_dup(env, argv[1], "groupId must be a string");
+    if (group == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* map = NULL;
+    kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
+    for (uint32_t i = 0; err == NULL && ok && i < n; i++) {
+        napi_value row = element(env, argv[2], i);
+        napi_value k = row == NULL ? NULL : element(env, row, 0);
+        napi_value off = k == NULL ? NULL : element(env, row, 1);
+        napi_value ep = off == NULL ? NULL : element(env, row, 2);
+        napi_value md = ep == NULL ? NULL : element(env, row, 3);
+        int64_t offset = 0;
+        bool lossless = false;
+        if (md == NULL || napi_get_value_bigint_int64(env, off, &offset, &lossless) != napi_ok) {
+            if (md != NULL) napi_throw_type_error(env, NULL, "an offset must be a bigint");
+            ok = 0;
+            break;
+        }
+        int32_t epoch = int32_of(env, ep, "a leader epoch", &ok);
+        char* metadata = ok ? js_string_dup(env, md, "metadata must be a string") : NULL;
+        if (metadata == NULL) {
+            ok = 0;
+            break;
+        }
+        kafka_common_TopicPartition_t* tp = tp_from_js(env, k);
+        if (tp == NULL) {
+            free(metadata);
+            ok = 0;
+            break;
+        }
+        kafka_consumer_OffsetAndMetadata_t* value = NULL;
+        err = FFI_SET(value, kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(offset, epoch, metadata, &ffi_err));
+        free(metadata);
+        if (err == NULL) err = FFI_ERR(kafka_Map_put_err(map, tp, value, &ffi_err));
+        if (err != NULL) {
+            FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+            if (value != NULL) FFI_DISCARD(kafka_consumer_OffsetAndMetadata_destroy_err(value, &ffi_err));
+        }
+    }
+    void* o = err == NULL && ok ? admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[3]) : NULL;
+    ADMIN_RESULT_T* r = NULL;
+    if (o != NULL)
+        err = FFI_SET(r, kafka_admin_Admin_alter_consumer_group_offsets_with_options_err(a->view, group, map, (ADMIN_OPTIONS_T*)admin_opts(o),
+                                                                                        &ffi_err));
+    free(group);
+    // The map's keys and offsets are copied by the call: freed here.
+    map_free_with(env, map, tp_item_destroy, offset_and_metadata_destroy);
+    if (o == NULL) {
+        if (err != NULL) error_throw_owned(env, err);
+        return NULL;
+    }
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison AlterConsumerGroupOffsetsOptions_desc AlterConsumerGroupOffsetsResult_desc
+
+// ---- deleteConsumerGroupOffsets ---------------------------------------------------------------
+
+#define ADMIN_RPC DeleteConsumerGroupOffsets
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DeleteConsumerGroupOffsetsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DeleteConsumerGroupOffsetsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DeleteConsumerGroupOffsetsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+
+// `partition_result(partition)`, the key a [topic, partition] pair.
+static kafka_common_KafkaFuture_t* delete_offsets_partition_result(napi_env env, const void* result, napi_value key,
+                                                                   kafka_common_Error_t** out_err) {
+    kafka_common_TopicPartition_t* tp = tp_from_js(env, key);
+    if (tp == NULL) return NULL;
+    kafka_common_KafkaFuture_t* future = kafka_admin_DeleteConsumerGroupOffsetsResult_partition_result((const ADMIN_RESULT_T*)result, tp, out_err);
+    kafka_common_Error_t* ffi_err = NULL;
+    error_warn(env, 1, FFI_ERR(kafka_common_TopicPartition_destroy_err(tp, &ffi_err)));
+    return future;
+}
+
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DeleteConsumerGroupOffsetsResult_destroy_err),
+    {ADMIN_ACC_JS(partition_result, delete_offsets_partition_result, NULL),
+     ADMIN_ACC_ONE(all, kafka_admin_DeleteConsumerGroupOffsetsResult_all_err, NULL), ADMIN_ACC_END},
+};
+
+// adminDeleteConsumerGroupOffsets(handle, groupId, partitions, options): the
+// partitions as [topic, partition] pairs; the result's futures are
+// `partition_result(partition)` and `all`.
+napi_value js_admin_delete_consumer_group_offsets(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 4 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    char* group = js_string_dup(env, argv[1], "groupId must be a string");
+    if (group == NULL) return NULL;
+    kafka_List_t* partitions = handle_list(env, argv[2], tp_from_js_item, tp_item_destroy);
+    if (partitions == NULL) {
+        free(group);
+        return NULL;
+    }
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[3]);
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = NULL;
+    if (o != NULL)
+        err = FFI_SET(r, kafka_admin_Admin_delete_consumer_group_offsets_with_options_err(a->view, group, partitions,
+                                                                                         (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    free(group);
+    admin_list_free(env, partitions, tp_item_destroy);
+    if (o == NULL) return NULL;
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DeleteConsumerGroupOffsetsOptions_desc DeleteConsumerGroupOffsetsResult_desc
+
+// ---- deleteConsumerGroups ---------------------------------------------------------------------
+
+#define ADMIN_RPC DeleteConsumerGroups
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DeleteConsumerGroupsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DeleteConsumerGroupsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DeleteConsumerGroupsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DeleteConsumerGroupsResult_destroy_err),
+    {ADMIN_ACC_MAP(deleted_groups, kafka_admin_DeleteConsumerGroupsResult_deleted_groups_err, key_string, NULL), ADMIN_ACC_END},
+};
+
+// adminDeleteConsumerGroups(handle, groupIds, options): the result's futures
+// are `deleted_groups` (a map by group id).
+napi_value js_admin_delete_consumer_groups(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* ids = string_list(env, argv[1]);
+    if (ids == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, ids, free_item);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_delete_consumer_groups_with_options_err(a->view, ids, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, ids, free_item);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DeleteConsumerGroupsOptions_desc DeleteConsumerGroupsResult_desc
+
+// ---- removeMembersFromConsumerGroup -----------------------------------------------------------
+
+#define ADMIN_RPC RemoveMembersFromConsumerGroup
+
+// The members Java's `(members)` constructor takes, set by the entry point
+// for the descriptor's create, which takes no argument, during the one call.
+// Each worker thread is a JS thread of its own and the addon is loaded once
+// per process, so the pointer is per thread: a call on one thread never reads
+// another's members.
+static _Thread_local const kafka_List_t* remove_members_pending = NULL;
+
+// Java's `new RemoveMembersFromConsumerGroupOptions(members)`: the FFI has no
+// setter of the members, a final field of Java's, only that constructor.
+static ADMIN_OPTIONS_T* remove_members_options_with_members(kafka_common_Error_t** out_err) {
+    return kafka_admin_RemoveMembersFromConsumerGroupOptions_with_members(remove_members_pending, out_err);
+}
+
+ADMIN_OPT_TIMEOUT(kafka_admin_RemoveMembersFromConsumerGroupOptions_set_timeout_ms_err)
+// `reason(String)`: a string, or null to clear it.
+static int ADMIN_SETTER_FN(reason)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    int ok = 0;
+    char* reason = string_or_null(env, v, "reason must be a string or null", &ok);
+    if (!ok) return -1;
+    kafka_admin_RemoveMembersFromConsumerGroupOptions_set_reason_err((ADMIN_OPTIONS_T*)o, reason, out_err);
+    free(reason);
+    return 0;
+}
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_RemoveMembersFromConsumerGroupOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(reason), {NULL, NULL}},
+};
+// The same options, from Java's `(members)` constructor.
+static const AdminOptionsDesc RemoveMembersFromConsumerGroupWithMembersOptions_desc = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(remove_members_options_with_members),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_RemoveMembersFromConsumerGroupOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(reason), {NULL, NULL}},
+};
+
+static void member_to_remove_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_admin_MemberToRemove_destroy_err((kafka_admin_MemberToRemove_t*)item, out_err);
+}
+
+// A JS group instance id as an owned MemberToRemove, or NULL with a JS
+// exception pending.
+static kafka_admin_MemberToRemove_t* member_from_js(napi_env env, napi_value id) {
+    char* s = js_string_dup(env, id, "a member's group instance id must be a string");
+    if (s == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_admin_MemberToRemove_t* m = NULL;
+    kafka_common_Error_t* err = FFI_SET(m, kafka_admin_MemberToRemove_new_err(s, &ffi_err));
+    free(s);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return m;
+}
+
+static void* member_from_js_item(napi_env env, napi_value v) {
+    return member_from_js(env, v);
+}
+
+// `member_result(member)`, the key the member's group instance id.
+static kafka_common_KafkaFuture_t* remove_members_member_result(napi_env env, const void* result, napi_value key,
+                                                                kafka_common_Error_t** out_err) {
+    kafka_admin_MemberToRemove_t* m = member_from_js(env, key);
+    if (m == NULL) return NULL;
+    kafka_common_KafkaFuture_t* future = kafka_admin_RemoveMembersFromConsumerGroupResult_member_result((const ADMIN_RESULT_T*)result, m, out_err);
+    kafka_common_Error_t* ffi_err = NULL;
+    error_warn(env, 1, FFI_ERR(kafka_admin_MemberToRemove_destroy_err(m, &ffi_err)));
+    return future;
+}
+
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_RemoveMembersFromConsumerGroupResult_destroy_err),
+    {ADMIN_ACC_JS(member_result, remove_members_member_result, NULL),
+     ADMIN_ACC_ONE(all, kafka_admin_RemoveMembersFromConsumerGroupResult_all_err, NULL), ADMIN_ACC_END},
+};
+
+// adminRemoveMembersFromConsumerGroup(handle, groupId, members, options): the
+// members their group instance ids, or null for Java's `()` constructor
+// (removeAll mode), the options built with Java's `(members)` constructor
+// otherwise; the result's futures are `member_result(member)` and `all`.
+napi_value js_admin_remove_members_from_consumer_group(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 4 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[2], &type), NULL);
+    kafka_List_t* members = NULL;
+    if (type != napi_null && (members = handle_list(env, argv[2], member_from_js_item, member_to_remove_destroy)) == NULL) return NULL;
+    char* group = js_string_dup(env, argv[1], "groupId must be a string");
+    if (group == NULL) {
+        admin_list_free(env, members, member_to_remove_destroy);
+        return NULL;
+    }
+    const AdminOptionsDesc* odesc = members != NULL ? &RemoveMembersFromConsumerGroupWithMembersOptions_desc : &ADMIN_OPTIONS_DESC;
+    remove_members_pending = members;
+    void* o = admin_options_build(env, odesc, argv[3]);
+    remove_members_pending = NULL;
+    admin_list_free(env, members, member_to_remove_destroy);
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err = NULL;
+    if (o != NULL)
+        err = FFI_SET(r, kafka_admin_Admin_remove_members_from_consumer_group_with_options_err(a->view, group, (ADMIN_OPTIONS_T*)admin_opts(o),
+                                                                                             &ffi_err));
+    free(group);
+    if (o == NULL) return NULL;
+    return admin_rpc_return(env, odesc, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison RemoveMembersFromConsumerGroupOptions_desc RemoveMembersFromConsumerGroupWithMembersOptions_desc \
+    RemoveMembersFromConsumerGroupResult_desc
+
+// ---- the mock's group offsets -----------------------------------------------------------------
+
+// mockAdminUpdateConsumerGroupOffsets(handle, newOffsets): Java's
+// MockAdminClient.updateConsumerGroupOffsets, the offsets an array of
+// [[topic, partition], offset].
+napi_value js_mock_admin_update_consumer_group_offsets(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 2 ? admin_mock_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_Map_t* map = offsets_map_from_js(env, argv[1]);
+    if (map == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* err = FFI_ERR(kafka_admin_MockAdminClient_update_consumer_group_offsets_err(a->mock, map, &ffi_err));
     // The map is copied by the call: its keys and offsets are freed here.
     map_free_with(env, map, tp_item_destroy, NULL);
     if (err != NULL) error_throw_owned(env, err);

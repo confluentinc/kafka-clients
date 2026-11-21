@@ -29,8 +29,66 @@
  * `AdminClient`, Java's abstract base class
  * of `KafkaAdminClient`, is not translated.
  *
+ * Invented *(js-only)*: `MemberToRemoveSet`, Java's `Set<MemberToRemove>`:
+ * JavaScript has no value equality for set members.
+ *
  * `MockAdminClient` wraps the C FFI's mock, as the .NET client's does; Java
  * ships it in its test fixtures, and it is public here, as in the Rust core.
+ *
+ * @remarks *(deviation)* A null Java only stores, and reads later or never,
+ * is a `TypeError` naming the parameter at the call, where Java's caller sees
+ * the failure at `get()`, or none:
+ *
+ * - options given as `null` (the FFI's "options must not be null"), also where
+ *   Java reads them only once there is something to send, or never (an empty
+ *   collection), and on `MockAdminClient`, whose Java counterpart reads the
+ *   options of none of these calls and answers them;
+ * - `listConfigResources`: a null set of types, or a null type in it, which
+ *   Java reads when it builds the request;
+ * - `incrementalAlterConfigs`: a null list of operations, a null operation, or
+ *   an `AlterConfigOp` with a null `configEntry` or `opType`, which Java's
+ *   request builder reads;
+ * - a `TopicPartition` with a null topic: in `alterPartitionReassignments`
+ *   (a key) and `listPartitionReassignments`, where Java fails the future with
+ *   `InvalidTopicException` "The given topic name 'null' cannot be represented
+ *   in a request."; in `electLeaders`, `listOffsets` (a key),
+ *   `alterConsumerGroupOffsets` (a key), `deleteConsumerGroupOffsets` and a
+ *   `ListConsumerGroupOffsetsSpec`'s partitions, which Java reads when it
+ *   builds the request;
+ * - a null element of a partition set, in `electLeaders`,
+ *   `deleteConsumerGroupOffsets` and a `ListConsumerGroupOffsetsSpec`'s
+ *   partitions, and a null key of `alterConsumerGroupOffsets`' offsets, which
+ *   Java reads when it builds the request;
+ * - `electLeaders`: a null election type, which Java reads when it builds the
+ *   request;
+ * - `listOffsets`: options whose isolation level is null
+ *   (`new ListOffsetsOptions(null)`), which Java reads when it builds a request
+ *   (so an empty map completes there), and Java's `MockAdminClient` never;
+ * - `MockAdminClient.updateBeginningOffsets`, `updateEndOffsets` and
+ *   `updateConsumerGroupOffsets`: a null key, a key with a null topic, or a
+ *   null offset, which Java's mock stores with `putAll`;
+ * - the seven group calls that take group ids: a null group id, or a null id
+ *   in `groupIds`, which Java's `CoordinatorKey.byGroupId` stores, the future
+ *   failing later;
+ * - `listConsumerGroupOffsets`: a null `ListConsumerGroupOffsetsSpec`;
+ *   `alterConsumerGroupOffsets`: a null `offsets` map, or a null
+ *   `OffsetAndMetadata` in it;
+ *   `deleteConsumerGroupOffsets`: null partitions. Java's handlers store them
+ *   and read them when they build the request;
+ * - `removeMembersFromConsumerGroup`: a `MemberToRemove` whose group instance
+ *   id is null, which Java sends as a null member identity;
+ * - `AlterConsumerGroupOffsetsResult.partitionResult`: a null partition, or
+ *   one with a null topic, where Java's future fails with the request's error
+ *   or with "Alter offset for partition "null" was not attempted".
+ *
+ * Why: the C API cannot carry these nulls (a list, a handle, a C string or a
+ * singleton cannot be `NULL` there). Goes when: the FFI takes them and the
+ * core fails the future as Java does.
+ *
+ * *(deviation)* `alterReplicaLogDirs` with a null log directory sends the empty
+ * string, where Java's request carries a null path, which fails it. Why: the
+ * FFI reads a `NULL` log directory as `""`. Goes when: the FFI carries the
+ * null.
  *
  * @packageDocumentation
  */
@@ -41,25 +99,37 @@ export type { AdminClientConfigs } from './admin_client_configs';
 export { AlterConfigOp } from './alter_config_op';
 export { AlterConfigsOptions } from './alter_configs_options';
 export { AlterConfigsResult } from './alter_configs_result';
+export { AlterConsumerGroupOffsetsOptions } from './alter_consumer_group_offsets_options';
+export { AlterConsumerGroupOffsetsResult } from './alter_consumer_group_offsets_result';
 export { AlterPartitionReassignmentsOptions } from './alter_partition_reassignments_options';
 export { AlterPartitionReassignmentsResult } from './alter_partition_reassignments_result';
 export { AlterReplicaLogDirsOptions } from './alter_replica_log_dirs_options';
 export { AlterReplicaLogDirsResult } from './alter_replica_log_dirs_result';
+export { ClassicGroupDescription } from './classic_group_description';
 export { Config } from './config';
 export { ConfigEntry } from './config_entry';
+export { ConsumerGroupDescription } from './consumer_group_description';
 export { CreatePartitionsOptions } from './create_partitions_options';
 export { CreatePartitionsResult } from './create_partitions_result';
 export { CreateTopicsOptions } from './create_topics_options';
 export { CreateTopicsResult } from './create_topics_result';
+export { DeleteConsumerGroupOffsetsOptions } from './delete_consumer_group_offsets_options';
+export { DeleteConsumerGroupOffsetsResult } from './delete_consumer_group_offsets_result';
+export { DeleteConsumerGroupsOptions } from './delete_consumer_groups_options';
+export { DeleteConsumerGroupsResult } from './delete_consumer_groups_result';
 export { DeleteRecordsOptions } from './delete_records_options';
 export { DeleteRecordsResult } from './delete_records_result';
 export { DeleteTopicsOptions } from './delete_topics_options';
 export { DeleteTopicsResult } from './delete_topics_result';
 export { DeletedRecords } from './deleted_records';
+export { DescribeClassicGroupsOptions } from './describe_classic_groups_options';
+export { DescribeClassicGroupsResult } from './describe_classic_groups_result';
 export { DescribeClusterOptions } from './describe_cluster_options';
 export { DescribeClusterResult } from './describe_cluster_result';
 export { DescribeConfigsOptions } from './describe_configs_options';
 export { DescribeConfigsResult } from './describe_configs_result';
+export { DescribeConsumerGroupsOptions } from './describe_consumer_groups_options';
+export { DescribeConsumerGroupsResult } from './describe_consumer_groups_result';
 export { DescribeLogDirsOptions } from './describe_log_dirs_options';
 export { DescribeLogDirsResult } from './describe_log_dirs_result';
 export { DescribeReplicaLogDirsOptions } from './describe_replica_log_dirs_options';
@@ -68,10 +138,16 @@ export { DescribeTopicsOptions } from './describe_topics_options';
 export { DescribeTopicsResult } from './describe_topics_result';
 export { ElectLeadersOptions } from './elect_leaders_options';
 export { ElectLeadersResult } from './elect_leaders_result';
+export { GroupListing } from './group_listing';
 export { KafkaAdminClient } from './kafka_admin_client';
 export type { CloseArgs } from './kafka_admin_client';
 export { ListConfigResourcesOptions } from './list_config_resources_options';
 export { ListConfigResourcesResult } from './list_config_resources_result';
+export { ListConsumerGroupOffsetsOptions } from './list_consumer_group_offsets_options';
+export { ListConsumerGroupOffsetsResult } from './list_consumer_group_offsets_result';
+export { ListConsumerGroupOffsetsSpec } from './list_consumer_group_offsets_spec';
+export { ListGroupsOptions } from './list_groups_options';
+export { ListGroupsResult } from './list_groups_result';
 export { ListOffsetsOptions } from './list_offsets_options';
 export { ListOffsetsResult } from './list_offsets_result';
 export { ListPartitionReassignmentsOptions } from './list_partition_reassignments_options';
@@ -79,6 +155,10 @@ export { ListPartitionReassignmentsResult } from './list_partition_reassignments
 export { ListTopicsOptions } from './list_topics_options';
 export { ListTopicsResult } from './list_topics_result';
 export { LogDirDescription } from './log_dir_description';
+export { MemberAssignment } from './member_assignment';
+export { MemberDescription } from './member_description';
+export { MemberToRemove } from './member_to_remove';
+export { MemberToRemoveSet } from './member_to_remove_set';
 export { MockAdminClient } from './mock_admin_client';
 export { NewPartitionReassignment } from './new_partition_reassignment';
 export { NewPartitions } from './new_partitions';
@@ -86,6 +166,8 @@ export { NewTopic } from './new_topic';
 export { OffsetSpec } from './offset_spec';
 export { PartitionReassignment } from './partition_reassignment';
 export { RecordsToDelete } from './records_to_delete';
+export { RemoveMembersFromConsumerGroupOptions } from './remove_members_from_consumer_group_options';
+export { RemoveMembersFromConsumerGroupResult } from './remove_members_from_consumer_group_result';
 export { ReplicaInfo } from './replica_info';
 export { TopicDescription } from './topic_description';
 export { TopicListing } from './topic_listing';
