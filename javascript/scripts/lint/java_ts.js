@@ -93,6 +93,7 @@ const DATA_CLASSES = new Set([
   'org.apache.kafka.clients.consumer.OffsetAndMetadata',
   // The admin client's descriptions (the owner's decision of 2026-11-20).
   'org.apache.kafka.clients.admin.TopicDescription',
+  'org.apache.kafka.clients.admin.LogDirDescription',
 ]);
 
 /**

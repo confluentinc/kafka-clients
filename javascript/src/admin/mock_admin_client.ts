@@ -59,6 +59,24 @@ import type { DescribeClusterResult } from './describe_cluster_result';
 import type { CloseArgs } from './kafka_admin_client';
 import type { ListTopicsOptions } from './list_topics_options';
 import type { ListTopicsResult } from './list_topics_result';
+import type { AlterConfigOp } from './alter_config_op';
+import type { AlterConfigsOptions } from './alter_configs_options';
+import type { AlterConfigsResult } from './alter_configs_result';
+import type { AlterReplicaLogDirsOptions } from './alter_replica_log_dirs_options';
+import type { AlterReplicaLogDirsResult } from './alter_replica_log_dirs_result';
+import type { DescribeConfigsOptions } from './describe_configs_options';
+import type { DescribeConfigsResult } from './describe_configs_result';
+import type { DescribeLogDirsOptions } from './describe_log_dirs_options';
+import type { DescribeLogDirsResult } from './describe_log_dirs_result';
+import type { DescribeReplicaLogDirsOptions } from './describe_replica_log_dirs_options';
+import type { DescribeReplicaLogDirsResult } from './describe_replica_log_dirs_result';
+import type { ListConfigResourcesOptions } from './list_config_resources_options';
+import type { ListConfigResourcesResult } from './list_config_resources_result';
+import type { ConfigResource } from '../common/config/config_resource';
+import type { ConfigResourceMap } from '../common/config/config_resource_map';
+import type { TopicPartitionReplica } from '../common/topic_partition_replica';
+import type { TopicPartitionReplicaMap } from '../common/topic_partition_replica_map';
+import * as configCalls from '../internal/admin_config_calls';
 
 const CONSTRUCTOR_FORMS = new JavaForms('MockAdminClient', [[], ['brokers', 'controller']]);
 const CREATE_FORMS = new JavaForms('create', [[]]);
@@ -727,6 +745,308 @@ export class MockAdminClient implements Admin {
    */
   deleteRecords(args: unknown): DeleteRecordsResult {
     return calls.deleteRecords(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Get the configuration for the specified resources with the default options.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
+   *
+   * @param resources - The resources: see the relevant `ConfigResource.Type`.
+   * @returns The DescribeConfigsResult.
+   */
+  describeConfigs(resources: Iterable<ConfigResource>): DescribeConfigsResult;
+  /**
+   * The same as `describeConfigs(resources)`, the resources given by name.
+   *
+   * @param args - the resources
+   * @returns The DescribeConfigsResult.
+   */
+  describeConfigs(args: {
+    /** The resources: see the relevant `ConfigResource.Type`. */
+    resources: Iterable<ConfigResource>;
+    options?: never;
+  }): DescribeConfigsResult;
+  /**
+   * Get the configuration for the specified resources.
+   *
+   * The returned configuration includes default values and the isDefault() method can be used to distinguish
+   * them from user supplied values.
+   *
+   * The value of config entries where isSensitive() is true is always `null` so that sensitive information is
+   * not disclosed.
+   *
+   * Config entries where isReadOnly() is true cannot be updated.
+   *
+   * The different behavior of nonexistent resource: `ConfigResource.Type.BROKER` will fail with a
+   * `TimeoutError`; `ConfigResource.Type.TOPIC` will fail with an `UnknownTopicOrPartitionError`;
+   * `ConfigResource.Type.GROUP` just returns default configs even if the target group is nonexistent;
+   * `ConfigResource.Type.BROKER_LOGGER` will fail with a `TimeoutError`; `ConfigResource.Type.CLIENT_METRICS`
+   * will return empty configs.
+   *
+   * Note that you cannot describe broker configs or broker logger using
+   * `AdminClientConfig.BOOTSTRAP_CONTROLLERS_CONFIG`, and you cannot describe controller configs or
+   * controller logger using `AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG`.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
+   *
+   * @param args - the resources, and the options to use
+   * @returns The DescribeConfigsResult.
+   */
+  describeConfigs(args: {
+    /** The resources: see the relevant `ConfigResource.Type`. */
+    resources: Iterable<ConfigResource>;
+    /** The options to use. */
+    options: DescribeConfigsOptions;
+  }): DescribeConfigsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  describeConfigs(args: unknown): DescribeConfigsResult {
+    return configCalls.describeConfigs(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Incrementally updates the configuration for the specified resources with default options.
+   *
+   * This operation is supported by brokers with version 2.3.0 or higher.
+   *
+   * @param configs - The resources with their configs.
+   * @returns The AlterConfigsResult.
+   */
+  incrementalAlterConfigs(configs: ConfigResourceMap<Iterable<AlterConfigOp>>): AlterConfigsResult;
+  /**
+   * The same as `incrementalAlterConfigs(configs)`, the configs given by name.
+   *
+   * @param args - the configs
+   * @returns The AlterConfigsResult.
+   */
+  incrementalAlterConfigs(args: {
+    /** The resources with their configs. */
+    configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
+    options?: never;
+  }): AlterConfigsResult;
+  /**
+   * Incrementally update the configuration for the specified resources.
+   *
+   * Updates are not transactional so they may succeed for some resources while fail for others. The configs
+   * for a particular resource are updated atomically.
+   *
+   * The following errors can be anticipated when calling `get()` on the futures obtained from the returned
+   * `AlterConfigsResult`: `ClusterAuthorizationError` if the authenticated user didn't have alter access to
+   * the cluster; `TopicAuthorizationError` if the authenticated user didn't have alter access to the Topic;
+   * `UnknownTopicOrPartitionError` if the Topic doesn't exist; `InvalidRequestError` if the request details
+   * are invalid. e.g., a configuration key was specified more than once for a resource.
+   *
+   * This operation is supported by brokers with version 2.3.0 or higher.
+   *
+   * @param args - the configs, and the options to use
+   * @returns The AlterConfigsResult.
+   */
+  incrementalAlterConfigs(args: {
+    /** The resources with their configs. */
+    configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
+    /** The options to use. */
+    options: AlterConfigsOptions;
+  }): AlterConfigsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  incrementalAlterConfigs(args: unknown): AlterConfigsResult {
+    return configCalls.incrementalAlterConfigs(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Change the log directory for the specified replicas. If the replica does not exist on the broker, the
+   * result shows REPLICA_NOT_AVAILABLE for the given replica and the replica will be created in the given log
+   * directory on the broker when it is created later. If the replica already exists on the broker, the
+   * replica will be moved to the given log directory if it is not already there. For detailed result, inspect
+   * the returned `AlterReplicaLogDirsResult` instance.
+   *
+   * This operation is not transactional so it may succeed for some replicas while fail for others.
+   *
+   * This operation is supported by brokers with version 1.1.0 or higher.
+   *
+   * @param replicaAssignment - The replicas with their log directory absolute path.
+   * @returns The AlterReplicaLogDirsResult.
+   */
+  alterReplicaLogDirs(replicaAssignment: TopicPartitionReplicaMap<string>): AlterReplicaLogDirsResult;
+  /**
+   * The same as `alterReplicaLogDirs(replicaAssignment)`, the replicaAssignment given by name.
+   *
+   * @param args - the replicaAssignment
+   * @returns The AlterReplicaLogDirsResult.
+   */
+  alterReplicaLogDirs(args: {
+    /** The replicas with their log directory absolute path. */
+    replicaAssignment: TopicPartitionReplicaMap<string>;
+    options?: never;
+  }): AlterReplicaLogDirsResult;
+  /**
+   * Change the log directory for the specified replicas. If the replica does not exist on the broker, the
+   * result shows REPLICA_NOT_AVAILABLE for the given replica and the replica will be created in the given log
+   * directory on the broker when it is created later. If the replica already exists on the broker, the
+   * replica will be moved to the given log directory if it is not already there. For detailed result, inspect
+   * the returned `AlterReplicaLogDirsResult` instance.
+   *
+   * This operation is not transactional so it may succeed for some replicas while fail for others.
+   *
+   * This operation is supported by brokers with version 1.1.0 or higher.
+   *
+   * @param args - the replicaAssignment, and the options to use
+   * @returns The AlterReplicaLogDirsResult.
+   */
+  alterReplicaLogDirs(args: {
+    /** The replicas with their log directory absolute path. */
+    replicaAssignment: TopicPartitionReplicaMap<string>;
+    /** The options to use. */
+    options: AlterReplicaLogDirsOptions;
+  }): AlterReplicaLogDirsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  alterReplicaLogDirs(args: unknown): AlterReplicaLogDirsResult {
+    return configCalls.alterReplicaLogDirs(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Query the information of all log directories on the given set of brokers
+   *
+   * This operation is supported by brokers with version 1.0.0 or higher.
+   *
+   * @param brokers - A list of brokers.
+   * @returns The DescribeLogDirsResult.
+   */
+  describeLogDirs(brokers: Iterable<number>): DescribeLogDirsResult;
+  /**
+   * The same as `describeLogDirs(brokers)`, the brokers given by name.
+   *
+   * @param args - the brokers
+   * @returns The DescribeLogDirsResult.
+   */
+  describeLogDirs(args: {
+    /** A list of brokers. */
+    brokers: Iterable<number>;
+    options?: never;
+  }): DescribeLogDirsResult;
+  /**
+   * Query the information of all log directories on the given set of brokers
+   *
+   * This operation is supported by brokers with version 1.0.0 or higher.
+   *
+   * @param args - the brokers, and the options to use
+   * @returns The DescribeLogDirsResult.
+   */
+  describeLogDirs(args: {
+    /** A list of brokers. */
+    brokers: Iterable<number>;
+    /** The options to use. */
+    options: DescribeLogDirsOptions;
+  }): DescribeLogDirsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  describeLogDirs(args: unknown): DescribeLogDirsResult {
+    return configCalls.describeLogDirs(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Query the replica log directory information for the specified replicas.
+   *
+   * This operation is supported by brokers with version 1.0.0 or higher.
+   *
+   * @param replicas - The replicas to query.
+   * @returns The DescribeReplicaLogDirsResult.
+   */
+  describeReplicaLogDirs(replicas: Iterable<TopicPartitionReplica>): DescribeReplicaLogDirsResult;
+  /**
+   * The same as `describeReplicaLogDirs(replicas)`, the replicas given by name.
+   *
+   * @param args - the replicas
+   * @returns The DescribeReplicaLogDirsResult.
+   */
+  describeReplicaLogDirs(args: {
+    /** The replicas to query. */
+    replicas: Iterable<TopicPartitionReplica>;
+    options?: never;
+  }): DescribeReplicaLogDirsResult;
+  /**
+   * Query the replica log directory information for the specified replicas.
+   *
+   * This operation is supported by brokers with version 1.0.0 or higher.
+   *
+   * @param args - the replicas, and the options to use
+   * @returns The DescribeReplicaLogDirsResult.
+   */
+  describeReplicaLogDirs(args: {
+    /** The replicas to query. */
+    replicas: Iterable<TopicPartitionReplica>;
+    /** The options to use. */
+    options: DescribeReplicaLogDirsOptions;
+  }): DescribeReplicaLogDirsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  describeReplicaLogDirs(args: unknown): DescribeReplicaLogDirsResult {
+    return configCalls.describeReplicaLogDirs(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * List all configuration resources available in the cluster with the
+   * default options.
+   *
+   * @returns The ListConfigurationResourcesResult.
+   */
+  listConfigResources(): ListConfigResourcesResult;
+  /**
+   * List the configuration resources available in the cluster which matches
+   * config resource type. If no config resource types are specified, all
+   * configuration resources will be listed.
+   *
+   * @param args - the configResourceTypes, and the options to use
+   * @returns The ListConfigurationResourcesResult.
+   */
+  listConfigResources(args: {
+    /** The set of configuration resource types to list. */
+    configResourceTypes: Iterable<ConfigResource.Type>;
+    /** The options to use when listing the configuration resources. */
+    options: ListConfigResourcesOptions;
+  }): ListConfigResourcesResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  listConfigResources(args?: unknown): ListConfigResourcesResult {
+    return configCalls.listConfigResources(this.#handle, args, arguments.length);
   }
 
   /**

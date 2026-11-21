@@ -31,6 +31,11 @@
 // here; testDefaultMetadataRecoveryStrategy is skipped, as AdminClientConfig
 // is translated for its constants only, so the parsed value cannot be read
 // (core: admin_client_config.rs test_default_metadata_recovery_strategy).
+// For the config and log-dir calls, KafkaAdminClientTopicTest's isCordoned
+// assertions (testDescribeLogDirsWithCordonedDir and assertDescriptionContains)
+// are ported as Python ports them, over the conversion of the addon's rows
+// (test/unit/internal/admin_config_calls.test.js); the rest of those calls'
+// Java tests need MockClient.
 // Then the binding's own: the forms, liveness and the native objects'
 // lifetimes, each in a child process.
 
@@ -415,8 +420,9 @@ test('the native objects are freed: the client once closed and collected, each r
   const r = runNode(
     `
     const native = require('./dist/internal/native.js');
-    const { Admin, MockAdminClient, NewTopic } = require('@confluentinc/kafka-javascript/admin');
-    const { TopicCollection } = require('@confluentinc/kafka-javascript/common');
+    const { Admin, AlterConfigOp, ConfigEntry, MockAdminClient, NewTopic } = require('@confluentinc/kafka-javascript/admin');
+    const { TopicCollection, TopicPartitionReplica, TopicPartitionReplicaMap } = require('@confluentinc/kafka-javascript/common');
+    const { ConfigResource, ConfigResourceMap } = require('@confluentinc/kafka-javascript/common/config');
     (async () => {
       const before = native.adminStats();
       // One function per round, so no client stays in a frame after it.
@@ -439,6 +445,19 @@ test('the native objects are freed: the client once closed and collected, each r
         await byName.topicNameValues().get('t').get();
         const id = (await t.describeTopics(['t']).allTopicNames().get()).get('t').topicId;
         t.describeTopics(TopicCollection.ofTopicIds([id]));
+        // The config and log-dir calls: their map futures (keyed by
+        // ConfigResource, broker id and TopicPartitionReplica) and one future.
+        const res = new ConfigResource({ type: ConfigResource.Type.TOPIC, name: 't' });
+        const configs = t.describeConfigs([res]);
+        await configs.all().get();
+        t.describeConfigs([new ConfigResource({ type: ConfigResource.Type.BROKER, name: '9' })]);
+        const set = new AlterConfigOp({ configEntry: new ConfigEntry({ name: 'retention.ms', value: '1' }), operationType: AlterConfigOp.OpType.SET });
+        await t.incrementalAlterConfigs(new ConfigResourceMap([[res, [set]]])).all().get();
+        await t.listConfigResources().all().get();
+        await t.describeLogDirs([0, 1]).allDescriptions().get();
+        const replica = new TopicPartitionReplica({ topic: 't', partition: 0, brokerId: 0 });
+        await t.alterReplicaLogDirs(new TopicPartitionReplicaMap([[replica, '/tmp/kafka-logs']])).all().get();
+        await t.describeReplicaLogDirs([replica]).all().get();
         await t.deleteTopics(['t']).all().get();
         await t.close();
       }

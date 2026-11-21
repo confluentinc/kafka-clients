@@ -28,6 +28,8 @@
 
 import { JavaForms } from '../internal/args';
 import { javaString } from '../internal/java_string';
+import { create } from '../internal/throwable';
+import { UnsupportedOperationError } from '../unsupported_operation_error';
 import { TopicPartition } from './topic_partition';
 
 const FORMS = new JavaForms('TopicPartitionMap', [[], ['entries']], {
@@ -80,6 +82,9 @@ function keyOf(tp: unknown): string {
  */
 export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
   readonly #entries = new Map<string, [TopicPartition | null, V]>();
+  // Java's Collections.unmodifiableMap view of a data class's map
+  // (LogDirDescription.replicaInfos): set, delete and clear throw.
+  #readOnly = false;
 
   /**
    * Creates an empty map.
@@ -198,8 +203,11 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
    * @returns this map
    * @throws `TypeError` when the key is neither a TopicPartition nor null,
    *   or the value is `undefined` or left out
+   * @throws `UnsupportedOperationError` when the map is a read-only view a
+   *   data class holds, as Java's unmodifiable map throws
    */
   set(key: TopicPartition | null, value: V): this {
+    this.#checkWritable();
     const k = keyOf(key);
     const v = valueOf<V>(value, 'value');
     const kept = this.#entries.get(k);
@@ -229,12 +237,37 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
   delete(key: TopicPartition | null): boolean;
   delete(key: unknown): boolean {
     DELETE_FORMS.match(key, arguments.length);
+    this.#checkWritable();
     return this.#entries.delete(keyOf(DELETE_FORMS.value(key, 'key')));
   }
 
-  /** Removes every entry. */
+  /**
+   * Removes every entry.
+   *
+   * @throws `UnsupportedOperationError` when the map is a read-only view a
+   *   data class holds
+   */
   clear(): void {
+    this.#checkWritable();
     this.#entries.clear();
+  }
+
+  /**
+   * Makes the map read-only, as Java's `Collections.unmodifiableMap` view a
+   * data class returns: `set`, `delete` and `clear` throw from then on.
+   * Called by the data classes.
+   *
+   * @returns this map
+   * @internal
+   */
+  internalSetReadOnly(): this {
+    this.#readOnly = true;
+    return this;
+  }
+
+  /** Throws `UnsupportedOperationError` when the map is read-only. */
+  #checkWritable(): void {
+    if (this.#readOnly) throw create(UnsupportedOperationError, '');
   }
 
   /**

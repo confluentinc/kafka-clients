@@ -21,7 +21,13 @@ const assert = require('node:assert/strict');
 
 const {
   Admin,
+  AlterConfigOp,
+  AlterConfigsOptions,
+  ConfigEntry,
   CreateTopicsOptions,
+  DescribeConfigsOptions,
+  ListConfigResourcesOptions,
+  LogDirDescription,
   DeletedRecords,
   DescribeClusterOptions,
   DescribeTopicsOptions,
@@ -39,9 +45,12 @@ const {
   TopicPartition,
   TopicPartitionInfo,
   TopicPartitionMap,
+  TopicPartitionReplica,
+  TopicPartitionReplicaMap,
   Uuid,
 } = require('@confluentinc/kafka-javascript/common');
-const { TopicExistsError, UnknownTopicOrPartitionError } = require('@confluentinc/kafka-javascript/common/errors');
+const { ConfigResource, ConfigResourceMap } = require('@confluentinc/kafka-javascript/common/config');
+const { LogDirNotFoundError, TopicExistsError, UnknownTopicOrPartitionError } = require('@confluentinc/kafka-javascript/common/errors');
 
 // A string in every test that runs: the tests are skipped when it is unset.
 const BOOTSTRAP = /** @type {string} */ (process.env.KAFKA_BOOTSTRAP_SERVERS);
@@ -201,4 +210,155 @@ async function retryUnknown(call) {
     }
   },
   120000,
+);
+
+/**
+ * A future's value, retried while `accept` refuses it: a config change
+ * reaches describeConfigs a little later.
+ *
+ * @template T
+ * @param {() => import('@confluentinc/kafka-javascript/common').KafkaFuture<T>} call
+ * @param {(value: T) => boolean} accept
+ * @returns {Promise<T>}
+ */
+async function retryUntil(call, accept) {
+  for (let attempt = 0; ; attempt++) {
+    const value = await retryUnknown(call);
+    if (accept(value) || attempt >= 40) return value;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+(SKIP ? test.skip : test)(
+  'describeConfigs, incrementalAlterConfigs and listConfigResources',
+  async () => {
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    const topic = `admin-configs-${process.pid}-${Date.now()}`;
+    try {
+      await admin
+        .createTopics([new NewTopic({ name: topic, numPartitions: 1, replicationFactor: 1 })])
+        .all()
+        .get();
+      const res = new ConfigResource({ type: ConfigResource.Type.TOPIC, name: topic });
+      const controller = present(await admin.describeCluster().controller().get());
+      const broker = new ConfigResource({ type: ConfigResource.Type.BROKER, name: String(controller.id) });
+
+      const described = await retryUnknown(() =>
+        admin.describeConfigs({ resources: [res, broker], options: new DescribeConfigsOptions({ includeSynonyms: true }) }).all(),
+      );
+      assert.ok(described instanceof ConfigResourceMap);
+      const policy = described.get(res)?.get('cleanup.policy');
+      assert.ok(policy instanceof ConfigEntry);
+      assert.equal(policy.value(), 'delete');
+      assert.ok(present(policy.synonyms()).length >= 1);
+      assert.ok(present(described.get(broker)).get('log.dirs') instanceof ConfigEntry);
+
+      const SET = AlterConfigOp.OpType.SET;
+      const set = new AlterConfigOp({ configEntry: new ConfigEntry({ name: 'retention.ms', value: '123456' }), operationType: SET });
+      // validateOnly changes nothing.
+      await admin
+        .incrementalAlterConfigs({
+          configs: new ConfigResourceMap([[res, [set]]]),
+          options: new AlterConfigsOptions({ validateOnly: true }),
+        })
+        .all()
+        .get();
+      const altered = admin.incrementalAlterConfigs(new ConfigResourceMap([[res, [set]]]));
+      await present(altered.values().get(res)).get();
+      const after = await retryUntil(
+        () => admin.describeConfigs([res]).all(),
+        (configs) => configs.get(res)?.get('retention.ms')?.value() === '123456',
+      );
+      assert.equal(after.get(res)?.get('retention.ms')?.value(), '123456');
+      const unset = new AlterConfigOp({
+        configEntry: new ConfigEntry({ name: 'retention.ms', value: null }),
+        operationType: AlterConfigOp.OpType.DELETE,
+      });
+      await admin
+        .incrementalAlterConfigs(new ConfigResourceMap([[res, [unset]]]))
+        .all()
+        .get();
+
+      // An unknown topic: the broker's UnknownTopicOrPartitionError.
+      const missing = new ConfigResource({ type: ConfigResource.Type.TOPIC, name: `${topic}-missing` });
+      await assert.rejects(
+        present(admin.describeConfigs([missing]).values().get(missing)).get(),
+        (error) => /** @type {Error} */ (error).cause instanceof UnknownTopicOrPartitionError,
+      );
+
+      const listed = await retryUntil(
+        () =>
+          admin.listConfigResources({ configResourceTypes: [ConfigResource.Type.TOPIC], options: new ListConfigResourcesOptions() }).all(),
+        (resources) => resources.some((r) => r.equals(res)),
+      );
+      assert.ok(listed.some((r) => r.equals(res)));
+      for (const r of listed) assert.equal(r.type(), ConfigResource.Type.TOPIC);
+      const everything = await admin.listConfigResources().all().get();
+      assert.ok(everything.some((r) => r.equals(res)));
+    } finally {
+      await admin
+        .deleteTopics([topic])
+        .all()
+        .get()
+        .catch(() => {});
+      await admin.close();
+    }
+  },
+  60000,
+);
+
+(SKIP ? test.skip : test)(
+  'describeLogDirs, describeReplicaLogDirs and alterReplicaLogDirs',
+  async () => {
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    const topic = `admin-log-dirs-${process.pid}-${Date.now()}`;
+    try {
+      await admin
+        .createTopics([new NewTopic({ name: topic, numPartitions: 1, replicationFactor: 1 })])
+        .all()
+        .get();
+      const broker = present(await admin.describeCluster().controller().get()).id;
+      const tp = new TopicPartition({ topic, partition: 0 });
+      const dirs = await retryUntil(
+        () => present(admin.describeLogDirs([broker]).descriptions().get(broker)),
+        (byPath) => [...byPath.values()].some((d) => d.replicaInfos.has(tp)),
+      );
+      // The scratch broker has one log directory.
+      assert.equal(dirs.size, 1);
+      const [[path, description]] = [...dirs];
+      assert.ok(description instanceof LogDirDescription);
+      assert.equal(description.error, null);
+      assert.equal(description.isCordoned, false);
+      assert.ok(description.totalBytes !== null && description.totalBytes > 0n);
+      assert.ok(description.replicaInfos.get(tp)?.isFuture() === false);
+      const all = await admin.describeLogDirs([broker]).allDescriptions().get();
+      assert.ok(all.get(broker)?.has(path));
+
+      const replica = new TopicPartitionReplica({ topic, partition: 0, brokerId: broker });
+      const info = await present(admin.describeReplicaLogDirs([replica]).values().get(replica)).get();
+      assert.equal(info.getCurrentReplicaLogDir(), path);
+      assert.equal(info.getFutureReplicaLogDir(), null);
+      assert.equal(info.getFutureReplicaOffsetLag(), -1n);
+
+      // The scratch broker's only directory: a move there is no move; a
+      // directory it has not is the broker's LogDirNotFoundError.
+      await admin
+        .alterReplicaLogDirs(new TopicPartitionReplicaMap([[replica, path]]))
+        .all()
+        .get();
+      const elsewhere = admin.alterReplicaLogDirs(new TopicPartitionReplicaMap([[replica, '/no-such-log-dir']]));
+      await assert.rejects(
+        present(elsewhere.values().get(replica)).get(),
+        (error) => /** @type {Error} */ (error).cause instanceof LogDirNotFoundError,
+      );
+    } finally {
+      await admin
+        .deleteTopics([topic])
+        .all()
+        .get()
+        .catch(() => {});
+      await admin.close();
+    }
+  },
+  60000,
 );
