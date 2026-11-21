@@ -236,6 +236,24 @@ function electLeadersResult(future) {
 }
 
 /**
+ * Java's package-private `DescribeUserScramCredentialsResult(dataFuture)`, the
+ * library's `internalCreate` (src/admin/describe_user_scram_credentials_result.ts):
+ * the future of the response's per-user results, each error null for Java's
+ * `Errors.NONE`.
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<ReadonlyArray<{ user: string, error: Error | null, credentialInfos: ReadonlyArray<import('@confluentinc/kafka-javascript/admin').ScramCredentialInfo> }>>} dataFuture the per-user results
+ * @returns {import('@confluentinc/kafka-javascript/admin').DescribeUserScramCredentialsResult} the result
+ */
+function describeUserScramCredentialsResultOfData(dataFuture) {
+  const { DescribeUserScramCredentialsResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory =
+    /** @type {{ internalCreate(f: typeof dataFuture): import('@confluentinc/kafka-javascript/admin').DescribeUserScramCredentialsResult }} */ (
+      /** @type {unknown} */ (DescribeUserScramCredentialsResult)
+    );
+  return factory.internalCreate(dataFuture);
+}
+
+/**
  * The admin client's `DescribeUserScramCredentialsResult`, over the core's
  * futures of `all()`, `users()` and `description(userName)`, the library's
  * `internalOfClient` (src/admin/describe_user_scram_credentials_result.ts).
@@ -254,7 +272,23 @@ function describeUserScramCredentialsResult(all, users, description) {
   return factory.internalOfClient(all, users, description);
 }
 
+/**
+ * Java's package-private constructor of a transaction Result: `cls`'s
+ * `internalCreate` over `arg` (src/admin/list_transactions_result.ts and its
+ * siblings).
+ *
+ * @template R
+ * @param {{ prototype: R }} cls the Result class
+ * @param {unknown} arg Java's constructor's argument
+ * @returns {R} the result
+ */
+function internalResult(cls, arg) {
+  const factory = /** @type {{ internalCreate(a: unknown): R }} */ (/** @type {unknown} */ (cls));
+  return factory.internalCreate(arg);
+}
+
 module.exports = {
+  internalResult,
   describeUserScramCredentialsResult,
   electLeadersResult,
   createFuture,
@@ -267,5 +301,6 @@ module.exports = {
   topicResultFactories,
   deleteConsumerGroupOffsetsResult,
   removeMembersResult,
+  describeUserScramCredentialsResultOfData,
   listGroupsResult,
 };

@@ -447,6 +447,30 @@ interface Native {
   adminExpireDelegationToken(handle: AdminHandle, hmac: Uint8Array, options: AdminOptionsSetters): AdminResultBox;
   // Admin.describeDelegationToken.
   adminDescribeDelegationToken(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeProducers: the partitions as [topic, partition].
+  adminDescribeProducers(handle: AdminHandle, partitions: Array<[string, number]>, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeTransactions: the transactional ids.
+  adminDescribeTransactions(handle: AdminHandle, transactionalIds: string[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.abortTransaction: the spec as [[topic, partition], producerId,
+  // producerEpoch, coordinatorEpoch].
+  adminAbortTransaction(
+    handle: AdminHandle,
+    spec: [[string, number], bigint, number, number],
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.forceTerminateTransaction: the transactional id.
+  adminForceTerminateTransaction(handle: AdminHandle, transactionalId: string, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.listTransactions.
+  adminListTransactions(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.fenceProducers: the transactional ids.
+  adminFenceProducers(handle: AdminHandle, transactionalIds: string[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeFeatures.
+  adminDescribeFeatures(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.updateFeatures: [feature, [maxVersionLevel, upgradeTypeCode]]
+  // pairs; an empty map or a blank feature name throws the core's error.
+  adminUpdateFeatures(handle: AdminHandle, featureUpdates: Array<[string, [number, number]]>, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.unregisterController: the controller id.
+  adminUnregisterController(handle: AdminHandle, controllerId: number, options: AdminOptionsSetters): AdminResultBox;
   // Java's MockAdminClient() (no argument) or MockAdminClient(brokers,
   // controller).
   mockAdminCreate(...args: [] | [brokers: NodeFields[] | null, controller: NodeFields | null]): AdminHandle;

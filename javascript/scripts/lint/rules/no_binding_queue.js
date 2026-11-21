@@ -140,6 +140,10 @@ const ALLOWED = [
     reason: "one call's futures by topic (Java's Map<String, KafkaFuture<Void>>), not a store of records",
   },
   {
+    key: 'UpdateFeaturesResult.#futures',
+    reason: "one call's futures by feature name (Java's Map<String, KafkaFuture<Void>>), not a store of records",
+  },
+  {
     key: 'CreateTopicsResult.#futures',
     reason: "one call's futures by topic (Java's Map<String, KafkaFuture<...>>), not a store of records",
   },
@@ -260,6 +264,14 @@ const ALLOWED = [
   {
     key: 'ListConsumerGroupOffsetsSpec.#topicPartitions',
     reason: "one group's partitions to list (Java's Collection<TopicPartition>), not a store of records",
+  },
+  {
+    key: 'ListTransactionsOptions.#filteredStates',
+    reason: "the transaction states to filter by (Java's Set<TransactionState>), not a store of records",
+  },
+  {
+    key: 'ListTransactionsOptions.#filteredProducerIds',
+    reason: "the producer ids to filter by (Java's Set<Long>), not a store of records",
   },
   {
     key: 'ListGroupsOptions.#groupStates',
