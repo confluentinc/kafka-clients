@@ -223,3 +223,11 @@ dotnet_diagnostic.CKRDA0010.severity = warning
 dotnet_diagnostic.CKRDA0011.severity = warning
 dotnet_diagnostic.CKRDA0012.severity = warning
 dotnet_diagnostic.CKRDA0015.severity = warning
+
+# CKRDA0016: a public async method ends with CancellationToken cancellationToken = default (CLAUDE.md §4
+# Cancellation). Off by default, on in src/: an async test method is a public Task too.
+[*.cs]
+dotnet_diagnostic.CKRDA0016.severity = none
+
+[src/**.cs]
+dotnet_diagnostic.CKRDA0016.severity = warning

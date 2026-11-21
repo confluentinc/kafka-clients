@@ -94,4 +94,10 @@ public static class DiagnosticIds
     /// enum once, written out, in declaration order.
     /// </summary>
     public const string EnumValuesList = "CKRDA0015";
+
+    /// <summary>
+    /// A public method returning a <c>Task</c> or <c>ValueTask</c> that does not end with
+    /// <c>CancellationToken cancellationToken = default</c>.
+    /// </summary>
+    public const string AsyncCancellationToken = "CKRDA0016";
 }
