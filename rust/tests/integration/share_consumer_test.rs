@@ -2511,13 +2511,14 @@ fn create_string_producer(base: &ShareConsumerTestBase) -> KafkaProducer<String,
     .expect("KafkaProducer::new")
 }
 
-/// Waits up to Java's 5 s `awaitTermination` for each task of a
-/// `shutdownExecutorService`, aborting the rest (`shutdownNow`). A task that
-/// panicked fails the test.
+/// Java's `shutdownExecutorService`: one 5 s `awaitTermination` for the whole
+/// set of tasks, then `shutdownNow` (abort) for every task not finished by
+/// then. A task that panicked fails the test.
 async fn shutdown_tasks(tasks: Vec<tokio::task::JoinHandle<()>>) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     for task in tasks {
         let abort = task.abort_handle();
-        match tokio::time::timeout(Duration::from_secs(5), task).await {
+        match tokio::time::timeout_at(deadline, task).await {
             Ok(Ok(())) => {},
             Ok(Err(e)) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
             Ok(Err(_)) => {},
