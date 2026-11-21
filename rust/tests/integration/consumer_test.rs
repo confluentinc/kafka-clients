@@ -46,10 +46,15 @@
 //!
 //! `ConsumerIntegrationTest.testRackAwareAssignment` (added in 4.1.0 by
 //! `949617b0b2`, changed in 4.4 by `90a4c93979`)
-//! is NOT translated: it configures the broker with
+//! is NOT translated (yet): it configures the broker with
 //! `group.consumer.assignors=org.apache.kafka.clients.consumer.RackAwareTestAssignor`,
 //! a Java test class on the Java test cluster's classpath that the Docker
-//! broker image cannot load. What it proves on the client side — that
+//! broker image does not ship. Since M18 P10 the harness can load it, from the
+//! published `kafka-clients-integration-tests-4.4.0-test.jar`
+//! (`ClusterConfig::broker_libs` with `TestJar::ClientsIntegrationTests`, as
+//! `share_consumer_rack_aware_test.rs` does), so the test is now translatable,
+//! on a 4.4 broker; that is a consumer follow-up outside M18 (Milestone 18 PLAN
+//! §8). What it proves on the client side — that
 //! `client.rack` reaches the group coordinator over KIP-848 (the bug fixed in
 //! `55cc35be`) — is covered instead by [`test_client_rack_reaches_the_broker`],
 //! which reads the member's rack back through `describe_consumer_groups`
