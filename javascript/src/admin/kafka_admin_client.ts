@@ -77,6 +77,25 @@ import type { OffsetSpec } from './offset_spec';
 import type { ElectionType } from '../common/election_type';
 import type { TopicPartition } from '../common/topic_partition';
 import * as offsetCalls from '../internal/admin_offset_calls';
+import type { AlterConsumerGroupOffsetsOptions } from './alter_consumer_group_offsets_options';
+import type { AlterConsumerGroupOffsetsResult } from './alter_consumer_group_offsets_result';
+import type { DeleteConsumerGroupOffsetsOptions } from './delete_consumer_group_offsets_options';
+import type { DeleteConsumerGroupOffsetsResult } from './delete_consumer_group_offsets_result';
+import type { DeleteConsumerGroupsOptions } from './delete_consumer_groups_options';
+import type { DeleteConsumerGroupsResult } from './delete_consumer_groups_result';
+import type { DescribeClassicGroupsOptions } from './describe_classic_groups_options';
+import type { DescribeClassicGroupsResult } from './describe_classic_groups_result';
+import type { DescribeConsumerGroupsOptions } from './describe_consumer_groups_options';
+import type { DescribeConsumerGroupsResult } from './describe_consumer_groups_result';
+import type { ListConsumerGroupOffsetsOptions } from './list_consumer_group_offsets_options';
+import type { ListConsumerGroupOffsetsResult } from './list_consumer_group_offsets_result';
+import type { ListConsumerGroupOffsetsSpec } from './list_consumer_group_offsets_spec';
+import type { ListGroupsOptions } from './list_groups_options';
+import type { ListGroupsResult } from './list_groups_result';
+import type { RemoveMembersFromConsumerGroupOptions } from './remove_members_from_consumer_group_options';
+import type { RemoveMembersFromConsumerGroupResult } from './remove_members_from_consumer_group_result';
+import type { OffsetAndMetadata } from '../consumer/offset_and_metadata';
+import * as groupCalls from '../internal/admin_group_calls';
 
 /**
  * The parameters of the admin client's timed `close`, Java's
@@ -1086,5 +1105,372 @@ export class KafkaAdminClient implements Admin {
    */
   listOffsets(args: unknown): ListOffsetsResult {
     return offsetCalls.listOffsets(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * List the groups available in the cluster with the default options.
+   *
+   * This is a convenience method for `listGroups({ options })` with default options. See the overload for
+   * more details.
+   *
+   * @returns The ListGroupsResult.
+   */
+  listGroups(): ListGroupsResult;
+  /**
+   * List the groups available in the cluster.
+   *
+   * @param args - the options to use
+   * @returns The ListGroupsResult.
+   */
+  listGroups(args: {
+    /** The options to use. */
+    options: ListGroupsOptions;
+  }): ListGroupsResult;
+  /**
+   * The same as `listGroups({ options })`: the options on their own.
+   *
+   * @param options - the options to use
+   * @returns The ListGroupsResult.
+   */
+  listGroups(options: ListGroupsOptions): ListGroupsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param options - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  listGroups(options?: unknown): ListGroupsResult {
+    return groupCalls.listGroups(this.#handle, options, arguments.length);
+  }
+
+  /**
+   * Describe some consumer groups in the cluster, with the default options.
+   *
+   * This is a convenience method for `describeConsumerGroups({ groupIds, options })` with default options.
+   * See the overload for more details.
+   *
+   * @param groupIds - The IDs of the groups to describe.
+   * @returns The DescribeConsumerGroupsResult.
+   */
+  describeConsumerGroups(groupIds: Iterable<string>): DescribeConsumerGroupsResult;
+  /**
+   * The same as `describeConsumerGroups(groupIds)`, the groupIds given by name.
+   *
+   * @param args - the groupIds
+   * @returns The DescribeConsumerGroupsResult.
+   */
+  describeConsumerGroups(args: {
+    /** The IDs of the groups to describe. */
+    groupIds: Iterable<string>;
+    options?: never;
+  }): DescribeConsumerGroupsResult;
+  /**
+   * Describe some consumer groups in the cluster.
+   *
+   * @param args - the groupIds, and the options to use
+   * @returns The DescribeConsumerGroupsResult.
+   */
+  describeConsumerGroups(args: {
+    /** The IDs of the groups to describe. */
+    groupIds: Iterable<string>;
+    /** The options to use. */
+    options: DescribeConsumerGroupsOptions;
+  }): DescribeConsumerGroupsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  describeConsumerGroups(args: unknown): DescribeConsumerGroupsResult {
+    return groupCalls.describeConsumerGroups(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Describe some classic groups in the cluster, with the default options.
+   *
+   * This is a convenience method for `describeClassicGroups({ groupIds, options })` with default options. See
+   * the overload for more details.
+   *
+   * @param groupIds - The IDs of the groups to describe.
+   * @returns The DescribeClassicGroupsResult.
+   */
+  describeClassicGroups(groupIds: Iterable<string>): DescribeClassicGroupsResult;
+  /**
+   * The same as `describeClassicGroups(groupIds)`, the groupIds given by name.
+   *
+   * @param args - the groupIds
+   * @returns The DescribeClassicGroupsResult.
+   */
+  describeClassicGroups(args: {
+    /** The IDs of the groups to describe. */
+    groupIds: Iterable<string>;
+    options?: never;
+  }): DescribeClassicGroupsResult;
+  /**
+   * Describe some classic groups in the cluster.
+   *
+   * @param args - the groupIds, and the options to use
+   * @returns The DescribeClassicGroupsResult.
+   */
+  describeClassicGroups(args: {
+    /** The IDs of the groups to describe. */
+    groupIds: Iterable<string>;
+    /** The options to use. */
+    options: DescribeClassicGroupsOptions;
+  }): DescribeClassicGroupsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  describeClassicGroups(args: unknown): DescribeClassicGroupsResult {
+    return groupCalls.describeClassicGroups(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * List the consumer group offsets available in the cluster with the
+   * default options.
+   *
+   * This is a convenience method for `listConsumerGroupOffsets({ groupSpecs,
+   * options })` to list offsets of all partitions of one group with default
+   * options.
+   *
+   * @param groupId - The group to list the offsets of.
+   * @returns The ListConsumerGroupOffsetsResult.
+   */
+  listConsumerGroupOffsets(groupId: string): ListConsumerGroupOffsetsResult;
+  /**
+   * The same as `listConsumerGroupOffsets(groupId)`, the groupId given by name.
+   *
+   * @param args - the groupId
+   * @returns The ListConsumerGroupOffsetsResult.
+   */
+  listConsumerGroupOffsets(args: {
+    /** The group to list the offsets of. */
+    groupId: string;
+    groupSpecs?: never;
+    options?: never;
+  }): ListConsumerGroupOffsetsResult;
+  /**
+   * List the consumer group offsets available in the cluster.
+   *
+   * @param args - the groupId, and the options to use
+   * @returns The ListConsumerGroupOffsetsResult.
+   */
+  listConsumerGroupOffsets(args: {
+    /** The group to list the offsets of. */
+    groupId: string;
+    /** The options to use when listing the consumer group offsets. */
+    options: ListConsumerGroupOffsetsOptions;
+    groupSpecs?: never;
+  }): ListConsumerGroupOffsetsResult;
+  /**
+   * List the consumer group offsets available in the cluster for the
+   * specified groups with the default options.
+   *
+   * This is a convenience method for `listConsumerGroupOffsets({ groupSpecs,
+   * options })` with default options.
+   *
+   * @param groupSpecs - Map of consumer group ids to a spec that specifies the topic partitions of the group to list offsets for.
+   * @returns The ListConsumerGroupOffsetsResult.
+   */
+  listConsumerGroupOffsets(groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec>): ListConsumerGroupOffsetsResult;
+  /**
+   * The same as `listConsumerGroupOffsets(groupSpecs)`, the groupSpecs given by name.
+   *
+   * @param args - the groupSpecs, a `Map` or a plain object
+   * @returns The ListConsumerGroupOffsetsResult.
+   */
+  listConsumerGroupOffsets(args: {
+    /** Map of consumer group ids to a spec that specifies the topic partitions of the group to list offsets for. */
+    groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
+    groupId?: never;
+    options?: never;
+  }): ListConsumerGroupOffsetsResult;
+  /**
+   * List the consumer group offsets available in the cluster for the
+   * specified consumer groups.
+   *
+   * @param args - the groupSpecs, and the options to use
+   * @returns The ListConsumerGroupOffsetsResult.
+   */
+  listConsumerGroupOffsets(args: {
+    /** Map of consumer group ids to a spec that specifies the topic partitions of the group to list offsets for. */
+    groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
+    /** The options to use when listing the consumer group offsets. */
+    options: ListConsumerGroupOffsetsOptions;
+    groupId?: never;
+  }): ListConsumerGroupOffsetsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  listConsumerGroupOffsets(args?: unknown): ListConsumerGroupOffsetsResult {
+    return groupCalls.listConsumerGroupOffsets(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Alters offsets for the specified group. In order to succeed, the group must be empty.
+   *
+   * This is a convenience method for `alterConsumerGroupOffsets({ groupId, offsets, options })` with default
+   * options. See the overload for more details.
+   *
+   * @param args - the groupId, offsets
+   * @returns The AlterConsumerGroupOffsetsResult.
+   */
+  alterConsumerGroupOffsets(args: {
+    /** The group for which to alter offsets. */
+    groupId: string;
+    /** A map of offsets by partition with associated metadata. Partitions not specified in the map are ignored. */
+    offsets: TopicPartitionMap<OffsetAndMetadata>;
+    options?: never;
+  }): AlterConsumerGroupOffsetsResult;
+  /**
+   * Alters offsets for the specified group. In order to succeed, the group must be empty.
+   *
+   * This operation is not transactional so it may succeed for some partitions while fail for others.
+   *
+   * @param args - the groupId, offsets, and the options to use
+   * @returns The AlterConsumerGroupOffsetsResult.
+   */
+  alterConsumerGroupOffsets(args: {
+    /** The group for which to alter offsets. */
+    groupId: string;
+    /** A map of offsets by partition with associated metadata. Partitions not specified in the map are ignored. */
+    offsets: TopicPartitionMap<OffsetAndMetadata>;
+    /** The options to use. */
+    options: AlterConsumerGroupOffsetsOptions;
+  }): AlterConsumerGroupOffsetsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  alterConsumerGroupOffsets(args: unknown): AlterConsumerGroupOffsetsResult {
+    return groupCalls.alterConsumerGroupOffsets(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Delete committed offsets for a set of partitions in a consumer group with the default options. This will
+   * succeed at the partition level only if the group is not actively subscribed to the corresponding topic.
+   *
+   * @param args - the groupId, partitions
+   * @returns The DeleteConsumerGroupOffsetsResult.
+   */
+  deleteConsumerGroupOffsets(args: {
+    /** The group to delete the offsets of. */
+    groupId: string;
+    /** The partitions whose committed offsets to delete. */
+    partitions: Iterable<TopicPartition>;
+    options?: never;
+  }): DeleteConsumerGroupOffsetsResult;
+  /**
+   * Delete committed offsets for a set of partitions in a consumer group. This will succeed at the partition
+   * level only if the group is not actively subscribed to the corresponding topic.
+   *
+   * @param args - the groupId, partitions, and the options to use
+   * @returns The DeleteConsumerGroupOffsetsResult.
+   */
+  deleteConsumerGroupOffsets(args: {
+    /** The group to delete the offsets of. */
+    groupId: string;
+    /** The partitions whose committed offsets to delete. */
+    partitions: Iterable<TopicPartition>;
+    /** The options to use. */
+    options: DeleteConsumerGroupOffsetsOptions;
+  }): DeleteConsumerGroupOffsetsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  deleteConsumerGroupOffsets(args: unknown): DeleteConsumerGroupOffsetsResult {
+    return groupCalls.deleteConsumerGroupOffsets(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Delete consumer groups from the cluster with the default options.
+   *
+   * @param groupIds - The IDs of the groups to delete.
+   * @returns The DeleteConsumerGroupsResult.
+   */
+  deleteConsumerGroups(groupIds: Iterable<string>): DeleteConsumerGroupsResult;
+  /**
+   * The same as `deleteConsumerGroups(groupIds)`, the groupIds given by name.
+   *
+   * @param args - the groupIds
+   * @returns The DeleteConsumerGroupsResult.
+   */
+  deleteConsumerGroups(args: {
+    /** The IDs of the groups to delete. */
+    groupIds: Iterable<string>;
+    options?: never;
+  }): DeleteConsumerGroupsResult;
+  /**
+   * Delete consumer groups from the cluster.
+   *
+   * @param args - the groupIds, and the options to use
+   * @returns The DeleteConsumerGroupsResult.
+   */
+  deleteConsumerGroups(args: {
+    /** The IDs of the groups to delete. */
+    groupIds: Iterable<string>;
+    /** The options to use. */
+    options: DeleteConsumerGroupsOptions;
+  }): DeleteConsumerGroupsResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  deleteConsumerGroups(args: unknown): DeleteConsumerGroupsResult {
+    return groupCalls.deleteConsumerGroups(this.#handle, args, arguments.length);
+  }
+
+  /**
+   * Remove members from the consumer group by given member identities.
+   *
+   * For possible error codes, refer to `LeaveGroupResponse`.
+   *
+   * @param args - The ID of the group to remove member from, and the options to carry removing members' information.
+   * @returns The MembershipChangeResult.
+   */
+  removeMembersFromConsumerGroup(args: {
+    /** The ID of the group to remove member from. */
+    groupId: string;
+    /** The options to carry removing members' information. */
+    options: RemoveMembersFromConsumerGroupOptions;
+  }): RemoveMembersFromConsumerGroupResult;
+  /**
+   * Checks the call's form and runs the RPC.
+   *
+   * @param args - the call's argument
+   * @returns the result
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  removeMembersFromConsumerGroup(args?: unknown): RemoveMembersFromConsumerGroupResult {
+    return groupCalls.removeMembersFromConsumerGroup(this.#handle, args, arguments.length);
   }
 }

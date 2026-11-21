@@ -1018,3 +1018,109 @@ async function adminTopics(): Promise<void> {
   await admin.close();
 }
 void adminTopics;
+
+// The config, log-dir, leader, reassignment, offset and group calls: each
+// Result accessor's type, and each RPC's forms by name.
+async function adminConfigsOffsetsGroups(): Promise<void> {
+  const admin = await import('@confluentinc/kafka-javascript/admin');
+  const common = await import('@confluentinc/kafka-javascript/common');
+  const { ConfigResource, ConfigResourceMap } = await import('@confluentinc/kafka-javascript/common/config');
+  const { OffsetAndMetadata } = await import('@confluentinc/kafka-javascript/consumer');
+  type KafkaFutureOf<T> = import('@confluentinc/kafka-javascript/common').KafkaFuture<T>;
+  type TopicPartitionMapOf<V> = import('@confluentinc/kafka-javascript/common').TopicPartitionMap<V>;
+  type TopicPartitionReplicaMapOf<V> = import('@confluentinc/kafka-javascript/common').TopicPartitionReplicaMap<V>;
+  type ConfigResourceMapOf<V> = import('@confluentinc/kafka-javascript/common/config').ConfigResourceMap<V>;
+  type ConfigType = import('@confluentinc/kafka-javascript/admin').Config;
+  type ConfigResourceType = import('@confluentinc/kafka-javascript/common/config').ConfigResource;
+  type LogDirDescriptionType = import('@confluentinc/kafka-javascript/admin').LogDirDescription;
+  type ReplicaLogDirInfoType = import('@confluentinc/kafka-javascript/admin').DescribeReplicaLogDirsResult.ReplicaLogDirInfo;
+  type PartitionReassignmentType = import('@confluentinc/kafka-javascript/admin').PartitionReassignment;
+  type ListOffsetsResultInfoType = import('@confluentinc/kafka-javascript/admin').ListOffsetsResult.ListOffsetsResultInfo;
+  type GroupListingType = import('@confluentinc/kafka-javascript/admin').GroupListing;
+  type ConsumerGroupDescriptionType = import('@confluentinc/kafka-javascript/admin').ConsumerGroupDescription;
+  type ClassicGroupDescriptionType = import('@confluentinc/kafka-javascript/admin').ClassicGroupDescription;
+  type OffsetAndMetadataType = import('@confluentinc/kafka-javascript/consumer').OffsetAndMetadata;
+  const mock = new admin.MockAdminClient();
+  const tp = new common.TopicPartition({ topic: 't', partition: 0 });
+  const resource = new ConfigResource({ type: ConfigResource.Type.TOPIC, name: 't' });
+  const replica = new common.TopicPartitionReplica({ topic: 't', partition: 0, brokerId: 0 });
+
+  // Configs and log dirs.
+  const configs = mock.describeConfigs({ resources: [resource] });
+  expectTypeOf(configs.values()).toEqualTypeOf<ConfigResourceMapOf<KafkaFutureOf<ConfigType>>>();
+  expectTypeOf(configs.all()).toEqualTypeOf<KafkaFutureOf<ConfigResourceMapOf<ConfigType>>>();
+  const ops = new ConfigResourceMap([
+    [
+      resource,
+      [
+        new admin.AlterConfigOp({
+          configEntry: new admin.ConfigEntry({ name: 'a', value: 'b' }),
+          operationType: admin.AlterConfigOp.OpType.SET,
+        }),
+      ],
+    ],
+  ]);
+  const altered = mock.incrementalAlterConfigs({ configs: ops, options: new admin.AlterConfigsOptions({ validateOnly: true }) });
+  expectTypeOf(altered.values()).toEqualTypeOf<ConfigResourceMapOf<KafkaFutureOf<void>>>();
+  expectTypeOf(altered.all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  expectTypeOf(mock.listConfigResources().all()).toEqualTypeOf<KafkaFutureOf<ConfigResourceType[]>>();
+  const logDirs = mock.describeLogDirs({ brokers: [0] });
+  expectTypeOf(logDirs.descriptions()).toEqualTypeOf<Map<number, KafkaFutureOf<Map<string, LogDirDescriptionType>>>>();
+  expectTypeOf(logDirs.allDescriptions()).toEqualTypeOf<KafkaFutureOf<Map<number, Map<string, LogDirDescriptionType>>>>();
+  const moved = mock.alterReplicaLogDirs({ replicaAssignment: new common.TopicPartitionReplicaMap([[replica, '/tmp']]) });
+  expectTypeOf(moved.values()).toEqualTypeOf<TopicPartitionReplicaMapOf<KafkaFutureOf<void>>>();
+  const replicaDirs = mock.describeReplicaLogDirs({ replicas: [replica] });
+  expectTypeOf(replicaDirs.values()).toEqualTypeOf<TopicPartitionReplicaMapOf<KafkaFutureOf<ReplicaLogDirInfoType>>>();
+  expectTypeOf(replicaDirs.all()).toEqualTypeOf<KafkaFutureOf<TopicPartitionReplicaMapOf<ReplicaLogDirInfoType>>>();
+
+  // Leaders, reassignments and offsets.
+  const elected = mock.electLeaders({ electionType: common.ElectionType.PREFERRED, partitions: null });
+  expectTypeOf(elected.partitions()).toEqualTypeOf<KafkaFutureOf<TopicPartitionMapOf<unknown>>>();
+  expectTypeOf(elected.all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  const reassigned = mock.alterPartitionReassignments({
+    reassignments: new common.TopicPartitionMap([[tp, new admin.NewPartitionReassignment([0])]]),
+  });
+  expectTypeOf(reassigned.values()).toEqualTypeOf<TopicPartitionMapOf<KafkaFutureOf<void>>>();
+  const listed = mock.listPartitionReassignments({ options: new admin.ListPartitionReassignmentsOptions() });
+  expectTypeOf(listed.reassignments()).toEqualTypeOf<KafkaFutureOf<TopicPartitionMapOf<PartitionReassignmentType>>>();
+  void mock.listPartitionReassignments({ partitions: [tp] });
+  void mock.listPartitionReassignments({ partitions: null, options: new admin.ListPartitionReassignmentsOptions() });
+  const offsets = mock.listOffsets({ topicPartitionOffsets: new common.TopicPartitionMap([[tp, admin.OffsetSpec.latest()]]) });
+  expectTypeOf(offsets.partitionResult(tp)).toEqualTypeOf<KafkaFutureOf<ListOffsetsResultInfoType>>();
+  expectTypeOf(offsets.all()).toEqualTypeOf<KafkaFutureOf<TopicPartitionMapOf<ListOffsetsResultInfoType>>>();
+  mock.updateBeginningOffsets({ newOffsets: new common.TopicPartitionMap([[tp, 0n]]) });
+
+  // Groups.
+  const groups = mock.listGroups({ options: admin.ListGroupsOptions.forConsumerGroups() });
+  expectTypeOf(groups.all()).toEqualTypeOf<KafkaFutureOf<GroupListingType[]>>();
+  expectTypeOf(groups.errors()).toEqualTypeOf<KafkaFutureOf<unknown[]>>();
+  const described = mock.describeConsumerGroups({ groupIds: ['g'] });
+  expectTypeOf(described.describedGroups()).toEqualTypeOf<Map<string, KafkaFutureOf<ConsumerGroupDescriptionType>>>();
+  expectTypeOf(described.all()).toEqualTypeOf<KafkaFutureOf<Map<string, ConsumerGroupDescriptionType>>>();
+  const classic = mock.describeClassicGroups({ groupIds: ['g'] });
+  expectTypeOf(classic.all()).toEqualTypeOf<KafkaFutureOf<Map<string, ClassicGroupDescriptionType>>>();
+  const groupOffsets = mock.listConsumerGroupOffsets({ groupId: 'g' });
+  expectTypeOf(groupOffsets.partitionsToOffsetAndMetadata()).toEqualTypeOf<
+    KafkaFutureOf<TopicPartitionMapOf<OffsetAndMetadataType | null>>
+  >();
+  expectTypeOf(groupOffsets.all()).toEqualTypeOf<KafkaFutureOf<Map<string, TopicPartitionMapOf<OffsetAndMetadataType | null>>>>();
+  void mock.listConsumerGroupOffsets({ groupSpecs: { g: new admin.ListConsumerGroupOffsetsSpec() } });
+  const committed = mock.alterConsumerGroupOffsets({
+    groupId: 'g',
+    offsets: new common.TopicPartitionMap([[tp, new OffsetAndMetadata(1n)]]),
+  });
+  expectTypeOf(committed.partitionResult(tp)).toEqualTypeOf<KafkaFutureOf<void>>();
+  expectTypeOf(mock.deleteConsumerGroupOffsets({ groupId: 'g', partitions: [tp] }).all()).toEqualTypeOf<KafkaFutureOf<void>>();
+  expectTypeOf(mock.deleteConsumerGroups({ groupIds: ['g'] }).deletedGroups()).toEqualTypeOf<Map<string, KafkaFutureOf<void>>>();
+  const removed = mock.removeMembersFromConsumerGroup({
+    groupId: 'g',
+    options: new admin.RemoveMembersFromConsumerGroupOptions([new admin.MemberToRemove('i')]),
+  });
+  expectTypeOf(removed.memberResult(new admin.MemberToRemove('i'))).toEqualTypeOf<KafkaFutureOf<void>>();
+  // @ts-expect-error removeMembersFromConsumerGroup has only Java's two-parameter form
+  mock.removeMembersFromConsumerGroup({ groupId: 'g' });
+  // @ts-expect-error listOffsets takes a TopicPartitionMap
+  mock.listOffsets(new Map());
+  await mock.close();
+}
+void adminConfigsOffsetsGroups;
