@@ -62,6 +62,9 @@ tools/java-perf-test/bin/
 !/javascript/package.json
 !/javascript/package-lock.json
 !/javascript/tsconfig.json
+# The examples' type check and its ESLint program (javascript/examples/).
+!/javascript/examples/tsconfig.json
+!/javascript/examples/tsconfig.eslint.json
 # The platform packages' manifests (javascript/npm/README.md), published as committed.
 !/javascript/npm/*/package.json
 # The interface check's baseline (javascript/scripts/api_report.js).
