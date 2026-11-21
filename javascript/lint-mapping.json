@@ -23,6 +23,8 @@
     "src/common/topic_partition_set.ts:TopicPartitionSet": "the set form of TopicPartitionMap, for the Set<TopicPartition> the client returns: JavaScript has no value equality for set members (javascript/CLAUDE.md, JavaScript Binding Conventions, Types, Q25)",
     "src/common/metric_name_map.ts:MetricNameMap": "the map keyed by MetricName that metrics() returns for Java's Map<MetricName, ? extends Metric>: JavaScript has no value equality for map keys (javascript/CLAUDE.md, JavaScript Binding Conventions, Types, as TopicPartitionMap)",
     "src/common/uuid_map.ts:UuidMap": "the map keyed by Uuid for Java's Map<Uuid, V>: JavaScript has no value equality for map keys (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; javascript/design/current/admin/PLAN.md, D2)",
+    "src/common/config/config_resource_map.ts:ConfigResourceMap": "the map keyed by ConfigResource for Java's Map<ConfigResource, V>: JavaScript has no value equality for map keys (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; javascript/design/current/admin/PLAN.md, D2)",
+    "src/common/topic_partition_replica_map.ts:TopicPartitionReplicaMap": "the map keyed by TopicPartitionReplica for Java's Map<TopicPartitionReplica, V>: JavaScript has no value equality for map keys (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; javascript/design/current/admin/PLAN.md, D2)",
     "src/admin/admin_client_configs.ts:AdminClientConfigs": "the type of the configuration map Admin.create takes, Java's Map and Properties as one, its known keys generated from Java's AdminClientConfig",
     "src/admin/kafka_admin_client.ts:CloseArgs": "the options object of Java's Admin.close(Duration), the timed form of the close() overload set",
     "KafkaAdminClient.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's AutoCloseable, so `await using` closes the admin client",
@@ -37,6 +39,11 @@
     "TopicPartitionInfo.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "Uuid.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: the base64 text",
     "TopicListing.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "ConfigResource.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: the type by name",
+    "TopicPartitionReplica.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "AlterConfigOp.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: the type by name",
+    "ReplicaInfo.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string",
+    "LogDirDescription.toJSON": "toJSON() on value classes, JavaScript's JSON protocol: a bigint written as a decimal string, the error as its text",
     "AclOperation.toJSON": "toJSON() on enums, JavaScript's JSON protocol: the constant's name"
   },
   "javaTargets": {
