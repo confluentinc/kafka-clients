@@ -25,9 +25,15 @@ const assert = require('node:assert/strict');
 
 const { ExecutionError, IllegalArgumentError, UnsupportedOperationError } = require('@confluentinc/kafka-javascript');
 const {
+  AlterConfigOp,
+  AlterConfigsOptions,
+  ConfigEntry,
   CreateTopicsOptions,
   DeleteTopicsOptions,
   DescribeClusterOptions,
+  DescribeLogDirsOptions,
+  DescribeReplicaLogDirsOptions,
+  ListConfigResourcesOptions,
   DescribeTopicsOptions,
   ListTopicsOptions,
   MockAdminClient,
@@ -41,10 +47,16 @@ const {
   TopicPartition,
   TopicPartitionInfo,
   TopicPartitionMap,
+  TopicPartitionReplica,
+  TopicPartitionReplicaMap,
   Uuid,
 } = require('@confluentinc/kafka-javascript/common');
+const { ConfigResource, ConfigResourceMap } = require('@confluentinc/kafka-javascript/common/config');
 const {
+  InvalidRequestError,
   InvalidReplicationFactorError,
+  KafkaStorageError,
+  ReplicaNotAvailableError,
   TimeoutError,
   TopicExistsError,
   UnknownTopicIdError,
@@ -701,4 +713,396 @@ test('the forms of the constructors and the methods', () => {
   // @ts-expect-error a setter with no value: TypeError
   assert.throws(() => MockAdminClient.create().numBrokers(), { name: 'TypeError', message: 'numBrokers() takes the value to set' });
   return mock.close();
+});
+
+// ---- configs and log dirs ------------------------------------------------------------
+//
+// The Rust core's tests of its mock's configs (rust/src/admin/mock_admin_client.rs),
+// and new tests of its log-dir calls, which no Java or Rust test covers: they
+// follow Java's MockAdminClient#describeLogDirs, #alterReplicaLogDirs and
+// #describeReplicaLogDirs as the core translates them.
+
+const { Type } = ConfigResource;
+/**
+ * @param {ConfigResource.Type} type
+ * @param {string} name
+ */
+const resource = (type, name) => new ConfigResource({ type, name });
+/**
+ * @param {string} name
+ * @param {string | null} value
+ * @param {AlterConfigOp.OpType} opType
+ */
+const op = (name, value, opType) => new AlterConfigOp({ configEntry: new ConfigEntry({ name, value }), operationType: opType });
+
+/**
+ * One resource's configs, from `client`.
+ *
+ * @param {MockAdminClient} client
+ * @param {ConfigResource} res
+ */
+async function described(client, res) {
+  const future = client.describeConfigs([res]).values().get(res);
+  assert.ok(future);
+  return future.get();
+}
+
+/**
+ * The future of `res` in an incrementalAlterConfigs of `ops` on it.
+ *
+ * @param {MockAdminClient} client
+ * @param {ConfigResource} res
+ * @param {AlterConfigOp[]} ops
+ */
+function altered(client, res, ops) {
+  const future = client
+    .incrementalAlterConfigs(new ConfigResourceMap([[res, ops]]))
+    .values()
+    .get(res);
+  assert.ok(future);
+  return future;
+}
+
+test('describe_configs_returns_a_null_value_set_by_incremental_alter_configs', async () => {
+  const client = track(new MockAdminClient.Builder().defaultGroupConfigs(new Map([['consumer.session.timeout.ms', '45000']])).build());
+  await client
+    .createTopics([newTopic('t', 1, 1)])
+    .all()
+    .get();
+  const topic = resource(Type.TOPIC, 't');
+  const broker = resource(Type.BROKER, '0');
+  const metrics = resource(Type.CLIENT_METRICS, 'metrics');
+  const group = resource(Type.GROUP, 'group');
+  const SET = AlterConfigOp.OpType.SET;
+  const configs = new ConfigResourceMap([
+    [topic, [op('cleanup.policy', null, SET)]],
+    [broker, [op('log.retention.ms', null, SET)]],
+    [metrics, [op('interval.ms', null, SET)]],
+    [group, [op('consumer.heartbeat.interval.ms', null, SET), op('consumer.session.timeout.ms', null, SET)]],
+  ]);
+  await client.incrementalAlterConfigs({ configs, options: new AlterConfigsOptions() }).all().get();
+  for (const [res, name] of /** @type {Array<[ConfigResource, string]>} */ ([
+    [topic, 'cleanup.policy'],
+    [broker, 'log.retention.ms'],
+    [metrics, 'interval.ms'],
+    [group, 'consumer.heartbeat.interval.ms'],
+  ])) {
+    const entry = (await described(client, res)).get(name);
+    assert.ok(entry, `${name} is stored for ${res}`);
+    assert.equal(entry.value(), null, res.toString());
+  }
+  assert.equal((await described(client, group)).get('consumer.session.timeout.ms')?.value(), '45000');
+});
+
+test('describe_configs_topic_returns_stored_configs', async () => {
+  const client = admin();
+  await client
+    .createTopics([newTopic('t', 1, 1).configs({ 'retention.ms': '1000' })])
+    .all()
+    .get();
+  assert.equal((await described(client, resource(Type.TOPIC, 't'))).get('retention.ms')?.value(), '1000');
+});
+
+test('describe_configs_broker_returns_default_replication_factor', async () => {
+  const client = admin();
+  assert.equal((await described(client, resource(Type.BROKER, '0'))).get('default.replication.factor')?.value(), '3');
+});
+
+test('describe_configs_unknown_topic_is_unknown_topic_error', async () => {
+  const client = admin();
+  const res = resource(Type.TOPIC, 'missing');
+  const future = client.describeConfigs([res]).values().get(res);
+  assert.ok(future);
+  const error = await failure(future);
+  assert.ok(error instanceof UnknownTopicOrPartitionError, String(error));
+  assert.equal(error.message, "Resource ConfigResource(type=TOPIC, name='missing') not found.");
+});
+
+test('describe_configs_unknown_broker_is_invalid_request', async () => {
+  const client = admin();
+  const res = resource(Type.BROKER, '99');
+  const future = client.describeConfigs([res]).values().get(res);
+  assert.ok(future);
+  const error = await failure(future);
+  assert.ok(error instanceof InvalidRequestError, String(error));
+  assert.equal(error.message, 'Broker 99 not found.');
+});
+
+test('describe_configs_timeout_recovers_on_next_call', async () => {
+  const client = admin();
+  client.timeoutNextRequest(1);
+  const res = resource(Type.BROKER, '0');
+  const timedOut = client.describeConfigs([res]).values().get(res);
+  assert.ok(timedOut);
+  assert.ok((await failure(timedOut)) instanceof TimeoutError);
+  await described(client, res);
+});
+
+test('incremental_alter_configs_topic_set_and_delete', async () => {
+  const client = admin();
+  await client
+    .createTopics([newTopic('t', 1, 1)])
+    .all()
+    .get();
+  const res = resource(Type.TOPIC, 't');
+  await altered(client, res, [op('retention.ms', '42', AlterConfigOp.OpType.SET)]).get();
+  assert.equal((await described(client, res)).get('retention.ms')?.value(), '42');
+  await altered(client, res, [op('retention.ms', null, AlterConfigOp.OpType.DELETE)]).get();
+  assert.equal((await described(client, res)).get('retention.ms'), null);
+});
+
+test('incremental_alter_configs_unknown_topic_is_unknown_topic_error', async () => {
+  const client = admin();
+  const error = await failure(altered(client, resource(Type.TOPIC, 'missing'), [op('k', 'v', AlterConfigOp.OpType.SET)]));
+  assert.ok(error instanceof UnknownTopicOrPartitionError, String(error));
+  assert.equal(error.message, 'No such topic as missing');
+});
+
+test('incremental_alter_configs_broker_logger_is_unsupported_without_message', async () => {
+  const client = admin();
+  const error = await failure(altered(client, resource(Type.BROKER_LOGGER, '0'), [op('k', 'v', AlterConfigOp.OpType.SET)]));
+  assert.ok(error instanceof UnsupportedOperationError, String(error));
+  assert.equal(error.message, '');
+});
+
+test('incremental_alter_configs_client_metrics_creates_resource', async () => {
+  const client = admin();
+  const res = resource(Type.CLIENT_METRICS, 'cm');
+  await altered(client, res, [op('interval.ms', '5000', AlterConfigOp.OpType.SET)]).get();
+  const listed = await client
+    .listConfigResources({ configResourceTypes: [Type.CLIENT_METRICS], options: new ListConfigResourcesOptions() })
+    .all()
+    .get();
+  assert.ok(listed.some((r) => r.equals(res)));
+});
+
+test('incremental_alter_configs_empty_client_metrics_name_is_invalid_request', async () => {
+  const client = admin();
+  const error = await failure(altered(client, resource(Type.CLIENT_METRICS, ''), [op('k', 'v', AlterConfigOp.OpType.SET)]));
+  assert.ok(error instanceof InvalidRequestError, String(error));
+  assert.equal(error.message, 'Empty resource name');
+});
+
+test('list_config_resources_all_types_when_empty', async () => {
+  const client = admin();
+  await client
+    .createTopics([newTopic('t', 1, 1)])
+    .all()
+    .get();
+  for (const listed of [
+    await client.listConfigResources().all().get(),
+    await client.listConfigResources({ configResourceTypes: [], options: new ListConfigResourcesOptions() }).all().get(),
+  ]) {
+    const set = new ConfigResourceMap(listed.map((r) => /** @type {[ConfigResource, boolean]} */ ([r, true])));
+    assert.ok(set.has(resource(Type.TOPIC, 't')));
+    // 3 brokers -> broker 0..2 and broker-logger 0..2.
+    for (const i of ['0', '1', '2']) {
+      assert.ok(set.has(resource(Type.BROKER, i)));
+      assert.ok(set.has(resource(Type.BROKER_LOGGER, i)));
+    }
+  }
+});
+
+test('list_config_resources_filters_by_type', async () => {
+  const client = admin();
+  await client
+    .createTopics([newTopic('t', 1, 1)])
+    .all()
+    .get();
+  const listed = await client
+    .listConfigResources({ configResourceTypes: new Set([Type.TOPIC]), options: new ListConfigResourcesOptions() })
+    .all()
+    .get();
+  assert.deepEqual(listed.map(String), ["ConfigResource(type=TOPIC, name='t')"]);
+});
+
+test("the config calls' forms and null arguments: Java's NullPointerException as a TypeError naming the parameter", () => {
+  const client = admin();
+  const res = resource(Type.TOPIC, 't');
+  // @ts-expect-error a null collection, which the types forbid: Java dereferences it
+  assert.throws(() => client.describeConfigs(null), { name: 'TypeError', message: 'resources must not be null' });
+  // @ts-expect-error a null element, which the types forbid: Java dereferences it
+  assert.throws(() => client.describeConfigs([null]), { name: 'TypeError', message: 'resources must not contain null' });
+  // @ts-expect-error a bare string where Java takes a collection
+  assert.throws(() => client.describeConfigs('t'), {
+    name: 'TypeError',
+    message: 'resources must be an iterable of ConfigResource, not a string',
+  });
+  // @ts-expect-error a Map: Java's map keyed by ConfigResource is a ConfigResourceMap
+  assert.throws(() => client.incrementalAlterConfigs(new Map()), {
+    name: 'TypeError',
+    message: 'configs must be a ConfigResourceMap, not a Map: build one with new ConfigResourceMap()',
+  });
+  assert.throws(() => client.incrementalAlterConfigs(new ConfigResourceMap([[null, []]])), {
+    name: 'TypeError',
+    message: 'configs must not contain a null key',
+  });
+  // @ts-expect-error a null element, which the types forbid: Java dereferences each operation
+  assert.throws(() => client.incrementalAlterConfigs(new ConfigResourceMap([[res, [null]]])), {
+    name: 'TypeError',
+    message: 'configs must not contain null',
+  });
+  assert.throws(
+    () =>
+      client.incrementalAlterConfigs(
+        new ConfigResourceMap([[res, [new AlterConfigOp({ configEntry: null, operationType: AlterConfigOp.OpType.SET })]]]),
+      ),
+    { name: 'TypeError', message: 'configs must not contain an AlterConfigOp with a null configEntry' },
+  );
+  // @ts-expect-error a form Java has not: listConfigResources(configResourceTypes) without the options
+  assert.throws(() => client.listConfigResources({ configResourceTypes: [] }), {
+    name: 'IllegalArgumentError',
+    message: 'listConfigResources() takes one of (), (configResourceTypes, options); got (configResourceTypes)',
+  });
+  // @ts-expect-error a null element, which the types forbid: Java unboxes each broker id
+  assert.throws(() => client.describeLogDirs([0, null]), { name: 'TypeError', message: 'brokers must not contain null' });
+  // @ts-expect-error a bare string where Java takes a collection
+  assert.throws(() => client.describeLogDirs('0'), { name: 'TypeError', message: 'brokers must be an iterable of numbers, not a string' });
+  assert.throws(() => client.alterReplicaLogDirs(new TopicPartitionReplicaMap([[null, '/a']])), {
+    name: 'TypeError',
+    message: 'replicaAssignment must not contain a null key',
+  });
+  // @ts-expect-error a null element, which the types forbid: Java dereferences it
+  assert.throws(() => client.describeReplicaLogDirs([null]), { name: 'TypeError', message: 'replicas must not contain null' });
+});
+
+/**
+ * @param {string} topic
+ * @param {number} partition
+ * @param {number} brokerId
+ */
+const replica = (topic, partition, brokerId) => new TopicPartitionReplica({ topic, partition, brokerId });
+
+test("describeLogDirs: each broker asked for, its topics' replicas in their first log directory", async () => {
+  const client = track(
+    new MockAdminClient.Builder()
+      .numBrokers(1)
+      .brokerLogDirs([['/a', '/b']])
+      .build(),
+  );
+  await client
+    .createTopics([newTopic('t', 2, 1)])
+    .all()
+    .get();
+  const result = client.describeLogDirs({ brokers: [0, 7], options: new DescribeLogDirsOptions() });
+  assert.deepEqual([...result.descriptions().keys()], [0, 7]);
+  const all = await result.allDescriptions().get();
+  assert.equal(all.get(7)?.size, 0);
+  const dirs = all.get(0);
+  assert.ok(dirs);
+  assert.deepEqual([...dirs.keys()], ['/a']);
+  const description = dirs.get('/a');
+  assert.ok(description);
+  assert.equal(description.error, null);
+  assert.equal(description.totalBytes, null);
+  assert.equal(description.usableBytes, null);
+  assert.equal(description.isCordoned, false);
+  assert.deepEqual([...description.replicaInfos.keys()].map(String).sort(), ['t-0', 't-1']);
+  assert.equal(
+    description.replicaInfos.get(new TopicPartition({ topic: 't', partition: 0 }))?.toString(),
+    'ReplicaInfo(size=0, offsetLag=0, isFuture=false)',
+  );
+});
+
+test("alterReplicaLogDirs: a known directory moves the replica, others fail as Java's mock fails them", async () => {
+  const client = track(
+    new MockAdminClient.Builder()
+      .numBrokers(1)
+      .brokerLogDirs([['/a', '/b']])
+      .build(),
+  );
+  await client
+    .createTopics([newTopic('t', 1, 1)])
+    .all()
+    .get();
+  const moved = replica('t', 0, 0);
+  const result = client.alterReplicaLogDirs(
+    new TopicPartitionReplicaMap([
+      [moved, '/b'],
+      [replica('t', 0, 5), '/a'],
+      [replica('u', 0, 0), '/a'],
+    ]),
+  );
+  assert.equal(result.values().size(), 3);
+  await result.values().get(moved)?.get();
+  const offline = client
+    .alterReplicaLogDirs(new TopicPartitionReplicaMap([[moved, '/c']]))
+    .values()
+    .get(moved);
+  assert.ok(offline);
+  const offlineError = await failure(offline);
+  assert.ok(offlineError instanceof KafkaStorageError, String(offlineError));
+  assert.equal(offlineError.message, 'Log directory /c is offline');
+  const noBroker = result.values().get(replica('t', 0, 5));
+  assert.ok(noBroker);
+  const noBrokerError = await failure(noBroker);
+  assert.ok(noBrokerError instanceof ReplicaNotAvailableError, String(noBrokerError));
+  assert.equal(noBrokerError.message, "Can't find t-0-5");
+  const noTopic = result.values().get(replica('u', 0, 0));
+  assert.ok(noTopic);
+  assert.ok((await failure(noTopic)) instanceof ReplicaNotAvailableError);
+  assert.ok((await failure(result.all())) instanceof ReplicaNotAvailableError);
+
+  const described = await client
+    .describeReplicaLogDirs([moved, replica('t', 5, 0), replica('u', 0, 0)])
+    .all()
+    .get();
+  // An unknown topic's replica is left out, as Java's mock leaves it.
+  assert.equal(described.size(), 2);
+  const info = described.get(moved);
+  assert.ok(info);
+  assert.equal(info.getCurrentReplicaLogDir(), '/a');
+  assert.equal(info.getCurrentReplicaOffsetLag(), 0n);
+  assert.equal(info.getFutureReplicaLogDir(), '/b');
+  assert.equal(info.getFutureReplicaOffsetLag(), 0n);
+  assert.equal(info.toString(), '(currentReplicaLogDir=/a, futureReplicaLogDir=/b, futureReplicaOffsetLag=0)');
+  const none = described.get(replica('t', 5, 0));
+  assert.ok(none);
+  assert.equal(none.getCurrentReplicaLogDir(), null);
+  assert.equal(none.getFutureReplicaOffsetLag(), -1n);
+  assert.equal(none.toString(), 'ReplicaLogDirInfo(currentReplicaLogDir=null)');
+  assert.equal(
+    JSON.stringify(none),
+    '{"currentReplicaLogDir":null,"currentReplicaOffsetLag":"-1","futureReplicaLogDir":null,"futureReplicaOffsetLag":"-1"}',
+  );
+});
+
+test('describeReplicaLogDirs: an unmoved replica reads its current log directory only', async () => {
+  const client = track(
+    new MockAdminClient.Builder()
+      .numBrokers(1)
+      .brokerLogDirs([['/a', '/b']])
+      .build(),
+  );
+  await client
+    .createTopics([newTopic('t', 1, 1)])
+    .all()
+    .get();
+  const values = client.describeReplicaLogDirs({ replicas: [replica('t', 0, 0)], options: new DescribeReplicaLogDirsOptions() }).values();
+  const info = await values.get(replica('t', 0, 0))?.get();
+  assert.ok(info);
+  assert.equal(info.toString(), 'ReplicaLogDirInfo(currentReplicaLogDir=/a)');
+  assert.equal(info.getFutureReplicaLogDir(), null);
+});
+
+test("the config and log-dir Results' readers only read", () => {
+  const client = admin();
+  for (const [name, call] of /** @type {Array<[string, () => void]>} */ ([
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['values', () => client.describeConfigs([]).values(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['all', () => client.incrementalAlterConfigs(new ConfigResourceMap()).all(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['all', () => client.listConfigResources().all(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['descriptions', () => client.describeLogDirs([]).descriptions(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['allDescriptions', () => client.describeLogDirs([]).allDescriptions(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['values', () => client.alterReplicaLogDirs(new TopicPartitionReplicaMap()).values(1)],
+    // @ts-expect-error an argument given to a reader: it only reads
+    ['all', () => client.describeReplicaLogDirs([]).all(1)],
+  ])) {
+    assert.throws(call, { name: 'TypeError', message: `${name}() only reads: it takes no argument` });
+  }
 });
