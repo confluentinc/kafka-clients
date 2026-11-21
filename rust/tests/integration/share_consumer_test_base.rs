@@ -41,6 +41,14 @@
 //! - The consumers, producers and admin clients Java closes with
 //!   try-with-resources are closed explicitly, and a close failure fails the
 //!   test, as a throwing `close` does in Java.
+//! - **The class-level `@Timeout(1200)`** of `ShareConsumerTest`,
+//!   `ShareConsumerDeliveryTest`, `ShareConsumerLagTest`,
+//!   `ShareConsumerCallbackTest` and `ShareConsumerRenewTest` is not
+//!   translated: every wait of the Rust tests is already bounded (each `poll`
+//!   by its timeout, each wait loop by Java's deadline, each `close` by
+//!   [`close_share_consumer`]'s 60 s, each `commit_sync` by the consumer's
+//!   `default.api.timeout.ms`), so no test can run anywhere near 20 minutes.
+//!   The two method-level `@Timeout`s (90 s and 150 s) are translated.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
