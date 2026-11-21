@@ -52,7 +52,10 @@ const REPO = path.dirname(JS);
 const COPIED = ['test', 'scripts', 'grpc-server', 'verifiable_clients', 'examples', 'jest.config.cjs', 'tsconfig.json'];
 // Neither copied nor linked: the repository's build and its addon.
 const LEFT_OUT = ['dist', 'native', 'build', 'node_modules', 'package.json', 'package-lock.json'];
-const REPOSITORY_ONLY = ['this checkout loads its development build, as an instance of its own'];
+const REPOSITORY_ONLY = [
+  'this checkout loads its development build, as an instance of its own',
+  "each OffsetSpec's number is offset_spec_of's case building the spec of its name",
+];
 
 /**
  * @param {string[]} argv the arguments

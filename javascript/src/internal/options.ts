@@ -55,15 +55,19 @@ export function applyOptionKeys(className: string, args: unknown, count: number,
 /** The forms of a getter and setter sharing Java name `name`: `()` and `(<name>)`. */
 export class GetterSetter {
   readonly #name: string;
+  readonly #param: string;
   readonly #forms: JavaForms;
 
   /**
    * @param name - the Java name
    * @param isValue - the test of the value given on its own
+   * @param param - the setter's parameter's Java name, when it is not the
+   *   method's (`allowReplicationFactorChange(boolean allow)`)
    */
-  constructor(name: string, isValue: (value: unknown) => boolean) {
+  constructor(name: string, isValue: (value: unknown) => boolean, param: string = name) {
     this.#name = name;
-    this.#forms = new JavaForms(name, [[], [name]], { bareTypes: { [name]: isValue } });
+    this.#param = param;
+    this.#forms = new JavaForms(name, [[], [param]], { bareTypes: { [param]: isValue } });
   }
 
   /**
@@ -90,7 +94,7 @@ export class GetterSetter {
    * @returns the value
    */
   value(args: unknown): unknown {
-    return this.#forms.value(args, this.#name);
+    return this.#forms.value(args, this.#param);
   }
 }
 
