@@ -23,6 +23,8 @@
 // `require-returns` (root CLAUDE.md, JavaScript Binding Conventions,
 // Documentation, Q64, and Build, packaging and release, Q74).
 
+const path = require('node:path');
+
 const jsdoc = require('eslint-plugin-jsdoc');
 const tseslint = require('typescript-eslint');
 
@@ -57,6 +59,9 @@ const RETURNS_CONTEXTS = [
   ...['TSDeclareFunction', ...BODYLESS_CONTEXTS].map((c) => ({ context: `${c}${RETURNS_VALUE}`, forceRequireReturn: true })),
 ];
 
+/** The examples' files, which the typed configuration lints as an app's code. */
+const EXAMPLE_FILES = ['examples/**/*.js'];
+
 /** Every `kafka` rule, as an error. */
 const KAFKA_RULES = Object.fromEntries(Object.keys(plugin.rules).map((name) => [`kafka/${name}`, 'error']));
 
@@ -75,6 +80,33 @@ function config(root, { typed = true } = {}) {
           languageOptions: { parserOptions: { projectService: true, tsconfigRootDir: root } },
         },
       ];
+  // The examples (examples/) are user code: typescript-eslint's recommended
+  // type-checked rules (`no-floating-promises`, `no-unused-vars`, ...), typed
+  // through examples/tsconfig.eslint.json, which maps the package's import
+  // paths to src/ so that no build is needed; `typed: false` leaves them out. The
+  // examples load the client with `require`, as a CommonJS app does.
+  const exampleConfigs = !typed
+    ? []
+    : [
+        ...tseslint.configs.recommendedTypeChecked.map((c) => ({ ...c, files: EXAMPLE_FILES })),
+        {
+          files: EXAMPLE_FILES,
+          languageOptions: {
+            sourceType: 'commonjs',
+            parserOptions: { project: path.join(root, 'examples', 'tsconfig.eslint.json'), tsconfigRootDir: root },
+          },
+          // Off: `require` is how a CommonJS app loads the client; and the
+          // examples print the client's values in template literals and
+          // `String()` on purpose, through Java's `toString()` (a
+          // `TopicPartition` prints `orders-0`, a `Uuid` its base64 form),
+          // which the two string rules refuse for any non-primitive.
+          rules: {
+            '@typescript-eslint/no-require-imports': 'off',
+            '@typescript-eslint/restrict-template-expressions': 'off',
+            '@typescript-eslint/no-base-to-string': 'off',
+          },
+        },
+      ];
   return [
     { ignores: ['node_modules/', 'build/', 'dist/', '.claude/', 'package-lock.json'] },
     { linterOptions: { reportUnusedDisableDirectives: 'error' } },
@@ -82,6 +114,7 @@ function config(root, { typed = true } = {}) {
     { files: ['**/*.mjs'], languageOptions: { ecmaVersion: 'latest', sourceType: 'module' } },
     { files: ['**/*.ts'], languageOptions: { parser: tseslint.parser } },
     ...typedConfigs,
+    ...exampleConfigs,
     {
       // A doc comment names each parameter with `@param` and what the function
       // returns with `@returns`. An options object is one parameter, described
