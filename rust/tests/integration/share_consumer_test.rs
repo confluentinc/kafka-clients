@@ -1500,7 +1500,7 @@ async fn test_consumer_close_on_broker_shutdown() {
 /// callbackCalled.set(true)`. The Rust consumer catches a panicking callback
 /// (as Java catches an `Exception`, though not the `AssertionError` its
 /// assertion throws), so the callback records what it was called with and the
-/// test asserts it afterwards.
+/// test asserts it afterwards, after `close` (which runs the callback too).
 struct NetworkErrorCallback {
     callback_called: Arc<AtomicBool>,
     unexpected: Arc<Mutex<Vec<String>>>,
@@ -1527,13 +1527,22 @@ impl NetworkErrorCallback {
 
     /// Java's `assertTrue(callbackCalled.get())`, plus the callback's own
     /// `assertInstanceOf(NetworkException.class, exception)`.
+    /// Java's `assertTrue(callbackCalled.get())`.
     fn assert_called(&self) {
+        assert!(self.callback_called.load(Ordering::SeqCst));
+    }
+
+    /// Java's in-callback `assertInstanceOf(NetworkException.class, exception)`,
+    /// checked once the consumer is closed: Java's `close` runs the callback
+    /// too and rethrows an assertion that failed in it (it keeps it through
+    /// `swallow` and fails the close), so the check covers the callbacks of
+    /// `close` as well.
+    fn assert_only_network_errors(&self) {
         let unexpected = self.unexpected.lock().expect("lock");
         assert!(
             unexpected.is_empty(),
             "the callback expected a NetworkException, got {unexpected:?}"
         );
-        assert!(self.callback_called.load(Ordering::SeqCst));
     }
 }
 
@@ -1593,6 +1602,7 @@ async fn test_leader_restart_without_leadership_change_explicit_acknowledgement_
 
     callback.assert_called();
     close_share_consumer(share_consumer).await;
+    callback.assert_only_network_errors();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1617,6 +1627,7 @@ async fn test_leader_restart_without_leadership_change_explicit_acknowledgement_
 
     callback.assert_called();
     close_share_consumer(share_consumer).await;
+    callback.assert_only_network_errors();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1638,6 +1649,7 @@ async fn test_leader_restart_without_leadership_change_implicit_acknowledgement(
 
     callback.assert_called();
     close_share_consumer(share_consumer).await;
+    callback.assert_only_network_errors();
 }
 
 #[tokio::test(flavor = "multi_thread")]
