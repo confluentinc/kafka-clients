@@ -1,0 +1,8 @@
+# Types the cpp/CLAUDE.md §1.4 closure reaches that the rules do not translate.
+# One per line: <binary name | prefix*> <§rule> <why>. A line that excludes
+# nothing in scope is reported by `ck_java_model scope` and fails the lint.
+org.apache.kafka.common.config.AbstractConfig §7.1 the config classes carry the AbstractConfig getters the FFI exposes; AbstractConfig itself is not translated
+org.apache.kafka.common.config.ConfigDef §7.1 the config classes are built from string maps and validated by the core; the ConfigDef machinery is not translated
+org.apache.kafka.common.metrics.MetricConfig §5 a type not translated yet: an incomplete class of Java's name
+org.apache.kafka.common.metrics.Measurable §5 a type not translated yet: an incomplete class of Java's name
+org.apache.kafka.common.metrics.MetricValueProvider §5 a type not translated yet: an incomplete class of Java's name

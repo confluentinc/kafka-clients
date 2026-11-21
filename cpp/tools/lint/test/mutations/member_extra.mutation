@@ -1,0 +1,5 @@
+# A public member translates a Java member (§1.4).
+file: confluent/kafka/common/topic_partition.hpp
+replace: [[nodiscard]] int32_t partition() const;
+with: [[nodiscard]] int32_t partition() const;\n    [[nodiscard]] int32_t size() const;
+expect: confluent-kafka-java-members translates nothing of Java's org.apache.kafka.common.TopicPartition

@@ -627,15 +627,29 @@ impl JavaIndex {
         })
     }
 
-    /// The class supertype `written` of `class` names: in `class`'s package,
-    /// fully qualified below `org.apache.kafka`, or else the only class of that
-    /// simple name (an imported one, `AbstractConfig`). `None` for a JDK type
-    /// (`Object`, `RuntimeException`, `Comparable`).
+    /// The class supertype `written` of `class` names: a member type of
+    /// `class` or of a class enclosing it, innermost first, as Java scopes a
+    /// simple name (`implements Node` inside `StreamsGroupTopologyDescription`
+    /// is its nested `Node`, not `org.apache.kafka.common.Node`); in `class`'s
+    /// package; fully qualified below `org.apache.kafka`; or else the only
+    /// class of that simple name (an imported one, `AbstractConfig`). `None`
+    /// for a JDK type (`Object`, `RuntimeException`, `Comparable`).
     pub fn supertype(&self, class: &JavaClass, written: &str) -> Option<&JavaClass> {
         let classes = || self.classes.iter().filter(|c| !c.is_test);
-        let exact = classes().find(|c| {
-            let nested = c.path.join(".");
-            (c.package == class.package && nested == written) || format!("{}.{nested}", c.package) == written
+        let scoped = (1..=class.path.len()).rev().find_map(|depth| {
+            let wanted: Vec<&str> = class.path[..depth]
+                .iter()
+                .map(String::as_str)
+                .chain(written.split('.'))
+                .collect();
+            classes()
+                .find(|c| c.package == class.package && c.path.iter().map(String::as_str).eq(wanted.iter().copied()))
+        });
+        let exact = scoped.or_else(|| {
+            classes().find(|c| {
+                let nested = c.path.join(".");
+                (c.package == class.package && nested == written) || format!("{}.{nested}", c.package) == written
+            })
         });
         exact.or_else(|| {
             let simple = written.rsplit('.').next().unwrap_or(written);
@@ -2431,6 +2445,41 @@ mod tests {
         assert_eq!(docs("Api$Kind#A"), ["First."]);
         assert!(docs("Api$Kind#B").is_empty());
         assert_eq!(index.marker_javadocs("org.apache.kafka.clients.x.Missing"), None);
+    }
+
+    /// A supertype named by a simple name is a member type of an enclosing
+    /// class first, as Java scopes it, even when another class shares the name.
+    #[test]
+    fn test_supertype_prefers_an_enclosing_class_member() {
+        let outer = r#"
+            package x;
+            public class Topology {
+                public interface Node {
+                    /** The node's name. */
+                    String name();
+                }
+                public static final class Source implements Node {
+                    public String name() { return ""; }
+                }
+            }
+        "#;
+        let other = r#"
+            package y;
+            public class Node {
+                /** Another name. */
+                public String name() { return ""; }
+            }
+        "#;
+        let mut classes = Vec::new();
+        push_classes(&["clients".into(), "x".into()], outer, false, &mut classes);
+        push_classes(&["clients".into(), "y".into()], other, false, &mut classes);
+        let index = JavaIndex { classes };
+        assert_eq!(
+            index
+                .marker_javadocs("org.apache.kafka.clients.x.Topology$Source#name()")
+                .unwrap(),
+            ["The node's name."]
+        );
     }
 
     #[test]

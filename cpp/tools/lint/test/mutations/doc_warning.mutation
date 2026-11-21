@@ -1,0 +1,5 @@
+# A contract change needs an accepted ledger entry (cpp/CLAUDE.md §12.2).
+file: confluent/kafka/common/node.hpp
+replace:     /// The port for this node\n
+with:     /// The port for this node\n    ///\n    /// @par Translation notes\n    /// WARNING: blocks.\n
+expect: confluent-kafka-doc with no entry `confluent::kafka::common::Node::port()`

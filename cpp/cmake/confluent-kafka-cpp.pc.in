@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: confluent-kafka-cpp
+Description: The C++ binding of the Confluent Kafka client
+Version: @PROJECT_VERSION@
+Requires.private: confluent-kafka
+Libs: -L${libdir} -lconfluent_kafka_cpp
+Cflags: -I${includedir}
+Cflags.private: -DCONFLUENT_KAFKA_CPP_STATIC

@@ -1,0 +1,2 @@
+# A non-default shape, recorded as cpp/CLAUDE.md §4.6 asks.
+org.apache.kafka.common.Gadget#label(String) return nullable javadoc the label may be absent

@@ -1,0 +1,5 @@
+# A shorter Java overload is a C++ overload, never a default argument (§4.1).
+file: confluent/kafka/common/node.hpp
+replace:          bool is_fenced)
+with:          bool is_fenced = false)
+expect: confluent-kafka-java-signature parameter 'is_fenced' has a default argument

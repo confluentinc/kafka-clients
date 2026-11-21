@@ -1,0 +1,5 @@
+# AclPermissionType.ALLOW is (byte) 3 in Java.
+file: confluent/kafka/common/acl/acl_permission_type.hpp
+replace: ALLOW = 3,
+with: ALLOW = 4,
+expect: confluent-kafka-java-enum Java gives it 3

@@ -1,0 +1,5 @@
+# Diagnostics the surface check places at line 1 of the probe.
+confluent-kafka-surface org.apache.kafka.clients.producer.ProducerConfig is in scope (reached by seed) but not translated
+confluent-kafka-surface org.apache.kafka.clients.producer.Producer is translated: remove its baseline line
+confluent-kafka-surface org.apache.kafka.clients.producer.Nothing is not in scope
+confluent-kafka-surface no header needs `org.apache.kafka.clients.producer.Producer#flush() return nullable`
