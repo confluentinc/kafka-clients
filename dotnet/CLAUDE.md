@@ -961,7 +961,9 @@ out of date). The rule:
    every C# version. A Java static field of the enum (`SslClientAuth.VALUES`) is a `static readonly` field of the
    `<Enum>Methods` class, outside the blocks, since a block cannot hold one (CS9282). Java's `toString()` override
    is a static `ToString(<Enum>)` in the `extension(<Enum>)` block: an instance extension named `ToString` is never
-   called.
+   called. CKRDA0015 checks the class's `s_values` or `VALUES`, Java's `values()` or `VALUES` written out, since
+   `Enum.GetValues(Type)` is not Native AOT safe: it lists every member of the enum once, as `Enum.MEMBER`, in
+   declaration order.
 10. A Java interface's `default` method is not declared on the .NET interface, which cannot hold a body on
     netstandard2.0. It is an extension method in a top-level static class named after the interface without
     its `I` plus `Extensions`, beside it (`ConsumerRebalanceListenerExtensions`). An interface
