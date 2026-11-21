@@ -510,7 +510,12 @@ impl ShareConsumerTestBase {
         }
         .await;
         if result.is_err() {
-            let _ = transactional_producer.abort_transaction().await;
+            // Java's `catch (Exception e) { transactionalProducer.abortTransaction(); }`:
+            // the first error is ignored, the fallback abort's is not.
+            transactional_producer
+                .abort_transaction()
+                .await
+                .unwrap_or_else(|e| panic!("abortTransaction after a failed transaction: {e}"));
         }
     }
 
@@ -526,7 +531,12 @@ impl ShareConsumerTestBase {
         }
         .await;
         if result.is_err() {
-            let _ = transactional_producer.abort_transaction().await;
+            // Java's `catch (Exception e) { transactionalProducer.abortTransaction(); }`:
+            // the first error is ignored, the fallback abort's is not.
+            transactional_producer
+                .abort_transaction()
+                .await
+                .unwrap_or_else(|e| panic!("abortTransaction after a failed transaction: {e}"));
         }
     }
 
@@ -562,7 +572,12 @@ impl ShareConsumerTestBase {
         }
         .await;
         if result.is_err() {
-            let _ = transactional_producer.abort_transaction().await;
+            // Java's `catch (Exception e) { transactionalProducer.abortTransaction(); }`:
+            // the first error is ignored, the fallback abort's is not.
+            transactional_producer
+                .abort_transaction()
+                .await
+                .unwrap_or_else(|e| panic!("abortTransaction after a failed transaction: {e}"));
         }
         close_producer(transactional_producer).await;
     }
