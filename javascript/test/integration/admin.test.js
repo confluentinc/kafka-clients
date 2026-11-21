@@ -18,6 +18,8 @@
 // set (`make -C javascript test-integration` starts a scratch broker for it).
 
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const path = require('node:path');
 
 const {
   Admin,
@@ -739,7 +741,7 @@ const securityAdmin = require('@confluentinc/kafka-javascript/admin');
       // A user that is not part of the request: Java's ResourceNotFoundException.
       await assert.rejects(result.description('nobody').get(), (e) => {
         const c = /** @type {Error} */ (e).cause;
-        return c instanceof Error && c.name === 'ResourceNotFoundError';
+        return c instanceof Error && c.name === 'ResourceNotFoundError' && c.message === 'No such user: nobody';
       });
       const deleted = admin.alterUserScramCredentials([
         new securityAdmin.UserScramCredentialDeletion({ user, mechanism: securityAdmin.ScramMechanism.SCRAM_SHA_256 }),
@@ -768,11 +770,21 @@ const securityAdmin = require('@confluentinc/kafka-javascript/admin');
         const cause = /** @type {Error} */ (error).cause;
         // Over PLAINTEXT the broker refuses the call before it checks for a
         // token secret: Java's UnsupportedByAuthenticationException.
+        // With SASL but no token secret: Java's DelegationTokenDisabledException.
+        // Both carry the broker's Errors text.
+        const refusals = new Map([
+          [
+            'UnsupportedByAuthenticationError',
+            'Delegation Token requests are not allowed on PLAINTEXT/1-way SSL channels and on delegation token authenticated channels.',
+          ],
+          ['DelegationTokenDisabledError', 'Delegation Token feature is not enabled.'],
+        ]);
         assert.ok(cause instanceof Error, String(cause));
-        assert.ok(['UnsupportedByAuthenticationError', 'DelegationTokenDisabledError'].includes(cause.name), String(cause));
+        assert.ok(refusals.has(cause.name), String(cause));
+        assert.equal(cause.message, refusals.get(cause.name));
         await assert.rejects(admin.describeDelegationToken().delegationTokens().get(), (e) => {
           const c = /** @type {Error} */ (e).cause;
-          return c instanceof Error && c.name === cause.name;
+          return c instanceof Error && c.name === cause.name && c.message === cause.message;
         });
         console.log(`the broker refuses delegation tokens (${cause.name}: ${cause.message}): the token round trip is skipped`);
         return;
@@ -788,4 +800,247 @@ const securityAdmin = require('@confluentinc/kafka-javascript/admin');
     }
   },
   60000,
+);
+
+// ---- the transaction and producer calls ------------------------------------------------------
+//
+// The JavaScript producer has no transactions in the preview, so no
+// transaction is left open: fenceProducers initializes a transactional id
+// (an InitProducerId with no transaction), which listTransactions and
+// describeTransactions then see as Empty; forceTerminateTransaction fences
+// it again; an idempotent producer gives describeProducers a producer to
+// describe; abortTransaction, with no hanging transaction to abort, writes
+// its abort marker all the same. The scratch broker's transaction log has one
+// replica (the Makefile's KAFKA_TRANSACTION_STATE_LOG_* settings), as the Rust
+// harness's clusters have.
+
+const txnAdmin = require('@confluentinc/kafka-javascript/admin');
+
+(SKIP ? test.skip : test)(
+  'fenceProducers, listTransactions, describeTransactions, forceTerminateTransaction, describeProducers and abortTransaction',
+  async () => {
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    const topic = `admin-txn-${process.pid}-${Date.now()}`;
+    const id = `js-txn-${process.pid}-${Date.now()}`;
+    try {
+      const fenced = admin.fenceProducers([id]);
+      assert.equal(await fenced.all().get(), null);
+      const producerId = await fenced.producerId(id).get();
+      assert.equal(typeof producerId, 'bigint');
+      assert.ok(producerId >= 0n);
+      assert.equal(typeof (await fenced.epochId(id).get()), 'number');
+      assert.equal(await present(fenced.fencedProducers().get(id)).get(), null);
+
+      // The per-broker futures the outer future's value holds.
+      const byBroker = await admin.listTransactions().byBrokerId().get();
+      assert.ok(byBroker.size >= 1);
+      for (const [broker, future] of byBroker) {
+        assert.equal(typeof broker, 'number');
+        assert.ok(Array.isArray(await future.get()));
+      }
+      const listed = await retryUntil(
+        () => admin.listTransactions(new txnAdmin.ListTransactionsOptions({ filteredProducerIds: [producerId] })).all(),
+        (listings) => listings.some((l) => l.transactionalId() === id),
+      );
+      const listing = present(listed.find((l) => l.transactionalId() === id));
+      assert.ok(listing instanceof txnAdmin.TransactionListing);
+      assert.equal(listing.producerId(), producerId);
+      assert.equal(listing.state(), txnAdmin.TransactionState.EMPTY);
+      const byState = await admin
+        .listTransactions(new txnAdmin.ListTransactionsOptions({ filteredStates: [txnAdmin.TransactionState.ONGOING] }))
+        .all()
+        .get();
+      assert.ok(!byState.some((l) => l.transactionalId() === id));
+      assert.ok((await admin.listTransactions().allByBrokerId().get()).size >= 1);
+
+      const description = await admin.describeTransactions([id]).description(id).get();
+      assert.ok(description instanceof txnAdmin.TransactionDescription);
+      assert.equal(description.state, txnAdmin.TransactionState.EMPTY);
+      assert.equal(description.producerId, producerId);
+      assert.equal(description.transactionStartTimeMs, null);
+      assert.equal(description.topicPartitions?.size(), 0);
+      assert.ok(description.transactionTimeoutMs > 0n);
+      const unknown = await failureOf(admin.describeTransactions([`${id}-none`]).all());
+      assert.equal(unknown.name, 'TransactionalIdNotFoundError', String(unknown));
+
+      assert.equal(await admin.forceTerminateTransaction(id).result().get(), null);
+      const after = await admin.describeTransactions([id]).description(id).get();
+      assert.ok(after.producerEpoch > description.producerEpoch || after.producerId !== description.producerId, String(after));
+
+      await admin
+        .createTopics([new NewTopic({ name: topic, numPartitions: 1, replicationFactor: 1 })])
+        .all()
+        .get();
+      const tp = new TopicPartition({ topic, partition: 0 });
+      const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all', 'enable.idempotence': true } });
+      try {
+        await (await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('v') }))).get();
+      } finally {
+        await producer.close();
+      }
+      const states = await retryUnknown(() => admin.describeProducers([tp]).partitionResult(tp));
+      const active = present(states.activeProducers());
+      assert.equal(active.length, 1);
+      assert.ok(active[0] instanceof txnAdmin.ProducerState);
+      assert.equal(active[0].lastSequence(), 0);
+      assert.equal(active[0].currentTransactionStartOffset(), null);
+      assert.equal(active[0].coordinatorEpoch(), null);
+      assert.ok((await admin.describeProducers([tp]).all().get()).get(tp));
+
+      const spec = new txnAdmin.AbortTransactionSpec({
+        topicPartition: tp,
+        producerId: active[0].producerId(),
+        producerEpoch: active[0].producerEpoch(),
+        coordinatorEpoch: 0,
+      });
+      assert.equal(await admin.abortTransaction(spec).all().get(), null);
+    } finally {
+      await admin.close();
+    }
+  },
+  120000,
+);
+
+/**
+ * The cause a future fails with.
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<unknown>} future
+ * @returns {Promise<Error>}
+ */
+async function failureOf(future) {
+  try {
+    await future.get();
+  } catch (error) {
+    return /** @type {Error} */ (/** @type {{ cause: unknown }} */ (error).cause);
+  }
+  assert.fail('the future succeeded');
+}
+
+const featureAdmin = require('@confluentinc/kafka-javascript/admin');
+const {
+  ControllerIdNotRegisteredError,
+  InvalidUpdateVersionError,
+  UnsupportedVersionError,
+} = require('@confluentinc/kafka-javascript/common/errors');
+
+(SKIP ? test.skip : test)(
+  'describeFeatures, updateFeatures and unregisterController',
+  async () => {
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    try {
+      const metadata = await admin.describeFeatures().featureMetadata().get();
+      assert.ok(metadata instanceof featureAdmin.FeatureMetadata);
+      const epoch = metadata.finalizedFeaturesEpoch();
+      assert.equal(typeof epoch, 'bigint');
+      const version = present(metadata.finalizedFeatures().get('metadata.version'));
+      assert.ok(version instanceof featureAdmin.FinalizedVersionRange);
+      assert.equal(version.minVersionLevel(), version.maxVersionLevel());
+      const supported = present(metadata.supportedFeatures().get('metadata.version'));
+      assert.ok(supported instanceof featureAdmin.SupportedVersionRange);
+      assert.ok(supported.minVersion() <= version.maxVersionLevel() && version.maxVersionLevel() <= supported.maxVersion());
+      // The node the request goes to, given: the single broker's own view.
+      const fromNode = await admin
+        .describeFeatures(new featureAdmin.DescribeFeaturesOptions({ nodeId: 1 }))
+        .featureMetadata()
+        .get();
+      assert.ok(present(fromNode.finalizedFeatures().get('metadata.version')).equals(version));
+
+      // validateOnly: an upgrade to the current level is valid and changes nothing.
+      const same = new featureAdmin.FeatureUpdate({
+        maxVersionLevel: version.maxVersionLevel(),
+        upgradeType: featureAdmin.FeatureUpdate.UpgradeType.UPGRADE,
+      });
+      const validated = admin.updateFeatures({
+        featureUpdates: { 'metadata.version': same },
+        options: new featureAdmin.UpdateFeaturesOptions({ validateOnly: true }),
+      });
+      assert.deepEqual([...validated.values().keys()], ['metadata.version']);
+      assert.equal(await validated.all().get(), null);
+
+      // A feature the controller does not support: the broker's error.
+      const unknown = admin.updateFeatures(
+        new Map([
+          [
+            'no.such.feature',
+            new featureAdmin.FeatureUpdate({ maxVersionLevel: 1, upgradeType: featureAdmin.FeatureUpdate.UpgradeType.UPGRADE }),
+          ],
+        ]),
+      );
+      const refused = await failureOf(unknown.all());
+      assert.ok(refused instanceof InvalidUpdateVersionError, String(refused));
+      assert.equal(
+        refused.message,
+        'The update failed for all features since the following feature had an error: Invalid update version 1 for feature ' +
+          'no.such.feature. Local controller 1 does not support this feature.',
+      );
+
+      // No controller has this id. metadata.version 33 is the first to support
+      // controller unregistration (KAFKA-20395): a broker that cannot reach it
+      // (the pinned Kafka 4.3 image) does not offer the RPC, which the core
+      // reports itself; one finalized below it refuses the request; otherwise
+      // the controller refuses the unknown id.
+      const UNREGISTER_CONTROLLER_LEVEL = 33;
+      const [expectedClass, expectedMessage] =
+        supported.maxVersion() < UNREGISTER_CONTROLLER_LEVEL
+          ? [UnsupportedVersionError, 'The node does not support UNREGISTER_CONTROLLER']
+          : version.maxVersionLevel() < UNREGISTER_CONTROLLER_LEVEL
+            ? [UnsupportedVersionError, 'The current MetadataVersion is too old to support controller unregistration.']
+            : [ControllerIdNotRegisteredError, 'Controller ID 9999 is not currently registered.'];
+      const unregistered = await failureOf(admin.unregisterController(9999).all());
+      assert.ok(unregistered instanceof expectedClass, String(unregistered));
+      assert.equal(unregistered.message, expectedMessage);
+    } finally {
+      await admin.close();
+    }
+  },
+  60000,
+);
+
+// listTransactions().byBrokerId()'s per-broker futures are borrowed from the
+// outer future's value, so each holds its parent until it is freed. Only a
+// broker answers listTransactions (the mock does not implement it), so the
+// native counts are checked here, in a child process that can collect its
+// garbage, as the unit test's lifetime test checks the other calls'.
+(SKIP ? test.skip : test)(
+  'listTransactions().byBrokerId(): the per-broker futures free their parent, read, unread and kept',
+  () => {
+    const script = `
+    const native = require('./dist/internal/native.js');
+    const { Admin } = require('@confluentinc/kafka-javascript/admin');
+    (async () => {
+      const before = native.adminStats();
+      const kept = [];
+      async function round() {
+        const a = Admin.create({ 'bootstrap.servers': ${JSON.stringify(String(BOOTSTRAP))} });
+        const byBroker = await a.listTransactions().byBrokerId().get();
+        for (const future of byBroker.values()) await future.get();
+        kept.push([...byBroker.values()][0]);
+        await a.listTransactions().all().get();
+        a.listTransactions();
+        await a.close();
+      }
+      for (let i = 0; i < 2; i++) await round();
+      for (let i = 0; i < 20; i++) { global.gc(); await new Promise((r) => setTimeout(r, 20)); }
+      // A kept per-broker future, its Result and outer future gone, still reads.
+      const read = await Promise.all(kept.map((f) => f.get()));
+      kept.length = 0;
+      let after = native.adminStats();
+      for (let i = 0; i < 100 && after.adminsFreed - before.adminsFreed < 2; i++) {
+        global.gc();
+        await new Promise((r) => setTimeout(r, 20));
+        after = native.adminStats();
+      }
+      const d = (k) => after[k] - before[k];
+      console.log(JSON.stringify([read.every(Array.isArray), d('adminsMade'), d('adminsFreed'), d('resultsMade') === d('resultsFreed'), d('futuresMade') === d('futuresFreed'), d('waitsStarted') === d('waitsCompleted')]));
+    })();
+  `;
+    const r = spawnSync(process.execPath, ['--no-warnings', '--expose-gc', '-e', script], {
+      cwd: path.join(__dirname, '..', '..'),
+      encoding: 'utf8',
+      timeout: 60000,
+    });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, '[true,2,2,true,true,true]\n');
+  },
+  90000,
 );

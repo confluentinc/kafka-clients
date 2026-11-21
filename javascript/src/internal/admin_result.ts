@@ -57,6 +57,20 @@ function waiting<T>(handle: AdminHandle, slot: number, post: (raw: unknown) => T
 }
 
 /**
+ * A future over a native future the addon put in `slot` while it converted
+ * another future's value (`ListTransactionsResult.byBrokerId`'s futures by
+ * broker), its untimed wait started.
+ *
+ * @param handle - the admin client's handle
+ * @param slot - the native future's slot
+ * @param post - builds the value from the addon's plain value
+ * @returns the future
+ */
+export function adminFutureOfSlot<T>(handle: AdminHandle, slot: number, post: (raw: unknown) => T): KafkaFuture<T> {
+  return waiting(handle, slot, post);
+}
+
+/**
  * The future accessor `name` of a result hands out, for `key` (null for an
  * accessor of no key).
  *
