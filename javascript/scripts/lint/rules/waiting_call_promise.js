@@ -63,6 +63,8 @@ const DEPENDANTS = [
   },
   { key: 'DescribeReplicaLogDirsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
   { key: 'AlterReplicaLogDirsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'ListOffsetsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'AlterPartitionReassignmentsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
 ];
 
 /** The C call graph of native/*.c: function name -> the names it calls. */

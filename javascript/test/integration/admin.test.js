@@ -27,6 +27,10 @@ const {
   CreateTopicsOptions,
   DescribeConfigsOptions,
   ListConfigResourcesOptions,
+  ListOffsetsOptions,
+  ListOffsetsResult,
+  NewPartitionReassignment,
+  OffsetSpec,
   LogDirDescription,
   DeletedRecords,
   DescribeClusterOptions,
@@ -40,6 +44,8 @@ const {
 } = require('@confluentinc/kafka-javascript/admin');
 const { AclOperation } = require('@confluentinc/kafka-javascript/common/acl');
 const {
+  ElectionType,
+  IsolationLevel,
   Node,
   TopicCollection,
   TopicPartition,
@@ -50,7 +56,15 @@ const {
   Uuid,
 } = require('@confluentinc/kafka-javascript/common');
 const { ConfigResource, ConfigResourceMap } = require('@confluentinc/kafka-javascript/common/config');
-const { LogDirNotFoundError, TopicExistsError, UnknownTopicOrPartitionError } = require('@confluentinc/kafka-javascript/common/errors');
+const {
+  ElectionNotNeededError,
+  InvalidReplicaAssignmentError,
+  LogDirNotFoundError,
+  NoReassignmentInProgressError,
+  TopicExistsError,
+  UnknownTopicOrPartitionError,
+} = require('@confluentinc/kafka-javascript/common/errors');
+const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 // A string in every test that runs: the tests are skipped when it is unset.
 const BOOTSTRAP = /** @type {string} */ (process.env.KAFKA_BOOTSTRAP_SERVERS);
@@ -351,6 +365,91 @@ async function retryUntil(call, accept) {
         present(elsewhere.values().get(replica)).get(),
         (error) => /** @type {Error} */ (error).cause instanceof LogDirNotFoundError,
       );
+    } finally {
+      await admin
+        .deleteTopics([topic])
+        .all()
+        .get()
+        .catch(() => {});
+      await admin.close();
+    }
+  },
+  60000,
+);
+
+(SKIP ? test.skip : test)(
+  'listOffsets, electLeaders, alterPartitionReassignments and listPartitionReassignments',
+  async () => {
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    const topic = `admin-offsets-${process.pid}-${Date.now()}`;
+    const tp = new TopicPartition({ topic, partition: 0 });
+    try {
+      await admin
+        .createTopics([new NewTopic({ name: topic, numPartitions: 1, replicationFactor: 1 })])
+        .all()
+        .get();
+      const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' } });
+      try {
+        for (const timestamp of [1000n, 2000n, 3000n]) {
+          await (await producer.send(new ProducerRecord({ topic, partition: 0, timestamp, key: null, value: Buffer.from('v') }))).get();
+        }
+      } finally {
+        await producer.close();
+      }
+
+      /**
+       * The listed offset of the topic's partition for `spec`.
+       *
+       * @param {import('@confluentinc/kafka-javascript/admin').OffsetSpec} spec
+       * @param {import('@confluentinc/kafka-javascript/admin').ListOffsetsOptions} [options]
+       */
+      const listed = (spec, options = new ListOffsetsOptions()) =>
+        retryUnknown(() => admin.listOffsets({ topicPartitionOffsets: new TopicPartitionMap([[tp, spec]]), options }).partitionResult(tp));
+      const earliest = await listed(OffsetSpec.earliest());
+      assert.ok(earliest instanceof ListOffsetsResult.ListOffsetsResultInfo);
+      assert.equal(earliest.offset(), 0n);
+      assert.equal((await listed(OffsetSpec.latest())).offset(), 3n);
+      assert.equal((await listed(OffsetSpec.latest(), new ListOffsetsOptions(IsolationLevel.READ_COMMITTED))).offset(), 3n);
+      const byTime = await listed(OffsetSpec.forTimestamp(2000));
+      assert.equal(byTime.offset(), 1n);
+      assert.equal(byTime.timestamp(), 2000n);
+      assert.equal(typeof byTime.leaderEpoch(), 'number');
+      const max = await listed(OffsetSpec.maxTimestamp());
+      assert.equal(max.offset(), 2n);
+      assert.equal(max.timestamp(), 3000n);
+      const all = await admin
+        .listOffsets(new TopicPartitionMap([[tp, OffsetSpec.latest()]]))
+        .all()
+        .get();
+      assert.equal(all.get(tp)?.offset(), 3n);
+
+      // One broker: its only replica already leads, so a preferred election
+      // is not needed.
+      const elections = await admin
+        .electLeaders({ electionType: ElectionType.PREFERRED, partitions: [tp] })
+        .partitions()
+        .get();
+      assert.ok(elections.get(tp) instanceof ElectionNotNeededError, String(elections.get(tp)));
+      await assert.rejects(
+        admin
+          .electLeaders({ electionType: ElectionType.PREFERRED, partitions: [tp] })
+          .all()
+          .get(),
+        (error) => /** @type {Error} */ (error).cause instanceof ElectionNotNeededError,
+      );
+
+      // No reassignment in progress: none listed, and cancelling one is the
+      // broker's NoReassignmentInProgressError.
+      assert.equal((await admin.listPartitionReassignments().reassignments().get()).size(), 0);
+      assert.equal((await admin.listPartitionReassignments([tp]).reassignments().get()).size(), 0);
+      const cancelled = admin.alterPartitionReassignments(new TopicPartitionMap([[tp, null]]));
+      await assert.rejects(
+        present(cancelled.values().get(tp)).get(),
+        (error) => /** @type {Error} */ (error).cause instanceof NoReassignmentInProgressError,
+      );
+      // A broker the cluster has not is an invalid assignment.
+      const invalid = admin.alterPartitionReassignments(new TopicPartitionMap([[tp, new NewPartitionReassignment([999])]]));
+      await assert.rejects(invalid.all().get(), (error) => /** @type {Error} */ (error).cause instanceof InvalidReplicaAssignmentError);
     } finally {
       await admin
         .deleteTopics([topic])
