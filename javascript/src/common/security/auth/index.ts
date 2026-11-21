@@ -13,8 +13,11 @@
 // limitations under the License.
 
 // The public classes of Java's
-// org.apache.kafka.common.security.auth this client has.
+// org.apache.kafka.common.security.auth this client has: SecurityProtocol,
+// and KafkaPrincipal, which the admin client's delegation-token calls take
+// and return.
 
+export { KafkaPrincipal } from './kafka_principal';
 export { SecurityProtocol } from './security_protocol';
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import

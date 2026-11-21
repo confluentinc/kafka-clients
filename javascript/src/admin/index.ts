@@ -80,10 +80,29 @@
  * - `AlterConsumerGroupOffsetsResult.partitionResult`: a null partition, or
  *   one with a null topic, where Java's future fails with the request's error
  *   or with "Alter offset for partition "null" was not attempted".
+ * - `describeClientQuotas`: a null filter, a filter with null components, or
+ *   a null component, which Java's request builder reads;
+ * - `alterClientQuotas`: a `ClientQuotaAlteration` with a null entity, null
+ *   ops or a null op, an entity with null entries, or an op with a null key,
+ *   which Java's request builder reads;
+ * - `renewDelegationToken` and `expireDelegationToken`: a null HMAC, which
+ *   Java writes when it sends the request;
+ * - `describeDelegationToken`: a `DescribeDelegationTokenOptions` whose
+ *   owners hold null, which Java's request builder reads.
  *
  * Why: the C API cannot carry these nulls (a list, a handle, a C string or a
  * singleton cannot be `NULL` there). Goes when: the FFI takes them and the
  * core fails the future as Java does.
+ *
+ * *(deviation)* `alterUserScramCredentials` takes only the two
+ * `UserScramCredentialAlteration` subclasses Java has, and refuses another
+ * subclass with a `TypeError` at the call, where Java gives its user a future
+ * that no request answers. Why: the C API carries an alteration as one of the
+ * two; a subclass Java adds is a new form. Permanent.
+ *
+ * *(deviation)* `alterClientQuotas` with an op whose value is `NaN` clears the
+ * quota, as a null value does, where Java sends `NaN`. Why: the FFI reads
+ * `NaN` as Java's null. Goes when: the FFI carries the null separately.
  *
  * *(deviation)* `alterReplicaLogDirs` with a null log directory sends the empty
  * string, where Java's request carries a null path, which fails it. Why: the
@@ -95,7 +114,10 @@
 
 export { AbstractOptions } from './abstract_options';
 export { Admin } from './admin';
+export { AdminClientConfig } from './admin_client_config';
 export type { AdminClientConfigs } from './admin_client_configs';
+export { AlterClientQuotasOptions } from './alter_client_quotas_options';
+export { AlterClientQuotasResult } from './alter_client_quotas_result';
 export { AlterConfigOp } from './alter_config_op';
 export { AlterConfigsOptions } from './alter_configs_options';
 export { AlterConfigsResult } from './alter_configs_result';
@@ -105,14 +127,23 @@ export { AlterPartitionReassignmentsOptions } from './alter_partition_reassignme
 export { AlterPartitionReassignmentsResult } from './alter_partition_reassignments_result';
 export { AlterReplicaLogDirsOptions } from './alter_replica_log_dirs_options';
 export { AlterReplicaLogDirsResult } from './alter_replica_log_dirs_result';
+export { AlterUserScramCredentialsOptions } from './alter_user_scram_credentials_options';
+export { AlterUserScramCredentialsResult } from './alter_user_scram_credentials_result';
 export { ClassicGroupDescription } from './classic_group_description';
+export type { CloseArgs } from './kafka_admin_client';
 export { Config } from './config';
 export { ConfigEntry } from './config_entry';
 export { ConsumerGroupDescription } from './consumer_group_description';
+export { CreateAclsOptions } from './create_acls_options';
+export { CreateAclsResult } from './create_acls_result';
+export { CreateDelegationTokenOptions } from './create_delegation_token_options';
+export { CreateDelegationTokenResult } from './create_delegation_token_result';
 export { CreatePartitionsOptions } from './create_partitions_options';
 export { CreatePartitionsResult } from './create_partitions_result';
 export { CreateTopicsOptions } from './create_topics_options';
 export { CreateTopicsResult } from './create_topics_result';
+export { DeleteAclsOptions } from './delete_acls_options';
+export { DeleteAclsResult } from './delete_acls_result';
 export { DeleteConsumerGroupOffsetsOptions } from './delete_consumer_group_offsets_options';
 export { DeleteConsumerGroupOffsetsResult } from './delete_consumer_group_offsets_result';
 export { DeleteConsumerGroupsOptions } from './delete_consumer_groups_options';
@@ -122,25 +153,34 @@ export { DeleteRecordsResult } from './delete_records_result';
 export { DeleteTopicsOptions } from './delete_topics_options';
 export { DeleteTopicsResult } from './delete_topics_result';
 export { DeletedRecords } from './deleted_records';
+export { DescribeAclsOptions } from './describe_acls_options';
+export { DescribeAclsResult } from './describe_acls_result';
 export { DescribeClassicGroupsOptions } from './describe_classic_groups_options';
 export { DescribeClassicGroupsResult } from './describe_classic_groups_result';
+export { DescribeClientQuotasOptions } from './describe_client_quotas_options';
+export { DescribeClientQuotasResult } from './describe_client_quotas_result';
 export { DescribeClusterOptions } from './describe_cluster_options';
 export { DescribeClusterResult } from './describe_cluster_result';
 export { DescribeConfigsOptions } from './describe_configs_options';
 export { DescribeConfigsResult } from './describe_configs_result';
 export { DescribeConsumerGroupsOptions } from './describe_consumer_groups_options';
 export { DescribeConsumerGroupsResult } from './describe_consumer_groups_result';
+export { DescribeDelegationTokenOptions } from './describe_delegation_token_options';
+export { DescribeDelegationTokenResult } from './describe_delegation_token_result';
 export { DescribeLogDirsOptions } from './describe_log_dirs_options';
 export { DescribeLogDirsResult } from './describe_log_dirs_result';
 export { DescribeReplicaLogDirsOptions } from './describe_replica_log_dirs_options';
 export { DescribeReplicaLogDirsResult } from './describe_replica_log_dirs_result';
 export { DescribeTopicsOptions } from './describe_topics_options';
 export { DescribeTopicsResult } from './describe_topics_result';
+export { DescribeUserScramCredentialsOptions } from './describe_user_scram_credentials_options';
+export { DescribeUserScramCredentialsResult } from './describe_user_scram_credentials_result';
 export { ElectLeadersOptions } from './elect_leaders_options';
 export { ElectLeadersResult } from './elect_leaders_result';
+export { ExpireDelegationTokenOptions } from './expire_delegation_token_options';
+export { ExpireDelegationTokenResult } from './expire_delegation_token_result';
 export { GroupListing } from './group_listing';
 export { KafkaAdminClient } from './kafka_admin_client';
-export type { CloseArgs } from './kafka_admin_client';
 export { ListConfigResourcesOptions } from './list_config_resources_options';
 export { ListConfigResourcesResult } from './list_config_resources_result';
 export { ListConsumerGroupOffsetsOptions } from './list_consumer_group_offsets_options';
@@ -168,12 +208,17 @@ export { PartitionReassignment } from './partition_reassignment';
 export { RecordsToDelete } from './records_to_delete';
 export { RemoveMembersFromConsumerGroupOptions } from './remove_members_from_consumer_group_options';
 export { RemoveMembersFromConsumerGroupResult } from './remove_members_from_consumer_group_result';
+export { RenewDelegationTokenOptions } from './renew_delegation_token_options';
+export { RenewDelegationTokenResult } from './renew_delegation_token_result';
 export { ReplicaInfo } from './replica_info';
+export { ScramCredentialInfo } from './scram_credential_info';
+export { ScramMechanism } from './scram_mechanism';
 export { TopicDescription } from './topic_description';
 export { TopicListing } from './topic_listing';
-
-// BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
-export { AdminClientConfig } from './admin_client_config';
+export { UserScramCredentialAlteration } from './user_scram_credential_alteration';
+export { UserScramCredentialDeletion } from './user_scram_credential_deletion';
+export { UserScramCredentialUpsertion } from './user_scram_credential_upsertion';
+export { UserScramCredentialsDescription } from './user_scram_credentials_description';
 // END GENERATED EXPORTS
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import
