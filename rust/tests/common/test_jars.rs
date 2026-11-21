@@ -46,6 +46,8 @@ const KAFKA_TEST_JARS_VERSION: &str = "4.4.0";
 
 /// Serializes downloads within a test process, so concurrent cluster starts do
 /// not fetch the same jar twice.
+/// Separate processes download to partial files of their own (see
+/// [`TestJar::local_path`]).
 static DOWNLOAD_LOCK: Mutex<()> = Mutex::new(());
 
 /// A Kafka test jar a broker container can load classes from.
@@ -112,11 +114,21 @@ impl TestJar {
         if path.exists() && self.verify(&path).is_ok() {
             return path;
         }
-        let partial = dir.join(format!("{}.partial", self.file_name()));
+        // A name of this process's own: two test processes downloading the
+        // same jar at once never write one file; each renames its verified
+        // copy over the target atomically, and every copy holds the same bytes.
+        let partial = dir.join(format!("{}.partial.{}", self.file_name(), std::process::id()));
         let url = self.url();
+        // Bounded, so a stalled network fails the cluster start instead of
+        // holding `DOWNLOAD_LOCK` (and the start) for ever: 10 s to connect and
+        // 120 s per attempt, for jars of at most a few hundred KB.
         let output = std::process::Command::new("curl")
             .args([
                 "-fsSL",
+                "--connect-timeout",
+                "10",
+                "--max-time",
+                "120",
                 "--retry",
                 "5",
                 "--retry-delay",
