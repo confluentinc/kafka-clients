@@ -58,6 +58,7 @@ struct AdminFuture {
     int refs;
     int32_t slot;
     int waiting;                               // the untimed wait started
+    AdminFuture* parent;                       // a future borrowed from this one's value, or NULL
 };
 
 typedef kafka_Map_t* (*admin_map_acc_fn)(const void* result, kafka_common_Error_t** out_err);
@@ -226,6 +227,15 @@ napi_value admin_box_new(napi_env env, void* result, kafka_Map_t* map, const Adm
 // borrowed future.
 int32_t admin_future_new(napi_env env, Admin* a, kafka_common_KafkaFuture_t* future, int owned, napi_value keep,
                          admin_conv_fn conv);
+// For a converter only: a context in the slot table over a future the value
+// being converted holds (`ListTransactionsResult.byBrokerId`'s map of
+// futures), which keeps the converting future's context, and so the value,
+// alive until it is released. Its slot, or -1 with a JS exception pending
+// (or when called outside a conversion).
+int32_t admin_future_new_borrowed_from_value(napi_env env, kafka_common_KafkaFuture_t* future, admin_conv_fn conv);
+// Releases such a context, made by the same conversion, when the conversion
+// fails after making it (JS never sees its slot).
+void admin_future_drop_borrowed(napi_env env, int32_t slot);
 
 // A JS node's fields as an owned node; an array of them as an owned list of
 // owned nodes (`null` is NULL with *is_null set); NULL with a JS exception
