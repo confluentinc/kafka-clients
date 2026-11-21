@@ -70,7 +70,7 @@ KAFKA_PORT ?= 39092
 # $(CONFLUENT_KAFKA_LIB_DIR) and its header under $(CONFLUENT_KAFKA_INCLUDE_DIR):
 # the repository root's Makefile orders that (`build-javascript` depends on the
 # Rust build); run standalone, build it first.
-# The gRPC server of the Rust multilanguage harness's `__grpc_js` producer arm
+# The gRPC server of the Rust multilanguage harness's `__grpc_js` producer and admin arms
 # (grpc-server/grpc_server.js; see rust/tests/common/backend_pool.rs). Its two packages are
 # pinned once, in package.json's devDependencies: `npm ci` installs them in
 # node_modules/, where the server finds them natively, and Dockerfile.grpc
