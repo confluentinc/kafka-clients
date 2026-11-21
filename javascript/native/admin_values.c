@@ -2031,3 +2031,499 @@ napi_value js_admin_describe_replica_log_dirs(napi_env env, napi_callback_info i
 #undef ADMIN_RPC
 // Its tables are named only inside the section.
 #pragma GCC poison DescribeReplicaLogDirsOptions_desc DescribeReplicaLogDirsResult_desc
+
+// ---- leaders, reassignments and offsets: shared values ----------------------------------
+
+static void tp_item_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_TopicPartition_destroy_err((kafka_common_TopicPartition_t*)item, out_err);
+}
+
+// A JS [topic, partition] as an owned TopicPartition, or NULL with a JS
+// exception pending.
+static kafka_common_TopicPartition_t* tp_from_js(napi_env env, napi_value pair) {
+    int ok = 1;
+    napi_value t = element(env, pair, 0);
+    napi_value p = t == NULL ? NULL : element(env, pair, 1);
+    if (p == NULL) return NULL;
+    int32_t partition = int32_of(env, p, "a partition's index", &ok);
+    if (!ok) return NULL;
+    char* topic = js_string_dup(env, t, "a partition's topic must be a string");
+    if (topic == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_TopicPartition_t* tp = NULL;
+    kafka_common_Error_t* err = FFI_SET(tp, kafka_common_TopicPartition_new_err(topic, partition, &ffi_err));
+    free(topic);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return tp;
+}
+
+static void* tp_from_js_item(napi_env env, napi_value v) {
+    return tp_from_js(env, v);
+}
+
+// An array of [topic, partition] as an owned list of owned TopicPartitions;
+// `null` is NULL with none (*is_null), Java's null set; NULL with a JS
+// exception pending on failure.
+static kafka_List_t* tp_list_or_null(napi_env env, napi_value array, int* is_null) {
+    napi_valuetype type;
+    *is_null = 0;
+    if (napi_typeof(env, array, &type) != napi_ok) {
+        js_throw_last_napi_error(env, "napi_typeof");
+        return NULL;
+    }
+    if (type == napi_null) {
+        *is_null = 1;
+        return NULL;
+    }
+    return handle_list(env, array, tp_from_js_item, tp_item_destroy);
+}
+
+// A borrowed int32_t.
+static napi_value item_int32(napi_env env, const void* item) {
+    return js_int32(env, *(const int32_t*)item);
+}
+
+// A borrowed error, or NULL (Java's empty Optional) as `null`.
+static napi_value item_error_or_null(napi_env env, const void* item) {
+    return item == NULL ? js_null(env) : error_to_js(env, (const kafka_common_Error_t*)item);
+}
+
+// A PartitionReassignment as { replicas, addingReplicas, removingReplicas },
+// each owned list converted, then destroyed with its elements.
+static napi_value item_partition_reassignment(napi_env env, const void* item) {
+    const kafka_admin_PartitionReassignment_t* r = (const kafka_admin_PartitionReassignment_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_List_t *replicas = NULL, *adding = NULL, *removing = NULL;
+    kafka_common_Error_t* err = FFI_SET(replicas, kafka_admin_PartitionReassignment_replicas_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(adding, kafka_admin_PartitionReassignment_adding_replicas_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(removing, kafka_admin_PartitionReassignment_removing_replicas_err(r, &ffi_err));
+    napi_value lists[3];
+    lists[0] = owned_list_to_js(env, replicas, item_int32, 0);
+    lists[1] = owned_list_to_js(env, adding, item_int32, 0);
+    lists[2] = owned_list_to_js(env, removing, item_int32, 0);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "replicas", lists[0]) < 0 || set(env, obj, "addingReplicas", lists[1]) < 0
+        || set(env, obj, "removingReplicas", lists[2]) < 0)
+        return NULL;
+    return obj;
+}
+
+// The elections' outcomes: [[[topic, partition], error or null]].
+static napi_value conv_elections(napi_env env, void* v) {
+    return admin_map_to_js(env, (const kafka_Map_t*)v, key_topic_partition, item_error_or_null);
+}
+
+// The reassignments: [[[topic, partition], reassignment]].
+static napi_value conv_reassignments(napi_env env, void* v) {
+    return admin_map_to_js(env, (const kafka_Map_t*)v, key_topic_partition, item_partition_reassignment);
+}
+
+// A ListOffsetsResultInfo as { offset, timestamp, leaderEpoch }, the epoch
+// null for Java's empty Optional (-1).
+static napi_value conv_list_offsets_info(napi_env env, void* v) {
+    if (v == NULL) return js_null(env);
+    const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t* i = (const kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_t*)v;
+    kafka_common_Error_t* ffi_err = NULL;
+    int64_t offset = 0, timestamp = 0;
+    int32_t epoch = -1;
+    kafka_common_Error_t* err = FFI_SET(offset, kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_offset_err(i, &ffi_err));
+    if (err == NULL) err = FFI_SET(timestamp, kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_timestamp_err(i, &ffi_err));
+    if (err == NULL) err = FFI_SET(epoch, kafka_admin_ListOffsetsResult_ListOffsetsResultInfo_leader_epoch_err(i, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value obj;
+    NAPI_CHECK(env, napi_create_object(env, &obj), NULL);
+    if (set(env, obj, "offset", js_int64(env, offset)) < 0 || set(env, obj, "timestamp", js_int64(env, timestamp)) < 0
+        || set(env, obj, "leaderEpoch", epoch < 0 ? js_null(env) : js_int32(env, epoch)) < 0)
+        return NULL;
+    return obj;
+}
+
+// ---- electLeaders -------------------------------------------------------------------------
+
+#define ADMIN_RPC ElectLeaders
+
+ADMIN_OPT_TIMEOUT(kafka_admin_ElectLeadersOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_ElectLeadersOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_ElectLeadersOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_ElectLeadersResult_destroy_err),
+    {ADMIN_ACC_ONE(partitions, kafka_admin_ElectLeadersResult_partitions_err, conv_elections), ADMIN_ACC_END},
+};
+
+// adminElectLeaders(handle, electionType, partitions, options): the election
+// type as its ordinal (0 PREFERRED, 1 UNCLEAN), the partitions as [topic,
+// partition] pairs or null for every partition; the result's one future is
+// `partitions`.
+napi_value js_admin_elect_leaders(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 4 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    int ok = 1;
+    int32_t ordinal = int32_of(env, argv[1], "an election type's ordinal", &ok);
+    if (!ok) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_common_ElectionType_t* type = NULL;
+    kafka_common_Error_t* err = ordinal == 1 ? FFI_SET(type, kafka_common_ElectionType_unclean_err(&ffi_err))
+                                             : FFI_SET(type, kafka_common_ElectionType_preferred_err(&ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    int is_null = 0;
+    kafka_List_t* partitions = tp_list_or_null(env, argv[2], &is_null);
+    if (partitions == NULL && !is_null) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[3]);
+    if (o == NULL) {
+        admin_list_free(env, partitions, tp_item_destroy);
+        return NULL;
+    }
+    ADMIN_RESULT_T* r = NULL;
+    err = FFI_SET(r, kafka_admin_Admin_elect_leaders_with_options_err(a->view, type, partitions, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, partitions, tp_item_destroy);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison ElectLeadersOptions_desc ElectLeadersResult_desc
+
+// ---- alterPartitionReassignments ----------------------------------------------------------
+
+#define ADMIN_RPC AlterPartitionReassignments
+
+ADMIN_OPT_TIMEOUT(kafka_admin_AlterPartitionReassignmentsOptions_set_timeout_ms_err)
+ADMIN_OPT_BOOL(allowReplicationFactorChange, kafka_admin_AlterPartitionReassignmentsOptions_set_allow_replication_factor_change_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_AlterPartitionReassignmentsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_AlterPartitionReassignmentsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(allowReplicationFactorChange), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_AlterPartitionReassignmentsResult_destroy_err),
+    {ADMIN_ACC_MAP(values, kafka_admin_AlterPartitionReassignmentsResult_values_err, key_topic_partition, NULL), ADMIN_ACC_END},
+};
+
+static void new_reassignment_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_admin_NewPartitionReassignment_destroy_err((kafka_admin_NewPartitionReassignment_t*)item, out_err);
+}
+
+// adminAlterPartitionReassignments(handle, reassignments, options): an array
+// of [[topic, partition], targetReplicas or null], null cancelling (Java's
+// empty Optional); the result's futures are `values` (a map keyed by [topic,
+// partition]).
+napi_value js_admin_alter_partition_reassignments(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    int ok = 0;
+    uint32_t n = length_of(env, argv[1], &ok);
+    if (!ok) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* map = NULL;
+    kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
+    for (uint32_t i = 0; err == NULL && ok && i < n; i++) {
+        napi_value pair = element(env, argv[1], i);
+        napi_value k = pair == NULL ? NULL : element(env, pair, 0);
+        napi_value v = k == NULL ? NULL : element(env, pair, 1);
+        kafka_common_TopicPartition_t* tp = v == NULL ? NULL : tp_from_js(env, k);
+        if (tp == NULL) {
+            ok = 0;
+            break;
+        }
+        napi_valuetype type;
+        kafka_admin_NewPartitionReassignment_t* target = NULL;
+        if (napi_typeof(env, v, &type) != napi_ok) {
+            FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+            js_throw_last_napi_error(env, "napi_typeof");
+            ok = 0;
+            break;
+        }
+        if (type != napi_null) {
+            kafka_List_t* replicas = int_list(env, v);
+            if (replicas == NULL) {
+                FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+                ok = 0;
+                break;
+            }
+            err = FFI_SET(target, kafka_admin_NewPartitionReassignment_new(replicas, &ffi_err));
+            admin_list_free(env, replicas, free_item);
+            if (err != NULL) {
+                FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+                break;
+            }
+        }
+        err = FFI_ERR(kafka_Map_put_err(map, tp, target, &ffi_err));
+        if (err != NULL) {
+            FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+            if (target != NULL) FFI_DISCARD(kafka_admin_NewPartitionReassignment_destroy_err(target, &ffi_err));
+        }
+    }
+    void* o = err == NULL && ok ? admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]) : NULL;
+    ADMIN_RESULT_T* r = NULL;
+    if (o != NULL)
+        err = FFI_SET(r, kafka_admin_Admin_alter_partition_reassignments_with_options_err(a->view, map, (ADMIN_OPTIONS_T*)admin_opts(o),
+                                                                                         &ffi_err));
+    // The map's keys and reassignments are copied by the call: freed here.
+    map_free_with(env, map, tp_item_destroy, new_reassignment_destroy);
+    if (o == NULL) {
+        if (err != NULL) error_throw_owned(env, err);
+        return NULL;
+    }
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison AlterPartitionReassignmentsOptions_desc AlterPartitionReassignmentsResult_desc
+
+// ---- listPartitionReassignments -----------------------------------------------------------
+
+#define ADMIN_RPC ListPartitionReassignments
+
+ADMIN_OPT_TIMEOUT(kafka_admin_ListPartitionReassignmentsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_ListPartitionReassignmentsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_ListPartitionReassignmentsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_ListPartitionReassignmentsResult_destroy_err),
+    {ADMIN_ACC_ONE(reassignments, kafka_admin_ListPartitionReassignmentsResult_reassignments_err, conv_reassignments), ADMIN_ACC_END},
+};
+
+// adminListPartitionReassignments(handle, partitions, options): the
+// partitions as [topic, partition] pairs (`_with_partitions_options`), or
+// null for every partition (`_with_options`, Java's empty Optional); the
+// result's one future is `reassignments`.
+napi_value js_admin_list_partition_reassignments(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    int is_null = 0;
+    kafka_List_t* partitions = tp_list_or_null(env, argv[1], &is_null);
+    if (partitions == NULL && !is_null) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, partitions, tp_item_destroy);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    ADMIN_OPTIONS_T* opts = (ADMIN_OPTIONS_T*)admin_opts(o);
+    kafka_common_Error_t* err =
+        partitions == NULL
+            ? FFI_SET(r, kafka_admin_Admin_list_partition_reassignments_with_options_err(a->view, opts, &ffi_err))
+            : FFI_SET(r, kafka_admin_Admin_list_partition_reassignments_with_partitions_options_err(a->view, partitions, opts, &ffi_err));
+    admin_list_free(env, partitions, tp_item_destroy);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison ListPartitionReassignmentsOptions_desc ListPartitionReassignmentsResult_desc
+
+// ---- listOffsets --------------------------------------------------------------------------
+
+#define ADMIN_RPC ListOffsets
+
+// Java's `new ListOffsetsOptions(IsolationLevel.READ_COMMITTED)`: the FFI has
+// no setter of the isolation level, a final field of Java's, only its
+// constructor `with_isolation_level`.
+static ADMIN_OPTIONS_T* list_offsets_options_read_committed(kafka_common_Error_t** out_err) {
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_common_IsolationLevel_t* level = NULL;
+    kafka_common_Error_t* err = FFI_SET(level, kafka_common_IsolationLevel_read_committed_err(&ffi_err));
+    if (err != NULL) {
+        *out_err = err;
+        return NULL;
+    }
+    return kafka_admin_ListOffsetsOptions_with_isolation_level_err(level, out_err);
+}
+
+ADMIN_OPT_TIMEOUT(kafka_admin_ListOffsetsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_ListOffsetsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_ListOffsetsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+// The same options, from Java's READ_COMMITTED constructor.
+static const AdminOptionsDesc ListOffsetsReadCommittedOptions_desc = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(list_offsets_options_read_committed),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_ListOffsetsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+
+// `partition_result(partition)`, the key a [topic, partition] pair.
+static kafka_common_KafkaFuture_t* list_offsets_partition_result(napi_env env, const void* result, napi_value key,
+                                                                  kafka_common_Error_t** out_err) {
+    kafka_common_TopicPartition_t* tp = tp_from_js(env, key);
+    if (tp == NULL) return NULL;
+    kafka_common_KafkaFuture_t* future = kafka_admin_ListOffsetsResult_partition_result((const ADMIN_RESULT_T*)result, tp, out_err);
+    kafka_common_Error_t* ffi_err = NULL;
+    error_warn(env, 1, FFI_ERR(kafka_common_TopicPartition_destroy_err(tp, &ffi_err)));
+    return future;
+}
+
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_ListOffsetsResult_destroy_err),
+    {ADMIN_ACC_JS(partition_result, list_offsets_partition_result, conv_list_offsets_info), ADMIN_ACC_END},
+};
+
+// An OffsetSpec of the C enum's order (0 EARLIEST, 1 LATEST, 2 MAX_TIMESTAMP,
+// 3 EARLIEST_LOCAL, 4 LATEST_TIERED, 5 EARLIEST_PENDING_UPLOAD, 6 TIMESTAMP
+// with `timestamp`): a singleton, or an owned TimestampSpec, both freed with
+// kafka_admin_OffsetSpec_destroy, which takes a singleton too (a no-op).
+static const kafka_admin_OffsetSpec_t* offset_spec_of(int32_t spec, int64_t timestamp, kafka_common_Error_t** out_err) {
+    switch (spec) {
+        case 0: return kafka_admin_OffsetSpec_earliest_err(out_err);
+        case 2: return kafka_admin_OffsetSpec_max_timestamp_err(out_err);
+        case 3: return kafka_admin_OffsetSpec_earliest_local_err(out_err);
+        case 4: return kafka_admin_OffsetSpec_latest_tiered_err(out_err);
+        case 5: return kafka_admin_OffsetSpec_earliest_pending_upload_err(out_err);
+        case 6: return kafka_admin_OffsetSpec_for_timestamp_err(timestamp, out_err);
+        default: return kafka_admin_OffsetSpec_latest_err(out_err);
+    }
+}
+
+static void offset_spec_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_admin_OffsetSpec_destroy_err((kafka_admin_OffsetSpec_t*)item, out_err);
+}
+
+// adminListOffsets(handle, topicPartitionOffsets, readCommitted, options): an
+// array of [[topic, partition], spec, timestamp] (offset_spec_of), the
+// options built from Java's READ_COMMITTED constructor when readCommitted;
+// the result's futures are each partition's `partition_result`.
+napi_value js_admin_list_offsets(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 4 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    bool read_committed = false;
+    if (napi_get_value_bool(env, argv[2], &read_committed) != napi_ok) {
+        napi_throw_type_error(env, NULL, "readCommitted must be a boolean");
+        return NULL;
+    }
+    int ok = 0;
+    uint32_t n = length_of(env, argv[1], &ok);
+    if (!ok) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* map = NULL;
+    kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
+    for (uint32_t i = 0; err == NULL && ok && i < n; i++) {
+        napi_value row = element(env, argv[1], i);
+        napi_value k = row == NULL ? NULL : element(env, row, 0);
+        napi_value s = k == NULL ? NULL : element(env, row, 1);
+        napi_value t = s == NULL ? NULL : element(env, row, 2);
+        int32_t spec = t == NULL ? 0 : int32_of(env, s, "an offset spec", &ok);
+        int64_t timestamp = 0;
+        bool lossless = false;
+        if (t == NULL || !ok || napi_get_value_bigint_int64(env, t, &timestamp, &lossless) != napi_ok) {
+            if (t != NULL && ok) napi_throw_type_error(env, NULL, "an offset spec's timestamp must be a bigint");
+            ok = 0;
+            break;
+        }
+        kafka_common_TopicPartition_t* tp = tp_from_js(env, k);
+        if (tp == NULL) {
+            ok = 0;
+            break;
+        }
+        const kafka_admin_OffsetSpec_t* value = NULL;
+        err = FFI_SET(value, offset_spec_of(spec, timestamp, &ffi_err));
+        if (err == NULL) err = FFI_ERR(kafka_Map_put_err(map, tp, (void*)value, &ffi_err));
+        if (err != NULL) {
+            FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+            if (value != NULL) FFI_DISCARD(kafka_admin_OffsetSpec_destroy_err((kafka_admin_OffsetSpec_t*)value, &ffi_err));
+        }
+    }
+    const AdminOptionsDesc* odesc = read_committed ? &ListOffsetsReadCommittedOptions_desc : &ADMIN_OPTIONS_DESC;
+    void* o = err == NULL && ok ? admin_options_build(env, odesc, argv[3]) : NULL;
+    ADMIN_RESULT_T* r = NULL;
+    if (o != NULL) err = FFI_SET(r, kafka_admin_Admin_list_offsets_with_options_err(a->view, map, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    // The map's keys and specs are copied by the call: freed here.
+    map_free_with(env, map, tp_item_destroy, offset_spec_destroy);
+    if (o == NULL) {
+        if (err != NULL) error_throw_owned(env, err);
+        return NULL;
+    }
+    return admin_rpc_return(env, odesc, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison ListOffsetsOptions_desc ListOffsetsReadCommittedOptions_desc ListOffsetsResult_desc
+
+// ---- the mock's offsets -------------------------------------------------------------------
+
+// mockAdminUpdateOffsets(handle, end, newOffsets): Java's
+// MockAdminClient.updateEndOffsets (end) or updateBeginningOffsets, the
+// offsets an array of [[topic, partition], offset].
+napi_value js_mock_admin_update_offsets(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_mock_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    bool end = false;
+    if (napi_get_value_bool(env, argv[1], &end) != napi_ok) {
+        napi_throw_type_error(env, NULL, "end must be a boolean");
+        return NULL;
+    }
+    int ok = 0;
+    uint32_t n = length_of(env, argv[2], &ok);
+    if (!ok) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* map = NULL;
+    kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
+    for (uint32_t i = 0; err == NULL && ok && i < n; i++) {
+        napi_value pair = element(env, argv[2], i);
+        napi_value k = pair == NULL ? NULL : element(env, pair, 0);
+        napi_value v = k == NULL ? NULL : element(env, pair, 1);
+        int64_t* offset = (int64_t*)malloc(sizeof(int64_t));
+        bool lossless = false;
+        if (v == NULL || offset == NULL || napi_get_value_bigint_int64(env, v, offset, &lossless) != napi_ok) {
+            free(offset);
+            if (v != NULL) napi_throw_type_error(env, NULL, "an offset must be a bigint");
+            ok = 0;
+            break;
+        }
+        kafka_common_TopicPartition_t* tp = tp_from_js(env, k);
+        if (tp == NULL) {
+            free(offset);
+            ok = 0;
+            break;
+        }
+        err = FFI_ERR(kafka_Map_put_err(map, tp, offset, &ffi_err));
+        if (err != NULL) {
+            FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+            free(offset);
+        }
+    }
+    if (err == NULL && ok)
+        err = end ? FFI_ERR(kafka_admin_MockAdminClient_update_end_offsets_err(a->mock, map, &ffi_err))
+                  : FFI_ERR(kafka_admin_MockAdminClient_update_beginning_offsets_err(a->mock, map, &ffi_err));
+    // The map is copied by the call: its keys and offsets are freed here.
+    map_free_with(env, map, tp_item_destroy, NULL);
+    if (err != NULL) error_throw_owned(env, err);
+    return NULL;
+}

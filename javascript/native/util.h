@@ -409,6 +409,11 @@ napi_value js_admin_list_config_resources(napi_env env, napi_callback_info info)
 napi_value js_admin_describe_log_dirs(napi_env env, napi_callback_info info);
 napi_value js_admin_alter_replica_log_dirs(napi_env env, napi_callback_info info);
 napi_value js_admin_describe_replica_log_dirs(napi_env env, napi_callback_info info);
+napi_value js_admin_elect_leaders(napi_env env, napi_callback_info info);
+napi_value js_admin_alter_partition_reassignments(napi_env env, napi_callback_info info);
+napi_value js_admin_list_partition_reassignments(napi_env env, napi_callback_info info);
+napi_value js_admin_list_offsets(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_update_offsets(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_add_topic(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_mark_topic_for_deletion(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_set_fetches_remaining_until_visible(napi_env env, napi_callback_info info);
