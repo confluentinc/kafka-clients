@@ -38,15 +38,30 @@
 // files that are not tests (dist/ is generated) and the second lets a test
 // file that forgets the comment go unchecked.
 //
-// Usage: node scripts/typecheck_tests.js
+// The examples (examples/, `make typecheck-examples`) are checked the same
+// way, with examples/tsconfig.json: they are user code, typed against the
+// compiled declarations as an app's code is, so a call the API has no form
+// for fails the check. Their config has Node's globals only, no Jest's.
+//
+// Usage: node scripts/typecheck_tests.js [examples]
 
 const fs = require('node:fs');
 const path = require('node:path');
 const { ROOT, runTsc } = require('./typescript');
 
-const CONFIG = path.join('test', 'tsconfig.json');
-/** The directories of the test files, relative to the client's directory. */
-const TEST_DIRS = ['test', path.join('verifiable_clients', 'test')];
+/** The suites: each one's config and the directories of its files, relative to the client's directory. */
+const SUITES = {
+  tests: { config: path.join('test', 'tsconfig.json'), dirs: ['test', path.join('verifiable_clients', 'test')] },
+  examples: { config: path.join('examples', 'tsconfig.json'), dirs: ['examples'] },
+};
+const SUITE_NAME = process.argv[2] ?? 'tests';
+if (!Object.hasOwn(SUITES, SUITE_NAME)) {
+  console.error(`typecheck-tests: unknown suite ${SUITE_NAME}; one of ${Object.keys(SUITES).join(', ')}`);
+  process.exit(2);
+}
+const CONFIG = SUITES[SUITE_NAME].config;
+/** The directories of the checked files, relative to the client's directory. */
+const TEST_DIRS = SUITES[SUITE_NAME].dirs;
 /** The extensions of the files checked: every kind of JavaScript and TypeScript file Node or tsc reads. */
 const EXTENSIONS = ['.js', '.mjs', '.cjs', '.ts', '.mts', '.cts'];
 /** A declaration file, which `skipLibCheck` leaves unchecked. */
@@ -136,7 +151,7 @@ function main() {
 
   const r = runTsc(['-p', CONFIG, '--pretty', 'false']);
   if (r.status === null) {
-    console.error(`typecheck-tests: tsc did not run\n${r.output}`);
+    console.error(`typecheck-${SUITE_NAME}: tsc did not run\n${r.output}`);
     return 1;
   }
   // A finding is a line `file(line,col): error TS...: message`, or a line
@@ -164,20 +179,20 @@ function main() {
     }
   }
   if (r.status !== 0 && failures.length === 0 && outside === 0) {
-    console.error(`typecheck-tests: tsc failed\n${r.output}`);
+    console.error(`typecheck-${SUITE_NAME}: tsc failed\n${r.output}`);
     return 1;
   }
   for (const failure of failures) console.error(Array.isArray(failure) ? failure.join('\n') : failure);
   if (outside > 0) {
     console.log(
-      `typecheck-tests: ${outside} finding(s) in ${outsideFiles.size} file(s) the tests require from outside the test directories, not failed on`,
+      `typecheck-${SUITE_NAME}: ${outside} finding(s) in ${outsideFiles.size} file(s) the checked files require from outside the test directories, not failed on`,
     );
   }
   if (failures.length > 0) {
-    console.error(`typecheck-tests: ${failures.length} finding(s) in the test files`);
+    console.error(`typecheck-${SUITE_NAME}: ${failures.length} finding(s) in the checked files`);
     return 1;
   }
-  console.log(`typecheck-tests: no finding in the test files (${TEST_DIRS.join(', ')})`);
+  console.log(`typecheck-${SUITE_NAME}: no finding in the checked files (${TEST_DIRS.join(', ')})`);
   return 0;
 }
 
