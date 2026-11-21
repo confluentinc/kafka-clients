@@ -94,7 +94,7 @@ HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (pro
 	test-integration-ssl test-integration-sasl security-certs test-memory test-memory-mutation test-asan \
 	grpc-image grpc-native test-integration-grpc pack pack-check clean lint-rules test-lint \
 	test-verifiable-clients test-grpc-server test-stress soak check-api update-api docs format format-check \
-	typecheck-tests
+	typecheck-tests typecheck-examples
 
 # The addon and the compiled library: the package cannot run without either.
 build: build-addon build-ts
@@ -134,7 +134,7 @@ test: test-except-grpc-arm
 # "verify-javascript (Linux amd64) — plaintext" runs it, through the root
 # `test-javascript-except-grpc-arm`, and "verify-javascript (Linux amd64) —
 # plaintext gRPC arm" runs the arm.
-test-except-grpc-arm: test-static test-unit test-memory test-typing check-api typecheck-tests test-verifiable-clients test-grpc-server \
+test-except-grpc-arm: test-static test-unit test-memory test-typing check-api typecheck-tests typecheck-examples test-verifiable-clients test-grpc-server \
 	test-integration
 	$(MAKE) test-stress
 
@@ -218,6 +218,13 @@ test-typing: build-ts
 # that read dist/ after the one build-ts.
 typecheck-tests: build-ts
 	$(NODE) scripts/typecheck_tests.js
+
+# The type check of the examples (scripts/typecheck_tests.js examples,
+# examples/tsconfig.json): `tsc --strict` over examples/ through `checkJs`,
+# against the compiled declarations in dist/, as an app's code types against
+# them, so an example calling the API in a form it has not fails here.
+typecheck-examples: build-ts
+	$(NODE) scripts/typecheck_tests.js examples
 
 # The interface check (JS conventions, Stability; scripts/api_report.js):
 # api-extractor's report of each import path's compiled declarations and the
