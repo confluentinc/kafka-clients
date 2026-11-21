@@ -148,6 +148,10 @@ test("a DEPENDANTS entry that matches nothing is a finding; the real tree lists 
       'DescribeClassicGroupsResult.all',
       'DescribeConsumerGroupsResult.all',
       'ListConsumerGroupOffsetsResult.all',
+      'CreateAclsResult.all',
+      'DeleteAclsResult.all',
+      'AlterClientQuotasResult.all',
+      'AlterUserScramCredentialsResult.all',
     ],
   );
 });

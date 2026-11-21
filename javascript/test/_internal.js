@@ -229,7 +229,27 @@ function electLeadersResult(future) {
   return factory.internalCreate(future);
 }
 
+/**
+ * The admin client's `DescribeUserScramCredentialsResult`, over the core's
+ * futures of `all()`, `users()` and `description(userName)`, the library's
+ * `internalOfClient` (src/admin/describe_user_scram_credentials_result.ts).
+ *
+ * @param {() => import('@confluentinc/kafka-javascript/common').KafkaFuture<Map<string, import('@confluentinc/kafka-javascript/admin').UserScramCredentialsDescription>>} all the core's all()
+ * @param {() => import('@confluentinc/kafka-javascript/common').KafkaFuture<string[]>} users the core's users()
+ * @param {(userName: string | null) => import('@confluentinc/kafka-javascript/common').KafkaFuture<import('@confluentinc/kafka-javascript/admin').UserScramCredentialsDescription>} description the core's description(userName)
+ * @returns {import('@confluentinc/kafka-javascript/admin').DescribeUserScramCredentialsResult} the result
+ */
+function describeUserScramCredentialsResult(all, users, description) {
+  const { DescribeUserScramCredentialsResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory =
+    /** @type {{ internalOfClient(a: typeof all, u: typeof users, d: typeof description): import('@confluentinc/kafka-javascript/admin').DescribeUserScramCredentialsResult }} */ (
+      /** @type {unknown} */ (DescribeUserScramCredentialsResult)
+    );
+  return factory.internalOfClient(all, users, description);
+}
+
 module.exports = {
+  describeUserScramCredentialsResult,
   electLeadersResult,
   createFuture,
   internalFuture,
