@@ -4640,3 +4640,826 @@ napi_value js_admin_describe_delegation_token(napi_env env, napi_callback_info i
 #undef ADMIN_RPC
 // Its tables are named only inside the section.
 #pragma GCC poison DescribeDelegationTokenOptions_desc DescribeDelegationTokenResult_desc
+
+// ---- the transaction and producer calls -----------------------------------------------------
+
+// A value of `long` that is -1 for Java's empty `OptionalLong` (or `OptionalInt`), as `null`.
+static napi_value js_int64_or_null(napi_env env, int64_t n) {
+    return n == -1 ? js_null(env) : js_int64(env, n);
+}
+
+// A TransactionState singleton as Java's ordinal (the C enum's order is Java's
+// declaration order), or NULL with a JS exception pending.
+static napi_value transaction_state_to_js(napi_env env, const kafka_admin_TransactionState_t* state) {
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_admin_TransactionState_e e = kafka_admin_TransactionState_UNKNOWN;
+    kafka_common_Error_t* err = FFI_SET(e, kafka_admin_TransactionState__enum_err(state, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return js_int32(env, (int32_t)e);
+}
+
+// A TransactionState of Java's ordinal, a singleton.
+static const kafka_admin_TransactionState_t* transaction_state_of(int32_t ordinal, kafka_common_Error_t** out_err) {
+    switch (ordinal) {
+        case 0: return kafka_admin_TransactionState_ongoing_err(out_err);
+        case 1: return kafka_admin_TransactionState_prepare_abort_err(out_err);
+        case 2: return kafka_admin_TransactionState_prepare_commit_err(out_err);
+        case 3: return kafka_admin_TransactionState_complete_abort_err(out_err);
+        case 4: return kafka_admin_TransactionState_complete_commit_err(out_err);
+        case 5: return kafka_admin_TransactionState_empty_err(out_err);
+        case 6: return kafka_admin_TransactionState_prepare_epoch_fence_err(out_err);
+        default: return kafka_admin_TransactionState_unknown_err(out_err);
+    }
+}
+
+static const void* transaction_state_item(int32_t ordinal, kafka_common_Error_t** out_err) {
+    return transaction_state_of(ordinal, out_err);
+}
+
+// A borrowed TopicPartition item as [topic, partition].
+static napi_value item_topic_partition(napi_env env, const void* item) {
+    return key_topic_partition(env, item);
+}
+
+// ---- describeProducers ----------------------------------------------------------------------
+
+#define ADMIN_RPC DescribeProducers
+
+// A borrowed ProducerState as [producerId, producerEpoch, lastSequence,
+// lastTimestamp, coordinatorEpoch (null: empty), currentTransactionStartOffset
+// (null: empty)].
+static napi_value item_producer_state(napi_env env, const void* item) {
+    const kafka_admin_ProducerState_t* p = (const kafka_admin_ProducerState_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    int64_t id = 0, timestamp = 0, start = 0;
+    int32_t epoch = 0, sequence = 0, coordinator_epoch = 0;
+    kafka_common_Error_t* err = FFI_SET(id, kafka_admin_ProducerState_producer_id_err(p, &ffi_err));
+    if (err == NULL) err = FFI_SET(epoch, kafka_admin_ProducerState_producer_epoch_err(p, &ffi_err));
+    if (err == NULL) err = FFI_SET(sequence, kafka_admin_ProducerState_last_sequence_err(p, &ffi_err));
+    if (err == NULL) err = FFI_SET(timestamp, kafka_admin_ProducerState_last_timestamp_err(p, &ffi_err));
+    if (err == NULL) err = FFI_SET(coordinator_epoch, kafka_admin_ProducerState_coordinator_epoch_err(p, &ffi_err));
+    if (err == NULL) err = FFI_SET(start, kafka_admin_ProducerState_current_transaction_start_offset_err(p, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value out;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 6, &out), NULL);
+    napi_value parts[6] = {js_int64(env, id), js_int32(env, epoch), js_int32(env, sequence), js_int64(env, timestamp),
+                           coordinator_epoch == -1 ? js_null(env) : js_int32(env, coordinator_epoch), js_int64_or_null(env, start)};
+    for (uint32_t i = 0; i < 6; i++) {
+        if (parts[i] == NULL || napi_set_element(env, out, i, parts[i]) != napi_ok) {
+            if (parts[i] != NULL) js_throw_last_napi_error(env, "napi_set_element");
+            return NULL;
+        }
+    }
+    return out;
+}
+
+// A PartitionProducerState, owned by its future, as the array of its active
+// producers (the owned list of copies converted, then destroyed).
+static napi_value conv_partition_producer_state(napi_env env, void* v) {
+    if (v == NULL) return js_null(env);
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_List_t* producers = NULL;
+    kafka_common_Error_t* err = FFI_SET(
+        producers, kafka_admin_DescribeProducersResult_PartitionProducerState_active_producers_err(
+                       (const kafka_admin_DescribeProducersResult_PartitionProducerState_t*)v, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return owned_list_to_js(env, producers, item_producer_state, 1);
+}
+
+static kafka_common_KafkaFuture_t* describe_producers_partition_result(napi_env env, const void* result, napi_value key,
+                                                                         kafka_common_Error_t** out_err) {
+    kafka_common_TopicPartition_t* tp = tp_from_js(env, key);
+    if (tp == NULL) return NULL;
+    kafka_common_KafkaFuture_t* future = kafka_admin_DescribeProducersResult_partition_result((const ADMIN_RESULT_T*)result, tp, out_err);
+    kafka_common_Error_t* ffi_err = NULL;
+    error_warn(env, 1, FFI_ERR(kafka_common_TopicPartition_destroy_err(tp, &ffi_err)));
+    return future;
+}
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeProducersOptions_set_timeout_ms_err)
+ADMIN_OPT_INT32(brokerId, kafka_admin_DescribeProducersOptions_set_broker_id_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeProducersOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeProducersOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(brokerId), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeProducersResult_destroy_err),
+    {ADMIN_ACC_JS(partition_result, describe_producers_partition_result, conv_partition_producer_state), ADMIN_ACC_END},
+};
+
+// adminDescribeProducers(handle, partitions, options): the partitions an array
+// of [topic, partition]; the result's futures are `partition_result(partition)`.
+napi_value js_admin_describe_producers(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* partitions = handle_list(env, argv[1], tp_from_js_item, tp_item_destroy);
+    if (partitions == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, partitions, tp_item_destroy);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_describe_producers_with_options_err(a->view, partitions, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, partitions, tp_item_destroy);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeProducersOptions_desc DescribeProducersResult_desc
+
+// ---- describeTransactions -------------------------------------------------------------------
+
+#define ADMIN_RPC DescribeTransactions
+
+// A TransactionDescription, owned by its future, as [coordinatorId,
+// stateOrdinal, producerId, producerEpoch, transactionTimeoutMs,
+// transactionStartTimeMs (null: empty), [[topic, partition], ...]].
+static napi_value conv_transaction_description(napi_env env, void* v) {
+    if (v == NULL) return js_null(env);
+    const kafka_admin_TransactionDescription_t* d = (const kafka_admin_TransactionDescription_t*)v;
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t coordinator = 0, epoch = 0;
+    int64_t producer = 0, timeout = 0, start = 0;
+    const kafka_admin_TransactionState_t* state = NULL;
+    kafka_List_t* partitions = NULL;
+    kafka_common_Error_t* err = FFI_SET(coordinator, kafka_admin_TransactionDescription_coordinator_id_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(state, kafka_admin_TransactionDescription_state_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(producer, kafka_admin_TransactionDescription_producer_id_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(epoch, kafka_admin_TransactionDescription_producer_epoch_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(timeout, kafka_admin_TransactionDescription_transaction_timeout_ms_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(start, kafka_admin_TransactionDescription_transaction_start_time_ms_err(d, &ffi_err));
+    if (err == NULL) err = FFI_SET(partitions, kafka_admin_TransactionDescription_topic_partitions_err(d, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    // The list of copies is owned: converted, then destroyed with them.
+    napi_value tps = owned_list_to_js(env, partitions, item_topic_partition, 1);
+    if (tps == NULL) return NULL;
+    napi_value out;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 7, &out), NULL);
+    napi_value parts[7] = {js_int32(env, coordinator), transaction_state_to_js(env, state), js_int64(env, producer),
+                           js_int32(env, epoch), js_int64(env, timeout), js_int64_or_null(env, start), tps};
+    for (uint32_t i = 0; i < 7; i++) {
+        if (parts[i] == NULL || napi_set_element(env, out, i, parts[i]) != napi_ok) {
+            if (parts[i] != NULL) js_throw_last_napi_error(env, "napi_set_element");
+            return NULL;
+        }
+    }
+    return out;
+}
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeTransactionsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeTransactionsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeTransactionsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeTransactionsResult_destroy_err),
+    {ADMIN_ACC_STR(description, kafka_admin_DescribeTransactionsResult_description, conv_transaction_description), ADMIN_ACC_END},
+};
+
+// adminDescribeTransactions(handle, transactionalIds, options): the result's
+// futures are `description(transactionalId)`.
+napi_value js_admin_describe_transactions(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* ids = string_list(env, argv[1]);
+    if (ids == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, ids, free_item);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_describe_transactions_with_options_err(a->view, ids, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, ids, free_item);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeTransactionsOptions_desc DescribeTransactionsResult_desc
+
+// ---- abortTransaction -----------------------------------------------------------------------
+
+#define ADMIN_RPC AbortTransaction
+
+ADMIN_OPT_TIMEOUT(kafka_admin_AbortTransactionOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_AbortTransactionOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_AbortTransactionOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_AbortTransactionResult_destroy_err),
+    {ADMIN_ACC_ONE(all, kafka_admin_AbortTransactionResult_all_err, NULL), ADMIN_ACC_END},
+};
+
+// adminAbortTransaction(handle, spec, options): the spec as [[topic,
+// partition], producerId (bigint), producerEpoch, coordinatorEpoch]; the
+// result's one future is `all`.
+napi_value js_admin_abort_transaction(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    int ok = 1;
+    napi_value k = element(env, argv[1], 0);
+    napi_value p = k == NULL ? NULL : element(env, argv[1], 1);
+    napi_value e = p == NULL ? NULL : element(env, argv[1], 2);
+    napi_value c = e == NULL ? NULL : element(env, argv[1], 3);
+    if (c == NULL) return NULL;
+    int64_t producer_id = 0;
+    bool lossless = false;
+    if (napi_get_value_bigint_int64(env, p, &producer_id, &lossless) != napi_ok) {
+        napi_throw_type_error(env, NULL, "a producer id must be a bigint");
+        return NULL;
+    }
+    int32_t epoch = int32_of(env, e, "a producer epoch", &ok);
+    int32_t coordinator_epoch = ok ? int32_of(env, c, "a coordinator epoch", &ok) : 0;
+    if (!ok) return NULL;
+    kafka_common_TopicPartition_t* tp = tp_from_js(env, k);
+    if (tp == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_admin_AbortTransactionSpec_t* spec = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(spec, kafka_admin_AbortTransactionSpec_new_err(tp, producer_id, (int16_t)epoch, coordinator_epoch, &ffi_err));
+    // The spec copies the partition.
+    error_warn(env, 1, FFI_ERR(kafka_common_TopicPartition_destroy_err(tp, &ffi_err)));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    ADMIN_RESULT_T* r = NULL;
+    if (o != NULL)
+        err = FFI_SET(r, kafka_admin_Admin_abort_transaction_with_options_err(a->view, spec, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    // The call copies the spec.
+    error_warn(env, 1, FFI_ERR(kafka_admin_AbortTransactionSpec_destroy_err(spec, &ffi_err)));
+    if (o == NULL) return NULL;
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison AbortTransactionOptions_desc AbortTransactionResult_desc
+
+// ---- forceTerminateTransaction --------------------------------------------------------------
+
+#define ADMIN_RPC TerminateTransaction
+
+ADMIN_OPT_TIMEOUT(kafka_admin_TerminateTransactionOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_TerminateTransactionOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_TerminateTransactionOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_TerminateTransactionResult_destroy_err),
+    {ADMIN_ACC_ONE(result, kafka_admin_TerminateTransactionResult_result_err, NULL), ADMIN_ACC_END},
+};
+
+// adminForceTerminateTransaction(handle, transactionalId, options): the
+// result's one future is `result`.
+napi_value js_admin_force_terminate_transaction(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    char* id = js_string_dup(env, argv[1], "a transactional id must be a string");
+    if (id == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        free(id);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_force_terminate_transaction_with_options_err(a->view, id, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    free(id);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison TerminateTransactionOptions_desc TerminateTransactionResult_desc
+
+// ---- listTransactions -----------------------------------------------------------------------
+
+#define ADMIN_RPC ListTransactions
+
+// A borrowed TransactionListing as [transactionalId, producerId, stateOrdinal].
+static napi_value item_transaction_listing(napi_env env, const void* item) {
+    const kafka_admin_TransactionListing_t* l = (const kafka_admin_TransactionListing_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    const char* id = NULL;
+    int64_t producer = 0;
+    const kafka_admin_TransactionState_t* state = NULL;
+    kafka_common_Error_t* err = FFI_SET(id, kafka_admin_TransactionListing_transactional_id_err(l, &ffi_err));
+    if (err == NULL) err = FFI_SET(producer, kafka_admin_TransactionListing_producer_id_err(l, &ffi_err));
+    if (err == NULL) err = FFI_SET(state, kafka_admin_TransactionListing_state_err(l, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value out;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 3, &out), NULL);
+    napi_value parts[3] = {js_string_or_null(env, id), js_int64(env, producer), transaction_state_to_js(env, state)};
+    for (uint32_t i = 0; i < 3; i++) {
+        if (parts[i] == NULL || napi_set_element(env, out, i, parts[i]) != napi_ok) {
+            if (parts[i] != NULL) js_throw_last_napi_error(env, "napi_set_element");
+            return NULL;
+        }
+    }
+    return out;
+}
+
+// A broker's listings, a list borrowed from its future, as an array.
+static napi_value conv_transaction_listings(napi_env env, void* v) {
+    return admin_list_to_js(env, (const kafka_List_t*)v, item_transaction_listing, 0);
+}
+
+// `byBrokerId()`'s value, a map (owned by its future) of broker ids to
+// futures (owned by the map), as [[brokerId, slot], ...]: each future a
+// context of its own, which keeps the outer future's context, and so the map,
+// alive (admin_future_new_borrowed_from_value).
+static napi_value conv_by_broker_id(napi_env env, void* v) {
+    const kafka_Map_t* map = (const kafka_Map_t*)v;
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t n = 0;
+    kafka_common_Error_t* err = map == NULL ? NULL : FFI_SET(n, kafka_Map_size_err(map, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value out;
+    NAPI_CHECK(env, napi_create_array_with_length(env, (size_t)n, &out), NULL);
+    int32_t* made = n > 0 ? (int32_t*)calloc((size_t)n, sizeof(int32_t)) : NULL;
+    if (n > 0 && made == NULL) {
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    int32_t count = 0;
+    int ok = 1;
+    for (int32_t i = 0; ok && i < n; i++) {
+        void* k = NULL;
+        void* f = NULL;
+        err = FFI_SET(k, kafka_Map_key_err(map, i, &ffi_err));
+        if (err == NULL) err = FFI_SET(f, kafka_Map_value_err(map, i, &ffi_err));
+        if (err != NULL) {
+            ok = 0;
+            break;
+        }
+        int32_t slot = admin_future_new_borrowed_from_value(env, (kafka_common_KafkaFuture_t*)f, conv_transaction_listings);
+        if (slot < 0) {
+            ok = 0;
+            break;
+        }
+        made[count++] = slot;
+        napi_value pair, broker, slot_value;
+        if (napi_create_array_with_length(env, 2, &pair) != napi_ok || napi_create_int32(env, *(const int32_t*)k, &broker) != napi_ok
+            || napi_create_int32(env, slot, &slot_value) != napi_ok || napi_set_element(env, pair, 0, broker) != napi_ok
+            || napi_set_element(env, pair, 1, slot_value) != napi_ok || napi_set_element(env, out, (uint32_t)i, pair) != napi_ok) {
+            js_throw_last_napi_error(env, "the brokers' futures");
+            ok = 0;
+        }
+    }
+    if (!ok)
+        for (int32_t j = 0; j < count; j++) admin_future_drop_borrowed(env, made[j]);
+    free(made);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return ok ? out : NULL;
+}
+
+// `filterProducerIds`: an array of bigints, as a borrowed list of `const
+// int64_t *` (Java's `new HashSet<>(producerIdFilters)`: JS stores the copy).
+static int ADMIN_SETTER_FN(filterProducerIds)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    int ok = 0;
+    uint32_t n = length_of(env, v, &ok);
+    if (!ok) return -1;
+    int64_t* ids = n > 0 ? (int64_t*)calloc(n, sizeof(int64_t)) : NULL;
+    if (n > 0 && ids == NULL) {
+        napi_throw_error(env, NULL, "out of memory");
+        return -1;
+    }
+    kafka_List_t* list = list_new(env);
+    int rc = list == NULL ? -1 : 0;
+    for (uint32_t i = 0; rc == 0 && i < n; i++) {
+        napi_value x = element(env, v, i);
+        bool lossless = false;
+        if (x == NULL || napi_get_value_bigint_int64(env, x, &ids[i], &lossless) != napi_ok) {
+            if (x != NULL) napi_throw_type_error(env, NULL, "a producer id must be a bigint");
+            rc = -1;
+        } else if (list_add(env, list, &ids[i], NULL) < 0) {
+            rc = -1;
+        }
+    }
+    if (rc == 0) kafka_admin_ListTransactionsOptions_filter_producer_ids_err((ADMIN_OPTIONS_T*)o, list, out_err);  // copies
+    if (list != NULL) admin_list_free(env, list, NULL);
+    free(ids);
+    return rc;
+}
+// `filterStates`: an array of ordinals, as a borrowed list of singletons.
+static int ADMIN_SETTER_FN(filterStates)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    kafka_List_t* list = singleton_list(env, v, transaction_state_item);
+    if (list == NULL) return -1;
+    kafka_admin_ListTransactionsOptions_filter_states_err((ADMIN_OPTIONS_T*)o, list, out_err);  // copies
+    admin_list_free(env, list, NULL);
+    return 0;
+}
+// `filterOnDuration`: a bigint.
+static int ADMIN_SETTER_FN(filterOnDuration)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    int64_t ms = 0;
+    if (admin_option_int64(env, v, &ms) < 0) return -1;
+    kafka_admin_ListTransactionsOptions_filter_on_duration_err((ADMIN_OPTIONS_T*)o, ms, out_err);
+    return 0;
+}
+// `filterOnTransactionalIdPattern`: a string, or null, Java's null.
+static int ADMIN_SETTER_FN(filterOnTransactionalIdPattern)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
+    int ok = 1;
+    char* pattern = string_or_null(env, v, "a transactional id pattern must be a string", &ok);
+    if (!ok) return -1;
+    kafka_admin_ListTransactionsOptions_filter_on_transactional_id_pattern_err((ADMIN_OPTIONS_T*)o, pattern, out_err);  // copies
+    free(pattern);
+    return 0;
+}
+ADMIN_OPT_TIMEOUT(kafka_admin_ListTransactionsOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME,
+    ADMIN_OPTIONS_NEW_FN(kafka_admin_ListTransactionsOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_ListTransactionsOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(filterStates), ADMIN_SETTER(filterProducerIds), ADMIN_SETTER(filterOnDuration),
+     ADMIN_SETTER(filterOnTransactionalIdPattern), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_ListTransactionsResult_destroy_err),
+    {ADMIN_ACC_ONE(by_broker_id, kafka_admin_ListTransactionsResult_by_broker_id_err, conv_by_broker_id), ADMIN_ACC_END},
+};
+
+// adminListTransactions(handle, options): the result's one future is
+// `by_broker_id`, whose value holds a future per broker.
+napi_value js_admin_list_transactions(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 2 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[1]);
+    if (o == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_list_transactions_with_options_err(a->view, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison ListTransactionsOptions_desc ListTransactionsResult_desc
+
+// ---- fenceProducers -------------------------------------------------------------------------
+
+#define ADMIN_RPC FenceProducers
+
+// A producer's epoch, an `int16_t` owned by its future.
+static napi_value conv_int16_ptr(napi_env env, void* v) {
+    return js_int32(env, v == NULL ? 0 : (int32_t) * (const int16_t*)v);
+}
+
+ADMIN_OPT_TIMEOUT(kafka_admin_FenceProducersOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_FenceProducersOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_FenceProducersOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_FenceProducersResult_destroy_err),
+    {ADMIN_ACC_STR(producer_id, kafka_admin_FenceProducersResult_producer_id, conv_int64_ptr),
+     ADMIN_ACC_STR(epoch_id, kafka_admin_FenceProducersResult_epoch_id, conv_int16_ptr), ADMIN_ACC_END},
+};
+
+// adminFenceProducers(handle, transactionalIds, options): the result's
+// futures are `producer_id(transactionalId)` and `epoch_id(transactionalId)`,
+// which complete together with that id's fencing.
+napi_value js_admin_fence_producers(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    kafka_List_t* ids = string_list(env, argv[1]);
+    if (ids == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) {
+        admin_list_free(env, ids, free_item);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_fence_producers_with_options_err(a->view, ids, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    admin_list_free(env, ids, free_item);
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison FenceProducersOptions_desc FenceProducersResult_desc
+
+// ---- describeFeatures -----------------------------------------------------------------------
+
+#define ADMIN_RPC DescribeFeatures
+
+// A borrowed FinalizedVersionRange as [minVersionLevel, maxVersionLevel].
+static napi_value item_finalized_version_range(napi_env env, const void* item) {
+    const kafka_admin_FinalizedVersionRange_t* r = (const kafka_admin_FinalizedVersionRange_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    int16_t min = 0, max = 0;
+    kafka_common_Error_t* err = FFI_SET(min, kafka_admin_FinalizedVersionRange_min_version_level_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(max, kafka_admin_FinalizedVersionRange_max_version_level_err(r, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value out;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 2, &out), NULL);
+    napi_value parts[2] = {js_int32(env, min), js_int32(env, max)};
+    for (uint32_t i = 0; i < 2; i++) {
+        if (parts[i] == NULL || napi_set_element(env, out, i, parts[i]) != napi_ok) {
+            if (parts[i] != NULL) js_throw_last_napi_error(env, "napi_set_element");
+            return NULL;
+        }
+    }
+    return out;
+}
+
+// A borrowed SupportedVersionRange as [minVersion, maxVersion].
+static napi_value item_supported_version_range(napi_env env, const void* item) {
+    const kafka_admin_SupportedVersionRange_t* r = (const kafka_admin_SupportedVersionRange_t*)item;
+    kafka_common_Error_t* ffi_err = NULL;
+    int16_t min = 0, max = 0;
+    kafka_common_Error_t* err = FFI_SET(min, kafka_admin_SupportedVersionRange_min_version_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(max, kafka_admin_SupportedVersionRange_max_version_err(r, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value out;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 2, &out), NULL);
+    napi_value parts[2] = {js_int32(env, min), js_int32(env, max)};
+    for (uint32_t i = 0; i < 2; i++) {
+        if (parts[i] == NULL || napi_set_element(env, out, i, parts[i]) != napi_ok) {
+            if (parts[i] != NULL) js_throw_last_napi_error(env, "napi_set_element");
+            return NULL;
+        }
+    }
+    return out;
+}
+
+// The FeatureMetadata a future owns as [finalized, epoch, supported]: each
+// map an array of [name, [min, max]] in its (ascending) order, the epoch a
+// bigint or null for Java's empty Optional (the FFI's -1).
+static napi_value conv_feature_metadata(napi_env env, void* v) {
+    const kafka_admin_FeatureMetadata_t* m = (const kafka_admin_FeatureMetadata_t*)v;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* finalized = NULL;
+    kafka_Map_t* supported = NULL;
+    int64_t epoch = -1;
+    kafka_common_Error_t* err = FFI_SET(finalized, kafka_admin_FeatureMetadata_finalized_features_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(epoch, kafka_admin_FeatureMetadata_finalized_features_epoch_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(supported, kafka_admin_FeatureMetadata_supported_features_err(m, &ffi_err));
+    // The maps are owned, their entries with them: converted, then destroyed.
+    napi_value js_finalized = err == NULL ? admin_map_to_js(env, finalized, admin_item_string, item_finalized_version_range) : NULL;
+    napi_value js_supported =
+        err == NULL && js_finalized != NULL ? admin_map_to_js(env, supported, admin_item_string, item_supported_version_range) : NULL;
+    if (finalized != NULL) error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(finalized, &ffi_err)));
+    if (supported != NULL) error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(supported, &ffi_err)));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    if (js_finalized == NULL || js_supported == NULL) return NULL;
+    napi_value js_epoch = js_int64_or_null(env, epoch);
+    if (js_epoch == NULL) return NULL;
+    napi_value out;
+    NAPI_CHECK(env, napi_create_array_with_length(env, 3, &out), NULL);
+    napi_value parts[3] = {js_finalized, js_epoch, js_supported};
+    for (uint32_t i = 0; i < 3; i++) {
+        if (napi_set_element(env, out, i, parts[i]) != napi_ok) {
+            js_throw_last_napi_error(env, "napi_set_element");
+            return NULL;
+        }
+    }
+    return out;
+}
+
+ADMIN_OPT_TIMEOUT(kafka_admin_DescribeFeaturesOptions_set_timeout_ms_err)
+ADMIN_OPT_INT32(nodeId, kafka_admin_DescribeFeaturesOptions_set_node_id_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_DescribeFeaturesOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_DescribeFeaturesOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(nodeId), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_DescribeFeaturesResult_destroy_err),
+    {ADMIN_ACC_ONE(feature_metadata, kafka_admin_DescribeFeaturesResult_feature_metadata_err, conv_feature_metadata), ADMIN_ACC_END},
+};
+
+// adminDescribeFeatures(handle, options): the result's one future is
+// `feature_metadata`.
+napi_value js_admin_describe_features(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 2 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[1]);
+    if (o == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_describe_features_with_options_err(a->view, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison DescribeFeaturesOptions_desc DescribeFeaturesResult_desc
+
+// ---- updateFeatures -------------------------------------------------------------------------
+
+#define ADMIN_RPC UpdateFeatures
+
+ADMIN_OPT_TIMEOUT(kafka_admin_UpdateFeaturesOptions_set_timeout_ms_err)
+ADMIN_OPT_BOOL(validateOnly, kafka_admin_UpdateFeaturesOptions_set_validate_only_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_UpdateFeaturesOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_UpdateFeaturesOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), ADMIN_SETTER(validateOnly), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_UpdateFeaturesResult_destroy_err),
+    {ADMIN_ACC_MAP(values, kafka_admin_UpdateFeaturesResult_values_err, key_string, NULL), ADMIN_ACC_END},
+};
+
+// A JS [maxVersionLevel, upgradeTypeCode] as an owned FeatureUpdate, or NULL
+// with a JS exception pending.
+static kafka_admin_FeatureUpdate_t* feature_update_from_js(napi_env env, napi_value pair) {
+    napi_value level = element(env, pair, 0);
+    napi_value code = level == NULL ? NULL : element(env, pair, 1);
+    int32_t l = 0, c = 0;
+    if (code == NULL || napi_get_value_int32(env, level, &l) != napi_ok || napi_get_value_int32(env, code, &c) != napi_ok) {
+        if (code != NULL) napi_throw_type_error(env, NULL, "a FeatureUpdate's level and upgrade type");
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_admin_FeatureUpdate_UpgradeType_t* type = NULL;
+    kafka_admin_FeatureUpdate_t* u = NULL;
+    kafka_common_Error_t* err = FFI_SET(type, kafka_admin_FeatureUpdate_UpgradeType_from_code_err(c, &ffi_err));
+    if (err == NULL) err = FFI_SET(u, kafka_admin_FeatureUpdate_new((int16_t)l, type, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return u;
+}
+
+// adminUpdateFeatures(handle, featureUpdates, options): featureUpdates an
+// array of [feature, [maxVersionLevel, upgradeTypeCode]]; the result's
+// futures are `values` (a map). The entry point is fallible: an empty map or
+// a blank feature name is the core's IllegalArgumentError, thrown here.
+napi_value js_admin_update_features(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    int ok = 0;
+    uint32_t n = length_of(env, argv[1], &ok);
+    if (!ok) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* map = NULL;
+    kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
+    for (uint32_t i = 0; err == NULL && ok && i < n; i++) {
+        napi_value pair = element(env, argv[1], i);
+        napi_value k = pair == NULL ? NULL : element(env, pair, 0);
+        napi_value v = pair == NULL ? NULL : element(env, pair, 1);
+        char* feature = k == NULL ? NULL : js_string_dup(env, k, "a feature name must be a string");
+        if (feature == NULL) {
+            ok = 0;
+            break;
+        }
+        kafka_admin_FeatureUpdate_t* u = v == NULL ? NULL : feature_update_from_js(env, v);
+        if (u == NULL) {
+            free(feature);
+            ok = 0;
+            break;
+        }
+        err = FFI_ERR(kafka_Map_put_err(map, feature, u, &ffi_err));
+        if (err != NULL) {
+            free(feature);
+            FFI_DISCARD(kafka_admin_FeatureUpdate_destroy_err(u, &ffi_err));
+        }
+    }
+    void* o = err == NULL && ok ? admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]) : NULL;
+    ADMIN_RESULT_T* r = NULL;
+    if (o != NULL)
+        err = FFI_SET(r, kafka_admin_Admin_update_features_with_options(a->view, map, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    // The map's keys and FeatureUpdates are copied by the call: freed here.
+    if (map != NULL) {
+        int32_t size = 0;
+        kafka_common_Error_t* e2 = FFI_SET(size, kafka_Map_size_err(map, &ffi_err));
+        for (int32_t i = 0; e2 == NULL && i < size; i++) {
+            void* key = NULL;
+            void* u = NULL;
+            e2 = FFI_SET(key, kafka_Map_key_err(map, i, &ffi_err));
+            if (e2 == NULL) e2 = FFI_SET(u, kafka_Map_value_err(map, i, &ffi_err));
+            if (e2 == NULL) {
+                free(key);
+                e2 = FFI_ERR(kafka_admin_FeatureUpdate_destroy_err((kafka_admin_FeatureUpdate_t*)u, &ffi_err));
+            }
+        }
+        error_warn(env, 1, e2);
+        error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(map, &ffi_err)));
+    }
+    if (o == NULL) {
+        if (err != NULL) error_throw_owned(env, err);
+        return NULL;
+    }
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison UpdateFeaturesOptions_desc UpdateFeaturesResult_desc
+
+// ---- unregisterController -------------------------------------------------------------------
+
+#define ADMIN_RPC UnregisterController
+
+ADMIN_OPT_TIMEOUT(kafka_admin_UnregisterControllerOptions_set_timeout_ms_err)
+static const AdminOptionsDesc ADMIN_OPTIONS_DESC = {
+    ADMIN_OPTIONS_NAME, ADMIN_OPTIONS_NEW_FN(kafka_admin_UnregisterControllerOptions_new_err),
+    ADMIN_OPTIONS_DESTROY_FN(kafka_admin_UnregisterControllerOptions_destroy_err),
+    {ADMIN_SETTER(timeoutMs), {NULL, NULL}},
+};
+static const AdminResultDesc ADMIN_RESULT_DESC = {
+    ADMIN_RESULT_NAME, ADMIN_RESULT_DESTROY_FN(kafka_admin_UnregisterControllerResult_destroy_err),
+    {ADMIN_ACC_ONE(all, kafka_admin_UnregisterControllerResult_all_err, NULL), ADMIN_ACC_END},
+};
+
+// adminUnregisterController(handle, controllerId, options): the result's one
+// future is `all`.
+napi_value js_admin_unregister_controller(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
+    if (a == NULL) return NULL;
+    int32_t id = 0;
+    if (napi_get_value_int32(env, argv[1], &id) != napi_ok) {
+        napi_throw_type_error(env, NULL, "a controller id must be a number");
+        return NULL;
+    }
+    void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
+    if (o == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    ADMIN_RESULT_T* r = NULL;
+    kafka_common_Error_t* err =
+        FFI_SET(r, kafka_admin_Admin_unregister_controller_with_options_err(a->view, id, (ADMIN_OPTIONS_T*)admin_opts(o), &ffi_err));
+    return admin_rpc_return(env, &ADMIN_OPTIONS_DESC, o, err, r, &ADMIN_RESULT_DESC);
+}
+
+#undef ADMIN_RPC
+// Its tables are named only inside the section.
+#pragma GCC poison UnregisterControllerOptions_desc UnregisterControllerResult_desc
