@@ -433,6 +433,15 @@ napi_value js_admin_create_delegation_token(napi_env env, napi_callback_info inf
 napi_value js_admin_renew_delegation_token(napi_env env, napi_callback_info info);
 napi_value js_admin_expire_delegation_token(napi_env env, napi_callback_info info);
 napi_value js_admin_describe_delegation_token(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_producers(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_transactions(napi_env env, napi_callback_info info);
+napi_value js_admin_abort_transaction(napi_env env, napi_callback_info info);
+napi_value js_admin_force_terminate_transaction(napi_env env, napi_callback_info info);
+napi_value js_admin_list_transactions(napi_env env, napi_callback_info info);
+napi_value js_admin_fence_producers(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_features(napi_env env, napi_callback_info info);
+napi_value js_admin_update_features(napi_env env, napi_callback_info info);
+napi_value js_admin_unregister_controller(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_update_consumer_group_offsets(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_add_topic(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_mark_topic_for_deletion(napi_env env, napi_callback_info info);

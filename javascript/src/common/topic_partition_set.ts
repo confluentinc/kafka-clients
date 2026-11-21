@@ -21,6 +21,8 @@
 // TopicPartition gives.
 
 import { JavaForms } from '../internal/args';
+import { create } from '../internal/throwable';
+import { UnsupportedOperationError } from '../unsupported_operation_error';
 import { TopicPartition } from './topic_partition';
 
 const FORMS = new JavaForms('TopicPartitionSet', [[], ['values']], {
@@ -59,6 +61,10 @@ function keyOf(tp: unknown): string {
  */
 export class TopicPartitionSet implements Iterable<TopicPartition> {
   readonly #members = new Map<string, TopicPartition | null>();
+
+  // A read-only view a data class holds (TransactionDescription), as Java's
+  // unmodifiable set: the writes throw.
+  #readOnly = false;
 
   /**
    * Creates an empty set.
@@ -158,6 +164,7 @@ export class TopicPartitionSet implements Iterable<TopicPartition> {
   add(value: TopicPartition | null): this;
   add(value: unknown): this {
     ADD_FORMS.match(value, arguments.length);
+    this.#checkWritable();
     const tp = ADD_FORMS.value(value, 'value');
     const key = keyOf(tp);
     if (!this.#members.has(key)) this.#members.set(key, tp as TopicPartition | null);
@@ -186,12 +193,36 @@ export class TopicPartitionSet implements Iterable<TopicPartition> {
   delete(value: TopicPartition | null): boolean;
   delete(value: unknown): boolean {
     DELETE_FORMS.match(value, arguments.length);
+    this.#checkWritable();
     return this.#members.delete(keyOf(DELETE_FORMS.value(value, 'value')));
   }
 
-  /** Removes every member. */
+  /**
+   * Removes every member.
+   *
+   * @throws `UnsupportedOperationError` when the set is a read-only view a
+   *   data class holds, as Java's unmodifiable set throws
+   */
   clear(): void {
+    this.#checkWritable();
     this.#members.clear();
+  }
+
+  /**
+   * Makes the set read-only, as the view a data class holds. Called by the
+   * data classes.
+   *
+   * @returns this set
+   * @internal
+   */
+  internalSetReadOnly(): this {
+    this.#readOnly = true;
+    return this;
+  }
+
+  /** Throws `UnsupportedOperationError` when the set is read-only. */
+  #checkWritable(): void {
+    if (this.#readOnly) throw create(UnsupportedOperationError, '');
   }
 
   /**

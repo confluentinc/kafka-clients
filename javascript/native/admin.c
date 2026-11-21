@@ -115,6 +115,7 @@ static void slot_give_back(Admin* a, int32_t i) {
 static void future_release(napi_env env, AdminFuture* f) {
     if (--f->refs != 0) return;
     Admin* a = f->a;
+    AdminFuture* parent = f->parent;
     kafka_common_Error_t* ffi_err = NULL;
     if (f->slot >= 0) slot_give_back(a, f->slot);
     if (f->owned && f->future != NULL)
@@ -122,6 +123,8 @@ static void future_release(napi_env env, AdminFuture* f) {
     delete_ref(env, &f->keep);
     free(f);
     atomic_fetch_add(&stat_futures_freed, 1);
+    // A future borrowed from another's value: that one's reference, last.
+    if (parent != NULL) future_release(env, parent);
     admin_release(a);
 }
 
@@ -154,6 +157,28 @@ int32_t admin_future_new(napi_env env, Admin* a, kafka_common_KafkaFuture_t* fut
         return -1;
     }
     return f->slot;
+}
+
+// The future whose value its converter is converting (future_on_wait), on
+// this thread: worker threads share the addon, so it is thread-local.
+static _Thread_local AdminFuture* converting = NULL;
+
+int32_t admin_future_new_borrowed_from_value(napi_env env, kafka_common_KafkaFuture_t* future, admin_conv_fn conv) {
+    AdminFuture* parent = converting;
+    if (parent == NULL) {
+        napi_throw_error(env, NULL, "a future borrowed from a value outside its conversion");
+        return -1;
+    }
+    int32_t slot = admin_future_new(env, parent->a, future, 0, NULL, conv);
+    if (slot < 0) return -1;
+    parent->refs++;
+    parent->a->slots[slot]->parent = parent;
+    return slot;
+}
+
+void admin_future_drop_borrowed(napi_env env, int32_t slot) {
+    if (converting != NULL && slot >= 0 && slot < converting->a->slot_count && converting->a->slots[slot] != NULL)
+        future_release(env, converting->a->slots[slot]);
 }
 
 // ---- unwrapping -------------------------------------------------------------
@@ -256,7 +281,10 @@ static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaqu
             argv[1] = error_take_to_js(env, error);
             error = NULL;
         } else {
+            AdminFuture* outer = converting;
+            converting = f;
             argv[0] = f->conv != NULL ? f->conv(env, value) : NULL;
+            converting = outer;
             if (argv[0] == NULL && f->conv == NULL) napi_get_null(env, &argv[0]);
             if (argv[0] == NULL) {
                 // The conversion failed: the pending exception is the future's failure.
