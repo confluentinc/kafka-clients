@@ -764,3 +764,528 @@ test('the admin client emits the preview notice once; the mock emits none', () =
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stderr.split('\n').filter((l) => l.includes('ExperimentalWarning')).length, 1, r.stderr);
 });
+
+// ---- the security calls ------------------------------------------------------------------
+//
+// The admin client's security calls over an unreachable bootstrap address:
+// what Python's test_admin_client_security.py checks of them. Each call
+// returns its Result at once, as Java's does, and every future of it fails
+// with Java's message for a call that found no node; the forms and the null
+// arguments are refused as Java refuses them. Java's KafkaAdminClientTest
+// cases of these RPCs (testDescribeAcls, testCreateAcls, testDeleteAcls and
+// the rest) script broker responses through Java's MockClient, which the
+// binding cannot inject (javascript/CLAUDE.md, JavaScript Binding Conventions,
+// Tests); the Rust core translates them.
+
+const { CreateAclsOptions, DeleteAclsOptions, DescribeAclsOptions } = require('@confluentinc/kafka-javascript/admin');
+const {
+  AccessControlEntry,
+  AccessControlEntryFilter,
+  AclBinding,
+  AclBindingFilter,
+  AclBindingFilterMap,
+  AclBindingMap,
+  AclOperation,
+  AclPermissionType,
+} = require('@confluentinc/kafka-javascript/common/acl');
+const { InvalidRequestError } = require('@confluentinc/kafka-javascript/common/errors');
+const { KafkaFuture: KafkaFutureClass } = require('@confluentinc/kafka-javascript/common');
+const { PatternType, ResourcePattern, ResourcePatternFilter, ResourceType } = require('@confluentinc/kafka-javascript/common/resource');
+
+/** @param {string} name */
+const binding = (name = 't') =>
+  new AclBinding({
+    pattern: new ResourcePattern({ resourceType: ResourceType.TOPIC, name, patternType: PatternType.LITERAL }),
+    entry: new AccessControlEntry({
+      principal: 'User:a',
+      host: '*',
+      operation: AclOperation.READ,
+      permissionType: AclPermissionType.ALLOW,
+    }),
+  });
+
+test("the ACL calls return at once and time out with the core's message naming Java's call", async () => {
+  const client = admin();
+  const timedOut = (/** @type {string} */ call) => `Timed out waiting for a node assignment. Call: ${call}`;
+  try {
+    let started = Date.now();
+    const described = client.describeAcls({ filter: AclBindingFilter.ANY, options: new DescribeAclsOptions({ timeoutMs: 300 }) });
+    assert.ok(Date.now() - started < 1000);
+    let cause = await failure(described.values());
+    assert.ok(cause instanceof TimeoutError, String(cause));
+    assert.equal(cause.message, timedOut('describeAcls'));
+
+    started = Date.now();
+    const created = client.createAcls({
+      acls: [binding('a'), binding('b'), binding('a')],
+      options: new CreateAclsOptions({ timeoutMs: 300 }),
+    });
+    assert.ok(Date.now() - started < 1000);
+    const values = created.values();
+    assert.ok(values instanceof AclBindingMap);
+    // Java's futures map holds one future per distinct binding.
+    assert.deepEqual([...values.keys()].map((b) => b.pattern().name()).sort(), ['a', 'b']);
+    const a = values.get(binding('a'));
+    assert.ok(a instanceof KafkaFutureClass);
+    for (const future of [...values.values(), created.all()]) {
+      cause = await failure(future);
+      assert.ok(cause instanceof TimeoutError, String(cause));
+      assert.equal(cause.message, timedOut('createAcls'));
+    }
+
+    const deleted = client.deleteAcls({
+      filters: [AclBindingFilter.ANY, binding('c').toFilter()],
+      options: new DeleteAclsOptions({ timeoutMs: 300 }),
+    });
+    const byFilter = deleted.values();
+    assert.ok(byFilter instanceof AclBindingFilterMap);
+    assert.equal(byFilter.size(), 2);
+    assert.ok(byFilter.has(binding('c').toFilter()));
+    for (const future of [...byFilter.values(), deleted.all()]) {
+      cause = await failure(future);
+      assert.ok(cause instanceof TimeoutError, String(cause));
+      assert.equal(cause.message, timedOut('deleteAcls'));
+    }
+    // values() hands out a new map each call; the futures are the same.
+    assert.notEqual(deleted.values(), byFilter);
+    assert.equal(deleted.values().get(AclBindingFilter.ANY), byFilter.get(AclBindingFilter.ANY));
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test("testDescribeAcls' unknown filter: the core fails the future at once with Java's InvalidRequestException message", async () => {
+  const client = admin();
+  try {
+    const unknown = new AclBindingFilter({
+      patternFilter: new ResourcePatternFilter({ resourceType: ResourceType.UNKNOWN, name: null, patternType: PatternType.ANY }),
+      entryFilter: AccessControlEntryFilter.ANY,
+    });
+    const cause = await failure(client.describeAcls(unknown).values());
+    assert.ok(cause instanceof InvalidRequestError, String(cause));
+    assert.equal(cause.message, 'The AclBindingFilter must not contain UNKNOWN elements.');
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test("createAcls' binding with an UNKNOWN element: its own future fails with Java's message, the others go on", async () => {
+  const client = admin();
+  try {
+    const unknown = new AclBinding({
+      pattern: new ResourcePattern({ resourceType: ResourceType.UNKNOWN, name: 't', patternType: PatternType.LITERAL }),
+      entry: binding().entry(),
+    });
+    const result = client.createAcls({ acls: [unknown, binding()], options: new CreateAclsOptions({ timeoutMs: 300 }) });
+    const future = result.values().get(unknown);
+    assert.ok(future);
+    const cause = await failure(future);
+    assert.ok(cause instanceof InvalidRequestError, String(cause));
+    assert.equal(cause.message, 'Invalid ACL creation: Resource type is UNKNOWN.');
+    const other = result.values().get(binding());
+    assert.ok(other);
+    assert.ok((await failure(other)) instanceof TimeoutError);
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test("the ACL calls' forms and null arguments: TypeError naming the RPC's own parameter", async () => {
+  const client = admin();
+  try {
+    // A string is an Iterable<string> to tsc only as a wrong element type: the run time refuses it.
+    // @ts-expect-error a string where Java takes a Collection<AclBinding>
+    assert.throws(() => client.createAcls('acl'), { name: 'TypeError', message: 'acls must be an iterable of AclBinding, not a string' });
+    // @ts-expect-error a null collection
+    assert.throws(() => client.createAcls(null), { name: 'TypeError', message: 'acls must not be null' });
+    // @ts-expect-error a null element, which Java's loop dereferences
+    assert.throws(() => client.createAcls([binding(), null]), { name: 'TypeError', message: 'acls must not contain null' });
+    // @ts-expect-error a filter where Java takes an AclBinding
+    assert.throws(() => client.createAcls([AclBindingFilter.ANY]), {
+      name: 'TypeError',
+      message: 'acls must contain only AclBinding, not an AclBindingFilter',
+    });
+    // Java dereferences the bindings before the options.
+    // @ts-expect-error a null element and null options
+    assert.throws(() => client.createAcls({ acls: [null], options: null }), { name: 'TypeError', message: 'acls must not contain null' });
+    // @ts-expect-error null options
+    assert.throws(() => client.createAcls({ acls: [], options: null }), { name: 'TypeError', message: 'options must not be null' });
+    // @ts-expect-error a null filter, which Java dereferences first
+    assert.throws(() => client.describeAcls({ filter: null, options: null }), { name: 'TypeError', message: 'filter must not be null' });
+    // @ts-expect-error a binding where Java takes a filter
+    assert.throws(() => client.describeAcls(binding()), {
+      name: 'TypeError',
+      message: 'filter must be an AclBindingFilter, not an AclBinding',
+    });
+    // @ts-expect-error null options
+    assert.throws(() => client.describeAcls({ filter: AclBindingFilter.ANY, options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
+    // @ts-expect-error a null element, which Java's loop dereferences
+    assert.throws(() => client.deleteAcls([null]), { name: 'TypeError', message: 'filters must not contain null' });
+    // @ts-expect-error a string where Java takes a Collection<AclBindingFilter>
+    assert.throws(() => client.deleteAcls('f'), {
+      name: 'TypeError',
+      message: 'filters must be an iterable of AclBindingFilter, not a string',
+    });
+    assert.throws(
+      // @ts-expect-error a key Java's forms have not
+      () => client.deleteAcls({ filters: [], timeoutMs: 1 }),
+      { name: 'IllegalArgumentError', message: 'deleteAcls() takes one of (filters), (filters, options); got (filters, timeoutMs)' },
+    );
+    // Options of another RPC: the same shape to tsc, which only the run time refuses.
+    assert.throws(() => client.deleteAcls({ filters: [], options: new CreateAclsOptions() }), {
+      name: 'TypeError',
+      message: 'options must be a DeleteAclsOptions, not a CreateAclsOptions: build one with new DeleteAclsOptions()',
+    });
+    // An empty collection: Java's call still runs, its futures none.
+    const none = client.deleteAcls([]);
+    assert.equal(none.values().size(), 0);
+    assert.deepEqual(await none.all().get(), []);
+    assert.equal(client.createAcls([]).values().size(), 0);
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+// The quota, SCRAM and delegation-token calls, as Python's
+// test_admin_client_security.py checks them over an unreachable bootstrap
+// address. Java's KafkaAdminClientTest cases of these RPCs
+// (testDescribeClientQuotas, testAlterClientQuotas,
+// testDescribeUserScramCredentials, testAlterUserScramCredentials* and the
+// delegation-token ones) script broker responses through Java's MockClient,
+// which the binding cannot inject (javascript/CLAUDE.md, JavaScript Binding
+// Conventions, Tests); the Rust core translates them.
+
+const {
+  AlterClientQuotasOptions,
+  AlterUserScramCredentialsOptions,
+  AlterUserScramCredentialsResult,
+  CreateDelegationTokenOptions,
+  DescribeClientQuotasOptions,
+  DescribeDelegationTokenOptions,
+  DescribeUserScramCredentialsOptions,
+  ExpireDelegationTokenOptions,
+  RenewDelegationTokenOptions,
+  ScramCredentialInfo,
+  ScramMechanism,
+  UserScramCredentialAlteration,
+  UserScramCredentialDeletion,
+  UserScramCredentialUpsertion,
+} = require('@confluentinc/kafka-javascript/admin');
+const {
+  ClientQuotaAlteration,
+  ClientQuotaEntity,
+  ClientQuotaEntityMap,
+  ClientQuotaFilter,
+  ClientQuotaFilterComponent,
+} = require('@confluentinc/kafka-javascript/common/quota');
+const { KafkaPrincipal } = require('@confluentinc/kafka-javascript/common/security/auth');
+
+const QUOTA_ENTITY = new ClientQuotaEntity(new Map([[ClientQuotaEntity.USER, 'alice']]));
+/** @param {string} key @param {number | null} value */
+const quotaOp = (key, value) => new ClientQuotaAlteration.Op({ key, value });
+
+test("the quota, SCRAM and delegation-token calls return at once and time out with the core's message naming Java's call", async () => {
+  const client = admin();
+  const timedOut = (/** @type {string} */ call) => `Timed out waiting for a node assignment. Call: ${call}`;
+  const user = new KafkaPrincipal({ principalType: KafkaPrincipal.USER_TYPE, name: 'alice' });
+  /** @type {Array<[string, () => import('@confluentinc/kafka-javascript/common').KafkaFuture<unknown>[]]>} */
+  const calls = [
+    [
+      'createDelegationToken',
+      () => [client.createDelegationToken(new CreateDelegationTokenOptions({ timeoutMs: 300, renewers: [user] })).delegationToken()],
+    ],
+    [
+      'renewDelegationToken',
+      () => [
+        client
+          .renewDelegationToken({ hmac: Buffer.from('mac'), options: new RenewDelegationTokenOptions({ timeoutMs: 300 }) })
+          .expiryTimestamp(),
+      ],
+    ],
+    [
+      'expireDelegationToken',
+      () => [
+        client
+          .expireDelegationToken({ hmac: Buffer.from('mac'), options: new ExpireDelegationTokenOptions({ timeoutMs: 300 }) })
+          .expiryTimestamp(),
+      ],
+    ],
+    [
+      'describeDelegationToken',
+      () => [client.describeDelegationToken(new DescribeDelegationTokenOptions({ timeoutMs: 300 })).delegationTokens()],
+    ],
+    [
+      'describeClientQuotas',
+      () => {
+        const entities = client
+          .describeClientQuotas({ filter: ClientQuotaFilter.all(), options: new DescribeClientQuotasOptions({ timeoutMs: 300 }) })
+          .entities();
+        assert.ok(entities);
+        return [entities];
+      },
+    ],
+    [
+      'alterClientQuotas',
+      () => {
+        const r = client.alterClientQuotas({
+          entries: [new ClientQuotaAlteration({ entity: QUOTA_ENTITY, ops: [quotaOp('producer_byte_rate', 1024)] })],
+          options: new AlterClientQuotasOptions({ timeoutMs: 300 }),
+        });
+        const values = r.values();
+        assert.ok(values instanceof ClientQuotaEntityMap);
+        assert.ok(values.has(new ClientQuotaEntity(new Map([['user', 'alice']]))));
+        return [...values.values(), r.all()];
+      },
+    ],
+    [
+      'describeUserScramCredentials',
+      () => {
+        const r = client.describeUserScramCredentials({
+          users: ['u'],
+          options: new DescribeUserScramCredentialsOptions({ timeoutMs: 300 }),
+        });
+        return [r.all(), r.users(), r.description('u')];
+      },
+    ],
+    [
+      'alterUserScramCredentials',
+      () => {
+        const r = client.alterUserScramCredentials({
+          alterations: [new UserScramCredentialDeletion({ user: 'u', mechanism: ScramMechanism.SCRAM_SHA_256 })],
+          options: new AlterUserScramCredentialsOptions({ timeoutMs: 300 }),
+        });
+        return [...r.values().values(), r.all()];
+      },
+    ],
+  ];
+  try {
+    for (const [name, call] of calls) {
+      const started = Date.now();
+      const futures = call();
+      assert.ok(Date.now() - started < 1000, name);
+      for (const future of futures) {
+        const cause = await failure(future);
+        assert.ok(cause instanceof TimeoutError, `${name}: ${String(cause)}`);
+        assert.equal(cause.message, timedOut(name));
+      }
+    }
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test("describeUserScramCredentials' forms: (), (users), (users, options); a null user is skipped, as Java's builder skips it", async () => {
+  const client = admin({ 'default.api.timeout.ms': '300', 'request.timeout.ms': '100' });
+  try {
+    const options = new DescribeUserScramCredentialsOptions({ timeoutMs: 300 });
+    // @ts-expect-error Java has no (options) form
+    assert.throws(() => client.describeUserScramCredentials({ options }), {
+      name: 'IllegalArgumentError',
+      message: 'describeUserScramCredentials() takes one of (), (users), (users, options); got (options)',
+    });
+    // A string is an Iterable<string> to tsc: the run time refuses it.
+    assert.throws(() => client.describeUserScramCredentials('u'), {
+      name: 'TypeError',
+      message: 'users must be an iterable of strings, not string',
+    });
+    // @ts-expect-error null options
+    assert.throws(() => client.describeUserScramCredentials({ users: null, options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
+    for (const result of [
+      client.describeUserScramCredentials(),
+      client.describeUserScramCredentials(null),
+      client.describeUserScramCredentials(['u', /** @type {string} */ (/** @type {unknown} */ (null))]),
+      client.describeUserScramCredentials({ users: null, options }),
+      client.describeUserScramCredentials({ users: [], options }),
+    ]) {
+      const cause = await failure(result.users());
+      assert.ok(cause instanceof TimeoutError, String(cause));
+      assert.equal(cause.message, 'Timed out waiting for a node assignment. Call: describeUserScramCredentials');
+    }
+    // Each reader hands out a new future of the core's; description(null)
+    // names no user, as Java's does.
+    const result = client.describeUserScramCredentials();
+    assert.notEqual(result.users(), result.users());
+    assert.ok((await failure(result.description(null))) instanceof TimeoutError);
+    // @ts-expect-error a number where Java takes a String
+    assert.throws(() => result.description(1), {
+      name: 'IllegalArgumentError',
+      message: 'description() takes one of (userName); got a number',
+    });
+    // @ts-expect-error a reader takes no argument
+    assert.throws(() => result.all(1), { name: 'TypeError', message: 'all() only reads: it takes no argument' });
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test('testAlterUserScramCredentialsUnknownMechanism without its scripted response: a failed call fails every user', async () => {
+  // Java fails the users of an illegal alteration only in handleResponse, so
+  // a call that fails (handleFailure: completeAllExceptionally) fails every
+  // user, the UNKNOWN-mechanism ones included, with the call's error.
+  const client = admin();
+  try {
+    const result = client.alterUserScramCredentials({
+      alterations: [
+        new UserScramCredentialDeletion({ user: 'user0', mechanism: ScramMechanism.UNKNOWN }),
+        new UserScramCredentialUpsertion({
+          user: 'user1',
+          credentialInfo: new ScramCredentialInfo({ mechanism: ScramMechanism.UNKNOWN, iterations: 8192 }),
+          password: 'password',
+        }),
+        new UserScramCredentialUpsertion({
+          user: 'user2',
+          credentialInfo: new ScramCredentialInfo({ mechanism: ScramMechanism.SCRAM_SHA_256, iterations: 4096 }),
+          password: 'password',
+        }),
+      ],
+      options: new AlterUserScramCredentialsOptions({ timeoutMs: 300 }),
+    });
+    const values = result.values();
+    assert.deepEqual([...values.keys()].sort(), ['user0', 'user1', 'user2']);
+    assert.ok(result instanceof AlterUserScramCredentialsResult);
+    for (const future of [...values.values(), result.all()]) {
+      const cause = await failure(future);
+      assert.ok(cause instanceof TimeoutError, String(cause));
+      assert.equal(cause.message, 'Timed out waiting for a node assignment. Call: alterUserScramCredentials');
+    }
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
+test("the quota, SCRAM and token calls' forms and null arguments: TypeError naming the RPC's own parameter, in Java's order", async () => {
+  const client = admin();
+  try {
+    // describeClientQuotas: Java reads the options first, the filter later
+    // (the deviation the admin package lists).
+    // @ts-expect-error null options
+    assert.throws(() => client.describeClientQuotas({ filter: null, options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
+    // @ts-expect-error a null filter
+    assert.throws(() => client.describeClientQuotas(null), { name: 'TypeError', message: 'filter must not be null' });
+    assert.throws(() => client.describeClientQuotas(ClientQuotaFilter.contains(null)), {
+      name: 'TypeError',
+      message: 'filter must not be a ClientQuotaFilter with null components',
+    });
+    assert.throws(
+      // @ts-expect-error a null component
+      () => client.describeClientQuotas(ClientQuotaFilter.containsOnly([ClientQuotaFilterComponent.ofEntityType('user'), null])),
+      { name: 'TypeError', message: 'filter must not contain a null ClientQuotaFilterComponent' },
+    );
+    // alterClientQuotas: Java dereferences the entries and each entry before
+    // the options, the rest when it builds the request.
+    // @ts-expect-error null entries
+    assert.throws(() => client.alterClientQuotas({ entries: null, options: null }), {
+      name: 'TypeError',
+      message: 'entries must not be null',
+    });
+    // @ts-expect-error a null entry
+    assert.throws(() => client.alterClientQuotas({ entries: [null], options: null }), {
+      name: 'TypeError',
+      message: 'entries must not contain null',
+    });
+    // @ts-expect-error null options
+    assert.throws(() => client.alterClientQuotas({ entries: [], options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
+    assert.throws(() => client.alterClientQuotas([new ClientQuotaAlteration({ entity: null, ops: [] })]), {
+      name: 'TypeError',
+      message: 'entries must not contain a ClientQuotaAlteration with a null entity',
+    });
+    assert.throws(() => client.alterClientQuotas([new ClientQuotaAlteration({ entity: QUOTA_ENTITY, ops: null })]), {
+      name: 'TypeError',
+      message: 'entries must not contain a ClientQuotaAlteration with null ops',
+    });
+    assert.throws(() => client.alterClientQuotas([new ClientQuotaAlteration({ entity: new ClientQuotaEntity(null), ops: [] })]), {
+      name: 'TypeError',
+      message: 'entries must not be a ClientQuotaEntity with null entries',
+    });
+    assert.throws(
+      () =>
+        client.alterClientQuotas([
+          new ClientQuotaAlteration({ entity: QUOTA_ENTITY, ops: [quotaOp(/** @type {string} */ (/** @type {unknown} */ (null)), 1)] }),
+        ]),
+      {
+        name: 'TypeError',
+        message: 'entries must not contain a ClientQuotaAlteration.Op with a null key',
+      },
+    );
+    // @ts-expect-error a string where Java takes a Collection
+    assert.throws(() => client.alterClientQuotas('q'), {
+      name: 'TypeError',
+      message: 'entries must be an iterable of ClientQuotaAlteration, not a string',
+    });
+    // A null op value is a removal: the call is sent.
+    const removal = client
+      .alterClientQuotas([new ClientQuotaAlteration({ entity: QUOTA_ENTITY, ops: [quotaOp('producer_byte_rate', null)] })])
+      .values();
+    assert.equal(removal?.size(), 1);
+
+    // alterUserScramCredentials: Java dereferences each alteration first.
+    // @ts-expect-error a null alteration
+    assert.throws(() => client.alterUserScramCredentials({ alterations: [null], options: null }), {
+      name: 'TypeError',
+      message: 'alterations must not contain null',
+    });
+    // @ts-expect-error null options
+    assert.throws(() => client.alterUserScramCredentials({ alterations: [], options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
+    class Other extends UserScramCredentialAlteration {
+      constructor() {
+        super({ user: 'u' });
+      }
+    }
+    assert.throws(() => client.alterUserScramCredentials([new Other()]), {
+      name: 'TypeError',
+      message: 'alterations must contain only UserScramCredentialUpsertion or UserScramCredentialDeletion, not an Other',
+    });
+
+    // createDelegationToken: Java's first read is the renewers, each
+    // dereferenced, at the call.
+    assert.throws(() => client.createDelegationToken(new CreateDelegationTokenOptions({ renewers: null })), {
+      name: 'TypeError',
+      message: 'CreateDelegationTokenOptions.renewers must not be null',
+    });
+    assert.throws(
+      // @ts-expect-error a null renewer
+      () => client.createDelegationToken(new CreateDelegationTokenOptions({ renewers: [null] })),
+      { name: 'TypeError', message: 'CreateDelegationTokenOptions.renewers must not contain null' },
+    );
+    // @ts-expect-error null options
+    assert.throws(() => client.createDelegationToken(null), { name: 'TypeError', message: 'options must not be null' });
+    assert.throws(
+      // @ts-expect-error an argument where Java takes none
+      () => client.createDelegationToken({ timeoutMs: 1 }),
+      { name: 'IllegalArgumentError', message: 'createDelegationToken() takes one of (), (options); got (timeoutMs)' },
+    );
+    // renew and expire: Java reads the options, then the HMAC when it builds
+    // the request (the deviation the admin package lists).
+    // @ts-expect-error null options and a null HMAC
+    assert.throws(() => client.renewDelegationToken({ hmac: null, options: null }), {
+      name: 'TypeError',
+      message: 'options must not be null',
+    });
+    // @ts-expect-error a null HMAC
+    assert.throws(() => client.renewDelegationToken(null), { name: 'TypeError', message: 'hmac must not be null' });
+    // @ts-expect-error a string where Java takes byte[]
+    assert.throws(() => client.expireDelegationToken('mac'), { name: 'TypeError', message: 'hmac must be a Uint8Array, not a string' });
+    assert.throws(
+      // @ts-expect-error a null owner
+      () => client.describeDelegationToken(new DescribeDelegationTokenOptions({ owners: [null] })),
+      { name: 'TypeError', message: 'DescribeDelegationTokenOptions.owners must not contain null' },
+    );
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
