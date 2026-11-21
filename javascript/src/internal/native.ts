@@ -313,6 +313,26 @@ interface Native {
     recordsToDelete: Array<[[string | null, number], bigint]>,
     options: AdminOptionsSetters,
   ): AdminResultBox;
+  // Admin.describeConfigs: each resource as [typeId, name] (Java's byte id).
+  adminDescribeConfigs(handle: AdminHandle, resources: Array<[number, string]>, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.incrementalAlterConfigs: [[typeId, name], [[opId, name, value]]] pairs.
+  adminIncrementalAlterConfigs(
+    handle: AdminHandle,
+    configs: Array<[[number, string], Array<[number, string, string | null]>]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.listConfigResources: the types as Java's byte ids (none: every type).
+  adminListConfigResources(handle: AdminHandle, typeIds: number[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeLogDirs: the broker ids.
+  adminDescribeLogDirs(handle: AdminHandle, brokers: number[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.alterReplicaLogDirs: [[topic, partition, brokerId], logDir] pairs.
+  adminAlterReplicaLogDirs(
+    handle: AdminHandle,
+    replicaAssignment: Array<[[string, number, number], string | null]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.describeReplicaLogDirs: each replica as [topic, partition, brokerId].
+  adminDescribeReplicaLogDirs(handle: AdminHandle, replicas: Array<[string, number, number]>, options: AdminOptionsSetters): AdminResultBox;
   // Java's MockAdminClient() (no argument) or MockAdminClient(brokers,
   // controller).
   mockAdminCreate(...args: [] | [brokers: NodeFields[] | null, controller: NodeFields | null]): AdminHandle;
