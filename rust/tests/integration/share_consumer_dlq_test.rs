@@ -40,16 +40,18 @@
 //!   `dlq.topic`, `dlq.release`, … become `dlq.<per-test name>`, and Java's
 //!   `wrong.prefix` becomes `wrong.<per-test name>`.
 //!
-//! # Skipped
+//! # Tiered storage
 //!
-//! - `testDlqCopiesRecordsReadFromRemoteStorage` and
-//!   `testDlqCopiesRecordsReadFromRemoteAndLocalStorage` configure the broker
-//!   with `org.apache.kafka.server.log.remote.storage.LocalTieredStorage`, a
-//!   class of the `storage` module's test fixtures: no jar in the
-//!   `apache/kafka:4.4.0` image's `/opt/kafka/libs` contains it (checked by
-//!   listing every jar), so the broker cannot start with that remote storage
-//!   manager. They also name `remote.log.metadata.manager.listener.name=EXTERNAL`,
-//!   the Java test kit's listener, which the harness's brokers do not have.
+//! `testDlqCopiesRecordsReadFromRemoteStorage` and
+//! `testDlqCopiesRecordsReadFromRemoteAndLocalStorage` configure the broker
+//! with `org.apache.kafka.server.log.remote.storage.LocalTieredStorage`, a
+//! class of the `storage` module's test fixtures that the `apache/kafka` image
+//! does not ship. The harness copies Kafka's published 4.4.0 test-fixtures jars
+//! into the brokers' `/opt/kafka/libs` ([`TestJar::StorageTestFixtures`], and
+//! [`TestJar::ClientsTestFixtures`] for the `TestUtils#tempDirectory` it
+//! calls). Java's `remote.log.metadata.manager.listener.name=EXTERNAL` becomes
+//! the harness's `BROKER`, since both name the test cluster's inter-broker
+//! listener ([`TIERED_STORAGE_PROPERTIES`]).
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -61,7 +63,9 @@ use confluent_kafka::admin::AlterConfigOp;
 use confluent_kafka::admin::AlterConfigsOptions;
 use confluent_kafka::admin::ConfigEntry;
 use confluent_kafka::admin::NewTopic;
+use confluent_kafka::admin::OffsetSpec;
 use confluent_kafka::admin::OpType;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::config::ConfigResource;
 use confluent_kafka::common::config::config_resource;
@@ -77,6 +81,7 @@ use confluent_kafka::producer::Producer;
 
 use super::share_consumer_test_base::*;
 use crate::common::cluster_config::ClusterConfig;
+use crate::common::test_jars::TestJar;
 
 // DLQ context headers written onto each DLQ record. These mirror the (package-private) constants in
 // org.apache.kafka.server.share.dlq.ShareGroupDLQStateManager and form the wire contract for DLQ records.
@@ -337,6 +342,192 @@ async fn test_rejected_records_written_to_dlq_with_copy_record_enabled() {
 
     verify_dlq_topic_records(&base, &dlq_topic, &group_id, &expected_source_offsets(record_count), true).await;
     verify_dlq_metrics(&base, &group_id, record_count).await;
+}
+
+/// The server properties of the two tiered-storage tests: tiered storage backed by the local-filesystem
+/// `LocalTieredStorage` RSM and the default `TopicBasedRemoteLogMetadataManager`, with short task/cleanup
+/// intervals. Java's `remote.log.metadata.manager.listener.name=EXTERNAL` names the Java test kit's broker
+/// listener, which is also its inter-broker listener (`KafkaClusterTestKit` sets
+/// `inter.broker.listener.name` to it); the harness's inter-broker listener is `BROKER`.
+const TIERED_STORAGE_PROPERTIES: &[(&str, &str)] = &[
+    ("KAFKA_REMOTE_LOG_STORAGE_SYSTEM_ENABLE", "true"),
+    (
+        "KAFKA_REMOTE_LOG_STORAGE_MANAGER_CLASS_NAME",
+        "org.apache.kafka.server.log.remote.storage.LocalTieredStorage",
+    ),
+    ("KAFKA_REMOTE_LOG_MANAGER_TASK_INTERVAL_MS", "500"),
+    ("KAFKA_REMOTE_LOG_METADATA_MANAGER_LISTENER_NAME", "BROKER"),
+    ("KAFKA_RLMM_CONFIG_REMOTE_LOG_METADATA_TOPIC_REPLICATION_FACTOR", "1"),
+    ("KAFKA_RLMM_CONFIG_REMOTE_LOG_METADATA_TOPIC_NUM_PARTITIONS", "1"),
+    ("KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS", "500"),
+    ("KAFKA_LOG_INITIAL_TASK_DELAY_MS", "100"),
+];
+
+/// [`dlq_cluster_config_with`] `overrides`, with the brokers loading `LocalTieredStorage` (and the
+/// `TestUtils` it calls) from Kafka's published 4.4.0 test-fixtures jars, which the image does not ship.
+fn tiered_storage_cluster_config(overrides: &[(&str, &str)]) -> ClusterConfig {
+    let mut config = dlq_cluster_config_with(overrides);
+    config.broker_libs = vec![TestJar::StorageTestFixtures, TestJar::ClientsTestFixtures];
+    config
+}
+
+/// End-to-end DLQ copy when the source records have been tiered to remote storage. The source topic enables
+/// tiered storage and rolls a segment per record, with a 45s total retention and a 5s local retention so the
+/// early offsets are offloaded to remote storage and then deleted locally (well before the remote segments
+/// expire). Once the local segments are gone (verified via the earliest-local offset advancing past them), the
+/// records are rejected with record copy enabled - so the DLQ record fetcher must read the original records
+/// back from remote storage. The resulting DLQ records carrying the original key/value confirm the fetcher
+/// successfully pulled them from remote storage.
+///
+/// Tiered storage is backed by the local-filesystem `LocalTieredStorage` RSM and the default
+/// `TopicBasedRemoteLogMetadataManager`; short task/cleanup intervals keep the offload + local-delete
+/// cycle quick.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_dlq_copies_records_read_from_remote_storage() {
+    if skip_below(SHARE_DLQ_RELEASE, "testDlqCopiesRecordsReadFromRemoteStorage") {
+        return;
+    }
+    let mut base = ShareConsumerTestBase::setup(tiered_storage_cluster_config(TIERED_STORAGE_PROPERTIES)).await;
+    let group_id = base.group("dlq-remote-group");
+    // The broker's default share-group DLQ topic prefix is "dlq.", so the topic name must start with it.
+    let dlq_topic = dlq_topic_name(&mut base, "remote");
+    let source_topic = base.topic("dlq-remote-source");
+    let record_count = 5;
+
+    base.alter_share_auto_offset_reset(&group_id, "earliest").await;
+    create_dlq_topic(&base, &dlq_topic).await;
+    base.alter_share_group_config(&group_id, ERRORS_DEADLETTERQUEUE_TOPIC_NAME_CONFIG, &dlq_topic)
+        .await;
+    // Record copy enabled: the DLQ fetcher must read the original records back to copy their key/value.
+    base.alter_share_group_config(&group_id, ERRORS_DEADLETTERQUEUE_COPY_RECORD_ENABLE_CONFIG, "true")
+        .await;
+
+    // Tiered source topic: one segment per record, 45s total retention and 5s local retention so inactive
+    // segments are offloaded to remote storage and then deleted locally shortly after, while the remote
+    // segments comfortably survive the rest of the test.
+    create_remote_storage_source_topic(&base, &source_topic, 45_000, 5_000).await;
+
+    produce_to(&base, &source_topic, 0, record_count).await;
+
+    // Wait until the early offsets have been offloaded to remote storage AND removed locally - i.e. the
+    // earliest *local* offset has advanced past them, so reading those offsets must now hit remote storage.
+    // The last record stays in the active (never-offloaded) segment, so the earliest local offset should
+    // reach recordCount - 1. A generous timeout (well inside the 45s remote retention) absorbs remote-log
+    // metadata-manager startup; it normally resolves a few seconds after the 5s local retention elapses.
+    wait_for_condition_with_pause(
+        || async {
+            earliest_local_offset(&base, &source_topic, 0)
+                .await
+                .is_ok_and(|offset| offset >= record_count as i64 - 1)
+        },
+        30_000,
+        500,
+        "Source records were not tiered to remote storage and removed locally in time",
+    )
+    .await;
+
+    // Reject every record. Both the share fetch (to deliver them) and the DLQ record fetcher (to copy them)
+    // must read the tiered offsets back from remote storage.
+    reject_records_with_topic(&base, &group_id, &source_topic, record_count).await;
+
+    // Record copy is enabled, so every DLQ record must carry the original key/value. For the tiered offsets
+    // (no longer present locally) that is only possible if the DLQ fetcher pulled them from remote storage.
+    verify_dlq_topic_records_with_source(
+        &base,
+        &dlq_topic,
+        &group_id,
+        &source_topic,
+        0,
+        &expected_source_offsets(record_count),
+        true,
+    )
+    .await;
+    verify_dlq_metrics(&base, &group_id, record_count).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_dlq_copies_records_read_from_remote_and_local_storage() {
+    if skip_below(SHARE_DLQ_RELEASE, "testDlqCopiesRecordsReadFromRemoteAndLocalStorage") {
+        return;
+    }
+    let mut properties = TIERED_STORAGE_PROPERTIES.to_vec();
+    properties.extend([
+        ("KAFKA_GROUP_SHARE_MIN_HEARTBEAT_INTERVAL_MS", "1500"),
+        ("KAFKA_GROUP_SHARE_HEARTBEAT_INTERVAL_MS", "1500"),
+    ]);
+    let mut base = ShareConsumerTestBase::setup(tiered_storage_cluster_config(&properties)).await;
+    let group_id = base.group("dlq-remote-and-local-group");
+    // The broker's default share-group DLQ topic prefix is "dlq.", so the topic name must start with it.
+    let dlq_topic = dlq_topic_name(&mut base, "remote-and-local-topic");
+    let source_topic = base.topic("dlq-remote-and-local-source");
+    let record_count = 5;
+
+    base.alter_share_auto_offset_reset(&group_id, "earliest").await;
+    create_dlq_topic(&base, &dlq_topic).await;
+    base.alter_share_group_config(&group_id, ERRORS_DEADLETTERQUEUE_TOPIC_NAME_CONFIG, &dlq_topic)
+        .await;
+    // Record copy enabled: the DLQ fetcher must read the original records back to copy their key/value.
+    base.alter_share_group_config(&group_id, ERRORS_DEADLETTERQUEUE_COPY_RECORD_ENABLE_CONFIG, "true")
+        .await;
+
+    // Tiered source topic: one segment per record, 45s total retention and 5s local retention so inactive
+    // segments are offloaded to remote storage and then deleted locally shortly after, while the remote
+    // segments comfortably survive the rest of the test.
+    create_remote_storage_source_topic(&base, &source_topic, 45_000, 10_000).await;
+
+    produce_to(&base, &source_topic, 0, record_count).await;
+
+    // Wait until the early offsets have been offloaded to remote storage AND removed locally - i.e. the
+    // earliest *local* offset has advanced past them, so reading those offsets must now hit remote storage.
+    // The last record stays in the active (never-offloaded) segment, so the earliest local offset should
+    // reach recordCount - 1. A generous timeout (well inside the 45s remote retention) absorbs remote-log
+    // metadata-manager startup; it normally resolves a few seconds after the 5s local retention elapses.
+    wait_for_condition_with_pause(
+        || async {
+            earliest_local_offset(&base, &source_topic, 0)
+                .await
+                .is_ok_and(|offset| offset >= record_count as i64 - 1)
+        },
+        30_000,
+        500,
+        "Source records were not tiered to remote storage and removed locally in time",
+    )
+    .await;
+
+    // Produce some more which stay in local.
+    produce_to(&base, &source_topic, 0, record_count).await;
+
+    // Reject every record. Both the share fetch (to deliver them) and the DLQ record fetcher (to copy them)
+    // must read the tiered offsets back from remote storage.
+    reject_records_with_topic(&base, &group_id, &source_topic, record_count * 2).await;
+
+    // Record copy is enabled, so every DLQ record must carry the original key/value. For the tiered offsets
+    // (no longer present locally) that is only possible if the DLQ fetcher pulled them from remote storage.
+    verify_dlq_topic_records_with_source(
+        &base,
+        &dlq_topic,
+        &group_id,
+        &source_topic,
+        0,
+        &expected_source_offsets(record_count * 2),
+        true,
+    )
+    .await;
+
+    // Make sure not all offsets from second produce are tiered.
+    wait_for_condition_with_pause(
+        || async {
+            earliest_local_offset(&base, &source_topic, 0)
+                .await
+                .is_ok_and(|offset| offset < (record_count * 2) as i64 - 1)
+        },
+        30_000,
+        500,
+        "Offsets from second produce were tiered",
+    )
+    .await;
+
+    verify_dlq_metrics(&base, &group_id, record_count * 2).await;
 }
 
 /// Rejects records from a multi-partition source topic and verifies they are routed to the correct DLQ
@@ -1231,6 +1422,49 @@ async fn create_topics(base: &ShareConsumerTestBase, topics: Vec<NewTopic>) {
         .await
         .unwrap_or_else(|e| panic!("Failed to create topics: {e}"));
     close_admin(admin).await;
+}
+
+/// Java's `createRemoteStorageSourceTopic`: a one-partition topic with tiered storage on, `retention_ms`
+/// total and `local_retention_ms` local retention, rolling a segment for every record.
+async fn create_remote_storage_source_topic(
+    base: &ShareConsumerTestBase,
+    topic: &str,
+    retention_ms: i64,
+    local_retention_ms: i64,
+) {
+    let retention_ms = retention_ms.to_string();
+    let local_retention_ms = local_retention_ms.to_string();
+    create_topics(
+        base,
+        vec![new_topic(
+            topic,
+            1,
+            &[
+                ("remote.storage.enable", "true"),
+                ("retention.ms", &retention_ms),
+                ("local.retention.ms", &local_retention_ms),
+                // Roll a segment for every record so each inactive segment can be offloaded then deleted locally.
+                ("index.interval.bytes", "1"),
+                ("segment.index.bytes", "12"),
+            ],
+        )],
+    )
+    .await;
+}
+
+/// Java's `earliestLocalOffset`: the earliest offset still held in local storage. Offsets below this have been
+/// removed locally (e.g. after being offloaded to remote storage), so reading them must hit remote storage.
+/// Used to confirm tiering. An error is returned, as Java throws it, for the caller's wait to retry.
+async fn earliest_local_offset(base: &ShareConsumerTestBase, topic: &str, partition: i32) -> Result<i64, Error> {
+    let topic_partition = TopicPartition::new(topic.to_string(), partition);
+    let admin = base.create_admin_client();
+    let result = admin.list_offsets(&HashMap::from([(topic_partition.clone(), OffsetSpec::earliest_local())]));
+    let offset = match result.partition_result(&topic_partition) {
+        Ok(future) => future.get().await.map(|info| info.offset()),
+        Err(e) => Err(e),
+    };
+    close_admin(admin).await;
+    offset
 }
 
 /// Java's `produceTo`: produces `count` records (key "key", value "value") to a specific topic-partition.
