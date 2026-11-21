@@ -144,6 +144,10 @@ test("a DEPENDANTS entry that matches nothing is a finding; the real tree lists 
       'AlterReplicaLogDirsResult.all',
       'ListOffsetsResult.all',
       'AlterPartitionReassignmentsResult.all',
+      'DeleteConsumerGroupsResult.all',
+      'DescribeClassicGroupsResult.all',
+      'DescribeConsumerGroupsResult.all',
+      'ListConsumerGroupOffsetsResult.all',
     ],
   );
 });

@@ -414,6 +414,15 @@ napi_value js_admin_alter_partition_reassignments(napi_env env, napi_callback_in
 napi_value js_admin_list_partition_reassignments(napi_env env, napi_callback_info info);
 napi_value js_admin_list_offsets(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_update_offsets(napi_env env, napi_callback_info info);
+napi_value js_admin_list_groups(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_consumer_groups(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_classic_groups(napi_env env, napi_callback_info info);
+napi_value js_admin_list_consumer_group_offsets(napi_env env, napi_callback_info info);
+napi_value js_admin_alter_consumer_group_offsets(napi_env env, napi_callback_info info);
+napi_value js_admin_delete_consumer_group_offsets(napi_env env, napi_callback_info info);
+napi_value js_admin_delete_consumer_groups(napi_env env, napi_callback_info info);
+napi_value js_admin_remove_members_from_consumer_group(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_update_consumer_group_offsets(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_add_topic(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_mark_topic_for_deletion(napi_env env, napi_callback_info info);
 napi_value js_mock_admin_set_fetches_remaining_until_visible(napi_env env, napi_callback_info info);
