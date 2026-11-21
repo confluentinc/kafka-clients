@@ -175,7 +175,11 @@ function formOptionNames(forms) {
     out.push(
       f.params.map((t, i) => {
         const earlier = out.findIndex((names, k) => names[i] !== undefined && hostKind(forms[k].params[i]) === hostKind(t));
-        return earlier >= 0 ? out[earlier][i] : optionName(t, f.param_names[i]);
+        // An enum's implicit `valueOf(String name)` has no source, so the
+        // index gives its parameter no name: the JLS names it `name`
+        // (`ElectionType.valueOf(byte value)` beside it).
+        const javaName = f.param_names[i] || (f.name === 'valueOf' && f.static && t === 'String' ? 'name' : '');
+        return earlier >= 0 ? out[earlier][i] : optionName(t, javaName);
       }),
     );
   }
