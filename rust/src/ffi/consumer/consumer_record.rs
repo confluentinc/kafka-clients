@@ -457,6 +457,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_headers(
     let inner = unsafe { inner_ref(self_, "self_") };
     inner
         .headers
+        // The clone copies no header: it shares the record's header list, or, while that list
+        // is not read yet, the slice of the fetched data the record keeps for it, which the
+        // handle then reads when C first asks it for a header.
         .get_or_init(|| RecordHeadersInner::boxed(inner.record.headers().clone()))
         .as_ptr()
 }
@@ -991,6 +994,90 @@ mod tests {
                 timestamp_type::singleton(TimestampType::NoTimestampType)
             );
             assert!(!kafka_consumer_ConsumerRecord_headers(record).is_null());
+            kafka_consumer_ConsumerRecord_destroy(record);
+        }
+    }
+
+    /// The headers of a fetched record reach C without a copy: the handle
+    /// `kafka_consumer_ConsumerRecord_headers` returns reads the record's
+    /// header section, and each key view and value it hands out is a slice of
+    /// that section.
+    #[test]
+    fn headers_of_a_fetched_record_are_read_in_place() {
+        use crate::common::header::{RecordHeader, RecordHeaders};
+        use crate::common::record::internal::DefaultRecord;
+        use crate::ffi::common::header::internals::record_header::{
+            kafka_common_header_internals_RecordHeader__as_Header, kafka_common_header_internals_RecordHeader_t,
+        };
+        use crate::ffi::common::header::internals::record_headers::kafka_common_header_internals_RecordHeaders__as_Headers;
+        use crate::ffi::common::header::{
+            kafka_common_header_Header__key_bytes, kafka_common_header_Header_value,
+            kafka_common_header_Headers_to_array,
+        };
+        use crate::ffi::util::{kafka_List_destroy, kafka_List_get, kafka_List_size};
+
+        // The record as the fetch path builds it: its headers are a slice of the fetched bytes.
+        let mut fetched = Vec::new();
+        DefaultRecord::write_to(
+            &mut fetched,
+            0,
+            0,
+            None,
+            None,
+            &[
+                RecordHeader::new("h1".to_string(), Some(b"v1".to_vec())),
+                RecordHeader::new("h2".to_string(), None),
+            ],
+        )
+        .unwrap();
+        let fetched = bytes::Bytes::from(fetched);
+        let (record_ref, _) = DefaultRecord::read_ref_from_buffer(&fetched, 0, 0, 0, None).unwrap();
+        let headers = RecordHeaders::from_wire(fetched.slice_ref(record_ref.headers_bytes()), record_ref.num_headers());
+        let options = ConsumerRecordOptionsBuilder::new()
+            .set_topic("t")
+            .set_partition(0)
+            .set_offset(0)
+            .set_key(None)
+            .set_value(None)
+            .set_headers(headers)
+            .build()
+            .unwrap();
+        let record = box_consumer_record(GenericRecord::with_options(options), false, false);
+
+        let fetch_buffer = fetched.as_ptr_range();
+        let in_fetch_buffer = |bytes: kafka_Bytes_t| {
+            let end = bytes.data.wrapping_add(bytes.len as usize);
+            fetch_buffer.start <= bytes.data && end <= fetch_buffer.end
+        };
+        // SAFETY: Test code: `record` is a live handle from `box_consumer_record`, destroyed once,
+        // last; the headers handle, its view, the list's elements and the bytes read from them are
+        // borrowed from it and used before that; the list is owned and destroyed once.
+        unsafe {
+            let headers = kafka_consumer_ConsumerRecord_headers(record);
+            assert_eq!(headers, kafka_consumer_ConsumerRecord_headers(record));
+            let list = kafka_common_header_Headers_to_array(kafka_common_header_internals_RecordHeaders__as_Headers(
+                headers.cast_mut(),
+            ));
+            assert_eq!(kafka_List_size(list), 2);
+            let header = |i| {
+                kafka_common_header_internals_RecordHeader__as_Header(
+                    kafka_List_get(list, i) as *const kafka_common_header_internals_RecordHeader_t
+                )
+            };
+
+            let key = kafka_common_header_Header__key_bytes(header(0));
+            assert_eq!(key.as_slice(), Some(&b"h1"[..]));
+            assert!(in_fetch_buffer(key), "the key was copied out of the fetch buffer");
+            let value = kafka_common_header_Header_value(header(0));
+            assert_eq!(value.as_slice(), Some(&b"v1"[..]));
+            assert!(in_fetch_buffer(value), "the value was copied out of the fetch buffer");
+
+            let key = kafka_common_header_Header__key_bytes(header(1));
+            assert_eq!(key.as_slice(), Some(&b"h2"[..]));
+            assert!(in_fetch_buffer(key), "the key was copied out of the fetch buffer");
+            assert!(kafka_common_header_Header_value(header(1)).data.is_null());
+
+            kafka_List_destroy(list);
             kafka_consumer_ConsumerRecord_destroy(record);
         }
     }
