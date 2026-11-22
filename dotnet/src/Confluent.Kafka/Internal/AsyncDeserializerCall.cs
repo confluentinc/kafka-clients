@@ -65,7 +65,7 @@ internal sealed class AsyncDeserializerCall<T>
 
     // Calls an awaited deserializer in the form chosen when the consumer was built.
     internal ValueTask<T?> DeserializeAwaited(
-        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        string topic, IHeaders headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
         WithHeaders is null
             ? Deserializer.Deserialize(topic, data, cancellationToken)
             : WithHeaders.Deserialize(topic, headers, data, cancellationToken);

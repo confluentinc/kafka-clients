@@ -398,6 +398,16 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     typeLocation));
             }
 
+            // A Java interface is a C# interface (rule 1), which a user can implement as a Java user implements it. The
+            // static class holding the interface's static methods is a companion, so it is not checked here.
+            if (java is { IsInterface: true } && type.TypeKind != TypeKind.Interface)
+            {
+                findings.Add(new Finding(
+                    "kind " + typeId,
+                    "translates the Java interface " + java.Marker + "; declare it as the interface I" + type.Name,
+                    typeLocation));
+            }
+
             if (java is null || type.TypeKind == TypeKind.Delegate)
             {
                 return;

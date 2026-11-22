@@ -114,9 +114,9 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// a function that returns the deserializer.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A given deserializer declares a public <c>Deserialize(string, Headers, ReadOnlySpan&lt;byte&gt;)</c> but does
+    /// A given deserializer declares a public <c>Deserialize(string, IHeaders, ReadOnlySpan&lt;byte&gt;)</c> but does
     /// not implement <see cref="IDeserializerWithHeaders{T}"/>, a public
-    /// <c>Deserialize(string, Headers, ReadOnlyMemory&lt;byte&gt;)</c> but not
+    /// <c>Deserialize(string, IHeaders, ReadOnlyMemory&lt;byte&gt;)</c> but not
     /// <see cref="IDeserializerWithReadOnlyMemory{T}"/>, or a public <c>Close()</c> but is not
     /// <see cref="IDisposable"/>: the consumer would never call that method.
     /// </exception>

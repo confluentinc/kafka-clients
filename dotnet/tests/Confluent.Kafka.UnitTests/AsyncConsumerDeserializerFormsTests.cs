@@ -198,14 +198,14 @@ public sealed class AsyncConsumerDeserializerFormsTests
     /// </summary>
     private sealed class WithHeaders : IAsyncDeserializerWithHeaders<string>
     {
-        internal List<Headers> Seen { get; } = new List<Headers>();
+        internal List<IHeaders> Seen { get; } = new List<IHeaders>();
 
         public ValueTask<string?> Deserialize(
             string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("the consumer called the form without headers");
 
         public ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+            string topic, IHeaders headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
         {
             Seen.Add(headers);
             return new ValueTask<string?>(Text(data) + "|" + headers.ToArray().Length);
@@ -218,14 +218,14 @@ public sealed class AsyncConsumerDeserializerFormsTests
     /// </summary>
     private sealed class Retaining : IAsyncDeserializerWithRetention<ReadOnlyMemory<byte>?>
     {
-        internal List<Headers> Seen { get; } = new List<Headers>();
+        internal List<IHeaders> Seen { get; } = new List<IHeaders>();
 
         public ValueTask<ReadOnlyMemory<byte>?> Deserialize(
             string topic, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("the consumer called the form without headers");
 
         public async ValueTask<ReadOnlyMemory<byte>?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+            string topic, IHeaders headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
         {
             Seen.Add(headers);
             await Task.Yield();

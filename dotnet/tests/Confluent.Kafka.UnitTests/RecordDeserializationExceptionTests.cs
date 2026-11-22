@@ -19,6 +19,7 @@ using System.Reflection;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Record;
 using Xunit;
 
@@ -43,7 +44,7 @@ public sealed class RecordDeserializationExceptionTests
             TimestampType.CREATE_TIME,
             new byte[] { (byte)'k' },
             new byte[] { (byte)'v' },
-            new Headers(new[] { new Header("h", new byte[] { (byte)'1' }) }),
+            new RecordHeaders(new[] { new RecordHeader("h", new byte[] { (byte)'1' }) }),
             "m",
             cause);
 
@@ -54,7 +55,7 @@ public sealed class RecordDeserializationExceptionTests
         Assert.Equal(TimestampType.CREATE_TIME, e.TimestampType());
         Assert.Equal(new byte[] { (byte)'k' }, e.KeyBuffer());
         Assert.Equal(new byte[] { (byte)'v' }, e.ValueBuffer());
-        Header header = Assert.Single(e.Headers()!);
+        IHeader header = Assert.Single(e.Headers()!);
         Assert.Equal("h", header.Key());
         Assert.Equal(new byte[] { (byte)'1' }, header.Value());
         Assert.Equal("m", e.Message);
@@ -88,7 +89,7 @@ public sealed class RecordDeserializationExceptionTests
     public void ARecordWithoutAKey_KeepsTheValueBuffer()
     {
         RecordDeserializationException e = new RecordDeserializationException(
-            Origin.KEY, s_tp, 3, 1, TimestampType.CREATE_TIME, null, new byte[] { (byte)'v' }, new Headers(), "m", null);
+            Origin.KEY, s_tp, 3, 1, TimestampType.CREATE_TIME, null, new byte[] { (byte)'v' }, new RecordHeaders(), "m", null);
 
         Assert.Null(e.KeyBuffer());
         Assert.Equal(new byte[] { (byte)'v' }, e.ValueBuffer());
@@ -97,7 +98,7 @@ public sealed class RecordDeserializationExceptionTests
     [Fact]
     public void Headers_KeepsTheHeadersInstance()
     {
-        Headers headers = new Headers(new[] { new Header("a", null) });
+        RecordHeaders headers = new RecordHeaders(new[] { new RecordHeader("a", null) });
         RecordDeserializationException e = new RecordDeserializationException(
             Origin.KEY, s_tp, 0, 0, TimestampType.CREATE_TIME, null, null, headers, "m", null);
 
