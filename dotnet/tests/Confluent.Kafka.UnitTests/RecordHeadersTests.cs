@@ -14,11 +14,14 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -27,16 +30,18 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// <see cref="Header"/> and <see cref="Headers"/>: every test of Java's <c>RecordHeadersTest</c> in Java order, then
-/// the null key, equality, hash and string form of Java's <c>RecordHeader</c> and <c>RecordHeaders</c>, and the
-/// headers of a record to send and of a fetched record, as Python's <c>test_headers.py</c> tests them.
+/// <see cref="RecordHeader"/> and <see cref="RecordHeaders"/>: every test of Java's <c>RecordHeadersTest</c> in Java
+/// order, under Java's names, then the null key, equality, hash and string form of both classes, the add forms, the
+/// live view of <see cref="RecordHeaders.Headers(string)"/>, and the headers of a record to send and of a fetched
+/// record, as Python's <c>test_headers.py</c> tests them.
 /// </summary>
 /// <remarks>
 /// A .NET enumerator has no <c>remove()</c>, so Java's <c>testHeadersIteratorRemove</c> and the two
-/// <c>iterator.remove()</c> checks of <c>testReadOnly</c> do not apply. Kafka 4.4.0 has no <c>RecordHeaderTest</c>,
-/// so <see cref="Header"/>'s checks follow the Java source.
+/// <c>iterator.remove()</c> checks of <c>testReadOnly</c> do not apply. The two thread-safety tests build their header
+/// over buffers, as Java's do. Kafka 4.4.0 has no <c>RecordHeaderTest</c>, so <see cref="RecordHeader"/>'s checks follow
+/// the Java source.
 /// </remarks>
-public sealed class PublicHeadersTests
+public sealed class RecordHeadersTests
 {
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromMilliseconds(100);
     private static readonly TimeSpan s_joinBound = TimeSpan.FromSeconds(30);
@@ -45,32 +50,33 @@ public sealed class PublicHeadersTests
     private const int Partition = 0;
 
     [Fact]
-    public void Add()
+    public void TestAdd()
     {
-        Headers headers = new Headers();
-        headers.Add(new Header("key", Bytes("value")));
+        IHeaders headers = new RecordHeaders();
+        headers.Add(new RecordHeader("key", Bytes("value")));
 
-        using (IEnumerator<Header> iterator = headers.GetEnumerator())
+        using (IEnumerator<IHeader> iterator = headers.GetEnumerator())
         {
             Assert.True(iterator.MoveNext());
-            AssertHeader("key", "value", iterator.Current);
+            IHeader header = iterator.Current;
+            AssertHeader("key", "value", header);
         }
 
-        headers.Add(new Header("key2", Bytes("value2")));
+        headers.Add(new RecordHeader("key2", Bytes("value2")));
 
         AssertHeader("key2", "value2", headers.LastHeader("key2"));
         Assert.Equal(2, GetCount(headers));
     }
 
     [Fact]
-    public void AddHeadersPreserveOrder()
+    public void TestAddHeadersPreserveOrder()
     {
-        Headers headers = new Headers();
-        headers.Add(new Header("key", Bytes("value")));
-        headers.Add(new Header("key2", Bytes("value2")));
-        headers.Add(new Header("key3", Bytes("value3")));
+        IHeaders headers = new RecordHeaders();
+        headers.Add(new RecordHeader("key", Bytes("value")));
+        headers.Add(new RecordHeader("key2", Bytes("value2")));
+        headers.Add(new RecordHeader("key3", Bytes("value3")));
 
-        Header[] headersArr = headers.ToArray();
+        IHeader[] headersArr = headers.ToArray();
         AssertHeader("key", "value", headersArr[0]);
         AssertHeader("key2", "value2", headersArr[1]);
         AssertHeader("key3", "value3", headersArr[2]);
@@ -79,10 +85,10 @@ public sealed class PublicHeadersTests
     }
 
     [Fact]
-    public void Remove()
+    public void TestRemove()
     {
-        Headers headers = new Headers();
-        headers.Add(new Header("key", Bytes("value")));
+        IHeaders headers = new RecordHeaders();
+        headers.Add(new RecordHeader("key", Bytes("value")));
 
         Assert.True(HasNext(headers));
 
@@ -92,20 +98,20 @@ public sealed class PublicHeadersTests
     }
 
     [Fact]
-    public void PreserveOrderAfterRemove()
+    public void TestPreserveOrderAfterRemove()
     {
-        Headers headers = new Headers();
-        headers.Add(new Header("key", Bytes("value")));
-        headers.Add(new Header("key2", Bytes("value2")));
-        headers.Add(new Header("key3", Bytes("value3")));
+        IHeaders headers = new RecordHeaders();
+        headers.Add(new RecordHeader("key", Bytes("value")));
+        headers.Add(new RecordHeader("key2", Bytes("value2")));
+        headers.Add(new RecordHeader("key3", Bytes("value3")));
 
         headers.Remove("key");
-        Header[] headersArr = headers.ToArray();
+        IHeader[] headersArr = headers.ToArray();
         AssertHeader("key2", "value2", headersArr[0]);
         AssertHeader("key3", "value3", headersArr[1]);
         Assert.Equal(2, GetCount(headers));
 
-        headers.Add(new Header("key4", Bytes("value4")));
+        headers.Add(new RecordHeader("key4", Bytes("value4")));
         headers.Remove("key3");
         headersArr = headers.ToArray();
         AssertHeader("key2", "value2", headersArr[0]);
@@ -114,11 +120,11 @@ public sealed class PublicHeadersTests
     }
 
     [Fact]
-    public void AddRemoveInterleaved()
+    public void TestAddRemoveInterleaved()
     {
-        Headers headers = new Headers();
-        headers.Add(new Header("key", Bytes("value")));
-        headers.Add(new Header("key2", Bytes("value2")));
+        IHeaders headers = new RecordHeaders();
+        headers.Add(new RecordHeader("key", Bytes("value")));
+        headers.Add(new RecordHeader("key2", Bytes("value2")));
 
         Assert.True(HasNext(headers));
 
@@ -126,7 +132,7 @@ public sealed class PublicHeadersTests
 
         Assert.Equal(1, GetCount(headers));
 
-        headers.Add(new Header("key3", Bytes("value3")));
+        headers.Add(new RecordHeader("key3", Bytes("value3")));
 
         Assert.Null(headers.LastHeader("key"));
 
@@ -146,13 +152,13 @@ public sealed class PublicHeadersTests
 
         Assert.Equal(1, GetCount(headers));
 
-        headers.Add(new Header("key3", Bytes("value4")));
+        headers.Add(new RecordHeader("key3", Bytes("value4")));
 
         AssertHeader("key3", "value4", headers.LastHeader("key3"));
 
         Assert.Equal(2, GetCount(headers));
 
-        headers.Add(new Header("key", Bytes("valueNew")));
+        headers.Add(new RecordHeader("key", Bytes("valueNew")));
 
         Assert.Equal(3, GetCount(headers));
 
@@ -170,33 +176,33 @@ public sealed class PublicHeadersTests
     }
 
     [Fact]
-    public void LastHeader()
+    public void TestLastHeader()
     {
-        Headers headers = new Headers();
-        headers.Add(new Header("key", Bytes("value")));
-        headers.Add(new Header("key", Bytes("value2")));
-        headers.Add(new Header("key", Bytes("value3")));
+        IHeaders headers = new RecordHeaders();
+        headers.Add(new RecordHeader("key", Bytes("value")));
+        headers.Add(new RecordHeader("key", Bytes("value2")));
+        headers.Add(new RecordHeader("key", Bytes("value3")));
 
         AssertHeader("key", "value3", headers.LastHeader("key"));
         Assert.Equal(3, GetCount(headers));
     }
 
     [Fact]
-    public void ReadOnly()
+    public void TestReadOnly()
     {
-        Headers headers = new Headers();
-        headers.Add(new Header("key", Bytes("value")));
-        using IEnumerator<Header> headerIteratorBeforeClose = headers.GetEnumerator();
+        RecordHeaders headers = new RecordHeaders();
+        headers.Add(new RecordHeader("key", Bytes("value")));
+        using IEnumerator<IHeader> headerIteratorBeforeClose = headers.GetEnumerator();
         headers.SetReadOnly();
 
         IllegalStateException add = Assert.Throws<IllegalStateException>(
-            () => headers.Add(new Header("key", Bytes("value"))));
+            () => headers.Add(new RecordHeader("key", Bytes("value"))));
         Assert.Equal("RecordHeaders has been closed.", add.Message);
 
         IllegalStateException remove = Assert.Throws<IllegalStateException>(() => headers.Remove("key"));
         Assert.Equal("RecordHeaders has been closed.", remove.Message);
 
-        using (IEnumerator<Header> headerIterator = headers.GetEnumerator())
+        using (IEnumerator<IHeader> headerIterator = headers.GetEnumerator())
         {
             Assert.True(headerIterator.MoveNext());
             AssertHeader("key", "value", headerIterator.Current);
@@ -208,15 +214,15 @@ public sealed class PublicHeadersTests
     }
 
     [Fact]
-    public void HeadersByKey()
+    public void TestHeaders()
     {
-        Headers headers = new Headers();
-        headers.Add(new Header("key", Bytes("value")));
-        headers.Add(new Header("key1", Bytes("key1value")));
-        headers.Add(new Header("key", Bytes("value2")));
-        headers.Add(new Header("key2", Bytes("key2value")));
+        RecordHeaders headers = new RecordHeaders();
+        headers.Add(new RecordHeader("key", Bytes("value")));
+        headers.Add(new RecordHeader("key1", Bytes("key1value")));
+        headers.Add(new RecordHeader("key", Bytes("value2")));
+        headers.Add(new RecordHeader("key2", Bytes("key2value")));
 
-        using (IEnumerator<Header> keyHeaders = headers.GetHeaders("key").GetEnumerator())
+        using (IEnumerator<IHeader> keyHeaders = headers.Headers("key").GetEnumerator())
         {
             Assert.True(keyHeaders.MoveNext());
             AssertHeader("key", "value", keyHeaders.Current);
@@ -225,14 +231,14 @@ public sealed class PublicHeadersTests
             Assert.False(keyHeaders.MoveNext());
         }
 
-        using (IEnumerator<Header> keyHeaders = headers.GetHeaders("key1").GetEnumerator())
+        using (IEnumerator<IHeader> keyHeaders = headers.Headers("key1").GetEnumerator())
         {
             Assert.True(keyHeaders.MoveNext());
             AssertHeader("key1", "key1value", keyHeaders.Current);
             Assert.False(keyHeaders.MoveNext());
         }
 
-        using (IEnumerator<Header> keyHeaders = headers.GetHeaders("key2").GetEnumerator())
+        using (IEnumerator<IHeader> keyHeaders = headers.Headers("key2").GetEnumerator())
         {
             Assert.True(keyHeaders.MoveNext());
             AssertHeader("key2", "key2value", keyHeaders.Current);
@@ -241,14 +247,14 @@ public sealed class PublicHeadersTests
     }
 
     [Fact]
-    public void New()
+    public void TestNew()
     {
-        Headers headers = new Headers();
-        headers.Add(new Header("key", Bytes("value")));
+        RecordHeaders headers = new RecordHeaders();
+        headers.Add(new RecordHeader("key", Bytes("value")));
         headers.SetReadOnly();
 
-        Headers newHeaders = new Headers(headers);
-        newHeaders.Add(new Header("key", Bytes("value2")));
+        RecordHeaders newHeaders = new RecordHeaders(headers);
+        newHeaders.Add(new RecordHeader("key", Bytes("value2")));
 
         AssertHeader("key", "value", headers.LastHeader("key"));
         Assert.Equal(1, GetCount(headers));
@@ -260,7 +266,7 @@ public sealed class PublicHeadersTests
     [Fact]
     public void ShouldThrowNpeWhenAddingNullHeader()
     {
-        Headers recordHeaders = new Headers();
+        RecordHeaders recordHeaders = new RecordHeaders();
         ArgumentNullException exception = Assert.Throws<ArgumentNullException>(() => recordHeaders.Add(null!));
         AssertNullArgument("header", "Header cannot be null.", exception);
     }
@@ -268,76 +274,80 @@ public sealed class PublicHeadersTests
     [Fact]
     public void ShouldThrowNpeWhenAddingCollectionWithNullHeader()
     {
-        ArgumentNullException exception = Assert.Throws<ArgumentNullException>(() => new Headers(new Header[1]));
+        ArgumentNullException exception = Assert.Throws<ArgumentNullException>(() => new RecordHeaders(new IHeader[1]));
         AssertNullArgument("headers", "Header cannot be null.", exception);
     }
 
     [Fact]
-    public void RecordHeaderIsReadThreadSafe()
+    public async Task TestRecordHeaderIsReadThreadSafe()
     {
         for (int i = 0; i < 100; i++)
         {
-            AssertRecordHeaderReadThreadSafe(new Header("key", Bytes("value")));
+            RecordHeader header = new RecordHeader(
+                new ReadOnlyMemory<byte>(Encoding.UTF8.GetBytes("key")),
+                new ReadOnlyMemory<byte>(Encoding.UTF8.GetBytes("value")));
+            await AssertRecordHeaderReadThreadSafe(header);
         }
     }
 
     [Fact]
-    public void RecordHeaderWithNullValueIsReadThreadSafe()
+    public async Task TestRecordHeaderWithNullValueIsReadThreadSafe()
     {
         for (int i = 0; i < 100; i++)
         {
-            AssertRecordHeaderReadThreadSafe(new Header("key", null));
+            RecordHeader header = new RecordHeader(new ReadOnlyMemory<byte>(Encoding.UTF8.GetBytes("key")), null);
+            await AssertRecordHeaderReadThreadSafe(header);
         }
     }
 
     [Fact]
-    public void HeaderNullKey_IsJavasRequireNonNull()
+    public void RecordHeaderNullKey_IsJavasRequireNonNull()
     {
         // Python's other two checks (a positional call, a str value) are type errors the C# compiler rejects.
-        ArgumentNullException exception = Assert.Throws<ArgumentNullException>(() => new Header(null!, new byte[] { 1 }));
+        ArgumentNullException exception = Assert.Throws<ArgumentNullException>(() => new RecordHeader(null!, new byte[] { 1 }));
         AssertNullArgument("key", "Null header keys are not permitted", exception);
     }
 
     [Fact]
-    public void HeaderEqualityHashAndString_AreRecordHeaders()
+    public void RecordHeaderEqualityHashAndString_AreJavas()
     {
-        Header a = new Header("k", new byte[] { 0x01, 0xff });
-        Header sameBytes = new Header("k", new byte[] { 0x01, 0xff });
+        RecordHeader a = new RecordHeader("k", new byte[] { 0x01, 0xff });
+        RecordHeader sameBytes = new RecordHeader("k", new byte[] { 0x01, 0xff });
         Assert.True(a.Equals(sameBytes));
         Assert.Equal(a.GetHashCode(), sameBytes.GetHashCode());
-        Assert.False(a.Equals(new Header("k", new byte[] { 0x01 })));
-        Assert.False(a.Equals(new Header("j", new byte[] { 0x01, 0xff })));
-        Assert.True(new Header("n", null).Equals(new Header("n", null)));
-        Assert.False(new Header("n", null).Equals(new Header("n", Array.Empty<byte>())));
-        Assert.False(new Header("n", Array.Empty<byte>()).Equals(new Header("n", null)));
-        Assert.Equal(new Header("n", null).GetHashCode(), new Header("n", null).GetHashCode());
+        Assert.False(a.Equals(new RecordHeader("k", new byte[] { 0x01 })));
+        Assert.False(a.Equals(new RecordHeader("j", new byte[] { 0x01, 0xff })));
+        Assert.True(new RecordHeader("n", null).Equals(new RecordHeader("n", null)));
+        Assert.False(new RecordHeader("n", null).Equals(new RecordHeader("n", Array.Empty<byte>())));
+        Assert.False(new RecordHeader("n", Array.Empty<byte>()).Equals(new RecordHeader("n", null)));
+        Assert.Equal(new RecordHeader("n", null).GetHashCode(), new RecordHeader("n", null).GetHashCode());
 
         // RecordHeader.hashCode: 31 * the key's hash + Arrays.hashCode(value), which is 31 * (31 + 1) - 1 for
         // the signed bytes [1, -1], and 0 for a null value.
         int keyHash = StringComparer.Ordinal.GetHashCode("k");
         Assert.Equal(unchecked((31 * keyHash) + 991), a.GetHashCode());
-        Assert.Equal(unchecked(31 * StringComparer.Ordinal.GetHashCode("n")), new Header("n", null).GetHashCode());
+        Assert.Equal(unchecked(31 * StringComparer.Ordinal.GetHashCode("n")), new RecordHeader("n", null).GetHashCode());
 
         Assert.False(a.Equals(null));
         Assert.False(a.Equals("k"));
 
         Assert.Equal("RecordHeader(key = k, value = [1, -1])", a.ToString());
-        Assert.Equal("RecordHeader(key = n, value = null)", new Header("n", null).ToString());
-        Assert.Equal("RecordHeader(key = e, value = [])", new Header("e", Array.Empty<byte>()).ToString());
+        Assert.Equal("RecordHeader(key = n, value = null)", new RecordHeader("n", null).ToString());
+        Assert.Equal("RecordHeader(key = e, value = [])", new RecordHeader("e", Array.Empty<byte>()).ToString());
     }
 
     [Fact]
-    public void HeadersNullKeyChecks_AndOrder()
+    public void RecordHeadersNullKeyChecks_AndOrder()
     {
         // Java's RecordHeaders.checkKey throws IllegalArgumentException, not a NullPointerException.
-        Headers headers = new Headers();
+        RecordHeaders headers = new RecordHeaders();
         Assert.Equal(
             "key cannot be null.", Assert.Throws<IllegalArgumentException>(() => headers.Remove(null!)).Message);
         Assert.Equal(
             "key cannot be null.", Assert.Throws<IllegalArgumentException>(() => headers.LastHeader(null!)).Message);
         Assert.Equal(
             "key cannot be null.",
-            Assert.Throws<IllegalArgumentException>(() => { _ = headers.GetHeaders(null!); }).Message);
+            Assert.Throws<IllegalArgumentException>(() => { _ = headers.Headers(null!); }).Message);
 
         headers.SetReadOnly();
         Assert.Throws<IllegalStateException>(() => headers.Remove(null!));
@@ -352,11 +362,11 @@ public sealed class PublicHeadersTests
     }
 
     [Fact]
-    public void HeadersAddForms_AndChaining()
+    public void RecordHeadersAddForms_AndChaining()
     {
         // Python's keyword-form errors are overload resolution in C#.
-        Headers headers = new Headers();
-        Assert.Same(headers, headers.Add("a", new byte[] { (byte)'1' }).Add(new Header("b", null)));
+        RecordHeaders headers = new RecordHeaders();
+        Assert.Same(headers, headers.Add("a", new byte[] { (byte)'1' }).Add(new RecordHeader("b", null)));
         Assert.Collection(
             headers,
             header =>
@@ -375,10 +385,10 @@ public sealed class PublicHeadersTests
     }
 
     [Fact]
-    public void GetHeaders_IsALiveView()
+    public void Headers_IsALiveView()
     {
-        Headers headers = new Headers();
-        IEnumerable<Header> byKey = headers.GetHeaders("k");
+        RecordHeaders headers = new RecordHeaders();
+        IEnumerable<IHeader> byKey = headers.Headers("k");
         Assert.Empty(byKey);
 
         headers.Add("k", new byte[] { 1 }).Add("other", null).Add("k", new byte[] { 2 });
@@ -389,41 +399,41 @@ public sealed class PublicHeadersTests
 
         headers.Remove("k");
         Assert.Empty(byKey);
-        Assert.Empty(new Headers().ToArray());
-        Assert.Same(Array.Empty<Header>(), new Headers().ToArray());
+        Assert.Empty(new RecordHeaders().ToArray());
+        Assert.Same(Array.Empty<IHeader>(), new RecordHeaders().ToArray());
     }
 
     [Fact]
-    public void HeadersEqualityHashAndString_AreRecordHeaders()
+    public void RecordHeadersEqualityHashAndString_AreJavas()
     {
-        Headers a = new Headers(new[] { new Header("k", new byte[] { 0x01, 0xff }), new Header("n", null) });
-        Headers b = new Headers(new[] { new Header("k", new byte[] { 0x01, 0xff }), new Header("n", null) });
+        RecordHeaders a = new RecordHeaders(new[] { new RecordHeader("k", new byte[] { 0x01, 0xff }), new RecordHeader("n", null) });
+        RecordHeaders b = new RecordHeaders(new[] { new RecordHeader("k", new byte[] { 0x01, 0xff }), new RecordHeader("n", null) });
 
         b.SetReadOnly();
         Assert.True(a.Equals(b));
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
-        Assert.False(a.Equals(new Headers(new[] { new Header("n", null), new Header("k", new byte[] { 0x01, 0xff }) })));
-        Assert.False(a.Equals(new Headers(new[] { new Header("k", new byte[] { 0x01, 0xff }) })));
+        Assert.False(a.Equals(new RecordHeaders(new[] { new RecordHeader("n", null), new RecordHeader("k", new byte[] { 0x01, 0xff }) })));
+        Assert.False(a.Equals(new RecordHeaders(new[] { new RecordHeader("k", new byte[] { 0x01, 0xff }) })));
         Assert.False(a.Equals(null));
-        Assert.True(new Headers().Equals(new Headers(Array.Empty<Header>())));
-        Assert.True(new Headers().Equals(new Headers().Add("k", null).Remove("k")));
-        Assert.Equal(new Headers().GetHashCode(), new Headers().Add("k", null).Remove("k").GetHashCode());
+        Assert.True(new RecordHeaders().Equals(new RecordHeaders(Array.Empty<RecordHeader>())));
+        Assert.True(new RecordHeaders().Equals(new RecordHeaders().Add("k", null).Remove("k")));
+        Assert.Equal(new RecordHeaders().GetHashCode(), new RecordHeaders().Add("k", null).Remove("k").GetHashCode());
 
         Assert.Equal(
             "RecordHeaders(headers = [RecordHeader(key = k, value = [1, -1]), RecordHeader(key = n, value = null)], "
                 + "isReadOnly = false)",
             a.ToString());
         Assert.EndsWith("isReadOnly = true)", b.ToString(), StringComparison.Ordinal);
-        Assert.Equal("RecordHeaders(headers = [], isReadOnly = false)", new Headers().ToString());
+        Assert.Equal("RecordHeaders(headers = [], isReadOnly = false)", new RecordHeaders().ToString());
     }
 
     [Fact]
     public void RecordHeaders_NeverNull()
     {
         ProducerRecord<string, string> plain = new ProducerRecord<string, string>(Topic, value: "v");
-        Assert.True(new Headers().Equals(plain.Headers()));
+        Assert.True(new RecordHeaders().Equals(plain.Headers()));
         Assert.True(
-            new Headers().Equals(new ProducerRecord<string, string>(Topic, value: "v", key: null, partition: 0, headers: null).Headers()));
+            new RecordHeaders().Equals(new ProducerRecord<string, string>(Topic, value: "v", key: null, partition: 0, headers: null).Headers()));
         Assert.NotSame(plain.Headers(), new ProducerRecord<string, string>(Topic, value: "v").Headers());
 
         IReadOnlyList<ConsumerRecord<byte[], byte[]>> records = PollMockRecords(2);
@@ -436,10 +446,10 @@ public sealed class PublicHeadersTests
     public void Poll_BuildsAWritableHeadersPerRecord()
     {
         IReadOnlyList<ConsumerRecord<byte[], byte[]>> records = PollMockRecords(2);
-        Headers first = records[0].Headers();
-        Headers second = records[1].Headers();
+        IHeaders first = records[0].Headers();
+        IHeaders second = records[1].Headers();
         Assert.Empty(first.ToArray());
-        Assert.False(first.IsReadOnly);
+        Assert.False(((RecordHeaders)first).IsReadOnly());
         Assert.NotSame(first, second);
 
         first.Add("k", new byte[] { (byte)'v' });
@@ -452,7 +462,7 @@ public sealed class PublicHeadersTests
         // Java's CompletedFetch leaves a fetched record's headers writable: only KafkaProducer.doSend seals them.
         // The deserializer half does not apply: IDeserializer has no headers form.
         ConsumerRecord<byte[], byte[]> record = Assert.Single(PollMockRecords(1));
-        Assert.False(record.Headers().IsReadOnly);
+        Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
         record.Headers().Add("added", Bytes("after-poll")).Add("k", null);
         AssertHeader("added", "after-poll", record.Headers().ToArray()[0]);
         Assert.NotNull(record.Headers().LastHeader("k"));
@@ -474,50 +484,35 @@ public sealed class PublicHeadersTests
         return records;
     }
 
-    private static void AssertRecordHeaderReadThreadSafe(Header header)
+    private static async Task AssertRecordHeaderReadThreadSafe(RecordHeader header)
     {
         const int threadCount = 16;
-        using ManualResetEventSlim startLatch = new ManualResetEventSlim(false);
-        int failures = 0;
-        Thread[] threads = new Thread[threadCount];
-        for (int i = 0; i < threadCount; i++)
-        {
-            threads[i] = new Thread(() =>
+        using CountdownEvent startLatch = new CountdownEvent(1);
+
+        List<Task> futures = Enumerable.Range(0, threadCount)
+            .Select(i => Task.Run(() =>
             {
-                try
-                {
-                    startLatch.Wait();
-                    _ = header.Key();
-                    _ = header.Value();
-                }
-                catch (Exception)
-                {
-                    Interlocked.Increment(ref failures);
-                }
-            });
-            threads[i].Start();
-        }
+                startLatch.Wait();
+                _ = header.Key();
+                _ = header.Value();
+            }))
+            .ToList();
 
-        startLatch.Set();
-        foreach (Thread thread in threads)
-        {
-            Assert.True(thread.Join(s_joinBound));
-        }
-
-        Assert.Equal(0, Volatile.Read(ref failures));
+        startLatch.Signal();
+        await TestTimeout.Run(() => Task.WhenAll(futures), s_joinBound);
     }
 
     private static byte[] Bytes(string value) => Encoding.UTF8.GetBytes(value);
 
-    private static int GetCount(Headers headers) => headers.ToArray().Length;
+    private static int GetCount(IHeaders headers) => headers.ToArray().Length;
 
-    private static bool HasNext(Headers headers)
+    private static bool HasNext(IHeaders headers)
     {
-        using IEnumerator<Header> iterator = headers.GetEnumerator();
+        using IEnumerator<IHeader> iterator = headers.GetEnumerator();
         return iterator.MoveNext();
     }
 
-    private static void AssertHeader(string key, string? value, Header? actual)
+    private static void AssertHeader(string key, string? value, IHeader? actual)
     {
         Assert.NotNull(actual);
         Assert.Equal(key, actual.Key());

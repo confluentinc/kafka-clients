@@ -88,4 +88,16 @@ public static class DiagnosticIds
     /// A line of the Java-name baseline, allowlist or pairs that matches nothing.
     /// </summary>
     public const string StaleJavaNameLine = "CKRDA0014";
+
+    /// <summary>
+    /// An <c>&lt;Enum&gt;Methods</c> class's <c>s_values</c> or <c>VALUES</c> that does not list every member of the
+    /// enum once, written out, in declaration order.
+    /// </summary>
+    public const string EnumValuesList = "CKRDA0015";
+
+    /// <summary>
+    /// A public method returning a <c>Task</c> or <c>ValueTask</c> that does not end with
+    /// <c>CancellationToken cancellationToken = default</c>.
+    /// </summary>
+    public const string AsyncCancellationToken = "CKRDA0016";
 }

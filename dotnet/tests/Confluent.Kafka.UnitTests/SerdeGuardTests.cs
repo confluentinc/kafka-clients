@@ -35,14 +35,14 @@ public sealed class SerdeGuardTests
 {
     private const string Prefix = "Confluent.Kafka.UnitTests.SerdeGuardTests+";
 
-    private const string StraySerializerMessage = Prefix + "StraySerializer declares Serialize(string, Headers, string) "
+    private const string StraySerializerMessage = Prefix + "StraySerializer declares Serialize(string, IHeaders, string) "
         + "but does not implement ISerializerWithHeaders<string>, so the producer would never call it.";
 
-    private const string StrayDeserializerMessage = Prefix + "StrayDeserializer declares Deserialize(string, Headers, "
+    private const string StrayDeserializerMessage = Prefix + "StrayDeserializer declares Deserialize(string, IHeaders, "
         + "ReadOnlySpan<byte>) but does not implement IDeserializerWithHeaders<string>, so the consumer would never call it.";
 
     private const string StrayMemoryDeserializerMessage = Prefix + "StrayMemoryDeserializer declares "
-        + "Deserialize(string, Headers, ReadOnlyMemory<byte>) but does not implement "
+        + "Deserialize(string, IHeaders, ReadOnlyMemory<byte>) but does not implement "
         + "IDeserializerWithReadOnlyMemory<string>, so the consumer would never call it.";
 
     private const string ClosingSerializerMessage = Prefix + "ClosingSerializer declares Close() but does not implement "
@@ -182,7 +182,7 @@ public sealed class SerdeGuardTests
             () => new MockProducer<int?, string>(new StrayIntSerializer(), new HeadersSerializer()));
 
         Assert.Equal(
-            Prefix + "StrayIntSerializer declares Serialize(string, Headers, int?) but does not implement "
+            Prefix + "StrayIntSerializer declares Serialize(string, IHeaders, int?) but does not implement "
                 + "ISerializerWithHeaders<int?>, so the producer would never call it.",
             e.Message);
     }
@@ -247,7 +247,7 @@ public sealed class SerdeGuardTests
     {
         public ReadOnlyMemory<byte>? Serialize(string topic, string? data) => Bytes(data);
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, Headers headers, string? data) => Bytes(data);
+        public ReadOnlyMemory<byte>? Serialize(string topic, IHeaders headers, string? data) => Bytes(data);
     }
 
     /// <summary>A serializer of a nullable value type with a public headers form but not the interface.</summary>
@@ -255,7 +255,7 @@ public sealed class SerdeGuardTests
     {
         public ReadOnlyMemory<byte>? Serialize(string topic, int? data) => null;
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, Headers headers, int? data) => null;
+        public ReadOnlyMemory<byte>? Serialize(string topic, IHeaders headers, int? data) => null;
     }
 
     /// <summary>A string serializer whose headers-like method takes another type of data, so it is no headers form.</summary>
@@ -263,7 +263,7 @@ public sealed class SerdeGuardTests
     {
         public ReadOnlyMemory<byte>? Serialize(string topic, string? data) => Bytes(data);
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, Headers headers, object? data) => null;
+        public ReadOnlyMemory<byte>? Serialize(string topic, IHeaders headers, object? data) => null;
     }
 
     /// <summary>A serializer with Java's public close but not IDisposable.</summary>
@@ -281,7 +281,7 @@ public sealed class SerdeGuardTests
     {
         public ReadOnlyMemory<byte>? Serialize(string topic, string? data) => Bytes(data);
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, Headers headers, string? data) => Bytes(data);
+        public ReadOnlyMemory<byte>? Serialize(string topic, IHeaders headers, string? data) => Bytes(data);
     }
 
     /// <summary>A serializer with a public close that is also IDisposable, counting its disposals.</summary>
@@ -303,7 +303,7 @@ public sealed class SerdeGuardTests
     {
         public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlySpan<byte> data) => null;
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlySpan<byte> data) => null;
     }
 
     /// <summary>A deserializer with Java's public close but not IDisposable.</summary>
@@ -321,7 +321,7 @@ public sealed class SerdeGuardTests
     {
         public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlySpan<byte> data) => null;
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlySpan<byte> data) => null;
     }
 
     /// <summary>A deserializer with a public memory form but not the interface that makes a consumer call it.</summary>
@@ -329,7 +329,7 @@ public sealed class SerdeGuardTests
     {
         public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data) => null;
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlyMemory<byte> data) => null;
     }
 
     /// <summary>A deserializer that implements the memory interface.</summary>
@@ -337,7 +337,7 @@ public sealed class SerdeGuardTests
     {
         public string? Deserialize(string topic, ReadOnlySpan<byte> data) => null;
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data) => null;
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlyMemory<byte> data) => null;
     }
 
     /// <summary>A deserializer with a public close that is also IDisposable, counting its disposals.</summary>

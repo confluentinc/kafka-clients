@@ -41,7 +41,7 @@ internal sealed class AsyncDeserializerOver<T> : IAsyncDeserializerWithHeaders<T
         new ValueTask<T?>(_inner.Deserialize(topic, data.Span));
 
     public ValueTask<T?> Deserialize(
-        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        string topic, IHeaders headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
         new ValueTask<T?>(_withHeaders is null
             ? _inner.Deserialize(topic, data.Span)
             : _withHeaders.Deserialize(topic, headers, data.Span));

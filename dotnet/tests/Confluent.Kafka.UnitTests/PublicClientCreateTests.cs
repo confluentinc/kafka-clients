@@ -25,6 +25,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -932,8 +933,8 @@ public sealed class PublicClientCreateTests
 
         await using (TestTimeout.AsyncDisposal(await AsyncKafkaProducer<string, string>.Create(configs)))
         {
-            ReadOnlyMemory<byte>? keyBytes = await key!.Serialize("t", new Headers(), "k", CancellationToken.None);
-            ReadOnlyMemory<byte>? valueBytes = await value!.Serialize("t", new Headers(), "é", CancellationToken.None);
+            ReadOnlyMemory<byte>? keyBytes = await key!.Serialize("t", new RecordHeaders(), "k", CancellationToken.None);
+            ReadOnlyMemory<byte>? valueBytes = await value!.Serialize("t", new RecordHeaders(), "é", CancellationToken.None);
             Assert.Equal(Encoding.BigEndianUnicode.GetPreamble().Length + 2, keyBytes!.Value.Length);
             Assert.Equal(new byte[] { 0xE9 }, valueBytes!.Value.ToArray());
         }
@@ -952,8 +953,8 @@ public sealed class PublicClientCreateTests
 
         await using (TestTimeout.AsyncDisposal(await AsyncKafkaConsumer<string, string>.Create(configs)))
         {
-            Assert.Equal("k", await key!.Deserialize("t", new Headers(), new byte[] { 0x00, 0x6B }, CancellationToken.None));
-            Assert.Equal("é", await value!.Deserialize("t", new Headers(), new byte[] { 0xE9 }, CancellationToken.None));
+            Assert.Equal("k", await key!.Deserialize("t", new RecordHeaders(), new byte[] { 0x00, 0x6B }, CancellationToken.None));
+            Assert.Equal("é", await value!.Deserialize("t", new RecordHeaders(), new byte[] { 0xE9 }, CancellationToken.None));
         }
     }
 

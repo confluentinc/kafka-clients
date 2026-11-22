@@ -17,6 +17,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 
@@ -34,7 +35,7 @@ internal readonly struct SerializedProducerRecord
         long? timestamp,
         ReadOnlyMemory<byte>? key,
         ReadOnlyMemory<byte>? value,
-        Headers? headers = null)
+        RecordHeaders? headers = null)
     {
         Topic = topic;
         Partition = partition;
@@ -54,12 +55,12 @@ internal readonly struct SerializedProducerRecord
 
     internal ReadOnlyMemory<byte>? Value { get; }
 
-    internal Headers? Headers { get; }
+    internal RecordHeaders? Headers { get; }
 
     // mock is false for KafkaProducer and AsyncKafkaProducer, as Java's doSend: a serializer's headers form gets the
     // record's own headers, and a ClassCastException is wrapped in a SerializationException. It is true for the mocks,
-    // as Java's MockProducer on its empty cluster: each headers form gets a new, empty Headers that is then dropped, and
-    // every throw leaves send unchanged, since the serializers are called with no try.
+    // as Java's MockProducer on its empty cluster: each headers form gets a new, empty RecordHeaders that is then dropped,
+    // and every throw leaves send unchanged, since the serializers are called with no try.
     internal static SerializedProducerRecord Serialize<TKey, TValue>(
         ProducerRecord<TKey, TValue> record,
         ISerializer<TKey> keySerializer,
@@ -68,7 +69,7 @@ internal readonly struct SerializedProducerRecord
         ISerializerWithHeaders<TValue>? valueWithHeaders,
         bool mock)
     {
-        Headers headers = record.Headers();
+        RecordHeaders headers = record.OwnHeaders;
         ReadOnlyMemory<byte>? keyBytes = mock
             ? SerializeOnMock(keySerializer, keyWithHeaders, record.Topic(), record.Key())
             : SerializeField(keySerializer, keyWithHeaders, record.Topic(), headers, record.Key(), isKey: true);
@@ -87,7 +88,7 @@ internal readonly struct SerializedProducerRecord
 
     // The asynchronous producers' form when a serializer is awaited: the key, then the value. A built-in side is
     // called through its synchronous class. mock is as on Serialize: an awaited serializer's headers form gets a new,
-    // empty Headers on a mock and the record's own on a client, and its form without headers gets none.
+    // empty RecordHeaders on a mock and the record's own on a client, and its form without headers gets none.
     internal static async ValueTask<SerializedProducerRecord> SerializeAsync<TKey, TValue>(
         ProducerRecord<TKey, TValue> record,
         AsyncSerializerCall<TKey> key,
@@ -95,7 +96,7 @@ internal readonly struct SerializedProducerRecord
         bool mock,
         CancellationToken cancellationToken)
     {
-        Headers headers = record.Headers();
+        RecordHeaders headers = record.OwnHeaders;
         ReadOnlyMemory<byte>? keyBytes =
             await SerializeFieldAsync(key, record.Topic(), headers, record.Key(), isKey: true, mock, cancellationToken)
                 .ConfigureAwait(false);
@@ -115,7 +116,7 @@ internal readonly struct SerializedProducerRecord
     private static ValueTask<ReadOnlyMemory<byte>?> SerializeFieldAsync<T>(
         AsyncSerializerCall<T> call,
         string topic,
-        Headers headers,
+        IHeaders headers,
         T? data,
         bool isKey,
         bool mock,
@@ -132,7 +133,7 @@ internal readonly struct SerializedProducerRecord
         {
             return call.WithHeaders is null
                 ? call.Serializer.Serialize(topic, data, cancellationToken)
-                : call.WithHeaders.Serialize(topic, new Headers(), data, cancellationToken);
+                : call.WithHeaders.Serialize(topic, new RecordHeaders(), data, cancellationToken);
         }
 
         return AwaitField(call, topic, headers, data, isKey, cancellationToken);
@@ -141,7 +142,7 @@ internal readonly struct SerializedProducerRecord
     private static async ValueTask<ReadOnlyMemory<byte>?> AwaitField<T>(
         AsyncSerializerCall<T> call,
         string topic,
-        Headers headers,
+        IHeaders headers,
         T? data,
         bool isKey,
         CancellationToken cancellationToken)
@@ -162,10 +163,12 @@ internal readonly struct SerializedProducerRecord
     // The serializer is called also for a null key or value, as Java's doSend and MockProducer.send call it.
     private static ReadOnlyMemory<byte>? SerializeOnMock<T>(
         ISerializer<T> serializer, ISerializerWithHeaders<T>? withHeaders, string topic, T? data) =>
-        withHeaders is null ? serializer.Serialize(topic, data) : withHeaders.Serialize(topic, new Headers(), data);
+        withHeaders is null
+            ? serializer.Serialize(topic, data)
+            : withHeaders.Serialize(topic, new RecordHeaders(), data);
 
     private static ReadOnlyMemory<byte>? SerializeField<T>(
-        ISerializer<T> serializer, ISerializerWithHeaders<T>? withHeaders, string topic, Headers headers, T? data, bool isKey)
+        ISerializer<T> serializer, ISerializerWithHeaders<T>? withHeaders, string topic, IHeaders headers, T? data, bool isKey)
     {
         try
         {

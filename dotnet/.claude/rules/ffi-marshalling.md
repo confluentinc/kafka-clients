@@ -722,6 +722,12 @@ hazard, fixed by pinning.)
     pointer with length 0 (the sentinel byte above: `fixed` over an empty array yields `NULL`, which the
     ABI reads as a `null` value). The copy is a recorded deviation from root `CLAUDE.md` §14 (ledger 301):
     the C API has no borrowed header value (ledger 305), as for Python's binding.
+  - **Headers are read through `IHeader`.** The record's `RecordHeaders` may hold a user's `IHeader`, which
+    may answer differently at each call. The send reads its `Value()` once, in the build, and checks its key
+    at every read: before anything is pinned, and again in the build. A `null` key throws Java's
+    `IllegalArgumentException` and a NUL the existing rejection (`dotnet/CLAUDE.md` §3 call-site checks,
+    ledger 603), so a header that changes between reads cannot reach the ABI. On the async send the later
+    read comes after the key and value pins, which its failure path releases, once each.
 
 **Why:** the borrow ends when the sync call returns, or at the async handover `cb`, so a pin
 of exactly that span is sufficient; Task-scoped pinning is unnecessary and fragments the heap.
@@ -755,6 +761,9 @@ per-message allocation CLAUDE.md §12 exists to prevent.
     it becomes collectable.
   - A record with headers sends them: a `null` value, an empty value and a non-ASCII key read back
     from the native record; a send with headers adds no managed allocation per header.
+  - A user header whose key turns invalid after the async send's pin is rejected with the pins
+    balanced: each pin released once, its `Value()` never read
+    (`AsyncMockSend_AUserHeaderWhoseKeyIsNullOnlyAtALaterRead_UnpinsTheKeyAndValueOnce`).
 
 ---
 
@@ -864,9 +873,10 @@ end of this section).
 
 One producer callback runs on none of these threads and crosses no ABI: when a serializer throws an
 `ApiException` on `KafkaProducer` / `AsyncKafkaProducer`, the record never reaches the core, and the
-binding runs the user's delivery callback itself, once, inside `Send` on the caller's thread, with
-Java's placeholder metadata, before it returns the failed future (CLAUDE.md §3, as Java's `doSend`).
-The mocks rethrow that exception from `Send`, as Java's `MockProducer` does.
+binding runs the user's delivery callback itself, once, inside `Send` on the caller's thread (behind an
+awaited serializer, on the thread that ended the serialization), with Java's placeholder metadata, before
+it returns the failed future (CLAUDE.md §3, as Java's `doSend`). The mocks rethrow that exception from
+`Send`, as Java's `MockProducer` does, or, behind an awaited serializer, end the first stage with it.
 
   - **The `_cb` completions:** the async `Send`'s handover `cb`, `flush_cb`, `close_cb` /
     `close_with_timeout_cb`, the transaction `_cb`s, `partitions_for_cb`. Each fires once with the
