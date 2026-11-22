@@ -22,7 +22,9 @@
 //     `out_err` (`kafka_common_Error_t`), or as a non-const `kafka_..._t *`
 //     parameter of a completion native/ implements for a `_cb` twin;
 //   - each owned type is destroyed somewhere in native/ (a header
-//     `<Type>_destroy` / `_destroy_err`), or handed to a header function whose
+//     `<Type>_destroy` / `_destroy_err`, called, or named as a value, taken by
+//     address into a descriptor table the code calls it through: the admin
+//     client's results and options), or handed to a header function whose
 //     documentation says it consumes that parameter ("(consumed)"). A
 //     set-level check;
 //   - a delivery completion (an interface method native/ implements, an
@@ -33,7 +35,7 @@
 
 const { atLine } = require('../location');
 const { cModel, bodyKey } = require('../c_model');
-const { bareArg } = require('../c_source');
+const { bareArg, stripComments } = require('../c_source');
 
 const HANDLE = /^(const\s+)?(kafka_\w+_t)\s*\*$/;
 
@@ -82,6 +84,14 @@ module.exports = {
       }
     }
     const called = new Set(calls.map((c) => c.name));
+    // A destroy taken by address into a descriptor table: an argument of
+    // `ADMIN_RESULT_DESTROY_FN(...)` / `ADMIN_OPTIONS_DESTROY_FN(...)`, in
+    // the code, never a comment.
+    for (const file of ctx.files(['native'], ['.c'])) {
+      for (const row of stripComments(ctx.read(file)).matchAll(/\bADMIN_(?:RESULT|OPTIONS)_DESTROY_FN\s*\(([^)]*)\)/g)) {
+        for (const m of row[1].matchAll(/\b(kafka_\w+_destroy(?:_err)?)\b/g)) called.add(m[1]);
+      }
+    }
     for (const [type, where] of [...owned].sort()) {
       checked += 1;
       if (destroysOf(type).some((d) => called.has(d))) continue;

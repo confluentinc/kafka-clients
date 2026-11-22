@@ -159,7 +159,7 @@ build-javascript:
 	$(MAKE) -C rust build-all-features
 	$(MAKE) -C javascript build
 
-# Just the JavaScript gRPC image (producer only). Like the C image it needs only
+# Just the JavaScript gRPC image (producer and admin client). Like the C image it needs only
 # the Rust release artifacts: javascript/Dockerfile.grpc builds the addon itself
 # against the copied libconfluent_kafka.so. Not part of `build-grpc-images`,
 # as the JavaScript client is not yet part of `build` either.
@@ -180,14 +180,15 @@ test-javascript: build-javascript
 # of `verify`): the static tests (header conformance, the package layout, the
 # release scripts), the unit tests, the memory probes (test-memory), and the
 # type checks, `tsc --strict` over the sources (the build), over the type
-# tests (test-typing, against the compiled declarations) and over every test
-# file (typecheck-tests), with the interface check of the declarations and the
-# exports map against the committed API report (check-api). The type check of
+# tests (test-typing, against the compiled declarations), over every test
+# file (typecheck-tests) and over every example (typecheck-examples), with the
+# interface check of the declarations and the exports map against the
+# committed API report (check-api). The type check of
 # the tests reads the compiled declarations, so it runs here, in the one
 # sub-make that builds dist/, never beside it: under `make -j` a second build
 # would delete dist/ while these tests read it.
 test-javascript-unit: build-javascript
-	$(MAKE) -C javascript test-static test-unit test-memory test-typing check-api typecheck-tests
+	$(MAKE) -C javascript test-static test-unit test-memory test-typing check-api typecheck-tests typecheck-examples
 
 # macOS variant of test-javascript: the unit and memory tests only, as
 # python/'s `verify-macos` runs pytest test/unit only. On macOS the gRPC
@@ -213,7 +214,7 @@ verify-javascript: test-javascript lint-javascript
 verify-javascript-macos-docker: test-javascript-macos-docker
 	$(MAKE) test-integration-javascript-native
 
-# The producer-only `__grpc_js` arm. Self-skips off Linux, like the Python and C
+# The `__grpc_js` arm, the producer and admin scenarios. Self-skips off Linux, like the Python and C
 # arms (the image copies the host-built Linux libconfluent_kafka.so); use
 # `test-integration-javascript-native` there. Part of `verify-javascript`
 # (through javascript/'s `test`), not of `verify`.

@@ -70,7 +70,7 @@ KAFKA_PORT ?= 39092
 # $(CONFLUENT_KAFKA_LIB_DIR) and its header under $(CONFLUENT_KAFKA_INCLUDE_DIR):
 # the repository root's Makefile orders that (`build-javascript` depends on the
 # Rust build); run standalone, build it first.
-# The gRPC server of the Rust multilanguage harness's `__grpc_js` producer arm
+# The gRPC server of the Rust multilanguage harness's `__grpc_js` producer and admin arms
 # (grpc-server/grpc_server.js; see rust/tests/common/backend_pool.rs). Its two packages are
 # pinned once, in package.json's devDependencies: `npm ci` installs them in
 # node_modules/, where the server finds them natively, and Dockerfile.grpc
@@ -94,7 +94,7 @@ HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (pro
 	test-integration-ssl test-integration-sasl security-certs test-memory test-memory-mutation test-asan \
 	grpc-image grpc-native test-integration-grpc pack pack-check clean lint-rules test-lint \
 	test-verifiable-clients test-grpc-server test-stress soak check-api update-api docs format format-check \
-	typecheck-tests
+	typecheck-tests typecheck-examples
 
 # The addon and the compiled library: the package cannot run without either.
 build: build-addon build-ts
@@ -126,7 +126,7 @@ build-ts:
 # broker at once. The gRPC arm self-skips off Linux (see
 # test-integration-grpc); the root `verify-javascript-macos-docker` runs the
 # native arm there instead.
-test: test-static test-unit test-memory test-typing check-api typecheck-tests test-verifiable-clients test-grpc-server \
+test: test-static test-unit test-memory test-typing check-api typecheck-tests typecheck-examples test-verifiable-clients test-grpc-server \
 	test-integration
 	$(MAKE) test-stress
 	$(MAKE) test-integration-grpc
@@ -212,6 +212,13 @@ test-typing: build-ts
 typecheck-tests: build-ts
 	$(NODE) scripts/typecheck_tests.js
 
+# The type check of the examples (scripts/typecheck_tests.js examples,
+# examples/tsconfig.json): `tsc --strict` over examples/ through `checkJs`,
+# against the compiled declarations in dist/, as an app's code types against
+# them, so an example calling the API in a form it has not fails here.
+typecheck-examples: build-ts
+	$(NODE) scripts/typecheck_tests.js examples
+
 # The interface check (root conventions, Stability; scripts/api_report.js):
 # api-extractor's report of each import path's compiled declarations and the
 # exports map of package.json, against the committed baseline in api/. A change
@@ -247,6 +254,7 @@ test-integration: build
 	    -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
 	    -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
 	    -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+	    -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
 	    $(KAFKA_IMAGE) >/dev/null || exit 1; \
 	  status=0; \
 	  KAFKA_BOOTSTRAP_SERVERS=localhost:$(KAFKA_PORT) KAFKA_CONTAINER=$(KAFKA_CONTAINER) \
@@ -276,6 +284,7 @@ test-memory-mutation: build
 	    -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
 	    -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
 	    -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+	    -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
 	    $(KAFKA_IMAGE) >/dev/null || exit 1; \
 	  status=0; \
 	  KAFKA_BOOTSTRAP_SERVERS=localhost:$(KAFKA_PORT) KAFKA_CONTAINER=$(KAFKA_CONTAINER) \
@@ -326,6 +335,7 @@ test-stress: build
 	    -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
 	    -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
 	    -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+	    -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
 	    $(KAFKA_IMAGE) >/dev/null || exit 1; \
 	  status=0; \
 	  KAFKA_BOOTSTRAP_SERVERS=localhost:$(KAFKA_PORT) KAFKA_CONTAINER=$(KAFKA_CONTAINER) \
@@ -364,6 +374,7 @@ soak: build
 	    -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
 	    -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
 	    -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+	    -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
 	    $(KAFKA_IMAGE) >/dev/null || exit 1; \
 	  status=0; \
 	  $(SOAK_RUN) localhost:$(KAFKA_PORT) || status=$$?; \
@@ -394,6 +405,7 @@ SECURITY_BROKER = --memory 2500m --memory-swap 2500m -v $(SECURITY_DIR):/etc/kaf
 	-e CLUSTER_ID=$(SECURITY_CLUSTER_ID) -e KAFKA_NODE_ID=1 -e KAFKA_PROCESS_ROLES=broker,controller \
 	-e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9099 \
 	-e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+	    -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \
 	-e KAFKA_HEAP_OPTS='-Xmx512m -Xms256m' \
 	-e KAFKA_SSL_KEYSTORE_TYPE=PEM -e KAFKA_SSL_KEYSTORE_LOCATION=/etc/kafka/secrets/broker-keystore.pem \
 	-e KAFKA_SSL_TRUSTSTORE_TYPE=PEM -e KAFKA_SSL_TRUSTSTORE_LOCATION=/etc/kafka/secrets/ca.pem
