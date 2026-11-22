@@ -16,8 +16,10 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Threading;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Consumer;
 
@@ -48,7 +50,9 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
     private readonly List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> _records;
     private readonly Dictionary<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>> _byPartition;
     private readonly ReadOnlyCollection<TopicPartition> _partitions;
-    private readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> _nextOffsets;
+    // Null for a polled batch until the first NextOffsets() reads them from _batch, which no poll does.
+    private IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? _nextOffsets;
+    private readonly SafeConsumerRecordsHandle? _batch;
     private readonly int _count;
 
     /// <summary>Constructs a new ConsumerRecords with the given records and next offsets.</summary>
@@ -73,10 +77,12 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
 
     private ConsumerRecords(
         List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> records,
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets)
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? nextOffsets,
+        SafeConsumerRecordsHandle? batch = null)
     {
         _records = records;
         _nextOffsets = nextOffsets;
+        _batch = batch;
         _byPartition = new Dictionary<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>(records.Count);
         TopicPartition[] partitions = new TopicPartition[records.Count];
         int count = 0;
@@ -108,7 +114,7 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
     /// advanced in this poll call.
     /// </summary>
     /// <returns>The next offsets that the consumer will consume, as a read-only map.</returns>
-    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> NextOffsets() => _nextOffsets;
+    public IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> NextOffsets() => _nextOffsets ?? ReadNextOffsets();
 
     /// <summary>Get just the records for the given topic.</summary>
     /// <param name="topic">The topic to get records for.</param>
@@ -164,11 +170,42 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
     /// <returns>An empty <see cref="ConsumerRecords{TKey, TValue}"/>, <see cref="EMPTY"/>.</returns>
     public static ConsumerRecords<TKey, TValue> Empty() => EMPTY;
 
-    // Wraps the poll's per-partition records and next offsets without copying them: the caller gives up both.
+    // Wraps the per-partition records and next offsets of a poll with no records, or of one cut short by a failing
+    // deserializer, without copying them: the caller gives up both.
     internal static ConsumerRecords<TKey, TValue> Owned(
         List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> records,
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets) =>
         new ConsumerRecords<TKey, TValue>(records, ReadOnly(nextOffsets));
+
+    // Wraps the poll's per-partition records without copying them, the next offsets read from `batch` on the first
+    // NextOffsets(): the caller gives up the records.
+    internal static ConsumerRecords<TKey, TValue> Owned(
+        List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> records,
+        SafeConsumerRecordsHandle batch) =>
+        new ConsumerRecords<TKey, TValue>(records, null, batch);
+
+    // The batch's next offsets, read once: a racing first call reads them too and returns the cached map. The
+    // reference taken on the handle keeps the batch from being released during the read.
+    private IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> ReadNextOffsets()
+    {
+        SafeConsumerRecordsHandle batch = _batch!;
+        bool added = false;
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> read;
+        try
+        {
+            batch.DangerousAddRef(ref added);
+            read = ReadOnly(ConsumerRecordsMarshal.NextOffsets(batch.DangerousGetHandle()));
+        }
+        finally
+        {
+            if (added)
+            {
+                batch.DangerousRelease();
+            }
+        }
+
+        return Interlocked.CompareExchange(ref _nextOffsets, read, null) ?? read;
+    }
 
     private static List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>> CopyRecords(
         IReadOnlyDictionary<TopicPartition, IReadOnlyList<ConsumerRecord<TKey, TValue>>> records)

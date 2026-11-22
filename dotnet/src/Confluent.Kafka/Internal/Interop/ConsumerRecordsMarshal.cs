@@ -68,10 +68,10 @@ internal static class ConsumerRecordsMarshal
         IntPtr outErr = IntPtr.Zero;
         int count = NativeMethods.ConsumerRecordsCount(records, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets = NextOffsets(records);
         if (count <= 0)
         {
             // A poll that only moved past control records gives next offsets and no records.
+            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets = NextOffsets(records);
             return nextOffsets.Count == 0
                 ? ConsumerRecords<TKey, TValue>.EMPTY
                 : ConsumerRecords<TKey, TValue>.Owned(
@@ -114,7 +114,7 @@ internal static class ConsumerRecordsMarshal
                         {
                             rewind = Rewind(records, partitions, p, error);
                             AddPartition(byPartition, topic, partitionId, list);
-                            return Build(byPartition, Cut(nextOffsets, rewind, byPartition));
+                            return Build(byPartition, Cut(NextOffsets(records), rewind, byPartition));
                         }
                     }
 
@@ -131,7 +131,8 @@ internal static class ConsumerRecordsMarshal
             DestroyList(partitions);
         }
 
-        return Build(byPartition, nextOffsets);
+        // The next offsets are read from the batch on the first NextOffsets(), which no poll makes.
+        return ConsumerRecords<TKey, TValue>.Owned(byPartition, owner);
     }
 
     // The awaiting form of CopyOut, for a consumer one of whose deserializers is awaited: one record at a time, key
@@ -154,9 +155,9 @@ internal static class ConsumerRecordsMarshal
         IntPtr outErr = IntPtr.Zero;
         int count = NativeMethods.ConsumerRecordsCount(records, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets = NextOffsets(records);
         if (count <= 0)
         {
+            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> nextOffsets = NextOffsets(records);
             copy.Records = nextOffsets.Count == 0
                 ? ConsumerRecords<TKey, TValue>.EMPTY
                 : ConsumerRecords<TKey, TValue>.Owned(
@@ -248,7 +249,7 @@ internal static class ConsumerRecordsMarshal
                             copy.Error = error;
                             copy.Rewind = Rewind(records, partitions, p, error);
                             AddPartition(byPartition, topic, partitionId, list);
-                            copy.Records = Build(byPartition, Cut(nextOffsets, copy.Rewind, byPartition));
+                            copy.Records = Build(byPartition, Cut(NextOffsets(records), copy.Rewind, byPartition));
                             return;
                         }
 
@@ -269,7 +270,7 @@ internal static class ConsumerRecordsMarshal
             DestroyList(partitions);
         }
 
-        copy.Records = Build(byPartition, nextOffsets);
+        copy.Records = ConsumerRecords<TKey, TValue>.Owned(byPartition, batch);
     }
 
     internal static IReadOnlyList<KeyValuePair<TopicPartition, long>> FirstPositions(IntPtr records)
@@ -323,7 +324,7 @@ internal static class ConsumerRecordsMarshal
             : ConsumerRecords<TKey, TValue>.Owned(byPartition, nextOffsets);
 
     // The batch's owned map is copied and freed here, before the batch it was read from is.
-    private static IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> NextOffsets(IntPtr records)
+    internal static IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> NextOffsets(IntPtr records)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr map = NativeMethods.ConsumerRecordsNextOffsets(records, ref outErr);

@@ -15,8 +15,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
@@ -98,6 +100,54 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
         Assert.Equal(new OffsetAndMetadata(100, CoreEpoch, CoreMetadata), records.NextOffsets()[s_a0]);
         Assert.Equal(new OffsetAndMetadata(300, CoreEpoch, CoreMetadata), records.NextOffsets()[s_b0]);
         Assert.Equal(new OffsetAndMetadata(400, CoreEpoch, CoreMetadata), records.NextOffsets()[s_c0]);
+    }
+
+    [Fact]
+    public void ABatchThatDeserializes_ReadsItsNextOffsetsOnTheFirstCall_AndReturnsTheSameMapAfterwards()
+    {
+        using NativeBatch batch = new NativeBatch();
+        batch.Partition(s_a0, (0, 3, "a"));
+        batch.NextOffset(s_a0, 100, CoreEpoch, CoreMetadata);
+
+        ConsumerRecords<string, string> records = batch.CopyOut(new FailingDeserializer("bad"), out _, out _);
+
+        FieldInfo field = typeof(ConsumerRecords<string, string>)
+            .GetField("_nextOffsets", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        Assert.Null(field.GetValue(records));
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> first = records.NextOffsets();
+        Assert.Same(first, field.GetValue(records));
+        Assert.Same(first, records.NextOffsets());
+        Assert.Equal(new OffsetAndMetadata(100, CoreEpoch, CoreMetadata), Assert.Single(first).Value);
+    }
+
+    [Fact]
+    public void ABatchThatDeserializes_GivesEveryRacingFirstCallTheSameMap()
+    {
+        const int Threads = 8;
+        using NativeBatch batch = new NativeBatch();
+        batch.Partition(s_a0, (0, 3, "a"));
+        batch.NextOffset(s_a0, 100, CoreEpoch, CoreMetadata);
+        ConsumerRecords<string, string> records = batch.CopyOut(new FailingDeserializer("bad"), out _, out _);
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>[] seen =
+            new IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>[Threads];
+        using Barrier barrier = new Barrier(Threads);
+
+        Thread[] threads = Enumerable.Range(0, Threads).Select(i => new Thread(() =>
+        {
+            barrier.SignalAndWait();
+            seen[i] = records.NextOffsets();
+        })).ToArray();
+        foreach (Thread thread in threads)
+        {
+            thread.Start();
+        }
+
+        foreach (Thread thread in threads)
+        {
+            thread.Join();
+        }
+
+        Assert.All(seen, map => Assert.Same(records.NextOffsets(), map));
     }
 
     [Fact]
