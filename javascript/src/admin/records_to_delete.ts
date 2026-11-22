@@ -47,6 +47,7 @@ export class RecordsToDelete {
    * @param offset - The offset before which all records will be deleted.
    *   Use `-1` to truncate to the high watermark.
    * @returns the records to delete
+   * @throws `TypeError` or `RangeError` when it is not a Java `long`
    */
   static beforeOffset(offset: bigint | number): RecordsToDelete;
   /**
@@ -54,6 +55,7 @@ export class RecordsToDelete {
    *
    * @param options - the offset before which all records will be deleted
    * @returns the records to delete
+   * @throws `TypeError` or `RangeError` when it is not a Java `long`
    */
   static beforeOffset(options: {
     /** The offset before which all records will be deleted; `-1` truncates to the high watermark. */

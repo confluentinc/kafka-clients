@@ -168,6 +168,8 @@ export class ListTransactionsOptions extends AbstractOptions {
    *
    * @param states - the set of states to filter by, on its own
    * @returns this object
+   * @throws `TypeError` when the value is missing, null (Java dereferences
+   *   it), or not an iterable of TransactionState
    */
   filterStates(states: Iterable<TransactionState>): this;
   /**
@@ -175,6 +177,8 @@ export class ListTransactionsOptions extends AbstractOptions {
    *
    * @param options - the set of states to filter by
    * @returns this object
+   * @throws `TypeError` when the value is missing, null (Java dereferences
+   *   it), or not an iterable of TransactionState
    */
   filterStates(options: {
     /** The set of states to filter by. */
@@ -206,6 +210,9 @@ export class ListTransactionsOptions extends AbstractOptions {
    *
    * @param producerIdFilters - the set of producerIds to filter by, on its own
    * @returns this object
+   * @throws `TypeError` when the value is missing, null (Java dereferences
+   *   it), or not an iterable of whole numbers
+   * @throws `RangeError` for an id beyond Java's `long`
    */
   filterProducerIds(producerIdFilters: Iterable<bigint | number>): this;
   /**
@@ -213,6 +220,9 @@ export class ListTransactionsOptions extends AbstractOptions {
    *
    * @param options - the set of producerIds to filter by
    * @returns this object
+   * @throws `TypeError` when the value is missing, null (Java dereferences
+   *   it), or not an iterable of whole numbers
+   * @throws `RangeError` for an id beyond Java's `long`
    */
   filterProducerIds(options: {
     /** The set of producerIds to filter by. */
@@ -247,6 +257,8 @@ export class ListTransactionsOptions extends AbstractOptions {
    *
    * @param durationMs - the duration in milliseconds to filter by, on its own
    * @returns this object
+   * @throws `TypeError` when the value is missing or not a whole number
+   * @throws `RangeError` when it is beyond Java's `long`
    */
   filterOnDuration(durationMs: bigint | number): this;
   /**
@@ -254,6 +266,8 @@ export class ListTransactionsOptions extends AbstractOptions {
    *
    * @param options - the duration in milliseconds to filter by
    * @returns this object
+   * @throws `TypeError` when the value is missing or not a whole number
+   * @throws `RangeError` when it is beyond Java's `long`
    */
   filterOnDuration(options: {
     /** The duration in milliseconds to filter by. */
@@ -280,6 +294,7 @@ export class ListTransactionsOptions extends AbstractOptions {
    *
    * @param pattern - the transactional ID regular expression pattern to filter by, on its own
    * @returns this object
+   * @throws `TypeError` when the value is missing, or neither a string nor null
    */
   filterOnTransactionalIdPattern(pattern: string | null): this;
   /**
@@ -287,6 +302,7 @@ export class ListTransactionsOptions extends AbstractOptions {
    *
    * @param options - the transactional ID regular expression pattern to filter by
    * @returns this object
+   * @throws `TypeError` when the value is missing, or neither a string nor null
    */
   filterOnTransactionalIdPattern(options: {
     /** The transactional ID regular expression pattern to filter by, or null. */

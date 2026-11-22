@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Java's org.apache.kafka.common.security.token: this client has none of its
-// own classes. Its subpackage `delegation` has its own import path
-// (`@confluentinc/kafka-javascript/common/security/token/delegation`).
+/**
+ * Java's `org.apache.kafka.common.security.token`, which has no class of its
+ * own. Its subpackage `delegation` has its own import path
+ * (`@confluentinc/kafka-javascript/common/security/token/delegation`).
+ *
+ * @packageDocumentation
+ */
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import
 // under `esModuleInterop` is a compile error rather than `undefined` (import by

@@ -70,6 +70,8 @@ export class RenewDelegationTokenOptions extends AbstractOptions {
    *
    * @param renewTimePeriodMs - the value in milliseconds, a `long`, on its own
    * @returns This RenewDelegationTokenOptions object.
+   * @throws `TypeError` when the value is not a whole number
+   * @throws `RangeError` when it is outside Java's `long`
    */
   renewTimePeriodMs(renewTimePeriodMs: bigint | number): this;
   /**
@@ -77,6 +79,8 @@ export class RenewDelegationTokenOptions extends AbstractOptions {
    *
    * @param options - the value in milliseconds
    * @returns This RenewDelegationTokenOptions object.
+   * @throws `TypeError` when the value is not a whole number
+   * @throws `RangeError` when it is outside Java's `long`
    */
   renewTimePeriodMs(options: {
     /** The value in milliseconds. */

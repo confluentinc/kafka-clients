@@ -260,7 +260,8 @@ These decide every question, in this order:
    header the addon includes (JS conventions, Build, packaging and
    release).
 3. The Java public API (`KafkaProducer`, `ProducerRecord`, `RecordMetadata`,
-   `Callback`, Apache Kafka 4.4.0 in `kafka/`).
+   `Callback`, `Admin` and its classes, `MockAdminClient` from Java's test
+   fixtures, Apache Kafka 4.4.0 in `kafka/`).
 4. Root `CLAUDE.md` §4 "C FFI Conventions".
 
 ### Boundary rules
@@ -688,8 +689,9 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   (JS conventions, Q35: no repeated precondition); its `Headers` stays
   writable until `send()` makes it read-only. The data classes are listed in `DATA_CLASSES`
   (`scripts/lint/java_ts.js`), which `check-data-objects` reads:
-  `ProducerRecord`, `RecordMetadata`, `TopicPartition`, `Node` and
-  `OffsetAndMetadata` today. `RecordHeader` is not on the list and keeps
+  `ProducerRecord`, `RecordMetadata`, `TopicPartition`, `Node`,
+  `OffsetAndMetadata` and the admin client's seven `*Description` classes
+  ("The admin client"). `RecordHeader` is not on the list and keeps
   Java's `key()` and `value()`, the methods of Java's `Header` interface (JS
   conventions, Serialization). Java's `public final` instance fields are
   `readonly` fields of a frozen object (`SecurityProtocol.id`); `public static
@@ -1095,7 +1097,7 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `flush`, `close`, and `[Symbol.asyncDispose]` for Java's `Closeable`), in
   `src/producer/producer.ts`; `KafkaProducer implements Producer`. Java's
   `Producer` has no static member, so it has no runtime object (one would
-  hold the statics, as `Admin.create()`'s will).
+  hold the statics, as `Admin`'s holds `Admin.create()`).
 - `KafkaProducer` has `close()` and `[Symbol.asyncDispose]()`, which calls
   `close()`, so `await using` closes it.
 - `MockProducer` (`src/producer/mock_producer.ts`) wraps the FFI's
@@ -1405,6 +1407,162 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `NODE_DEBUG=confluent_kafka`; no constructor takes a logger or an error
   callback.
 
+### The admin client
+
+The rules are the JS conventions' (Scope, Class family, Futures and
+waiting, Signatures, Types, Implementation over the FFI) and
+`.claude/rules/admin-client.md` (§1: each RPC is a plain method returning its
+Result, only `close()` waits; §9: `MockAdminClient` stays public). The
+decisions it rests on are `DECISIONS.md` entries 35 to 53. What this binding
+adds:
+
+- **The native layer** (`native/admin.h`, `admin.c`, `admin_values.c`, all
+  hand-written, entry 32). `KafkaAdminClient` and `MockAdminClient` share one
+  native handle type, `Admin` (`admin.h`), over a `kafka_admin_Admin_t` view:
+  the client's own handle, or the mock's `MockAdminClient__as_Admin`, as
+  `KafkaProducer` and `MockProducer` share theirs. It embeds a
+  `CallbackQueue` over `kafka_admin_Admin__set_callbacks_notify_err` and
+  `__execute_callbacks_err` (`admin_execute`), so boundary rules 2, 3, 9 and
+  10 hold as they do for the producer: one drain, the notify hook only
+  signals, `close()` goes to `close_cb` or `close_with_timeout_cb` every time
+  (the form called picks the call) and keeps the handle, and the handle
+  object's finalizer (`admin_finalize`) destroys only a closed client
+  (`admin_destroy`), running no JS. Each RPC is one native function
+  (`adminCreateTopics`, ...): it reads plain JS values, builds the C inputs
+  by the FFI tables (a `kafka_List_t` or `kafka_Map_t`, a value class
+  through its C constructor, the options through `<Rpc>Options_new` and one
+  `set_<field>` per setter that ran, in last-call order), calls
+  the RPC's `..._options` entry point (`kafka_admin_Admin_<rpc>_with_options`,
+  or the form's own, such as `describe_topics_with_topic_names_options`) and
+  wraps the `<Rpc>Result_t` in a box whose
+  finalizer destroys it. A value returned is read through its accessors into
+  plain JS values, which TypeScript builds the class from (Python's
+  `*_to_py`, entry 43); an enum crosses as its Java code where Java has one,
+  else as its ordinal, the C `_e` order being Java's. Each RPC's tables are
+  written in a section that binds the RPC once (`#define ADMIN_RPC <Rpc>`
+  ... `#undef`), whose rows `ADMIN_CHECKED` (`_Generic`) checks against the
+  header's types for that RPC, so a row naming another RPC's destroy,
+  accessor or setter does not compile; each row still names its header
+  function in full, which the lints read. A mutable static is
+  `_Thread_local` (the addon is loaded once per process and shared by every
+  worker): `converting`, the future whose value is being converted, and
+  `remove_members_pending`.
+- **Futures and Results** (`src/internal/admin_result.ts`,
+  `src/internal/admin_*_calls.ts`). Each `kafka_common_KafkaFuture_t` a
+  Result hands out lives in a context (`AdminFuture`) in the client's slot
+  table, as a record's future does (boundary rule 5), with its value
+  converter: owned, or `const`-borrowed with a reference on the box that
+  owns it (`ADMIN_ACC_ONE_BORROWED`), or borrowed from the value of another
+  future (`ListTransactionsResult.byBrokerId`'s, through
+  `admin_future_new_borrowed_from_value`, which keeps that future's context
+  alive). Its untimed wait (`get_cb`) starts when the Result is made, not on
+  first use as a record's does (entry 44): `getNow()`, `isDone()` and the
+  other synchronous reads must see the outcome, and the binding calls no
+  blocking C function. The wait's completion (`future_on_wait`) converts the
+  borrowed value and completes the JS `KafkaFuture` in the client's drain,
+  then drops the context; `get({ timeout })` calls `get_with_timeout_cb` for
+  the deadline alone. No Promise exists until a `get()` or
+  `toCompletionStage()`, so a failed future nobody reads raises no unhandled
+  rejection. Each wait is counted as a `_cb` call ("Threads and liveness"),
+  so a closed client with an unanswered future holds Node until the core
+  answers it (entry 33). The outcome arrives on a later turn of the event
+  loop, never inside the call, the mock's included (entry 36). The Results
+  are Java's classes in TypeScript, holding the futures Java's constructor
+  holds and composing `all()`, `values()` and the refinements with `allOf` and
+  `thenApply` where Java does; where Python's Result takes the C future
+  (`DescribeUserScramCredentialsResult`, `AlterConsumerGroupOffsetsResult`,
+  `RemoveMembersFromConsumerGroupResult`, `ListGroupsResult`,
+  `DeleteConsumerGroupOffsetsResult`, and refinements such as
+  `CreateTopicsResult.config(topic)`), so does this one. A Result's
+  constructor is Java's: `private`, built through `internalCreate`, or
+  `protected` / public where Java's is, and its doc names the call that
+  returns it.
+- **Options** (`src/internal/options.ts`). Each `*Options` class keeps the
+  setters that ran, in last-call order, which the addon turns into
+  `set_<field>` calls; `timeoutMs` is read by `admin_option_timeout`
+  (`null` as `-1`, the core's `default.api.timeout.ms`; a negative value as
+  `0`, entry 48). Java's `null` options cross as a marker the entry point
+  turns into `NULL`, which the FFI refuses ("options must not be null").
+- **Nulls the C API cannot carry**, which Java stores and reads later or
+  never (a group id, a transactional id, a topic of a `TopicPartition`, ...),
+  are a `TypeError` at the call, each listed as a *(deviation)* in the admin
+  package's documentation (`src/admin/index.ts`) with its Goes when (entry
+  51). Each such check runs in Java's order, after the form check.
+- **`MockAdminClient` wraps the FFI's mock** (JS conventions,
+  Implementation over the FFI, Q62; entry 45), as the .NET client's does, so
+  it answers as the core's mock does. Its constructors are Java's `()` and
+  `{ brokers, controller }`, `MockAdminClient.create()` returns its `Builder`
+  (a keyed constructor and Java's setters, over the FFI's `Builder`), and
+  its own methods are those of Java's mock that have an entry point; the
+  others are listed in the admin package's documentation. It differs from
+  Java's mock where the core's does (entry 51), chiefly: a call Java's mock
+  does not implement returns its Result, whose futures fail with
+  `UnsupportedOperationError`, where Java's mock throws from the call; and
+  its futures are not done when the call returns (entry 36). Every such
+  difference is a *(deviation)*, with its Why and Goes when: in the admin
+  package's documentation, or, for the futures not done after the call and
+  `createDelegationToken` with no renewer, on the class, which that
+  documentation points to. A call made on
+  a closed mock holds Node until its answer, as a closed client's.
+- **The value-keyed maps** (entry 38) are each a class over a `Map` keyed by a
+  string made from the fields the Java class's `equals` compares, built as
+  `TopicPartitionMap` is (Java shape, JS idiom), with its methods, and listed
+  in `lint-mapping.json` as invented names. A map keyed by strings that a
+  call takes is a `Map` or a plain object (entry 49); one a Result returns is
+  a `Map`, keyed by `number` for broker ids (a `ReadonlyMap` for Java's
+  unmodifiable view) **(not decided yet in the JS conventions**: the
+  Types table has no row for `Map<Integer, V>`, `OptionalLong` or a
+  returned `Throwable`, typed here `Map<number, V>`, `bigint | null` and
+  `unknown`; entry 52**)**.
+- **The data classes** are the seven `*Description` classes (entry 39), in
+  `DATA_CLASSES`; a collection they hold is read-only
+  (`internalSetReadOnly` on `TopicPartitionMap` and `TopicPartitionSet`,
+  `src/internal/read_only_map.ts`).
+- **Strings.** The SCRAM upsertion's password goes through `encodeLikeJava`,
+  as Java's `getBytes(UTF_8)`, and so does its random salt. The other admin
+  strings (ACL resource names, principals, hosts, user names, group and
+  transactional ids, feature names) cross as JS strings, as topic names do,
+  so a lone surrogate there is written as U+FFFD, and a Result keyed by such
+  a string no longer finds the caller's key **(not decided yet in the JS
+  conventions**: Q24 lists neither; entry 52**)**.
+- **The gRPC server** serves the `AdminService` (`grpc-server/grpc_admin.js`,
+  its 47 RPCs: the 45, `CreateAdmin` and `Close`) over the public API, the
+  proto translation in `grpc-server/grpc_admin_translate.js`, as .NET's
+  `TranslateAdmin.cs` and Python's servicer have theirs. A per-key failure
+  is that key's entry error, the whole call's the top-level error, and an
+  argument the server refuses is `LOCAL_ILLEGAL_ARGUMENT` "js server: ...".
+  The Rust harness runs `multilanguage_admin_test!`'s `__grpc_js` arm through
+  `multilanguage_admin_js_test!` and `JsGrpcFactory`'s `AdminBackendFactory`;
+  every admin case runs, so `JS_GRPC_SKIPS` has no admin entry.
+  `test/grpc_server/admin_service.test.js` calls the handlers in-process,
+  every RPC of the proto included.
+- **The rule linter reads the admin client as it reads the producer** (The
+  rule linter): the C rules know its names (`admin_execute` the drain's
+  execute for `check-single-drainer`, `admin_release` for
+  `check-tsfn-lifetime`, the future waits `adminFutureWait` and
+  `adminFutureGet` for `check-completion-order`, the destroys taken into the
+  descriptor tables for `check-ownership`, the constructors' failure paths
+  for `check-out-err`); `check-public-audience` keeps `MockAdminClient`, a
+  Java test fixture, public; `check-java-completeness` reads Java's
+  `MockAdminClient` and its `Builder` from the Java index and counts
+  `Admin.create` on the runtime object; `check-type-mapping` holds the rows
+  of the value-keyed maps and sets; `check-waiting-call-promise` follows a
+  Result's `all()` to the futures it composes; `check-exception-word` keeps
+  Java's `DeleteAclsResult.FilterResult#exception()`; and
+  `eslint-baseline.txt` lists the members of Java's `Admin`,
+  `KafkaAdminClient` and `MockAdminClient` left out for want of an entry
+  point, with the admin package's documentation as their reason.
+  `test/lint/mutation.test.js` injects a violation into the admin files for
+  the C rules too.
+- **The examples** (`examples/admin/`, `examples/README.md`): one per RPC,
+  the JavaScript twin of `rust/examples/admin/`'s of the same name, with the
+  same command line (`admin/common.js`: `-X key=value`, `--flag`,
+  `--name=value`, positional arguments, `--help`, `KAFKA_BOOTSTRAP_SERVERS`;
+  exit codes 0, 1 and 2) and the same output, run by
+  `test/integration/admin_examples.test.js` (entry 42). They use the client
+  as users do (How the client is used, below), and `make typecheck-examples`
+  and the linter check them (The rule linter).
+
 ### Files and layout
 
 The layout is the JS conventions' (Layout and modules).
@@ -1428,7 +1586,9 @@ The layout is the JS conventions' (Layout and modules).
   (the copy of a record's headers a send hands the core), `record_spy.c`
   (the test-only read-back of the record a send built), `producer.c` (the
   `KafkaProducer` and `MockProducer` handles, which share one native handle
-  type).
+  type), `admin.h`, `admin.c` and `admin_values.c` (the `KafkaAdminClient`
+  and `MockAdminClient` handle, its futures and results, and each RPC's
+  marshaling: "The admin client").
 - `src/`: TypeScript sources only (`.ts`; no `.js`, no `.d.ts`), one folder
   per Java package (`clients` dropped), one public Java type per file,
   snake_case names; `RecordHeader`, of Java's `common.header.internals`, is
@@ -1547,10 +1707,11 @@ The layout is the JS conventions' (Layout and modules).
   self-reference), so no install is needed; tests of private helpers, and the
   gRPC server, require `dist/internal/*.js` directly.
 - The gRPC conformance server lives at `javascript/grpc-server/`
-  (`grpc_server.js`, `grpc_translate.js`) and serves, over the public API,
-  the `ProducerService` and the chaos harness's `ChaosWorkloadService`
-  (`verifiable_clients/chaos_workload.js`), with an image on port 50054; the
-  consumer and admin services come with their clients. The Rust harness runs
+  (`grpc_server.js`, `grpc_translate.js`, `grpc_admin.js`,
+  `grpc_admin_translate.js`) and serves, over the public API, the
+  `ProducerService`, the `AdminService` ("The admin client") and the chaos
+  harness's `ChaosWorkloadService` (`verifiable_clients/chaos_workload.js`),
+  with an image on port 50054; the consumer service comes with its client. The Rust harness runs
   it as `BackendKind::Js`, one backend, and its `JS_GRPC_SKIPS` list
   (`rust/Makefile`) gives each skip a reason and a removal condition (JS
   conventions, Tests).
@@ -1742,6 +1903,23 @@ The rules, each named in its finding:
   the TypeScript parser, a C source or header, a Java source, a linker map or
   a JSON file through the C tokenizer, and a gyp file's `#` comments, never a
   string or a document such as a README.
+  `check-java-line` also reads `examples/`, which point 7 leaves out as user
+  code. Of the rules, only the file-wide ones read the examples
+  (`check-no-todo`, `check-java-line`, `check-directives`): the rules that
+  check a translation of Java's API (`check-java-name`,
+  `check-overload-shape`, `check-type-mapping`, ...) read `src/` only, as an
+  example translates nothing. What checks the examples' calls is
+  typescript-eslint's recommended type-checked rules, which the ESLint half
+  runs on `examples/` too (through `examples/tsconfig.eslint.json`, which
+  maps the package's import paths to `src/`, so no build is needed;
+  `no-require-imports` and `restrict-template-expressions` are off there, as
+  a CommonJS example `require`s the package and prints values through Java's
+  `toString()`; `no-base-to-string` stays on, with one explained disable in
+  `examples/admin/common.js`, where an error's cause may be any value), and `make typecheck-examples`
+  (`scripts/typecheck_tests.js examples`, `examples/tsconfig.json`): `tsc
+  --strict` with `checkJs` over every example against `dist/`'s
+  declarations, as an app's code types against them, in `make test` and the
+  root `test-javascript-unit`.
 - `check-source-line`: no comment cites a line of a Python, C#, Rust, Scala
   or C++ source (point 4): a file name of those languages followed by a colon
   and a line or range, by a range, or by the word `line` and a line or range,
@@ -1863,20 +2041,20 @@ The rules, each named in its finding:
   the consumer) holds a native handle, its construction (its constructor, its field
   initializers and, through `extends`, a base class's) or a static method
   that constructs it (`internalCreate`, for a private constructor) reaching
-  a use of the addon, as the mocks wrap the FFI's mocks: `MockProducer`
-  today; any other code of a `src/` module outside `src/internal/` that
-  reaches one is listed in `lint-mapping.json`'s `nativeCallers` with the
-  reason the rules give, and every entry is needed: a class, exported or not
-  (its members, field initializers and construction, a base class's
-  included), an exported function, an exported const by its initializer (an
-  arrow function, an object of methods such as an interface's statics), and
-  the module's top-level code with any use in it that none of those reaches
-  (a function nothing calls or names), keyed by the module; the record's
-  future, `KafkaFutureImpl`, over its native future (Futures and waiting),
-  today. A use is `native.<fn>`, `native['<fn>']` or
-  `const { <fn> } = native`, and counts when the code reaches it directly or
-  through the `src/internal/` functions and its module's unexported
-  functions it calls or hands on as a callback
+  a use of the addon, as the mocks wrap the FFI's mocks: `MockProducer` and
+  `MockAdminClient` today; any other code of a `src/` module outside
+  `src/internal/` that reaches one is listed in `lint-mapping.json`'s
+  `nativeCallers` with the reason the rules give, and every entry is needed:
+  a class, exported or not (its members, field initializers and
+  construction, a base class's included), an exported function, an exported
+  const by its initializer (an arrow function, an object of methods such as
+  an interface's statics), and the module's top-level code with any use in
+  it that none of those reaches (a function nothing calls or names), keyed
+  by the module; the record's future, `KafkaFutureImpl`, over its native
+  future (Futures and waiting), today. A use is `native.<fn>`,
+  `native['<fn>']` or `const { <fn> } = native`, and counts when the code
+  reaches it directly or through the `src/internal/` functions and its
+  module's unexported functions it calls or hands on as a callback
   (`scripts/lint/native_uses.js`); a call into another such class, or
   another exported function or const, is that one's. Not checked: what a use
   does (that it creates the FFI's object, that every method goes through
@@ -1955,7 +2133,7 @@ The rules, each named in its finding:
   not through a helper); and each such completion calls `cbq_call_end` once,
   as a statement of its body's own block, with no `return` in the body and
   nothing after it but the release of the client struct
-  (`producer_release`). So a client keeps Node running
+  (`producer_release`, `admin_release`). So a client keeps Node running
   while it is open or a call made on it waits for its answer (JS
   conventions, Lifetime, Q21; "Threads and liveness"). Checked by function,
   lexically, as the other `native/` rules read the C sources: not that a
@@ -1976,10 +2154,14 @@ The rules, each named in its finding:
   for is a finding too. `Callback` has no default method, so no helper
   exists yet.
 - `check-encode-callers`: only the string serializer (`src/common/serialization/`),
-  the headers code (`src/common/header/`) and the config code
-  (`src/internal/config.ts`) use `encodeLikeJava` (JS conventions, Types,
-  Q24); a string key or value given without a serializer is a `TypeError`
-  (Class family, Q27), never encoded.
+  the headers code (`src/common/header/`), the config code
+  (`src/internal/config.ts`) and the SCRAM upsertion
+  (`src/admin/user_scram_credential_upsertion.ts`, Java's
+  `getBytes(UTF_8)` of its password and salt) use `encodeLikeJava` (JS
+  conventions, Types, Q24, which lists the first three: the fourth is an
+  open question for the rules' owner, `DECISIONS.md` entry 52); a string key
+  or value given without a serializer is a `TypeError` (Class family, Q27),
+  never encoded.
 - `check-commonjs-pin`: `package.json` has no `"type": "module"` (none, or `"commonjs"`), `tsconfig.json`'s
   `module` and `moduleResolution` are `nodenext`, and each `exports` entry
   has exactly the conditions `types` then `default` (JS conventions,

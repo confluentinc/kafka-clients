@@ -36,12 +36,14 @@ export class AlterClientQuotasResult {
    * Maps an entity to its alteration result.
    *
    * @param futures - maps entity to its alteration result, on its own
+   * @throws `TypeError` when they are not a ClientQuotaEntityMap
    */
   constructor(futures: ClientQuotaEntityMap<KafkaFuture<void>>);
   /**
    * The same as `new AlterClientQuotasResult(futures)`.
    *
    * @param options - maps entity to its alteration result
+   * @throws `TypeError` when they are not a ClientQuotaEntityMap
    */
   constructor(options: {
     /** Maps entity to its alteration result. */

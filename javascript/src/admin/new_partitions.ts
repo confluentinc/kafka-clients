@@ -49,6 +49,8 @@ export class NewPartitions {
    *
    * @param totalCount - The total number of partitions after the operation succeeds.
    * @returns the new partitions
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` or `RangeError` when the count is not a Java `int`
    */
   static increaseTo(totalCount: number): NewPartitions;
   /**
@@ -56,6 +58,8 @@ export class NewPartitions {
    *
    * @param options - the total number of partitions after the operation succeeds
    * @returns the new partitions
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` or `RangeError` when the count is not a Java `int`
    */
   static increaseTo(options: {
     /** The total number of partitions after the operation succeeds. */
@@ -82,6 +86,8 @@ export class NewPartitions {
    * @param options - the total number of partitions after the operation
    *   succeeds, and the replica assignments for the new partitions
    * @returns the new partitions
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` or `RangeError` when a count or a broker id is not a Java `int`
    */
   static increaseTo(options: {
     /** The total number of partitions after the operation succeeds. */

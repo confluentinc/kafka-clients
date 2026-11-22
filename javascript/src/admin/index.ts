@@ -25,9 +25,17 @@
  * `handleDescribeTopicsUsingIds`, `setMockMetrics`, `addedMetrics`,
  * `disableTelemetry`, `setClientInstanceId`, `advanceTimeOnClientInstanceId`,
  * `addStreamsGroupDescription`, and the five-parameter form of `addTopic`
- * (`addTopic(internal, name, partitions, configs, usesTopicId)`).
- * `AdminClient`, Java's abstract base class
- * of `KafkaAdminClient`, is not translated.
+ * (`addTopic(internal, name, partitions, configs, usesTopicId)`), with the
+ * options, Result and value classes only those calls use (the share-group,
+ * streams-group, Raft voter, metadata quorum and `unregisterBroker` ones,
+ * `QuorumInfo`, `RaftVoterEndpoint` and `EndpointType`).
+ *
+ * Not translated: `AdminClient`, Java's abstract base class of
+ * `KafkaAdminClient`; and Java's deprecated API, `ForwardingAdmin`,
+ * `listConsumerGroups` with `ConsumerGroupListing`,
+ * `ListConsumerGroupsOptions` and `ListConsumerGroupsResult`, and
+ * `listClientMetricsResources` with its classes (use `listGroups` and
+ * `listConfigResources`).
  *
  * Invented *(js-only)*: `MemberToRemoveSet`, Java's `Set<MemberToRemove>`:
  * JavaScript has no value equality for set members.
@@ -170,6 +178,77 @@
  * binding's `TypeError`, whatever Java's mock would throw. Why: the FFI's mock answers through the
  * Result, and an RPC's entry point reports no error at the call but a caught
  * panic. Goes when: the FFI's mock throws from the call as Java's does.
+ *
+ * Two more differences of `MockAdminClient` are marked *(deviation)* on its
+ * class, with their Why and Goes when: its futures show their outcome on a
+ * later turn of the event loop, and `createDelegationToken` with no renewer
+ * fails its future where Java's mock throws.
+ *
+ * *(deviation)* `MockAdminClient` answers otherwise where Java's mock throws:
+ *
+ * - `createTopics` on `new MockAdminClient()` (whose broker is
+ *   `Node.noNode()`) fails its futures with `IllegalArgumentError` "Index -1
+ *   out of bounds for length 1", where Java's mock throws
+ *   `IndexOutOfBoundsException` from the call;
+ * - `Builder.controller(index)` out of range, and `Builder.numBrokers`
+ *   shrinking below the log-dir list, throw `IllegalArgumentError`
+ *   (`controller(3)` with three brokers: "Index 3 out of bounds for length 3";
+ *   the shrinking `numBrokers`: "toIndex = 2"), where Java throws
+ *   `IndexOutOfBoundsException`;
+ * - `setFetchesRemainingUntilVisible` on an unknown topic throws
+ *   `IllegalArgumentError`, where Java's mock throws a bare
+ *   `RuntimeException`;
+ * - `controller(null)`, and the constructor's `{ brokers, controller: null }`,
+ *   throw `TypeError` "controller must not be null", where Java's mock throws
+ *   `IllegalArgumentException` "The controller node must be in the list of
+ *   brokers";
+ * - `addTopic` with a null name throws `TypeError` "name must not be null",
+ *   where Java's mock adds a topic named null; `Builder.clusterId(null)` and
+ *   `Builder.brokerLogDirs(null)` throw `TypeError`, where Java's builder
+ *   stores the null and builds a mock with it;
+ * - `alterReplicaLogDirs` with a broker id beyond the log dirs,
+ *   `listPartitionReassignments` after the topic is deleted or shrinks, and a
+ *   `ConfigResource.Type.BROKER` resource whose name is not a number (`abc`)
+ *   in `describeConfigs` and `incrementalAlterConfigs` fail their futures,
+ *   where Java's mock throws `IndexOutOfBoundsException`, a bare
+ *   `RuntimeException` or `NumberFormatException` from the call;
+ * - `listOffsets` on a partition never seeded answers offset -1,
+ *   `listConsumerGroupOffsets(groupId)` with seeded offsets answers every
+ *   offset, and `describeDelegationToken()` with the default options lists
+ *   every token, where Java's mock throws `NullPointerException`;
+ * - `alterPartitionReassignments` on an unknown partition fails its future
+ *   with `UnknownTopicOrPartitionError` "This server does not host this
+ *   topic-partition.", where Java's mock's error has no message;
+ * - where Java's mock returns null for a field it does not track, the core's
+ *   mock returns an empty list or `UNKNOWN`.
+ *
+ * Why: the FFI's mock answers so, and its argument checks are the FFI's.
+ * Goes when: the core's mock throws and answers as Java's does.
+ *
+ * *(deviation)* `deleteTopics` and `describeTopics` with a null topic name, and
+ * `createTopics` with a `NewTopic` whose name is null, throw `TypeError` at the
+ * call ("topics must not contain null", "topic_names must not contain null",
+ * "name must not be null", the FFI's words), where Java fails that topic's
+ * future with `InvalidTopicError` ("The given topic name 'null' cannot be
+ * represented in a request." for a `NewTopic`). Why: the C API cannot carry a
+ * null name. Goes when: the FFI takes the null and the core fails the future
+ * as Java's does.
+ *
+ * *(deviation)* `describeConfigs` and `incrementalAlterConfigs` with a
+ * `ConfigResource.Type.BROKER` or `BROKER_LOGGER` resource whose name is not
+ * a number return their Result: the core sends the resource to any broker,
+ * which refuses it, and its future fails with the broker's
+ * `InvalidRequestError` ("Broker id must be an integer, but it is: abc", or
+ * "Node id must be an integer …"), where Java's `KafkaAdminClient` throws
+ * `NumberFormatException` from the call. Why: the core reads such a name as
+ * any broker. Goes when: the core refuses it as Java's does.
+ *
+ * *(deviation)* `RemoveMembersFromConsumerGroupResult.memberResult` for a
+ * member not in a client's request fails with the core's message, "Member
+ * <id> was not included in the original request", where Java's names the
+ * member by its `Object.toString()`; a Result built through the constructor
+ * uses Java's text. Why: the core builds the client's Result. Goes when: the
+ * core's message is Java's.
  *
  * @packageDocumentation
  */

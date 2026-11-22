@@ -17,9 +17,10 @@ replaces what, what is not offered and what changes silently (first of all,
 hashes keys with CRC-32).
 
 The API follows the Java client's shape (`KafkaProducer`, `ProducerRecord`,
-`RecordMetadata`, `KafkaFuture`), with JavaScript idioms (a `Promise` for a
-blocking call, a `KafkaFuture` whose `get()` returns a `Promise`). This first
-slice covers the producer only.
+`RecordMetadata`, `Admin`, `KafkaFuture`), with JavaScript idioms (a `Promise`
+for a blocking call, a `KafkaFuture` whose `get()` returns a `Promise`). The
+preview covers the producer and the admin client (see "The admin client");
+the consumer comes later.
 
 The package is `@confluentinc/kafka-javascript`, the npm name of the
 librdkafka-based client, at version `4.4.0-beta.1`: like the Rust-based Python
@@ -155,11 +156,12 @@ run; it is not published. `cargo xtask bump-version --javascript-version <v>`
 
 ### The Rust multilanguage suite
 
-The Rust integration tests' `multilanguage_test!` producer cases also run
-against this client, as their `__grpc_js` arm, through
-`grpc-server/grpc_server.js` (a gRPC server on port 50054 over
-`rust/multilanguage-test-server/proto`'s `ProducerService`, and the chaos
-harness's `ChaosWorkloadService`; it is not part of the published package):
+The Rust integration tests' `multilanguage_test!` producer cases and
+`multilanguage_admin_test!` admin cases also run against this client, as
+their `__grpc_js` arm, through `grpc-server/grpc_server.js` (a gRPC server on
+port 50054 over `rust/multilanguage-test-server/proto`'s `ProducerService`
+and `AdminService`, and the chaos harness's `ChaosWorkloadService`; it is not
+part of the published package):
 
 ```bash
 make test-integration-javascript-native  # from the repository root: the server as a host process
@@ -168,9 +170,10 @@ make test-integration-javascript         # Linux only: the server in a container
 
 The native arm loads `@grpc/grpc-js` and `@grpc/proto-loader`, two of the
 devDependencies, from `javascript/node_modules` (`npm ci`);
-`make -C javascript grpc-native` checks they are there. The transaction cases
-are skipped for this arm (`JS_GRPC_SKIPS` in `rust/Makefile`), as the
-producer has no transactions yet.
+`make -C javascript grpc-native` checks they are there. The producer's
+transaction cases are skipped for this arm (`JS_GRPC_SKIPS` in
+`rust/Makefile`), as the producer has no transactions yet; every admin case
+runs.
 
 ## Layout
 
@@ -220,15 +223,21 @@ src/index.ts           the Java built-in errors (IllegalStateError, IllegalArgum
                        and the Duration type
 src/producer/          KafkaProducer, ProducerRecord, RecordMetadata, Callback (a type),
                        ProducerConfig, BufferExhaustedError
-src/common/            KafkaError, KafkaFuture; errors/ (Java's common.errors), config/
-                       (SslConfigs, SaslConfigs, SecurityConfig, SslClientAuth, ConfigError),
-                       security/auth/ (SecurityProtocol), ...
+src/admin/             Admin, KafkaAdminClient, MockAdminClient, the *Options and *Result
+                       classes and the admin value classes
+src/common/            KafkaError, KafkaFuture, Node, TopicPartition, Uuid, ...; errors/
+                       (Java's common.errors), config/ (SslConfigs, SaslConfigs,
+                       ConfigResource, TopicConfig, ConfigError, ...), acl/, quota/,
+                       resource/, security/auth/ (SecurityProtocol, KafkaPrincipal),
+                       security/token/delegation/, ...
 src/consumer/          the consumer's errors only (no consumer yet)
 src/internal/          private helpers (not exported, not declared)
 dist/                  src/ compiled by tsc (tsconfig.json): .js, .d.ts and maps, the
                        package's entry points (git-ignored)
 native/                the addon: util.h, addon.c, callback_queue.c, error.c, record.c, producer.c,
-                       and binding.gyp (node-gyp runs here, never at install)
+                       admin.h, admin.c, admin_values.c, and binding.gyp (node-gyp runs here,
+                       never at install)
+examples/              producer.js and admin/, one example per admin call (examples/README.md)
 test/static|unit|typing|integration
 npm/                   one folder per platform package (its package.json and README)
 ```
@@ -685,6 +694,215 @@ venv/bin/python python/verifiable_clients/verifiable_consumer.py --bootstrap-ser
   --topic js-demo --group-id js-verify --group-protocol consumer --max-messages 1 --verbose \
   --reset-policy earliest
 ```
+
+[`examples/README.md`](examples/README.md) lists every example, the 45 admin
+ones included, and how to run them.
+
+## The admin client
+
+The admin client is Java's `Admin`: the 45 calls the C FFI has, from
+`createTopics` to `unregisterController`, with their `*Options` and
+`*Result` classes (`@confluentinc/kafka-javascript/admin`), and the classes
+they take and return from `common`, `common/acl`, `common/config`,
+`common/quota`, `common/resource` and `common/security/token/delegation`.
+The admin package's documentation lists the members of Java's `Admin` and
+`MockAdminClient` left out because the FFI has no entry point for them (the
+Raft voter, metadata quorum, metrics, telemetry, share-group and
+streams-group calls, among others).
+
+```js
+const { ExecutionError } = require('@confluentinc/kafka-javascript');
+const { Admin, CreateTopicsOptions, NewTopic } = require('@confluentinc/kafka-javascript/admin');
+const { TopicExistsError } = require('@confluentinc/kafka-javascript/common/errors');
+
+const admin = Admin.create({ 'bootstrap.servers': 'localhost:9092' });
+try {
+  const result = admin.createTopics({                    // returns at once
+    newTopics: [new NewTopic({ name: 'orders', numPartitions: 3, replicationFactor: 1 })],
+    options: new CreateTopicsOptions({ timeoutMs: 30000 }),
+  });
+  for (const [topic, future] of result.values()) {      // one future per topic
+    try {
+      await future.get();
+      console.log(`created ${topic}`);
+    } catch (e) {
+      const cause = e instanceof ExecutionError ? e.cause : e;
+      if (cause instanceof TopicExistsError) console.log(`${topic} already exists`);
+      else throw e;
+    }
+  }
+  const names = await admin.listTopics().names().get(); // a Set of topic names
+  console.log([...names]);
+} finally {
+  await admin.close();
+}
+```
+
+### Creating and closing the admin client
+
+`Admin.create(configs)`, or `Admin.create({ configs })`, returns a
+`KafkaAdminClient`, whose constructor is private, as Java's `create` is the
+way to build one. The configuration is a plain object of Java's keys
+(`AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG`, ...), checked by the core as
+the producer's is (Configuration, above). The client is ready once created:
+there is no `connect()`.
+
+Like a producer, an admin client keeps Node running from its creation until
+`close()` closes it, so close every one. `close()` waits without a time
+limit for the calls in flight, as Java's `close()` does; `close(timeout)` or
+`close({ timeout })` waits at most that long, milliseconds or a
+`Temporal.Duration`, and a negative timeout is read as zero *(deviation:
+Java's throws `IllegalArgumentException`)*. A call made after `close()`
+still returns its Result, whose futures fail with the core's error.
+
+On Node.js 24 and later, `await using` closes the client when the block
+ends; on Node.js 22, which has no `using` declarations, close it in a
+`finally`, as above:
+
+<!-- snippet: fragment -->
+```js
+await using admin = Admin.create({ 'bootstrap.servers': 'localhost:9092' });
+```
+
+### Results and their futures
+
+An admin call is a plain method: it returns its `*Result` at once, as Java's
+does, and the work goes on in the background. A form or argument error
+throws from the call itself. The Result holds a `KafkaFuture` per key (per
+topic, group, partition or resource), and the Result's other methods are
+Java's: `values()` (a map from key to future: a `Map` for keys of strings or
+broker ids, the key class's map class for value-class keys, such as a
+`ConfigResourceMap`), `all()` (a future of the
+whole call, failing with the first key's error) and the per-key refinements,
+such as `createTopicsResult.numPartitions(topic)`. `await future.get()`
+resolves with the key's value, or rejects with an `ExecutionError` (Java's
+`ExecutionException`) whose `cause` is the key's error; `whenComplete`,
+`thenApply` and `toCompletionStage()` give the error itself.
+
+A future's outcome reaches JavaScript on a later turn of the event loop, not
+inside the call, even on `MockAdminClient`, whose calls Java's mock
+completes before returning *(deviation: the core answers a completed future
+from a task)*: right after a call, `isDone()` is `false` and `getNow()`
+returns its argument, and `await future.get()` is unaffected. A future
+nobody reads raises no unhandled rejection.
+
+### Options
+
+Each call takes its `*Options` class as the `options` key, built with one
+object of its setters' fields (`new CreateTopicsOptions({ validateOnly: true,
+timeoutMs: 5000 })`) or through Java's setters
+(`new CreateTopicsOptions().validateOnly(true)`). A Java getter and setter of
+one name is one method: `options.timeoutMs()` reads and
+`options.timeoutMs(5000)` sets; a reader with a Java name of its own keeps it
+(`options.shouldValidateOnly()`), and `validateOnly()` with no argument throws
+`TypeError`. `timeoutMs` is a Java `Integer`: `null` means
+`default.api.timeout.ms`, a negative value is sent as `0`, and a value
+outside 32 bits throws `RangeError`. `ListOffsetsOptions` and
+`RemoveMembersFromConsumerGroupOptions` keep Java's constructors only
+(`new ListOffsetsOptions(IsolationLevel.READ_COMMITTED)`).
+
+### Maps and sets keyed by value classes
+
+A map keyed by a value class is a class of its own *(js-only)*, built as
+`TopicPartitionMap` is (Data objects, enums and constructors, above):
+JavaScript's `Map` would compare the keys by identity. They are `UuidMap`
+and `TopicPartitionReplicaMap` (`common`), `ConfigResourceMap`
+(`common/config`), `AclBindingMap` and `AclBindingFilterMap`
+(`common/acl`) and `ClientQuotaEntityMap` (`common/quota`), with the set
+`MemberToRemoveSet` (`admin`). Each compares keys by the fields Java's
+`equals` compares, keeps the original key objects, and has
+`TopicPartitionMap`'s methods (`MemberToRemoveSet` has
+`TopicPartitionSet`'s). Where Java takes such a map, pass its class
+(a `Map` throws `TypeError` with a hint):
+
+```js
+const { AlterConfigOp, ConfigEntry } = require('@confluentinc/kafka-javascript/admin');
+const { ConfigResource, ConfigResourceMap } = require('@confluentinc/kafka-javascript/common/config');
+
+const resource = new ConfigResource({ type: ConfigResource.Type.TOPIC, name: 'orders' });
+const configs = new ConfigResourceMap([
+  [resource, [new AlterConfigOp({ configEntry: new ConfigEntry({ name: 'retention.ms', value: '86400000' }), operationType: AlterConfigOp.OpType.SET })]],
+]);
+void configs; // admin.incrementalAlterConfigs(configs)
+```
+
+A map keyed by strings that a call takes (`createPartitions`,
+`updateFeatures`, the group specs of `listConsumerGroupOffsets`) is a `Map`
+or a plain object, given under its parameter's name:
+`admin.createPartitions({ newPartitions: { orders: NewPartitions.increaseTo(6) } })`.
+A map a Result returns keyed by strings or broker ids is a `Map`.
+
+### Admin data classes
+
+The seven `*Description` classes are data objects, as `RecordMetadata` is:
+`TopicDescription`, `ConsumerGroupDescription`, `ClassicGroupDescription`,
+`MemberDescription`, `TransactionDescription`, `LogDirDescription` and
+`UserScramCredentialsDescription`. Java's getters are frozen `readonly`
+fields (`description.name`, `description.partitions`), and a collection they
+hold is read-only. Every other admin class keeps Java's methods, so fields
+and methods meet in one expression:
+`description.partitions[0].leader().host` (`TopicPartitionInfo.leader()` is a
+method; `Node` is a data object). The admin calls also take and return the
+data objects of the other packages: `TopicPartition`, `Node` and the
+`OffsetAndMetadata` of the group offset calls (`oam.offset`, not
+`oam.offset()`). Without the `()` a method read returns the function and
+raises no error. The value classes have Java's `equals`,
+`hashCode` and `toString()`, and `toJSON()`.
+
+### Admin errors
+
+A key's error is the class of its Java exception, the `cause` of `get()`'s
+`ExecutionError`: `TopicExistsError`, `UnknownTopicOrPartitionError`,
+`GroupIdNotFoundError`, `SecurityDisabledError` (an ACL call to a broker with
+no authorizer), ... (`common/errors`). A wrong form or argument type throws
+from the call: `IllegalArgumentError` for a form Java has not, `TypeError`
+for a value of the wrong type. A `null` that Java stores and reads only later
+(a null group id, a `TopicPartition` with a null topic, ...) is a
+`TypeError` at the call *(deviation: the C API cannot carry it; the admin
+package's documentation lists each)*.
+
+### MockAdminClient
+
+`MockAdminClient` is Java's mock of the admin client, over the client core's
+own mock: `new MockAdminClient()` (one broker), `new MockAdminClient({
+brokers, controller })`, or `MockAdminClient.create()`, Java's `Builder`,
+which also takes its fields in its constructor
+(`new MockAdminClient.Builder({ brokers, usingRaftController: true }).build()`).
+It implements `Admin`, and adds Java's mock methods the FFI has: `addTopic`,
+`markTopicForDeletion`, `controller(node)`, `setFetchesRemainingUntilVisible`,
+`timeoutNextRequest`, `updateBeginningOffsets`, `updateEndOffsets` and
+`updateConsumerGroupOffsets`.
+
+```js
+const { MockAdminClient } = require('@confluentinc/kafka-javascript/admin');
+const { Node } = require('@confluentinc/kafka-javascript/common');
+
+const node = new Node({ id: 0, host: 'localhost', port: 9092 });
+const mock = new MockAdminClient({ brokers: [node], controller: node });
+try {
+  mock.addTopic({ internal: false, name: 'orders', partitions: [], configs: null });
+  console.log([...(await mock.listTopics().names().get())]); // [ 'orders' ]
+} finally {
+  await mock.close();
+}
+```
+
+Where it differs from Java's mock:
+
+- Its futures show their outcome on a later turn of the event loop (Results
+  and their futures, above).
+- A call Java's mock does not implement (the group calls but `listGroups` and
+  a one-group `listConsumerGroupOffsets`, the ACL, quota, SCRAM, transaction
+  and producer calls, `createPartitions`, `electLeaders`, ...) returns its
+  Result, whose futures fail with `UnsupportedOperationError` and Java's
+  mock's message ("Not implemented yet", or "Not implement yet" where Java's
+  mock spells it so), where Java's mock throws it from the call.
+- `createDelegationToken` with no renewer fails its future with
+  `IllegalArgumentError`, where Java's mock throws `IndexOutOfBoundsException`.
+- Like the client, it keeps Node running until closed.
+
+The admin package's documentation lists every deviation, and the examples
+in [`examples/admin/`](examples/README.md) call each of the 45 RPCs.
 
 ## Migrating from the earlier development builds
 

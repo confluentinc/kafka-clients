@@ -68,6 +68,8 @@ export class TopicDescription {
    *   and a list of partitions where the index represents the partition id
    *   and the element contains leadership and replica information for that
    *   partition
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type, or null partitions
    */
   constructor(options: {
     /** The topic name. */
@@ -84,6 +86,8 @@ export class TopicDescription {
    *
    * @param options - the topic name, whether the topic is internal to Kafka,
    *   a list of partitions, and the authorized operations for this topic
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type, or null partitions
    */
   constructor(options: {
     /** The topic name. */
@@ -102,6 +106,8 @@ export class TopicDescription {
    * @param options - the topic name, whether the topic is internal to Kafka,
    *   a list of partitions, the authorized operations for this topic and the
    *   topic id
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type, or null partitions
    */
   constructor(options: {
     /** The topic name. */
