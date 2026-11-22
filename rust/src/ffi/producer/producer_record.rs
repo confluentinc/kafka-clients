@@ -57,8 +57,9 @@ pub struct kafka_producer_ProducerRecord_t {
 pub(crate) struct ProducerRecordInner {
     record: GenericRecord,
     topic_c: CString,
-    /// The headers getter's view: a copy of the record's (immutable) headers
-    /// behind a stable address.
+    /// The headers getter's view: the record's (immutable) headers, their
+    /// list shared with the record rather than copied, behind a stable
+    /// address.
     headers: Box<RecordHeadersInner>,
 }
 

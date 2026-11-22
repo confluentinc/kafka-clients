@@ -34,8 +34,8 @@ use crate::common::record::TimestampType;
 /// collection; here it hands out a shared reference, so the borrow rules make
 /// concurrent reads safe.
 // The `topic` is an `Arc<str>` shared cheaply across all records from the same
-// topic-partition (consumer-threading.md §27), and the headers are owned,
-// matching Java's allocation behavior.
+// topic-partition (consumer-threading.md §27). The headers of a fetched record
+// are one slice of its encoded header section, read on first access (§27).
 #[derive(Clone)]
 #[doc(alias = "org.apache.kafka.clients.consumer.ConsumerRecord")]
 pub struct ConsumerRecord<K, V> {

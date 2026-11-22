@@ -35,6 +35,7 @@
 //!
 //! No Java counterpart: Java has no C boundary.
 
+use std::borrow::Cow;
 use std::ffi::{CStr, c_char, c_void};
 
 use crate::common::Error;
@@ -118,6 +119,24 @@ pub(crate) unsafe fn require_str_or(s: *const c_char, param: &'static str, error
     // SAFETY: `s` is non-null (checked above) and, per this function's `# Safety`, a valid
     // NUL-terminated string, as `require_str` requires.
     unsafe { require_str(s, param) }
+}
+
+/// The mandatory string `s`, borrowed for a call that only reads it (a key
+/// to look up) and so needs no copy of it. Only a string that is not valid
+/// UTF-8 is copied, its malformed bytes replaced as [`require_str`] replaces
+/// them. Panics with [`fail`]`(error())` when `s` is `NULL`.
+///
+/// # Safety
+///
+/// `s` must be `NULL` or a valid NUL-terminated string, alive and not written
+/// for `'a`.
+pub(crate) unsafe fn require_str_ref_or<'a>(s: *const c_char, error: impl FnOnce() -> Error) -> Cow<'a, str> {
+    if s.is_null() {
+        fail(error())
+    }
+    // SAFETY: `s` is non-null (checked above) and, per this function's `# Safety`, a valid
+    // NUL-terminated string that stays alive and unwritten for `'a`, the lifetime of the borrow.
+    unsafe { CStr::from_ptr(s) }.to_string_lossy()
 }
 
 /// The elements of the mandatory list `list`; panics with [`null`] when it is
