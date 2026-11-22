@@ -1,0 +1,1717 @@
+# JavaScript (Node.js) binding
+
+The Node.js client in `javascript/` is built only on the C FFI of root
+`CLAUDE.md` §4. It is a Node-API addon written in plain C against
+`node_api.h` (`native/`), under a thin layer written in TypeScript (`src/`),
+which tsc compiles, with its declarations, into `dist/`, the package's entry
+points.
+
+The rules are the root `CLAUDE.md`'s **JavaScript Binding Conventions**
+("the root conventions" below). They decide every question they answer, and
+this file does not repeat them: where they state a rule, this file points to
+the group that states it ("root conventions, Signatures"). This file holds
+what they leave to the binding: the addon's internals, liveness, the file
+layout, the generated files and the rule linter. An item the root conventions
+list under "Not decided yet" is marked **(not decided yet in the root
+conventions)** here: the text records the current choice, and nobody treats it
+as settled. A **(root conflict)** mark names a place where the root
+conventions disagree with themselves or with a reviewed fact; the code follows
+the root text literally, as the owner chose, except where that text, read
+literally, breaks the client or misdescribes what it does: there the code and
+docs follow Java and the core
+(`design/current/javascript-producer/DECISIONS.md`, entry 4). Either way the
+mark records the conflict for the rules' owner. Root `CLAUDE.md` still applies
+wherever both are silent. The approved design is
+`design/current/javascript-producer/PLAN.md`.
+
+## Ground truth
+
+These decide every question, in this order:
+
+1. The root conventions (root `CLAUDE.md`, JavaScript Binding Conventions).
+2. The C ABI in `rust/target/include/confluent_kafka_bindings.h`, the only
+   header the addon includes (root conventions, Build, packaging and
+   release).
+3. The Java public API (`KafkaProducer`, `ProducerRecord`, `RecordMetadata`,
+   `Callback`, Apache Kafka 4.4.0 in `kafka/`).
+4. Root `CLAUDE.md` §4 "C FFI Conventions".
+
+## Boundary rules
+
+1. **Java shape, host idiom, no Kafka logic.** Batching, partitioning, retries
+   and config validation live only in the Rust core. The binding's own checks
+   are the listed few of the root conventions (Implementation over the FFI),
+   in their order: the form of the arguments, then the rest. There is no
+   closed-client check (root conventions, Q61): the binding keeps no closed
+   flag, and a call after `close()` goes to the FFI, whose error is the
+   core's. Each check has its Why and its Goes when:
+   - **The form of the arguments** (`JavaForms`, unknown option keys). Why:
+     one JavaScript method stands for Java's overload set, and only the
+     binding sees which form was written. Goes when: never; it is the
+     language mapping, not a missing FFI feature.
+   - **Run-time types and a missing topic.** Why: TypeScript's types are not
+     checked at run time, and a wrong JavaScript type has no C form to cross
+     as. Goes when: never, for the same reason.
+   - **A negative partition or timestamp.** Why: the C record constructors
+     read a negative value as Java's `null`, so the core cannot see it. Goes
+     when: the FFI carries "absent" separately from the value.
+   - **The configuration's shape**: a `Map` or another non-plain object is a
+     `TypeError`, and a symbol key a `ConfigError`. Why: a `Map`'s entries
+     and a symbol have no string to cross as. Goes when: never. No config
+     value is checked (root conventions, Configuration), except the
+     producer's serde keys, which never reach the core: `key.serializer` and
+     `value.serializer` take a synchronous `({ configs, isKey }) => serde`
+     (root conventions, Serialization, Q53), and a class name, a serde
+     object, a class or a function that returns a Promise or no serializer
+     is a `ConfigError` saying what to pass (`src/internal/serde.ts`
+     `configuredSerializer`). Why: the binding runs the serdes, so only it
+     reads these keys. Goes when: never.
+   - **A NUL byte in a string or bytes that cross as a C string** (the topic,
+     the header keys, the config keys and values: `js_string_dup` and
+     `js_bytes_cstring` in `native/record.c`, which `native/headers.c` uses for
+   the header keys), a `TypeError` "... without null
+     bytes". Why: every C reader stops at the first NUL, so the value would be
+     truncated silently at the ABI. Goes when: these values cross the ABI with
+     a length, as `kafka_Bytes_t` does.
+   - **Read-only headers' changes go to headers with no views**: on a
+     read-only `Headers`, `add` and `remove` are sent, with their arguments
+     unchanged, to the shared empty read-only `RecordHeaders`, so the core's
+     error comes from a handle whose views nothing holds
+     (`src/common/header/headers.ts` `#write`). Why: the FFI drops a handle's
+     views on every mutating call, refused or not, which would free the
+     `Header` views the app holds. Goes when: the FFI keeps them across a
+     refused call.
+
+   No precondition of Java's is repeated (root conventions, Q35): a negative
+   timeout goes to the FFI as it is, and the form called, not the value,
+   picks `close_cb` or `close_with_timeout_cb`; the producer FFI's close
+   rejects a negative one with Java's `IllegalArgumentError("The timeout
+   cannot be negative.")` and closes nothing. What stays is the conversion a
+   number or a `Temporal.Duration` needs: `NaN`, a count beyond 2^53 - 1 and
+   a calendar unit are `RangeError`s, and `null` is a `TypeError`
+   (`src/internal/duration.ts`). A `ProducerRecord` is frozen, so `send()`
+   checks no field again ("Java shape, JS idiom", the data objects).
+2. **The notify hook only signals.** `cbq_notify` (`native/callback_queue.c`)
+   calls `napi_call_threadsafe_function(..., napi_tsfn_nonblocking)` and
+   nothing else, under the client queue's `notify_mtx` and only while
+   `notify_open`. It may fire on any thread, including the JS thread inside
+   `send_with_callback_cb`. Replacing the hook does not wait for a call in
+   flight, so the JS thread clears `notify_open` under that lock before the
+   threadsafe function is released or once it is finalized; no hook call can
+   then reach a deleted threadsafe function.
+3. **One drainer per client.** `kafka_producer_Producer__execute_callbacks_err`
+   runs only on the JS main thread, in one drain loop (looped while it returns
+   > 0, `cbq_drain`) run from the threadsafe function's `call_js` or from
+   `send()`'s pump (below), and drains never nest: a drain started inside a
+   drain (a `send()` from a delivery callback) or once destroy began is a
+   no-op. The binding never calls `_destroy` from inside a drain, nor from a
+   completion or a call: only the handle object's finalizer destroys a
+   producer, and only a closed one (rule 10).
+
+   **Cooperative scheduling.** The rule is the root conventions' (Threads and
+   callbacks): every 64th send that is accepted at once, and the first send
+   after one that had to wait, runs the producer's queued callbacks before
+   sending, and every 1000th send yields to the event loop with
+   `setImmediate` (Python's `AsyncProducer` `_PUMP_EVERY` /
+   `_FAST_PATH_YIELD_EVERY`). Why: a `send()` the producer takes at once
+   settles its Promise inside the call, and awaiting a settled Promise runs
+   only microtasks, so a loop awaiting such sends would never return to the
+   event loop: no timer, no I/O, no `call_js`, and every record's delivery
+   state would pile up until the loop ended. In this binding the count is of
+   the sends whose hand-over completed inside the call since this producer's
+   last deferral turn (its own `setImmediate`; other event-loop turns and
+   `call_js` do not restart it) or since a send whose hand-over had to wait,
+   which restarts it, as Python's does, so the next send runs the queued
+   callbacks; the yield settles the sends' Promises after one event-loop
+   turn, from a single `setImmediate` that settles them in order and restarts
+   the count, while a send settling during that turn, queued or taken at
+   once, settles in it too, behind the sends already deferred. The record
+   itself is handed over at once in every case (rule 7): only the resolution
+   waits, so a deferred `send()` may settle after its record's delivery
+   callback ran.
+4. **Waiting calls use the `_cb` twin** (root conventions, Futures and
+   waiting): `send_with_callback_cb`, `flush_cb`, `close_cb`,
+   `close_with_timeout_cb`. The blocking forms would block the event loop and
+   run callbacks on the caller's thread. There is no exception: no finalizer
+   closes a client, so no teardown needs a blocking close
+   (`test/static/header_conformance.test.js` and `check-cb-twin-only` pin
+   it).
+5. **Never the blocking `KafkaFuture_get`; `get_cb` and
+   `get_with_timeout_cb` are the waits.** The `kafka_common_KafkaFuture_t*` a
+   send's hand-over completion receives is the record's future. The send's
+   context (`SendCtx.future`) owns it, and JS gets the number of the
+   context's slot in the producer's table (`Producer.slots`, a small integer
+   kept in the record's `KafkaFuture` with the producer's handle), so no
+   object, and no finalizer, is made per record. The record's `KafkaFuture`
+   completes with the delivery its callback saw, as Java's
+   `completeFutureAndFireCallbacks` completes the future once the callback
+   returned (`KafkaFuture.internalSetDelivery`, rule 6), and from then on
+   `get()`, `getNow()` and `isDone()` answer from it, as Python reads a done
+   future's value at once. A wait started before that goes through
+   `kafka_common_KafkaFuture_get_cb` (`get()`, and a first dependant:
+   `thenApply`, `whenComplete`, `allOf`, `toCompletionStage`) or
+   `kafka_common_KafkaFuture_get_with_timeout_cb` (`get({ timeout })`, the
+   FFI keeping the time, a negative timeout passed on as it is), each created
+   on first use, so nothing waits, and no Promise exists, for a future nobody
+   reads. A wait's completion runs in the producer's drain (inline inside the
+   call once the producer is destroyed); one the destroy runs, from the
+   handle object's finalizer, reaches no JS. Each wait holds one reference on
+   the context and one unit of the producer struct (`owners`). The context
+   destroys the native future exactly once, on the JS thread, running no JS
+   (`send_ctx_maybe_destroy_future`): once the callback reported, the last
+   wait completed and JS recorded the delivery (or was never handed the
+   slot), giving the slot back then. A context whose delivery reached no JS
+   while JS holds its slot (an environment teardown) is kept, so the slot
+   never names freed memory. A callback Promise still pending when the
+   finalizer destroys a closed producer is not such a case, although a
+   completed close does not rule it out (a `close()` made from the callback
+   before its first `await` closes at once, the Promise still pending): the
+   destroy reports it as returned (rule 6), and JS holds its future no more,
+   since a `KafkaFuture` holding a slot holds the handle object being
+   finalized, so its future, slot and context are freed as a recorded
+   one's are (`send_report_awaiting`). Only a future with no native
+   handle (`allOf()`, `completedFuture()`, the dependants) runs a JS timer,
+   for a timed `get`.
+
+   The cost was measured as the root's Futures and waiting asks (Python's
+   gate, an A/B run of the producer performance test): send-only,
+   100-byte values, `linger.ms` 5, 3M records, 11 interleaved runs each
+   against the code before the native future: 394.6k
+   records/s (median 394.6k) before, 385.0k (median 387.2k) after, -2.4% (-1.9%
+   by median), GC time 79 ms against 81 ms. A first form, one wrapped handle
+   object with a finalizer per record, cost 7-10% and 2.7 times the GC time;
+   a `napi_external` without one, 2.3% and 2.5 times.
+6. **One `Callback_t` per record.** In `on_completion` the order is: run the
+   user callback; record the delivery on the record's `KafkaFuture`
+   (`internalSetDelivery`, which completes it); call
+   `__set_callback_result_err(view, id, NULL, err)` exactly once, `err` NULL or
+   an owned `kafka_common_Error_local_callback` error carrying what the
+   callback threw. No report is sent once destroy has begun (`_destroy`
+   completes the unreported ones itself). A callback may return a Promise
+   (root conventions, Threads and callbacks): the binding wraps any result
+   but `undefined` (Java's `void`, reported at once, the cheap common case)
+   with `Promise.resolve(result)`, and the delivery is recorded, completing
+   the future, and the one report is made, only once that settled (`send_defer` hands the Promise a function
+   owning the record's context, as both its handlers, `callback_id` kept in C),
+   a rejection reported as a throw. The function is held by a strong reference
+   until it reports, so a garbage collection never reports a Promise early,
+   even one nothing references: a Promise that never settles keeps its record
+   pending, and a `flush` or `close` covering it. Before the finalizer
+   destroys a closed producer, a callback Promise still pending is reported as
+   returned (`send_report_awaiting`): no JS will settle it, and no report may
+   follow the destroy.
+
+   **Callbacks run one at a time, in completion order** (the root conventions
+   leave this open; the owner decided it on 2026-11-18, for Java parity).
+   Java runs its callbacks one after another on the producer's I/O thread, so
+   a slow callback holds back the next; Python's `AsyncProducer` and the .NET
+   binding do the same. While a callback runs or its Promise is awaited
+   (`Producer.current`), a callback the core delivers waits at the end of the
+   run queue (`send_enqueue`) with the `RecordMetadata` and error it will
+   receive, made when the core delivered it (the core's are borrowed), and it
+   runs, and reports, once every callback before it has ended
+   (`send_run_queued`, from `js_send_on_settled` once the awaited Promise
+   settled; its loop runs the waiting ones in turn, and stops at the next one
+   that returns a Promise). So each record's future still completes only after
+   its own callback, and a `flush` or `close` covering a waiting callback
+   still waits for it; a later record's future completes only once the
+   earlier callback's Promise settled, so a callback's timed
+   `get({ timeout })` on it rejects with `TimeoutError`, as Java's
+   `get(timeout)` on the I/O thread throws `TimeoutException`. A Promise that
+   never settles holds the callbacks behind it too, and their records'
+   futures, which hold the handle object, keep the producer from being
+   collected, as an I/O thread stuck in a callback keeps Java's producer. The
+   destroy reports the callbacks still waiting as returned, after the awaited
+   one, running no JS (`send_report_queued`). The rest stays as it was: the
+   hand-overs and the cooperative pump and yield (rule 3).
+
+   A waiting callback runs after the drain, from `js_send_on_settled` (a
+   Promise reaction), and the core counts as inside a callback only its own
+   `__execute_callbacks` (`Client::in_callback`). So, as after a callback's
+   first `await`, its `flush()` is not refused and its `close()` is not
+   Java's `close(0)`: an awaited one waits for that same callback, one of the
+   anti-patterns inside a send callback (root conventions, Threads and
+   callbacks). Only a callback the drain runs keeps, until its first
+   `await`, the refusal of `flush()` and the `close(0)`. Refusing them in a
+   waiting callback too is the root conventions' Future improvement
+   (refusing a call made inside a callback after its first `await`), which
+   the owner kept as one: no core change and no binding-side mark. Any
+   result but `undefined` takes the Promise path (`send_defer`), an
+   expression-bodied arrow such as `() => seen.push(x)` included, so the
+   callbacks the same drain delivers after such a callback are waiting ones.
+7. **No binding-side send queue, buffer, cap or lock** (PLAN D8; root
+   conventions, Threads and callbacks: no tracking and no async locks of the
+   binding's own). The core does NOT serialise a caller that does not wait: a
+   record it cannot take at once is queued and may be overtaken by a later
+   one, and `flush` / `close` do not wait for it
+   (`rust/src/ffi/producer/mod.rs`, module docs on `send_cb`). Ordering is put
+   on the caller instead, as the FFI says: `send()` resolves at the hand-over
+   completion (inline inside `send_with_callback_cb`, or later), where Java's
+   blocking `send()` returns, so a caller that awaits each `send()` meets the
+   FFI's "wait for the hand-over before the next send" contract. Sends not
+   awaited one by one are concurrent, like Java sends on several threads; this
+   is documented on `send`, in its compiled declaration and in the README. The
+   binding never holds records back itself. The run queue of rule 6 is no
+   send queue: it holds the callbacks of records the core has already
+   delivered, waiting for their turn, as Python's does, and no record.
+8. **No copy of the app's key and value; strings encoded as Java encodes
+   them.** The rule is the root conventions' (Serialization, and the FFI table
+   of Implementation over the FFI): the binding doesn't copy a key or value
+   the app hands over as a `Buffer` or `Uint8Array`, one a serializer returns
+   included, nor the Buffer it makes itself for a string. The addon reads
+   each as a `kafka_Bytes_t` over the Buffer's own memory (`native/record.c`
+   `js_bytes`) and holds a `napi_ref` on the Buffer (`SendCtx.key_ref` /
+   `value_ref`, taken in `js_producer_send`), which it drops in the send's
+   hand-over completion (`send_on_handover`, through
+   `send_ctx_release_buffers`), whether the record was taken or refused, on
+   the JS thread: the FFI borrows the bytes only until that completion
+   (`rust/src/ffi/producer/mod.rs`, module docs), and the core copies them
+   when it appends the record. A record that can't be built drops them at
+   once. Header values are copied by the core when they are added to a
+   `Headers` (the C API keeps no borrowed header value), and the record's
+   `RecordHeaders` is copied into the native record during the send. The user-facing
+   contract, documented on `send`, in its compiled declaration and in the
+   README, is the root conventions' text: "The client reads a `Buffer` or
+   `Uint8Array` key or value after `send()` returns. Don't write to it,
+   transfer it or resize it until the Promise from `send()` settles;
+   awaiting `send()` is enough. A serializer must return a new Buffer for
+   each record.", plus, for a Buffer over a `SharedArrayBuffer`, "If other
+   workers share the Buffer's memory, they mustn't write to it until then
+   either." `src/` copies no bytes itself.
+
+   Strings follow the root conventions (Types, the paragraph after the
+   table): one function, `encodeLikeJava(s)` in `src/internal/encode.ts`, is
+   the only place the binding turns a string into bytes, writing each lone
+   surrogate as `?` as Java's `String.getBytes(UTF_8)` does (Node and
+   Node-API write U+FFFD). `stringSerializer()` for keys and values, the
+   headers code for header keys, and the config code once per client, for the
+   config keys and values (group IDs among them), call it, and the addon reads
+   the header and config bytes into C strings (`native/record.c`
+   `js_bytes_cstring`); topic names skip it and cross as JS strings. A string
+   key or value given without a serializer throws `TypeError` pointing to
+   `stringSerializer()` (root conventions, Class family, Q24, Q27), checked at
+   `send()` (`src/producer/producer_record.ts` `rawBytes`).
+   `check-zero-copy` and `check-string-encoding` partly enforce this (The rule
+   linter, below), and an integration test checks that an accepted record's
+   Buffers are collectable once its `send()` resolved, before delivery. Not
+   checked: which strings go through `encodeLikeJava`, and copies in other
+   `native/` files.
+9. **Ownership follows the signature.** Errors from `out_err` and from `_cb`
+   completions are owned: copied into a JS error (`src/internal/errors.ts`),
+   then destroyed, before the Promise settles (root conventions, Errors). An
+   error with nowhere else to go (a failed `__set_callback_result`, a failed
+   destroy of a handle, a JS exception the addon would clear) is handed to
+   `process.emitWarning` through the `warn` function `src/internal/native.ts`
+   registers (`error_warn`, `js_warn_thrown`) wherever JS can run; at an
+   environment teardown, where none can, it is only freed. The
+   error and metadata a delivery callback receives are borrowed: copied,
+   never destroyed. If a send fails at hand-over, its per-record context stays
+   on the producer's orphan list until after destroy (the delivery callback
+   may still fire, once).
+10. **Closed state and teardown** (root conventions, Lifetime and
+    Implementation over the FFI, Q21, Q61): `close()` goes to `close_cb` /
+    `close_with_timeout_cb` every time, a second close included, and does not
+    free the native handle. Its completion (`close_on_complete`) records the
+    core's answer: any outcome but a rejected timeout closed the producer, so
+    `cbq_closed` lets Node go once no call made on the producer waits for its
+    answer ("Threads and liveness"), makes the queue's reference on the
+    handle object weak, and drops the `on_complete` function of every send
+    context parked on the orphan list (a hand-over refused after the close
+    drops its own at once): no delivery callback can
+    fire for those records any more, and the functions' closures hold the
+    `KafkaProducer`, which would never be collected. The handle object's Node-API
+    finalizer (`producer_finalize`) then calls `KafkaProducer_destroy_err`,
+    on the JS thread, outside a drain, running no JS (`finalizing`), only for
+    a producer that `cbq_is_closed` says is closed, and releases the
+    threadsafe function, whose finalizer frees the notify opaque. No
+    finalizer closes or destroys an open producer: only an environment
+    teardown finalizes one (the reference is strong until the close), and it
+    leaves the producer to the core and its memory to the process. So a late
+    call never touches freed memory: the handle is destroyed only once no JS
+    can reach it.
+
+## Threads and liveness
+
+The rules are the root conventions' (Threads and callbacks, Lifetime). In this
+binding:
+
+- Every callback the core queues (delivery callbacks, hand-over completions,
+  `flush` / `partitionsFor` / `close` completions, the waits on a record's
+  future) runs on the JS thread that owns the client, inside the drain, so JS
+  values are created there directly.
+- A producer keeps Node running from its creation until `close()` closes it
+  (root conventions, Lifetime), and a call made on it keeps Node running
+  until that call settles, closed or not, as Java's call returns. The
+  threadsafe function is created referenced, as Node-API creates it, and is
+  referenced while the producer is open or while one of its `_cb` calls waits
+  for its completion; `cbq_hold_update` (`native/callback_queue.c`) is the
+  one place that references or unreferences it, only when that answer
+  changes. Node-API counts neither call (a uv handle's ref is a flag), so the
+  callback queue counts the calls itself: `cbq_call_begin` as the statement
+  right before each `_cb` call, in the same block, after every early return
+  of the function making it, and `cbq_call_end` as the last statement of its
+  completion (only the release of the producer struct, which may free the
+  queue, comes after), on every path: the drain, inline inside the call, and
+  the destroy, where the hold no longer changes since the threadsafe function
+  is being released. Neither appears anywhere else: a delivery callback ends
+  no count. Every `_cb` call is counted: a send's hand-over
+  (`send_with_callback_cb`, ended in `send_on_handover`), `flush_cb`,
+  `partitions_for_cb` (ended in `partitions_for_on_complete`), `close_cb` and
+  `close_with_timeout_cb` (ended in `close_on_complete`, after the JS
+  callback), and the waits on a record's future (`get_cb`,
+  `get_with_timeout_cb`, ended in `future_on_wait`). A `MockProducer` makes
+  the same calls through the same view and sites, so its calls are counted
+  the same way; the mock's own calls (`history`, `clear`, `completeNext`,
+  `errorNext`, the error setters) are answered inside the call and have no
+  completion to count. A second close made while
+  the first runs is answered after the first close's completion; the
+  hand-overs and the waits have been answered before it in every scenario
+  found, so their counts are guarded by `check-tsfn-lifetime` and by the test
+  of a late `close()` and `flush()` after a record's callback ran, not by a
+  test of a late answer. `cbq_closed`, run by the close completion once the
+  core reported the producer closed, ends the open half, so a closed producer
+  with no call waiting lets Node exit right after its last answer ran. The
+  threadsafe function is not released then: the completions of calls made
+  after the close still run, and each such call holds Node until it has. A
+  script that never calls `close()` never exits on its own.
+- **(root conflict)** The root conventions' Lifetime rule says the binding
+  "calls `napi_unref_threadsafe_function` once `close()` has closed the
+  client, so nothing is counted". Read literally, that lets Node go at the
+  first close completion, so a completion the core queues after it is lost
+  when nothing else holds Node: an awaited `close()`, `close(timeout)`,
+  `[Symbol.asyncDispose]()`, `flush()` or `partitionsFor()` on a closed
+  `KafkaProducer` or `MockProducer` never settles, the code after its
+  `await` never runs, Node exits with code 0, and of two `close()` calls at
+  once one is lost. That reading breaks the client, and with it the rule's
+  own reason ("this way no pending send or poll is cut off"), the root
+  conventions' "an async one rejects with it" (Implementation over the FFI:
+  an async call after `close()` settles with the core's answer), and Java
+  parity, where each of those calls returns. So the code follows the rule's
+  intent, the hold lasting while a call waits: a closed client holds Node
+  only while a call made on it is still waiting for its answer
+  (`DECISIONS.md`, entries 4 and 33;
+  `design/current/javascript-producer/PLAN-close-liveness.md`). The root
+  wording needs its owner; the wording proposed: "…calls
+  `napi_unref_threadsafe_function` once `close()` has closed the client and
+  every call made on it has had its answer."
+- The handle object is held by a strong reference from its creation until
+  the close (`cbq_attach` / `cbq_closed`), so garbage collection never
+  finalizes an open producer, even once the `KafkaProducer` object is
+  collected; after the close the reference is weak, and the finalizer
+  destroys the closed producer (rule 10).
+- A producer never closed gets no warning. The code once counted the open
+  producers and warned at `process` `'beforeExit'`, but an open producer
+  keeps the event loop from emptying, so `'beforeExit'` never comes while
+  one is open and the warning could never print. Kaushik's inline comment on
+  "Q21: keeping Node running while work is pending" (Confluence, "JavaScript
+  binding design decisions") says the case "should not happen, because
+  producer is alive", so the dead code was removed (`DECISIONS.md`, entry
+  35), and the admin client gets none either. **(root conflict)** The root
+  conventions' Lifetime rule says "A client that's never closed runs until
+  the process exits, with a warning", and their "Not decided yet" table has
+  a row on when and how that warning is logged; both describe a case the
+  comment says can't happen, so the binding logs nothing. The wording
+  proposed to the rules' owner drops "with a warning" and the row.
+- Clients in worker threads are not supported in the preview (root
+  conventions, Threads and callbacks); the binding keeps no check for one. A
+  worker ended with its producer open (`worker.terminate()`,
+  `process.exit()`, an uncaught error) leaves the producer to the core, as
+  an environment teardown does (rule 10); the cleanup hook that would close
+  it is a Future improvement of the root conventions, not built.
+- The preview warning follows the root conventions (Implementation over the
+  FFI): `process.emitWarning` with the type `ExperimentalWarning`, once per
+  process, with no code (the root's invented names list only deprecation
+  codes), silenced by `--no-warnings`; its text is the root conventions',
+  Python's `PREVIEW_WARNING` with "JavaScript" in place of "Python"
+  (`src/internal/lifecycle.ts`). Debug lines use `util.debuglog('confluent_kafka')`
+  (`src/internal/debug.ts`): the addon's load, the producer's creation,
+  close and pump. The main thread and the
+  workers share the one notice: the addon, loaded once per process and kept
+  loaded (`RTLD_NODELETE`, so a worker ending does not unload it), answers
+  `previewNoticeDue()` true only once.
+
+## Java shape, JS idiom
+
+The rules are the root conventions' (Names, Class family, Futures and
+waiting, Signatures, Types, Errors, Configuration). What this binding adds:
+
+- Supported import forms: `require`, named imports, `import * as`, and an ES
+  module's default import under Node's own loader. A default import through an
+  interop helper (`esModuleInterop`, Babel) is not supported: every public
+  `index.ts` declares `export declare const __esModule: true;` (tsc emits the
+  marker itself, the declaration no JS), so TypeScript rejects it (TS1192)
+  rather than letting it read a missing `default` (`test/typing` pins this).
+  The package is CommonJS only, built with `module: nodenext` (root
+  conventions, Layout and modules, Q13): `package.json` has no `"type": "module"`, and
+  each `exports` entry has the `types` and `default` conditions.
+- Data objects (root conventions, Class family): their Java getters are public
+  `readonly` fields, set once in the constructor (not getter methods, not
+  `get` accessors), so a spread and `JSON.stringify` keep them
+  (`structuredClone` / `postMessage` keep every field but
+  `ProducerRecord.headers`, a class instance, which becomes `{}`); a field has
+  its Java getter's name, `is` / `has` included (`metadata.offset`,
+  `metadata.hasOffset`), and Java's `-1` and `null` stay (never `undefined`).
+  Every data class is frozen (`Object.freeze(this)` in its constructor,
+  which `check-data-objects` requires), so `ProducerRecord.internalToNative` reads
+  the fields its constructor checked and checks nothing again at `send()`
+  (root conventions, Q35: no repeated precondition); its `Headers` stays
+  writable until `send()` seals it. The data classes are listed in `DATA_CLASSES`
+  (`scripts/lint/java_ts.js`), which `check-data-objects` reads:
+  `ProducerRecord`, `RecordMetadata`, `TopicPartition`, `Node` and
+  `OffsetAndMetadata` today. **(root conflict)** The root
+  conventions' list (the records, `TopicPartition`, `OffsetAndMetadata`,
+  `RecordMetadata`, `Node`, the admin description classes) does not name
+  `Header`, which its one-line test would admit; the code follows the list, so
+  `Header` keeps Java's `key()` and `value()`. Java's `public final` instance fields are
+  `readonly` fields of a frozen object (`SecurityProtocol.id`); `public static
+  final` constants are static properties (`RecordMetadata.UNKNOWN_PARTITION`).
+  Value classes have `toJSON()` *(js-only)*, whose output is frozen once
+  released (`Header`'s writes `{ key, value }`, `Headers`' its array, an
+  enum's its name, `ProducerRecord`'s and `RecordMetadata`'s their fields
+  with each `long` as a decimal string, root conventions, Types).
+  `toString()` is Java's, an enum's included (below). A constant Java
+  `List` is a frozen array, a constant `Set` a read-only set
+  (`src/internal/read_only_set.ts`) whose `add`, `delete` and `clear` throw
+  `UnsupportedOperationError`.
+- Headers are Java's `Header` and `Headers` (`common/header`), as the Python
+  client's, over the FFI's `RecordHeader` and `RecordHeaders` (root
+  conventions, Serialization, Q31), each a private native handle
+  (`native/headers.c`): a type-tagged object `napi_wrap`ed over a box whose
+  finalizer drops its reference, so the handle is destroyed once, on the JS
+  thread, when its last reference goes. `Headers`' methods call the addon, so
+  the core holds the headers and refuses a change once they are read-only,
+  with Java's text; the core's own errors are kept for a null header, key or
+  header key ("Header cannot be null.", "key cannot be null.", "Null header
+  keys are not permitted"). An app's `Headers` makes its own `RecordHeaders`
+  (`RecordHeaders_new`, or the `with_header_slice` / `with_header_iter` /
+  `with_record_headers` forms for Java's constructors) on its first `add`:
+  until then it reads one shared empty `RecordHeaders` that nothing changes,
+  and sealing it gives it one shared empty read-only one, so a record sent
+  with no headers makes no native object for them. An app's `Header` owns a
+  `RecordHeader` made with `RecordHeader_new_err`, which copies the key and
+  the value; `add(header)` and the constructors store copies, so the app's
+  `Header` stays its own. The key is read with `kafka_common_header_Header_key`
+  and the value with `kafka_common_header_Header_value`, once, on first use: a
+  `Buffer` over the native bytes (`napi_create_external_buffer`, its finalizer
+  holding a reference on the header box, so the `Buffer` keeps the header
+  alive), or a copy where the runtime refuses external buffers, or `null`.
+  **Option 1**, decided by the owner on 2026-11-15
+  (`design/current/javascript-producer/DECISIONS.md`, entry 21), while the
+  root row ("how a `Header` from a `Headers` that can still change stays
+  valid") is still parked: while a `Headers` can still change,
+  `lastHeader()`, `headers(key)`, `toArray()` and iteration hand out the
+  binding's own copy of each header, a new owned `RecordHeader` made from its
+  key and value, which stays valid when the `Headers` changes, as Java's does;
+  once it is read-only they hand out a `Header` over the FFI's borrowed view,
+  with no copy, which holds a reference on its `Headers`' box. The addon
+  decides which from `RecordHeaders_is_read_only`. A key crosses as
+  `encodeLikeJava`'s bytes, so a lone surrogate reads back as `?` and a NUL is
+  refused when the header is made *(deviation: Java's `RecordHeader` keeps the
+  `String`. Why: the C API takes the key as a NUL-terminated UTF-8 string.
+  Goes when: for the NUL, the key crosses with a length; the `?` stays, as the
+  core holds the key as UTF-8)*. A change to read-only headers goes to the
+  shared empty read-only `RecordHeaders`, which refuses it, so the views the
+  app holds stay valid (boundary rule 1). On read-only headers `remove(null)`
+  is the FFI's `IllegalArgumentError` "key cannot be null." *(deviation:
+  Java's `remove` checks `canWrite()` first, an `IllegalStateException`. Why:
+  root §4 has the FFI check a NULL argument first, and Q35 has the binding
+  repeat no precondition. Goes when: the FFI checks the read-only state
+  first)*. An iterator over a `Headers` or `headers(key)` reads the headers
+  when it is made *(deviation: a change during an iteration is not seen and
+  throws nothing, where Java's iterators throw
+  `ConcurrentModificationException`. Why: the FFI hands the headers out as a
+  list, and Java's `ArrayList` iterators fail fast only on a best-effort
+  basis. Goes when: never, unless it is emulated)*. A key holding a NUL is
+  refused by `add`, `remove`, `lastHeader` and an iterated `headers(key)` too,
+  where Java takes the key (the NUL check of boundary rule 1).
+  Whether a record also takes headers as plain `[key, value]` pairs is not
+  decided yet in the root conventions: `ProducerRecord` takes `Header`
+  objects only, as before. A consumed record's `Headers` (over
+  `kafka_consumer_ConsumerRecord_headers`) comes with the consumer.
+  `Header` keeps Java's methods, `key()` and `value()` (`new Header({ key,
+  value })`, the constructor of Java's internal `RecordHeader`), its value
+  bytes taken as a `Uint8Array` (root conventions, Types), so a string value
+  throws `TypeError` asking to encode it, and a `toJSON()`; `Headers` keeps
+  Java's methods, in Java's order (`add(header)` / `add({ key, value })`,
+  `remove(key)`, `lastHeader(key)`, `headers(key)`, an iterable read when
+  iterated, `toArray()`, `[Symbol.iterator]`, Java's `Iterable`), with Java's
+  internal `RecordHeaders`' three constructors as one `headers` parameter
+  (`()`, `(Header[])`, `(Iterable<Header>)`), its `toString()`, and a
+  `toJSON()` writing its array; `equals`, `hashCode` and `toString` are
+  computed from the accessors. Where Java takes `Headers` or
+  `Iterable<Header>`, a `Headers` or an iterable of `Header` is taken, as
+  Java takes them; `ProducerRecord` copies what it is given into its own
+  `Headers`, as Java's `new RecordHeaders(headers)`, so a record with no
+  headers has an empty one. The library reads a header through
+  `Header.internalKeyOf` / `internalValueOf`, never through methods plain
+  JavaScript may have reassigned on the instance. `send()` seals the
+  record's headers (`internalSetReadOnly`, `RecordHeaders_set_read_only`,
+  Java's `setReadOnly`) once the serializers have run and the fields are
+  converted, and passes their handle to the native send, which hands it to
+  `ProducerRecordOptionsBuilder_set_headers`, which copies it into the native
+  record; a later `add` or `remove` throws the core's `IllegalStateError`
+  "RecordHeaders has been closed.". `headerStats()`, registered for the tests
+  only, counts the handles made and freed, the copies and the views.
+- Enums (root conventions, Class family): a class whose constants are frozen
+  instances, with `java.lang.Enum`'s `name()` and `ordinal()`, static
+  `values()` and `valueOf(name)` (exact; `IllegalArgumentError` "No enum
+  constant <Java canonical class name>.<name>", `TypeError` "Name is null" for
+  `null`), and `toJSON()`, the name (it ignores the key `JSON.stringify`
+  passes it). `toString()` returns the name, unless Java overrides it:
+  `SslClientAuth.REQUIRED.toString()` is `'required'`, Java's
+  `super.toString().toLowerCase(Locale.ROOT)`, while its `toJSON()` stays
+  `'REQUIRED'`. The root decides it: its JDK-interfaces row (Class family,
+  Q29) has "`toString()` keeps Java's format, with JavaScript's spelling of
+  values (Q37)"; the Class family's enum sentence, `toString()` and
+  `toJSON()` returning the name, says nothing of Java's override, and Rule 1
+  puts content with Java, as root §3 prints a constant's name "unless Java
+  overrides it" and Python reaches Java's `toString()` through `__str__`. Java's
+  `SecurityProtocol.name` field and `name()` are the one method.
+- A `null` key or value binds `never` (root conventions, Class family, Q26),
+  through extra TypeScript signatures for the null combinations, as Python's
+  Binding rule adds one stub per combination beside its one stub per Java
+  overload, so the per-form rule (Q15) and the binding (Q26) both hold:
+  `ProducerRecord`'s constructor has, before each Java constructor's
+  signature, one with a `null` key, one with a `null` value and one with
+  both, each typed `null`, and `send` takes a `ProducerRecord<K, V>`.
+- Signatures (root conventions, Signatures): one Java overload set is one
+  method taking one options object of Java's parameter names
+  (`new KafkaProducer({configs})`, `send({record, callback})`,
+  `close()` / `close({timeout})`, `new ProducerRecord({topic, value})` up to
+  `{topic, partition, timestamp, key, value, headers}`), with one TypeScript
+  overload signature per Java form (`send(options: { record; callback })` and
+  `send(options: { record; callback?: never })`, `close()` and
+  `close(options: CloseArgs)`, `get()` and `get(options: { timeout })`), each
+  closing the other forms' names with `never`, plus one for the bare value of
+  a one-parameter form (`send(record)`, `close(timeout)`, `forName(name)`,
+  the configs themselves); each option key is documented on its options type.
+  The given names (own enumerable keys, which is all the methods read) must
+  be exactly one Java form's (`src/internal/args.ts`, Python's `java_forms`):
+  a set no form has, or a name no form has, throws `IllegalArgumentError`
+  "<m>() takes one of (<a>, <b>), (<c>); got (<given>)" (a constructor's `<m>`
+  is its class name). A bare value picks its form by its type, each
+  one-parameter form's test (`bareTypes`: `typeof`, `Array.isArray`,
+  `instanceof`, `null` where Java takes a reference), and one that fits no
+  form throws the same message ending in Python's form, `got a string`, `got
+  a number`, `got an array`, `got null`, `got a Map`. `null` is Java's `null`
+  and given; `undefined` throws the root conventions' `TypeError` naming the
+  parameter, a bare `undefined` (`close(undefined)`, `flush(undefined)`,
+  `get(undefined)`) and `undefined` inside the headers included, except a
+  config value, which is dropped (`ProducerRecord`'s `value`: "value must not
+  be undefined. Pass null for Java's null, which sends a tombstone."). A
+  method passes `arguments.length` to the matcher: more than one argument is
+  the form error "got 2 arguments, not one object of named parameters", so
+  Java's `send(record, callback)` is refused, never run without its callback;
+  a method of no parameter (`flush()`) refuses any argument with the form
+  error, and a method that only reads (`isDone()`, `name()`, `values()`,
+  `toArray()`, `key()`: the `reader` option) with `TypeError` "<m>() only
+  reads: it takes no argument". `toString()` is
+  JavaScript's protocol and takes none. In TypeScript a bare value whose type
+  is a type variable cannot tell a plain object from an instance of the
+  caller's class, so its signature takes only what no plain object can be
+  (`BareValue`: primitives, `null`, arrays, functions, `Map`, `Set`, `Date`,
+  `ArrayBuffer`, `DataView`, typed arrays): `completedFuture<U>(value: U,
+  ...check: BareCheck<U>)` infers `U` from the value alone and refuses any
+  other `U` through the rest parameter, which no call gives, and a member of a
+  class's `T` takes `Bare<T>` (`getNow(valueIfAbsent: Bare<T | null>)`); any
+  other object goes by name there, while plain JavaScript takes it bare.
+- Collections (root conventions, Types): a Java array or collection taken is
+  any iterable (`PartitionInfo`'s `Node[]`, plan §5 item 1), and one
+  returned is a new array each call (`PartitionInfo.replicas()`,
+  `partitionsFor()`'s `List`). A map keyed by strings taken is a `Map` or a
+  plain object (the root's Types row "Other collections taken", Q25):
+  `MetricName`'s constructor takes its `tags` so: a `Map` is kept as given
+  and `tags()` returns it, as Java stores the map; a plain object is read
+  into a new `Map`. Java's `Map<MetricName, ? extends Metric>` is a `MetricNameMap`
+  *(js-only, on the invented-names list)*, a read-only map keyed by the
+  JSON text of the group, the name and the tags sorted by key (the fields
+  `MetricName.equals` compares), keeping the original `MetricName`s, with a
+  `toJSON()` writing the entries by that string key, as `TopicPartitionMap`'s
+  does. Java's `Map<TopicPartition, V>` is a `TopicPartitionMap` and the
+  `Set<TopicPartition>` the client returns a `TopicPartitionSet` *(js-only, on
+  the invented-names list)* (root conventions, Class family and Types, Q25):
+  each wraps a `Map` keyed by `'<topic>:<partition>'` (`'orders:3'`;
+  `'-<partition>'` for a null topic, and the partition is an integer, so two
+  topic partitions never share a key; a `null` key or member, which Java's
+  `HashMap` and `HashSet` hold, is the string key `'null'`, which no
+  `TopicPartition` gives, and prints as Java's `null`; no key is an
+  integer-like property name, so `toJSON()` keeps the entries' order),
+  refuses an `undefined` value (`set(tp)` included) with a `TypeError`
+  (Signatures, Q18), keeps the original `TopicPartition`s,
+  which `keys()`, `entries()` and iteration return, and does not extend `Map`
+  or `Set`. Both are mutable (`set` / `add`, `delete`, `clear`), `size()` is a
+  method, as `MetricNameMap`'s, `get()` returns `null` for a missing key,
+  `toString()` is Java's `AbstractMap` / `AbstractCollection` text
+  (`{orders-0=5}`, `[orders-0]`), and `toJSON()` writes a map's entries by
+  the string key, a `bigint` value as a decimal string, and a set as the
+  array of its members. Where Java takes a `Map<TopicPartition, V>`, only a
+  `TopicPartitionMap` is taken, and a `Map` is refused with a hint;
+  `check-type-mapping` holds the rows.
+- `metrics()` (plan §5 item 3) reads every metric through the C ABI when it
+  runs: a `MetricNameMap` of `KafkaMetric`s, plain TypeScript (Java's public
+  constructor, its untranslated `MetricValueProvider`, `MetricConfig` and
+  `Measurable` placeholder types typed `unknown`, read by their Java
+  methods), each built with a provider returning the value read. *(deviation:
+  Java's map is a live view. Why: only the clients call the addon, and
+  Python's `metrics()` is a snapshot too. Goes when: the JavaScript metrics
+  wrap the core's.)* A long value is a `bigint`.
+- Serializers (root conventions, Serialization): `Serializer` is an object
+  type in `common/serialization`, run in JavaScript inside `send()`
+  (`src/internal/serde.ts`), key then value, after the form and argument
+  checks and before the pump and the hand-over; a thenable result is
+  awaited. The binding keeps no closed state, so a serializer runs on a
+  closed producer too, and the core reports the closed producer at the
+  hand-over (rule 1). What a serializer returns is borrowed until the
+  hand-over, as the app's bytes are (rule 8). With no serializer (a null
+  one, or none, and no config key) the record's own bytes are sent, checked
+  at `send()`: a `ProducerRecord<K, V>` holds any key and value, a run-time
+  type TypeScript cannot enforce, and a string throws `TypeError` pointing to
+  `stringSerializer()`. What a serializer throws, or its Promise rejects
+  with, is answered as Java's `KafkaProducer#doSend` answers it (owner's
+  decision 2026-11-18; `src/internal/serde.ts` `serializerFailure`,
+  `kafka_producer.ts` `serializerFailed`): an `ApiError` runs the callback
+  once, inside `send()`, with Java's failure metadata
+  (`RecordMetadata(appendCallbacks.topicPartition(), -1, -1, NO_TIMESTAMP,
+  -1, -1)`: the record's topic and its partition or -1) and resolves `send()`
+  to a done future failed with it (Java's `FutureFailure`), what that callback
+  throws or rejects with rejecting `send()` instead; a `TypeError`, Java's
+  `ClassCastException`, rejects as a `SerializationError` "Can't convert key
+  of class <class> to class <serializer> specified in key.serializer" (or
+  `value`), its `cause` the `TypeError`, the classes spelled as JavaScript
+  names them (a value's constructor, a primitive's wrapper, `null`, the
+  serializer's class, a built-in's factory name, `stringSerializer`)
+  *(deviation: Java writes fully qualified Java names, and a null key throws
+  `NullPointerException` there. Why: JavaScript has no names of that form)*;
+  anything else rejects as it is. No failure `send()` reports, a
+  serializer's included, is counted in `record-error-rate` or
+  `record-error-total`, which Java's `doSend` records for an `ApiException`
+  or a `KafkaException` *(deviation. Why: the core's `send()` records no
+  error in that sensor, and a serializer's failure is answered in
+  JavaScript (`serializerFailed`), before the core. Goes when: the core
+  records its `send()`'s errors, a core issue, `DECISIONS.md` entry 31; and,
+  for a serializer's failure, the binding counts it, which it cannot today:
+  the FFI hands out only an unmodifiable live view of the producer's metrics
+  (`kafka_producer_Producer_metrics`), never its `Metrics` registry or its
+  `errors` sensor, and the binding gives the core no serializer (Serialization,
+  Q50). It needs an FFI entry that records a send failure on the producer, or
+  the core running the serializers)*. The
+  binding's own check of what a serializer returns stays a `TypeError`.
+  `MockProducer` passes every serializer error out raw, as Java's
+  `MockProducer#send` serializes with no `try`. `stringSerializer()`
+  (`src/common/serialization/string_serializer.ts`) is Java's
+  `StringSerializer` through `encodeLikeJava`; it takes an optional
+  `{ configs, isKey }`, Java's `configure`, so it goes in a serde config key
+  without `()`, and writes Java's six standard charsets (`US-ASCII`,
+  `ISO-8859-1`, `UTF-8`, `UTF-16BE`, `UTF-16LE`, `UTF-16`) byte for byte,
+  under their canonical names and the JDK's aliases, ignoring case, as
+  `Charset.forName` matches them. `encodeLikeJava(s, charset)` writes them by
+  hand where Node's encoders differ: a character US-ASCII or ISO-8859-1
+  cannot map is `?`, a lone surrogate in UTF-16 is U+FFFD, and `UTF-16` is
+  big-endian after the BOM `FE FF`. Any other name is Java's
+  `SerializationError` "Unsupported encoding <name>" *(deviation. Why: Node
+  has no Java charset providers. Goes when: never needed for the standard
+  set)*. The rest of the factory list
+  is not decided yet in the root conventions. `close()` closes both serializers once
+  the core reports the producer closed; a construction the core fails with
+  Java's relabelled "Failed to construct kafka producer" closes them too.
+  An omitted or `null` key or value binds `never` (root conventions, Class
+  family, Q26), through extra `ProducerRecord` signatures for the null
+  combinations beside each Java constructor's, so `send` takes the
+  `ProducerRecord<K, V>` of the producer's serializers.
+- A Java `Duration` is the root's `Duration` (root conventions, Signatures): a
+  number of milliseconds, or a `Temporal.Duration` (built in from Node 26, a
+  polyfill's before), recognised by its `Symbol.toStringTag` and read with
+  `total({ unit: 'millisecond' })`, typed by its structure. One private helper
+  converts them all (`src/internal/duration.ts`), as the root conventions say:
+  rounded down; `Infinity` is Java's `Long.MAX_VALUE` milliseconds, handed to
+  the addon exactly as a bigint. The form called picks the call: `close()`
+  passes `null`, which the addon sends to `close_cb`, Java's untimed form,
+  and `close({ timeout })` the timeout, to `close_with_timeout_cb`. A
+  negative timeout is passed on as it is: for `close` the FFI answers Java's
+  "The timeout cannot be negative." (`IllegalArgumentError`) and closes
+  nothing; for a wait (`KafkaFuture.get(timeout)`, Java's
+  `CompletableFuture.get`) it is no error but no wait, as Java's times out at
+  once. One with years, months or weeks, `NaN` and beyond
+  ±`Number.MAX_SAFE_INTEGER` ms are a plain `RangeError`; `null` is
+  `TypeError('timeout must not be null')`, and any other value `TypeError`.
+  `-Infinity`, which the root conventions do not name, is `RangeError`. A
+  record's future waits natively until its delivery (rule 5), so the core
+  enforces the deadline; a future with no native handle races a
+  `setTimeout`, as the root conventions decide (Futures and waiting, and
+  Signatures, Q22, Q44), and one longer than a Node timer's 2^31 - 1 ms
+  waits in steps of at most that.
+- Promises (root conventions, Futures and waiting): a method returns a Promise
+  if and only if its entry point has a `_cb` twin, and a method returning a
+  Promise never throws: every failure, the argument and form checks and the
+  core's errors included, rejects it. `send` returns
+  `Promise<KafkaFuture<RecordMetadata>>` (PLAN D8), resolving at the
+  hand-over, and the future's `get()` returns `Promise<RecordMetadata>`,
+  settling at delivery. `KafkaFuture` is Java's: a TypeScript `abstract
+  class`, as Java's is, whose public constructor throws `TypeError`
+  ("KafkaFuture cannot be constructed directly; use
+  KafkaFuture.completedFuture(...) or KafkaFuture.allOf(...)", Python's text)
+  when `new.target` is `KafkaFuture` itself, so a caller's own subclass may be
+  built and `allOf` reads one through its `whenComplete`; every future the
+  client makes is of its private subclass `KafkaFutureImpl`
+  (`src/common/kafka_future.ts`, not exported, its `name` the public class's),
+  Python's `_KafkaFutureImpl`, as the root conventions present a Java
+  abstract class (Class family, Q16, Q32: a TypeScript `abstract class`, so
+  `tsc` refuses `new`, Java's abstract methods `abstract`, and a constructor
+  that throws `TypeError` for plain JavaScript when `new.target` is the
+  abstract class itself). Its members, in Java's order: static `completedFuture(value)` and `allOf(futures)` (Java's varargs:
+  an array, bare or `{futures}`), `toCompletionStage()` (a `Promise` settling
+  with the future, rejecting with the raw failure, the same Promise every
+  call), `thenApply(function)`, `whenComplete(action)`,
+  `cancel(mayInterruptIfRunning)`, `get()` and `get(timeout)` (Java's `(long,
+  TimeUnit)` as one `Duration`), `getNow(valueIfAbsent)`, `isCancelled()`,
+  `isCompletedExceptionally()`, `isDone()`, plus `KafkaFutureImpl`'s
+  `toString()` on the subclass; the nested `BaseFunction` / `BiConsumer` are type aliases on
+  the class's namespace (`KafkaFuture.BaseFunction<A, B>`). One class has two
+  value sources, as Python's: a record's future (`send()`'s, Java's
+  `FutureRecordMetadata`, over the native future, rule 5: `cancel()` false,
+  never cancelled, a timed-out `get` rejecting with the root `TimeoutError`
+  and the core's message, "Timed out waiting for KafkaFuture after <ms> ms",
+  a negative timeout printed as 0 ms, where Java's is "Timeout after waiting
+  for <ms> ms." with the value given *(deviation: the text is the Rust
+  core's `KafkaFutureImpl::get_with_timeout`,
+  `rust/src/common/internals/kafka_future_impl.rs`, which every future
+  shares; changing it is a core change)*) and
+  Java's `KafkaFutureImpl` (`completedFuture`, `allOf`, the dependants:
+  `cancel()` completes the future and its own dependants with a
+  `CancellationError`, never its source, and answers as Java's
+  `CompletableFuture.cancel`: true when this call or an earlier one cancelled
+  it on its own, false for a dependant cancelled through its source or by its
+  own function; a timed-out `get` is `TimeoutError` with no message,
+  `CompletableFuture`'s). `get()` and `getNow()` on a failed future reject or
+  throw `ExecutionError` (Java's `ExecutionException`), the failure its `cause`
+  and the cause's `String()` its message; on a cancelled one, the
+  `CancellationError` itself (the root `CancellationError extends
+  IllegalStateError`, Java's `CancellationException`). Any thrown value is a
+  failure: one that is not an `Error` (`undefined`, `Object.create(null)`) is
+  the `ExecutionError`'s cause too, its message a `String()` that cannot throw
+  (`''` for `null` and `undefined`, as the `(cause)` form gives), and so is
+  one whose class cannot be read (a revoked Proxy). `whenComplete`'s action
+  gets the raw failure. What depends on a future runs where it completes
+  (inside the producer's drain for a record), or inside the registering call
+  when it is done, as `CompletableFuture` runs it. A dependant's completion is
+  queued for the loop already running, as Java's `postComplete` runs a
+  dependant's (no recursion, so a chain of any length completes; one waiter
+  that throws stops none of the others), while an explicit completion
+  (`cancel()`, the client's) finishes its own dependants, and an `allOf` over
+  it, before it returns, even inside another's function. An `allOf` reads its
+  sources' states, as Java's relays on their results: it completes once every
+  source is done, whichever source's completion runs it, its failure the first
+  in the sources' order. Nothing waits or allocates a Promise until a `get()`
+  or `toCompletionStage()` (the root conventions' lazy Promise). *(Deviation
+  from the one-object rule for single-method callbacks, Python's too:)*
+  `thenApply`'s function and `whenComplete`'s action are called positionally,
+  `function(value)` and `action(value, error)`, as Java calls `apply(a)` and
+  `accept(a, b)`: Java names those parameters `a` and `b`, which carry no
+  meaning as names. A `null` function or action throws `TypeError` at the
+  call, where Java's dependant would fail with a `NullPointerException` when
+  the source completes.
+- A hand-over error (what Java's `doSend` rethrows) rejects the `send()`
+  Promise and never reaches the callback; that Promise is never marked
+  handled, so an un-awaited failing send surfaces as an unhandled rejection,
+  as Java's `send()` would throw. Only delivery failures are kept from
+  surfacing unread: a future rejects only the Promises its `get()` and
+  `toCompletionStage()` returned, so a failed future nobody reads raises no
+  unhandled rejection, and neither do its dependants, and starts no native
+  wait; a `get()` Promise the
+  caller drops still raises one, as any rejected Promise does.
+- `Callback` is a function of one object of named parameters,
+  `({ metadata, exception }) => void` (root conventions, Class family), Java's
+  `onCompletion(metadata, exception)` named as Java names them (the one place
+  `exception` is an identifier, allowlisted in `check-exception-word`), run
+  before the future completes, as Java fires the callback before completing
+  the future (rules 5 and 6). A callback that returns a Promise is awaited
+  (rule 6): the
+  record's future completes, and a `flush()` or `close()` covering the record
+  returns, only once it settled; a rejection is a throw, logged by the core
+  and never propagated, except the callback a serializer's `ApiError` runs
+  inside `send()`, whose throw or rejection rejects `send()`, as Java's
+  `onCompletion` throws out of `KafkaProducer#doSend`'s `ApiException` catch,
+  which has no `try` around it. **(root conflict)** The root conventions,
+  Threads and callbacks, say the producer logs a send callback's error; that
+  holds where the core runs the callback (the delivery path, and a hand-over
+  the core refuses, where the core logs the throw and `send()` resolves), but
+  not for the serializer's catch, which runs in JavaScript. The code follows
+  Java there (`DECISIONS.md`, entries 4 and 29): the root wording needs its
+  owner. Such a Promise must not wait for `flush()` or
+  `close()` of its own producer, which wait for it (root conventions, Threads
+  and callbacks: anti-patterns inside a send callback). In a callback the
+  core runs in its drain, before its first `await`, `flush()` is refused, as
+  Java's throws, and `close()` closes at once as `close({ timeout: 0 })`, with
+  Java's warning, failing the records still pending with "Producer is closed
+  forcefully.", as Java's `KafkaProducer.close` documents. A callback that
+  waited for its turn behind an earlier callback's Promise (rule 6) runs from
+  the settled Promise's continuation, outside the drain, so the core sees no
+  callback running: it is as after its first `await`, its `flush()` is not
+  refused and its `close()` waits for it; refusing them there stays the root
+  conventions' Future improvement (owner's decision 2026-11-19,
+  `DECISIONS.md` entry 34). **(root conflict)** The root conventions' Q46
+  says the core refuses these calls before the callback's first `await`;
+  Java and the core refuse only `flush()` and close as `close(0)`. The code
+  and docs follow Java and the core (`DECISIONS.md`, entries 4 and 27): the
+  root wording needs its owner. Q46's other statement, that awaiting a later
+  record's future waits for that same callback, holds: a later record's
+  future completes only after its own callback ran, which waits for this one
+  (rule 6).
+- Java's `Producer` interface is a TypeScript `interface` (root conventions,
+  Class family, Q10) with the members `KafkaProducer` translates (`send`,
+  `flush`, `close`, and `[Symbol.asyncDispose]` for Java's `Closeable`), in
+  `src/producer/producer.ts`; `KafkaProducer implements Producer`. Java's
+  `Producer` has no static member, so it has no runtime object (one would
+  hold the statics, as `Admin.create()`'s will).
+- `KafkaProducer` has `close()` and `[Symbol.asyncDispose]()`, which calls
+  `close()`, so `await using` closes it.
+- `MockProducer` (`src/producer/mock_producer.ts`) wraps the FFI's
+  `MockProducer` (root conventions, Implementation over the FFI, Q62): the
+  addon builds it through `MockProducerOptionsBuilder` and
+  `MockProducer_with_options` (`autoComplete` set, the cluster left
+  `Cluster.empty()`, no partitioner and no serializers), and it is the same
+  native handle as a `KafkaProducer`'s, over its `__as_Producer` view, so
+  `send`, `flush`, `close`, `partitionsFor` and `metrics` go through the
+  producer's `_cb` twins and drain, with the same lifetime rules (rules 3, 5,
+  6, 10: no closed flag, `close()` keeps the handle, the finalizer destroys
+  only a closed mock, which `MockProducer_closed` decides, as a close that
+  threw `closeException` leaves Java's mock open), each `_cb` call counted as
+  a producer's, so a call made on a closed mock holds Node until its answer
+  ("Threads and liveness"). Its constructors are
+  Java's `()` and `{ autoComplete, partitioner, keySerializer,
+  valueSerializer }`, `partitioner` typed `Partitioner | null`, the
+  placeholder (Scope, Q30), and never called, as the cluster is empty; the
+  `Cluster` form is left out. A send passes the app's `ProducerRecord`: its
+  key and value cross as the `void *` addresses of a `MockRecord`'s tags,
+  which the FFI's mock keeps without reading, and the addon holds the record
+  by a reference from the send until `clear()` (for a record a hand-over
+  took) or the destroy (`native/producer.c`, `MockRecord`), so `history()`
+  returns the app's own records; a record the mock refused is released at
+  its hand-over, with its send's context, as the core's mock refuses before
+  it keeps the record or makes a completion. No header crosses, the record
+  keeping its own, writable, as Java's mock leaves them, and no partition:
+  the core's mock reports partition 0 and Java's offsets whatever the record
+  says, as Java's empty-cluster mock sends to partition 0. A waiting send's
+  delivery function is held by the `MockProducer` (`#pending`) and only
+  weakly by the addon, so a closed mock nothing references is collected and
+  destroyed, its sends pending at the close or dropped by `clear()` freed
+  then (`Producer.mock_pending`), while a `completeNext()` after `close()`
+  still runs the callback, as Java's does; an error given to the mock is
+  released once the core holds no copy of it (`injected_errors_sweep`, run
+  by every mock call). The serializers run in
+  JavaScript on every send, key then value, each with its own fresh empty
+  `Headers` (Java's `new RecordHeaders()` per call when the cluster has no
+  partition), awaited when they return
+  a thenable, and what they return is not kept; a null one is not run, as
+  the core's mock skips it *(deviation: Java's dereferences it. Why: the
+  mock is the core's)*. The serializers run before the core's mock checks
+  that it is closed, fenced or has a send error, which Java checks first
+  *(deviation, as for `KafkaProducer`)*. After each send, `completeNext()`
+  and `errorNext()` the mock runs the producer's pump, so a callback runs
+  inside the call that completed its record, as Java's mock runs it, and
+  what a callback throws comes out of that call, as Java's `onCompletion`
+  runs with no `try`: `completeNext()` and `errorNext()` throw it, `send()`
+  (with `autoComplete`) and `flush()` reject with it, and nothing logs it.
+  The record's future completes all the same *(deviation: Java's mock leaves
+  it incomplete. Why: the core's mock completes it. Goes when: the core's
+  mock leaves it incomplete)*, and `flush()` completes every waiting record,
+  running each callback, before it rejects with the first throw
+  *(deviation: Java's `flush()` stops at the first callback that throws, the
+  later records staying waiting. Why: the core's mock completes all of them
+  in one call. Goes when: the core's mock stops at the first throw)*. A callback's Promise that rejects is the
+  callback's error, as a throw is, and nothing logs it (owner's decision 2026-11-18, restoring an earlier accepted design;
+  `DECISIONS.md` entry 30): `send()` with `autoComplete` waits for its callback's Promise and rejects with its rejection, and `flush()`
+  rejects with it; `completeNext()` and `errorNext()`, being synchronous, keep it in a FIFO (`#callbackErrors`), and
+  the next `send()`, `flush()` or `close()` raises the oldest, once *(deviation, as Python's `AsyncMockProducer`:
+  Java's mock throws it from the completing call. Why: these calls return before the Promise settles)*. `flush()`
+  and `close()` (so `[Symbol.asyncDispose]` too) wait for every callback Promise already started (`#running`,
+  `allSettled` semantics), and for the callbacks waiting for their turn, then raise the oldest kept error, so no kept
+  error is lost; `flush()` with a kept error still flushes first. The mock's callbacks go through the addon's run queue
+  (rule 6), so they run one at a time in completion order, as the producer's (`DECISIONS.md` entry 34): one that waits
+  for its turn behind an earlier callback's Promise runs once that settled (`send_run_queued`), after the
+  `completeNext()` or `errorNext()` that completed its record returned, so what it throws goes to the FIFO, as a
+  rejection does (`#completing` counts the completing calls that can still throw it) *(deviation, as Python's
+  `AsyncMockProducer`: Java's runs it inside the call. Why: a callback starts only once the one before it settled)*,
+  and the addon holds its function strongly from the moment it waits, so `clear()`, which drops `#pending`, leaves it
+  to run (`send_enqueue`). A callback's error belongs to the call that completed its record only: with `autoComplete`
+  that is the record's own `send()`, whichever drain runs its callback, and otherwise `completeNext()`,
+  `errorNext()` or `flush()` (the throw to the completing call, the rejection to the FIFO), so a `send()` nested in a
+  callback, or a `send()` whose drain runs the callbacks a pending `flush()` completed, leaves those errors to their
+  own calls. The callback queue does not nest (the addon's `cbq_drain` returns inside a drain, and the FFI's
+  `CallbackQueue::execute` returns 0 there), so with `autoComplete` a `send()` made from a callback's synchronous part
+  has its record's callback run in its turn, once that callback and the Promise it returns settled; that `send()`
+  waits for it before it settles, and rejects with its throw or rejection, as Java's nested `send()` throws it, so a
+  callback that awaits a `send()` it made never settles *(deviation: Java's runs the callback inside the nested
+  `send()`. Why: the callback queue does not nest, and the callbacks run one at a time. Goes when: a drain started
+  inside a drain runs the callbacks, where `cbq_drain` and `CallbackQueue::execute` return at once)*. A nested completing call
+  (`#callbackDepth > 0`) neither clears nor takes `#callbackThrown`, so an earlier record's throw stays the outer
+  call's, as Java's first `onCompletion` throw ends it. A `completeNext()` or `errorNext()` made
+  there cannot wait: the next record's callback runs in its turn, and its throw comes out of the outer completing call,
+  or goes to the FIFO when none runs it *(deviation: Java's nested call throws it. Why: the callback queue does not
+  nest, and those calls are synchronous)*. A `close()` made from one of the mock's
+  callbacks before its first `await`, a callback the core runs in its drain, does not wait for the callbacks, its own
+  among them, as Python's `AsyncMockProducer` skips the wait (`_in_async_callback`); the mock counts the callbacks
+  running their synchronous part (`#callbackDepth`). One that waited for its turn is as after its first `await`. After
+  that `await` the core's close waits for the running callback's
+  report (the FFI's `in_callback` is the drain's thread only), and a `flush()` from a callback waits for that
+  callback's report too, unless a flush error is set, which it rejects with at once, as Java's (the core's `flush_cb`
+  waits for the reports only on success), so a callback that awaits either never settles, the anti-pattern the producer documents
+  (`KafkaProducer` refuses a `flush()` made before the callback's first `await`; Java's mock makes no such check); Python's mock, not over the core, skips the wait after an `await` too. The record's future completes
+  once the Promise settled, the deviation above for a throw covering this case too.
+  `partitionsFor(null)` rejects with the FFI's `TypeError` "topic cannot be
+  null" *(deviation: Java's mock answers `[]`, as its empty cluster has no
+  topic. Why: the FFI checks its mandatory parameters, and the binding
+  repeats no precondition, Q35. Goes when: the FFI's mock accepts a null
+  topic)*. `send(null)` on a closed mock rejects with `TypeError` "record
+  must not be null" *(deviation: Java's mock checks `closed` first, an
+  `IllegalStateException` "MockProducer is already closed.". Why: the
+  binding keeps no closed state (Q61), and the record is checked in
+  JavaScript, by `#send`'s own TypeScript check, before the call reaches the
+  core's mock, which holds the closed state, the reason `KafkaProducer.send`
+  records for the same order)*. Java's
+  public error fields are setters only (plan §5 item 2, Python's
+  `set_send_exception`): `setSendException`, `setFlushException`,
+  `setPartitionsForException`, `setCloseException`, over
+  `MockProducer_set_*_error`, as `errorNext(e)` is over `error_next`; the
+  addon hands the core a `LocalCallbackError` whose opaque is an
+  `InjectedError` holding the JS value, and `native/error.c` hands that very
+  value back wherever the core reports the error (root conventions, Errors,
+  Q38). Left out: transactions (by request), `setMockMetrics` (the FFI takes
+  a native `KafkaMetric_t`, which the binding cannot build, as .NET's mock,
+  which also wraps the FFI's, leaves it out), and the
+  telemetry and metric-subscription calls (no FFI); `metrics()` is therefore
+  always empty. The mock emits no preview warning.
+- A Java `long` is a `bigint` (root conventions, Types): returned always as a
+  `bigint` (`RecordMetadata.offset` and `.timestamp`, `ProducerRecord.timestamp`,
+  a `long` constant such as `SaslConfigs.DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN`),
+  and taken as a `bigint` or a whole `number` up to 2^53 - 1, a larger number
+  throwing `RangeError` rather than rounding; the addon reads and writes it
+  with `napi_get_value_bigint_int64` / `napi_create_bigint_int64`. A Java
+  `int` is a `number`, and one outside Java's range throws `RangeError`
+  (`ProducerRecord`'s partition). Timeouts stay milliseconds or a
+  `Temporal.Duration` (Q22).
+- Errors (root conventions, Errors): the generated error hierarchy is the
+  Python client's: one class per FFI id, Java's name with its `Exception`
+  suffix as `Error`, Java's `extends` chain (`SaslAuthenticationError extends
+  AuthenticationError extends ApiError extends KafkaError`), in the folder of
+  its Java package (`common/errors/`, `java.*` at the root). Every
+  `kafka_common_Error_t` becomes an instance of the class of its FFI id
+  (`src/internal/errors.ts` `fromNative`, Python's `_errors.py` `_build`: an
+  unknown id is the base `KafkaError`, and `UNKNOWN_SERVER_ERROR` without
+  `is_api_error` is the bare `KafkaError`, not `UnknownServerError`), built
+  with the core's message and cause whatever constructor forms its class has
+  (`src/internal/throwable.ts` `create`, which captures the caller's stack
+  frames, as the binding's own `IllegalArgumentError` / `IllegalStateError`
+  do through it). Users classify with `instanceof`, `name` the fallback, and
+  there is no `code`, `errorName`, `retriable` or `apiError`. The FFI id is
+  kept in the private `_ffiId`, for the binding and the test harness (root
+  conventions, Errors; `check-internal-members` allows the name on the error
+  classes and asks `KafkaError` for it): each generated class with an id
+  declares `static readonly _ffiId`, marked `@internal` so `stripInternal`
+  leaves it out of the declarations, and an error from the core whose id
+  differs from its class's (an unknown id) keeps it in its own
+  non-enumerable `_ffiId`. **(root conflict)** The root conventions' Class
+  family names library-only members through `@internal` members named
+  `internal...`, while `_ffiId` is an underscore name; the code follows the
+  root text. `src/internal/errors.ts` `errorFfiId` gives the id to the gRPC
+  server and the tests. The Java built-ins (`IllegalStateError`, ...)
+  extend `Error`, not `KafkaError`, except `IllegalArgumentError` and
+  `IndexOutOfBoundsError`, which extend `RangeError`, and `CancellationError`,
+  which extends `IllegalStateError` as Java's `CancellationException` does (a
+  built-in only this client has a class for: Python answers a cancelled future
+  with its inner future's `CancelledError`). A value of the wrong JS type
+  throws `TypeError`; a `null` Java rejects with `requireNonNull` or a bare
+  dereference throws `TypeError` "<param> must not be null" ("<param> must not
+  contain null" for an element, "<param> must not contain a <Class> with a null
+  <field>" for an element's field), but where Java throws its own message
+  ("Topic cannot be null.", "Null header keys are not permitted",
+  `Enum.valueOf`'s "Name is null") the binding keeps Java's text and class.
+  The constructors take one options object with `message` and `cause`, Java's
+  other parameters keeping their names, and a single value read by its type
+  (a string is the message, an `Error` the cause: `new KafkaError('boom')`,
+  `new KafkaError(cause)`), as the root conventions say; matched by name
+  through `src/internal/args.ts`, one TypeScript signature per form, each
+  key documented on the options type. Each form's message is the one Java's
+  constructor chain gives: the cause's `String()` for `(cause)`, as Java's is
+  `cause.toString()`, or Java's own fixed text. A second argument (ES2022's
+  `new Error(message, { cause })`) throws `IllegalArgumentError` in the form
+  check's format (root conventions, Errors, Q39), listing the class's forms
+  as JavaScript calls them, by number of parameters, ties in Java's
+  declaration order: `()`, a one-parameter form's value on its own,
+  `(message)` or `(cause)`, and a longer form's options object,
+  `({ message, cause })`, as in `KafkaError() takes one of (), (message),
+  (cause), ({ message, cause }); got 2 arguments` (the `callShapes` option of
+  `src/internal/args.ts`, which every error class's matcher sets, so its
+  other form errors list the forms the same way). A method's form error
+  keeps its own format (Signatures, above). Java's abstract bases (`RetriableError`, ...)
+  are catch-only, `abstract` classes without an FFI id: constructing one
+  throws `TypeError` (root conventions, Class family, Q16, Q32). A user's
+  subclass takes the forms of its nearest generated class. The constructors
+  that take a payload are generated too (root conventions, Errors, Q39), in
+  the same one-object shape, Java's other parameters by their Java names
+  (`new TopicAuthorizationError({ message, unauthorizedTopics })`); a payload
+  is given by name only, never as a bare value, so a form error lists such a
+  one-parameter form as its options object, `({ unauthorizedTopics })`. Each
+  form's message and the fields it sets are Java's constructor chain, which
+  the generator evaluates as JavaScript (Java's `String.valueOf` and
+  `Double.toString` for a message it builds, `src/internal/java_string.ts`),
+  and each payload parameter is taken by its kind (`src/internal/payload.ts`:
+  a `Set<String>` an iterable of strings, a string refused; a
+  `Map<TopicPartition, Long>` a `TopicPartitionMap` only, a `Map` refused with
+  a hint; a `long` a `bigint` or a whole number). The payload getters are
+  methods over private fields (`unauthorizedTopics()`, `partitions()`), which
+  only read and return a new collection the caller may change
+  (`Set<String>` a `Set`, `Set<TopicPartition>` a `TopicPartitionSet`,
+  `Map<TopicPartition, Long>` a `TopicPartitionMap<bigint>`), with Java's
+  static factory (`GroupAuthorizationError.forGroupId`) and Java's
+  `toString()` override (`QuotaViolationError`'s, its class name written as
+  the error's `name`). An error the core reports carries its payload: the
+  addon reads it through the FFI's view of the class and its accessors
+  (`native/error_payload.c`, generated from the table in
+  `rust/xtask/src/error_hierarchy/js.rs`), and `create` runs the class's
+  constructors with a private token so each class sets its fields.
+  `QuotaViolationError`'s `metric()` is a `KafkaMetric` built, as the .NET
+  client builds it (Python keeps the name and group only), from the metric
+  name the view gives and the error's `value` (the value Java's `Sensor.checkQuotas` measured), with an
+  empty name when the view gives none. A field the core cannot give keeps
+  its default, listed in its module's header comment:
+  `CorrelationIdMismatchError`'s ids are
+  `-1`, as Python's *(deviation: Java's error carries them. Why: the class is
+  in `common.requests`, not a supported API, so the C API has no view of it.
+  Goes when: the C FFI gives a view of it)*. A form's doc says what Java's
+  shorter forms leave the getters returning (Q64: "`groupId()` returns
+  `null`"). The public types a
+  payload reaches are translated, as Python's Scope translates them (root
+  conventions, Scope, Q30: only `MockProducer` and `KafkaMetric` keep
+  untranslated types): `TimestampType` (`common/record`, an enum whose Java
+  field `name`, `'CreateTime'`, is reached through Java's `toString()`, as
+  Python's Enum rule reaches it, since a field cannot share the name of
+  `Enum.name()`), `OffsetAndMetadata` (`consumer`, a data class, its
+  `leaderEpoch` Java's `Optional<Integer>` getter as `number | null`), and
+  Java's nested `RecordDeserializationException.DeserializationExceptionOrigin`,
+  a class of the namespace merged with `RecordDeserializationError`, so a
+  static member of it (Names, Q11). A `ByteBuffer` payload is taken as a
+  `Uint8Array` and kept and returned as a `Buffer` over the same memory, a
+  `Headers` one as the `Headers` given, or a new one from an iterable of
+  `Header`; from the core, both are copies, as the error outlives the core's
+  handle. Java's `public static final` instances are: `INSTANCE` on
+  `DisconnectError` and `CoordinatorNotAvailableError`, a static property of
+  the class that is not writable, built by Java's no-argument chain (an empty
+  message, no cause) whatever that constructor's visibility
+  (`CoordinatorNotAvailableException`'s is private), as Python's
+  `_throwable.singleton` (each module's header comment says so); a class whose every
+  Java constructor takes a type the client does not translate has a
+  `protected` constructor that throws `TypeError` until then.
+- The closed producer (root conventions, Implementation over the FFI, Q61):
+  the binding keeps no closed flag. A call after `close()` goes to the core:
+  `send` rejects with its `IllegalStateError` "Cannot perform operation after
+  producer has been closed", after the record was checked and converted in
+  JavaScript *(deviation: Java checks the closed producer before it
+  serializes. Why: the binding keeps no state, and the conversion runs in
+  JavaScript before the call reaches the core)*; `flush()` and a second
+  `close()` do what the core does (they resolve), with no deviation. A
+  negative `timeout` is `IllegalArgumentError` "The timeout cannot be
+  negative.", from the FFI, and such a close changes nothing (rule 1).
+- Configuration (root conventions, Configuration, Q52, Q54, Q55): a plain
+  object of Java's config keys (a `Map`, or another non-plain object, throws
+  `TypeError`), and a key that is not a string (a symbol) throws
+  `ConfigError` "Key must be a string.", as it has no string to cross as
+  (`src/internal/config.ts`). The binding has no `ConfigDef` table and checks
+  no value: each value becomes the string the FFI takes (`true` → `"true"`,
+  numbers in decimal, never in exponent form, bigints in decimal, so a `long`
+  above 2^53 goes as its exact digits, arrays' items written so and joined
+  with `,`, anything else by `String()`, an object as `[object Object]`);
+  `null` and `undefined` leave the key unset; unknown keys, a `kafkaJS` block
+  included, pass, and the core lists the ones it does not use. The keys and
+  values cross as `encodeLikeJava`'s bytes, and the core checks types,
+  ranges, enums, unknown keys and cross-key rules with Java's messages naming
+  the key. `key.serializer` and `value.serializer` take a synchronous
+  function `({ configs, isKey }) => serializer`, which the producer calls
+  once, key then value, with a frozen copy of the whole configuration, each
+  value as given, through a `Proxy` that records each of its keys the
+  function reads. The two serde keys are left out of the configuration the
+  core gets, and so is each read key that is not a producer key, of Java's
+  or of the core's own (`partitioner.type`):
+  `src/internal/producer_config_keys.ts`, generated with the
+  `ProducerConfigs` type, from Java's `ProducerConfig` and the core's
+  `rust/src/producer/producer_config.rs`. A key such as
+  `schema.registry.url` is left out, so that the core
+  doesn't list it as unused; the consumer's serde keys reach the core, which
+  lists them as unused (root conventions, Serialization, Q53). **(root
+  conflict)** The root text says "the binding leaves those keys out of the
+  config it sends to the core, as Java's `originals()` marks them as used",
+  which read literally drops every key the function reads, `bootstrap.servers`
+  included, so a function that spreads the configuration would leave the
+  core with none. The code follows the rule's purpose and Java: Java only
+  marks the keys it reads and never removes them, so a producer key the
+  function reads still reaches the core, and only a read key the core doesn't
+  know is left out, which is what keeps `schema.registry.url` from being
+  listed as unused. Two deviations follow from the function running before
+  the core exists, to know which keys it reads *(deviation. Why: the binding
+  calls the function before the core is built. Goes when: the FFI exposes the
+  computed client id and the configuration check before construction)*: the
+  function gets the configuration as the user gave it, without the computed
+  `client.id` Java's `originals()` carries, and a configured serializer is
+  built before the core checks the configuration, where Java checks it
+  first. A serializer given as a
+  constructor argument wins, and its config key is then ignored; a null one
+  is the config key's, as Java's `if (keySerializer == null)`. A function
+  that throws is Java's "Failed to construct kafka producer" `KafkaError`,
+  with the error as its `cause`, and the serializers made so far are closed;
+  those the config functions made are closed on any construction failure,
+  since only the producer holds them. The `ProducerConfigs` type, generated into
+  `src/producer/producer_configs.ts` by the `config_types` emitter
+  (`rust/xtask/src/config_types/js.rs`), lists the keys Java's
+  `ProducerConfig` defines (with its SSL and SASL keys) for autocompletion
+  and takes any other string through `(string & {})` *(js-only, types
+  only)*. Debug lines use `util.debuglog('confluent_kafka')`, shown with
+  `NODE_DEBUG=confluent_kafka`; no constructor takes a logger or an error
+  callback.
+
+## Files and layout
+
+The layout is the root conventions' (Layout and modules).
+`test/static/layout.test.js` checks the parts of this a test can see.
+
+- `native/`: the addon, its C sources and its build file. `binding.gyp` and
+  `addon.exports.map` (the Linux export list of a static build) are here, not
+  at the package root, so npm never compiles on install; `make build-addon`
+  runs node-gyp in `native/`, which builds `native/build/Release/` (root
+  conventions, Build, packaging and release, Q73: the build tool is node-gyp,
+  `javascript/` finds the core in `../rust`, `CONFLUENT_KAFKA_LIB_DIR`
+  overrides that, the target is `make build-javascript`, the addon targets
+  Node-API 9 (`NAPI_VERSION=9`), and a release `.node` exports only Node-API's
+  registration symbols). `util.h` is the only file including the bindings
+  header and holds the `out_err` macros (`FFI_ERR`, `FFI_SET`,
+  `FFI_DISCARD`); `addon.c` is the entry point and registers every native
+  function; `callback_queue.c` is a client's notify hook, threadsafe
+  function, drain, keep-alive and teardown (each client embeds a
+  `CallbackQueue` and passes its own `__execute_callbacks`); `error.c`,
+  `record.c` (`ProducerRecord`, the borrowed key and value), `headers.c`
+  (`Headers` and `Header` over `RecordHeaders` and `RecordHeader`), `producer.c` (the `KafkaProducer` and `MockProducer` handles,
+  which share one native handle type).
+- `src/`: TypeScript sources only (`.ts`; no `.js`, no `.d.ts`), one folder
+  per Java package (`clients` dropped), one public Java type per file,
+  snake_case names. The package's own helpers are in `src/internal/` (never
+  exported, never declared; `dist/internal/` is not in `exports`). Every other
+  folder is a package with one import path
+  (`@confluentinc/kafka-javascript/producer`,
+  `@confluentinc/kafka-javascript/common/header`): its `index.ts` re-exports
+  only the modules of its own folder, by name, `export { A } from './a'`
+  (`export type { ... }` for a type), plus the one
+  `export declare const __esModule: true;` (above); no index re-exports a child
+  folder or exports a namespace, and the root `index.ts` exports only Java's
+  built-in errors (Java's `java.*` packages map to the root) and `Duration`
+  (`check-module-exports`). The addon is loaded, and its one-time setup done,
+  in `src/internal/native.ts`, never in an `index.ts`;
+  `src/internal/native_loader.ts` finds it, the platform package's
+  (`@confluentinc/kafka-javascript-<platform>`) first, then the development
+  build `native/build/Release/`. Each copy of the package loads an addon
+  instance of its own (`process.dlopen` with a module object of its own, not
+  `require()`, whose cache would hand two copies resolving the same `.node`
+  file the one instance), and `setFactories` registers that copy's classes on
+  its instance, so a copy's producers build that copy's errors and
+  `RecordMetadata`, as each copy of Java's kafka-clients, loaded by a class
+  loader of its own, throws its own classes. The `.node` file itself is loaded
+  once per process, so what the addon keeps per process (the preview notice,
+  `addon_pin_loaded`) stays once per process.
+- Types are TypeScript, under `strict` (`tsconfig.json`). The docs follow the
+  root conventions (Documentation): TSDoc translated from the Javadoc, Java's
+  contract first, at most 150% of the Javadoc's words, no Java file or line
+  references, and the tags `@param` (describing the options object as a
+  whole), `@returns`, `@throws` naming the error classes, `@defaultValue` for
+  Java's starting values, `@deprecated` and one `@remarks` for the JavaScript
+  notes, such as deviations, with no JSDoc type annotations; `@internal` marks
+  a library-only member (below). A JavaScript addition is marked *(js-only)*
+  and a departure *(deviation)*, with its Why, in that `@remarks`. There is no
+  custom tag: an item with no Java counterpart is on the list of invented
+  names, and one the naming convention cannot map is listed with its Java
+  target, both in `lint-mapping.json` (The rule linter); `src/` carries no
+  `@java` or `@jsOnly` tag. Each module's header comment lists the Java
+  overloads it leaves out; the producer package's is its `index.ts`'s
+  `@packageDocumentation` TSDoc, so the declarations show it (the API report
+  records only that the package has one). The docs lint, the `require-param`,
+  `require-returns` and `require-hyphen-before-param-description` rules of
+  `eslint-plugin-jsdoc` (Documentation, Q64, Q74), runs in `make lint-rules` (The rule linter), and `make docs` builds the HTML
+  reference with TypeDoc (`typedoc.config.cjs`, root conventions,
+  Documentation, Q64) into `build/docs/`: one module per import path, each
+  package's `@packageDocumentation` its page, the `@internal` members left out
+  as `stripInternal` leaves them out, and a warning failing the build. It is
+  not part of `verify`; `test/static/docs.test.js` checks that it builds. `make
+  build` (`build-ts`) compiles `src/` into `dist/` (`.js`, `.d.ts`, both with
+  maps): CommonJS (`module: nodenext`, the package's `"type"` being `"commonjs"`, root
+  conventions, Layout and modules), so `require` loads it and an ES module
+  `import`s it through Node's CommonJS interop, ES2022 (and ES2024's string
+  methods) for Node >= 22.14.0, `engines.node` (root conventions, Build,
+  packaging and release); the other `tsc` settings, such as the target, are
+  not decided yet in the root conventions. `scripts/dist_headers.js` then
+  puts each source's licence header first in its `.js` (above tsc's
+  `"use strict";`) and `.d.ts` (where tsc drops it), the source maps shifted
+  to match. `dist/` is git-ignored and is what
+  `package.json` points at and publishes; a `dist/internal/` module's `.d.ts`
+  is removed after compiling. A Java constructor that is not public is a
+  TypeScript `private` constructor (`protected` where Java's is); there is no
+  run-time guard (root conventions, Class family). The library builds such an
+  object through one static factory, `internalCreate` (`RecordMetadata`'s
+  builds it from the native layer's fields, through its public constructor
+  with a module-private mark that no caller can give), and calls its own methods on public
+  classes (`ProducerRecord.internalToNative`, `KafkaFuture.internalComplete`)
+  with dot access: each is a public member marked `@internal` in its TSDoc
+  and named `internal...`, which tsc's `stripInternal` leaves out of the
+  declarations; no member is `_`-prefixed but the error classes' `_ffiId`
+  (`check-internal-members`). The declarations keep each private constructor
+  as `private constructor();`, without which TypeScript would assume a public
+  one. `test/typing` type-checks `test/typing/usage.ts` against `dist/`'s
+  declarations under `--strict` (the `@internal` members and the private
+  constructors refused there) and checks no public declaration refers to a
+  private module; its type assertions go through `expect-type`'s
+  `expectTypeOf` (a pinned devDependency; root conventions, Tests):
+  `toEqualTypeOf` for an exact type, `toExtend` for a value of a wider type,
+  and `@ts-expect-error` for what must not compile.
+- `package.json`: `main`, `types`, an `exports` entry (`types` + `default`) per
+  package folder and its `typesVersions` all point into `dist/`, and the
+  folders behind the import paths also exist in the package, for TypeScript
+  setups that do not read `exports`: `pack-npm.sh` writes
+  `<path>/package.json` for each import path (`check-npm.py path-folders`),
+  its `main` and `types` pointing into `dist/`, and `files` names their
+  top-level folders (`common/`, `consumer/`, `producer/`); the package check
+  verifies them, and `test/unit/index.test.js` that a deep import fails with
+  `ERR_PACKAGE_PATH_NOT_EXPORTED`; `"gypfile": false`, no install scripts,
+  `files` naming `dist/` and `NOTICE` (Apache Kafka's credit line and
+  copyright, as Kafka's own NOTICE asks of a derived work), with the README
+  and the CHANGELOG; npm adds the README and the LICENSE on its own. Not
+  published: `src/`, the build inputs, the tests, `tools/` and the
+  gRPC server.
+- `api/` is the interface check's baseline (root conventions, Stability):
+  api-extractor's report of each import path's compiled declarations
+  (`<path>.api.md`), the `exports` map (`exports.json`) and the version they
+  were taken at (`baseline.json`). `make check-api` (`scripts/api_report.js`,
+  run by `make test` and the root `make verify`) compares the build with it: a
+  difference warns while the version or the baseline is a pre-release and in
+  a major release, and fails in any other release; `make update-api` records a
+  meant change, and the baseline of each release. `@microsoft/api-extractor`
+  is a pinned devDependency.
+- `npm/` holds one folder per platform package; `test/` and `examples/` sit
+  beside it (root conventions, Layout and modules).
+- Tests (root conventions, Tests): `test/static` (no build),
+  `test/unit/<module>/<file>.test.js` for a Java test class, named after the
+  `src/<module>/<file>.ts` it tests: the Java test class without its `Test`
+  suffix, snake_cased (`KafkaProducerTest` -> `producer/kafka_producer.test.js`;
+  `test/static/layout.test.js` checks it), other unit tests named after what
+  they test, `test/typing`, `test/integration` (broker-backed), `test/lint`
+  (the rule linter's own). The tests, the example and the gRPC server stay
+  JavaScript and run against the compiled package (every target that runs
+  them builds it first; `test/static` reads the sources and needs no build):
+  they import the package by its own name
+  (`require('@confluentinc/kafka-javascript/producer')`, Node's
+  self-reference), so no install is needed; tests of private helpers, and the
+  gRPC server, require `dist/internal/*.js` directly.
+- The gRPC conformance server lives at `javascript/grpc-server/`
+  (`grpc_server.js`, `grpc_translate.js`) and serves, over the public API,
+  the `ProducerService` and the chaos harness's `ChaosWorkloadService`
+  (`verifiable_clients/chaos_workload.js`), with an image on port 50054; the
+  consumer and admin services come with their clients. The Rust harness runs
+  it as `BackendKind::Js`, one backend, and its `JS_GRPC_SKIPS` list
+  (`rust/Makefile`) gives each skip a reason and a removal condition (root
+  conventions, Tests).
+
+## Packaging
+
+The rules are the root conventions' (Build, packaging and release). In this
+binding:
+
+- The repository's `package.json` stays `"private": true`; the published one
+  is written by `.semaphore/check-npm.py manifest`: this one without `private`,
+  `devDependencies` and `scripts`. The platform packages are pinned in
+  `optionalDependencies` at exactly its version, with no download fallback.
+  The pins are written into the published copy only: in the repository's
+  `package.json`, `npm ci` would fail once the version is on the registry,
+  since the lockfile cannot lock a package not yet published
+  (`test/static/lockfile.test.js`). Each platform package is a folder of
+  `npm/` (`npm/README.md`): its committed `package.json`, published as it is,
+  with npm's `os`, `cpu` and, on Linux, `libc` set and no install scripts, and
+  its README. The preview has linux-x64 (glibc) and darwin-arm64; after the
+  preview the platforms are the release RFC's list (Linux with glibc on x86-64
+  and arm64, macOS on arm64, Windows on x86-64), each built natively, with no
+  musl package and the core built with no `target-cpu` flag, so x86-64 needs
+  only Rust's baseline CPU (root conventions, Build, packaging and release,
+  Q73). Each platform package's `files` name `dist/` and
+  `NOTICE`, the addon and `THIRD_PARTY_LICENSES.txt`, the licences of the
+  crates linked into the addon. **(root conflict)** The root conventions
+  (Build, packaging and release) have every JavaScript package's `files` name
+  `dist/` and `NOTICE`, but a platform package has no `dist/`; the code follows
+  the root text literally, so the entry is there and matches nothing. CI
+  builds the licence file with cargo-about (`npm/about.toml`,
+  `npm/about.hbs`, `.semaphore/third-party-licenses.sh`) from
+  `rust/Cargo.lock`. Each package declares `"license": "Apache-2.0"` and
+  ships its own `LICENSE`, which `pack-npm.sh` copies into the package's
+  folder, since npm packs a `LICENSE` only from there; npm adds the README
+  and that LICENSE (root conventions, Q76). `test/static/layout.test.js`
+  pins the repository's side.
+- publint is among the package checks (root conventions, Build, packaging
+  and release, Q74): `make pack-check` lints each tarball it packs before
+  installing it, and an error, a warning or a suggestion fails it. Its one
+  suggestion, to name the module type, is why every package declares
+  `"type": "commonjs"` (the platform packages the main one's,
+  `check-npm.py`).
+- Prettier is the formatter (root conventions, Build, packaging and release,
+  Q74): `prettier.config.cjs` (width 140, single quotes, trailing commas, the
+  style the sources had), run by `scripts/format.js` over the TypeScript and
+  JavaScript of `src/`, `test/`, `scripts/`, `verifiable_clients/`,
+  `grpc-server/`, `tools/`, `examples/` and the root's config files. `make
+  format-check` fails on a file Prettier would change, and the root
+  `lint-javascript` runs it, so `verify` does; `make format` rewrites them. A
+  generated file (its "GENERATED, DO NOT EDIT" header) is left out: its
+  generator's output is what `cargo xtask check-generated` accepts.
+- No package has an install script or builds at install; `native/` (with
+  `binding.gyp`), `src/`, `scripts/`, `test/`, `tools/` and the gRPC
+  server are never published (`check-npm.py package` checks each tarball's
+  exact file list), and every `.js` and `.d.ts` in each tarball starts with
+  the licence header (`check-npm.py package`, Q76).
+- The released addon links the Rust core statically
+  (`CONFLUENT_KAFKA_LINK=static`, `native/binding.gyp`), needs glibc 2.28 or
+  macOS 11.0 at most (the glibc floor is 2.28, as for Python's wheels: root
+  conventions, Q73), loads only the system's libraries and exports only
+  `napi_register_module_v1` and `node_api_module_get_api_version_v1`
+  (`check-npm.py native`). Development builds, the tests and the gRPC image
+  link it dynamically, the default.
+- The version follows Kafka's line, now `4.4.0-beta.1`, the preview (root
+  conventions, Q75): `"version"` in `package.json`, repeated in
+  `package-lock.json` and in every `npm/<platform>/package.json`, which
+  `cargo xtask bump-version` writes together (`make bump-version
+  JAVASCRIPT_VERSION=...`), a preview as
+  `-beta.N`, as Python's is `bN`; there is no `-preview.N`. The version and
+  the npm tag say `beta`, while the docs and the warning call the stage the
+  preview. It refuses a version whose `MAJOR.MINOR` is not
+  the Kafka release of `kafka/gradle.properties`, or whose `PATCH` does not
+  follow `rfc/versioning.md` (`AK_patch × 100 + core_patch × 10 +
+  binding_patch`, the hundreds Kafka's patch, a digit back at 0 when one to
+  its left moves up). The tag build of `javascript/v<version>` records the
+  tested tarballs, and its manual "Publish to npm" promotion
+  (`.semaphore/publish-npm.yml`, `.semaphore/publish-npm.sh`) publishes them
+  from Semaphore with a granular npm token from Vault and no provenance. The
+  dist-tag is `check-npm.py dist-tag`'s: pre-releases go under `beta` only,
+  and it refuses to put one on `latest`; a release goes under `latest`; 1.x
+  fixes go out under `legacy`, from the earlier client's repository (the
+  publish job refuses a version below 4). There is no manual publish script.
+  `javascript/` is mirrored read-only to `confluent-kafka-javascript` and
+  released from `<major>.<minor>.x` branches.
+- CI runs the binding on Node 22 (every suite), on Node 24 (the static,
+  unit and typing tests, and the broker-backed tests against the scratch
+  broker `test-integration` starts, `await using` being native there) and on
+  Node 26 (the static, unit and typing tests, which need no broker), as the
+  root conventions ask (CI on Node 22, 24 and 26, Q73). The gRPC arms run on
+  Node 22.
+
+## Generated files
+
+`cargo xtask generate-error-codes` generates, from the Java sources and the
+FFI enum (the Python client's generators, `rust/xtask/src/javascript_gen.rs`):
+the error classes (their payload constructors and getters included) and
+`src/internal/error_registry.ts`, `native/error_payload.c` (the payload of an
+error the core reports, read through the FFI's view of its class, from the
+emitter's table, which the C compiler checks against the header), the config classes'
+constants (`ProducerConfig`, the client config class, its constants only;
+`SslConfigs`, `SaslConfigs`, `SecurityConfig`, the key-name classes,
+translated in full, Java's public default constructor included, but the
+`addClient...Support(ConfigDef)` methods: root conventions, Scope, Q55)
+and the producer's configuration keys (the `ProducerConfigs` type,
+`src/producer/producer_configs.ts`, and the key list
+`src/internal/producer_config_keys.ts`), all TypeScript but
+`native/error_payload.c` (typed: a config constant's type is written out, `static
+readonly X: string = '...'`, a `long` one a `bigint`), which
+`make build` compiles with the rest. *(deviation: the root conventions
+(Implementation over the FFI, Build, packaging and release, Class family)
+generate more, which is hand-written here: the addon's C wrappers
+(`native/`) and their TypeScript types (`src/internal/native.ts`, the root's
+generated `native_types.ts`), the class modules and their form tables (in the
+modules that call `src/internal/args.ts`), and the data-class list, kept in
+the linter (`DATA_CLASSES`, `scripts/lint/java_ts.js`). Why: the owner reads
+the root's "Code is generated wherever it can be" as meant for the error
+codes, so no generator is planned for the rest
+(`design/current/javascript-producer/DECISIONS.md`, entry 32).)* A generated file carries the license and `GENERATED,
+DO NOT EDIT` naming its generator, and is never edited by hand;
+`cargo xtask check-generated` fails on a stale, missing or orphaned one (a
+`.ts`, or a generated `.js` left in `src/`, or a generated `.c` or `.h` left
+in `native/`). A folder holding only generated
+modules has a generated `index.ts`, whose `@packageDocumentation` lists what
+its classes leave out (their header comments' notes); in a hand-written one
+(`src/`, `common/`, `common/config/`, `common/metrics/`, `producer/`) the
+generator owns the `BEGIN GENERATED EXPORTS` / `END GENERATED EXPORTS` block.
+
+## The rule linter
+
+`make lint-rules` checks the rules of this file and of the root conventions
+from the sources, as `cargo xtask lint-custom` checks the Rust crate's
+(`design/current/javascript-rule-linter/PLAN.md`). It has two halves: ESLint
+(`eslint.config.cjs`, the `kafka/` rules, with `eslint-baseline.txt`) runs the
+rules that read TypeScript, beside typescript-eslint's recommended
+type-checked rules on `src/` (`no-floating-promises` among them) and the docs
+lint, `eslint-plugin-jsdoc`'s `require-param`, `require-returns` and
+`require-hyphen-before-param-description` on `src/` (root conventions,
+Documentation, Q64, Q74). It reads each doc comment on a function, a method,
+an overload signature of either or of a constructor, an abstract method and
+an interface method (`scripts/lint/eslint/config.js`, the plugin's default
+contexts plus `TSEmptyBodyFunctionExpression` and `TSMethodSignature`), and
+asks for a `@param` for each parameter, an options object as one parameter
+(`checkDestructured` off), in TSDoc's form `@param name - text`, and a
+`@returns` unless the declaration returns no value (`void`, `undefined` or
+`never`, alone or in a `Promise`; a union of them, such as
+`void | Promise<void>`, is not exempted yet) or is an interface's setter (a
+bodied function's only when its body returns a value). Not checked: a member with no
+doc comment (which members need one is not the lint's), and function types
+(a type alias or a property). A generated file gets its tags from its
+generator. `test/lint/docs_lint.test.js` pins the configuration; the runner
+(`scripts/lint_rules.js`, with `lint-baseline.txt`) runs the addon's C rules
+and the other files. `make test-lint` runs the linter's own tests
+(`test/lint/`): each rule's tests over a fixture, and a mutation test that
+injects one known violation per rule into a copy of the real tree and expects
+exactly that rule to fail.
+
+A baseline lists findings not burnt down yet, each with a comment saying why;
+a line that matches no finding any more is itself a finding. Code that does
+not follow a rule yet is a finding to fix, never a new baseline line. The
+mapping lists are in `lint-mapping.json`: `invented`, the list of invented
+names for the exported items and public members (root conventions, Layout and
+modules), a member named by a well-known symbol keyed
+`<Class>.[Symbol.<name>]` (`KafkaProducer.[Symbol.asyncDispose]`,
+`Headers.[Symbol.iterator]`), each with its reason, and `javaTargets`, the Java class or member of
+an item the naming convention does not find; the other invented names are
+`NODE_DEBUG=confluent_kafka` and the platform package names (the
+never-closed warning and its code are gone: "Threads and liveness").
+
+The rules, each named in its finding:
+
+- `check-no-todo`: no unfinished-work marker in any file of the client.
+- `check-exception-word`: no identifier contains the word "exception" (root
+  §2, §4), Java's member names the rules keep aside.
+- `check-java-line`: no comment cites a Java source line.
+- `check-internal-members`: a library-only member is a public `@internal`
+  member named `internal...`, called with dot access; no member is
+  `_`-prefixed, but `_ffiId` on an error class, which `KafkaError` declares.
+- `check-java-name`, `check-java-members`, `check-java-completeness`,
+  `check-public-audience`, `check-no-deprecated-translation`: every export
+  translates a public, live Java class by name (or is listed), in its file,
+  every public member a Java member, and every public Java member is
+  translated (an enum's `java.lang.Enum` members and `toJSON()` included, a
+  public mutable field as its setter `set<Field>`, plan §5 item 2).
+- `check-invented-names`: every entry of `lint-mapping.json` is needed and
+  resolves, and an invented options type is named `...Args`.
+- `check-module-exports`: each package has one import path; an index
+  re-exports only its own folder's modules, with no namespace, and the root
+  exports only Java's built-in errors and `Duration`.
+- `check-data-objects`: the data classes' getters are `readonly` fields, every
+  other class keeps methods.
+- `check-overload-shape`: one Java overload set is one method taking one
+  options object of Java's parameter names, with one TypeScript overload
+  signature per Java form, the signatures of its null combinations (a `null`
+  key or value, above) and the bare value of a one-parameter form.
+- `check-type-mapping`: each member's type is the one the Types table gives
+  (a `byte[]` taken as a `Uint8Array`, returned as a `Buffer`; a `long`
+  returned as a `bigint`, taken as a `bigint` or a whole `number`); a Java
+  type the rule's table lacks is `unmapped`.
+- `check-waiting-call-promise`: a method returns a Promise if and only if its
+  native path reaches a `_cb` twin.
+- `check-native-registry`: the addon's registrations and the native handle's
+  uses match, and only the loader names a `.node` file.
+- `check-out-err`, `check-cb-twin-only`, `check-notify-hook`,
+  `check-single-drainer`, `check-completion-order`, `check-ownership`,
+  `check-no-binding-queue`: boundary rules 1 to 10, in the addon.
+- `check-zero-copy`: no copy of the app's key and value on the send path; a
+  `napi_ref` on each borrowed Buffer, dropped unconditionally by the
+  hand-over completion and never by the delivery callback (rule 8); and in
+  `src/` no copy of a bytes-typed value through `Buffer.from`,
+  `Buffer.copyBytesFrom`, `Buffer.concat`, `new Uint8Array`,
+  `Uint8Array.from`, `.slice()`, `.copy()` or `.set(bytes)` (a copy by
+  another means, such as a loop over the bytes, is not checked).
+- `check-string-encoding`: `encodeLikeJava` in `src/internal/encode.ts` is the
+  only place a string becomes bytes (no `Buffer.from(string)`, `TextEncoder`
+  or string write elsewhere).
+- `check-no-closed-flag`: no property of a `src/` class and no member or
+  variable of `native/` is named for a closed or closing state (`closed`,
+  `closing`, `isClosed`, with `#`, `_` or `is_` prefixes), and no string
+  literal holds one of Java's closed-client messages ("Cannot perform
+  operation after producer has been closed", ...), which only the core
+  reports; a `+` chain of strings, adjacent C literals and a template's
+  pieces read as one literal (`scripts/lint/literals.js`) (root conventions,
+  Implementation over the FFI, Q61; boundary rules 1 and 10). Not checked:
+  a closed state under another name, or in a module-level or closure
+  variable of `src/`.
+- `check-no-repeated-precondition`: no string literal of `src/` or
+  `native/`, read as `check-no-closed-flag` reads them, holds the message of a precondition the FFI or the core checks
+  ("The timeout cannot be negative.", "Invalid negative timeout", "Timeout
+  must not be negative", the busy message, ...), so the binding cannot raise
+  it itself (root conventions, Errors, Q35, Q58, Q60). The binding's own
+  listed checks write their own messages.
+- `check-tsfn-lifetime`: `napi_ref_threadsafe_function` and
+  `napi_unref_threadsafe_function` appear in `native/` only in the hold
+  update, `cbq_hold_update`, which calls both; `cbq_closed`, where the open
+  half of the hold ends, is called only by the close completion,
+  `close_on_complete`; every `kafka_*_cb(` call is a whole statement right
+  after a `cbq_call_begin` that is a whole statement too, in the same block
+  (so under the same condition), one each, and a `cbq_call_begin` anywhere
+  else is a finding; a `cbq_call_end` appears only in a completion passed to
+  a `_cb` call (the argument of the header parameter typed `..._cb_t`), and
+  no function calling it is called directly (not from the delivery callback,
+  not through a helper); and each such completion calls `cbq_call_end` once,
+  as a statement of its body's own block, with no `return` in the body and
+  nothing after it but the release of the client struct
+  (`producer_release`). So a client keeps Node running
+  while it is open or a call made on it waits for its answer (root
+  conventions, Lifetime, Q21; "Threads and liveness"). Checked by function,
+  lexically, as the other `native/` rules read the C sources: not that a
+  begin and its call name the same client's queue, that the core fires each
+  completion once (the FFI's contract), nor what the hold update decides,
+  which the unit tests check.
+- `check-default-helpers`: each interface the user implements (an
+  exported interface or function type translating a Java interface that no
+  exported class implements: `Callback`, not `Producer`) whose Java
+  interface has a `default` method that the TypeScript interface keeps as an
+  optional member (the Java index's flag, and `name?`: a default the root
+  drops or merges, such as a serde's `configure` or second `serialize`,
+  needs none) has its helper class, holding Java's default bodies (root
+  conventions, Class family, Q28). The root names its example, `ConsumerRebalanceListenerDefaults`,
+  and leaves the scheme open; this binding fixes it: the class
+  `<Interface>Defaults`, in `src/internal/<interface>_defaults.ts`, with a
+  method of each default method's name. A `...Defaults` class nothing asks
+  for is a finding too. `Callback` has no default method, so no helper
+  exists yet.
+- `check-mock-native`: each exported `Mock...` class holds a native handle,
+  its constructor (through the `src/` functions it calls, as
+  `check-waiting-call-promise` follows a method) or a field initializer
+  reaching a `native.<fn>` use, as the mocks wrap the FFI's mocks (root
+  conventions, Implementation over the FFI, Q62): `MockProducer` today.
+- `check-encode-callers`: only the string serializer (`src/common/serialization/`),
+  the headers code (`src/common/header/`) and the config code
+  (`src/internal/config.ts`) use `encodeLikeJava` (root conventions, Types,
+  Q24); a string key or value given without a serializer is a `TypeError`
+  (Class family, Q27), never encoded.
+- `check-commonjs-pin`: `package.json` has no `"type": "module"` (none, or `"commonjs"`), `tsconfig.json`'s
+  `module` and `moduleResolution` are `nodenext`, and each `exports` entry
+  has exactly the conditions `types` then `default` (root conventions,
+  Layout and modules, Q13).
+- `check-directives`, `check-config`: no inline ESLint configuration, a
+  targeted and explained disable that names no `kafka/` rule, and one ESLint
+  configuration.
+
+## How the client is used, in tests and reviews
+
+- **Callers await what the client returns.** Every method that returns a
+  Promise is meant to be awaited: `await producer.send(record)`,
+  `await producer.flush()`, `await producer.close()`. The client is built and
+  documented for that use: zero copy holds "until the Promise from `send()`
+  settles; awaiting `send()` is enough", and a send is part of a transaction
+  once its `send()` Promise has resolved (root conventions, Serialization and
+  Futures and waiting). The binding's own code is held to it by typescript-eslint's
+  `no-floating-promises`, which lints `src/`. Tests, examples and reviews use
+  the client the same way.
+- **A misuse without `await` is not a bug.** A test or a finding that depends
+  on a caller who doesn't await is not a defect of the client. That covers a
+  caller who drops a call's Promise, who changes, transfers or reuses a call's
+  arguments before its Promise settles, or who relies on the order of calls
+  that aren't awaited one by one. A Critic doesn't report one and an Actor
+  doesn't write a test for one. If the docs don't already tell users to
+  await at that point, it is a documentation item, not a code change.
+- **What the root conventions promise without `await` is still tested,**
+  because it's part of the contract:
+  - a send's delivery future need not be awaited: `await send()` is
+    expected and `await future.get()` isn't, and a failed future that nobody
+    awaits leaves no unhandled rejection (root conventions, Futures and
+    waiting; Tests);
+  - several calls in flight at once and awaited together, as in
+    `await Promise.all(sends)`, work on the producer, with no order promised
+    between them (root conventions, Threads and callbacks; rule 7);
+  - a callback that returns a Promise is awaited by the binding (root
+    conventions, Threads and callbacks).
+
+## Files and process
+
+- Every file carries Python's header, Confluent's copyright line with the
+  Apache 2.0 text, as the core's files do (root conventions, Build, packaging
+  and release, Q76), and code translated from OpenJDK keeps GPL with the
+  Classpath Exception. The Foundation's header, for a file copied unchanged
+  from Apache Kafka, has no place in `src/`, since Kafka ships no
+  TypeScript, so the build refuses it. `make build-ts` puts the header first
+  in each compiled `.js` and `.d.ts` (`scripts/dist_headers.js`), and the
+  package check confirms it in each tarball. No TODO or FIXME.
+- No Rust or C changes for the binding: a missing FFI function is reported,
+  not added (root conventions, Implementation over the FFI).
+- `test/static/header_conformance.test.js` asserts that every `kafka_*`
+  function `native/*.c` calls is declared in the bindings header and is not a
+  plain name that has an `_err` twin. Keep it passing when adding calls.
+- The tests run on Jest (root conventions, Tests, Q66; `jest.config.cjs`),
+  one project per Makefile target (`static`, `lint`, `unit`, `typing`,
+  `verifiable-clients`, `integration`; `make test-unit` runs
+  `jest --selectProjects unit`; `JEST_ARGS` passes more, before the project,
+  so `make test-unit JEST_ARGS=<test file>` runs only that file). They run in plain
+  Node.js, not in Jest's vm contexts: the runner, `test/jest_runner.mjs`,
+  runs jest-light-runner's test worker in a fresh child process per file, as
+  `node --test` did. A vm context would hand the tests another realm than the
+  addon's (its arrays and `TypeError`s fail `deepStrictEqual` and
+  `instanceof`), its own module resolver (no exports-map refusal of a deep
+  import, no ES module `import()`, no second copy of the package) and no
+  `require` of an ES module, which the linter's tests need; and a process
+  reused for the next file keeps what a file changed in it (a second copy's
+  error classes in the addon). The tests use `test()` and `node:assert/strict`;
+  a timeout is the last argument of `test`, `it`, `test.each`'s test,
+  `test.only`, `fit` and the hooks, which `test/jest_setup.js` applies (the
+  light runner registers it but does not enforce it), and refuses for
+  `test.concurrent`; `test.failing` is refused whatever it is given, as the
+  light runner runs it as a plain test; a `done` test or hook ends when it
+  calls `done`, and one that also returns something fails with Jest's
+  message, with a timeout or not (`test/static/jest_setup.test.js` runs each
+  form through Jest and checks its outcome); a conditional skip
+  is `(SKIP ? test.skip : test)(...)` with the reason printed once by the
+  file, and cleanup is `afterEach`. ts-jest is not used: the light runner
+  transforms nothing, and the tests are JavaScript. The integration tests run
+  in band (`--runInBand`), one file at a time, and are skipped, with a
+  visible message, unless `KAFKA_BOOTSTRAP_SERVERS` is set.
+- `tsc --strict` runs over the tests (root conventions, Tests, Q67, and
+  Build, packaging and release, Q74): `make typecheck-tests`
+  (`scripts/typecheck_tests.js`, in `make test` and the root
+  `test-javascript-unit`, so in `verify`: the sub-make that builds `dist/`,
+  so no second build deletes it under `make -j`) checks every test file,
+  under `test/` and `verifiable_clients/test/`, of every JavaScript and
+  TypeScript extension, with `test/tsconfig.json` (whose `include` the script
+  checks against its list; a `.d.ts` there is refused, as `skipLibCheck`
+  skips it), the JavaScript tests through `checkJs` under the library's own
+  settings, the package's import paths typed by `dist/`'s declarations (after
+  `build-ts`), as a user's code is. It fails on any finding in a test file;
+  the files the tests require from elsewhere (`scripts/`, `grpc-server/`, the
+  verifiable clients, the undeclared `dist/internal/*.js`) are read but not
+  failed on, by a path filter in the script, which checks every test file
+  with no opt-in comment and edits no file that is not a test. A call into
+  `dist/internal/` is typed by inference over the compiled JavaScript, except
+  where a test takes the signature from `src/` (`typeof import(...)` of the
+  `.ts` source). ts-jest is not used (the light runner transforms
+  nothing, and the tests stay JavaScript), so the tests are typed with JSDoc:
+  precise types, never `any` (`unknown` and narrowing where a value's type is
+  not known), a nullable value narrowed by an assertion the test makes
+  (`assert.ok(x)`), not a cast. A deliberate misuse a test makes to reach a
+  run-time check (a wrong type, a `null` the types forbid, an unknown key, a
+  string without a serializer) carries `// @ts-expect-error <the run-time
+  check it covers>` on the line above it: the directive also proves `tsc`
+  catches the misuse for a TypeScript caller, the other half of the
+  TypeScript-first rule, while the test proves the run time catches it for a
+  plain JavaScript caller. A directive marks only a misuse `tsc` catches,
+  and its reason says which kind: a wrong argument, a `null` the types forbid
+  by the nullability rule (Java only stores it, so the type is `T` while the
+  run time stores the `null` as Java does), or a class instance given bare
+  (below). A valid call is never marked: one the published types reject is a
+  type to fix in `src/`; one that reaches a library-only member (`internal...`,
+  `_ffiId`) goes through `test/_internal.js`, the one typed view of them; a
+  table of valid forms whose union `tsc` picks no overload for calls the
+  implementation's parameter through a cast. A misuse `tsc` lets through gets
+  no directive: number ranges, `NaN` and integer checks, a key computed at run
+  time, a parameter typed `unknown` (the placeholders, `V` of a map built
+  empty) and an `any[]` such as `fill(null)`'s are limits of `tsc`, recorded
+  in `DECISIONS.md`. `@ts-ignore`, `@ts-nocheck` and an `@ts-expect-error`
+  without a reason are refused.
+- What `tsc` catches against the run time (TypeScript first): a bare value
+  that may be any non-plain object (`KafkaFuture.completedFuture(value)`,
+  `getNow(valueIfAbsent)`) is typed to take only built-in values bare, since
+  TypeScript cannot tell a class instance from a plain object and the run
+  time reads a plain object as the options object, so a TypeScript caller
+  passes an instance of its own class by name, `{ value }`, while plain
+  JavaScript may pass it bare.
+- Assert the core's exact error messages in tests.
