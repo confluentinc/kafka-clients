@@ -128,10 +128,9 @@ export class ClassicGroupDescription {
   /**
    * If the group is a simple consumer group or not.
    *
-   * @remarks *(deviation)* Java computes it when called, and a null protocol
-   * throws `NullPointerException` there; a field is computed once, so a null
-   * protocol reads as false. Why: the description is a data class (decided by
-   * the owner on 2026-11-20).
+   * @remarks *(deviation)* Computed once, so a null protocol reads as false
+   * where Java's getter throws `NullPointerException`. Why: a data class's
+   * field.
    */
   readonly isSimpleConsumerGroup: boolean;
 
@@ -153,6 +152,8 @@ export class ClassicGroupDescription {
    *
    * @param options - the group's fields (a null group id or protocol data is
    *   the empty string, null members none)
+   * @throws `IllegalArgumentError` when the given parameters are not Java's
+   * @throws `TypeError` for a value of the wrong type
    */
   constructor(options: {
     /** The group id. */
@@ -174,6 +175,8 @@ export class ClassicGroupDescription {
    *
    * @param options - the group's fields (a null group id or protocol data is
    *   the empty string, null members none)
+   * @throws `IllegalArgumentError` when the given parameters are not Java's
+   * @throws `TypeError` for a value of the wrong type
    */
   constructor(options: {
     /** The group id. */

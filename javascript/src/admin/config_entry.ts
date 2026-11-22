@@ -70,6 +70,9 @@ export class ConfigEntry {
    * Create a configuration entry with the provided values.
    *
    * @param options - the non-null config name, and the config value or null
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` when the name is null ("name should not be null"),
+   *   or a value has the wrong type
    */
   constructor(options: {
     /** The non-null config name. */
@@ -91,6 +94,9 @@ export class ConfigEntry {
    *   (the broker never returns the value if it is sensitive), whether the
    *   config is read-only and cannot be updated, synonym configs in order of
    *   precedence, the config's type and its documentation
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` when the name is null ("name should not be null"),
+   *   or a value has the wrong type
    */
   constructor(options: {
     /** The non-null config name. */
@@ -439,6 +445,8 @@ export namespace ConfigEntry {
      *
      * @param name - the name of the constant to return
      * @returns the constant with the specified name
+     * @throws `IllegalArgumentError` when no constant has that name
+     * @throws `TypeError` when the name is null or not a string
      */
     static valueOf(name: string): ConfigType;
     /**
@@ -446,6 +454,8 @@ export namespace ConfigEntry {
      *
      * @param options - the name of the constant to return
      * @returns the constant with the specified name
+     * @throws `IllegalArgumentError` when no constant has that name
+     * @throws `TypeError` when the name is null or not a string
      */
     static valueOf(options: {
       /** The name of the constant to return. */
@@ -587,6 +597,8 @@ export namespace ConfigEntry {
      *
      * @param name - the name of the constant to return
      * @returns the constant with the specified name
+     * @throws `IllegalArgumentError` when no constant has that name
+     * @throws `TypeError` when the name is null or not a string
      */
     static valueOf(name: string): ConfigSource;
     /**
@@ -594,6 +606,8 @@ export namespace ConfigEntry {
      *
      * @param options - the name of the constant to return
      * @returns the constant with the specified name
+     * @throws `IllegalArgumentError` when no constant has that name
+     * @throws `TypeError` when the name is null or not a string
      */
     static valueOf(options: {
       /** The name of the constant to return. */

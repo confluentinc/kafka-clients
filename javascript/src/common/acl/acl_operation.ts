@@ -157,6 +157,8 @@ export class AclOperation {
    *
    * @param options - the constant's name
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(options: {
     /** The constant's name */
@@ -193,6 +195,7 @@ export class AclOperation {
    *
    * @param options - The string to parse.
    * @returns The AclOperation, or UNKNOWN if the string could not be matched.
+   * @throws `TypeError` when the string is null (Java dereferences it)
    */
   static fromString(options: {
     /** The string to parse. */
@@ -229,6 +232,8 @@ export class AclOperation {
    *
    * @param options - the code, a Java `byte`
    * @returns the operation
+   * @throws `TypeError` when the code is not an integer
+   * @throws `RangeError` when it is outside Java's `byte`
    */
   static fromCode(options: {
     /** The code, a Java `byte` */

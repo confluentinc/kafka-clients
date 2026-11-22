@@ -79,6 +79,7 @@ export class DescribeTopicsOptions extends AbstractOptions {
    *
    * @param includeAuthorizedOperations - whether authorized operations are included, on its own
    * @returns This DescribeTopicsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   includeAuthorizedOperations(includeAuthorizedOperations: boolean): this;
   /**
@@ -86,6 +87,7 @@ export class DescribeTopicsOptions extends AbstractOptions {
    *
    * @param options - whether authorized operations are included
    * @returns This DescribeTopicsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   includeAuthorizedOperations(options: {
     /** Whether authorized operations are included. */
@@ -116,6 +118,7 @@ export class DescribeTopicsOptions extends AbstractOptions {
    *
    * @param partitionSizeLimitPerResponse - the maximum number of partitions per response, on its own
    * @returns This DescribeTopicsOptions object.
+   * @throws `TypeError` when the value is not a 32-bit integer
    */
   partitionSizeLimitPerResponse(partitionSizeLimitPerResponse: number): this;
   /**
@@ -123,6 +126,7 @@ export class DescribeTopicsOptions extends AbstractOptions {
    *
    * @param options - the maximum number of partitions per response
    * @returns This DescribeTopicsOptions object.
+   * @throws `TypeError` when the value is not a 32-bit integer
    */
   partitionSizeLimitPerResponse(options: {
     /** The maximum number of partitions per response. */

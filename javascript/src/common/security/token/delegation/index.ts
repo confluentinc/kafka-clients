@@ -12,9 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The public classes of Java's
-// org.apache.kafka.common.security.token.delegation this client has: the
-// delegation tokens the admin client's token calls return.
+/**
+ * The public classes of Java's
+ * `org.apache.kafka.common.security.token.delegation` this client has: the
+ * delegation tokens the admin client's token calls return. Its `internals`
+ * package is not public.
+ *
+ * @packageDocumentation
+ */
 
 export { DelegationToken } from './delegation_token';
 export { TokenInformation } from './token_information';
