@@ -734,6 +734,9 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_common_header_Header_key_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr HeaderKey(IntPtr self, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_common_header_Header__key_bytes_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern KafkaBytes HeaderKeyBytes(IntPtr self, ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_common_header_Header_value_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern KafkaBytes HeaderValue(IntPtr self, ref IntPtr outErr);
 

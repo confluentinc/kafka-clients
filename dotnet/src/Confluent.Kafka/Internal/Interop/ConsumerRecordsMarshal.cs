@@ -202,8 +202,11 @@ internal static class ConsumerRecordsMarshal
                         KafkaException.ThrowIfFfiFailed(ref outErr);
                         IntPtr recordValue = NativeMethods.ConsumerRecordValue(record, ref outErr);
                         KafkaException.ThrowIfFfiFailed(ref outErr);
-                        Headers headers = CopyHeaders(record);
                         batch.AddRecord((long)Length(recordKey) + Length(recordValue));
+
+                        // Made here only for a deserializer that takes headers; otherwise the record makes them when
+                        // asked.
+                        Headers? headers = key.TakesHeaders || value.TakesHeaders ? new Headers(batch, record) : null;
 
                         TKey? deserializedKey = default;
                         TValue? deserializedValue = default;
@@ -240,8 +243,8 @@ internal static class ConsumerRecordsMarshal
                         if (cause is not null)
                         {
                             RecordDeserializationException error = NewError(
-                                origin, new TopicPartition(topic, partitionId), record, recordKey, recordValue, headers,
-                                cause);
+                                origin, new TopicPartition(topic, partitionId), batch, record, recordKey, recordValue,
+                                headers, cause);
                             copy.Error = error;
                             copy.Rewind = Rewind(records, partitions, p, error);
                             AddPartition(byPartition, topic, partitionId, list);
@@ -447,14 +450,18 @@ internal static class ConsumerRecordsMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
     }
 
-    private static Headers CopyHeaders(IntPtr record)
+    // The headers of a polled record, as headers whose key and value are read from the batch on first use, or null
+    // when it has none. The core's headers handle of the record and its elements' views are valid as long as the
+    // batch; the caller holds the batch's lock, since RecordHeaders__as_Headers must not run concurrently on one handle.
+    internal static List<Header>? ReadHeaders(SafeConsumerRecordsHandle batch, IntPtr record)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr recordHeaders = NativeMethods.ConsumerRecordHeaders(record, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         if (recordHeaders == IntPtr.Zero)
         {
-            return new Headers();
+            GC.KeepAlive(batch);
+            return null;
         }
 
         IntPtr view = NativeMethods.RecordHeadersAsHeaders(recordHeaders, ref outErr);
@@ -463,7 +470,8 @@ internal static class ConsumerRecordsMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         if (array == IntPtr.Zero)
         {
-            return new Headers();
+            GC.KeepAlive(batch);
+            return null;
         }
 
         try
@@ -471,7 +479,7 @@ internal static class ConsumerRecordsMarshal
             int count = Size(array);
             if (count <= 0)
             {
-                return new Headers();
+                return null;
             }
 
             List<Header> headers = new List<Header>(count);
@@ -479,18 +487,15 @@ internal static class ConsumerRecordsMarshal
             {
                 IntPtr header = NativeMethods.RecordHeaderAsHeader(Get(array, i), ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
-                IntPtr key = NativeMethods.HeaderKey(header, ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
-                KafkaBytes value = NativeMethods.HeaderValue(header, ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
-                headers.Add(new Header(Utf8Marshal.PtrToString(key) ?? string.Empty, CopyBytes(value)));
+                headers.Add(new Header(batch, header));
             }
 
-            return Headers.Wrap(headers);
+            return headers;
         }
         finally
         {
             DestroyList(array);
+            GC.KeepAlive(batch);
         }
     }
 
@@ -522,18 +527,18 @@ internal static class ConsumerRecordsMarshal
         IDeserializerWithReadOnlyMemory<T>? withMemory,
         SafeConsumerRecordsHandle batch,
         string topic,
-        Headers headers,
+        Headers? headers,
         IntPtr bytes)
     {
         KafkaBytes* view = (KafkaBytes*)bytes;
         int length = Math.Max(view->Length, 0);
         if (withMemory is not null)
         {
-            return withMemory.Deserialize(topic, headers, batch.HandOut(view->Data, length));
+            return withMemory.Deserialize(topic, headers!, batch.HandOut(view->Data, length));
         }
 
         ReadOnlySpan<byte> data = new ReadOnlySpan<byte>((void*)view->Data, length);
-        return withHeaders is null ? deserializer.Deserialize(topic, data) : withHeaders.Deserialize(topic, headers, data);
+        return withHeaders is null ? deserializer.Deserialize(topic, data) : withHeaders.Deserialize(topic, headers!, data);
     }
 
     // A deserializer that may keep its memory is given one over the batch; any other awaited one is lent a memory of
@@ -543,7 +548,7 @@ internal static class ConsumerRecordsMarshal
         AsyncDeserializerCall<T> call,
         SafeConsumerRecordsHandle batch,
         string topic,
-        Headers headers,
+        Headers? headers,
         IntPtr bytes,
         CancellationToken cancellationToken)
     {
@@ -570,7 +575,7 @@ internal static class ConsumerRecordsMarshal
         AsyncDeserializerCall<T> call,
         BytesMemoryManager lent,
         string topic,
-        Headers headers,
+        Headers? headers,
         CancellationToken cancellationToken)
     {
         try
@@ -584,17 +589,20 @@ internal static class ConsumerRecordsMarshal
         }
     }
 
-    // The failed record's offset and timestamp are read here, on the failure path only.
+    // The failed record's offset and timestamp are read here, on the failure path only. Its key, value and headers
+    // are owned copies, so an exception the caller keeps does not keep the batch.
     private static RecordDeserializationException NewError(
         RecordDeserializationException.DeserializationExceptionOrigin origin,
         TopicPartition partition,
+        SafeConsumerRecordsHandle batch,
         IntPtr record,
         IntPtr key,
         IntPtr value,
-        Headers headers,
+        Headers? headers,
         Exception cause)
     {
         long offset = ConsumerRecordMarshal.Offset(record);
+        Headers owned = (headers ?? new Headers(batch, record)).ToOwned();
         return new RecordDeserializationException(
             origin,
             partition,
@@ -603,7 +611,7 @@ internal static class ConsumerRecordsMarshal
             ConsumerRecordMarshal.TimestampTypeOf(record),
             CopyBytes(key),
             CopyBytes(value),
-            headers,
+            owned,
             "Error deserializing "
                 + (origin == RecordDeserializationException.DeserializationExceptionOrigin.KEY ? "KEY" : "VALUE")
                 + " for partition " + partition.ToString() + " at offset "
@@ -651,8 +659,13 @@ internal static class ConsumerRecordsMarshal
             KafkaException.ThrowIfFfiFailed(ref outErr);
             IntPtr value = NativeMethods.ConsumerRecordValue(record, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            Headers headers = CopyHeaders(record);
             batch.AddRecord((long)Length(key) + Length(value));
+
+            // Made here only for a deserializer that takes headers; otherwise the record makes them when asked.
+            Headers? headers = keyWithHeaders is not null || keyWithMemory is not null
+                || valueWithHeaders is not null || valueWithMemory is not null
+                ? new Headers(batch, record)
+                : null;
 
             TKey? deserializedKey = default;
             if (key != IntPtr.Zero)
@@ -666,7 +679,7 @@ internal static class ConsumerRecordsMarshal
                 {
                     return NewError(
                         RecordDeserializationException.DeserializationExceptionOrigin.KEY,
-                        new TopicPartition(topic, partition), record, key, value, headers, cause);
+                        new TopicPartition(topic, partition), batch, record, key, value, headers, cause);
                 }
             }
 
@@ -682,7 +695,7 @@ internal static class ConsumerRecordsMarshal
                 {
                     return NewError(
                         RecordDeserializationException.DeserializationExceptionOrigin.VALUE,
-                        new TopicPartition(topic, partition), record, key, value, headers, cause);
+                        new TopicPartition(topic, partition), batch, record, key, value, headers, cause);
                 }
             }
 

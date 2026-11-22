@@ -33,10 +33,9 @@ public sealed class PublicHeadersConstructorTests
 
         Assert.Same(header, Assert.Single(headers));
 
-        List<Header> backing = new List<Header> { header };
-        Headers original = Headers.Wrap(backing);
+        Headers original = new Headers().Add(header);
         Headers copy = new Headers(original);
-        backing.Add(new Header("key", new byte[] { (byte)'w' }));
+        original.Add(new Header("key", new byte[] { (byte)'w' }));
 
         Assert.NotSame(original, copy);
         Assert.Equal(2, original.ToArray().Length);

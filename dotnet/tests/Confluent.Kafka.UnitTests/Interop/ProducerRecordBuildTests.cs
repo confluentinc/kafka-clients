@@ -14,11 +14,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
@@ -120,6 +124,44 @@ public sealed class ProducerRecordBuildTests
         finally
         {
             Destroy(native);
+        }
+    }
+
+    [Fact]
+    public async Task BuildRecord_WithAPolledRecordsHeaders_SendsTheirValuesFromTheBatchWithoutACopy()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Assign(new[] { ("fetched", 0) });
+        consumer.Seek("fetched", 0, offset: 0);
+        using IDisposable blocks = ConsumerPollHeadersTests.AddRecordWithHeaders(
+            consumer, "fetched", 0, offset: 0, key: null, value: null,
+            ("null-value", null), ("empty-value", Array.Empty<byte>()), (NonAsciiKey, s_valueWithNul));
+        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback(
+            TimeSpan.FromMilliseconds(100),
+            new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()),
+            new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()));
+        Headers headers = Assert.Single(records).Headers();
+        SerializedProducerRecord record = new SerializedProducerRecord("t", 0, null, null, null, headers);
+
+        IntPtr native = Build(record, IntPtr.Zero, IntPtr.Zero);
+        try
+        {
+            Assert.Collection(
+                HeadersOf(native),
+                header => AssertHeader("null-value", null, header),
+                header => AssertHeader("empty-value", Array.Empty<byte>(), header),
+                header => AssertHeader(NonAsciiKey, s_valueWithNul, header));
+        }
+        finally
+        {
+            Destroy(native);
+        }
+
+        // The send read each value as a view of the batch: none was copied into a managed array.
+        foreach (Header header in headers)
+        {
+            Assert.Null(typeof(Header).GetField("_value", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(header));
         }
     }
 

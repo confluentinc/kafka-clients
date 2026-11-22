@@ -46,6 +46,8 @@ internal sealed class AsyncDeserializerCall<T>
             WithHeaders = deserializer as IAsyncDeserializerWithHeaders<T>;
             Retains = deserializer is IAsyncDeserializerWithRetention<T>;
         }
+
+        TakesHeaders = Inner is null ? WithHeaders is not null : InnerWithHeaders is not null || InnerWithMemory is not null;
     }
 
     internal IAsyncDeserializer<T> Deserializer { get; }
@@ -60,13 +62,16 @@ internal sealed class AsyncDeserializerCall<T>
     // The headers form of an awaited deserializer, null when it has only the form without headers or is a built-in.
     internal IAsyncDeserializerWithHeaders<T>? WithHeaders { get; }
 
+    // Whether a call is given the record's headers: a built-in's headers or memory form, or an awaited headers form.
+    internal bool TakesHeaders { get; }
+
     // Whether an awaited deserializer may keep the memory it is given. Such a deserializer has the headers form.
     internal bool Retains { get; }
 
     // Calls an awaited deserializer in the form chosen when the consumer was built.
     internal ValueTask<T?> DeserializeAwaited(
-        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        string topic, Headers? headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
         WithHeaders is null
             ? Deserializer.Deserialize(topic, data, cancellationToken)
-            : WithHeaders.Deserialize(topic, headers, data, cancellationToken);
+            : WithHeaders.Deserialize(topic, headers!, data, cancellationToken);
 }

@@ -104,7 +104,7 @@ public sealed class SerdeHeadersBrokerTests
     }
 
     [SkippableFact]
-    public async Task KafkaConsumer_AHeadersFormThatThrows_GivesTheExceptionTheHeadersItWasGiven()
+    public async Task KafkaConsumer_AHeadersFormThatThrows_GivesTheExceptionACopyOfTheHeadersItWasGiven()
     {
         string topic = await ProducedAsync();
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer(fail: true);
@@ -118,7 +118,7 @@ public sealed class SerdeHeadersBrokerTests
     }
 
     [SkippableFact]
-    public async Task AsyncKafkaConsumer_AHeadersFormThatThrows_GivesTheExceptionTheHeadersItWasGiven()
+    public async Task AsyncKafkaConsumer_AHeadersFormThatThrows_GivesTheExceptionACopyOfTheHeadersItWasGiven()
     {
         string topic = await ProducedAsync();
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer(fail: true);
@@ -151,8 +151,10 @@ public sealed class SerdeHeadersBrokerTests
     {
         Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.VALUE, e.Origin());
         Headers seen = Assert.Single(deserializer.Seen);
-        Assert.Same(seen, e.Headers());
-        Assert.Equal(Encoding.UTF8.GetBytes("1"), seen.LastHeader(SchemaId)?.Value());
+        // The error holds owned copies, so it never keeps the polled batch alive.
+        Assert.NotSame(seen, e.Headers());
+        Assert.Equal(seen, e.Headers());
+        Assert.Equal(Encoding.UTF8.GetBytes("1"), e.Headers()!.LastHeader(SchemaId)?.Value());
         Assert.Equal("bad v", e.InnerException?.Message);
     }
 

@@ -264,15 +264,17 @@ internal static unsafe class ProducerSendMarshal
         NativeMethods.ProducerRecordOptionsBuilderSetTopic(builder, pinned.Pointer, ref outErr);
     }
 
-    // Headers_add_with_key_value copies the key and the value, so both are pinned for the call only. An empty value
-    // crosses as a non-null pointer: fixed over an empty array yields NULL, which the ABI reads as a null value.
+    // Headers_add_with_key_value copies the key and the value, so both are pinned for the call only. A fetched
+    // header's value crosses as its view of the polled batch, with no managed copy; the header keeps the batch alive
+    // until the call returns. An empty value crosses as a non-null pointer: fixed over an empty span yields NULL,
+    // which the ABI reads as a null value.
     private static void AddHeader(IntPtr view, Header header, ref IntPtr outErr)
     {
-        byte[]? value = header.Value();
+        bool hasValue = header.ValueSpan(out ReadOnlySpan<byte> value);
         byte empty = 0;
         fixed (byte* valueData = value)
         {
-            KafkaBytes valueBytes = value is null
+            KafkaBytes valueBytes = !hasValue
                 ? default
                 : new KafkaBytes(value.Length == 0 ? (IntPtr)(&empty) : (IntPtr)valueData, value.Length);
             string key = header.Key();
@@ -282,12 +284,15 @@ internal static unsafe class ProducerSendMarshal
                 byte* buffer = stackalloc byte[capacity];
                 WriteUtf8(key, buffer, capacity);
                 NativeMethods.HeadersAddWithKeyValue(view, (IntPtr)buffer, valueBytes, ref outErr);
-                return;
             }
-
-            using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(key);
-            NativeMethods.HeadersAddWithKeyValue(view, pinned.Pointer, valueBytes, ref outErr);
+            else
+            {
+                using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(key);
+                NativeMethods.HeadersAddWithKeyValue(view, pinned.Pointer, valueBytes, ref outErr);
+            }
         }
+
+        GC.KeepAlive(header);
     }
 
     private static void WriteUtf8(string value, byte* buffer, int capacity)

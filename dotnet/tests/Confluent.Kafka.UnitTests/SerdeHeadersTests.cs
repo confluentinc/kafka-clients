@@ -322,7 +322,7 @@ public sealed class SerdeHeadersTests
     }
 
     [Fact]
-    public void MockConsumer_AHeadersFormThatThrows_GivesTheExceptionTheHeadersItWasGiven()
+    public void MockConsumer_AHeadersFormThatThrows_GivesTheExceptionACopyOfTheHeadersItWasGiven()
     {
         HeaderReadingDeserializer value = new HeaderReadingDeserializer(fail: true);
         using RecordBlocks blocks = new RecordBlocks();
@@ -338,7 +338,7 @@ public sealed class SerdeHeadersTests
     }
 
     [Fact]
-    public async Task AsyncMockConsumer_AHeadersFormThatThrows_GivesTheExceptionTheHeadersItWasGiven()
+    public async Task AsyncMockConsumer_AHeadersFormThatThrows_GivesTheExceptionACopyOfTheHeadersItWasGiven()
     {
         HeaderReadingDeserializer value = new HeaderReadingDeserializer(fail: true);
         await using RecordBlocks blocks = new RecordBlocks();
@@ -437,8 +437,17 @@ public sealed class SerdeHeadersTests
     {
         Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.VALUE, e.Origin());
         Headers seen = Assert.Single(value.Seen);
-        Assert.Same(seen, e.Headers());
+        // The error holds owned copies of the headers the deserializer saw, so it never keeps the
+        // polled batch alive: equal content, not the same instance.
+        Assert.NotSame(seen, e.Headers());
+        Assert.Equal(seen, e.Headers());
         Assert.Equal(Bytes("7"), seen.LastHeader(SchemaId)?.Value());
+        Assert.Equal(Bytes("7"), e.Headers()!.LastHeader(SchemaId)?.Value());
+        foreach (Header header in e.Headers()!)
+        {
+            // An owned header references no batch, so the error keeps none alive.
+            Assert.Null(typeof(Header).GetField("_batch", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(header));
+        }
         Assert.Equal("bad v", e.InnerException?.Message);
     }
 

@@ -14,6 +14,7 @@
 
 using System;
 using System.Globalization;
+using System.Threading;
 
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Record;
@@ -67,7 +68,9 @@ public sealed class ConsumerRecord<TKey, TValue>
     private readonly TimestampType _timestampType;
     private readonly TKey? _key;
     private readonly TValue? _value;
-    private readonly Headers _headers;
+    // A polled record's headers are made on the first call of Headers() unless a deserializer took them during the
+    // poll; a constructed record's are set by its constructor.
+    private Headers? _headers;
     private readonly int? _leaderEpoch;
     private readonly int _serializedKeySize;
     private readonly int _serializedValueSize;
@@ -204,7 +207,7 @@ public sealed class ConsumerRecord<TKey, TValue>
         int partition,
         TKey? key,
         TValue? value,
-        Headers headers)
+        Headers? headers)
     {
         _batch = batch;
         _record = record;
@@ -285,7 +288,7 @@ public sealed class ConsumerRecord<TKey, TValue>
 
     /// <summary>The record headers; empty when the record has none.</summary>
     /// <returns>The record headers; empty when the record has none.</returns>
-    public Headers Headers() => _headers;
+    public Headers Headers() => _headers ?? CreateHeaders();
 
     /// <summary>
     /// The record's leader epoch, or <see langword="null"/> when the record format has none (Java's
@@ -375,7 +378,14 @@ public sealed class ConsumerRecord<TKey, TValue>
         + ", deliveryCount = " + JavaText.ValueOf(DeliveryCount())
         + ", serialized key size = " + SerializedKeySize().ToString(CultureInfo.InvariantCulture)
         + ", serialized value size = " + SerializedValueSize().ToString(CultureInfo.InvariantCulture)
-        + ", headers = " + _headers
+        + ", headers = " + Headers()
         + ", key = " + JavaText.ValueOf(_key)
         + ", value = " + JavaText.ValueOf(_value) + ")";
+
+    // One instance per record, whichever thread asks first.
+    private Headers CreateHeaders()
+    {
+        Headers headers = new Headers(_batch!, _record);
+        return Interlocked.CompareExchange(ref _headers, headers, null) ?? headers;
+    }
 }

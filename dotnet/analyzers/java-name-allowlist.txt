@@ -31,6 +31,9 @@ overload M:Confluent.Kafka.Common.Header.Headers.#ctor
 overload M:Confluent.Kafka.Common.Header.Headers.#ctor(Confluent.Kafka.Common.Header.Header[])
 overload M:Confluent.Kafka.Common.Header.Headers.#ctor(System.Collections.Generic.IEnumerable{Confluent.Kafka.Common.Header.Header})
 
+# M23/P9 (ledger 596): Header.ValueMemory(), the value as a view of the polled batch; Java's Header has only value().
+unmatched M:Confluent.Kafka.Common.Header.Header.ValueMemory
+
 # C1: the mock consumer takes deserializers: it runs on the core's mock, which holds bytes (dotnet/CLAUDE.md §3).
 missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)
 missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)
