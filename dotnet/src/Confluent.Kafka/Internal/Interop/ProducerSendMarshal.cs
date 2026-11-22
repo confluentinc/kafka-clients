@@ -264,9 +264,11 @@ internal static unsafe class ProducerSendMarshal
         NativeMethods.ProducerRecordOptionsBuilderSetTopic(builder, pinned.Pointer, ref outErr);
     }
 
-    // Headers_add_with_key_value copies the key and the value, so both are pinned for the call only. A fetched
-    // header's value crosses as its view of the polled batch, with no managed copy; the header keeps the batch alive
-    // until the call returns. An empty value crosses as a non-null pointer: fixed over an empty span yields NULL,
+    // kafka_common_header_Headers_add_with_key_value copies the key into a String and the value into a Vec<u8>, as the
+    // C API has no borrowed header-value form (ledger 301), so both are pinned for the call only; the Rust producer
+    // makes no further copy, writing the header into the batch buffer as wire encoding. A fetched header's value
+    // crosses as its view of the polled batch, with no managed copy; the header keeps the batch alive until the call
+    // returns. An empty value crosses as a non-null pointer: fixed over an empty span yields NULL,
     // which the ABI reads as a null value.
     private static void AddHeader(IntPtr view, Header header, ref IntPtr outErr)
     {

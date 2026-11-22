@@ -151,10 +151,12 @@ core's header values being owned `Vec<u8>`); per-field retention (one kept recor
 | 584 | M23/P9 plan, decision 1 | Wrapped records | a polled `ConsumerRecord` wraps its native record: topic, partition, key and value are read at poll; every other getter is one P/Invoke per call, never cached. Supersedes the "owned copies" promise of the `ConsumerRecord` docs | Proposed |
 | 585 | decision 2 | Deserialization | key and value are still deserialized inside `Poll`; a failure is `RecordDeserializationException` from `Poll` with the position on the failed record, as Java | Proposed |
 | 586 | Design, batch lifetime | Batch release | every non-empty batch is released by the GC only, never disposed once a record wraps it; pressure = key and value bytes + a per-record constant. Extends ledger 537 to the span path | Proposed |
-| 587 | Design, `Headers` | Headers | a fetched record's `Headers` reads the native headers on first use (under a lock) and from then on holds writable owned copies; untouched, it makes no native call. Supersedes ledger 541 ("still copied") for when the copy happens; zero-copy header values stay out of scope | Proposed |
+| 587 | Design, `Headers`; Revision (2026-11-22) | Headers | a fetched record's `Headers` is created on first use and reads the native headers once, under the batch's lock, into native-backed `Header`s whose key and value are not read yet; untouched, it makes no native call; from then on its list is managed and writable. Supersedes ledger 541 ("still copied"); revised 2026-11-22 from owned copies to the zero-copy form over the C views of PR #355 | Proposed |
 | 588 | Design, `NewError` | Exception headers | `RecordDeserializationException` holds materialized headers, so it never keeps the batch | Proposed |
 | 589 | Design, `ConsumerRecords` | `NextOffsets` | read on first call and cached; not copied per poll | Proposed |
 | 590 | Rule drafts | Rule text W1–W7 | drafts below; applied only on the owner's explicit OK | Open |
+| 596 | Revision (2026-11-22) | `Header.ValueMemory()` | new public `ReadOnlyMemory<byte>? ValueMemory()`: `null` for a null value; for a fetched header a memory over the batch (`SafeConsumerRecordsHandle.HandOut`), never copied, readable after the next poll and after the consumer is disposed; for a built header its own array. *(Deviation: Java's `Header` has only `value()`. Why: a `byte[]` cannot view the batch)* | Proposed |
+| 597 | Revision (2026-11-22) | Fetched `Header` | reads its key and value through the C views on first use: `Key()` decoded once with UTF-8 (a NUL byte kept, invalid bytes as U+FFFD) and cached, `Value()` copied once and the same array returned on every call, as Java's `RecordHeader`; `ValueMemory()` never copies; a producer send of a fetched header makes no managed copy (the one copy is `kafka_common_header_Headers_add_with_key_value`'s, key into a `String` and value into a `Vec<u8>`, as the C API has no borrowed header-value form, ledger 301; the Rust producer only writes the header into the batch buffer); `RecordDeserializationException` holds owned copies | Proposed |
 
 ## Draft rule text (not applied)
 
@@ -285,7 +287,11 @@ the batch.
 - `NewError` materializes owned copies (string keys, `byte[]` values) for `RecordDeserializationException`, so an
   exception the caller keeps does not keep the batch.
 - `ProducerSendMarshal` reads each header value through `ValueMemory()`, pinned for the call, instead of `Value()`,
-  so forwarding a fetched header to a producer makes no managed copy; the ABI still copies it (ledger 301).
+  so forwarding a fetched header to a producer makes no managed copy. The one copy is made by the C FFI function
+  `kafka_common_header_Headers_add_with_key_value`, which builds `RecordHeader::new(key, value.to_vec())` (the key
+  into a `String`, the value into a `Vec<u8>`), because the C API has no borrowed header-value form (ledger 301); the
+  Rust producer makes no extra copy, writing the header into the batch buffer as wire encoding, as it does key and
+  value.
 - `CopyHeaders` is removed; copy-out builds the record's `Headers` with its native source.
 
 S4–S6 as above. S5 adds tests for: a fetched header's `ValueMemory()` backed by a `BytesMemoryManager` over the

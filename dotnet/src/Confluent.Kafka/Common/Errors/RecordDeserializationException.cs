@@ -102,6 +102,9 @@ public class RecordDeserializationException : SerializationException
 
     /// <summary>The record's headers, Java's <c>headers()</c>.</summary>
     /// <returns>The record's headers, or <see langword="null"/> when the constructor was given none.</returns>
+    /// <remarks>
+    /// A consumer gives copies of the headers the deserializer saw, which keep no polled batch in memory.
+    /// </remarks>
     public Headers? Headers() => _headers;
 
     internal override int FfiId => -27;

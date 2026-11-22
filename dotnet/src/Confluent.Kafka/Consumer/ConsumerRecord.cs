@@ -29,9 +29,10 @@ namespace Confluent.Kafka.Consumer;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A polled record's key and value are the deserializers' output, and its topic and headers are owned copies. Its
-/// other fields are read from the poll's native batch on each call, so the record keeps the batch in memory while it
-/// is reachable, after later polls and after the consumer is disposed, and the garbage collector frees it.
+/// A polled record's key and value are the deserializers' output, and its topic is an owned copy. Its headers are read
+/// from the poll's native batch on their first use (see <see cref="Confluent.Kafka.Common.Header.Header"/>), and its
+/// other fields on each call, so the record keeps the batch in memory while it is reachable, after later polls and
+/// after the consumer is disposed, and the garbage collector frees it.
 /// </para>
 /// <para>
 /// A deserializer that may keep its memory,

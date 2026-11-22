@@ -239,10 +239,18 @@ What to know about a memory that was kept:
   `using MemoryHandle pin = memory.Pin();` while reading a span that may outlive the memory.
 - `ReadOnlyMemory<byte>` has no position or limit, as Java's `ByteBuffer` has: it is exactly the key
   or the value. It compares by identity, so compare the bytes with `a.Span.SequenceEqual(b.Span)`.
-- Header values are copied, as before.
+- A polled record's headers are read from the batch on their first use. `Header.Key()` decodes the
+  key once and `Header.Value()` copies the value once, returning the same array on every call, as
+  Java's `RecordHeader`. `Header.ValueMemory()` is the value as a memory over the batch, with no copy,
+  kept valid as above; it has no Java counterpart. A header built in .NET gives its own array.
 
 A record consumed this way is produced again without a copy by giving the memory to a
-`ReadOnlyMemorySerializer`: the producer reads the consumer's bytes where they are.
+`ReadOnlyMemorySerializer`: the producer reads the consumer's bytes where they are. A polled
+record's headers given to a `ProducerRecord` are read the same way, with no managed copy of their
+values. The one copy is made by the C function `kafka_common_header_Headers_add_with_key_value`,
+which takes the key into a string and the value into an owned buffer, because the C API has no
+borrowed header-value form; the Rust producer then only writes the header into the batch buffer, as
+it does the key and the value.
 
 ```csharp
 using var consumer = KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(

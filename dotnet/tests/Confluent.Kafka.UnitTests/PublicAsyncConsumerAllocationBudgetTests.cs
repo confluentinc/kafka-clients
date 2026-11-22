@@ -55,10 +55,10 @@ public sealed class PublicAsyncConsumerAllocationBudgetTests
     private const int LargeSize = 64 * 1024;
     private const int RecordCount = 64;
 
-    // The measured 279 B or 280 B (net8.0, net10.0; the sync Poll's copy-out, with the built-in deserializers called
-    // without awaiting, a polled ConsumerRecord holding its batch and its native record) plus 8 B, less than one more
-    // object.
-    private const long PerRecordBudgetBytes = 288;
+    // The measured 247 B or 248 B (net8.0, net10.0; the sync Poll's copy-out, with the built-in deserializers called
+    // without awaiting, a polled ConsumerRecord holding its batch and its native record, its Headers created on first
+    // use only) plus 8 B, less than one more object.
+    private const long PerRecordBudgetBytes = 256;
 
     // A manager holds a reference, a pointer, a length and a flag: 40 B on a 64-bit runtime.
     private const long ManagerBytes = 40;
