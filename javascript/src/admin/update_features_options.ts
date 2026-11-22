@@ -69,6 +69,7 @@ export class UpdateFeaturesOptions extends AbstractOptions {
    *
    * @param validateOnly - whether it is, on its own
    * @returns This UpdateFeaturesOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   validateOnly(validateOnly: boolean): this;
   /**
@@ -76,6 +77,7 @@ export class UpdateFeaturesOptions extends AbstractOptions {
    *
    * @param options - whether it is
    * @returns This UpdateFeaturesOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   validateOnly(options: {
     /** Whether the request is only validated. */

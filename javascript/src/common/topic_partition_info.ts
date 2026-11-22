@@ -77,6 +77,8 @@ export class TopicPartitionInfo {
    *   replica assignment (the preferred replica is the head of the list), the
    *   in-sync replicas, the eligible leader replicas and the last known
    *   eligible leader replicas
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type, or a null list
    */
   constructor(options: {
     /** The partition id. */
@@ -98,6 +100,8 @@ export class TopicPartitionInfo {
    *
    * @param options - the partition id, the leader or null, the replicas and
    *   the in-sync replicas
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type, or a null list
    */
   constructor(options: {
     /** The partition id. */

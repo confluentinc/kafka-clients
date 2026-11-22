@@ -65,6 +65,7 @@ export class AlterConfigsOptions extends AbstractOptions {
    *
    * @param validateOnly - whether the request is only validated, on its own
    * @returns This AlterConfigsOptions object.
+   * @throws `TypeError` when the value is missing or not a boolean
    */
   validateOnly(validateOnly: boolean): this;
   /**
@@ -72,6 +73,7 @@ export class AlterConfigsOptions extends AbstractOptions {
    *
    * @param options - whether the request is only validated
    * @returns This AlterConfigsOptions object.
+   * @throws `TypeError` when the value is missing or not a boolean
    */
   validateOnly(options: {
     /** Whether the request is only validated. */

@@ -82,6 +82,7 @@ export class DescribeClusterOptions extends AbstractOptions {
    *
    * @param includeAuthorizedOperations - whether to include them, on its own
    * @returns this object
+   * @throws `TypeError` when the value is not a boolean
    */
   includeAuthorizedOperations(includeAuthorizedOperations: boolean): this;
   /**
@@ -89,6 +90,7 @@ export class DescribeClusterOptions extends AbstractOptions {
    *
    * @param options - whether to include them
    * @returns this object
+   * @throws `TypeError` when the value is not a boolean
    */
   includeAuthorizedOperations(options: {
     /** Whether authorized operations should be included. */
@@ -121,6 +123,7 @@ export class DescribeClusterOptions extends AbstractOptions {
    *
    * @param includeFencedBrokers - whether to include them, on its own
    * @returns this object
+   * @throws `TypeError` when the value is not a boolean
    */
   includeFencedBrokers(includeFencedBrokers: boolean): this;
   /**
@@ -128,6 +131,7 @@ export class DescribeClusterOptions extends AbstractOptions {
    *
    * @param options - whether to include them
    * @returns this object
+   * @throws `TypeError` when the value is not a boolean
    */
   includeFencedBrokers(options: {
     /** Whether fenced brokers should be included. */

@@ -65,9 +65,7 @@ export class AclBinding {
   }
 
   /**
-   * Whether this binding has any UNKNOWN components.
-   *
-   * @returns true if this binding has any UNKNOWN components
+   * @returns `true` if this binding has any UNKNOWN components.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   isUnknown(): boolean {
@@ -76,9 +74,7 @@ export class AclBinding {
   }
 
   /**
-   * The resource pattern for this binding.
-   *
-   * @returns the resource pattern for this binding
+   * @returns the resource pattern for this binding.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   pattern(): ResourcePattern {
@@ -87,9 +83,7 @@ export class AclBinding {
   }
 
   /**
-   * The access control entry for this binding.
-   *
-   * @returns the access control entry for this binding
+   * @returns the access control entry for this binding.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   entry(): AccessControlEntry {

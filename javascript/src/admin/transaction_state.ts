@@ -104,6 +104,8 @@ export class TransactionState {
    *
    * @param name - the name of the constant to return
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(name: string): TransactionState;
   /**
@@ -111,6 +113,8 @@ export class TransactionState {
    *
    * @param options - the name of the constant to return
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(options: {
     /** The name of the constant to return. */
@@ -140,6 +144,7 @@ export class TransactionState {
    *
    * @param name - the display name
    * @returns the constant
+   * @throws `TypeError` when the name is neither a string nor null
    */
   static parse(name: string | null): TransactionState;
   /**
@@ -147,6 +152,7 @@ export class TransactionState {
    *
    * @param options - the display name
    * @returns the constant
+   * @throws `TypeError` when the name is neither a string nor null
    */
   static parse(options: {
     /** The display name, or null. */

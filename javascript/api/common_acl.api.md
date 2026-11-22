@@ -8,6 +8,174 @@
 export const __esModule: true;
 
 // @public
+export class AccessControlEntry {
+    constructor(options: {
+        principal: string;
+        host: string;
+        operation: AclOperation;
+        permissionType: AclPermissionType;
+    });
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    host(): string;
+    isUnknown(): boolean;
+    operation(): AclOperation;
+    permissionType(): AclPermissionType;
+    principal(): string;
+    toFilter(): AccessControlEntryFilter;
+    toJSON(): {
+        principal: string;
+        host: string;
+        operation: string;
+        permissionType: string;
+    };
+    toString(): string;
+}
+
+// @public
+export class AccessControlEntryFilter {
+    constructor(options: {
+        principal: string | null;
+        host: string | null;
+        operation: AclOperation;
+        permissionType: AclPermissionType;
+    });
+    static readonly ANY: AccessControlEntryFilter;
+    equals(o: unknown): boolean;
+    findIndefiniteField(): string | null;
+    hashCode(): number;
+    host(): string | null;
+    isUnknown(): boolean;
+    matches(other: AccessControlEntry): boolean;
+    matches(options: {
+        other: AccessControlEntry;
+    }): boolean;
+    matchesAtMostOne(): boolean;
+    operation(): AclOperation;
+    permissionType(): AclPermissionType;
+    principal(): string | null;
+    toJSON(): {
+        principal: string | null;
+        host: string | null;
+        operation: string;
+        permissionType: string;
+    };
+    toString(): string;
+}
+
+// @public
+export class AclBinding {
+    constructor(options: {
+        pattern: ResourcePattern;
+        entry: AccessControlEntry;
+    });
+    // (undocumented)
+    entry(): AccessControlEntry;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    // (undocumented)
+    isUnknown(): boolean;
+    // (undocumented)
+    pattern(): ResourcePattern;
+    toFilter(): AclBindingFilter;
+    toJSON(): {
+        pattern: ReturnType<ResourcePattern['toJSON']>;
+        entry: ReturnType<AccessControlEntry['toJSON']>;
+    };
+    toString(): string;
+}
+
+// @public
+export class AclBindingFilter {
+    constructor(options: {
+        patternFilter: ResourcePatternFilter;
+        entryFilter: AccessControlEntryFilter;
+    });
+    static readonly ANY: AclBindingFilter;
+    // (undocumented)
+    entryFilter(): AccessControlEntryFilter;
+    equals(o: unknown): boolean;
+    findIndefiniteField(): string | null;
+    hashCode(): number;
+    // (undocumented)
+    isUnknown(): boolean;
+    matches(binding: AclBinding): boolean;
+    matches(options: {
+        binding: AclBinding;
+    }): boolean;
+    matchesAtMostOne(): boolean;
+    // (undocumented)
+    patternFilter(): ResourcePatternFilter;
+    toJSON(): {
+        patternFilter: ReturnType<ResourcePatternFilter['toJSON']>;
+        entryFilter: ReturnType<AccessControlEntryFilter['toJSON']>;
+    };
+    toString(): string;
+}
+
+// @public
+export class AclBindingFilterMap<V> implements Iterable<[AclBindingFilter, V]> {
+    [Symbol.iterator](): IterableIterator<[AclBindingFilter, V]>;
+    constructor();
+    constructor(options: {
+        entries: Iterable<readonly [AclBindingFilter | null, V]>;
+    });
+    constructor(entries: Iterable<readonly [AclBindingFilter | null, V]>);
+    clear(): void;
+    delete(options: {
+        key: AclBindingFilter | null;
+    }): boolean;
+    delete(key: AclBindingFilter | null): boolean;
+    entries(): IterableIterator<[AclBindingFilter, V]>;
+    forEach(callback: (value: V, key: AclBindingFilter, map: AclBindingFilterMap<V>) => void): void;
+    get(options: {
+        key: AclBindingFilter | null;
+    }): V | null;
+    get(key: AclBindingFilter | null): V | null;
+    has(options: {
+        key: AclBindingFilter | null;
+    }): boolean;
+    has(key: AclBindingFilter | null): boolean;
+    keys(): IterableIterator<AclBindingFilter>;
+    set(key: AclBindingFilter | null, value: V): this;
+    size(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    values(): IterableIterator<V>;
+}
+
+// @public
+export class AclBindingMap<V> implements Iterable<[AclBinding, V]> {
+    [Symbol.iterator](): IterableIterator<[AclBinding, V]>;
+    constructor();
+    constructor(options: {
+        entries: Iterable<readonly [AclBinding | null, V]>;
+    });
+    constructor(entries: Iterable<readonly [AclBinding | null, V]>);
+    clear(): void;
+    delete(options: {
+        key: AclBinding | null;
+    }): boolean;
+    delete(key: AclBinding | null): boolean;
+    entries(): IterableIterator<[AclBinding, V]>;
+    forEach(callback: (value: V, key: AclBinding, map: AclBindingMap<V>) => void): void;
+    get(options: {
+        key: AclBinding | null;
+    }): V | null;
+    get(key: AclBinding | null): V | null;
+    has(options: {
+        key: AclBinding | null;
+    }): boolean;
+    has(key: AclBinding | null): boolean;
+    keys(): IterableIterator<AclBinding>;
+    set(key: AclBinding | null, value: V): this;
+    size(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    values(): IterableIterator<V>;
+}
+
+// @public
 export class AclOperation {
     static readonly ALL: AclOperation;
     static readonly ALTER: AclOperation;
@@ -46,6 +214,31 @@ export class AclOperation {
     static readonly WRITE: AclOperation;
 }
 
-// (No @packageDocumentation comment for this package)
+// @public
+export class AclPermissionType {
+    static readonly ALLOW: AclPermissionType;
+    static readonly ANY: AclPermissionType;
+    code(): number;
+    static readonly DENY: AclPermissionType;
+    static fromCode(code: number): AclPermissionType;
+    static fromCode(options: {
+        code: number;
+    }): AclPermissionType;
+    static fromString(str: string): AclPermissionType;
+    static fromString(options: {
+        str: string;
+    }): AclPermissionType;
+    isUnknown(): boolean;
+    name(): string;
+    ordinal(): number;
+    toJSON(key?: string): string;
+    toString(): string;
+    static readonly UNKNOWN: AclPermissionType;
+    static valueOf(name: string): AclPermissionType;
+    static valueOf(options: {
+        name: string;
+    }): AclPermissionType;
+    static values(): AclPermissionType[];
+}
 
 ```

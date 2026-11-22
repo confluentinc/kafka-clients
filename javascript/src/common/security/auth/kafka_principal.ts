@@ -125,6 +125,7 @@ export class KafkaPrincipal {
    * Sets whether the principal was authenticated with a delegation token.
    *
    * @param tokenAuthenticated - whether it was, on its own
+   * @throws `TypeError` when the value is not a boolean
    */
   tokenAuthenticated(tokenAuthenticated: boolean): void;
   /**
@@ -132,6 +133,7 @@ export class KafkaPrincipal {
    * by name.
    *
    * @param options - whether it was
+   * @throws `TypeError` when the value is not a boolean
    */
   tokenAuthenticated(options: {
     /** Whether the principal was authenticated with a delegation token. */

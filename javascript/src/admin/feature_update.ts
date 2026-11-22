@@ -219,6 +219,8 @@ export namespace FeatureUpdate {
      *
      * @param name - the name of the constant to return
      * @returns the constant with the specified name
+     * @throws `IllegalArgumentError` when no constant has that name
+     * @throws `TypeError` when the name is null or not a string
      */
     static valueOf(name: string): UpgradeType;
     /**
@@ -226,6 +228,8 @@ export namespace FeatureUpdate {
      *
      * @param options - the name of the constant to return
      * @returns the constant with the specified name
+     * @throws `IllegalArgumentError` when no constant has that name
+     * @throws `TypeError` when the name is null or not a string
      */
     static valueOf(options: {
       /** The name of the constant to return. */
@@ -256,6 +260,8 @@ export namespace FeatureUpdate {
      *
      * @param code - the code, on its own or as `{ code }`
      * @returns the upgrade type
+     * @throws `TypeError` when the code is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     static fromCode(code: number): UpgradeType;
     /**
@@ -263,6 +269,8 @@ export namespace FeatureUpdate {
      *
      * @param options - the code
      * @returns the upgrade type
+     * @throws `TypeError` when the code is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     static fromCode(options: {
       /** The code, a Java `int`. */

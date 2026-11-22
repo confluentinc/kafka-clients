@@ -71,6 +71,7 @@ export class AlterClientQuotasOptions extends AbstractOptions {
    *
    * @param validateOnly - whether it should, on its own
    * @returns This AlterClientQuotasOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   validateOnly(validateOnly: boolean): this;
   /**
@@ -78,6 +79,7 @@ export class AlterClientQuotasOptions extends AbstractOptions {
    *
    * @param options - whether it should
    * @returns This AlterClientQuotasOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   validateOnly(options: {
     /** Whether the request should be validated without altering the configs. */

@@ -38,12 +38,14 @@ export class DeleteRecordsResult {
    * The result over the futures of each partition.
    *
    * @param futures - the futures, by partition, on its own
+   * @throws `TypeError` when they are not a TopicPartitionMap
    */
   constructor(futures: TopicPartitionMap<KafkaFuture<DeletedRecords>>);
   /**
    * The same as `new DeleteRecordsResult(futures)`.
    *
    * @param options - the futures, by partition
+   * @throws `TypeError` when they are not a TopicPartitionMap
    */
   constructor(options: {
     /** The futures, by partition. */

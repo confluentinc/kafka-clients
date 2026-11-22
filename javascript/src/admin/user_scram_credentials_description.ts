@@ -30,7 +30,7 @@ const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 
 /**
  * Representation of all SASL/SCRAM credentials associated with a user that
- * can be retrieved, or an exception indicating why credentials could not be
+ * can be retrieved, or an error indicating why credentials could not be
  * retrieved.
  *
  * See KIP-554: Add Broker-side SCRAM Config API.

@@ -78,6 +78,7 @@ export class DescribeConfigsOptions extends AbstractOptions {
    *
    * @param includeSynonyms - whether synonym configs are returned, on its own
    * @returns This DescribeConfigsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   includeSynonyms(includeSynonyms: boolean): this;
   /**
@@ -85,6 +86,7 @@ export class DescribeConfigsOptions extends AbstractOptions {
    *
    * @param options - whether synonym configs are returned
    * @returns This DescribeConfigsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   includeSynonyms(options: {
     /** Whether synonym configs are returned. */
@@ -115,6 +117,7 @@ export class DescribeConfigsOptions extends AbstractOptions {
    *
    * @param includeDocumentation - whether config documentation is returned, on its own
    * @returns This DescribeConfigsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   includeDocumentation(includeDocumentation: boolean): this;
   /**
@@ -122,6 +125,7 @@ export class DescribeConfigsOptions extends AbstractOptions {
    *
    * @param options - whether config documentation is returned
    * @returns This DescribeConfigsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   includeDocumentation(options: {
     /** Whether config documentation is returned. */

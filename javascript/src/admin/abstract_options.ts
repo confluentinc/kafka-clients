@@ -49,6 +49,9 @@ export abstract class AbstractOptions {
    * api timeout for the AdminClient should be used.
    *
    * @returns the timeout, or null
+   *
+   * @remarks A negative timeout is sent as 0, which Java's deadline makes of
+   * it.
    */
   timeoutMs(): number | null;
   /**
@@ -57,6 +60,11 @@ export abstract class AbstractOptions {
    *
    * @param timeoutMs - the timeout, or null, on its own
    * @returns this object
+   * @throws `RangeError` for `NaN`, an infinity, or a value outside 32 bits
+   * @throws `TypeError` when it is neither null nor a whole number
+   *
+   * @remarks A negative timeout is sent as 0, which Java's deadline makes of
+   * it.
    */
   timeoutMs(timeoutMs: number | null): this;
   /**
@@ -65,6 +73,11 @@ export abstract class AbstractOptions {
    *
    * @param options - the timeout
    * @returns this object
+   * @throws `RangeError` for `NaN`, an infinity, or a value outside 32 bits
+   * @throws `TypeError` when it is neither null nor a whole number
+   *
+   * @remarks A negative timeout is sent as 0, which Java's deadline makes of
+   * it.
    */
   timeoutMs(options: {
     /** The timeout in milliseconds, or null for the default api timeout. */

@@ -104,7 +104,7 @@ export class DeleteAclsResult {
 // eslint-disable-next-line @typescript-eslint/no-namespace -- Java's nested classes DeleteAclsResult.FilterResult and FilterResults, reached through the class name as in Java
 export namespace DeleteAclsResult {
   /**
-   * A class containing either the deleted ACL binding or an exception if the
+   * A class containing either the deleted ACL binding or an error if the
    * delete failed.
    */
   export class FilterResult {
@@ -140,7 +140,7 @@ export namespace DeleteAclsResult {
     }
 
     /**
-     * Return an exception if the ACL delete was not successful or null if it
+     * Return an error if the ACL delete was not successful or null if it
      * was.
      *
      * @returns the error, or null

@@ -85,8 +85,6 @@ export class ResourcePattern {
   }
 
   /**
-   * The specific resource type this pattern matches.
-   *
    * @returns the specific resource type this pattern matches
    * @throws `TypeError` when it is given an argument: it only reads
    */
@@ -96,9 +94,7 @@ export class ResourcePattern {
   }
 
   /**
-   * The resource name.
-   *
-   * @returns the resource name
+   * @returns the resource name.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   name(): string {
@@ -107,9 +103,7 @@ export class ResourcePattern {
   }
 
   /**
-   * The resource pattern type.
-   *
-   * @returns the resource pattern type
+   * @returns the resource pattern type.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   patternType(): PatternType {
@@ -118,9 +112,7 @@ export class ResourcePattern {
   }
 
   /**
-   * A filter which matches only this pattern.
-   *
-   * @returns a filter which matches only this pattern
+   * @returns a filter which matches only this pattern.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   toFilter(): ResourcePatternFilter {
@@ -129,9 +121,7 @@ export class ResourcePattern {
   }
 
   /**
-   * Whether this Resource has any UNKNOWN components.
-   *
-   * @returns `true` if this Resource has any UNKNOWN components
+   * @returns `true` if this Resource has any UNKNOWN components.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   isUnknown(): boolean {

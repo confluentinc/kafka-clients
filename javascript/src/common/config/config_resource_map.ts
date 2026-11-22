@@ -14,7 +14,7 @@
 
 // ConfigResourceMap (js-only): Java's Map<ConfigResource, V>, which JavaScript cannot key by
 // value (root CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; the
-// admin client's value-keyed maps, design decision D2). It is built as
+// admin client's value-keyed maps). It is built as
 // TopicPartitionMap is: it wraps a Map keyed by the JSON text of the fields
 // ConfigResource.equals compares (the type and the name; ConfigResource.internalKey), and keeps each original
 // ConfigResource, so keys() and entries() return ConfigResource objects. A null key, which
