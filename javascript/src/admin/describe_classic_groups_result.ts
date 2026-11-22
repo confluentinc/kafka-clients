@@ -36,12 +36,16 @@ export class DescribeClassicGroupsResult {
    * The result over the futures of each group.
    *
    * @param futures - the futures, by group id, on its own
+   * @throws `TypeError` when they are not a map of futures (null is stored,
+   *   as Java's constructor stores it)
    */
   constructor(futures: ReadonlyMap<string, KafkaFuture<ClassicGroupDescription>>);
   /**
    * The same as `new DescribeClassicGroupsResult(futures)`.
    *
    * @param options - the futures, by group id, as a `Map` or a plain object
+   * @throws `TypeError` when they are not a map of futures (null is stored,
+   *   as Java's constructor stores it)
    */
   constructor(options: {
     /** The futures, by group id. */

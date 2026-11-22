@@ -78,7 +78,7 @@ const { atNode } = require('../location');
 
 /**
  * The maps keyed by a value class other than TopicPartition and MetricName,
- * one class per key type (javascript/design/current/admin/PLAN.md, D2): the
+ * one class per key type (javascript/design/current/producer/DECISIONS.md, entry 38): the
  * Java key class, and the TypeScript class of its map.
  */
 const VALUE_KEYED_MAPS = new Map([
@@ -89,7 +89,7 @@ const VALUE_KEYED_MAPS = new Map([
   ['AclBindingFilter', 'AclBindingFilterMap'],
   ['ClientQuotaEntity', 'ClientQuotaEntityMap'],
 ]);
-/** The sets of a value class returned (D2): the Java member class, and the TypeScript class of its set. */
+/** The sets of a value class returned (DECISIONS.md entry 38): the Java member class, and the TypeScript class of its set. */
 const VALUE_KEYED_SETS = new Map([['MemberToRemove', 'MemberToRemoveSet']]);
 const { mappedMembers } = require('./java_members');
 const { liveForms, optionName, formOptionNames, signaturesOf } = require('./overload_shape');
@@ -296,7 +296,7 @@ module.exports = {
       }
       if (j.name === 'Set' && outward && j.args[0] !== undefined && VALUE_KEYED_SETS.has(j.args[0].name)) {
         // A set of another value class returned, one class per member type
-        // (javascript/design/current/admin/PLAN.md, D2).
+        // (javascript/design/current/producer/DECISIONS.md, entry 38).
         return symbolName(t) === VALUE_KEYED_SETS.get(j.args[0].name);
       }
       if (j.name === 'Set' && outward && ['ReadonlySet', 'Set'].includes(symbolName(t))) {
@@ -328,7 +328,7 @@ module.exports = {
       }
       if (j.name === 'Map' && j.args.length === 2 && VALUE_KEYED_MAPS.has(j.args[0].name)) {
         // A map keyed by another value class, one class per key type
-        // (javascript/design/current/admin/PLAN.md, D2).
+        // (javascript/design/current/producer/DECISIONS.md, entry 38).
         return symbolName(t) === VALUE_KEYED_MAPS.get(j.args[0].name) && matches(j.args[1], typeArgs(t)[0]) === true;
       }
       if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'Integer' && j.args[0].dims === 0) {

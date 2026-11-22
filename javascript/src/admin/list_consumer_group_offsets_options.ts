@@ -69,6 +69,7 @@ export class ListConsumerGroupOffsetsOptions extends AbstractOptions {
    *
    * @param requireStable - whether the broker returns stable offsets only, on its own
    * @returns This ListConsumerGroupOffsetsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   requireStable(requireStable: boolean): this;
   /**
@@ -76,6 +77,7 @@ export class ListConsumerGroupOffsetsOptions extends AbstractOptions {
    *
    * @param options - whether the broker returns stable offsets only
    * @returns This ListConsumerGroupOffsetsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   requireStable(options: {
     /** Whether the broker returns stable offsets only. */

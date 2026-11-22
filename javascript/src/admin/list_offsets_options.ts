@@ -35,6 +35,10 @@ export class ListOffsetsOptions extends AbstractOptions {
 
   /**
    * Java's `ListOffsetsOptions()`: `READ_UNCOMMITTED`.
+   *
+   * @remarks The class takes no keyed constructor of its setters, as Java's
+   * class has a constructor of its own (Q19). Set the timeout with
+   * `timeoutMs()`.
    */
   constructor();
   /**
@@ -42,6 +46,12 @@ export class ListOffsetsOptions extends AbstractOptions {
    *
    * @param isolationLevel - the isolation level of the offsets to list, on
    *   its own; null is stored, as Java stores it
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` when the isolation level is not an IsolationLevel
+   *
+   * @remarks The class takes no keyed constructor of its setters, as Java's
+   * class has a constructor of its own (Q19). Set the timeout with
+   * `timeoutMs()`.
    */
   constructor(isolationLevel: IsolationLevel | null);
   /**
@@ -49,6 +59,12 @@ export class ListOffsetsOptions extends AbstractOptions {
    * given by name.
    *
    * @param options - the isolation level of the offsets to list
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` when the isolation level is not an IsolationLevel
+   *
+   * @remarks The class takes no keyed constructor of its setters, as Java's
+   * class has a constructor of its own (Q19). Set the timeout with
+   * `timeoutMs()`.
    */
   constructor(options: {
     /** The isolation level of the offsets to list; null is stored, as Java stores it. */
@@ -61,10 +77,9 @@ export class ListOffsetsOptions extends AbstractOptions {
    * @throws `IllegalArgumentError` for a form Java has not
    * @throws `TypeError` when the isolation level is not an IsolationLevel
    *
-   * @remarks The class takes no keyed constructor of its setters: Java builds
-   * it with a constructor of its own (javascript/CLAUDE.md, JavaScript Binding
-   * Conventions, Class family, Q19, which follows Python's rule). Set the
-   * timeout with `timeoutMs()`.
+   * @remarks The class takes no keyed constructor of its setters, as Java's
+   * class has a constructor of its own (Q19). Set the timeout with
+   * `timeoutMs()`.
    */
   constructor(options?: unknown) {
     super();

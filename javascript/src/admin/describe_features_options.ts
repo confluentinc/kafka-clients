@@ -72,6 +72,9 @@ export class DescribeFeaturesOptions extends AbstractOptions {
    *
    * @param nodeId - the node id, on its own
    * @returns This DescribeFeaturesOptions object.
+   * @throws `TypeError` when the value is not an integer (null included:
+   *   Java's `int` cannot hold null)
+   * @throws `RangeError` when it is beyond Java's `int`
    */
   nodeId(nodeId: number): this;
   /**
@@ -79,6 +82,9 @@ export class DescribeFeaturesOptions extends AbstractOptions {
    *
    * @param options - the node id
    * @returns This DescribeFeaturesOptions object.
+   * @throws `TypeError` when the value is not an integer (null included:
+   *   Java's `int` cannot hold null)
+   * @throws `RangeError` when it is beyond Java's `int`
    */
   nodeId(options: {
     /** The node id. */

@@ -12,10 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The public classes of Java's org.apache.kafka.common.acl this client has:
-// the ACL bindings and filters the admin client's ACL calls take and return,
-// and AclOperation, which its descriptions hold. AclBindingMap and
-// AclBindingFilterMap are js-only: Java's maps keyed by them.
+/**
+ * The public classes of Java's `org.apache.kafka.common.acl` this client has:
+ * the ACL bindings and filters the admin client's ACL calls take and return,
+ * and `AclOperation`, which the descriptions' authorized operations hold.
+ *
+ * Invented *(js-only)*: `AclBindingMap` and `AclBindingFilterMap`, Java's
+ * `Map<AclBinding, V>` and `Map<AclBindingFilter, V>`: JavaScript has no
+ * value equality for map keys.
+ *
+ * @packageDocumentation
+ */
 
 export { AccessControlEntry } from './access_control_entry';
 export { AccessControlEntryFilter } from './access_control_entry_filter';

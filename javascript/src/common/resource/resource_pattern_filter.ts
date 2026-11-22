@@ -90,9 +90,7 @@ export class ResourcePatternFilter {
   });
 
   /**
-   * Whether this filter has any UNKNOWN components.
-   *
-   * @returns `true` if this filter has any UNKNOWN components
+   * @returns `true` if this filter has any UNKNOWN components.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   isUnknown(): boolean {
@@ -101,8 +99,6 @@ export class ResourcePatternFilter {
   }
 
   /**
-   * The specific resource type this pattern matches.
-   *
    * @returns the specific resource type this pattern matches
    * @throws `TypeError` when it is given an argument: it only reads
    */
@@ -112,9 +108,7 @@ export class ResourcePatternFilter {
   }
 
   /**
-   * The resource name.
-   *
-   * @returns the resource name, or null
+   * @returns the resource name.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   name(): string | null {
@@ -123,9 +117,7 @@ export class ResourcePatternFilter {
   }
 
   /**
-   * The resource pattern type.
-   *
-   * @returns the resource pattern type
+   * @returns the resource pattern type.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   patternType(): PatternType {
@@ -134,10 +126,8 @@ export class ResourcePatternFilter {
   }
 
   /**
-   * Whether this filter matches the given pattern.
-   *
    * @param pattern - the pattern, on its own or as `{ pattern }`
-   * @returns `true` if this filter matches the given pattern
+   * @returns `true` if this filter matches the given pattern.
    * @throws `TypeError` when the pattern is null where Java reads it, or not
    *   a ResourcePattern
    * @throws `IllegalArgumentError` "Unsupported PatternType: <type>" when the
@@ -145,20 +135,16 @@ export class ResourcePatternFilter {
    */
   matches(pattern: ResourcePattern): boolean;
   /**
-   * The same as `matches(pattern)`, the parameter given by name.
-   *
    * @param options - the pattern
-   * @returns `true` if this filter matches the given pattern
+   * @returns `true` if this filter matches the given pattern.
    */
   matches(options: {
     /** The pattern. */
     pattern: ResourcePattern;
   }): boolean;
   /**
-   * Whether this filter matches the given pattern.
-   *
    * @param pattern - the pattern, on its own or as `{ pattern }`
-   * @returns `true` if this filter matches the given pattern
+   * @returns `true` if this filter matches the given pattern.
    */
   matches(pattern: unknown): boolean {
     MATCHES_FORMS.match(pattern, arguments.length);
