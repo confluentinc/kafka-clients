@@ -10,6 +10,7 @@ export const __esModule: true;
 // @public
 export class PatternType {
     static readonly ANY: PatternType;
+    // (undocumented)
     code(): number;
     static fromCode(code: number): PatternType;
     static fromCode(options: {
@@ -20,6 +21,7 @@ export class PatternType {
         name: string | null;
     }): PatternType;
     isSpecific(): boolean;
+    // (undocumented)
     isUnknown(): boolean;
     static readonly LITERAL: PatternType;
     static readonly MATCH: PatternType;
@@ -45,10 +47,15 @@ export class ResourcePattern {
     });
     equals(o: unknown): boolean;
     hashCode(): number;
+    // (undocumented)
     isUnknown(): boolean;
+    // (undocumented)
     name(): string;
+    // (undocumented)
     patternType(): PatternType;
+    // (undocumented)
     resourceType(): ResourceType;
+    // (undocumented)
     toFilter(): ResourcePatternFilter;
     toJSON(): {
         resourceType: string;
@@ -70,14 +77,20 @@ export class ResourcePatternFilter {
     equals(o: unknown): boolean;
     findIndefiniteField(): string | null;
     hashCode(): number;
+    // (undocumented)
     isUnknown(): boolean;
+    // (undocumented)
     matches(pattern: ResourcePattern): boolean;
+    // (undocumented)
     matches(options: {
         pattern: ResourcePattern;
     }): boolean;
     matchesAtMostOne(): boolean;
+    // (undocumented)
     name(): string | null;
+    // (undocumented)
     patternType(): PatternType;
+    // (undocumented)
     resourceType(): ResourceType;
     toJSON(): {
         resourceType: string;
@@ -117,7 +130,5 @@ export class ResourceType {
     }): ResourceType;
     static values(): ResourceType[];
 }
-
-// (No @packageDocumentation comment for this package)
 
 ```

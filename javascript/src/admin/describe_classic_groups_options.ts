@@ -69,6 +69,7 @@ export class DescribeClassicGroupsOptions extends AbstractOptions {
    *
    * @param includeAuthorizedOperations - whether authorized operations are included, on its own
    * @returns This DescribeClassicGroupsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   includeAuthorizedOperations(includeAuthorizedOperations: boolean): this;
   /**
@@ -76,6 +77,7 @@ export class DescribeClassicGroupsOptions extends AbstractOptions {
    *
    * @param options - whether authorized operations are included
    * @returns This DescribeClassicGroupsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   includeAuthorizedOperations(options: {
     /** Whether authorized operations are included. */

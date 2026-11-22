@@ -79,6 +79,8 @@ export class ElectionType {
    *
    * @param name - the name of the constant to return
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(name: string): ElectionType;
   /**
@@ -86,6 +88,8 @@ export class ElectionType {
    *
    * @param options - the name of the constant to return
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(options: {
     /** The name of the constant to return. */
@@ -97,6 +101,10 @@ export class ElectionType {
    *
    * @param value - the byte
    * @returns the election type
+   * @throws `IllegalArgumentError` "Value <value> must be one of [PREFERRED,
+   *   UNCLEAN]" for a byte no constant has
+   * @throws `TypeError` when the value is not an integer
+   * @throws `RangeError` when the byte is outside Java's `byte`
    */
   static valueOf(value: number): ElectionType;
   /**
@@ -104,6 +112,10 @@ export class ElectionType {
    *
    * @param options - the byte
    * @returns the election type
+   * @throws `IllegalArgumentError` "Value <value> must be one of [PREFERRED,
+   *   UNCLEAN]" for a byte no constant has
+   * @throws `TypeError` when the value is not an integer
+   * @throws `RangeError` when the byte is outside Java's `byte`
    */
   static valueOf(options: {
     /** The byte. */

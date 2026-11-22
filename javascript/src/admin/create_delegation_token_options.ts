@@ -120,6 +120,7 @@ export class CreateDelegationTokenOptions extends AbstractOptions {
    *
    * @param renewers - the renewers, on its own
    * @returns This CreateDelegationTokenOptions object.
+   * @throws `TypeError` when the value is not an iterable of KafkaPrincipal
    */
   renewers(renewers: Iterable<KafkaPrincipal>): this;
   /**
@@ -127,6 +128,7 @@ export class CreateDelegationTokenOptions extends AbstractOptions {
    *
    * @param options - the renewers
    * @returns This CreateDelegationTokenOptions object.
+   * @throws `TypeError` when the value is not an iterable of KafkaPrincipal
    */
   renewers(options: {
     /** The principals allowed to renew the token. */
@@ -162,6 +164,7 @@ export class CreateDelegationTokenOptions extends AbstractOptions {
    *
    * @param owner - the owner, or null for the request's principal, on its own
    * @returns This CreateDelegationTokenOptions object.
+   * @throws `TypeError` when the value is neither a KafkaPrincipal nor null
    */
   owner(owner: KafkaPrincipal | null): this;
   /**
@@ -169,6 +172,7 @@ export class CreateDelegationTokenOptions extends AbstractOptions {
    *
    * @param options - the owner
    * @returns This CreateDelegationTokenOptions object.
+   * @throws `TypeError` when the value is neither a KafkaPrincipal nor null
    */
   owner(options: {
     /** The token's owner, or null for the request's principal. */
@@ -202,6 +206,8 @@ export class CreateDelegationTokenOptions extends AbstractOptions {
    *
    * @param maxLifetimeMs - the lifetime, a `long`, on its own
    * @returns This CreateDelegationTokenOptions object.
+   * @throws `TypeError` when the value is not a whole number
+   * @throws `RangeError` when it is outside Java's `long`
    */
   maxLifetimeMs(maxLifetimeMs: bigint | number): this;
   /**
@@ -209,6 +215,8 @@ export class CreateDelegationTokenOptions extends AbstractOptions {
    *
    * @param options - the lifetime
    * @returns This CreateDelegationTokenOptions object.
+   * @throws `TypeError` when the value is not a whole number
+   * @throws `RangeError` when it is outside Java's `long`
    */
   maxLifetimeMs(options: {
     /** The token's maximum lifetime in milliseconds. */
