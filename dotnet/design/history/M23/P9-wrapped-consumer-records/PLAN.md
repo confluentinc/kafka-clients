@@ -243,3 +243,59 @@ After: "The poll batch outlives `Poll`: the records wrap it and read their field
 copy-out through a span deserializer or `ByteArrayDeserializer`, and zero-copy through a memory-form
 deserializer, whose `ReadOnlyMemory<byte>` is backed by a `BytesMemoryManager` that keeps the batch alive
 (CLAUDE.md §6.4)."
+
+## Revision (2026-11-22): zero-copy headers over the C views
+
+Asked by the owner on 2026-11-22. The branch is now `esabellico/dotnet_consumer_records_and_headers_wrapped`,
+stacked on `esabellico/headers_performance_rust_and_c` (PR #355), with S0–S2 cherry-picked from the parked branch.
+PR #355 changes what this plan could assume: a fetched header's key and value are views of the fetch buffer in the
+core, the value crosses as a `kafka_Bytes_t` view, and `kafka_common_header_Header__key_bytes` gives the key as a
+`kafka_Bytes_t` view with no copy. The "zero-copy header values" exclusion of "Out of scope" is withdrawn. Still no
+Rust, C ABI, header, Python or proto change on this branch: the one new P/Invoke binds an export PR #355 adds.
+
+Native lifetime this relies on: `kafka_consumer_ConsumerRecord_headers` hands out the record's cached, `const`
+headers handle, valid until the batch is destroyed; the `kafka_common_header_internals_RecordHeader_t` elements of
+`kafka_common_header_Headers_to_array` are that handle's cached views, valid until its next mutation, which a
+`const` handle never has; so each element, and the `kafka_common_header_Header_t` view of it, is valid as long as
+the batch.
+
+**S3 (replaces the S3 above).**
+
+- `Headers` gets a native source, the batch handle and the record pointer. An untouched `Headers` makes no native
+  call. The first use of any member materializes the list once, under a lock (`ConsumerRecord_headers`,
+  `RecordHeaders__as_Headers`, `Headers_to_array`, one `RecordHeader__as_Header` per element, `List_destroy`) into
+  native-backed `Header`s whose key and value are not read yet. From then on the list is managed and writable as
+  before; `Add` and `Remove` change the managed list only.
+- `Header` gets an internal constructor `(SafeConsumerRecordsHandle batch, IntPtr header)`. Each native read is
+  followed by `ThrowIfFfiFailed` and `GC.KeepAlive(batch)`.
+  - `Key()`: on first call reads `kafka_common_header_Header__key_bytes_err` (new P/Invoke returning `KafkaBytes`)
+    and decodes it with `Encoding.UTF8`, caching the string (`Interlocked.CompareExchange`), as Java's
+    `RecordHeader.key()` caches its decoded key. The bytes are already valid UTF-8 (the core decodes an invalid key
+    as Java does), and a key holding a NUL byte is no longer cut at it (the former `Header_key` C string was).
+  - `Value()`: on first call copies the value view into a `byte[]` and caches it, so every call returns the same
+    array, as Java's `RecordHeader.value()` caches `Utils.toArray(valueBuffer)`.
+  - New public `ReadOnlyMemory<byte>? ValueMemory()`: `null` for a null value, as `ISerializer<T>`'s
+    `ReadOnlyMemory<byte>?` marks null; for a fetched header a memory over the batch through
+    `SafeConsumerRecordsHandle.HandOut` (a `BytesMemoryManager`, which keeps the batch alive while reachable and
+    while pinned), with no copy; for a header built with a `byte[]`, that array as memory. *(Deviation: Java's
+    `Header` has only `value()`. Why: a `byte[]` cannot view the batch, and the consumer's key and value already
+    have a zero-copy memory form.)*
+  - `Equals`, `GetHashCode` and `ToString` keep their output and compare or print the value through its span, so
+    they force no copy.
+- `NewError` materializes owned copies (string keys, `byte[]` values) for `RecordDeserializationException`, so an
+  exception the caller keeps does not keep the batch.
+- `ProducerSendMarshal` reads each header value through `ValueMemory()`, pinned for the call, instead of `Value()`,
+  so forwarding a fetched header to a producer makes no managed copy; the ABI still copies it (ledger 301).
+- `CopyHeaders` is removed; copy-out builds the record's `Headers` with its native source.
+
+S4–S6 as above. S5 adds tests for: a fetched header's `ValueMemory()` backed by a `BytesMemoryManager` over the
+batch (`MemoryMarshal.TryGetMemoryManager`), usable after the next `Poll` and after the consumer is disposed;
+`Value()` returning the same array on every call; a key with a NUL byte and a key with invalid UTF-8 (U+FFFD); a
+null value (`Value()` and `ValueMemory()` null) and an empty one; concurrent first use of `Key()`, `Value()` and the
+list; an untouched `Headers` making no native call; `RecordDeserializationException.Headers()` after the batch is
+released; and a producer sending a fetched header.
+
+Ledger rows (Proposed): 587 is revised to the zero-copy form above; 596, `Header.ValueMemory()` (the deviation
+above); 597, a fetched `Header` reads its key and value through the C views on first use, `Key()` and `Value()`
+cached as Java's `RecordHeader`, `ValueMemory()` never copied. Rule drafts W2 and W3 say "read from the batch on
+first use, its values views of the batch until `Value()` copies one".
