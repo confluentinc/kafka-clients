@@ -106,14 +106,15 @@ function config(root, { typed = true } = {}) {
             parserOptions: { project: path.join(root, 'examples', 'tsconfig.eslint.json'), tsconfigRootDir: root },
           },
           // Off: `require` is how a CommonJS app loads the client; and the
-          // examples print the client's values in template literals and
-          // `String()` on purpose, through Java's `toString()` (a
-          // `TopicPartition` prints `orders-0`, a `Uuid` its base64 form),
-          // which the two string rules refuse for any non-primitive.
+          // examples print the client's values in template literals on
+          // purpose, through Java's `toString()` (a `TopicPartition` prints
+          // `orders-0`, a `Uuid` its base64 form), which
+          // `restrict-template-expressions` refuses for any non-primitive.
+          // `no-base-to-string` stays on: it skips a type with a `toString`
+          // of its own, and catches an object printed as `[object Object]`.
           rules: {
             '@typescript-eslint/no-require-imports': 'off',
             '@typescript-eslint/restrict-template-expressions': 'off',
-            '@typescript-eslint/no-base-to-string': 'off',
           },
         },
       ];

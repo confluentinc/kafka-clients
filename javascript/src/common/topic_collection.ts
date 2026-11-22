@@ -85,25 +85,21 @@ export abstract class TopicCollection {
   }
 
   /**
-   * A collection of topics defined by topic ID.
-   *
    * @param topics - the topic IDs, any iterable of Uuid, on its own
    * @returns a collection of topics defined by topic ID
+   * @throws `TypeError` when they are null or not an iterable of Uuid
    */
   static ofTopicIds(topics: Iterable<Uuid>): TopicCollection.TopicIdCollection;
   /**
-   * The same as `ofTopicIds(topics)`, the topics given by name.
-   *
    * @param options - the topic IDs
    * @returns a collection of topics defined by topic ID
+   * @throws `TypeError` when they are null or not an iterable of Uuid
    */
   static ofTopicIds(options: {
     /** The topic IDs, any iterable of Uuid. */
     topics: Iterable<Uuid>;
   }): TopicCollection.TopicIdCollection;
   /**
-   * Builds a collection of topic IDs.
-   *
    * @param topics - the topic IDs
    * @returns a collection of topics defined by topic ID
    * @throws `TypeError` when they are null or not an iterable of Uuid
@@ -115,25 +111,21 @@ export abstract class TopicCollection {
   }
 
   /**
-   * A collection of topics defined by topic name.
-   *
    * @param topics - the topic names, any iterable of strings, on its own
    * @returns a collection of topics defined by topic name
+   * @throws `TypeError` when they are null, a string, or not an iterable of strings
    */
   static ofTopicNames(topics: Iterable<string>): TopicCollection.TopicNameCollection;
   /**
-   * The same as `ofTopicNames(topics)`, the topics given by name.
-   *
    * @param options - the topic names
    * @returns a collection of topics defined by topic name
+   * @throws `TypeError` when they are null, a string, or not an iterable of strings
    */
   static ofTopicNames(options: {
     /** The topic names, any iterable of strings. */
     topics: Iterable<string>;
   }): TopicCollection.TopicNameCollection;
   /**
-   * Builds a collection of topic names.
-   *
    * @param topics - the topic names
    * @returns a collection of topics defined by topic name
    * @throws `TypeError` when they are null, a string, or not an iterable of strings
@@ -172,9 +164,7 @@ export namespace TopicCollection {
     }
 
     /**
-     * A collection of topic IDs.
-     *
-     * @returns the topic IDs, a new array
+     * @returns A collection of topic IDs
      * @throws `TypeError` when it is given an argument: it only reads
      */
     topicIds(): Uuid[] {
@@ -220,9 +210,7 @@ export namespace TopicCollection {
     }
 
     /**
-     * A collection of topic names.
-     *
-     * @returns the topic names, a new array
+     * @returns A collection of topic names
      * @throws `TypeError` when it is given an argument: it only reads
      */
     topicNames(): string[] {

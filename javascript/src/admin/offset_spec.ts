@@ -80,6 +80,9 @@ export class OffsetSpec {
    *
    * @param timestamp - in milliseconds, a `bigint` or a whole number
    * @returns a new `TimestampSpec`
+   * @throws `TypeError` when the timestamp is not a `bigint` or a whole number
+   * @throws `RangeError` for a number beyond 2^53 - 1 or a bigint beyond
+   *   Java's `long`
    */
   static forTimestamp(timestamp: bigint | number): OffsetSpec;
   /**
@@ -87,6 +90,9 @@ export class OffsetSpec {
    *
    * @param options - the timestamp, in milliseconds
    * @returns a new `TimestampSpec`
+   * @throws `TypeError` when the timestamp is not a `bigint` or a whole number
+   * @throws `RangeError` for a number beyond 2^53 - 1 or a bigint beyond
+   *   Java's `long`
    */
   static forTimestamp(options: {
     /** In milliseconds, a `bigint` or a whole number. */

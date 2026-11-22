@@ -14,7 +14,7 @@
 
 'use strict';
 
-// LogDirDescription, an admin data class (design D3), and ReplicaInfo. Java
+// LogDirDescription, an admin data class (DECISIONS.md entry 39), and ReplicaInfo. Java
 // has no test of its own for them; KafkaAdminClientTopicTest's isCordoned
 // assertions are ported in kafka_admin_client.test.js. These check the
 // frozen readonly fields, Java's three constructors as one, the read-only

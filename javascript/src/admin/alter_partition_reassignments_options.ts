@@ -76,6 +76,7 @@ export class AlterPartitionReassignmentsOptions extends AbstractOptions {
    *
    * @param allow - whether the replication factor may change, on its own
    * @returns This AlterPartitionReassignmentsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   allowReplicationFactorChange(allow: boolean): this;
   /**
@@ -83,6 +84,7 @@ export class AlterPartitionReassignmentsOptions extends AbstractOptions {
    *
    * @param options - whether the replication factor may change
    * @returns This AlterPartitionReassignmentsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   allowReplicationFactorChange(options: {
     /** Whether the replication factor may change. */

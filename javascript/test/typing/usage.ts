@@ -1193,7 +1193,7 @@ async function adminConfigsOffsetsGroups(): Promise<void> {
 }
 void adminConfigsOffsetsGroups;
 
-// R3, the security calls: each Result accessor's type, and each RPC's forms
+// The security calls: each Result accessor's type, and each RPC's forms
 // by name and bare.
 async function adminSecurity(): Promise<void> {
   const admin = await import('@confluentinc/kafka-javascript/admin');
@@ -1315,7 +1315,7 @@ async function adminSecurity(): Promise<void> {
 }
 void adminSecurity;
 
-// The R3 transaction and producer calls: every Result accessor's type, and
+// The transaction and producer calls: every Result accessor's type, and
 // each RPC's forms bare and by name.
 async function adminTransactions(): Promise<void> {
   const admin = await import('@confluentinc/kafka-javascript/admin');
@@ -1380,7 +1380,7 @@ async function adminTransactions(): Promise<void> {
 }
 void adminTransactions;
 
-// The R3 feature and controller calls: every Result accessor's type, and
+// The feature and controller calls: every Result accessor's type, and
 // each RPC's forms bare and by name.
 async function adminFeatures(): Promise<void> {
   const admin = await import('@confluentinc/kafka-javascript/admin');

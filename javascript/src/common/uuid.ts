@@ -234,6 +234,9 @@ export class Uuid {
    *
    * @param options - the base64 encoding
    * @returns the UUID
+   * @throws `IllegalArgumentError` when the text is longer than 24
+   *   characters, is not base64, or does not decode to 16 bytes
+   * @throws `TypeError` when it is null or not a string
    */
   static fromString(options: {
     /** The base64 encoding */
@@ -280,6 +283,7 @@ export class Uuid {
    *
    * @param options - the UUID to compare with
    * @returns -1, 0 or 1
+   * @throws `TypeError` when it is null (Java dereferences it)
    */
   compareTo(options: {
     /** The UUID to compare with */
@@ -305,15 +309,15 @@ export class Uuid {
   /**
    * Convert a list of Uuid to an array of Uuid.
    *
-   * @param list - The input list, any iterable, on its own or as `{ list }`
-   * @returns The output array, or null for a null list
+   * @param list - The input list (any iterable), or `{ list }`
+   * @returns The output array (null for a null list)
    */
   static toArray(list: Iterable<Uuid> | null): Uuid[] | null;
   /**
    * The same as `toArray(list)`, the parameter given by name.
    *
    * @param options - The input list
-   * @returns The output array, or null for a null list
+   * @returns The output array (null for a null list)
    */
   static toArray(options: {
     /** The input list, any iterable */
@@ -322,8 +326,8 @@ export class Uuid {
   /**
    * Convert a list of Uuid to an array of Uuid.
    *
-   * @param list - The input list, any iterable, on its own or as `{ list }`
-   * @returns The output array, or null for a null list
+   * @param list - The input list (any iterable), or `{ list }`
+   * @returns The output array (null for a null list)
    */
   static toArray(list: unknown): Uuid[] | null {
     TO_ARRAY_FORMS.match(list, arguments.length);
@@ -336,15 +340,15 @@ export class Uuid {
   /**
    * Convert an array of Uuids to a list of Uuid.
    *
-   * @param array - The input array, on its own or as `{ array }`
-   * @returns The output list, or null for a null array
+   * @param array - The input array, or `{ array }`
+   * @returns The output list (null for a null array)
    */
   static toList(array: ReadonlyArray<Uuid> | null): Uuid[] | null;
   /**
    * The same as `toList(array)`, the parameter given by name.
    *
    * @param options - The input array
-   * @returns The output list, or null for a null array
+   * @returns The output list (null for a null array)
    */
   static toList(options: {
     /** The input array */
@@ -353,8 +357,8 @@ export class Uuid {
   /**
    * Convert an array of Uuids to a list of Uuid.
    *
-   * @param array - The input array, on its own or as `{ array }`
-   * @returns The output list, or null for a null array
+   * @param array - The input array, or `{ array }`
+   * @returns The output list (null for a null array)
    */
   static toList(array: unknown): Uuid[] | null {
     TO_LIST_FORMS.match(array, arguments.length);

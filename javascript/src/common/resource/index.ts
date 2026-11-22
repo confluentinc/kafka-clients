@@ -12,9 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The public classes of Java's org.apache.kafka.common.resource this client
-// has: the resource patterns and filters ACLs are bound to. Not translated:
-// Resource, which no admin call takes or returns.
+/**
+ * The public classes of Java's `org.apache.kafka.common.resource` this client
+ * has: the resource patterns and filters ACLs are bound to.
+ *
+ * Not translated: `Resource`, which no call of the client takes or returns.
+ *
+ * @packageDocumentation
+ */
 
 export { PatternType } from './pattern_type';
 export { ResourcePattern } from './resource_pattern';

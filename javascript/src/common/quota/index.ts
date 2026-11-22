@@ -12,10 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The public classes of Java's org.apache.kafka.common.quota: the client
-// quota entities, filters and alterations the admin client's quota calls take
-// and return. ClientQuotaEntityMap is js-only: Java's map keyed by
-// ClientQuotaEntity.
+/**
+ * The public classes of Java's `org.apache.kafka.common.quota` this client
+ * has: the client quota entities, filters and alterations the admin client's
+ * quota calls take and return.
+ *
+ * Invented *(js-only)*: `ClientQuotaEntityMap`, Java's
+ * `Map<ClientQuotaEntity, V>`: JavaScript has no value equality for map keys.
+ *
+ * @packageDocumentation
+ */
 
 export { ClientQuotaAlteration } from './client_quota_alteration';
 export { ClientQuotaEntity } from './client_quota_entity';

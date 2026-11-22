@@ -1778,7 +1778,7 @@ test("the checks run in Java's order: options first, where Java's body reads the
   await mock.close();
 });
 
-test("the R2 RPCs' one-parameter forms by name work as their bare forms", async () => {
+test("the configs, offsets and groups RPCs' one-parameter forms by name work as their bare forms", async () => {
   const A = require('@confluentinc/kafka-javascript/admin');
   const C = require('@confluentinc/kafka-javascript/common');
   const { ConfigResource } = require('@confluentinc/kafka-javascript/common/config');

@@ -32,9 +32,11 @@
 //     TypeScript), which hold no copy of the package;
 //   - there is no native/: the addon is the one of the installed platform
 //     package, which Node finds in <project>/node_modules.
-// Then Jest runs the unit and typing projects there. One test is left out,
-// as it asserts the repository's own build: "this checkout loads its
-// development build, as an instance of its own".
+// Then Jest runs the unit and typing projects there. Two tests are left out
+// (REPOSITORY_ONLY), as they need the repository itself: "this checkout loads
+// its development build, as an instance of its own" asserts the repository's
+// own build, and "each OffsetSpec's number is offset_spec_of's case building
+// the spec of its name" reads native/, which is not here.
 //
 // Usage: node installed-suites.js --project <dir>
 // It exits with Jest's status.
@@ -102,7 +104,7 @@ function main() {
   fs.mkdirSync(path.join(suite, 'build'));
 
   console.log(`the unit and typing tests, in ${suite}, against ${MAIN} as installed in ${project}`);
-  console.log(`left out, as it asserts the repository's own build: ${REPOSITORY_ONLY.join(', ')}`);
+  console.log(`left out, as they need the repository's own build or native/: ${REPOSITORY_ONLY.join(', ')}`);
   const r = spawnSync(
     process.execPath,
     [jest, '--ci', '--selectProjects', 'unit', 'typing', '--testNamePattern', allBut(REPOSITORY_ONLY)],
