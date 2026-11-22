@@ -27,6 +27,10 @@ overload M:Confluent.Kafka.Common.KafkaFuture.AllOf``1(Confluent.Kafka.Common.Ka
 kind T:Confluent.Kafka.Common.KafkaFuture.BaseFunction`2
 kind T:Confluent.Kafka.Common.KafkaFuture.BiConsumer`2
 
+# Java's Serdes holds only static members, its one constructor being the implicit default one: C# writes such a class
+# as a static class, which nothing constructs or derives from.
+kind T:Confluent.Kafka.Common.Serialization.Serdes
+
 # C1: the mock consumer takes deserializers: it runs on the core's mock, which holds bytes (dotnet/CLAUDE.md §3).
 missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)
 missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)

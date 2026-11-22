@@ -398,13 +398,14 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     typeLocation));
             }
 
-            // A Java interface is a C# interface (rule 1), which a user can implement as a Java user implements it. The
-            // static class holding the interface's static methods is a companion, so it is not checked here.
-            if (java is { IsInterface: true } && type.TypeKind != TypeKind.Interface)
+            // A Java type keeps its kind (rule 1): an interface is a C# interface, which a user can implement as a Java
+            // user implements it, an enum an enum, an abstract class an abstract class, and a class a class. The static
+            // class holding an interface's or an enum's static methods is a companion, so it is not checked here.
+            if (java is not null && KindToDeclare(java, type) is string expected)
             {
                 findings.Add(new Finding(
                     "kind " + typeId,
-                    "translates the Java interface " + java.Marker + "; declare it as the interface I" + type.Name,
+                    "translates the Java " + java.Kind + " " + java.Marker + "; declare it as " + expected,
                     typeLocation));
             }
 
@@ -789,6 +790,29 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             }
 
             return overloads.OrderBy(o => o.AsyncParameters).ToList();
+        }
+
+        // What the type must be declared as to have its Java type's kind, or null when it has it. A struct, a static class
+        // or a delegate is never a Java class's kind.
+        private static string? KindToDeclare(JavaType java, INamedTypeSymbol type)
+        {
+            bool isClass = type.TypeKind == TypeKind.Class && !type.IsStatic;
+            if (java.IsInterface)
+            {
+                return type.TypeKind == TypeKind.Interface ? null : "the interface I" + type.Name;
+            }
+
+            if (java.IsEnum)
+            {
+                return type.TypeKind == TypeKind.Enum ? null : "an enum";
+            }
+
+            if (java.IsAbstractClass)
+            {
+                return isClass && type.IsAbstract ? null : "an abstract class";
+            }
+
+            return isClass && !type.IsAbstract ? null : "a class";
         }
 
         // Whether a method of an enum's companion is a static string ToString of the enum, the form of Java's toString().
