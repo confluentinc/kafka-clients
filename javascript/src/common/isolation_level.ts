@@ -78,6 +78,8 @@ export class IsolationLevel {
    *
    * @param name - the name of the constant to return
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(name: string): IsolationLevel;
   /**
@@ -85,6 +87,8 @@ export class IsolationLevel {
    *
    * @param options - the name of the constant to return
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(options: {
     /** The name of the constant to return. */
@@ -113,6 +117,10 @@ export class IsolationLevel {
    *
    * @param id - the byte, on its own or as `{ id }`
    * @returns the isolation level
+   * @throws `IllegalArgumentError` "Unknown isolation level <id>" for an id
+   *   no level has
+   * @throws `TypeError` when the id is not an integer
+   * @throws `RangeError` when it is outside Java's `byte`
    */
   static forId(id: number): IsolationLevel;
   /**
@@ -120,6 +128,10 @@ export class IsolationLevel {
    *
    * @param options - the byte
    * @returns the isolation level
+   * @throws `IllegalArgumentError` "Unknown isolation level <id>" for an id
+   *   no level has
+   * @throws `TypeError` when the id is not an integer
+   * @throws `RangeError` when it is outside Java's `byte`
    */
   static forId(options: {
     /** The id. */

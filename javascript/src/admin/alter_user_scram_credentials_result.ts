@@ -37,13 +37,17 @@ export class AlterUserScramCredentialsResult {
    * The result over the futures of each user.
    *
    * @param futures - the required map from user names to futures
-   *   representing the results of the alteration(s) for each user, on its own
+   *   representing the results of the alteration(s) for each user
+   * @throws `TypeError` when they are null, or not a map of strings to
+   *   KafkaFutures
    */
   constructor(futures: ReadonlyMap<string, KafkaFuture<void>>);
   /**
    * The same as `new AlterUserScramCredentialsResult(futures)`.
    *
    * @param options - the required map from user names to futures
+   * @throws `TypeError` when they are null, or not a map of strings to
+   *   KafkaFutures
    */
   constructor(options: {
     /** The required map from user names to futures representing the results of the alteration(s) for each user. */

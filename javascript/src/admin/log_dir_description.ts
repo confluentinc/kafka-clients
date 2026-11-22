@@ -90,6 +90,13 @@ export class LogDirDescription {
    * A log directory's description, its sizes unknown.
    *
    * @param options - the error, or null, and the replicas by partition
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type, or null replicaInfos
+   *
+   * @remarks The map is copied into a read-only one, so a null map is a
+   * `TypeError` here *(deviation: Java stores it, and its getter's
+   * `unmodifiableMap(null)` throws `NullPointerException`. Why: the field is
+   * set once, frozen, in the constructor)*.
    */
   constructor(options: {
     /** The error if the log directory is offline or an error occurred, otherwise null. */
@@ -105,6 +112,15 @@ export class LogDirDescription {
    *
    * @param options - the error, or null, the replicas by partition, and the
    *   volume's total and usable bytes (-1 for unknown)
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type, or null replicaInfos
+   * @throws `RangeError` for a size beyond 2^53 - 1 as a number, or beyond
+   *   Java's `long`
+   *
+   * @remarks The map is copied into a read-only one, so a null map is a
+   * `TypeError` here *(deviation: Java stores it, and its getter's
+   * `unmodifiableMap(null)` throws `NullPointerException`. Why: the field is
+   * set once, frozen, in the constructor)*.
    */
   constructor(options: {
     /** The error if the log directory is offline or an error occurred, otherwise null. */
@@ -123,6 +139,15 @@ export class LogDirDescription {
    * @param options - the error, or null, the replicas by partition, the
    *   volume's total and usable bytes (-1 for unknown), and whether the
    *   directory is cordoned
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type, or null replicaInfos
+   * @throws `RangeError` for a size beyond 2^53 - 1 as a number, or beyond
+   *   Java's `long`
+   *
+   * @remarks The map is copied into a read-only one, so a null map is a
+   * `TypeError` here *(deviation: Java stores it, and its getter's
+   * `unmodifiableMap(null)` throws `NullPointerException`. Why: the field is
+   * set once, frozen, in the constructor)*.
    */
   constructor(options: {
     /** The error if the log directory is offline or an error occurred, otherwise null. */

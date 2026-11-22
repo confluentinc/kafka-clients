@@ -40,6 +40,7 @@ export class DescribeClientQuotasResult {
    *
    * @param entities - future for the collection of entities that matched the
    *   filter, on its own
+   * @throws `TypeError` when it is not a KafkaFuture
    */
   constructor(entities: KafkaFuture<ClientQuotaEntityMap<Map<string, number>>>);
   /**
@@ -47,6 +48,7 @@ export class DescribeClientQuotasResult {
    *
    * @param options - future for the collection of entities that matched the
    *   filter
+   * @throws `TypeError` when it is not a KafkaFuture
    */
   constructor(options: {
     /** Future for the collection of entities that matched the filter. */

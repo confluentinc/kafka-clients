@@ -248,6 +248,9 @@ let adopting: AdminHandle | null = null;
  * answers so, since the C FFI's error enum has no id for Java's
  * `IndexOutOfBoundsException`. Goes when: the FFI has that id and the core's
  * mock throws it from the call.
+ *
+ * The admin package's documentation lists the mock's other differences from
+ * Java's mock, each with its Why and Goes when.
  */
 export class MockAdminClient implements Admin {
   /** The cluster id of a mock a Builder builds unless it sets one. */
@@ -267,6 +270,10 @@ export class MockAdminClient implements Admin {
    * Java's `MockAdminClient(List<Node> brokers, Node controller)`.
    *
    * @param options - the brokers and the controller
+   * @throws `IllegalArgumentError` when the controller is not one of the
+   *   brokers ("The controller node must be in the list of brokers"), or for
+   *   a form Java has not
+   * @throws `TypeError` for a value of the wrong type or a null one
    */
   constructor(options: {
     /** The brokers, any iterable of Node. */
@@ -340,6 +347,10 @@ export class MockAdminClient implements Admin {
    * The same as `controller(controller)`, the parameter given by name.
    *
    * @param options - the node, one of the brokers
+   * @throws `IllegalArgumentError` when it is not one of the brokers ("The
+   *   controller node must be in the list of brokers"), the controller then
+   *   unchanged
+   * @throws `TypeError` when it is null or not a Node
    */
   controller(options: {
     /** The node, one of the brokers */
@@ -366,7 +377,10 @@ export class MockAdminClient implements Admin {
    * @param options - whether the topic is internal, its name, its partitions
    *   and its configuration (null for none)
    * @throws `IllegalArgumentError` when the topic was already added ("Topic
-   *   <name> was already added.")
+   *   <name> was already added."), when a partition's leader is not one of the
+   *   brokers ("Leader broker unknown"), or when its replicas or in-sync
+   *   replicas name another broker ("Unknown brokers in replica list",
+   *   "Unknown brokers in isr list"), or for a form Java has not
    * @throws `TypeError` for a value of the wrong type
    */
   addTopic(options: {
@@ -405,9 +419,18 @@ export class MockAdminClient implements Admin {
    *
    * @param name - the topic's name, on its own or as `{ name }`
    * @throws `IllegalArgumentError` when the topic does not exist ("Topic
-   *   <name> did not exist.")
+   *   <name> did not exist."), or for a form Java has not
+   * @throws `TypeError` when the name is not a string
    */
   markTopicForDeletion(name: string): void;
+  /**
+   * The same as `markTopicForDeletion(name)`, the name given by name.
+   *
+   * @param options - the topic's name
+   * @throws `IllegalArgumentError` when the topic does not exist ("Topic
+   *   <name> did not exist."), or for a form Java has not
+   * @throws `TypeError` when the name is not a string
+   */
   markTopicForDeletion(options: {
     /** The topic's name. */
     name: string;
@@ -430,6 +453,7 @@ export class MockAdminClient implements Admin {
    * The same as `timeoutNextRequest(numberOfRequest)`, the parameter given by name.
    *
    * @param options - how many RPCs time out
+   * @throws `TypeError` or `RangeError` when it is not a Java `int`
    */
   timeoutNextRequest(options: {
     /** How many RPCs time out */
@@ -460,6 +484,12 @@ export class MockAdminClient implements Admin {
    *
    * @param options - the time to use for the wait time
    * @returns resolving once the mock closed
+   * @throws `TypeError` rejects with it when the timeout is null or not a
+   *  `Duration`
+   * @throws `RangeError` rejects with it when the timeout is `NaN`, beyond
+   *  `Number.MAX_SAFE_INTEGER` milliseconds, or has years, months or weeks
+   * @throws `IllegalArgumentError` rejects with it when the given parameters
+   *  are no Java form
    */
   close(options: CloseArgs): Promise<void>;
   /**
@@ -467,6 +497,12 @@ export class MockAdminClient implements Admin {
    *
    * @param timeout - The time to use for the wait time.
    * @returns resolving once the mock closed
+   * @throws `TypeError` rejects with it when the timeout is null or not a
+   *  `Duration`
+   * @throws `RangeError` rejects with it when the timeout is `NaN`, beyond
+   *  `Number.MAX_SAFE_INTEGER` milliseconds, or has years, months or weeks
+   * @throws `IllegalArgumentError` rejects with it when the given parameters
+   *  are no Java form
    */
   close(timeout: Duration): Promise<void>;
   /**
@@ -474,6 +510,12 @@ export class MockAdminClient implements Admin {
    *
    * @param options - nothing, or the timeout
    * @returns resolving once the mock closed
+   * @throws `TypeError` rejects with it when the timeout is null or not a
+   *  `Duration`
+   * @throws `RangeError` rejects with it when the timeout is `NaN`, beyond
+   *  `Number.MAX_SAFE_INTEGER` milliseconds, or has years, months or weeks
+   * @throws `IllegalArgumentError` rejects with it when the given parameters
+   *  are no Java form
    */
   close(options?: unknown): Promise<void> {
     return calls.close(this.#handle, options, arguments.length);
@@ -501,6 +543,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - The options to use when listing the topics.
    * @returns The ListTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` when the options are not a `ListTopicsOptions`, or are null
    */
   listTopics(args: {
     /** The options to use when listing the topics. */
@@ -511,6 +555,8 @@ export class MockAdminClient implements Admin {
    *
    * @param options - The options to use when listing the topics.
    * @returns The ListTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` when the options are not a `ListTopicsOptions`, or are null
    */
   listTopics(options: ListTopicsOptions): ListTopicsResult;
   /**
@@ -536,6 +582,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - The options to use when getting information about the cluster.
    * @returns The DescribeClusterResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` when the options are not a `DescribeClusterOptions`, or are null
    */
   describeCluster(args: {
     /** The options to use when getting information about the cluster. */
@@ -546,6 +594,8 @@ export class MockAdminClient implements Admin {
    *
    * @param options - The options to use when getting information about the cluster.
    * @returns The DescribeClusterResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` when the options are not a `DescribeClusterOptions`, or are null
    */
   describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
   /**
@@ -561,6 +611,33 @@ export class MockAdminClient implements Admin {
   }
 
   /**
+   * Create a batch of new topics with the default options.
+   *
+   * This is a convenience method for `createTopics({ newTopics, options })`
+   * with default options. See the overload for more details.
+   *
+   * This operation is supported by brokers with version 0.10.1.0 or higher.
+   *
+   * @param newTopics - The new topics to create.
+   * @returns The CreateTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
+  /**
+   * The same as `createTopics(newTopics)`, the newTopics given by name.
+   *
+   * @param args - the newTopics
+   * @returns The CreateTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  createTopics(args: {
+    /** The new topics to create. */
+    newTopics: Iterable<NewTopic>;
+    options?: never;
+  }): CreateTopicsResult;
+  /**
    * Create a batch of new topics.
    *
    * This operation is not transactional so it may succeed for some topics
@@ -571,26 +648,10 @@ export class MockAdminClient implements Admin {
    * supported by brokers with version 0.10.1.0 or higher. The validateOnly
    * option is supported from version 0.10.2.0.
    *
-   * @param newTopics - The new topics to create.
-   * @returns The CreateTopicsResult.
-   */
-  createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
-  /**
-   * The same as `createTopics(newTopics)`, the newTopics given by name.
-   *
-   * @param args - the newTopics
-   * @returns The CreateTopicsResult.
-   */
-  createTopics(args: {
-    /** The new topics to create. */
-    newTopics: Iterable<NewTopic>;
-    options?: never;
-  }): CreateTopicsResult;
-  /**
-   * Create a batch of new topics.
-   *
    * @param args - the newTopics, and the options to use
    * @returns The CreateTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createTopics(args: {
     /** The new topics to create. */
@@ -611,21 +672,17 @@ export class MockAdminClient implements Admin {
   }
 
   /**
-   * Delete a batch of topics.
+   * Delete a batch of topics with the default options.
    *
-   * This operation is not transactional so it may succeed for some topics
-   * while fail for others. It may take several seconds after the result
-   * returns successfully for all the brokers to become aware that the topics
-   * are gone; during this time, `listTopics()` and `describeTopics()` may
-   * continue to return information about the deleted topics. If
-   * delete.topic.enable is false on the brokers, deleteTopics will mark the
-   * topics for deletion, but not actually delete them; the futures will return
-   * successfully in this case. When using topic IDs, this operation is
-   * supported by brokers with inter-broker protocol 2.8 or higher; when using
-   * topic names, by brokers with version 0.10.1.0 or higher.
+   * This is a convenience method for `deleteTopics({ topics, options })`
+   * with default options. See the overload for more details.
+   *
+   * This operation is supported by brokers with version 0.10.1.0 or higher.
    *
    * @param topics - The topic names, or the topics, to delete.
    * @returns The DeleteTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteTopics(topics: Iterable<string> | TopicCollection): DeleteTopicsResult;
   /**
@@ -633,6 +690,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the topics
    * @returns The DeleteTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteTopics(args: {
     /** The topic names, or the topics, to delete. */
@@ -642,8 +701,25 @@ export class MockAdminClient implements Admin {
   /**
    * Delete a batch of topics.
    *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others.
+   *
+   * It may take several seconds after the `DeleteTopicsResult` returns
+   * success for all the brokers to become aware that the topics are gone.
+   * During this time, `listTopics()` and `describeTopics()` may continue to
+   * return information about the deleted topics.
+   *
+   * If delete.topic.enable is set to false on the brokers, an error will be
+   * returned to the client indicating that topic deletion is disabled.
+   *
+   * When using topic IDs, this operation is supported by brokers with
+   * inter-broker protocol 2.8 or higher. When using topic names, this
+   * operation is supported by brokers with version 0.10.1.0 or higher.
+   *
    * @param args - the topics, and the options to use
    * @returns The DeleteTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteTopics(args: {
     /** The topic names, or the topics, to delete. */
@@ -664,13 +740,15 @@ export class MockAdminClient implements Admin {
   }
 
   /**
-   * Describe some topics in the cluster.
+   * Describe some topics in the cluster, with the default options.
    *
-   * When using topic IDs, this operation is supported by brokers with version
-   * 3.1.0 or higher.
+   * This is a convenience method for `describeTopics({ topicNames, options })`
+   * with default options. See the overload for more details.
    *
    * @param topicNames - The names of the topics to describe.
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
   /**
@@ -678,6 +756,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the topicNames
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(args: {
     /** The names of the topics to describe. */
@@ -690,6 +770,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the topicNames, and the options to use
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(args: {
     /** The names of the topics to describe. */
@@ -699,13 +781,16 @@ export class MockAdminClient implements Admin {
     topics?: never;
   }): DescribeTopicsResult;
   /**
-   * Describe some topics in the cluster.
+   * This is a convenience method for `describeTopics({ topics, options })`
+   * with default options. See the overload for more details.
    *
    * When using topic IDs, this operation is supported by brokers with version
    * 3.1.0 or higher.
    *
    * @param topics - The topics to describe.
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(topics: TopicCollection): DescribeTopicsResult;
   /**
@@ -713,6 +798,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the topics
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(args: {
     /** The topics to describe. */
@@ -723,8 +810,13 @@ export class MockAdminClient implements Admin {
   /**
    * Describe some topics in the cluster.
    *
+   * When using topic IDs, this operation is supported by brokers with version
+   * 3.1.0 or higher.
+   *
    * @param args - the topics, and the options to use
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(args: {
     /** The topics to describe. */
@@ -751,14 +843,13 @@ export class MockAdminClient implements Admin {
    * increased for a topic that has a key, the partition logic or ordering of
    * the messages will be affected.**
    *
-   * This operation is not transactional so it may succeed for some topics
-   * while fail for others. It may take several seconds after this method
-   * returns success for all the brokers to become aware that the partitions
-   * have been created. This operation is supported by brokers with version
-   * 1.0.0 or higher.
+   * This is a convenience method for `createPartitions({ newPartitions,
+   * options })` with default options. See the overload for more details.
    *
    * @param newPartitions - The topics which should have new partitions created, and corresponding parameters for the created partitions.
    * @returns The CreatePartitionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createPartitions(newPartitions: ReadonlyMap<string, NewPartitions>): CreatePartitionsResult;
   /**
@@ -766,6 +857,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the newPartitions
    * @returns The CreatePartitionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createPartitions(args: {
     /** The topics which should have new partitions created, and corresponding parameters for the created partitions. */
@@ -778,8 +871,16 @@ export class MockAdminClient implements Admin {
    * increased for a topic that has a key, the partition logic or ordering of
    * the messages will be affected.**
    *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others. It may take several seconds after this method
+   * returns success for all the brokers to become aware that the partitions
+   * have been created. This operation is supported by brokers with version
+   * 1.0.0 or higher.
+   *
    * @param args - the newPartitions, and the options to use
    * @returns The CreatePartitionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createPartitions(args: {
     /** The topics which should have new partitions created, and corresponding parameters for the created partitions. */
@@ -803,10 +904,16 @@ export class MockAdminClient implements Admin {
    * Delete records whose offset is smaller than the given offset of the
    * corresponding partition.
    *
+   * This is a convenience method for
+   * `deleteRecords({ recordsToDelete, options })` with default options. See the
+   * overload for more details.
+   *
    * This operation is supported by brokers with version 0.11.0.0 or higher.
    *
    * @param recordsToDelete - The topic partitions and related offsets from which records deletion starts.
    * @returns The DeleteRecordsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
   /**
@@ -814,6 +921,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the recordsToDelete
    * @returns The DeleteRecordsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteRecords(args: {
     /** The topic partitions and related offsets from which records deletion starts. */
@@ -826,6 +935,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the recordsToDelete, and the options to use
    * @returns The DeleteRecordsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteRecords(args: {
     /** The topic partitions and related offsets from which records deletion starts. */
@@ -852,6 +963,8 @@ export class MockAdminClient implements Admin {
    *
    * @param resources - The resources: see the relevant `ConfigResource.Type`.
    * @returns The DescribeConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConfigs(resources: Iterable<ConfigResource>): DescribeConfigsResult;
   /**
@@ -859,6 +972,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the resources
    * @returns The DescribeConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConfigs(args: {
     /** The resources: see the relevant `ConfigResource.Type`. */
@@ -890,6 +1005,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the resources, and the options to use
    * @returns The DescribeConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConfigs(args: {
     /** The resources: see the relevant `ConfigResource.Type`. */
@@ -916,6 +1033,8 @@ export class MockAdminClient implements Admin {
    *
    * @param configs - The resources with their configs.
    * @returns The AlterConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   incrementalAlterConfigs(configs: ConfigResourceMap<Iterable<AlterConfigOp>>): AlterConfigsResult;
   /**
@@ -923,6 +1042,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the configs
    * @returns The AlterConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   incrementalAlterConfigs(args: {
     /** The resources with their configs. */
@@ -945,6 +1066,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the configs, and the options to use
    * @returns The AlterConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   incrementalAlterConfigs(args: {
     /** The resources with their configs. */
@@ -971,12 +1094,17 @@ export class MockAdminClient implements Admin {
    * replica will be moved to the given log directory if it is not already there. For detailed result, inspect
    * the returned `AlterReplicaLogDirsResult` instance.
    *
+   * This is a convenience method for `alterReplicaLogDirs({ replicaAssignment,
+   * options })` with default options. See the overload for more details.
+   *
    * This operation is not transactional so it may succeed for some replicas while fail for others.
    *
    * This operation is supported by brokers with version 1.1.0 or higher.
    *
    * @param replicaAssignment - The replicas with their log directory absolute path.
    * @returns The AlterReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterReplicaLogDirs(replicaAssignment: TopicPartitionReplicaMap<string>): AlterReplicaLogDirsResult;
   /**
@@ -984,6 +1112,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the replicaAssignment
    * @returns The AlterReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterReplicaLogDirs(args: {
     /** The replicas with their log directory absolute path. */
@@ -1003,6 +1133,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the replicaAssignment, and the options to use
    * @returns The AlterReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterReplicaLogDirs(args: {
     /** The replicas with their log directory absolute path. */
@@ -1025,10 +1157,16 @@ export class MockAdminClient implements Admin {
   /**
    * Query the information of all log directories on the given set of brokers
    *
+   * This is a convenience method for `describeLogDirs({ brokers, options })`
+   * with default options. See the overload for more details.
+   *
    * This operation is supported by brokers with version 1.0.0 or higher.
    *
    * @param brokers - A list of brokers.
    * @returns The DescribeLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when a broker id is outside Java's `int`
    */
   describeLogDirs(brokers: Iterable<number>): DescribeLogDirsResult;
   /**
@@ -1036,6 +1174,9 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the brokers
    * @returns The DescribeLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when a broker id is outside Java's `int`
    */
   describeLogDirs(args: {
     /** A list of brokers. */
@@ -1049,6 +1190,9 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the brokers, and the options to use
    * @returns The DescribeLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when a broker id is outside Java's `int`
    */
   describeLogDirs(args: {
     /** A list of brokers. */
@@ -1063,6 +1207,7 @@ export class MockAdminClient implements Admin {
    * @returns the result
    * @throws `IllegalArgumentError` for a form Java has not
    * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when a broker id is outside Java's `int`
    */
   describeLogDirs(args: unknown): DescribeLogDirsResult {
     return configCalls.describeLogDirs(this.#handle, args, arguments.length);
@@ -1071,10 +1216,15 @@ export class MockAdminClient implements Admin {
   /**
    * Query the replica log directory information for the specified replicas.
    *
+   * This is a convenience method for `describeReplicaLogDirs({ replicas,
+   * options })` with default options. See the overload for more details.
+   *
    * This operation is supported by brokers with version 1.0.0 or higher.
    *
    * @param replicas - The replicas to query.
    * @returns The DescribeReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeReplicaLogDirs(replicas: Iterable<TopicPartitionReplica>): DescribeReplicaLogDirsResult;
   /**
@@ -1082,6 +1232,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the replicas
    * @returns The DescribeReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeReplicaLogDirs(args: {
     /** The replicas to query. */
@@ -1095,6 +1247,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the replicas, and the options to use
    * @returns The DescribeReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeReplicaLogDirs(args: {
     /** The replicas to query. */
@@ -1128,6 +1282,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the configResourceTypes, and the options to use
    * @returns The ListConfigurationResourcesResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConfigResources(args: {
     /** The set of configuration resource types to list. */
@@ -1155,6 +1311,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the electionType, partitions
    * @returns The ElectLeadersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   electLeaders(args: {
     /** The type of election to conduct. */
@@ -1186,6 +1344,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the electionType, partitions, and the options to use
    * @returns The ElectLeadersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   electLeaders(args: {
     /** The type of election to conduct. */
@@ -1216,6 +1376,8 @@ export class MockAdminClient implements Admin {
    *
    * @param reassignments - The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`.
    * @returns The AlterPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterPartitionReassignments(reassignments: TopicPartitionMap<NewPartitionReassignment | null>): AlterPartitionReassignmentsResult;
   /**
@@ -1223,6 +1385,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the reassignments
    * @returns The AlterPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterPartitionReassignments(args: {
     /** The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`. */
@@ -1247,6 +1411,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the reassignments, and the options to use
    * @returns The AlterPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterPartitionReassignments(args: {
     /** The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`. */
@@ -1284,6 +1450,8 @@ export class MockAdminClient implements Admin {
    *
    * @param partitions - The topic partitions to list reassignments for.
    * @returns The ListPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listPartitionReassignments(partitions: Iterable<TopicPartition>): ListPartitionReassignmentsResult;
   /**
@@ -1291,6 +1459,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the partitions
    * @returns The ListPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listPartitionReassignments(args: {
     /** The topic partitions to list reassignments for. */
@@ -1309,6 +1479,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the partitions, and the options to use
    * @returns The ListPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listPartitionReassignments(args: {
     /** The topic partitions to list reassignments for, or null for all of them. */
@@ -1327,6 +1499,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The ListPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listPartitionReassignments(args: {
     /** The options to use. */
@@ -1338,6 +1512,8 @@ export class MockAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The ListPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listPartitionReassignments(options: ListPartitionReassignmentsOptions): ListPartitionReassignmentsResult;
   /**
@@ -1360,6 +1536,8 @@ export class MockAdminClient implements Admin {
    *
    * @param topicPartitionOffsets - The mapping from partition to the OffsetSpec to look up.
    * @returns The ListOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listOffsets(topicPartitionOffsets: TopicPartitionMap<OffsetSpec>): ListOffsetsResult;
   /**
@@ -1367,6 +1545,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the topicPartitionOffsets
    * @returns The ListOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listOffsets(args: {
     /** The mapping from partition to the OffsetSpec to look up. */
@@ -1379,6 +1559,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the topicPartitionOffsets, and the options to use
    * @returns The ListOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listOffsets(args: {
     /** The mapping from partition to the OffsetSpec to look up. */
@@ -1412,6 +1594,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The ListGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listGroups(args: {
     /** The options to use. */
@@ -1422,6 +1606,8 @@ export class MockAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The ListGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listGroups(options: ListGroupsOptions): ListGroupsResult;
   /**
@@ -1444,6 +1630,8 @@ export class MockAdminClient implements Admin {
    *
    * @param groupIds - The IDs of the groups to describe.
    * @returns The DescribeConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConsumerGroups(groupIds: Iterable<string>): DescribeConsumerGroupsResult;
   /**
@@ -1451,6 +1639,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupIds
    * @returns The DescribeConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConsumerGroups(args: {
     /** The IDs of the groups to describe. */
@@ -1462,6 +1652,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupIds, and the options to use
    * @returns The DescribeConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConsumerGroups(args: {
     /** The IDs of the groups to describe. */
@@ -1489,6 +1681,8 @@ export class MockAdminClient implements Admin {
    *
    * @param groupIds - The IDs of the groups to describe.
    * @returns The DescribeClassicGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClassicGroups(groupIds: Iterable<string>): DescribeClassicGroupsResult;
   /**
@@ -1496,6 +1690,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupIds
    * @returns The DescribeClassicGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClassicGroups(args: {
     /** The IDs of the groups to describe. */
@@ -1507,6 +1703,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupIds, and the options to use
    * @returns The DescribeClassicGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClassicGroups(args: {
     /** The IDs of the groups to describe. */
@@ -1536,6 +1734,8 @@ export class MockAdminClient implements Admin {
    *
    * @param groupId - The group to list the offsets of.
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(groupId: string): ListConsumerGroupOffsetsResult;
   /**
@@ -1543,6 +1743,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupId
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(args: {
     /** The group to list the offsets of. */
@@ -1555,6 +1757,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupId, and the options to use
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(args: {
     /** The group to list the offsets of. */
@@ -1572,6 +1776,8 @@ export class MockAdminClient implements Admin {
    *
    * @param groupSpecs - Map of consumer group ids to a spec that specifies the topic partitions of the group to list offsets for.
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec>): ListConsumerGroupOffsetsResult;
   /**
@@ -1579,6 +1785,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupSpecs, a `Map` or a plain object
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(args: {
     /** Map of consumer group ids to a spec that specifies the topic partitions of the group to list offsets for. */
@@ -1592,6 +1800,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupSpecs, and the options to use
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(args: {
     /** Map of consumer group ids to a spec that specifies the topic partitions of the group to list offsets for. */
@@ -1620,6 +1830,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupId, offsets
    * @returns The AlterConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterConsumerGroupOffsets(args: {
     /** The group for which to alter offsets. */
@@ -1635,6 +1847,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupId, offsets, and the options to use
    * @returns The AlterConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterConsumerGroupOffsets(args: {
     /** The group for which to alter offsets. */
@@ -1662,6 +1876,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupId, partitions
    * @returns The DeleteConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteConsumerGroupOffsets(args: {
     /** The group to delete the offsets of. */
@@ -1676,6 +1892,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupId, partitions, and the options to use
    * @returns The DeleteConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteConsumerGroupOffsets(args: {
     /** The group to delete the offsets of. */
@@ -1702,6 +1920,8 @@ export class MockAdminClient implements Admin {
    *
    * @param groupIds - The IDs of the groups to delete.
    * @returns The DeleteConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteConsumerGroups(groupIds: Iterable<string>): DeleteConsumerGroupsResult;
   /**
@@ -1709,6 +1929,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupIds
    * @returns The DeleteConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteConsumerGroups(args: {
     /** The IDs of the groups to delete. */
@@ -1720,6 +1942,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the groupIds, and the options to use
    * @returns The DeleteConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteConsumerGroups(args: {
     /** The IDs of the groups to delete. */
@@ -1746,6 +1970,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - The ID of the group to remove member from, and the options to carry removing members' information.
    * @returns The MembershipChangeResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   removeMembersFromConsumerGroup(args: {
     /** The ID of the group to remove member from. */
@@ -1773,6 +1999,8 @@ export class MockAdminClient implements Admin {
    *
    * @param filter - The filter to use.
    * @returns The DescribeAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeAcls(filter: AclBindingFilter): DescribeAclsResult;
   /**
@@ -1780,6 +2008,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the filter
    * @returns The DescribeAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeAcls(args: {
     /** The filter to use. */
@@ -1796,6 +2026,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the filter, and the options to use
    * @returns The DescribeAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeAcls(args: {
     /** The filter to use. */
@@ -1823,6 +2055,8 @@ export class MockAdminClient implements Admin {
    *
    * @param acls - The ACLs to create
    * @returns The CreateAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createAcls(acls: Iterable<AclBinding>): CreateAclsResult;
   /**
@@ -1830,6 +2064,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the acls
    * @returns The CreateAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createAcls(args: {
     /** The ACLs to create */
@@ -1848,6 +2084,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the acls, and the options to use
    * @returns The CreateAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createAcls(args: {
     /** The ACLs to create */
@@ -1875,6 +2113,8 @@ export class MockAdminClient implements Admin {
    *
    * @param filters - The filters to use.
    * @returns The DeleteAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteAcls(filters: Iterable<AclBindingFilter>): DeleteAclsResult;
   /**
@@ -1882,6 +2122,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the filters
    * @returns The DeleteAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteAcls(args: {
     /** The filters to use. */
@@ -1897,6 +2139,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the filters, and the options to use
    * @returns The DeleteAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteAcls(args: {
     /** The filters to use. */
@@ -1932,6 +2176,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The CreateDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createDelegationToken(args: {
     /** The options to use. */
@@ -1942,6 +2188,8 @@ export class MockAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The CreateDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createDelegationToken(options: CreateDelegationTokenOptions): CreateDelegationTokenResult;
   /**
@@ -1964,6 +2212,8 @@ export class MockAdminClient implements Admin {
    *
    * @param hmac - HMAC of the Delegation token
    * @returns The RenewDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   renewDelegationToken(hmac: Uint8Array): RenewDelegationTokenResult;
   /**
@@ -1971,6 +2221,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the hmac
    * @returns The RenewDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   renewDelegationToken(args: {
     /** HMAC of the Delegation token */
@@ -1984,6 +2236,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the hmac, and the options to use
    * @returns The RenewDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   renewDelegationToken(args: {
     /** HMAC of the Delegation token */
@@ -2011,6 +2265,8 @@ export class MockAdminClient implements Admin {
    *
    * @param hmac - HMAC of the Delegation token
    * @returns The ExpireDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   expireDelegationToken(hmac: Uint8Array): ExpireDelegationTokenResult;
   /**
@@ -2018,6 +2274,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the hmac
    * @returns The ExpireDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   expireDelegationToken(args: {
     /** HMAC of the Delegation token */
@@ -2031,6 +2289,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the hmac, and the options to use
    * @returns The ExpireDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   expireDelegationToken(args: {
     /** HMAC of the Delegation token */
@@ -2067,6 +2327,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The DescribeDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeDelegationToken(args: {
     /** The options to use. */
@@ -2077,6 +2339,8 @@ export class MockAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The DescribeDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeDelegationToken(options: DescribeDelegationTokenOptions): DescribeDelegationTokenResult;
   /**
@@ -2102,6 +2366,8 @@ export class MockAdminClient implements Admin {
    *
    * @param filter - the filter to apply to match entities
    * @returns The DescribeClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClientQuotas(filter: ClientQuotaFilter): DescribeClientQuotasResult;
   /**
@@ -2109,6 +2375,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the filter
    * @returns The DescribeClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClientQuotas(args: {
     /** the filter to apply to match entities */
@@ -2123,6 +2391,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the filter, and the options to use
    * @returns The DescribeClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClientQuotas(args: {
     /** the filter to apply to match entities */
@@ -2152,6 +2422,8 @@ export class MockAdminClient implements Admin {
    *
    * @param entries - the alterations to perform
    * @returns The AlterClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterClientQuotas(entries: Iterable<ClientQuotaAlteration>): AlterClientQuotasResult;
   /**
@@ -2159,6 +2431,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the entries
    * @returns The AlterClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterClientQuotas(args: {
     /** the alterations to perform */
@@ -2175,6 +2449,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the entries, and the options to use
    * @returns The AlterClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterClientQuotas(args: {
     /** the alterations to perform */
@@ -2210,6 +2486,8 @@ export class MockAdminClient implements Admin {
    * @param users - the users for which credentials are to be described; all users' credentials are
    *   described if null or empty.
    * @returns The DescribeUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeUserScramCredentials(users: Iterable<string> | null): DescribeUserScramCredentialsResult;
   /**
@@ -2217,6 +2495,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the users
    * @returns The DescribeUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeUserScramCredentials(args: {
     /** The users for which credentials are to be described; all users' credentials are described if null or empty. */
@@ -2230,6 +2510,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the users, and the options to use
    * @returns The DescribeUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeUserScramCredentials(args: {
     /** The users for which credentials are to be described; all users' credentials are described if null or empty. */
@@ -2256,6 +2538,8 @@ export class MockAdminClient implements Admin {
    *
    * @param alterations - the alterations to be applied
    * @returns The AlterUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterUserScramCredentials(alterations: Iterable<UserScramCredentialAlteration>): AlterUserScramCredentialsResult;
   /**
@@ -2263,6 +2547,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the alterations
    * @returns The AlterUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterUserScramCredentials(args: {
     /** the alterations to be applied */
@@ -2276,6 +2562,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the alterations, and the options to use
    * @returns The AlterUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterUserScramCredentials(args: {
     /** the alterations to be applied */
@@ -2301,6 +2589,8 @@ export class MockAdminClient implements Admin {
    *
    * @param partitions - The set of partitions to query
    * @returns The DescribeProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeProducers(partitions: Iterable<TopicPartition>): DescribeProducersResult;
   /**
@@ -2308,6 +2598,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the partitions
    * @returns The DescribeProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeProducers(args: {
     /** The set of partitions to query */
@@ -2321,6 +2613,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the partitions, and the options to use
    * @returns The DescribeProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeProducers(args: {
     /** The set of partitions to query */
@@ -2346,6 +2640,8 @@ export class MockAdminClient implements Admin {
    *
    * @param transactionalIds - The set of transactional IDs to query
    * @returns The DescribeTransactionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTransactions(transactionalIds: Iterable<string>): DescribeTransactionsResult;
   /**
@@ -2353,6 +2649,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the transactionalIds
    * @returns The DescribeTransactionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTransactions(args: {
     /** The set of transactional IDs to query */
@@ -2365,6 +2663,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the transactionalIds, and the options to use
    * @returns The DescribeTransactionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTransactions(args: {
     /** The set of transactional IDs to query */
@@ -2390,6 +2690,8 @@ export class MockAdminClient implements Admin {
    *
    * @param spec - The transaction specification including topic partition and producer details
    * @returns The AbortTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   abortTransaction(spec: AbortTransactionSpec): AbortTransactionResult;
   /**
@@ -2397,6 +2699,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the spec
    * @returns The AbortTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   abortTransaction(args: {
     /** The transaction specification including topic partition and producer details */
@@ -2410,6 +2714,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the spec, and the options to use
    * @returns The AbortTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   abortTransaction(args: {
     /** The transaction specification including topic partition and producer details */
@@ -2443,6 +2749,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The ListTransactionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listTransactions(args: {
     /** The options to use. */
@@ -2453,6 +2761,8 @@ export class MockAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The ListTransactionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listTransactions(options: ListTransactionsOptions): ListTransactionsResult;
   /**
@@ -2475,6 +2785,8 @@ export class MockAdminClient implements Admin {
    *
    * @param transactionalIds - The IDs of the producers to fence.
    * @returns The FenceProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   fenceProducers(transactionalIds: Iterable<string>): FenceProducersResult;
   /**
@@ -2482,6 +2794,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the transactionalIds
    * @returns The FenceProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   fenceProducers(args: {
     /** The IDs of the producers to fence. */
@@ -2493,6 +2807,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the transactionalIds, and the options to use
    * @returns The FenceProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   fenceProducers(args: {
     /** The IDs of the producers to fence. */
@@ -2520,6 +2836,8 @@ export class MockAdminClient implements Admin {
    *
    * @param transactionalId - The ID of the transaction to terminate.
    * @returns The TerminateTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   forceTerminateTransaction(transactionalId: string): TerminateTransactionResult;
   /**
@@ -2527,6 +2845,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the transactionalId
    * @returns The TerminateTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   forceTerminateTransaction(args: {
     /** The ID of the transaction to terminate. */
@@ -2540,6 +2860,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the transactionalId, and the options to use
    * @returns The TerminateTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   forceTerminateTransaction(args: {
     /** The ID of the transaction to terminate. */
@@ -2577,6 +2899,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The DescribeFeaturesResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeFeatures(args: {
     /** The options to use. */
@@ -2587,6 +2911,8 @@ export class MockAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The DescribeFeaturesResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeFeatures(options: DescribeFeaturesOptions): DescribeFeaturesResult;
   /**
@@ -2609,6 +2935,8 @@ export class MockAdminClient implements Admin {
    *
    * @param featureUpdates - the map of finalized feature name to `FeatureUpdate`
    * @returns The UpdateFeaturesResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   updateFeatures(featureUpdates: ReadonlyMap<string, FeatureUpdate>): UpdateFeaturesResult;
   /**
@@ -2616,6 +2944,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the featureUpdates
    * @returns The UpdateFeaturesResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   updateFeatures(args: {
     /** the map of finalized feature name to `FeatureUpdate` */
@@ -2654,6 +2984,8 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the featureUpdates, and the options to use
    * @returns The UpdateFeaturesResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   updateFeatures(args: {
     /** the map of finalized feature name to `FeatureUpdate` */
@@ -2680,6 +3012,9 @@ export class MockAdminClient implements Admin {
    *
    * @param controllerId - the controller id to unregister.
    * @returns The UnregisterControllerResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when the controller id is outside Java's `int`
    */
   unregisterController(controllerId: number): UnregisterControllerResult;
   /**
@@ -2687,6 +3022,9 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the controllerId
    * @returns The UnregisterControllerResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when the controller id is outside Java's `int`
    */
   unregisterController(args: {
     /** the controller id to unregister. */
@@ -2705,6 +3043,9 @@ export class MockAdminClient implements Admin {
    *
    * @param args - the controllerId, and the options to use
    * @returns The UnregisterControllerResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when the controller id is outside Java's `int`
    */
   unregisterController(args: {
     /** the controller id to unregister. */
@@ -2719,6 +3060,7 @@ export class MockAdminClient implements Admin {
    * @returns the result
    * @throws `IllegalArgumentError` for a form Java has not
    * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when the controller id is outside Java's `int`
    */
   unregisterController(args: unknown): UnregisterControllerResult {
     return featureCalls.unregisterController(this.#handle, args, arguments.length);
@@ -2768,6 +3110,15 @@ export class MockAdminClient implements Admin {
    * The same as `updateBeginningOffsets(newOffsets)`, the offsets given by name.
    *
    * @param options - the beginning offset of each partition
+   * @throws `TypeError` for a null map, key or offset, or a value of the
+   *   wrong type
+   * @throws `RangeError` for a number beyond 2^53 - 1 or a bigint beyond
+   *   Java's `long`
+   *
+   * @remarks *(deviation)* A null key, a key with a null topic or a null
+   * offset is a `TypeError` at the call, where Java's mock stores it. Why: the
+   * C API takes each key as a handle and each offset as a `long`. Goes when:
+   * the FFI takes them.
    */
   updateBeginningOffsets(options: {
     /** The beginning offset of each partition. */
@@ -2797,6 +3148,15 @@ export class MockAdminClient implements Admin {
    * The same as `updateEndOffsets(newOffsets)`, the offsets given by name.
    *
    * @param options - the end offset of each partition
+   * @throws `TypeError` for a null map, key or offset, or a value of the
+   *   wrong type
+   * @throws `RangeError` for a number beyond 2^53 - 1 or a bigint beyond
+   *   Java's `long`
+   *
+   * @remarks *(deviation)* A null key, a key with a null topic or a null
+   * offset is a `TypeError` at the call, where Java's mock stores it. Why: the
+   * C API takes each key as a handle and each offset as a `long`. Goes when:
+   * the FFI takes them.
    */
   updateEndOffsets(options: {
     /** The end offset of each partition. */
@@ -2827,6 +3187,15 @@ export class MockAdminClient implements Admin {
    * The same as `updateConsumerGroupOffsets(newOffsets)`, the offsets given by name.
    *
    * @param options - the committed offset of each partition
+   * @throws `TypeError` for a null map, key or offset, or a value of the
+   *   wrong type
+   * @throws `RangeError` for a number beyond 2^53 - 1 or a bigint beyond
+   *   Java's `long`
+   *
+   * @remarks *(deviation)* A null key, a key with a null topic or a null
+   * offset is a `TypeError` at the call, where Java's mock stores it. Why: the
+   * C API takes each key as a handle and each offset as a `long`. Goes when:
+   * the FFI takes them.
    */
   updateConsumerGroupOffsets(options: {
     /** The committed offset of each partition. */
@@ -2948,9 +3317,14 @@ export namespace MockAdminClient {
    * Java's `MockAdminClient.Builder`: a builder of mocks.
    *
    * @remarks It holds the C FFI's builder, whose setters run at once, as
-   * Java's do. A null list or map goes to the FFI, which reports it as a
-   * `TypeError` *(deviation: Java's setters store the null, and `build()`
-   * throws later. Why: the FFI checks its mandatory parameters)*.
+   * Java's do. A null argument is a `TypeError` from the setter. For
+   * `brokers(null)` Java's setter throws too. Java's `clusterId(null)` and
+   * `brokerLogDirs(null)` store the null, and `build()` builds a mock with it;
+   * its `featureLevels`, `minSupportedFeatureLevels`,
+   * `maxSupportedFeatureLevels` and `defaultGroupConfigs` store the null, and
+   * `build()` throws `NullPointerException` *(deviation: the setter throws.
+   * Why: the FFI checks its mandatory parameters. Goes when: the FFI's builder
+   * takes the nulls)*.
    */
   export class Builder {
     readonly #native = native.mockAdminBuilderNew();
@@ -2961,8 +3335,10 @@ export namespace MockAdminClient {
      *
      * @param options - the setters' values, each key optional
      * @throws `IllegalArgumentError` for a key the builder has not, or a
-     *   setter's own error
-     * @throws `TypeError` for a value of the wrong type
+     *   setter's own `IllegalArgumentError`
+     * @throws `TypeError` for a value of the wrong type, or a setter's own
+     *   `TypeError`
+     * @throws `RangeError` for a number outside the Java type of its setter
      *
      * @remarks *(deviation)* Java builds it through its setters only. Why:
      * one call builds a configured object (Q19); the setters stay.
@@ -3021,6 +3397,8 @@ export namespace MockAdminClient {
      *
      * @param clusterId - the cluster id, on its own or as `{ clusterId }`
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the cluster id is null
      */
     clusterId(clusterId: string): this;
     /**
@@ -3028,6 +3406,8 @@ export namespace MockAdminClient {
      *
      * @param options - the cluster id
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the cluster id is null
      */
     clusterId(options: {
       /** The cluster id. */
@@ -3038,6 +3418,8 @@ export namespace MockAdminClient {
      *
      * @param clusterId - on its own or as `{ clusterId }`: the cluster id
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the cluster id is null
      */
     clusterId(clusterId: unknown): this {
       native.mockAdminBuilderSet(this.#native, 'clusterId', CLUSTER_ID.value(clusterId, arguments.length));
@@ -3058,6 +3440,8 @@ export namespace MockAdminClient {
      *
      * @param options - the brokers, any iterable of Node
      * @returns this builder
+     * @throws `IllegalArgumentError` when the log dirs set are fewer than the brokers
+     * @throws `TypeError` when an element is not a Node
      */
     brokers(options: {
       /** The brokers, any iterable of Node. */
@@ -3084,6 +3468,8 @@ export namespace MockAdminClient {
      * @returns this builder
      * @throws `IllegalArgumentError` for a negative count, or when shrinking
      *   past a shorter log-dir list
+     * @throws `TypeError` when the count is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     numBrokers(numBrokers: number): this;
     /**
@@ -3091,6 +3477,10 @@ export namespace MockAdminClient {
      *
      * @param options - the broker count
      * @returns this builder
+     * @throws `IllegalArgumentError` for a negative count, or when shrinking
+     *   past a shorter log-dir list
+     * @throws `TypeError` when the count is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     numBrokers(options: {
       /** The broker count. */
@@ -3104,6 +3494,8 @@ export namespace MockAdminClient {
      * @returns this builder
      * @throws `IllegalArgumentError` for a negative count, or when shrinking
      *   past a shorter log-dir list
+     * @throws `TypeError` when the count is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     numBrokers(numBrokers: unknown): this {
       native.mockAdminBuilderSet(this.#native, 'numBrokers', checkInt(NUM_BROKERS.value(numBrokers, arguments.length), 'numBrokers'));
@@ -3116,6 +3508,8 @@ export namespace MockAdminClient {
      * @param index - the broker's index, on its own or as `{ index }`
      * @returns this builder
      * @throws `IllegalArgumentError` when the index is out of the broker list
+     * @throws `TypeError` when the index is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     controller(index: number): this;
     /**
@@ -3123,6 +3517,9 @@ export namespace MockAdminClient {
      *
      * @param options - the broker's index
      * @returns this builder
+     * @throws `IllegalArgumentError` when the index is out of the broker list
+     * @throws `TypeError` when the index is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     controller(options: {
       /** The broker's index. */
@@ -3134,6 +3531,8 @@ export namespace MockAdminClient {
      * @param index - on its own or as `{ index }`: the broker's index
      * @returns this builder
      * @throws `IllegalArgumentError` when the index is out of the broker list
+     * @throws `TypeError` when the index is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     controller(index: unknown): this {
       native.mockAdminBuilderSet(this.#native, 'controller', checkInt(CONTROLLER.value(index, arguments.length), 'index'));
@@ -3146,6 +3545,8 @@ export namespace MockAdminClient {
      *
      * @param brokerLogDirs - the log dirs of each broker, any iterable of iterables, on its own or as `{ brokerLogDirs }`
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the list is null or holds a value that is not a string
      */
     brokerLogDirs(brokerLogDirs: Iterable<Iterable<string>>): this;
     /**
@@ -3153,6 +3554,8 @@ export namespace MockAdminClient {
      *
      * @param options - the log dirs of each broker
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the list is null or holds a value that is not a string
      */
     brokerLogDirs(options: {
       /** The log dirs of each broker, any iterable of iterables. */
@@ -3164,6 +3567,8 @@ export namespace MockAdminClient {
      *
      * @param brokerLogDirs - on its own or as `{ brokerLogDirs }`: the log dirs of each broker
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the list is null or holds a value that is not a string
      */
     brokerLogDirs(brokerLogDirs: unknown): this {
       native.mockAdminBuilderSet(this.#native, 'brokerLogDirs', logDirs(BROKER_LOG_DIRS.value(brokerLogDirs, arguments.length)));
@@ -3175,6 +3580,9 @@ export namespace MockAdminClient {
      *
      * @param defaultReplicationFactor - the factor, on its own or as `{ defaultReplicationFactor }`
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the factor is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     defaultReplicationFactor(defaultReplicationFactor: number): this;
     /**
@@ -3182,6 +3590,9 @@ export namespace MockAdminClient {
      *
      * @param options - the factor
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the factor is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     defaultReplicationFactor(options: {
       /** The factor. */
@@ -3192,6 +3603,9 @@ export namespace MockAdminClient {
      *
      * @param defaultReplicationFactor - on its own or as `{ defaultReplicationFactor }`: the factor
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the factor is not an integer
+     * @throws `RangeError` when it is outside Java's `int`
      */
     defaultReplicationFactor(defaultReplicationFactor: unknown): this {
       const value = DEFAULT_REPLICATION_FACTOR.value(defaultReplicationFactor, arguments.length);
@@ -3204,6 +3618,8 @@ export namespace MockAdminClient {
      *
      * @param usingRaftController - whether it does, on its own or as `{ usingRaftController }`
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the value is not a boolean
      */
     usingRaftController(usingRaftController: boolean): this;
     /**
@@ -3211,6 +3627,8 @@ export namespace MockAdminClient {
      *
      * @param options - whether it does
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the value is not a boolean
      */
     usingRaftController(options: {
       /** Whether it does. */
@@ -3221,6 +3639,8 @@ export namespace MockAdminClient {
      *
      * @param usingRaftController - on its own or as `{ usingRaftController }`: whether it does
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the value is not a boolean
      */
     usingRaftController(usingRaftController: unknown): this {
       const value = checkBoolean(USING_RAFT_CONTROLLER.value(usingRaftController, arguments.length), 'usingRaftController');
@@ -3233,6 +3653,9 @@ export namespace MockAdminClient {
      *
      * @param numPartitions - the count, a Java `short`, on its own or as `{ numPartitions }`
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the count is not an integer
+     * @throws `RangeError` when it is outside Java's `short`
      */
     defaultPartitions(numPartitions: number): this;
     /**
@@ -3240,6 +3663,9 @@ export namespace MockAdminClient {
      *
      * @param options - the count, a Java `short`
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the count is not an integer
+     * @throws `RangeError` when it is outside Java's `short`
      */
     defaultPartitions(options: {
       /** The count, a Java `short`. */
@@ -3250,6 +3676,9 @@ export namespace MockAdminClient {
      *
      * @param numPartitions - on its own or as `{ numPartitions }`: the count, a Java `short`
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the count is not an integer
+     * @throws `RangeError` when it is outside Java's `short`
      */
     defaultPartitions(numPartitions: unknown): this {
       native.mockAdminBuilderSet(
@@ -3265,6 +3694,9 @@ export namespace MockAdminClient {
      *
      * @param featureLevels - the levels by feature name, a `Map` on its own, or a `Map` or a plain object as `{ featureLevels }`
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a level is not an integer
+     * @throws `RangeError` when a level is outside Java's `short`
      */
     featureLevels(featureLevels: ReadonlyMap<string, number>): this;
     /**
@@ -3272,6 +3704,9 @@ export namespace MockAdminClient {
      *
      * @param options - the levels by feature name, a `Map` on its own, or a `Map` or a plain object as `{ featureLevels }`
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a level is not an integer
+     * @throws `RangeError` when a level is outside Java's `short`
      */
     featureLevels(options: {
       /** The levels by feature name, a `Map` on its own, or a `Map` or a plain object as `{ featureLevels }`. */
@@ -3282,6 +3717,9 @@ export namespace MockAdminClient {
      *
      * @param featureLevels - on its own or as `{ featureLevels }`: the levels by feature name, a `Map` on its own, or a `Map` or a plain object as `{ featureLevels }`
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a level is not an integer
+     * @throws `RangeError` when a level is outside Java's `short`
      */
     featureLevels(featureLevels: unknown): this {
       const value = FEATURE_LEVELS.value(featureLevels, arguments.length);
@@ -3294,6 +3732,9 @@ export namespace MockAdminClient {
      *
      * @param minSupportedFeatureLevels - the levels by feature name, a `Map` on its own, or a `Map` or a plain object by name
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a level is not an integer
+     * @throws `RangeError` when a level is outside Java's `short`
      */
     minSupportedFeatureLevels(minSupportedFeatureLevels: ReadonlyMap<string, number>): this;
     /**
@@ -3301,6 +3742,9 @@ export namespace MockAdminClient {
      *
      * @param options - the levels by feature name, a `Map` on its own, or a `Map` or a plain object by name
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a level is not an integer
+     * @throws `RangeError` when a level is outside Java's `short`
      */
     minSupportedFeatureLevels(options: {
       /** The levels by feature name, a `Map` on its own, or a `Map` or a plain object by name. */
@@ -3311,6 +3755,9 @@ export namespace MockAdminClient {
      *
      * @param minSupportedFeatureLevels - on its own or as `{ minSupportedFeatureLevels }`: the levels by feature name, a `Map` on its own, or a `Map` or a plain object by name
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a level is not an integer
+     * @throws `RangeError` when a level is outside Java's `short`
      */
     minSupportedFeatureLevels(minSupportedFeatureLevels: unknown): this {
       const value = MIN_SUPPORTED_FEATURE_LEVELS.value(minSupportedFeatureLevels, arguments.length);
@@ -3327,6 +3774,9 @@ export namespace MockAdminClient {
      *
      * @param maxSupportedFeatureLevels - the levels by feature name, a `Map` on its own, or a `Map` or a plain object by name
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a level is not an integer
+     * @throws `RangeError` when a level is outside Java's `short`
      */
     maxSupportedFeatureLevels(maxSupportedFeatureLevels: ReadonlyMap<string, number>): this;
     /**
@@ -3334,6 +3784,9 @@ export namespace MockAdminClient {
      *
      * @param options - the levels by feature name, a `Map` on its own, or a `Map` or a plain object by name
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a level is not an integer
+     * @throws `RangeError` when a level is outside Java's `short`
      */
     maxSupportedFeatureLevels(options: {
       /** The levels by feature name, a `Map` on its own, or a `Map` or a plain object by name. */
@@ -3344,6 +3797,9 @@ export namespace MockAdminClient {
      *
      * @param maxSupportedFeatureLevels - on its own or as `{ maxSupportedFeatureLevels }`: the levels by feature name, a `Map` on its own, or a `Map` or a plain object by name
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a level is not an integer
+     * @throws `RangeError` when a level is outside Java's `short`
      */
     maxSupportedFeatureLevels(maxSupportedFeatureLevels: unknown): this {
       const value = MAX_SUPPORTED_FEATURE_LEVELS.value(maxSupportedFeatureLevels, arguments.length);
@@ -3360,6 +3816,8 @@ export namespace MockAdminClient {
      *
      * @param defaultGroupConfigs - the configs, a `Map` on its own, or a `Map` or a plain object by name
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a value is not a string
      */
     defaultGroupConfigs(defaultGroupConfigs: ReadonlyMap<string, string>): this;
     /**
@@ -3367,6 +3825,8 @@ export namespace MockAdminClient {
      *
      * @param options - the configs, a `Map` on its own, or a `Map` or a plain object by name
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a value is not a string
      */
     defaultGroupConfigs(options: {
       /** The configs, a `Map` on its own, or a `Map` or a plain object by name. */
@@ -3377,6 +3837,8 @@ export namespace MockAdminClient {
      *
      * @param defaultGroupConfigs - on its own or as `{ defaultGroupConfigs }`: the configs, a `Map` on its own, or a `Map` or a plain object by name
      * @returns this builder
+     * @throws `IllegalArgumentError` for a form Java has not
+     * @throws `TypeError` when the map is null, or a value is not a string
      */
     defaultGroupConfigs(defaultGroupConfigs: unknown): this {
       const value = DEFAULT_GROUP_CONFIGS.value(defaultGroupConfigs, arguments.length);

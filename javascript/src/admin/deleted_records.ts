@@ -33,6 +33,7 @@ export class DeletedRecords {
    *
    * @param lowWatermark - "low watermark" for the topic partition on which
    *   the deletion was executed, on its own
+   * @throws `TypeError` or `RangeError` when it is not a Java `long`
    */
   constructor(lowWatermark: bigint | number);
   /**
@@ -40,6 +41,7 @@ export class DeletedRecords {
    *
    * @param options - "low watermark" for the topic partition on which the
    *   deletion was executed
+   * @throws `TypeError` or `RangeError` when it is not a Java `long`
    */
   constructor(options: {
     /** "low watermark" for the topic partition on which the deletion was executed. */

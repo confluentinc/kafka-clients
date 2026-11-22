@@ -94,6 +94,8 @@ export class ClassicGroupState {
    *
    * @param name - the name of the constant to return
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(name: string): ClassicGroupState;
   /**
@@ -101,6 +103,8 @@ export class ClassicGroupState {
    *
    * @param options - the name of the constant to return
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(options: {
     /** The name of the constant to return. */

@@ -104,7 +104,7 @@ export class DeleteTopicsResult {
   /**
    * Return a future which succeeds only if all the topic deletions succeed.
    *
-   * @returns a future which succeeds only if all the topic deletions succeed.
+   * @returns the future
    * @throws `TypeError` when it is given an argument: it only reads
    */
   all(): KafkaFuture<void> {

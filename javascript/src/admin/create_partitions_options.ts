@@ -81,6 +81,7 @@ export class CreatePartitionsOptions extends AbstractOptions {
    *
    * @param validateOnly - whether the request is only validated, on its own
    * @returns This CreatePartitionsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   validateOnly(validateOnly: boolean): this;
   /**
@@ -88,6 +89,7 @@ export class CreatePartitionsOptions extends AbstractOptions {
    *
    * @param options - whether the request is only validated
    * @returns This CreatePartitionsOptions object.
+   * @throws `TypeError` when the value is not a boolean
    */
   validateOnly(options: {
     /** Whether the request is only validated. */
@@ -112,6 +114,7 @@ export class CreatePartitionsOptions extends AbstractOptions {
    *
    * @param retryOnQuotaViolation - whether a quota violation is retried, on its own
    * @returns This CreatePartitionsOptions object.
+   * @throws `TypeError` when the value is missing or not a boolean
    */
   retryOnQuotaViolation(retryOnQuotaViolation: boolean): this;
   /**
@@ -119,6 +122,7 @@ export class CreatePartitionsOptions extends AbstractOptions {
    *
    * @param options - whether a quota violation is retried
    * @returns This CreatePartitionsOptions object.
+   * @throws `TypeError` when the value is missing or not a boolean
    */
   retryOnQuotaViolation(options: {
     /** Whether a quota violation is retried. */

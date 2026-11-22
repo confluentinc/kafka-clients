@@ -163,6 +163,7 @@ export class ListGroupsOptions extends AbstractOptions {
    *
    * @param groupStates - the states, on its own (null or empty: all)
    * @returns This ListGroupsOptions object.
+   * @throws `TypeError` when the value is missing, not an iterable of GroupState, or holds null
    */
   inGroupStates(groupStates: Iterable<GroupState> | null): this;
   /**
@@ -170,6 +171,7 @@ export class ListGroupsOptions extends AbstractOptions {
    *
    * @param options - the states (null or empty: all)
    * @returns This ListGroupsOptions object.
+   * @throws `TypeError` when the value is missing, not an iterable of GroupState, or holds null
    */
   inGroupStates(options: {
     /** The states (null or empty: all). */
@@ -198,6 +200,7 @@ export class ListGroupsOptions extends AbstractOptions {
    *
    * @param protocolTypes - the protocol types, on its own (null or empty: all)
    * @returns This ListGroupsOptions object.
+   * @throws `TypeError` when the value is missing, a string, not an iterable of strings, or holds null
    */
   withProtocolTypes(protocolTypes: Iterable<string> | null): this;
   /**
@@ -205,6 +208,7 @@ export class ListGroupsOptions extends AbstractOptions {
    *
    * @param options - the protocol types (null or empty: all)
    * @returns This ListGroupsOptions object.
+   * @throws `TypeError` when the value is missing, a string, not an iterable of strings, or holds null
    */
   withProtocolTypes(options: {
     /** The protocol types (null or empty: all). */
@@ -230,6 +234,7 @@ export class ListGroupsOptions extends AbstractOptions {
    *
    * @param types - the group types, on its own (null or empty: all)
    * @returns This ListGroupsOptions object.
+   * @throws `TypeError` when the value is missing, not an iterable of GroupType, or holds null
    */
   withTypes(types: Iterable<GroupType> | null): this;
   /**
@@ -237,6 +242,7 @@ export class ListGroupsOptions extends AbstractOptions {
    *
    * @param options - the group types (null or empty: all)
    * @returns This ListGroupsOptions object.
+   * @throws `TypeError` when the value is missing, not an iterable of GroupType, or holds null
    */
   withTypes(options: {
     /** The group types (null or empty: all). */

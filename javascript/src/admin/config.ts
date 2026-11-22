@@ -39,12 +39,14 @@ export class Config {
    * Create a configuration instance with the provided entries.
    *
    * @param entries - the entries, any iterable of ConfigEntry, on its own
+   * @throws `TypeError` when they are null (Java iterates them) or not ConfigEntry objects
    */
   constructor(entries: Iterable<ConfigEntry>);
   /**
    * Create a configuration instance with the provided entries, given by name.
    *
    * @param options - the entries
+   * @throws `TypeError` when they are null (Java iterates them) or not ConfigEntry objects
    */
   constructor(options: {
     /** The entries, any iterable of ConfigEntry. */
