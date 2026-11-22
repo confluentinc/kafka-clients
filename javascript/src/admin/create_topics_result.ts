@@ -176,14 +176,28 @@ export class CreateTopicsResult {
    * @returns the future
    * @throws `TypeError` for a null topic
    *
-   * @remarks *(deviation)* On the client's Result, a topic that was not part
-   * of the request gets a future failed with `IllegalArgumentError`, where
-   * Java's dereferences the missing future and throws
-   * `NullPointerException` (a `TypeError` here on a subclass's Result). Why:
-   * the C FFI answers so, as for the Python client.
+   * @remarks *(deviation)* On the client's Result, a topic not in the
+   * request fails its future with `IllegalArgumentError`, where Java throws
+   * `NullPointerException`. Why: the C FFI answers so. Goes when: the FFI
+   * answers as Java's accessor does.
    */
   config(topic: string): KafkaFuture<Config | null>;
-  config(options: { topic: string }): KafkaFuture<Config | null>;
+  /**
+   * The same as `config(topic)`, the topic given by name.
+   *
+   * @param options - the topic
+   * @returns the future
+   * @throws `TypeError` for a null topic
+   *
+   * @remarks *(deviation)* On the client's Result, a topic not in the
+   * request fails its future with `IllegalArgumentError`, where Java throws
+   * `NullPointerException`. Why: the C FFI answers so. Goes when: the FFI
+   * answers as Java's accessor does.
+   */
+  config(options: {
+    /** The topic. */
+    topic: string;
+  }): KafkaFuture<Config | null>;
   config(topic: unknown): KafkaFuture<Config | null> {
     const t = topicOf(CONFIG_FORMS, topic, arguments.length);
     return this.#refinements !== null ? this.#refinements.config(t) : this.#refine(t, (m) => m.config());
@@ -207,7 +221,17 @@ export class CreateTopicsResult {
    * gets a future failed with `IllegalArgumentError`.
    */
   topicId(topic: string): KafkaFuture<Uuid>;
-  topicId(options: { topic: string }): KafkaFuture<Uuid>;
+  /**
+   * The same as `topicId(topic)`, the topic given by name.
+   *
+   * @param options - the topic
+   * @returns the future
+   * @throws `TypeError` for a null topic
+   */
+  topicId(options: {
+    /** The topic. */
+    topic: string;
+  }): KafkaFuture<Uuid>;
   topicId(topic: unknown): KafkaFuture<Uuid> {
     const t = topicOf(TOPIC_ID_FORMS, topic, arguments.length);
     return this.#refinements !== null ? this.#refinements.topicId(t) : this.#refine(t, (m) => m.topicId() as Uuid);
@@ -231,7 +255,17 @@ export class CreateTopicsResult {
    * gets a future failed with `IllegalArgumentError`.
    */
   numPartitions(topic: string): KafkaFuture<number>;
-  numPartitions(options: { topic: string }): KafkaFuture<number>;
+  /**
+   * The same as `numPartitions(topic)`, the topic given by name.
+   *
+   * @param options - the topic
+   * @returns the future
+   * @throws `TypeError` for a null topic
+   */
+  numPartitions(options: {
+    /** The topic. */
+    topic: string;
+  }): KafkaFuture<number>;
   numPartitions(topic: unknown): KafkaFuture<number> {
     const t = topicOf(NUM_PARTITIONS_FORMS, topic, arguments.length);
     return this.#refinements !== null ? this.#refinements.numPartitions(t) : this.#refine(t, (m) => m.numPartitions());
@@ -255,7 +289,17 @@ export class CreateTopicsResult {
    * gets a future failed with `IllegalArgumentError`.
    */
   replicationFactor(topic: string): KafkaFuture<number>;
-  replicationFactor(options: { topic: string }): KafkaFuture<number>;
+  /**
+   * The same as `replicationFactor(topic)`, the topic given by name.
+   *
+   * @param options - the topic
+   * @returns the future
+   * @throws `TypeError` for a null topic
+   */
+  replicationFactor(options: {
+    /** The topic. */
+    topic: string;
+  }): KafkaFuture<number>;
   replicationFactor(topic: unknown): KafkaFuture<number> {
     const t = topicOf(REPLICATION_FACTOR_FORMS, topic, arguments.length);
     return this.#refinements !== null ? this.#refinements.replicationFactor(t) : this.#refine(t, (m) => m.replicationFactor());
@@ -282,6 +326,8 @@ export namespace CreateTopicsResult {
      *
      * @param options - the topic id, the number of partitions, the
      *   replication factor and the configuration
+     * @throws `IllegalArgumentError` when the given parameters are no Java form
+     * @throws `TypeError` for a value of the wrong type
      */
     constructor(options: {
       /** The topic id. */
@@ -297,6 +343,8 @@ export namespace CreateTopicsResult {
      * The topic's failure: its accessors throw it.
      *
      * @param options - the error
+     * @throws `IllegalArgumentError` when the given parameters are no Java form
+     * @throws `TypeError` for a value of the wrong type
      */
     constructor(options: {
       /** The error. */

@@ -306,6 +306,48 @@ newer.
   own or by name (`has({ key })`), as `MetricNameMap`'s do, and their types
   declare both.
 
+### Admin client
+
+- `Admin` (`@confluentinc/kafka-javascript/admin`), Java's admin client over
+  the Rust client's C FFI: `Admin.create(configs)` returns a
+  `KafkaAdminClient` with the 45 calls the FFI has, from `createTopics` to
+  `unregisterController`, each returning its `*Result` at once, as Java's
+  does, with a `KafkaFuture` per key; a failed key rejects `get()` with an
+  `ExecutionError` whose `cause` is its error. `close()` (no time limit),
+  `close(timeout)` and `[Symbol.asyncDispose]`; an open admin client keeps
+  Node running, as a producer does.
+- Java's `*Options` classes, built with one object of their fields or through
+  Java's setters, the `*Result` classes, and the value classes, with Java's
+  `equals`, `hashCode` and `toString()`, and `toJSON()`. The seven `*Description`
+  classes are data objects, read through frozen fields; every other class
+  keeps Java's methods.
+- New import paths for the classes the calls take and return: `admin`,
+  `common/acl`, `common/quota`, `common/resource`, `common/security/token`
+  and `common/security/token/delegation`, with additions to `common`
+  (`Uuid`, `TopicCollection`, `TopicPartitionInfo`, `TopicPartitionReplica`,
+  the group and election enums, ...), `common/config` (`ConfigResource`, and
+  the generated `TopicConfig` and `LogLevelConfig`) and
+  `common/security/auth` (`KafkaPrincipal`).
+- Maps and sets keyed by value classes *(js-only)*, as `TopicPartitionMap`:
+  `UuidMap`, `TopicPartitionReplicaMap`, `ConfigResourceMap`,
+  `AclBindingMap`, `AclBindingFilterMap`, `ClientQuotaEntityMap` and
+  `MemberToRemoveSet`.
+- `MockAdminClient`, Java's mock, over the Rust client's own mock: its
+  constructors, its `Builder` and the mock methods the FFI has (`addTopic`,
+  `markTopicForDeletion`, `controller`, `setFetchesRemainingUntilVisible`,
+  `timeoutNextRequest`, `updateBeginningOffsets`, `updateEndOffsets`,
+  `updateConsumerGroupOffsets`).
+- Left out, because the FFI has no entry point for them: the Raft voter,
+  metadata quorum, `unregisterBroker`, metrics, telemetry, share-group and
+  streams-group calls, and some of `MockAdminClient`'s members (the admin
+  package's documentation lists them). Java's deprecated `listConsumerGroups`
+  and `listClientMetricsResources` are not translated.
+- `examples/admin/`, one example per call, taking the same command line as
+  the Rust client's examples (`examples/README.md`); the examples are
+  type-checked (`make typecheck-examples`) and linted.
+- The gRPC conformance server serves the `AdminService`, so the Rust
+  multilanguage suite's admin cases run against this client.
+
 ### Errors and security
 
 - The error classes of Java's client, generated from the Java sources as the
@@ -428,6 +470,14 @@ newer.
   Use `require`, named imports or `import * as`.
 - Of the SASL mechanisms, only `PLAIN` is supported. Keys and certificates must
   be PEM (no JKS or PKCS12).
+- An admin future's outcome reaches JavaScript on a later turn of the event
+  loop, so right after a call `isDone()` is `false`, even on
+  `MockAdminClient`, whose Java counterpart completes its futures before
+  returning; `await future.get()` is unaffected.
+- A call `MockAdminClient` does not implement fails its futures with
+  `UnsupportedOperationError`, where Java's mock throws from the call; a
+  `null` that Java stores and reads later is a `TypeError` at the admin call
+  (the admin package's documentation lists both).
 
 ### Package
 

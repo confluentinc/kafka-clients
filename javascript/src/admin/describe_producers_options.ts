@@ -76,6 +76,9 @@ export class DescribeProducersOptions extends AbstractOptions {
    *
    * @param brokerId - the broker id, on its own
    * @returns This DescribeProducersOptions object.
+   * @throws `TypeError` when the value is not an integer (null included:
+   *   Java's `int` cannot hold null)
+   * @throws `RangeError` when it is beyond Java's `int`
    */
   brokerId(brokerId: number): this;
   /**
@@ -83,6 +86,9 @@ export class DescribeProducersOptions extends AbstractOptions {
    *
    * @param options - the broker id
    * @returns This DescribeProducersOptions object.
+   * @throws `TypeError` when the value is not an integer (null included:
+   *   Java's `int` cannot hold null)
+   * @throws `RangeError` when it is beyond Java's `int`
    */
   brokerId(options: {
     /** The broker id. */

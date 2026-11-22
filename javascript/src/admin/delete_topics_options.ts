@@ -65,6 +65,7 @@ export class DeleteTopicsOptions extends AbstractOptions {
    *
    * @param retryOnQuotaViolation - whether a quota violation is retried, on its own
    * @returns This DeleteTopicsOptions object.
+   * @throws `TypeError` when the value is missing or not a boolean
    */
   retryOnQuotaViolation(retryOnQuotaViolation: boolean): this;
   /**
@@ -72,6 +73,7 @@ export class DeleteTopicsOptions extends AbstractOptions {
    *
    * @param options - whether a quota violation is retried
    * @returns This DeleteTopicsOptions object.
+   * @throws `TypeError` when the value is missing or not a boolean
    */
   retryOnQuotaViolation(options: {
     /** Whether a quota violation is retried. */
