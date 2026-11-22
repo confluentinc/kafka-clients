@@ -62,11 +62,11 @@ if [ "${MACOS_INSTALL_GRPC_CPP:-}" = "true" ]; then
 fi
 
 # MACOS_ENSURE_ROSETTA=true installs Rosetta 2 if it is missing. Building the
-# native .NET gRPC server (make -C dotnet grpc-native) runs Grpc.Tools'
+# native .NET gRPC server (make -C dotnet grpc-native, or grpc-native-aot) runs Grpc.Tools'
 # protoc, and Grpc.Tools ships no macOS arm64 protoc, so on this arm64 agent it
 # runs the macosx_x64 one under Rosetta 2. The check runs an x86_64 slice of
-# /usr/bin/true and skips the install when that already works. Only the job that
-# needs Rosetta sets this variable.
+# /usr/bin/true and skips the install when that already works. Only the jobs that
+# need Rosetta set this variable.
 if [ "${MACOS_ENSURE_ROSETTA:-}" = "true" ]; then
   if ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
     sudo softwareupdate --install-rosetta --agree-to-license
@@ -75,8 +75,8 @@ fi
 
 # MACOS_SKIP_COLIMA=true skips the Colima/Docker bring-up below (the toolchain
 # setup above always runs). Intended for jobs whose tests need no container, or
-# that start Colima themselves: the "verify-dotnet (macOS arm64)" job sets it and
-# starts Colima after its unit tests.
+# that start Colima themselves: the "verify-dotnet (macOS arm64)" job sets it, as its unit
+# tests and package check need no container.
 if [ "${MACOS_SKIP_COLIMA:-}" = "true" ]; then
   echo "=== MACOS_SKIP_COLIMA=true -- skipping Colima/Docker setup (unit-tests-only block) ==="
 else

@@ -36,7 +36,7 @@ string topic = args[1];
 Dictionary<string, object?> conf = new() { ["bootstrap.servers"] = broker };
 
 // The serializers encode keys and values as UTF-8; the records sent here have no key.
-await using (AsyncKafkaProducer<string, string> producer = new(conf, new StringSerializer(), new StringSerializer()))
+await using (AsyncKafkaProducer<string, string> producer = await AsyncKafkaProducer<string, string>.Create(conf, new AsyncStringSerializer(), new AsyncStringSerializer()))
 {
     string? line;
     while ((line = await Console.In.ReadLineAsync()) is not null)

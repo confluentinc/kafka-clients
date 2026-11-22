@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 using Confluent.Kafka.Common;
 
@@ -29,6 +30,17 @@ internal static class ConfigMarshal
 {
     internal static IntPtr NewClient(IReadOnlyList<KeyValuePair<string, string>> configs, ClientKind client)
     {
+        using ValidatedConfig config = Validate(configs, client);
+        return config.CreateClient();
+    }
+
+    /// <summary>
+    /// The first half of <see cref="NewClient"/>: the core has read and accepted the whole configuration and no
+    /// client exists yet, which is where Java's client constructor enters its <c>try</c> and builds its serializers
+    /// or deserializers. The caller creates the client from the result, or not, and disposes it.
+    /// </summary>
+    internal static ValidatedConfig Validate(IReadOnlyList<KeyValuePair<string, string>> configs, ClientKind client)
+    {
         string parameter = client == ClientKind.Admin ? "conf" : "configs";
         foreach (KeyValuePair<string, string> entry in configs)
         {
@@ -36,47 +48,90 @@ internal static class ConfigMarshal
             AdminStrings.Validate(entry.Value, AdminStrings.InvalidConfigValueMessage, parameter);
         }
 
-        List<Utf8Marshal.PinnedUtf8String> pins = new List<Utf8Marshal.PinnedUtf8String>(configs.Count * 2);
-        IntPtr map = IntPtr.Zero;
-        IntPtr clientConfig = IntPtr.Zero;
-        IntPtr outErr = IntPtr.Zero;
+        ValidatedConfig config = new ValidatedConfig(client, configs.Count);
         try
         {
-            map = NativeMethods.MapNew(ref outErr);
+            config.Read(configs);
+            return config;
+        }
+        catch
+        {
+            config.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// A configuration the core accepted, with the map and the pinned texts it was read from, all freed once by
+    /// <see cref="Dispose"/>.
+    /// </summary>
+    internal sealed class ValidatedConfig : IDisposable
+    {
+        private readonly ClientKind _client;
+
+        private readonly List<Utf8Marshal.PinnedUtf8String> _pins;
+
+        private IntPtr _map;
+
+        private IntPtr _clientConfig;
+
+        private int _disposed;
+
+        internal ValidatedConfig(ClientKind client, int count)
+        {
+            _client = client;
+            _pins = new List<Utf8Marshal.PinnedUtf8String>(count * 2);
+        }
+
+        internal void Read(IReadOnlyList<KeyValuePair<string, string>> configs)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            _map = NativeMethods.MapNew(ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             foreach (KeyValuePair<string, string> entry in configs)
             {
                 Utf8Marshal.PinnedUtf8String key = Utf8Marshal.Pin(entry.Key);
-                pins.Add(key);
+                _pins.Add(key);
                 Utf8Marshal.PinnedUtf8String value = Utf8Marshal.Pin(entry.Value);
-                pins.Add(value);
-                NativeMethods.MapPut(map, key.Pointer, value.Pointer, ref outErr);
+                _pins.Add(value);
+                NativeMethods.MapPut(_map, key.Pointer, value.Pointer, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
             }
 
-            clientConfig = NewConfig(client, map, ref outErr);
+            _clientConfig = NewConfig(_client, _map, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            IntPtr created = CreateClient(client, clientConfig, ref outErr);
+        }
+
+        internal IntPtr CreateClient()
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr created = ConfigMarshal.CreateClient(_client, _clientConfig, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             return created;
         }
-        finally
+
+        public void Dispose()
         {
-            IntPtr destroyErr = IntPtr.Zero;
-            if (clientConfig != IntPtr.Zero)
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
             {
-                DestroyConfig(client, clientConfig, ref destroyErr);
+                return;
+            }
+
+            IntPtr destroyErr = IntPtr.Zero;
+            if (_clientConfig != IntPtr.Zero)
+            {
+                DestroyConfig(_client, _clientConfig, ref destroyErr);
                 FreeError(ref destroyErr);
             }
 
-            foreach (Utf8Marshal.PinnedUtf8String pin in pins)
+            foreach (Utf8Marshal.PinnedUtf8String pin in _pins)
             {
                 pin.Dispose();
             }
 
-            if (map != IntPtr.Zero)
+            if (_map != IntPtr.Zero)
             {
-                NativeMethods.MapDestroy(map, ref destroyErr);
+                NativeMethods.MapDestroy(_map, ref destroyErr);
                 FreeError(ref destroyErr);
             }
         }

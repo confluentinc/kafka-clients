@@ -159,7 +159,7 @@ public sealed class SerializationTests
         AssertNewSerde<float?, Serdes.FloatSerde, FloatSerializer, FloatDeserializer>(Serdes.SerdeFrom<float?>);
         AssertNewSerde<double?, Serdes.DoubleSerde, DoubleSerializer, DoubleDeserializer>(Serdes.SerdeFrom<double?>);
         AssertNewSerde<byte[], Serdes.ByteArraySerde, ByteArraySerializer, ByteArrayDeserializer>(Serdes.SerdeFrom<byte[]>);
-        AssertNewSerde<ReadOnlyMemory<byte>?, Serdes.ByteBufferSerde, ByteBufferSerializer, ByteBufferDeserializer>(
+        AssertNewSerde<ReadOnlyMemory<byte>?, Serdes.ReadOnlyMemorySerde, ReadOnlyMemorySerializer, ReadOnlyMemoryDeserializer>(
             Serdes.SerdeFrom<ReadOnlyMemory<byte>?>);
         AssertNewSerde<Guid?, Serdes.UUIDSerde, UUIDSerializer, UUIDDeserializer>(Serdes.SerdeFrom<Guid?>);
         AssertNewSerde<bool?, Serdes.BooleanSerde, BooleanSerializer, BooleanDeserializer>(Serdes.SerdeFrom<bool?>);
@@ -494,8 +494,8 @@ public sealed class SerializationTests
         AssertNewSerde<short?, Serdes.ShortSerde, ShortSerializer, ShortDeserializer>(Serdes.Short);
         AssertNewSerde<float?, Serdes.FloatSerde, FloatSerializer, FloatDeserializer>(Serdes.Float);
         AssertNewSerde<double?, Serdes.DoubleSerde, DoubleSerializer, DoubleDeserializer>(Serdes.Double);
-        AssertNewSerde<ReadOnlyMemory<byte>?, Serdes.ByteBufferSerde, ByteBufferSerializer, ByteBufferDeserializer>(
-            Serdes.ByteBuffer);
+        AssertNewSerde<ReadOnlyMemory<byte>?, Serdes.ReadOnlyMemorySerde, ReadOnlyMemorySerializer, ReadOnlyMemoryDeserializer>(
+            Serdes.ReadOnlyMemory);
         AssertNewSerde<Guid?, Serdes.UUIDSerde, UUIDSerializer, UUIDDeserializer>(Serdes.UUID);
         AssertNewSerde<bool?, Serdes.BooleanSerde, BooleanSerializer, BooleanDeserializer>(Serdes.Boolean);
         AssertNewSerde<object?, Serdes.VoidSerde, VoidSerializer, VoidDeserializer>(Serdes.Void);
@@ -572,7 +572,7 @@ public sealed class SerializationTests
     public async Task AsyncMockProducer_AKeylessRecordOfALongSerde_SendsANullKey()
     {
         AsyncMockProducer<long?, string> producer =
-            new AsyncMockProducer<long?, string>(Serdes.Long().Serializer(), Serdes.String().Serializer());
+            new AsyncMockProducer<long?, string>(new AsyncLongSerializer(), new AsyncStringSerializer());
         try
         {
             await (await producer.Send(new ProducerRecord<long?, string>(Topic, value: "keyless"))).Get();
@@ -587,11 +587,11 @@ public sealed class SerializationTests
     }
 
     [Fact]
-    public void MockProducer_AByteBufferSerde_SendsANullKeyForNullOnly()
+    public void MockProducer_AReadOnlyMemorySerde_SendsANullKeyForNullOnly()
     {
         byte[] larger = Encoding.UTF8.GetBytes("--my string");
         using MockProducer<ReadOnlyMemory<byte>?, string> producer = new MockProducer<ReadOnlyMemory<byte>?, string>(
-            Serdes.ByteBuffer().Serializer(), Serdes.String().Serializer());
+            Serdes.ReadOnlyMemory().Serializer(), Serdes.String().Serializer());
 
         producer.Send(new ProducerRecord<ReadOnlyMemory<byte>?, string>(Topic, value: "null key")).Get();
         producer.Send(new ProducerRecord<ReadOnlyMemory<byte>?, string>(Topic, value: "empty key", key: ReadOnlyMemory<byte>.Empty)).Get();
@@ -602,12 +602,12 @@ public sealed class SerializationTests
     }
 
     [Fact]
-    public void MockConsumer_AByteBufferSerde_ReadsCopiedBytes_AndNullOnlyForAnAbsentKeyOrValue()
+    public void MockConsumer_AReadOnlyMemorySerde_ReadsTheBatchsOwnBytes_AndNullOnlyForAnAbsentKeyOrValue()
     {
         byte[] value = Encoding.UTF8.GetBytes("my string");
         MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
             new MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
-                Serdes.ByteBuffer().Deserializer(), Serdes.ByteBuffer().Deserializer());
+                Serdes.ReadOnlyMemory().Deserializer(), Serdes.ReadOnlyMemory().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), 0L);
@@ -623,8 +623,7 @@ public sealed class SerializationTests
         Assert.False(polled[0].Key().HasValue);
         ReadOnlyMemory<byte> read = polled[0].Value()!.Value;
         Assert.Equal(value, read.ToArray());
-        Assert.True(MemoryMarshal.TryGetArray(read, out ArraySegment<byte> segment));
-        Assert.NotSame(value, segment.Array);
+        Assert.False(MemoryMarshal.TryGetArray(read, out _));
         Assert.True(polled[1].Key().HasValue);
         Assert.Equal(0, polled[1].Key()!.Value.Length);
         Assert.False(polled[1].Value().HasValue);
@@ -651,7 +650,7 @@ public sealed class SerializationTests
     public async Task AsyncMockConsumer_ATombstoneOfALongSerde_ReadsANullValue()
     {
         AsyncMockConsumer<string, long?> consumer =
-            new AsyncMockConsumer<string, long?>(Serdes.String().Deserializer(), Serdes.Long().Deserializer());
+            new AsyncMockConsumer<string, long?>(new AsyncStringDeserializer(), new AsyncLongDeserializer());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
@@ -694,7 +693,7 @@ public sealed class SerializationTests
     public async Task AsyncMockConsumer_AValueForAVoidDeserializer_ThrowsRecordDeserializationException()
     {
         AsyncMockConsumer<string, object?> consumer =
-            new AsyncMockConsumer<string, object?>(Serdes.String().Deserializer(), Serdes.Void().Deserializer());
+            new AsyncMockConsumer<string, object?>(new AsyncStringDeserializer(), new AsyncVoidDeserializer());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
@@ -723,7 +722,7 @@ public sealed class SerializationTests
         DisposableDeserializer deserializer = new DisposableDeserializer(new List<string>());
         ISerde<string> serde = Serdes.SerdeFrom(serializer, deserializer);
 
-        KafkaProducer<string, string> producer = new KafkaProducer<string, string>(
+        KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(
             new Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:1" },
             Serdes.String().Serializer(),
             serde.Serializer());
@@ -732,7 +731,7 @@ public sealed class SerializationTests
         Assert.Equal(1, serializer.Disposals);
         Assert.Equal(0, deserializer.Disposals);
 
-        KafkaConsumer<string, string> consumer = new KafkaConsumer<string, string>(
+        KafkaConsumer<string, string> consumer = KafkaConsumer<string, string>.Create(
             new Dictionary<string, object?>
             {
                 ["bootstrap.servers"] = "localhost:1",

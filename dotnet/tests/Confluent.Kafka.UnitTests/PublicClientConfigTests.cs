@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
@@ -124,17 +125,17 @@ public sealed class PublicClientConfigTests
     [InlineData(
         "AdminClientConfigTest.testInvalidMetadataRecoveryStrategy", "metadata.recovery.strategy", "abc",
         "String must be one of (case insensitive): REBOOTSTRAP, NONE")]
-    public void JavaConfigClasses_AConfigurationTheClientRejects(string test, string key, string value, string message)
+    public async Task JavaConfigClasses_AConfigurationTheClientRejects(string test, string key, string value, string message)
     {
         string client = ClientOfJavaTest(test);
 
-        Assert.Equal(Invalid(key, value, message), Refusal(client, Configs(client, (key, value))).Message);
+        Assert.Equal(Invalid(key, value, message), (await Refusal(client, Configs(client, (key, value)))).Message);
     }
 
     [Fact]
-    public void ProducerConfigTest_testValidBufferMemoryAllocationStrategy()
+    public async Task ProducerConfigTest_testValidBufferMemoryAllocationStrategy()
     {
-        Constructs(
+        await Constructs(
             KafkaProducerClient,
             Configs(
                 KafkaProducerClient,
@@ -146,7 +147,7 @@ public sealed class PublicClientConfigTests
     [InlineData(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, 1000)]
     [InlineData(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 30000)]
     [InlineData(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, "RoundRobinAssignor")]
-    public void ConsumerConfigTest_testUnsupportedConfigsWithConsumerGroupProtocol(string key, object value)
+    public async Task ConsumerConfigTest_testUnsupportedConfigsWithConsumerGroupProtocol(string key, object value)
     {
         Dictionary<string, object?> configs = Configs(
             KafkaConsumerClient,
@@ -156,11 +157,11 @@ public sealed class PublicClientConfigTests
         Assert.Equal(
             key + " cannot be set when " + ConsumerConfig.GROUP_PROTOCOL_CONFIG + "=" +
             GroupProtocol.CONSUMER.ToString(),
-            Refusal(KafkaConsumerClient, configs).Message);
+            (await Refusal(KafkaConsumerClient, configs)).Message);
     }
 
     [Fact]
-    public void ProducerConfigTest_testUpperboundCheckOfEnableIdempotence()
+    public async Task ProducerConfigTest_testUpperboundCheckOfEnableIdempotence()
     {
         Dictionary<string, object?> configs = Configs(
             KafkaProducerClient, (ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 6));
@@ -168,14 +169,14 @@ public sealed class PublicClientConfigTests
         Assert.Equal(
             "To use the idempotent producer, " + ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION +
             " must be set to at most 5. Current value is 6.",
-            Refusal(KafkaProducerClient, configs).Message);
+            (await Refusal(KafkaProducerClient, configs)).Message);
 
         configs[ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION] = 5;
-        Constructs(KafkaProducerClient, configs);
+        await Constructs(KafkaProducerClient, configs);
     }
 
     [Fact]
-    public void ProducerConfigTest_testTwoPhaseCommitIncompatibleWithTransactionTimeout()
+    public async Task ProducerConfigTest_testTwoPhaseCommitIncompatibleWithTransactionTimeout()
     {
         Dictionary<string, object?> configs = Configs(
             KafkaProducerClient,
@@ -188,24 +189,24 @@ public sealed class PublicClientConfigTests
             "Cannot set " + ProducerConfig.TRANSACTION_TIMEOUT_CONFIG + " when " +
             ProducerConfig.TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG + " is set to true. " +
             "Transactions will not expire with two-phase commit enabled.",
-            Refusal(KafkaProducerClient, configs).Message);
+            (await Refusal(KafkaProducerClient, configs)).Message);
 
         configs.Remove(ProducerConfig.TRANSACTION_TIMEOUT_CONFIG);
-        Constructs(KafkaProducerClient, configs);
+        await Constructs(KafkaProducerClient, configs);
 
         configs[ProducerConfig.TRANSACTION_TIMEOUT_CONFIG] = 60000;
         configs[ProducerConfig.TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG] = false;
-        Constructs(KafkaProducerClient, configs);
+        await Constructs(KafkaProducerClient, configs);
     }
 
     [Theory]
     [InlineData("KafkaProducerTest.testOsDefaultSocketBufferSizes")]
     [InlineData("KafkaConsumerTest.testOsDefaultSocketBufferSizes")]
-    public void JavaClients_TheOsDefaultSocketBufferSizesAreAccepted(string test)
+    public async Task JavaClients_TheOsDefaultSocketBufferSizesAreAccepted(string test)
     {
         string client = ClientOfJavaTest(test);
 
-        Constructs(client, Configs(client, ("send.buffer.bytes", -1), ("receive.buffer.bytes", -1)));
+        await Constructs(client, Configs(client, ("send.buffer.bytes", -1), ("receive.buffer.bytes", -1)));
     }
 
     [Theory]
@@ -213,17 +214,17 @@ public sealed class PublicClientConfigTests
     [InlineData("KafkaProducerTest.testInvalidSocketReceiveBufferSize", "receive.buffer.bytes")]
     [InlineData("KafkaConsumerTest.testInvalidSocketSendBufferSize", "send.buffer.bytes")]
     [InlineData("KafkaConsumerTest.testInvalidSocketReceiveBufferSize", "receive.buffer.bytes")]
-    public void JavaClients_AnInvalidSocketBufferSizeIsRefused(string test, string key)
+    public async Task JavaClients_AnInvalidSocketBufferSizeIsRefused(string test, string key)
     {
         string client = ClientOfJavaTest(test);
 
         Assert.Equal(
             Invalid(key, "-2", "Value must be at least -1"),
-            Refusal(client, Configs(client, (key, -2))).Message);
+            (await Refusal(client, Configs(client, (key, -2)))).Message);
     }
 
     [Fact]
-    public void KafkaProducerTest_testDeliveryTimeoutAndLingerMsConfig()
+    public async Task KafkaProducerTest_testDeliveryTimeoutAndLingerMsConfig()
     {
         Dictionary<string, object?> configs = Configs(
             KafkaProducerClient,
@@ -232,7 +233,7 @@ public sealed class PublicClientConfigTests
             ("linger.ms", 1000),
             ("request.timeout.ms", 1));
 
-        KafkaException failure = Assert.Throws<KafkaException>(() => Constructs(KafkaProducerClient, configs));
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(async () => await Constructs(KafkaProducerClient, configs));
         Assert.Equal("Failed to construct kafka producer", failure.Message);
         Assert.Equal(UnknownServerErrorCode, failure.Code);
         ConfigException cause = Assert.IsType<ConfigException>(failure.InnerException);
@@ -242,16 +243,16 @@ public sealed class PublicClientConfigTests
         Assert.Equal(ConfigErrorCode, cause.Code);
 
         configs["linger.ms"] = 999;
-        Constructs(KafkaProducerClient, configs);
+        await Constructs(KafkaProducerClient, configs);
     }
 
     [Theory]
     [InlineData(KafkaAdminClientClient)]
     [InlineData(AsyncKafkaAdminClientClient)]
-    public void KafkaAdminClientTest_testDefaultApiTimeoutAndRequestTimeoutConflicts(string client)
+    public async Task KafkaAdminClientTest_testDefaultApiTimeoutAndRequestTimeoutConflicts(string client)
     {
-        KafkaException failure = Assert.Throws<KafkaException>(
-            () => Constructs(client, Configs(client, ("default.api.timeout.ms", 500))));
+        KafkaException failure = await Assert.ThrowsAsync<KafkaException>(
+            async () => await Constructs(client, Configs(client, ("default.api.timeout.ms", 500))));
 
         Assert.Equal("Failed to create new KafkaAdminClient", failure.Message);
         Assert.Equal(UnknownServerErrorCode, failure.Code);
@@ -264,13 +265,13 @@ public sealed class PublicClientConfigTests
 
     [Theory]
     [MemberData(nameof(AllClients))]
-    public void KafkaProducerTest_testConstructorWithNotStringKey_ANullKeyIsRefusedByEveryClient(string client)
+    public async Task KafkaProducerTest_testConstructorWithNotStringKey_ANullKeyIsRefusedByEveryClient(string client)
     {
         var configs = new ClientConfigsTests.Entries(("bootstrap.servers", Unreachable), (null, "value"));
 
         Assert.Equal(
             "Invalid value value for configuration null: Key must be a string.",
-            Refusal(client, configs).Message);
+            (await Refusal(client, configs)).Message);
     }
 
     [Theory]
@@ -284,54 +285,54 @@ public sealed class PublicClientConfigTests
     [InlineData("enable.idempotence", "hello", "Expected value to be either true or false")]
     [InlineData("enable.idempotence", "truee", "Expected value to be either true or false")]
     [InlineData("enable.idempotence", "fals", "Expected value to be either true or false")]
-    public void ConfigDefTest_testBadInputs_TheCoreRefusesTheText(string key, string text, string message)
+    public async Task ConfigDefTest_testBadInputs_TheCoreRefusesTheText(string key, string text, string message)
     {
         Assert.Equal(
             Invalid(key, text, message),
-            Refusal(KafkaProducerClient, Configs(KafkaProducerClient, (key, text))).Message);
+            (await Refusal(KafkaProducerClient, Configs(KafkaProducerClient, (key, text)))).Message);
     }
 
     [Fact]
-    public void ConfigDefTest_testValidateCannotParse()
+    public async Task ConfigDefTest_testValidateCannotParse()
     {
         Assert.Equal(
             "Invalid value non_integer for configuration batch.size: Not a number of type INT",
-            Refusal(KafkaProducerClient, Configs(KafkaProducerClient, ("batch.size", "non_integer"))).Message);
+            (await Refusal(KafkaProducerClient, Configs(KafkaProducerClient, ("batch.size", "non_integer")))).Message);
     }
 
     [Fact]
-    public void TestConfig_test_bad_number_text_reaches_the_core()
+    public async Task TestConfig_test_bad_number_text_reaches_the_core()
     {
         Assert.Equal(
             "Invalid value many for configuration max.poll.records: Not a number of type INT",
-            Refusal(
+            (await Refusal(
                 KafkaConsumerClient,
-                Configs(KafkaConsumerClient, ("group.id", "g"), ("max.poll.records", "many"))).Message);
+                Configs(KafkaConsumerClient, ("group.id", "g"), ("max.poll.records", "many")))).Message);
         Assert.Equal(
             "Invalid value abc for configuration linger.ms: Not a number of type LONG",
-            Refusal(KafkaProducerClient, Configs(KafkaProducerClient, ("linger.ms", "abc"))).Message);
+            (await Refusal(KafkaProducerClient, Configs(KafkaProducerClient, ("linger.ms", "abc")))).Message);
     }
 
     [Fact]
-    public void TestConfig_test_unsupported_sasl_mechanism_is_rejected_by_the_core()
+    public async Task TestConfig_test_unsupported_sasl_mechanism_is_rejected_by_the_core()
     {
         Assert.Equal(
             "Invalid value SCRAM-SHA-256 for configuration sasl.mechanism: only PLAIN is supported by this client",
-            Refusal(
+            (await Refusal(
                 KafkaProducerClient,
                 Configs(
                     KafkaProducerClient,
                     ("security.protocol", "SASL_PLAINTEXT"),
-                    ("sasl.mechanism", "SCRAM-SHA-256"))).Message);
+                    ("sasl.mechanism", "SCRAM-SHA-256")))).Message);
         Assert.Equal(
             "Invalid value GSSAPI for configuration sasl.mechanism: only PLAIN is supported by this client",
-            Refusal(KafkaProducerClient, Configs(KafkaProducerClient, ("security.protocol", "SASL_SSL"))).Message);
+            (await Refusal(KafkaProducerClient, Configs(KafkaProducerClient, ("security.protocol", "SASL_SSL")))).Message);
     }
 
     [Theory]
     [InlineData(KafkaProducerClient)]
     [InlineData(KafkaConsumerClient)]
-    public void TestConfig_test_interceptor_and_partitioner_keys_reach_the_core(string client)
+    public async Task TestConfig_test_interceptor_and_partitioner_keys_reach_the_core(string client)
     {
         var keys = new Dictionary<string, object?>
         {
@@ -343,11 +344,11 @@ public sealed class PublicClientConfigTests
         Assert.Equal(
             keys.Select(pair => new KeyValuePair<string, string>(pair.Key, (string)pair.Value!)),
             ClientConfigs.Prepare(keys, Kind(client)));
-        Constructs(client, Configs(client, keys.Select(pair => (pair.Key, pair.Value)).ToArray()));
+        await Constructs(client, Configs(client, keys.Select(pair => (pair.Key, pair.Value)).ToArray()));
     }
 
     [Fact]
-    public void TestConfig_test_old_client_keys_are_accepted()
+    public async Task TestConfig_test_old_client_keys_are_accepted()
     {
         Dictionary<string, object?> configs = Configs(
             KafkaProducerClient,
@@ -360,12 +361,12 @@ public sealed class PublicClientConfigTests
             ClientConfigs.Prepare(configs, ClientKind.Producer)
                 .Select(pair => pair.Key)
                 .OrderBy(key => key, StringComparer.Ordinal));
-        Constructs(KafkaProducerClient, configs);
+        await Constructs(KafkaProducerClient, configs);
     }
 
     [Theory]
     [MemberData(nameof(AllClients))]
-    public void TestConfigMatrix_test_each_client_takes_a_typed_key_of_every_type(string client)
+    public async Task TestConfigMatrix_test_each_client_takes_a_typed_key_of_every_type(string client)
     {
         Dictionary<string, object?> configs = Configs(
             client,
@@ -393,7 +394,7 @@ public sealed class PublicClientConfigTests
                 break;
         }
 
-        Constructs(client, configs);
+        await Constructs(client, configs);
     }
 
     [Theory]
@@ -403,26 +404,26 @@ public sealed class PublicClientConfigTests
     [InlineData(AsyncKafkaConsumerClient, "max.poll.records", NullMaxPollRecords)]
     [InlineData(KafkaAdminClientClient, "bootstrap.servers", NullBootstrapServers)]
     [InlineData(AsyncKafkaAdminClientClient, "bootstrap.servers", NullBootstrapServers)]
-    public void TestConfigNull_test_the_clients_refuse_a_null_their_validator_rejects(
+    public async Task TestConfigNull_test_the_clients_refuse_a_null_their_validator_rejects(
         string client, string key, string message)
     {
-        Assert.Equal(message, Refusal(client, Configs(client, (key, null))).Message);
+        Assert.Equal(message, (await Refusal(client, Configs(client, (key, null)))).Message);
     }
 
     [Theory]
     [InlineData(KafkaAdminClientClient)]
     [InlineData(AsyncKafkaAdminClientClient)]
-    public void TestAdminClient_test_config_values_checked_by_admin_client_config(string client)
+    public async Task TestAdminClient_test_config_values_checked_by_admin_client_config(string client)
     {
         Assert.Equal(
             "Invalid value 1.5 for configuration request.timeout.ms: " +
             "Expected value to be a 32-bit integer, but it was a System.Double",
-            Refusal(client, Configs(client, ("request.timeout.ms", 1.5))).Message);
+            (await Refusal(client, Configs(client, ("request.timeout.ms", 1.5)))).Message);
         Assert.Equal(
             "Invalid value true for configuration retries: " +
             "Expected value to be a 32-bit integer, but it was a System.Boolean",
-            Refusal(client, Configs(client, ("retries", true))).Message);
-        Constructs(
+            (await Refusal(client, Configs(client, ("retries", true)))).Message);
+        await Constructs(
             client,
             new Dictionary<string, object?>
             {
@@ -431,31 +432,31 @@ public sealed class PublicClientConfigTests
             });
         Assert.Equal(
             "Invalid value 5 for configuration bootstrap.controllers: Expected a comma separated list.",
-            Refusal(client, new Dictionary<string, object?> { ["bootstrap.controllers"] = 5 }).Message);
+            (await Refusal(client, new Dictionary<string, object?> { ["bootstrap.controllers"] = 5 })).Message);
     }
 
     [Fact]
-    public void TestProducerFamily_test_kafka_producer_applies_javas_config_validators()
+    public async Task TestProducerFamily_test_kafka_producer_applies_javas_config_validators()
     {
         Assert.Equal(
             "Invalid value -1 for configuration batch.size: Value must be at least 0",
-            Refusal(KafkaProducerClient, Configs(KafkaProducerClient, ("batch.size", -1))).Message);
+            (await Refusal(KafkaProducerClient, Configs(KafkaProducerClient, ("batch.size", -1)))).Message);
     }
 
     [Theory]
     [MemberData(nameof(AllClients))]
-    public void TestNoneIsNullProducerCommon_test_clients_null_configs(string client)
+    public async Task TestNoneIsNullProducerCommon_test_clients_null_configs(string client)
     {
         string parameter = client is KafkaAdminClientClient or AsyncKafkaAdminClientClient ? "conf" : "configs";
-        Assert.Equal(parameter, Assert.Throws<ArgumentNullException>(() => Create(client, null!)).ParamName);
+        Assert.Equal(parameter, (await Assert.ThrowsAsync<ArgumentNullException>(async () => await Create(client, null!))).ParamName);
     }
 
     [Theory]
     [InlineData(KafkaConsumerClient)]
     [InlineData(AsyncKafkaConsumerClient)]
-    public void ANullGroupId_IsNotDefined_GroupMetadataThrowsInvalidGroupId(string client)
+    public async Task ANullGroupId_IsNotDefined_GroupMetadataThrowsInvalidGroupId(string client)
     {
-        var consumer = (IConsumerCommon)Create(client, Configs(client, ("group.id", null)));
+        var consumer = (IConsumerCommon)await Create(client, Configs(client, ("group.id", null)));
         try
         {
             InvalidGroupIdException failure = Assert.Throws<InvalidGroupIdException>(() => consumer.GroupMetadata());
@@ -476,12 +477,12 @@ public sealed class PublicClientConfigTests
     [InlineData(AsyncKafkaConsumerClient, "request.timeout.ms", "INT")]
     [InlineData(KafkaAdminClientClient, "request.timeout.ms", "INT")]
     [InlineData(AsyncKafkaAdminClientClient, "request.timeout.ms", "INT")]
-    public void ACoreConfigError_IsAConfigException_CaughtAsAKafkaException(string client, string key, string type)
+    public async Task ACoreConfigError_IsAConfigException_CaughtAsAKafkaException(string client, string key, string type)
     {
         KafkaException? caught = null;
         try
         {
-            Constructs(client, Configs(client, (key, "abc")));
+            await Constructs(client, Configs(client, (key, "abc")));
         }
         catch (KafkaException failure)
         {
@@ -495,7 +496,7 @@ public sealed class PublicClientConfigTests
 
     [Theory]
     [MemberData(nameof(AllClients))]
-    public void SerializerKeys_TheOwnRolesAreNotChecked_TheOtherRolesReachTheCoreAsUnknownKeys(string client)
+    public async Task SerializerKeys_TheOwnRolesAreNotChecked_TheOtherRolesReachTheCoreAsUnknownKeys(string client)
     {
         Dictionary<string, object?> configs = Configs(client);
         foreach (string key in s_serializerKeys.Concat(s_deserializerKeys))
@@ -508,23 +509,23 @@ public sealed class PublicClientConfigTests
         configs["serializer.encoding"] = null;
         configs["deserializer.encoding"] = typeof(string);
 
-        Constructs(client, configs);
+        await Constructs(client, configs);
     }
 
     [Theory]
     [MemberData(nameof(AllClients))]
-    public void ANulInAConfigurationKey_IsRejectedBeforeTheClientIsCreated(string client)
+    public async Task ANulInAConfigurationKey_IsRejectedBeforeTheClientIsCreated(string client)
     {
-        ArgumentException rejected = NulRefusal(client, Configs(client, ("client.id\0", "x")));
+        ArgumentException rejected = await NulRefusal(client, Configs(client, ("client.id\0", "x")));
 
         Assert.Equal(new ArgumentException(InvalidConfigKey, ConfigsParameter(client)).Message, rejected.Message);
     }
 
     [Theory]
     [MemberData(nameof(AllClients))]
-    public void ANulInAConfigurationValue_IsRejectedWithoutTheValue(string client)
+    public async Task ANulInAConfigurationValue_IsRejectedWithoutTheValue(string client)
     {
-        ArgumentException rejected = NulRefusal(client, Configs(client, ("ssl.key.password", "s3cret\0tail")));
+        ArgumentException rejected = await NulRefusal(client, Configs(client, ("ssl.key.password", "s3cret\0tail")));
 
         Assert.Equal(new ArgumentException(InvalidConfigValue, ConfigsParameter(client)).Message, rejected.Message);
         Assert.DoesNotContain("s3cret", rejected.Message, StringComparison.Ordinal);
@@ -532,9 +533,9 @@ public sealed class PublicClientConfigTests
 
     [Theory]
     [MemberData(nameof(AllClients))]
-    public void ANulSuffixedKey_CannotReplaceTheKeyItSpells(string client)
+    public async Task ANulSuffixedKey_CannotReplaceTheKeyItSpells(string client)
     {
-        ArgumentException rejected = NulRefusal(
+        ArgumentException rejected = await NulRefusal(
             client, Configs(client, ("security.protocol", "SASL_SSL"), ("security.protocol\0", "PLAINTEXT")));
 
         Assert.Equal(new ArgumentException(InvalidConfigKey, ConfigsParameter(client)).Message, rejected.Message);
@@ -542,25 +543,25 @@ public sealed class PublicClientConfigTests
 
     [Theory]
     [MemberData(nameof(AllClients))]
-    public void AValueOfTheWrongType_IsRefusedBeforeANulInAnotherKey(string client)
+    public async Task AValueOfTheWrongType_IsRefusedBeforeANulInAnotherKey(string client)
     {
         Assert.Equal(
             Invalid("client.id", "System.Object", "Expected value to be a string, but it was a System.Object"),
-            Refusal(client, Configs(client, ("x\0", "y"), ("client.id", new object()))).Message);
+            (await Refusal(client, Configs(client, ("x\0", "y"), ("client.id", new object())))).Message);
     }
 
     [Theory]
     [MemberData(nameof(AllClients))]
-    public void APasswordOfAnotherType_IsRefusedWithoutShowingIt(string client)
+    public async Task APasswordOfAnotherType_IsRefusedWithoutShowingIt(string client)
     {
         Assert.Equal(
             Invalid("ssl.key.password", "[hidden]", "Expected value to be a string, but it was a System.Char[]"),
-            Refusal(client, Configs(client, ("ssl.key.password", "s3cret".ToCharArray()))).Message);
+            (await Refusal(client, Configs(client, ("ssl.key.password", "s3cret".ToCharArray())))).Message);
     }
 
-    private static ArgumentException NulRefusal(string client, IReadOnlyDictionary<string, object?> configs)
+    private static async Task<ArgumentException> NulRefusal(string client, IReadOnlyDictionary<string, object?> configs)
     {
-        ArgumentException rejected = Assert.Throws<ArgumentException>(() => Constructs(client, configs));
+        ArgumentException rejected = await Assert.ThrowsAsync<ArgumentException>(async () => await Constructs(client, configs));
         Assert.Equal(ConfigsParameter(client), rejected.ParamName);
         return rejected;
     }
@@ -598,23 +599,23 @@ public sealed class PublicClientConfigTests
         return configs;
     }
 
-    private static IDisposable Create(string client, IReadOnlyDictionary<string, object?> configs) => client switch
+    private static async Task<IDisposable> Create(string client, IReadOnlyDictionary<string, object?> configs) => client switch
     {
-        KafkaProducerClient => new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
-        AsyncKafkaProducerClient => new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
-        KafkaConsumerClient => new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
-        AsyncKafkaConsumerClient => new AsyncKafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        KafkaProducerClient => KafkaProducer<byte[], byte[]>.Create(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()),
+        AsyncKafkaProducerClient => await AsyncKafkaProducer<byte[], byte[]>.Create(configs, new AsyncByteArraySerializer(), new AsyncByteArraySerializer()),
+        KafkaConsumerClient => KafkaConsumer<byte[], byte[]>.Create(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
+        AsyncKafkaConsumerClient => await AsyncKafkaConsumer<byte[], byte[]>.Create(configs, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
         KafkaAdminClientClient => IAdmin.Create(configs),
         AsyncKafkaAdminClientClient => IAsyncAdmin.Create(configs),
         _ => throw new ArgumentOutOfRangeException(nameof(client), client, null),
     };
 
-    private static void Constructs(string client, IReadOnlyDictionary<string, object?> configs) =>
-        TestTimeout.Dispose(Create(client, configs), s_deadline);
+    private static async Task Constructs(string client, IReadOnlyDictionary<string, object?> configs) =>
+        TestTimeout.Dispose(await Create(client, configs), s_deadline);
 
-    private static ConfigException Refusal(string client, IReadOnlyDictionary<string, object?> configs)
+    private static async Task<ConfigException> Refusal(string client, IReadOnlyDictionary<string, object?> configs)
     {
-        ConfigException failure = Assert.Throws<ConfigException>(() => Constructs(client, configs));
+        ConfigException failure = await Assert.ThrowsAsync<ConfigException>(async () => await Constructs(client, configs));
         Assert.Equal(ConfigErrorCode, failure.Code);
         Assert.Null(failure.InnerException);
         return failure;

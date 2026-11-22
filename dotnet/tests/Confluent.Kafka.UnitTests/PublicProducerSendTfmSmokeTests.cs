@@ -38,7 +38,7 @@ public sealed class PublicProducerSendTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendAutoComplete_RoundTrips()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         RecordMetadata metadata = default!;
@@ -55,7 +55,7 @@ public sealed class PublicProducerSendTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendManualComplete_RoundTrips()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = producer.Send(
@@ -71,7 +71,7 @@ public sealed class PublicProducerSendTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendManualError_RoundTrips()
     {
-        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = producer.Send(
@@ -85,10 +85,10 @@ public sealed class PublicProducerSendTfmSmokeTests
     public async Task RealProducer_CreateDisposeAsync_RoundTrips()
     {
         // A real producer is created and disposed but sends nothing: without a broker a send would not deliver.
-        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
+        AsyncKafkaProducer<byte[], byte[]> producer = await AsyncKafkaProducer<byte[], byte[]>.Create(
             new System.Collections.Generic.Dictionary<string, object?> { ["bootstrap.servers"] = "localhost:9092" },
-            Serdes.ByteArray().Serializer(),
-            Serdes.ByteArray().Serializer());
+            new AsyncByteArraySerializer(),
+            new AsyncByteArraySerializer());
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
     }

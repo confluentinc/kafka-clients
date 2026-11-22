@@ -80,7 +80,7 @@ public sealed class PublicConsumerSerdeThrowTests
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
         AsyncMockConsumer<byte[], int> consumer =
-            new AsyncMockConsumer<byte[], int>(Serdes.ByteArray().Deserializer(), valueDeserializer);
+            new AsyncMockConsumer<byte[], int>(new AsyncByteArrayDeserializer(), valueDeserializer.AsAsync());
         try
         {
             await TestTimeout.Run(
@@ -110,7 +110,7 @@ public sealed class PublicConsumerSerdeThrowTests
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
         AsyncMockConsumer<byte[], int> consumer =
-            new AsyncMockConsumer<byte[], int>(Serdes.ByteArray().Deserializer(), valueDeserializer);
+            new AsyncMockConsumer<byte[], int>(new AsyncByteArrayDeserializer(), valueDeserializer.AsAsync());
         try
         {
             await TestTimeout.Run(

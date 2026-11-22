@@ -43,8 +43,8 @@ namespace Confluent.Kafka.Consumer;
 /// consumer is in <see cref="IConsumerRebalanceListener"/>.
 /// </para>
 /// <para>
-/// A <see cref="KafkaConsumer{TKey, TValue}"/> disposes the deserializers it was given when it closes, as its
-/// constructor says; a <see cref="MockConsumer{TKey, TValue}"/> does not.
+/// A <see cref="KafkaConsumer{TKey, TValue}"/> disposes its deserializers, given or built from its configuration,
+/// when it closes, as its <c>Create</c> says; a <see cref="MockConsumer{TKey, TValue}"/> does not.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
@@ -54,7 +54,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <summary>
     /// Polls for records (Java <c>poll(Duration)</c>). An empty poll returns an empty
     /// <see cref="ConsumerRecords{TKey, TValue}"/>, not <see langword="null"/>. The records own copies of their
-    /// bytes.
+    /// bytes, except a key or value that a deserializer returned as a memory over the batch's own bytes, as
+    /// <see cref="ConsumerRecord{TKey, TValue}"/> describes.
     /// </summary>
     /// <param name="timeout">The maximum time to wait (must be non-negative).</param>
     /// <returns>The records polled, as an owned <see cref="ConsumerRecords{TKey, TValue}"/>.</returns>

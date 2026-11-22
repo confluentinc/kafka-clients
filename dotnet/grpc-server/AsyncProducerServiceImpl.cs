@@ -73,7 +73,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         }
     }
 
-    public override Task<Proto.CreateProducerResponse> CreateProducer(Proto.CreateProducerRequest request, ServerCallContext context)
+    public override async Task<Proto.CreateProducerResponse> CreateProducer(Proto.CreateProducerRequest request, ServerCallContext context)
     {
         IAsyncProducer<byte[], byte[]> producer;
         try
@@ -81,21 +81,23 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             // An empty or all-blank config selects an AsyncMockProducer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
             }
             else
             {
-                producer = new AsyncKafkaProducer<byte[], byte[]>(Translate.ConfigsFromProto(request.Config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                producer = await AsyncKafkaProducer<byte[], byte[]>
+                    .Create(Translate.ConfigsFromProto(request.Config), new AsyncByteArraySerializer(), new AsyncByteArraySerializer())
+                    .ConfigureAwait(false);
             }
         }
         catch (Exception ex)
         {
-            return Task.FromResult(new Proto.CreateProducerResponse { ProducerId = 0, Error = Translate.ToProto(ex) });
+            return new Proto.CreateProducerResponse { ProducerId = 0, Error = Translate.ToProto(ex) };
         }
 
         ulong id = (ulong)Interlocked.Increment(ref _nextId);
         _producers[id] = producer;
-        return Task.FromResult(new Proto.CreateProducerResponse { ProducerId = id });
+        return new Proto.CreateProducerResponse { ProducerId = id };
     }
 
     public override async Task<Proto.SendResponse> Send(Proto.SendRequest request, ServerCallContext context)

@@ -18,6 +18,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -99,7 +100,7 @@ internal sealed class V3SyncProducerBackend : IProducerBackend
 
     internal V3SyncProducerBackend(IReadOnlyDictionary<string, string> config)
     {
-        _producer = new KafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        _producer = KafkaProducer<byte[], byte[]>.Create(V3Config.ClientConfigs(config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
     }
 
     public PerfSendHandle Send(string topic, byte[]? key, byte[]? value) =>
@@ -126,10 +127,13 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 {
     private readonly AsyncKafkaProducer<byte[], byte[]> _producer;
 
-    internal V3AsyncProducerBackend(IReadOnlyDictionary<string, string> config)
-    {
-        _producer = new AsyncKafkaProducer<byte[], byte[]>(V3Config.ClientConfigs(config), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
-    }
+    private V3AsyncProducerBackend(AsyncKafkaProducer<byte[], byte[]> producer) => _producer = producer;
+
+    internal static async Task<V3AsyncProducerBackend> Create(IReadOnlyDictionary<string, string> config) =>
+        new V3AsyncProducerBackend(
+            await AsyncKafkaProducer<byte[], byte[]>
+                .Create(V3Config.ClientConfigs(config), new AsyncByteArraySerializer(), new AsyncByteArraySerializer())
+                .ConfigureAwait(false));
 
     public ValueTask<Task<PerfRecordMetadata>> Send(string topic, byte[]? key, byte[]? value)
     {
@@ -179,30 +183,39 @@ internal sealed class V3AsyncProducerBackend : IAsyncProducerBackend
 }
 
 /// <summary>
-/// Decodes a key or value to its length from the span over the fetched batch, copying nothing, as Python's Rust-core
-/// arm reads memoryviews over the batch. The binding passes a null key or value to no deserializer, so it reads as 0.
+/// What both consumer arms read from a record: its key and value are memories over the fetched batch, copying
+/// nothing, as Python's Rust-core arm reads memoryviews over the batch. A null key or value counts as 0 bytes.
+/// Under <c>DO_VERIFY=True</c> the verifier reads the bytes of both in place and checks the partition.
 /// </summary>
-internal sealed class ByteCountDeserializer : IDeserializer<int>
+internal static class PolledBytes
 {
-    internal static readonly ByteCountDeserializer Instance = new ByteCountDeserializer();
-
-    public int Deserialize(string topic, ReadOnlySpan<byte> data) => data.Length;
+    internal static PolledRecord Read(ConsumerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> record, PolledRecordVerifier? verifier)
+    {
+        ReadOnlyMemory<byte> key = record.Key().GetValueOrDefault();
+        ReadOnlyMemory<byte> value = record.Value().GetValueOrDefault();
+        verifier?.Verify(record.Partition(), key.Span, value.Span);
+        return new PolledRecord(record.Timestamp(), key.Length + value.Length);
+    }
 }
 
 /// <summary>
 /// Adapts our binding's <see cref="KafkaConsumer{TKey, TValue}"/> to the sync <see cref="IConsumerBackend"/>,
-/// normalizing each polled record to <see cref="PolledRecord"/> (timestamp + value/key length).
+/// normalizing each polled record to <see cref="PolledRecord"/> (timestamp + value/key length). Keys and values
+/// come from the built-in <see cref="ReadOnlyMemoryDeserializer"/>.
 /// </summary>
 internal sealed class V3SyncConsumerBackend : IConsumerBackend
 {
-    private readonly KafkaConsumer<int, int> _consumer;
+    private readonly KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> _consumer;
     private readonly TimeSpan _timeout;
+    private readonly PolledRecordVerifier? _verifier;
 
-    internal V3SyncConsumerBackend(IReadOnlyDictionary<string, string> config, int pollTimeoutMs)
+    internal V3SyncConsumerBackend(
+        IReadOnlyDictionary<string, string> config, int pollTimeoutMs, PolledRecordVerifier? verifier)
     {
-        _consumer = new KafkaConsumer<int, int>(
-            V3Config.ClientConfigs(config), ByteCountDeserializer.Instance, ByteCountDeserializer.Instance);
+        _consumer = KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
+            V3Config.ClientConfigs(config), new ReadOnlyMemoryDeserializer(), new ReadOnlyMemoryDeserializer());
         _timeout = TimeSpan.FromMilliseconds(pollTimeoutMs);
+        _verifier = verifier;
     }
 
     public void Subscribe(string topic) => _consumer.Subscribe(new[] { topic });
@@ -221,11 +234,11 @@ internal sealed class V3SyncConsumerBackend : IConsumerBackend
 
     public IReadOnlyList<PolledRecord> PollBatch()
     {
-        ConsumerRecords<int, int> records = _consumer.Poll(_timeout);
+        ConsumerRecords<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> records = _consumer.Poll(_timeout);
         var list = new List<PolledRecord>(records.Count());
-        foreach (ConsumerRecord<int, int> r in records)
+        foreach (ConsumerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> r in records)
         {
-            list.Add(new PolledRecord(r.Timestamp(), r.Key() + r.Value()));
+            list.Add(PolledBytes.Read(r, _verifier));
         }
 
         return list;
@@ -242,18 +255,33 @@ internal sealed class V3SyncConsumerBackend : IConsumerBackend
 /// <summary>
 /// Adapts this binding's <see cref="AsyncKafkaConsumer{TKey, TValue}"/> to the async
 /// <see cref="IAsyncConsumerBackend"/>: subscribe, poll and close are tasks; the assignment read is sync.
+/// Keys and values come from the built-in <see cref="AsyncReadOnlyMemoryDeserializer"/>.
 /// </summary>
 internal sealed class V3AsyncConsumerBackend : IAsyncConsumerBackend
 {
-    private readonly AsyncKafkaConsumer<int, int> _consumer;
+    private readonly AsyncKafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> _consumer;
     private readonly TimeSpan _timeout;
+    private readonly PolledRecordVerifier? _verifier;
 
-    internal V3AsyncConsumerBackend(IReadOnlyDictionary<string, string> config, int pollTimeoutMs)
+    private V3AsyncConsumerBackend(
+        AsyncKafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer, int pollTimeoutMs, PolledRecordVerifier? verifier)
     {
-        _consumer = new AsyncKafkaConsumer<int, int>(
-            V3Config.ClientConfigs(config), ByteCountDeserializer.Instance, ByteCountDeserializer.Instance);
+        _consumer = consumer;
         _timeout = TimeSpan.FromMilliseconds(pollTimeoutMs);
+        _verifier = verifier;
     }
+
+    internal static async Task<V3AsyncConsumerBackend> Create(
+        IReadOnlyDictionary<string, string> config, int pollTimeoutMs, PolledRecordVerifier? verifier) =>
+        new V3AsyncConsumerBackend(
+            await AsyncKafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>
+                .Create(
+                    V3Config.ClientConfigs(config),
+                    new AsyncReadOnlyMemoryDeserializer(),
+                    new AsyncReadOnlyMemoryDeserializer())
+                .ConfigureAwait(false),
+            pollTimeoutMs,
+            verifier);
 
     public Task Subscribe(string topic) => _consumer.Subscribe(new[] { topic });
 
@@ -271,11 +299,12 @@ internal sealed class V3AsyncConsumerBackend : IAsyncConsumerBackend
 
     public async Task<IReadOnlyList<PolledRecord>> PollBatch()
     {
-        ConsumerRecords<int, int> records = await _consumer.Poll(_timeout).ConfigureAwait(false);
+        ConsumerRecords<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> records =
+            await _consumer.Poll(_timeout).ConfigureAwait(false);
         var list = new List<PolledRecord>(records.Count());
-        foreach (ConsumerRecord<int, int> r in records)
+        foreach (ConsumerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> r in records)
         {
-            list.Add(new PolledRecord(r.Timestamp(), r.Key() + r.Value()));
+            list.Add(PolledBytes.Read(r, _verifier));
         }
 
         return list;

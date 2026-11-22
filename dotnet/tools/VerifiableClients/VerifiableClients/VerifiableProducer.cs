@@ -202,7 +202,7 @@ internal sealed class VerifiableProducer
     {
         (Namespace res, Dictionary<string, object?> props) = ParseArgs(parser, args, output);
         long createTime = res.GetLong("createTime")!.Value;
-        var producer = new KafkaProducer<string, string>(props, new StringSerializer(), new StringSerializer());
+        var producer = KafkaProducer<string, string>.Create(props, new StringSerializer(), new StringSerializer());
         return new VerifiableProducer(
             producer,
             output,

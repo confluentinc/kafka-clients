@@ -168,10 +168,11 @@ impl BackendKind {
     /// .NET runs the server assembly with the `dotnet` host resolved through
     /// `PATH` (`MULTILANG_DOTNET` overrides it); the assembly is the net10.0
     /// build under `target/grpc-native/dotnet`, with the native library beside
-    /// it (`MULTILANG_DOTNET_GRPC_SERVER` overrides it). Both .NET kinds run the
-    /// same assembly, and `CONSUMER_FLAVOR` is set explicitly to pick the sync
-    /// or async servicers, so a value inherited from the test process cannot
-    /// change the flavor.
+    /// it (`MULTILANG_DOTNET_GRPC_SERVER` overrides it). A server that is not a
+    /// `.dll` is a Native AOT executable, which runs without the host. Both .NET
+    /// kinds run the same server, and `CONSUMER_FLAVOR` is set explicitly to
+    /// pick the sync or async servicers, so a value inherited from the test
+    /// process cannot change the flavor.
     fn native_command(self) -> (Command, &'static str) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         match self {
@@ -204,20 +205,32 @@ impl BackendKind {
                 (Command::new(server), "-C c grpc-native")
             },
             BackendKind::Dotnet | BackendKind::DotnetAsync => {
-                let dotnet = std::env::var_os("MULTILANG_DOTNET")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("dotnet"));
                 let server = std::env::var_os("MULTILANG_DOTNET_GRPC_SERVER")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| root.join("target/grpc-native/dotnet/Confluent.Kafka.GrpcServer.dll"));
-                require_native_artifact(self, &server, "-C dotnet grpc-native");
+                let is_assembly = server.extension().is_some_and(|extension| extension == "dll");
+                let make_target = if is_assembly {
+                    "-C dotnet grpc-native"
+                } else {
+                    "-C dotnet grpc-native-aot"
+                };
+                require_native_artifact(self, &server, make_target);
                 let flavor = match self {
                     BackendKind::DotnetAsync => "async",
                     _ => "sync",
                 };
-                let mut command = Command::new(dotnet);
-                command.arg(server).env("CONSUMER_FLAVOR", flavor);
-                (command, "-C dotnet grpc-native")
+                let mut command = if is_assembly {
+                    let dotnet = std::env::var_os("MULTILANG_DOTNET")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from("dotnet"));
+                    let mut command = Command::new(dotnet);
+                    command.arg(server);
+                    command
+                } else {
+                    Command::new(server)
+                };
+                command.env("CONSUMER_FLAVOR", flavor);
+                (command, make_target)
             },
         }
     }
@@ -314,8 +327,9 @@ impl BackendHandle {
     ///   `ChaosWorkloadService`: a workload's stream stays open for the whole
     ///   run, and may go quiet for longer than 30 s while the brokers are down
     ///   (a server sends the response headers only with its first event);
-    /// - the producer's blocking RPCs (`MultilanguageProducer`), which set a
-    ///   deadline of their own, derived from the producer's config.
+    /// - the producer's blocking RPCs (`MultilanguageProducer`) and the
+    ///   consumer's calls that wait on the broker (`MultilanguageConsumer`),
+    ///   which set a deadline of their own, derived from the client's config.
     pub async fn untimed_channel(&self) -> Channel {
         self.connect(None).await
     }

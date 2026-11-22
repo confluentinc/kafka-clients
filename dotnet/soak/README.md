@@ -308,9 +308,10 @@ ASCII decimal, byte-identical to the Python soak's. Padding brings the record up
 to the profile's target size. `txcnt` counts **send attempts**, not retries.
 
 The deserializer that parses it is **total — it never throws.** That is not an
-optimisation: a throwing `IDeserializer<T>` is wrapped in a
-`SerializationException` that faults the **whole `Poll`**, turning one corrupt
-payload into a lost fetch batch. A malformed payload instead decodes to a marked
+optimisation: a throwing `IAsyncDeserializer<T>` stalls the consumer on the bad
+record. `Poll` returns the records before it, then throws
+`RecordDeserializationException` with the position left on the bad record, so
+every later `Poll` throws again. A malformed payload instead decodes to a marked
 record, which the consume loop counts as `consumer.msgerr` and keeps **out** of
 the high-water-mark accounting — a bad payload is not a gap.
 
@@ -327,6 +328,16 @@ the high-water-mark accounting — a bad payload is not a gap.
   `KafkaFuture` once the record is registered (blocking only while the core waits
   for metadata or buffer memory, up to `max.block.ms`), and only its `Get()` waits
   for the broker's ack, as Python's `send()` returns its future.
+* Keys go through the built-in `AsyncByteArraySerializer` /
+  `AsyncByteArrayDeserializer`, values through the soak's own
+  `SoakRecordSerializer` / `SoakRecordDeserializer`, which implement
+  `IAsyncSerializer<T>` / `IAsyncDeserializer<T>` and complete at once. A serde
+  that is not a built-in puts both clients on the **awaited path**: `Send` awaits
+  the value serializer before the record enters the producer (the unit tests
+  bound that path at 544 B per send on the mock producer with two such
+  serializers, against 480 B with two built-ins), and `Poll` awaits the value
+  deserializer for each record, lending it the value's bytes through one 40-byte
+  memory manager that is revoked when the call completes.
 * Delivery accounting awaits each send's acceptance stage, then a continuation on its
   delivery `Task<RecordMetadata>`. That
   continuation is also what **observes** the `Task`'s exception — a
@@ -421,14 +432,14 @@ Each of these is deliberate; the reason is what matters.
 | # | Difference | Why |
 |---|---|---|
 | 1 | **The metric primitives are forked**, not shared with the perf harness. | Five of them are `internal` to `PerformanceCommon` and its `Metrics` has no path/append constructor; and a two-week run must not break because a perf-test refactor changed a shared helper. Same choice the Python sibling made, for the same stated reason. The **JSONL schema stays identical** — that is what makes the numbers comparable. |
-| 2 | **The deserializer is total** (returns a marked record, never throws). | A throwing `IDeserializer<T>` stalls the consumer on the bad record: `Poll` returns the records before it, then throws `RecordDeserializationException` with the position left on the bad record, so every later `Poll` throws again. Python decodes each value after the poll (its deserializer is `memoryview_deserializer`), counts the bad record and continues. |
+| 2 | **The deserializer is total** (returns a marked record, never throws). | A throwing `IAsyncDeserializer<T>` stalls the consumer on the bad record: `Poll` returns the records before it, then throws `RecordDeserializationException` with the position left on the bad record, so every later `Poll` throws again. Python decodes each value after the poll (its deserializer is `memoryview_deserializer`), counts the bad record and continues. |
 | 3 | **No JAAS translation layer.** | `AsyncKafkaAdminClient` takes the same Java-shaped config as the producer and consumer, so `sasl.jaas.config` flows through untouched. Python's soak does the same since its topic creation goes through `confluent_kafka.admin`; both parse the JAAS string only to fail fast when SASL is set without credentials (`SoakConfig.CheckAdminCredentials`, Python's `check_admin_credentials`). |
 | 4 | **One `CancellationTokenSource`; no `_wakeup_sent` guard.** | A token is idempotent by construction. Python's guard existed only because each `wakeup()` re-arms the token and shutdown routinely delivers two signals. `_is_wakeup`'s message sniff becomes `catch (OperationCanceledException)`. |
 | 5 | **`memory.tracemalloc*` → `memory.gc_heap*`.** | `GC.GetTotalMemory(false)` is the direct analog, but naming a .NET gauge `tracemalloc` would assert a Python mechanism that is not running. Map one onto the other in dashboards. |
 | 6 | **`memory.rss.max` is a running max of sampled RSS**, not a kernel peak. | `Process.PeakWorkingSet64` **returns 0** on this platform (measured: .NET 10.0.302, macOS — `WorkingSet64` 38780928, `PeakWorkingSet64` 0), so the gauge would read a flat 0. The consequence is stated honestly: it is the peak of the soak's own per-window samples, so a spike entirely between two samples is invisible to it. |
 | 7 | **Configuration is `SOAK_*` environment, not `argparse` flags.** | The .NET convention in this repo (`PerfV2`/`PerfV3`). `SOAK_EXTRA_ARGS` therefore does not exist — `run.sh` **fails loudly** if it is set rather than silently dropping your tuning. |
 | 8 | **`stringify_config` is not ported.** | The parsed config is `IReadOnlyDictionary<string, string>` by construction; there is nothing to coerce. Python needed it because its C extension rejects non-string values. |
-| 9 | **The payload's target size lives on the serializer**, not on class state. | .NET has an `ISerializer<T>` to hang it on, which also keeps the unit tests independent without Python's reset fixture. |
+| 9 | **The payload's target size lives on the serializer**, not on class state. | .NET has a serializer class (`IAsyncSerializer<T>`) to hang it on, which also keeps the unit tests independent without Python's reset fixture. |
 | 10 | **`SoakClient.CreateAsync`, not a constructor.** | Topic creation awaits, and a C# constructor cannot. The startup ordering contract is unchanged. |
 | 11 | **No `--no-tracemalloc` switch.** | `GC.GetTotalMemory(false)` is a cheap read with no instrumentation to enable or disable, unlike `tracemalloc`, which must be started and costs a bookkeeping entry per allocation. |
 | 12 | **The assignment is polled, not registered via `IConsumerRebalanceListener`.** | Matching the Python original, which polls `assignment()` too. The listener exists in this binding, sync (`IConsumerRebalanceListener`) or async (`IAsyncConsumerRebalanceListener`), and would be a genuine improvement; on `AsyncKafkaConsumer` it runs on the consumer's drain thread, an exception it throws comes back from the call that ran it, and the rebalance does not advance until it reports. Polling also doubles as a liveness probe on `Assignment()` itself. **Recorded as a candidate follow-up.** |

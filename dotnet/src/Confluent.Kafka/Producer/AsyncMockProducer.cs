@@ -39,10 +39,9 @@ namespace Confluent.Kafka.Producer;
 public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValue>
 {
     private readonly NativeProducer _native;
-    private readonly ISerializer<TKey> _keySerializer;
-    private readonly ISerializer<TValue> _valueSerializer;
-    private readonly ISerializerWithHeaders<TKey>? _keyWithHeaders;
-    private readonly ISerializerWithHeaders<TValue>? _valueWithHeaders;
+    private readonly AsyncSerializerCall<TKey> _key;
+    private readonly AsyncSerializerCall<TValue> _value;
+    private readonly bool _awaits;
 
     /// <summary>
     /// Creates a broker-free mock producer whose sends complete at once: the three-argument constructor with
@@ -53,17 +52,15 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <exception cref="ArgumentNullException">
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
     /// </exception>
-    /// <exception cref="IllegalArgumentException">
-    /// A serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
-    /// <see cref="ISerializerWithHeaders{T}"/>: the producer would never call that method.
-    /// </exception>
-    public AsyncMockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer)
+    public AsyncMockProducer(IAsyncSerializer<TKey> keySerializer, IAsyncSerializer<TValue> valueSerializer)
         : this(keySerializer, valueSerializer, true)
     {
     }
 
     /// <summary>
     /// Creates a broker-free mock producer with the key and value serializers, as Java's <c>MockProducer</c> takes them.
+    /// <c>Send</c> awaits the serializers unless both are built-in ones, as on
+    /// <see cref="AsyncKafkaProducer{TKey, TValue}"/>. The mock never disposes them.
     /// </summary>
     /// <param name="keySerializer">The serializer for record keys.</param>
     /// <param name="valueSerializer">The serializer for record values.</param>
@@ -76,21 +73,18 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <exception cref="ArgumentNullException">
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
     /// </exception>
-    /// <exception cref="IllegalArgumentException">
-    /// A serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
-    /// <see cref="ISerializerWithHeaders{T}"/>: the producer would never call that method.
-    /// </exception>
     public AsyncMockProducer(
-        ISerializer<TKey> keySerializer,
-        ISerializer<TValue> valueSerializer,
+        IAsyncSerializer<TKey> keySerializer,
+        IAsyncSerializer<TValue> valueSerializer,
         bool autoComplete)
     {
-        _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
-        _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
-        SerdeGuard.Check(_keySerializer, DefaultMethodGuard.Producer, disposes: false);
-        SerdeGuard.Check(_valueSerializer, DefaultMethodGuard.Producer, disposes: false);
-        _keyWithHeaders = _keySerializer as ISerializerWithHeaders<TKey>;
-        _valueWithHeaders = _valueSerializer as ISerializerWithHeaders<TValue>;
+        IAsyncSerializer<TKey> key = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
+        IAsyncSerializer<TValue> value = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
+        SerdeGuard.Check(key, DefaultMethodGuard.Producer, disposes: false);
+        SerdeGuard.Check(value, DefaultMethodGuard.Producer, disposes: false);
+        _key = new AsyncSerializerCall<TKey>(key);
+        _value = new AsyncSerializerCall<TValue>(value);
+        _awaits = _key.Inner is null || _value.Inner is null;
         _native = NativeProducer.CreateMock(autoComplete, NativeProducer.PumpThreadName);
     }
 
@@ -166,19 +160,38 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     private static ValueTask<AsyncKafkaFuture<RecordMetadata>> Refused(Exception refused) =>
         new ValueTask<AsyncKafkaFuture<RecordMetadata>>(Task.FromException<AsyncKafkaFuture<RecordMetadata>>(refused));
 
-    // Not async, so a serializer throw stays synchronous.
+    // Not async, so with two built-in serializers a serializer throw stays synchronous and no state machine runs.
     private ValueTask<AsyncKafkaFuture<RecordMetadata>> SendValidated(
         ProducerRecord<TKey, TValue> record,
         ICallback? callback,
         CancellationToken cancellationToken,
         IAsyncCallback? asyncCallback = null)
     {
+        if (_awaits)
+        {
+            return SendAwaited(record, callback, cancellationToken, asyncCallback);
+        }
+
         // Java's MockProducer calls the serializers with no try, so every throw leaves Send unchanged.
         SerializedProducerRecord serialized =
             SerializedProducerRecord.Serialize(
-                record, _keySerializer, _keyWithHeaders, _valueSerializer, _valueWithHeaders, mock: true);
+                record, _key.Inner!, _key.InnerWithHeaders, _value.Inner!, _value.InnerWithHeaders, mock: true);
 
         return _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback);
+    }
+
+    // As Java's MockProducer calls the serializers with no try, every serializer failure ends the first stage unchanged.
+    private async ValueTask<AsyncKafkaFuture<RecordMetadata>> SendAwaited(
+        ProducerRecord<TKey, TValue> record,
+        ICallback? callback,
+        CancellationToken cancellationToken,
+        IAsyncCallback? asyncCallback)
+    {
+        SerializedProducerRecord serialized =
+            await SerializedProducerRecord.SerializeAsync(record, _key, _value, mock: true, cancellationToken)
+                .ConfigureAwait(false);
+
+        return await _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
