@@ -21,8 +21,8 @@ using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
-/// <summary><see cref="RecordHeaders"/>'s public constructors, Java's <c>RecordHeaders</c> constructors.</summary>
-public sealed class PublicHeadersConstructorTests
+/// <summary><see cref="RecordHeaders"/>'s constructors, Java's <c>RecordHeaders</c> constructors.</summary>
+public sealed class RecordHeadersConstructorTests
 {
     [Fact]
     public void TheConstructors_CopyTheirInput()

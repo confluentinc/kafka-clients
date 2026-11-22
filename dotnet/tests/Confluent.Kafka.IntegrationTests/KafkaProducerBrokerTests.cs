@@ -22,7 +22,6 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
-using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Performance.Tests;
@@ -201,7 +200,7 @@ public sealed class KafkaProducerBrokerTests
             KafkaProducer<byte[], byte[]>.Create(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
         {
             ProducerRecord<byte[], byte[]> record =
-                HeadersRecord(topic, new[] { new RecordHeader("given", Encoding.UTF8.GetBytes("1")) });
+                HeadersRecord(topic, new IHeader[] { new UserHeader("given", Encoding.UTF8.GetBytes("1")) });
             record.Headers().Add("added", null);
             Assert.Equal(0L, producer.Send(record).Get(s_get).Offset());
 
@@ -396,10 +395,10 @@ public sealed class KafkaProducerBrokerTests
         }
     }
 
-    private static RecordHeader[] HeadersOf((string Key, byte[]? Value)[] headers) =>
-        Array.ConvertAll(headers, header => new RecordHeader(header.Key, header.Value));
+    private static IHeader[] HeadersOf((string Key, byte[]? Value)[] headers) =>
+        Array.ConvertAll(headers, header => (IHeader)new UserHeader(header.Key, header.Value));
 
-    private static ProducerRecord<byte[], byte[]> HeadersRecord(string topic, RecordHeader[] headers) =>
+    private static ProducerRecord<byte[], byte[]> HeadersRecord(string topic, IHeader[] headers) =>
         new ProducerRecord<byte[], byte[]>(
             topic, value: Encoding.UTF8.GetBytes("v"), key: Encoding.UTF8.GetBytes("k"), partition: 0, headers: headers);
 

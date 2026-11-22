@@ -26,15 +26,23 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The members Java's <c>RecordHeader</c> and <c>RecordHeaders</c> have beyond the interfaces: the buffer constructor,
-/// which decodes the key and copies the value on first read and then drops the buffer, and the public
-/// <see cref="RecordHeaders.SetReadOnly()"/> and <see cref="RecordHeaders.IsReadOnly()"/>, with which a user seals their
-/// own headers.
+/// which decodes the key and copies the value on first read and then drops the buffer, and
+/// <see cref="RecordHeaders.SetReadOnly()"/> and <see cref="RecordHeaders.IsReadOnly()"/>, with which the producers seal a
+/// record's headers. Both classes are internal, as Java's package <c>common.header.internals</c> is not public API.
 /// </summary>
-public sealed class PublicRecordHeaderClassMembersTests
+public sealed class RecordHeaderClassMembersTests
 {
     private const string ClosedMessage = "RecordHeaders has been closed.";
 
     private static readonly TimeSpan s_joinBound = TimeSpan.FromSeconds(30);
+
+    [Fact]
+    public void RecordHeaderAndRecordHeaders_AreNotPublic()
+    {
+        Assert.False(typeof(RecordHeader).IsVisible);
+        Assert.False(typeof(RecordHeaders).IsVisible);
+        Assert.DoesNotContain(typeof(RecordHeader).Assembly.GetExportedTypes(), type => type.Namespace == typeof(RecordHeader).Namespace);
+    }
 
     [Fact]
     public void BufferConstructor_DecodesTheKeyAtTheFirstRead_ThenKeepsIt()
@@ -195,7 +203,7 @@ public sealed class PublicRecordHeaderClassMembersTests
     }
 
     [Fact]
-    public void SetReadOnlyAndIsReadOnly_ArePublicMethods_NotAProperty()
+    public void SetReadOnlyAndIsReadOnly_AreMethods_NotAProperty()
     {
         MethodInfo set = PublicInstanceMethod(nameof(RecordHeaders.SetReadOnly));
         MethodInfo isReadOnly = PublicInstanceMethod(nameof(RecordHeaders.IsReadOnly));
@@ -208,7 +216,7 @@ public sealed class PublicRecordHeaderClassMembersTests
     }
 
     [Fact]
-    public void AUserSealsTheirOwnHeaders_ThenAddAndRemoveThrowJavasIllegalStateException()
+    public void SetReadOnly_ThenAddAndRemoveThrowJavasIllegalStateException()
     {
         RecordHeaders headers = new RecordHeaders();
         headers.Add("k", new byte[] { 1 });

@@ -26,7 +26,7 @@ namespace Confluent.Kafka.Common.Header.Internals;
 /// <see cref="IllegalArgumentException"/>. A consumed record's headers are its own and writable, and empty, not null,
 /// when it has none.
 /// </summary>
-public sealed class RecordHeaders : IHeaders
+internal sealed class RecordHeaders : IHeaders
 {
     // Allocated on the first Add, or when built from non-empty input, so a record without headers costs one object.
     private List<IHeader>? _headers;

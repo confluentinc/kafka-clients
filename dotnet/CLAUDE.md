@@ -101,8 +101,9 @@ the assembly.) **`Internal/` is the visibility marker — the *only* folder that
 implies non-public:** every type under it is explicitly `internal` (and `sealed`
 where practical), and `Internal/Interop/` is the only place `unsafe` appears.
 Wanting a type under `Internal/` to be `public` is the signal it belongs in the public tree.
-`Common/Header/Internals/` is not such a folder: it is Java's package `common.header.internals`, and its two
-classes are public (ledger 597, §3 Java names).
+`Common/Header/Internals/` is Java's package `common.header.internals`: its two classes, `RecordHeader` and
+`RecordHeaders`, are `internal`, as Java's package is not public API, and sit beside the public interfaces they
+implement, as `Metric` sits beside `IMetric` (ledger 608, §3 Java names).
 **Every public type lives in the namespace of its Java package, and its file in the folder that
 mirrors that namespace** (M20/P1, ledger 253): drop `org.apache.kafka.`, then `clients.`, PascalCase
 each remaining segment, and prefix `Confluent.Kafka.`, as the Rust core names its modules (root
@@ -238,7 +239,7 @@ public sealed class ProducerRecord<TKey, TValue> {   // Java `ProducerRecord<K,V
     public long? Timestamp();                    // null = producer stamps it
     public TKey? Key();                          // null (ref) = no key; three-state via the serializer (§4)
     public TValue? Value();                      // null (ref) = tombstone; three-state via the serializer (§4)
-    public IHeaders Headers();                   // the record's own RecordHeaders; read-only once a KafkaProducer sends it
+    public IHeaders Headers();                   // the record's own headers; read-only once a KafkaProducer sends it
     public ProducerRecord(string topic, int? partition, long? timestamp, TKey? key, TValue? value,
         IEnumerable<IHeader>? headers);          // Java's checks, topic → timestamp → partition
     public ProducerRecord(string topic, int? partition, long? timestamp, TKey? key, TValue? value);
@@ -449,7 +450,7 @@ public sealed class ConsumerRecord<TKey, TValue> {  // Java `ConsumerRecord<K,V>
     public TimestampType TimestampType();
     public TKey? Key();          // deserialized (span → T); default(TKey) if absent (deser NOT called — decision C)
     public TValue? Value();      // deserialized (span → T); default(TValue) if absent (deser NOT called — decision C)
-    public IHeaders Headers();   // the record's own, writable RecordHeaders
+    public IHeaders Headers();   // the record's own, writable headers
 }
 
 public sealed class ConsumerRecords<TKey, TValue>          // Java `ConsumerRecords<K,V>`
@@ -832,7 +833,7 @@ its C# realization, and where the enforcing rule lives.
 | a member .NET forces to be a property | none: a property a .NET interface requires is implemented explicitly beside Java's method (`ConsumerRecords.Count()`, Java's `count()`, and an explicit `IReadOnlyCollection<T>.Count`); the inherited `Exception` ones stay; `PublicJavaMemberShapeTests` and `GeneratedErrorClassesTests` fail on any public property. A name C# forces apart is moved, not renamed: `FeatureUpdate.UpgradeType` (Java's nested enum) sits beside the class as `Confluent.Kafka.Admin.UpgradeType` (CS0102 with Java's `upgradeType()`), as `GroupMembershipOperation` does (ledger 109) | ledger 368 |
 | a .NET-only getter or property | none, except where Java's type has no C# form: `ClientQuotaFilterComponent.MatchType()` tells Java's three `match()` states (`ofEntity`, `ofDefaultEntity`, `ofEntityType`) apart, since C# has no `Optional` that can itself be `null` *(deviation)* | ledger 369 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive for a memory-form deserializer — ffi §B4 / §6.4 |
-| `Headers` / `Header` and `RecordHeaders` / `RecordHeader` (record headers) | Java's interfaces `IHeaders : IEnumerable<IHeader>` (`Add` / `Remove` / `LastHeader` / `Headers(key)` / `ToArray`) and `IHeader` (`Key()` / `Value()`) in `Confluent.Kafka.Common.Header`, in every public signature; a user may implement them. Java's classes `RecordHeaders` and `RecordHeader`, sealed, in `Confluent.Kafka.Common.Header.Internals` (§3 Java names), with Java's members: `RecordHeaders`' three constructors and public `SetReadOnly()` / `IsReadOnly()`; `RecordHeader(key, value)` and, for Java's `ByteBuffer` form, `RecordHeader(ReadOnlyMemory<byte>, ReadOnlyMemory<byte>?)`, decoded on first read. A record's headers are read-only once a `KafkaProducer` sends it (`IllegalStateException("RecordHeaders has been closed.")`, Java's class), never on the mocks; a fetched record's are its own and writable *(Python keeps `Header` / `Headers`)* | ledger 596, 599–601, 606; send: the header values are copied by the ABI, which has no borrowed form, a recorded deviation from root `CLAUDE.md` §14 (ledger 301) — ffi §A4 |
+| `Headers` / `Header` and `RecordHeaders` / `RecordHeader` (record headers) | Java's interfaces `IHeaders : IEnumerable<IHeader>` (`Add` / `Remove` / `LastHeader` / `Headers(key)` / `ToArray`) and `IHeader` (`Key()` / `Value()`) in `Confluent.Kafka.Common.Header`, in every public signature; a user may implement them. Java's classes `RecordHeaders` and `RecordHeader` are `internal` and sealed, in `Confluent.Kafka.Common.Header.Internals` (§3 Java names): a user adds a header with the record's `Headers().Add(key, value)` or passes their own `IHeader`, and never names the classes. They keep Java's members: `RecordHeaders`' three constructors and `SetReadOnly()` / `IsReadOnly()`; `RecordHeader(key, value)` and, for Java's `ByteBuffer` form, `RecordHeader(ReadOnlyMemory<byte>, ReadOnlyMemory<byte>?)`, decoded on first read. A record's headers are read-only once a `KafkaProducer` sends it (`IllegalStateException("RecordHeaders has been closed.")`, Java's class), never on the mocks; a fetched record's are its own and writable *(Python keeps `Header` / `Headers`)* | ledger 596, 599–601, 606, 608; send: the header values are copied by the ABI, which has no borrowed form, a recorded deviation from root `CLAUDE.md` §14 (ledger 301) — ffi §A4 |
 | opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §A2/§B2 |
 | `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
 | `Map<String, Object>` / `Properties` (a client's configuration) | one `IReadOnlyDictionary<string, object?> configs` per `Kafka*` `Create`; a value of the C# type Java's `parseType` accepts for the key, or Java's text; a `null` meets the key's validator or is not set | §4 **Config**; ffi §0.1, §A5 |
@@ -1011,12 +1012,13 @@ out of date). The rule:
     what to implement *(best effort: under trimming or Native
     AOT an uncalled method can be removed, and then the check passes)*.
 
-**Two public classes from an `internals` package.** `RecordHeader` and `RecordHeaders` are public although Java's
-package is `common.header.internals` and they are not `@InterfaceAudience.Public` (root `CLAUDE.md` §2), as the Rust
-core keeps them (`public-in-rust`) and as Java users build headers with them; `java-api.txt` lists them through
-`BINDING_PUBLIC_CLASSES` (`rust/xtask/src/java_api.rs`; ledger 597, 598). No other class from an `internals` package
-is public, and outside the Public list only `MockAdminClient` (Java's test jar) and the exception classes (§2
-**Errors**) are.
+**No public class from an `internals` package.** `RecordHeader` and `RecordHeaders` are `internal`: Java's package is
+`common.header.internals` and they are not `@InterfaceAudience.Public` (root `CLAUDE.md` §2), and C# makes no exception
+for them, so `java-api.txt` does not list them (ledger 608). A user adds headers with `IHeaders.Add` or their own
+`IHeader` *(the Rust core keeps the two classes public with `public-in-rust`, and Python keeps public `Header` /
+`Headers`; a .NET user who builds a `ConsumerRecord` or a `RecordDeserializationException` writes their own
+`IHeaders`)*. Outside the Public list only `MockAdminClient` (Java's test jar) and the exception classes (§2
+**Errors**) are public.
 
 A difference is fixed or listed, in `analyzers/`: `java-name-allowlist.txt` (kept on purpose, each group
 under a comment saying why), `java-name-pairs.txt` (a renamed type and the Java type it translates, so its

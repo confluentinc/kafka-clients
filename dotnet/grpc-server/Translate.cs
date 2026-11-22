@@ -18,7 +18,6 @@ using System.Collections.Generic;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
-using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
 using Google.Protobuf;
@@ -457,19 +456,16 @@ internal static class Translate
         int? partition = proto.HasPartition ? proto.Partition : (int?)null;
         long? timestamp = proto.HasTimestamp ? proto.Timestamp : (long?)null;
 
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(
+            proto.Topic, value: value, key: key, partition: partition, timestamp: timestamp);
+
         // A proto header's value is never null, so an empty value is sent empty.
-        RecordHeader[]? headers = null;
-        if (proto.Headers.Count > 0)
+        foreach (Proto.Header header in proto.Headers)
         {
-            headers = new RecordHeader[proto.Headers.Count];
-            for (int i = 0; i < headers.Length; i++)
-            {
-                Proto.Header header = proto.Headers[i];
-                headers[i] = new RecordHeader(header.Key, header.Value.ToByteArray());
-            }
+            record.Headers().Add(header.Key, header.Value.ToByteArray());
         }
 
-        return new ProducerRecord<byte[], byte[]>(proto.Topic, value: value, key: key, partition: partition, timestamp: timestamp, headers: headers);
+        return record;
     }
 
     internal static Proto.RecordMetadata MetadataToProto(RecordMetadata metadata) => new Proto.RecordMetadata

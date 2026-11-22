@@ -314,8 +314,6 @@ public sealed class PublicNamespaceLayoutTests
         ("RecordDeserializationException+DeserializationExceptionOrigin", "org.apache.kafka.common.errors.RecordDeserializationException.DeserializationExceptionOrigin"),
         ("IHeader", "org.apache.kafka.common.header.Header"),
         ("IHeaders", "org.apache.kafka.common.header.Headers"),
-        ("RecordHeader", "org.apache.kafka.common.header.internals.RecordHeader"),
-        ("RecordHeaders", "org.apache.kafka.common.header.internals.RecordHeaders"),
         ("KafkaMetric", "org.apache.kafka.common.metrics.KafkaMetric"),
         ("ClientQuotaAlteration", "org.apache.kafka.common.quota.ClientQuotaAlteration"),
         ("ClientQuotaAlteration+Op", "org.apache.kafka.common.quota.ClientQuotaAlteration.Op"),

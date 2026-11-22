@@ -73,7 +73,7 @@ namespace Confluent.Kafka.Producer;
 /// whose producer is closed, while a serializer is awaited is not sent, although its headers are then already
 /// read-only. On
 /// <see cref="AsyncMockProducer{TKey, TValue}"/> each awaited serializer gets a new, empty
-/// <see cref="Common.Header.Internals.RecordHeaders"/> that is then dropped, and the record's headers stay writable, as on
+/// headers object that is then dropped, and the record's headers stay writable, as on
 /// <see cref="MockProducer{TKey, TValue}"/>;</description></item>
 /// <item><description>the bytes a serializer returns are pinned, not copied, from the end of the serialization
 /// until the producer has taken the record; <see langword="null"/> is a null key or value and an empty memory

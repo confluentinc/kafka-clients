@@ -30,7 +30,7 @@ namespace Confluent.Kafka.Common.Header.Internals;
 /// <see cref="Value()"/> is a <c>byte[]</c>, as Java's <c>Header.value()</c> is, not a
 /// <see cref="System.ReadOnlyMemory{T}"/>.
 /// </remarks>
-public sealed class RecordHeader : IHeader
+internal sealed class RecordHeader : IHeader
 {
     // Java's four fields in two, so a header built from a string and an array holds no buffer field: the key is its
     // string or its buffer, the value null, its array or its buffer, until the first read replaces the buffer under
