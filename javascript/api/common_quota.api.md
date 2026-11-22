@@ -10,10 +10,12 @@ export const __esModule: true;
 // @public
 export class ClientQuotaAlteration {
     constructor(options: {
-        entity: ClientQuotaEntity | null;
-        ops: Iterable<ClientQuotaAlteration.Op> | null;
+        entity: ClientQuotaEntity;
+        ops: Iterable<ClientQuotaAlteration.Op>;
     });
+    // (undocumented)
     entity(): ClientQuotaEntity;
+    // (undocumented)
     ops(): ClientQuotaAlteration.Op[];
     toJSON(): {
         entity: ClientQuotaEntity | null;
@@ -26,11 +28,12 @@ export class ClientQuotaAlteration {
 export namespace ClientQuotaAlteration {
     export class Op {
         constructor(options: {
-            key: string | null;
+            key: string;
             value: number | null;
         });
         equals(o: unknown): boolean;
         hashCode(): number;
+        // (undocumented)
         key(): string;
         toJSON(): {
             key: string | null;
@@ -43,11 +46,12 @@ export namespace ClientQuotaAlteration {
 
 // @public
 export class ClientQuotaEntity {
-    constructor(entries: ReadonlyMap<string, string | null> | null);
+    constructor(entries: ReadonlyMap<string, string | null>);
     constructor(options: {
-        entries: ReadonlyMap<string, string | null> | Readonly<Record<string, string | null>> | null;
+        entries: ReadonlyMap<string, string | null> | Readonly<Record<string, string | null>>;
     });
     static readonly CLIENT_ID: string;
+    // (undocumented)
     entries(): Map<string, string | null>;
     equals(o: unknown): boolean;
     hashCode(): number;
@@ -97,17 +101,19 @@ export class ClientQuotaEntityMap<V> implements Iterable<[ClientQuotaEntity, V]>
 // @public
 export class ClientQuotaFilter {
     static all(): ClientQuotaFilter;
+    // (undocumented)
     components(): ClientQuotaFilterComponent[];
-    static contains(components: Iterable<ClientQuotaFilterComponent> | null): ClientQuotaFilter;
+    static contains(components: Iterable<ClientQuotaFilterComponent>): ClientQuotaFilter;
     static contains(options: {
-        components: Iterable<ClientQuotaFilterComponent> | null;
+        components: Iterable<ClientQuotaFilterComponent>;
     }): ClientQuotaFilter;
-    static containsOnly(components: Iterable<ClientQuotaFilterComponent> | null): ClientQuotaFilter;
+    static containsOnly(components: Iterable<ClientQuotaFilterComponent>): ClientQuotaFilter;
     static containsOnly(options: {
-        components: Iterable<ClientQuotaFilterComponent> | null;
+        components: Iterable<ClientQuotaFilterComponent>;
     }): ClientQuotaFilter;
     equals(o: unknown): boolean;
     hashCode(): number;
+    // (undocumented)
     strict(): boolean;
     toJSON(): {
         components: Array<ClientQuotaFilterComponent | null> | null;
@@ -118,9 +124,11 @@ export class ClientQuotaFilter {
 
 // @public
 export class ClientQuotaFilterComponent {
+    // (undocumented)
     entityType(): string;
     equals(o: unknown): boolean;
     hashCode(): number;
+    // (undocumented)
     match(): string | null;
     static ofDefaultEntity(entityType: string): ClientQuotaFilterComponent;
     static ofDefaultEntity(options: {
@@ -141,7 +149,5 @@ export class ClientQuotaFilterComponent {
     };
     toString(): string;
 }
-
-// (No @packageDocumentation comment for this package)
 
 ```

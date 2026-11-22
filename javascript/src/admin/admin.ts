@@ -157,7 +157,10 @@ const CREATE_FORMS = new JavaForms('create', [['configs']], {
  * key.
  *
  * @remarks A TypeScript interface; the runtime object `Admin` holds its
- * static `create`.
+ * static `create`. "Thread safe" is Java's reading: here every call is made
+ * from the JS thread, and the futures complete there, from the event loop, so
+ * a `thenApply` or `whenComplete` function must not block it. Clients in
+ * worker threads are not supported in the preview.
  */
 export interface Admin {
   /**
@@ -175,7 +178,7 @@ export interface Admin {
    * will be allowed to complete, specified by the given duration. New
    * operations will not be accepted during the grace period. Once the grace
    * period is over, all operations that have not yet been completed will be
-   * aborted with a `TimeoutError`.
+   * aborted with `common/errors`' `TimeoutError`.
    *
    * @param options - the time to use for the wait time
    * @returns resolving once the client closed
@@ -251,15 +254,12 @@ export interface Admin {
   describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
 
   /**
-   * Create a batch of new topics.
+   * Create a batch of new topics with the default options.
    *
-   * This operation is not transactional so it may succeed for some topics
-   * while fail for others. It may take several seconds after the result
-   * returns successfully for all the brokers to become aware that the topics
-   * have been created; during this time, `listTopics()` and `describeTopics()`
-   * may not return information about the new topics. This operation is
-   * supported by brokers with version 0.10.1.0 or higher. The validateOnly
-   * option is supported from version 0.10.2.0.
+   * This is a convenience method for `createTopics({ newTopics, options })`
+   * with default options. See the overload for more details.
+   *
+   * This operation is supported by brokers with version 0.10.1.0 or higher.
    *
    * @param newTopics - The new topics to create.
    * @returns The CreateTopicsResult.
@@ -279,6 +279,17 @@ export interface Admin {
   /**
    * Create a batch of new topics.
    *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others.
+   *
+   * It may take several seconds after `CreateTopicsResult` returns success for
+   * all the brokers to become aware that the topics have been created. During
+   * this time, `listTopics()` and `describeTopics()` may not return
+   * information about the new topics.
+   *
+   * This operation is supported by brokers with version 0.10.1.0 or higher.
+   * The validateOnly option is supported from version 0.10.2.0.
+   *
    * @param args - the newTopics, and the options to use
    * @returns The CreateTopicsResult.
    */
@@ -290,18 +301,12 @@ export interface Admin {
   }): CreateTopicsResult;
 
   /**
-   * Delete a batch of topics.
+   * This is a convenience method for `deleteTopics({ topics, options })` with
+   * default options. See the overload for more details.
    *
-   * This operation is not transactional so it may succeed for some topics
-   * while fail for others. It may take several seconds after the result
-   * returns successfully for all the brokers to become aware that the topics
-   * are gone; during this time, `listTopics()` and `describeTopics()` may
-   * continue to return information about the deleted topics. If
-   * delete.topic.enable is false on the brokers, deleteTopics will mark the
-   * topics for deletion, but not actually delete them; the futures will return
-   * successfully in this case. When using topic IDs, this operation is
-   * supported by brokers with inter-broker protocol 2.8 or higher; when using
-   * topic names, by brokers with version 0.10.1.0 or higher.
+   * When using topic IDs, this operation is supported by brokers with
+   * inter-broker protocol 2.8 or higher. When using topic names, this
+   * operation is supported by brokers with version 0.10.1.0 or higher.
    *
    * @param topics - The topic names, or the topics, to delete.
    * @returns The DeleteTopicsResult.
@@ -321,6 +326,21 @@ export interface Admin {
   /**
    * Delete a batch of topics.
    *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others.
+   *
+   * It may take several seconds after the `DeleteTopicsResult` returns
+   * success for all the brokers to become aware that the topics are gone.
+   * During this time, `listTopics()` and `describeTopics()` may continue to
+   * return information about the deleted topics.
+   *
+   * If delete.topic.enable is set to false on the brokers, an error will be
+   * returned to the client indicating that topic deletion is disabled.
+   *
+   * When using topic IDs, this operation is supported by brokers with
+   * inter-broker protocol 2.8 or higher. When using topic names, this
+   * operation is supported by brokers with version 0.10.1.0 or higher.
+   *
    * @param args - the topics, and the options to use
    * @returns The DeleteTopicsResult.
    */
@@ -332,10 +352,10 @@ export interface Admin {
   }): DeleteTopicsResult;
 
   /**
-   * Describe some topics in the cluster.
+   * Describe some topics in the cluster, with the default options.
    *
-   * When using topic IDs, this operation is supported by brokers with version
-   * 3.1.0 or higher.
+   * This is a convenience method for `describeTopics({ topicNames, options })`
+   * with default options. See the overload for more details.
    *
    * @param topicNames - The names of the topics to describe.
    * @returns The DescribeTopicsResult.
@@ -367,7 +387,8 @@ export interface Admin {
     topics?: never;
   }): DescribeTopicsResult;
   /**
-   * Describe some topics in the cluster.
+   * This is a convenience method for `describeTopics({ topics, options })`
+   * with default options. See the overload for more details.
    *
    * When using topic IDs, this operation is supported by brokers with version
    * 3.1.0 or higher.
@@ -391,6 +412,9 @@ export interface Admin {
   /**
    * Describe some topics in the cluster.
    *
+   * When using topic IDs, this operation is supported by brokers with version
+   * 3.1.0 or higher.
+   *
    * @param args - the topics, and the options to use
    * @returns The DescribeTopicsResult.
    */
@@ -408,11 +432,8 @@ export interface Admin {
    * increased for a topic that has a key, the partition logic or ordering of
    * the messages will be affected.**
    *
-   * This operation is not transactional so it may succeed for some topics
-   * while fail for others. It may take several seconds after this method
-   * returns success for all the brokers to become aware that the partitions
-   * have been created. This operation is supported by brokers with version
-   * 1.0.0 or higher.
+   * This is a convenience method for `createPartitions({ newPartitions,
+   * options })` with default options. See the overload for more details.
    *
    * @param newPartitions - The topics which should have new partitions created, and corresponding parameters for the created partitions.
    * @returns The CreatePartitionsResult.
@@ -435,6 +456,31 @@ export interface Admin {
    * increased for a topic that has a key, the partition logic or ordering of
    * the messages will be affected.**
    *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others.
+   *
+   * It may take several seconds after this method returns success for all
+   * the brokers to become aware that the partitions have been created. During
+   * this time, `describeTopics()` may not return information about the new
+   * partitions.
+   *
+   * This operation is supported by brokers with version 1.0.0 or higher.
+   *
+   * The following errors can be anticipated when calling `get()` on the
+   * futures obtained from the `values()` method of the returned
+   * `CreatePartitionsResult`: `AuthorizationError`, if the authenticated user
+   * is not authorized to alter the topic; `TimeoutError`, if the request was
+   * not completed in within the given `CreatePartitionsOptions.timeoutMs()`;
+   * `ReassignmentInProgressError`, if a partition reassignment is currently
+   * in progress; `BrokerNotAvailableError`, if the requested
+   * `NewPartitions.assignments()` contain a broker that is currently
+   * unavailable; `InvalidReplicationFactorError`, if no
+   * `NewPartitions.assignments()` are given and it is impossible for the
+   * broker to assign replicas with the topics replication factor; subclasses
+   * of `KafkaError`, if the request is invalid in some way;
+   * `InvalidPartitionsError`, if the requested partition count is less than
+   * or equal to the current partition count.
+   *
    * @param args - the newPartitions, and the options to use
    * @returns The CreatePartitionsResult.
    */
@@ -448,6 +494,9 @@ export interface Admin {
   /**
    * Delete records whose offset is smaller than the given offset of the
    * corresponding partition.
+   *
+   * This is a convenience method for `deleteRecords({ recordsToDelete,
+   * options })` with default options. See the overload for more details.
    *
    * This operation is supported by brokers with version 0.11.0.0 or higher.
    *
@@ -469,6 +518,8 @@ export interface Admin {
   /**
    * Delete records whose offset is smaller than the given offset of the
    * corresponding partition.
+   *
+   * This operation is supported by brokers with version 0.11.0.0 or higher.
    *
    * @param args - the recordsToDelete, and the options to use
    * @returns The DeleteRecordsResult.
@@ -586,6 +637,9 @@ export interface Admin {
    *
    * This operation is not transactional so it may succeed for some replicas while fail for others.
    *
+   * This is a convenience method for `alterReplicaLogDirs({ replicaAssignment, options })` with default
+   * options. See the overload for more details.
+   *
    * This operation is supported by brokers with version 1.1.0 or higher.
    *
    * @param replicaAssignment - The replicas with their log directory absolute path.
@@ -627,6 +681,9 @@ export interface Admin {
   /**
    * Query the information of all log directories on the given set of brokers
    *
+   * This is a convenience method for `describeLogDirs({ brokers, options })` with default options. See the
+   * overload for more details.
+   *
    * This operation is supported by brokers with version 1.0.0 or higher.
    *
    * @param brokers - A list of brokers.
@@ -661,6 +718,9 @@ export interface Admin {
 
   /**
    * Query the replica log directory information for the specified replicas.
+   *
+   * This is a convenience method for `describeReplicaLogDirs({ replicas, options })` with default options.
+   * See the overload for more details.
    *
    * This operation is supported by brokers with version 1.0.0 or higher.
    *
@@ -1953,7 +2013,11 @@ export const Admin = {
    * @returns The new KafkaAdminClient.
    * @throws `KafkaError` when the client cannot be created ("Failed to
    *   create new KafkaAdminClient")
-   * @throws `ConfigError` for a key that is not a string
+   * @throws `ConfigError` for a key that is not a string, or a value the
+   *   core refuses, with Java's message naming the key ("Invalid value abc
+   *   for configuration request.timeout.ms: Not a number of type INT")
+   * @throws `IllegalArgumentError` for a form Java has not ("create() takes
+   *   one of (configs); got ()")
    * @throws `TypeError` when the configuration is not a plain object
    */
   create(

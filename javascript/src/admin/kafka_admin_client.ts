@@ -164,9 +164,16 @@ export type CloseArgs = {
 
 /**
  * The default implementation of `Admin`. An instance of this class is created
- * by invoking `Admin.create`.
+ * by invoking `Admin.create`. Users should not refer to this class directly.
  *
- * Instances come from `Admin.create`.
+ * This class is thread-safe.
+ *
+ * @remarks The admin client is thread safe in Java; here every call is made
+ * from the JS thread, and a future's outcome, with its `thenApply` and
+ * `whenComplete` functions, arrives there too, from the event loop. An admin
+ * client keeps Node running from its creation until `close()` closes it:
+ * close every one (`close()`, or `await using`). Clients in worker threads
+ * are not supported in the preview.
  */
 export class KafkaAdminClient implements Admin {
   readonly #handle: AdminHandle;
@@ -191,19 +198,40 @@ export class KafkaAdminClient implements Admin {
   }
 
   /**
-   * Close the Admin and release all associated resources.
+   * Close the Admin and release all associated resources, with no time limit
+   * (`close({ timeout: Infinity })`, Java's `Long.MAX_VALUE` milliseconds).
    *
    * @returns resolving once the client closed
+   *
+   * @remarks A negative timeout is read as zero *(deviation: Java's
+   * `KafkaAdminClient.close` throws `IllegalArgumentException("The timeout
+   * cannot be negative.")`. Why: the binding repeats no precondition. Goes
+   * when: the FFI returns Java's error)*. A call after `close()` goes to the
+   * core: an RPC returns its Result, whose futures fail with the core's
+   * error.
    */
   close(): Promise<void>;
   /**
    * Close the Admin client and release all associated resources, with a
    * grace period during which current operations will be allowed to
    * complete. Once it is over, all operations that have not yet been
-   * completed will be aborted with a `TimeoutError`.
+   * completed will be aborted with `common/errors`' `TimeoutError`.
    *
    * @param options - the time to use for the wait time
    * @returns resolving once the client closed
+   * @throws `TypeError` rejects with it when the timeout is null or not a
+   *  `Duration`
+   * @throws `RangeError` rejects with it when the timeout is `NaN`, beyond
+   *  `Number.MAX_SAFE_INTEGER` milliseconds, or has years, months or weeks
+   * @throws `IllegalArgumentError` rejects with it when the given parameters
+   *  are no Java form
+   *
+   * @remarks A negative timeout is read as zero *(deviation: Java's
+   * `KafkaAdminClient.close` throws `IllegalArgumentException("The timeout
+   * cannot be negative.")`. Why: the binding repeats no precondition. Goes
+   * when: the FFI returns Java's error)*. A call after `close()` goes to the
+   * core: an RPC returns its Result, whose futures fail with the core's
+   * error.
    */
   close(options: CloseArgs): Promise<void>;
   /**
@@ -211,6 +239,19 @@ export class KafkaAdminClient implements Admin {
    *
    * @param timeout - The time to use for the wait time.
    * @returns resolving once the client closed
+   * @throws `TypeError` rejects with it when the timeout is null or not a
+   *  `Duration`
+   * @throws `RangeError` rejects with it when the timeout is `NaN`, beyond
+   *  `Number.MAX_SAFE_INTEGER` milliseconds, or has years, months or weeks
+   * @throws `IllegalArgumentError` rejects with it when the given parameters
+   *  are no Java form
+   *
+   * @remarks A negative timeout is read as zero *(deviation: Java's
+   * `KafkaAdminClient.close` throws `IllegalArgumentException("The timeout
+   * cannot be negative.")`. Why: the binding repeats no precondition. Goes
+   * when: the FFI returns Java's error)*. A call after `close()` goes to the
+   * core: an RPC returns its Result, whose futures fail with the core's
+   * error.
    */
   close(timeout: Duration): Promise<void>;
   /**
@@ -218,6 +259,12 @@ export class KafkaAdminClient implements Admin {
    *
    * @param options - nothing, or the timeout
    * @returns resolving once the client closed
+   * @throws `TypeError` rejects with it when the timeout is null or not a
+   *  `Duration`
+   * @throws `RangeError` rejects with it when the timeout is `NaN`, beyond
+   *  `Number.MAX_SAFE_INTEGER` milliseconds, or has years, months or weeks
+   * @throws `IllegalArgumentError` rejects with it when the given parameters
+   *  are no Java form
    *
    * @remarks A negative timeout is read as zero *(deviation: Java's
    * `KafkaAdminClient.close` throws `IllegalArgumentException("The timeout
@@ -252,6 +299,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - The options to use when listing the topics.
    * @returns The ListTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` when the options are not a `ListTopicsOptions`, or
+   *   are null
    */
   listTopics(args: {
     /** The options to use when listing the topics. */
@@ -262,6 +312,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param options - The options to use when listing the topics.
    * @returns The ListTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` when the options are not a `ListTopicsOptions`, or
+   *   are null
    */
   listTopics(options: ListTopicsOptions): ListTopicsResult;
   /**
@@ -294,6 +347,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - The options to use when getting information about the cluster.
    * @returns The DescribeClusterResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` when the options are not a `DescribeClusterOptions`,
+   *   or are null
    */
   describeCluster(args: {
     /** The options to use when getting information about the cluster. */
@@ -304,6 +360,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param options - The options to use when getting information about the cluster.
    * @returns The DescribeClusterResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` when the options are not a `DescribeClusterOptions`,
+   *   or are null
    */
   describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
   /**
@@ -320,6 +379,33 @@ export class KafkaAdminClient implements Admin {
   }
 
   /**
+   * Create a batch of new topics with the default options.
+   *
+   * This is a convenience method for `createTopics({ newTopics, options })`
+   * with default options. See the overload for more details.
+   *
+   * This operation is supported by brokers with version 0.10.1.0 or higher.
+   *
+   * @param newTopics - The new topics to create.
+   * @returns The CreateTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
+  /**
+   * The same as `createTopics(newTopics)`, the newTopics given by name.
+   *
+   * @param args - the newTopics
+   * @returns The CreateTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   */
+  createTopics(args: {
+    /** The new topics to create. */
+    newTopics: Iterable<NewTopic>;
+    options?: never;
+  }): CreateTopicsResult;
+  /**
    * Create a batch of new topics.
    *
    * This operation is not transactional so it may succeed for some topics
@@ -330,26 +416,10 @@ export class KafkaAdminClient implements Admin {
    * supported by brokers with version 0.10.1.0 or higher. The validateOnly
    * option is supported from version 0.10.2.0.
    *
-   * @param newTopics - The new topics to create.
-   * @returns The CreateTopicsResult.
-   */
-  createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
-  /**
-   * The same as `createTopics(newTopics)`, the newTopics given by name.
-   *
-   * @param args - the newTopics
-   * @returns The CreateTopicsResult.
-   */
-  createTopics(args: {
-    /** The new topics to create. */
-    newTopics: Iterable<NewTopic>;
-    options?: never;
-  }): CreateTopicsResult;
-  /**
-   * Create a batch of new topics.
-   *
    * @param args - the newTopics, and the options to use
    * @returns The CreateTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createTopics(args: {
     /** The new topics to create. */
@@ -370,21 +440,17 @@ export class KafkaAdminClient implements Admin {
   }
 
   /**
-   * Delete a batch of topics.
+   * Delete a batch of topics with the default options.
    *
-   * This operation is not transactional so it may succeed for some topics
-   * while fail for others. It may take several seconds after the result
-   * returns successfully for all the brokers to become aware that the topics
-   * are gone; during this time, `listTopics()` and `describeTopics()` may
-   * continue to return information about the deleted topics. If
-   * delete.topic.enable is false on the brokers, deleteTopics will mark the
-   * topics for deletion, but not actually delete them; the futures will return
-   * successfully in this case. When using topic IDs, this operation is
-   * supported by brokers with inter-broker protocol 2.8 or higher; when using
-   * topic names, by brokers with version 0.10.1.0 or higher.
+   * This is a convenience method for `deleteTopics({ topics, options })`
+   * with default options. See the overload for more details.
+   *
+   * This operation is supported by brokers with version 0.10.1.0 or higher.
    *
    * @param topics - The topic names, or the topics, to delete.
    * @returns The DeleteTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteTopics(topics: Iterable<string> | TopicCollection): DeleteTopicsResult;
   /**
@@ -392,6 +458,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the topics
    * @returns The DeleteTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteTopics(args: {
     /** The topic names, or the topics, to delete. */
@@ -401,8 +469,25 @@ export class KafkaAdminClient implements Admin {
   /**
    * Delete a batch of topics.
    *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others.
+   *
+   * It may take several seconds after the `DeleteTopicsResult` returns
+   * success for all the brokers to become aware that the topics are gone.
+   * During this time, `listTopics()` and `describeTopics()` may continue to
+   * return information about the deleted topics.
+   *
+   * If delete.topic.enable is set to false on the brokers, an error will be
+   * returned to the client indicating that topic deletion is disabled.
+   *
+   * When using topic IDs, this operation is supported by brokers with
+   * inter-broker protocol 2.8 or higher. When using topic names, this
+   * operation is supported by brokers with version 0.10.1.0 or higher.
+   *
    * @param args - the topics, and the options to use
    * @returns The DeleteTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteTopics(args: {
     /** The topic names, or the topics, to delete. */
@@ -423,13 +508,15 @@ export class KafkaAdminClient implements Admin {
   }
 
   /**
-   * Describe some topics in the cluster.
+   * Describe some topics in the cluster, with the default options.
    *
-   * When using topic IDs, this operation is supported by brokers with version
-   * 3.1.0 or higher.
+   * This is a convenience method for `describeTopics({ topicNames, options })`
+   * with default options. See the overload for more details.
    *
    * @param topicNames - The names of the topics to describe.
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
   /**
@@ -437,6 +524,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the topicNames
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(args: {
     /** The names of the topics to describe. */
@@ -449,6 +538,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the topicNames, and the options to use
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(args: {
     /** The names of the topics to describe. */
@@ -458,13 +549,16 @@ export class KafkaAdminClient implements Admin {
     topics?: never;
   }): DescribeTopicsResult;
   /**
-   * Describe some topics in the cluster.
+   * This is a convenience method for `describeTopics({ topics, options })`
+   * with default options. See the overload for more details.
    *
    * When using topic IDs, this operation is supported by brokers with version
    * 3.1.0 or higher.
    *
    * @param topics - The topics to describe.
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(topics: TopicCollection): DescribeTopicsResult;
   /**
@@ -472,6 +566,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the topics
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(args: {
     /** The topics to describe. */
@@ -482,8 +578,13 @@ export class KafkaAdminClient implements Admin {
   /**
    * Describe some topics in the cluster.
    *
+   * When using topic IDs, this operation is supported by brokers with version
+   * 3.1.0 or higher.
+   *
    * @param args - the topics, and the options to use
    * @returns The DescribeTopicsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTopics(args: {
     /** The topics to describe. */
@@ -510,14 +611,13 @@ export class KafkaAdminClient implements Admin {
    * increased for a topic that has a key, the partition logic or ordering of
    * the messages will be affected.**
    *
-   * This operation is not transactional so it may succeed for some topics
-   * while fail for others. It may take several seconds after this method
-   * returns success for all the brokers to become aware that the partitions
-   * have been created. This operation is supported by brokers with version
-   * 1.0.0 or higher.
+   * This is a convenience method for `createPartitions({ newPartitions,
+   * options })` with default options. See the overload for more details.
    *
    * @param newPartitions - The topics which should have new partitions created, and corresponding parameters for the created partitions.
    * @returns The CreatePartitionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createPartitions(newPartitions: ReadonlyMap<string, NewPartitions>): CreatePartitionsResult;
   /**
@@ -525,6 +625,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the newPartitions
    * @returns The CreatePartitionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createPartitions(args: {
     /** The topics which should have new partitions created, and corresponding parameters for the created partitions. */
@@ -537,8 +639,16 @@ export class KafkaAdminClient implements Admin {
    * increased for a topic that has a key, the partition logic or ordering of
    * the messages will be affected.**
    *
+   * This operation is not transactional so it may succeed for some topics
+   * while fail for others. It may take several seconds after this method
+   * returns success for all the brokers to become aware that the partitions
+   * have been created. This operation is supported by brokers with version
+   * 1.0.0 or higher.
+   *
    * @param args - the newPartitions, and the options to use
    * @returns The CreatePartitionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createPartitions(args: {
     /** The topics which should have new partitions created, and corresponding parameters for the created partitions. */
@@ -562,10 +672,16 @@ export class KafkaAdminClient implements Admin {
    * Delete records whose offset is smaller than the given offset of the
    * corresponding partition.
    *
+   * This is a convenience method for
+   * `deleteRecords({ recordsToDelete, options })` with default options. See the
+   * overload for more details.
+   *
    * This operation is supported by brokers with version 0.11.0.0 or higher.
    *
    * @param recordsToDelete - The topic partitions and related offsets from which records deletion starts.
    * @returns The DeleteRecordsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
   /**
@@ -573,6 +689,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the recordsToDelete
    * @returns The DeleteRecordsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteRecords(args: {
     /** The topic partitions and related offsets from which records deletion starts. */
@@ -585,6 +703,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the recordsToDelete, and the options to use
    * @returns The DeleteRecordsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteRecords(args: {
     /** The topic partitions and related offsets from which records deletion starts. */
@@ -611,6 +731,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param resources - The resources: see the relevant `ConfigResource.Type`.
    * @returns The DescribeConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConfigs(resources: Iterable<ConfigResource>): DescribeConfigsResult;
   /**
@@ -618,6 +740,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the resources
    * @returns The DescribeConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConfigs(args: {
     /** The resources: see the relevant `ConfigResource.Type`. */
@@ -649,6 +773,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the resources, and the options to use
    * @returns The DescribeConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConfigs(args: {
     /** The resources: see the relevant `ConfigResource.Type`. */
@@ -675,6 +801,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param configs - The resources with their configs.
    * @returns The AlterConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   incrementalAlterConfigs(configs: ConfigResourceMap<Iterable<AlterConfigOp>>): AlterConfigsResult;
   /**
@@ -682,6 +810,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the configs
    * @returns The AlterConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   incrementalAlterConfigs(args: {
     /** The resources with their configs. */
@@ -704,6 +834,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the configs, and the options to use
    * @returns The AlterConfigsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   incrementalAlterConfigs(args: {
     /** The resources with their configs. */
@@ -730,12 +862,17 @@ export class KafkaAdminClient implements Admin {
    * replica will be moved to the given log directory if it is not already there. For detailed result, inspect
    * the returned `AlterReplicaLogDirsResult` instance.
    *
+   * This is a convenience method for `alterReplicaLogDirs({ replicaAssignment,
+   * options })` with default options. See the overload for more details.
+   *
    * This operation is not transactional so it may succeed for some replicas while fail for others.
    *
    * This operation is supported by brokers with version 1.1.0 or higher.
    *
    * @param replicaAssignment - The replicas with their log directory absolute path.
    * @returns The AlterReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterReplicaLogDirs(replicaAssignment: TopicPartitionReplicaMap<string>): AlterReplicaLogDirsResult;
   /**
@@ -743,6 +880,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the replicaAssignment
    * @returns The AlterReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterReplicaLogDirs(args: {
     /** The replicas with their log directory absolute path. */
@@ -762,6 +901,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the replicaAssignment, and the options to use
    * @returns The AlterReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterReplicaLogDirs(args: {
     /** The replicas with their log directory absolute path. */
@@ -784,10 +925,16 @@ export class KafkaAdminClient implements Admin {
   /**
    * Query the information of all log directories on the given set of brokers
    *
+   * This is a convenience method for `describeLogDirs({ brokers, options })`
+   * with default options. See the overload for more details.
+   *
    * This operation is supported by brokers with version 1.0.0 or higher.
    *
    * @param brokers - A list of brokers.
    * @returns The DescribeLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when a broker id is outside Java's `int`
    */
   describeLogDirs(brokers: Iterable<number>): DescribeLogDirsResult;
   /**
@@ -795,6 +942,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the brokers
    * @returns The DescribeLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when a broker id is outside Java's `int`
    */
   describeLogDirs(args: {
     /** A list of brokers. */
@@ -808,6 +958,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the brokers, and the options to use
    * @returns The DescribeLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when a broker id is outside Java's `int`
    */
   describeLogDirs(args: {
     /** A list of brokers. */
@@ -822,6 +975,7 @@ export class KafkaAdminClient implements Admin {
    * @returns the result
    * @throws `IllegalArgumentError` for a form Java has not
    * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when a broker id is outside Java's `int`
    */
   describeLogDirs(args: unknown): DescribeLogDirsResult {
     return configCalls.describeLogDirs(this.#handle, args, arguments.length);
@@ -830,10 +984,15 @@ export class KafkaAdminClient implements Admin {
   /**
    * Query the replica log directory information for the specified replicas.
    *
+   * This is a convenience method for `describeReplicaLogDirs({ replicas,
+   * options })` with default options. See the overload for more details.
+   *
    * This operation is supported by brokers with version 1.0.0 or higher.
    *
    * @param replicas - The replicas to query.
    * @returns The DescribeReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeReplicaLogDirs(replicas: Iterable<TopicPartitionReplica>): DescribeReplicaLogDirsResult;
   /**
@@ -841,6 +1000,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the replicas
    * @returns The DescribeReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeReplicaLogDirs(args: {
     /** The replicas to query. */
@@ -854,6 +1015,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the replicas, and the options to use
    * @returns The DescribeReplicaLogDirsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeReplicaLogDirs(args: {
     /** The replicas to query. */
@@ -887,6 +1050,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the configResourceTypes, and the options to use
    * @returns The ListConfigurationResourcesResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConfigResources(args: {
     /** The set of configuration resource types to list. */
@@ -914,6 +1079,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the electionType, partitions
    * @returns The ElectLeadersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   electLeaders(args: {
     /** The type of election to conduct. */
@@ -945,6 +1112,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the electionType, partitions, and the options to use
    * @returns The ElectLeadersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   electLeaders(args: {
     /** The type of election to conduct. */
@@ -975,6 +1144,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param reassignments - The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`.
    * @returns The AlterPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterPartitionReassignments(reassignments: TopicPartitionMap<NewPartitionReassignment | null>): AlterPartitionReassignmentsResult;
   /**
@@ -982,6 +1153,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the reassignments
    * @returns The AlterPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterPartitionReassignments(args: {
     /** The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`. */
@@ -1006,6 +1179,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the reassignments, and the options to use
    * @returns The AlterPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterPartitionReassignments(args: {
     /** The reassignments to add, modify, or remove (null), see `NewPartitionReassignment`. */
@@ -1043,6 +1218,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param partitions - The topic partitions to list reassignments for.
    * @returns The ListPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listPartitionReassignments(partitions: Iterable<TopicPartition>): ListPartitionReassignmentsResult;
   /**
@@ -1050,6 +1227,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the partitions
    * @returns The ListPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listPartitionReassignments(args: {
     /** The topic partitions to list reassignments for. */
@@ -1068,6 +1247,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the partitions, and the options to use
    * @returns The ListPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listPartitionReassignments(args: {
     /** The topic partitions to list reassignments for, or null for all of them. */
@@ -1086,6 +1267,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The ListPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listPartitionReassignments(args: {
     /** The options to use. */
@@ -1097,6 +1280,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The ListPartitionReassignmentsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listPartitionReassignments(options: ListPartitionReassignmentsOptions): ListPartitionReassignmentsResult;
   /**
@@ -1119,6 +1304,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param topicPartitionOffsets - The mapping from partition to the OffsetSpec to look up.
    * @returns The ListOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listOffsets(topicPartitionOffsets: TopicPartitionMap<OffsetSpec>): ListOffsetsResult;
   /**
@@ -1126,6 +1313,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the topicPartitionOffsets
    * @returns The ListOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listOffsets(args: {
     /** The mapping from partition to the OffsetSpec to look up. */
@@ -1138,6 +1327,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the topicPartitionOffsets, and the options to use
    * @returns The ListOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listOffsets(args: {
     /** The mapping from partition to the OffsetSpec to look up. */
@@ -1171,6 +1362,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The ListGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listGroups(args: {
     /** The options to use. */
@@ -1181,6 +1374,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The ListGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listGroups(options: ListGroupsOptions): ListGroupsResult;
   /**
@@ -1203,6 +1398,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param groupIds - The IDs of the groups to describe.
    * @returns The DescribeConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConsumerGroups(groupIds: Iterable<string>): DescribeConsumerGroupsResult;
   /**
@@ -1210,6 +1407,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupIds
    * @returns The DescribeConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConsumerGroups(args: {
     /** The IDs of the groups to describe. */
@@ -1221,6 +1420,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupIds, and the options to use
    * @returns The DescribeConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeConsumerGroups(args: {
     /** The IDs of the groups to describe. */
@@ -1248,6 +1449,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param groupIds - The IDs of the groups to describe.
    * @returns The DescribeClassicGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClassicGroups(groupIds: Iterable<string>): DescribeClassicGroupsResult;
   /**
@@ -1255,6 +1458,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupIds
    * @returns The DescribeClassicGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClassicGroups(args: {
     /** The IDs of the groups to describe. */
@@ -1266,6 +1471,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupIds, and the options to use
    * @returns The DescribeClassicGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClassicGroups(args: {
     /** The IDs of the groups to describe. */
@@ -1295,6 +1502,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param groupId - The group to list the offsets of.
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(groupId: string): ListConsumerGroupOffsetsResult;
   /**
@@ -1302,6 +1511,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupId
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(args: {
     /** The group to list the offsets of. */
@@ -1314,6 +1525,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupId, and the options to use
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(args: {
     /** The group to list the offsets of. */
@@ -1331,6 +1544,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param groupSpecs - Map of consumer group ids to a spec that specifies the topic partitions of the group to list offsets for.
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec>): ListConsumerGroupOffsetsResult;
   /**
@@ -1338,6 +1553,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupSpecs, a `Map` or a plain object
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(args: {
     /** Map of consumer group ids to a spec that specifies the topic partitions of the group to list offsets for. */
@@ -1351,6 +1568,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupSpecs, and the options to use
    * @returns The ListConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listConsumerGroupOffsets(args: {
     /** Map of consumer group ids to a spec that specifies the topic partitions of the group to list offsets for. */
@@ -1379,6 +1598,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupId, offsets
    * @returns The AlterConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterConsumerGroupOffsets(args: {
     /** The group for which to alter offsets. */
@@ -1394,6 +1615,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupId, offsets, and the options to use
    * @returns The AlterConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterConsumerGroupOffsets(args: {
     /** The group for which to alter offsets. */
@@ -1421,6 +1644,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupId, partitions
    * @returns The DeleteConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteConsumerGroupOffsets(args: {
     /** The group to delete the offsets of. */
@@ -1435,6 +1660,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupId, partitions, and the options to use
    * @returns The DeleteConsumerGroupOffsetsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteConsumerGroupOffsets(args: {
     /** The group to delete the offsets of. */
@@ -1461,6 +1688,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param groupIds - The IDs of the groups to delete.
    * @returns The DeleteConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteConsumerGroups(groupIds: Iterable<string>): DeleteConsumerGroupsResult;
   /**
@@ -1468,6 +1697,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupIds
    * @returns The DeleteConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteConsumerGroups(args: {
     /** The IDs of the groups to delete. */
@@ -1479,6 +1710,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the groupIds, and the options to use
    * @returns The DeleteConsumerGroupsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteConsumerGroups(args: {
     /** The IDs of the groups to delete. */
@@ -1505,6 +1738,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - The ID of the group to remove member from, and the options to carry removing members' information.
    * @returns The MembershipChangeResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   removeMembersFromConsumerGroup(args: {
     /** The ID of the group to remove member from. */
@@ -1532,6 +1767,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param filter - The filter to use.
    * @returns The DescribeAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeAcls(filter: AclBindingFilter): DescribeAclsResult;
   /**
@@ -1539,6 +1776,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the filter
    * @returns The DescribeAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeAcls(args: {
     /** The filter to use. */
@@ -1555,6 +1794,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the filter, and the options to use
    * @returns The DescribeAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeAcls(args: {
     /** The filter to use. */
@@ -1582,6 +1823,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param acls - The ACLs to create
    * @returns The CreateAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createAcls(acls: Iterable<AclBinding>): CreateAclsResult;
   /**
@@ -1589,6 +1832,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the acls
    * @returns The CreateAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createAcls(args: {
     /** The ACLs to create */
@@ -1607,6 +1852,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the acls, and the options to use
    * @returns The CreateAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createAcls(args: {
     /** The ACLs to create */
@@ -1634,6 +1881,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param filters - The filters to use.
    * @returns The DeleteAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteAcls(filters: Iterable<AclBindingFilter>): DeleteAclsResult;
   /**
@@ -1641,6 +1890,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the filters
    * @returns The DeleteAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteAcls(args: {
     /** The filters to use. */
@@ -1656,6 +1907,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the filters, and the options to use
    * @returns The DeleteAclsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   deleteAcls(args: {
     /** The filters to use. */
@@ -1691,6 +1944,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The CreateDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createDelegationToken(args: {
     /** The options to use. */
@@ -1701,6 +1956,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The CreateDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   createDelegationToken(options: CreateDelegationTokenOptions): CreateDelegationTokenResult;
   /**
@@ -1723,6 +1980,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param hmac - HMAC of the Delegation token
    * @returns The RenewDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   renewDelegationToken(hmac: Uint8Array): RenewDelegationTokenResult;
   /**
@@ -1730,6 +1989,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the hmac
    * @returns The RenewDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   renewDelegationToken(args: {
     /** HMAC of the Delegation token */
@@ -1743,6 +2004,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the hmac, and the options to use
    * @returns The RenewDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   renewDelegationToken(args: {
     /** HMAC of the Delegation token */
@@ -1770,6 +2033,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param hmac - HMAC of the Delegation token
    * @returns The ExpireDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   expireDelegationToken(hmac: Uint8Array): ExpireDelegationTokenResult;
   /**
@@ -1777,6 +2042,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the hmac
    * @returns The ExpireDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   expireDelegationToken(args: {
     /** HMAC of the Delegation token */
@@ -1790,6 +2057,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the hmac, and the options to use
    * @returns The ExpireDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   expireDelegationToken(args: {
     /** HMAC of the Delegation token */
@@ -1826,6 +2095,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The DescribeDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeDelegationToken(args: {
     /** The options to use. */
@@ -1836,6 +2107,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The DescribeDelegationTokenResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeDelegationToken(options: DescribeDelegationTokenOptions): DescribeDelegationTokenResult;
   /**
@@ -1861,6 +2134,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param filter - the filter to apply to match entities
    * @returns The DescribeClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClientQuotas(filter: ClientQuotaFilter): DescribeClientQuotasResult;
   /**
@@ -1868,6 +2143,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the filter
    * @returns The DescribeClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClientQuotas(args: {
     /** the filter to apply to match entities */
@@ -1882,6 +2159,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the filter, and the options to use
    * @returns The DescribeClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeClientQuotas(args: {
     /** the filter to apply to match entities */
@@ -1911,6 +2190,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param entries - the alterations to perform
    * @returns The AlterClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterClientQuotas(entries: Iterable<ClientQuotaAlteration>): AlterClientQuotasResult;
   /**
@@ -1918,6 +2199,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the entries
    * @returns The AlterClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterClientQuotas(args: {
     /** the alterations to perform */
@@ -1934,6 +2217,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the entries, and the options to use
    * @returns The AlterClientQuotasResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterClientQuotas(args: {
     /** the alterations to perform */
@@ -1969,6 +2254,8 @@ export class KafkaAdminClient implements Admin {
    * @param users - the users for which credentials are to be described; all users' credentials are
    *   described if null or empty.
    * @returns The DescribeUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeUserScramCredentials(users: Iterable<string> | null): DescribeUserScramCredentialsResult;
   /**
@@ -1976,6 +2263,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the users
    * @returns The DescribeUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeUserScramCredentials(args: {
     /** The users for which credentials are to be described; all users' credentials are described if null or empty. */
@@ -1989,6 +2278,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the users, and the options to use
    * @returns The DescribeUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeUserScramCredentials(args: {
     /** The users for which credentials are to be described; all users' credentials are described if null or empty. */
@@ -2015,6 +2306,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param alterations - the alterations to be applied
    * @returns The AlterUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterUserScramCredentials(alterations: Iterable<UserScramCredentialAlteration>): AlterUserScramCredentialsResult;
   /**
@@ -2022,6 +2315,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the alterations
    * @returns The AlterUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterUserScramCredentials(args: {
     /** the alterations to be applied */
@@ -2035,6 +2330,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the alterations, and the options to use
    * @returns The AlterUserScramCredentialsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   alterUserScramCredentials(args: {
     /** the alterations to be applied */
@@ -2060,6 +2357,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param partitions - The set of partitions to query
    * @returns The DescribeProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeProducers(partitions: Iterable<TopicPartition>): DescribeProducersResult;
   /**
@@ -2067,6 +2366,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the partitions
    * @returns The DescribeProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeProducers(args: {
     /** The set of partitions to query */
@@ -2080,6 +2381,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the partitions, and the options to use
    * @returns The DescribeProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeProducers(args: {
     /** The set of partitions to query */
@@ -2105,6 +2408,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param transactionalIds - The set of transactional IDs to query
    * @returns The DescribeTransactionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTransactions(transactionalIds: Iterable<string>): DescribeTransactionsResult;
   /**
@@ -2112,6 +2417,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the transactionalIds
    * @returns The DescribeTransactionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTransactions(args: {
     /** The set of transactional IDs to query */
@@ -2124,6 +2431,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the transactionalIds, and the options to use
    * @returns The DescribeTransactionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeTransactions(args: {
     /** The set of transactional IDs to query */
@@ -2149,6 +2458,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param spec - The transaction specification including topic partition and producer details
    * @returns The AbortTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   abortTransaction(spec: AbortTransactionSpec): AbortTransactionResult;
   /**
@@ -2156,6 +2467,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the spec
    * @returns The AbortTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   abortTransaction(args: {
     /** The transaction specification including topic partition and producer details */
@@ -2169,6 +2482,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the spec, and the options to use
    * @returns The AbortTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   abortTransaction(args: {
     /** The transaction specification including topic partition and producer details */
@@ -2202,6 +2517,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The ListTransactionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listTransactions(args: {
     /** The options to use. */
@@ -2212,6 +2529,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The ListTransactionsResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   listTransactions(options: ListTransactionsOptions): ListTransactionsResult;
   /**
@@ -2234,6 +2553,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param transactionalIds - The IDs of the producers to fence.
    * @returns The FenceProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   fenceProducers(transactionalIds: Iterable<string>): FenceProducersResult;
   /**
@@ -2241,6 +2562,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the transactionalIds
    * @returns The FenceProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   fenceProducers(args: {
     /** The IDs of the producers to fence. */
@@ -2252,6 +2575,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the transactionalIds, and the options to use
    * @returns The FenceProducersResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   fenceProducers(args: {
     /** The IDs of the producers to fence. */
@@ -2279,6 +2604,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param transactionalId - The ID of the transaction to terminate.
    * @returns The TerminateTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   forceTerminateTransaction(transactionalId: string): TerminateTransactionResult;
   /**
@@ -2286,6 +2613,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the transactionalId
    * @returns The TerminateTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   forceTerminateTransaction(args: {
     /** The ID of the transaction to terminate. */
@@ -2299,6 +2628,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the transactionalId, and the options to use
    * @returns The TerminateTransactionResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   forceTerminateTransaction(args: {
     /** The ID of the transaction to terminate. */
@@ -2336,6 +2667,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the options to use
    * @returns The DescribeFeaturesResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeFeatures(args: {
     /** The options to use. */
@@ -2346,6 +2679,8 @@ export class KafkaAdminClient implements Admin {
    *
    * @param options - the options to use
    * @returns The DescribeFeaturesResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   describeFeatures(options: DescribeFeaturesOptions): DescribeFeaturesResult;
   /**
@@ -2368,6 +2703,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param featureUpdates - the map of finalized feature name to `FeatureUpdate`
    * @returns The UpdateFeaturesResult.
+   * @throws `IllegalArgumentError` for a form Java has not, and the core's
+   *   for an empty map or a blank feature name, as Java's
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   updateFeatures(featureUpdates: ReadonlyMap<string, FeatureUpdate>): UpdateFeaturesResult;
   /**
@@ -2375,6 +2713,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the featureUpdates
    * @returns The UpdateFeaturesResult.
+   * @throws `IllegalArgumentError` for a form Java has not, and the core's
+   *   for an empty map or a blank feature name, as Java's
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   updateFeatures(args: {
     /** the map of finalized feature name to `FeatureUpdate` */
@@ -2413,6 +2754,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the featureUpdates, and the options to use
    * @returns The UpdateFeaturesResult.
+   * @throws `IllegalArgumentError` for a form Java has not, and the core's
+   *   for an empty map or a blank feature name, as Java's
+   * @throws `TypeError` for an argument of the wrong type, or a null one
    */
   updateFeatures(args: {
     /** the map of finalized feature name to `FeatureUpdate` */
@@ -2440,6 +2784,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param controllerId - the controller id to unregister.
    * @returns The UnregisterControllerResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when the controller id is outside Java's `int`
    */
   unregisterController(controllerId: number): UnregisterControllerResult;
   /**
@@ -2447,6 +2794,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the controllerId
    * @returns The UnregisterControllerResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when the controller id is outside Java's `int`
    */
   unregisterController(args: {
     /** the controller id to unregister. */
@@ -2465,6 +2815,9 @@ export class KafkaAdminClient implements Admin {
    *
    * @param args - the controllerId, and the options to use
    * @returns The UnregisterControllerResult.
+   * @throws `IllegalArgumentError` for a form Java has not
+   * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when the controller id is outside Java's `int`
    */
   unregisterController(args: {
     /** the controller id to unregister. */
@@ -2479,6 +2832,7 @@ export class KafkaAdminClient implements Admin {
    * @returns the result
    * @throws `IllegalArgumentError` for a form Java has not
    * @throws `TypeError` for an argument of the wrong type, or a null one
+   * @throws `RangeError` when the controller id is outside Java's `int`
    */
   unregisterController(args: unknown): UnregisterControllerResult {
     return featureCalls.unregisterController(this.#handle, args, arguments.length);

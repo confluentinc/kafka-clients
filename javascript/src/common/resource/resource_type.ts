@@ -112,6 +112,8 @@ export class ResourceType {
    *
    * @param options - the constant's name
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(options: {
     /** The constant's name */
@@ -148,6 +150,7 @@ export class ResourceType {
    *
    * @param options - The string to parse.
    * @returns The ResourceType, or UNKNOWN if the string could not be matched.
+   * @throws `TypeError` when the string is null (Java dereferences it)
    */
   static fromString(options: {
     /** The string to parse. */
@@ -184,6 +187,8 @@ export class ResourceType {
    *
    * @param options - the code, a Java `byte`
    * @returns the constant
+   * @throws `TypeError` when the code is not an integer
+   * @throws `RangeError` when it is outside Java's `byte`
    */
   static fromCode(options: {
     /** The code, a Java `byte` */
@@ -207,7 +212,7 @@ export class ResourceType {
   }
 
   /**
-   * Return the code of this constant.
+   * Return the code of this resource.
    *
    * @returns the code
    * @throws `TypeError` when it is given an argument: it only reads
@@ -218,7 +223,7 @@ export class ResourceType {
   }
 
   /**
-   * Return true if this constant is UNKNOWN.
+   * Return whether this resource type is UNKNOWN.
    *
    * @returns whether this is `UNKNOWN`
    * @throws `TypeError` when it is given an argument: it only reads

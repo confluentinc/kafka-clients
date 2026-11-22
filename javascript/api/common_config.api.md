@@ -26,6 +26,81 @@ export class ConfigError extends KafkaError {
 }
 
 // @public
+export class ConfigResource {
+    constructor(options: {
+        type: ConfigResource.Type;
+        name: string;
+    });
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    isDefault(): boolean;
+    name(): string;
+    toJSON(): {
+        type: string;
+        name: string;
+    };
+    toString(): string;
+    type(): ConfigResource.Type;
+}
+
+// @public (undocumented)
+export namespace ConfigResource {
+    export class Type {
+        static readonly BROKER: Type;
+        static readonly BROKER_LOGGER: Type;
+        static readonly CLIENT_METRICS: Type;
+        static forId(id: number): Type;
+        static forId(options: {
+            id: number;
+        }): Type;
+        static readonly GROUP: Type;
+        id(): number;
+        name(): string;
+        ordinal(): number;
+        toJSON(key?: string): string;
+        static readonly TOPIC: Type;
+        toString(): string;
+        static readonly UNKNOWN: Type;
+        static valueOf(name: string): Type;
+        static valueOf(options: {
+            name: string;
+        }): Type;
+        static values(): Type[];
+    }
+}
+
+// @public
+export class ConfigResourceMap<V> implements Iterable<[ConfigResource, V]> {
+    [Symbol.iterator](): IterableIterator<[ConfigResource, V]>;
+    constructor();
+    constructor(options: {
+        entries: Iterable<readonly [ConfigResource | null, V]>;
+    });
+    constructor(entries: Iterable<readonly [ConfigResource | null, V]>);
+    clear(): void;
+    delete(options: {
+        key: ConfigResource | null;
+    }): boolean;
+    delete(key: ConfigResource | null): boolean;
+    entries(): IterableIterator<[ConfigResource, V]>;
+    forEach(callback: (value: V, key: ConfigResource, map: ConfigResourceMap<V>) => void): void;
+    get(options: {
+        key: ConfigResource | null;
+    }): V | null;
+    get(key: ConfigResource | null): V | null;
+    has(options: {
+        key: ConfigResource | null;
+    }): boolean;
+    has(key: ConfigResource | null): boolean;
+    keys(): IterableIterator<ConfigResource>;
+    set(key: ConfigResource | null, value: V): this;
+    size(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    values(): IterableIterator<V>;
+}
+
+// @public
 export class LogLevelConfig {
     constructor();
     static readonly DEBUG_LOG_LEVEL: string;
@@ -320,7 +395,5 @@ export class TopicConfig {
     static readonly UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG: string;
     static readonly UNCLEAN_LEADER_ELECTION_ENABLE_DOC: string;
 }
-
-// (No @packageDocumentation comment for this package)
 
 ```

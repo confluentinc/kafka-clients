@@ -100,12 +100,14 @@ export class RemoveMembersFromConsumerGroupOptions extends AbstractOptions {
    * Sets an optional reason.
    *
    * @param reason - the reason, or null, on its own
+   * @throws `TypeError` when the value is neither a string nor null
    */
   reason(reason: string | null): void;
   /**
    * The same as `reason(reason)`.
    *
    * @param options - the reason, or null
+   * @throws `TypeError` when the value is neither a string nor null
    */
   reason(options: {
     /** The reason, or null. */

@@ -79,6 +79,7 @@ export class ListConsumerGroupOffsetsSpec {
    *
    * @param topicPartitions - List of topic partitions to include, on its own
    * @returns This ListConsumerGroupOffsetSpec
+   * @throws `TypeError` when the value is not an iterable of TopicPartition or null
    */
   topicPartitions(topicPartitions: Iterable<TopicPartition> | null): this;
   /**
@@ -86,6 +87,7 @@ export class ListConsumerGroupOffsetsSpec {
    *
    * @param options - List of topic partitions to include
    * @returns This ListConsumerGroupOffsetSpec
+   * @throws `TypeError` when the value is not an iterable of TopicPartition or null
    */
   topicPartitions(options: {
     /** List of topic partitions to include, or null for all. */

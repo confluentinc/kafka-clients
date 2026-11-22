@@ -63,15 +63,12 @@ export class AlterConsumerGroupOffsetsResult {
    * partition.
    *
    * @param partition - the partition, on its own or as `{ partition }`
-   * @returns the future, failed with `IllegalArgumentError` when the
-   *   partition was not attempted
-   * @throws `TypeError` when the partition is null or not a TopicPartition
+   * @returns the future
+   * @throws `TypeError` when the partition is null, has a null topic or is
+   *   not a TopicPartition
    *
-   * @remarks *(deviation)* A null partition, or one with a null topic, is a
-   * `TypeError` at the call, where Java's future fails with the request's
-   * error or with "Alter offset for partition "null" was not attempted". Why:
-   * the C API takes the partition as a handle, whose topic cannot be `NULL`.
-   * Goes when: the FFI takes them.
+   * @remarks *(deviation)* Java fails the future for a null partition or
+   * topic. Why: the C API cannot carry the null. Goes when: the FFI takes it.
    */
   partitionResult(partition: TopicPartition): KafkaFuture<void>;
   /**
