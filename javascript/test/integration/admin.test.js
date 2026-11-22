@@ -575,8 +575,8 @@ async function retryUntil(call, accept) {
 //
 // ACLs need an authorizer, which the scratch broker of `make test-integration`
 // has not: there every ACL call fails with the broker's
-// SecurityDisabledException, which this test checks. With an authorizer (P8's
-// harness clusters), it creates, describes and deletes a binding instead.
+// SecurityDisabledException, which this test checks. With an authorizer (the
+// gRPC harness's clusters), it creates, describes and deletes a binding instead.
 
 const acl = require('@confluentinc/kafka-javascript/common/acl');
 const res = require('@confluentinc/kafka-javascript/common/resource');
@@ -652,8 +652,8 @@ const { SecurityDisabledError } = require('@confluentinc/kafka-javascript/common
 // round trips alter, describe and remove them. Delegation tokens need a
 // token secret and a SASL listener, which the scratch broker has not: there
 // the broker refuses the calls, which the test checks with the broker's
-// error, and with them (P8's harness clusters) it creates, describes, renews
-// and expires a token.
+// error, and with them (the gRPC harness's clusters) it creates, describes,
+// renews and expires a token.
 
 const quotaPkg = require('@confluentinc/kafka-javascript/common/quota');
 const { KafkaPrincipal: Principal } = require('@confluentinc/kafka-javascript/common/security/auth');

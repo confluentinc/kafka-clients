@@ -20,8 +20,13 @@
  *
  * Invented *(js-only)*: `TopicPartitionMap` and `TopicPartitionSet`, Java's
  * `Map<TopicPartition, V>` and the `Set<TopicPartition>` the client returns,
- * and `MetricNameMap`, the `Map<MetricName, ? extends Metric>` that
- * `metrics()` returns: JavaScript has no value equality for map keys.
+ * `MetricNameMap`, the `Map<MetricName, ? extends Metric>` that `metrics()`
+ * returns, and `UuidMap` and `TopicPartitionReplicaMap`, Java's
+ * `Map<Uuid, V>` and `Map<TopicPartitionReplica, V>`: JavaScript has no value
+ * equality for map keys.
+ *
+ * Not translated: Java's deprecated `ConsumerGroupState`, which `GroupState`
+ * replaces.
  *
  * @packageDocumentation
  */

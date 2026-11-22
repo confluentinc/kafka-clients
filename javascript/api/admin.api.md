@@ -8,6 +8,37 @@
 export const __esModule: true;
 
 // @public
+export class AbortTransactionOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+    toString(): string;
+}
+
+// @public
+export class AbortTransactionResult {
+    all(): KafkaFuture<void>;
+}
+
+// @public
+export class AbortTransactionSpec {
+    constructor(options: {
+        topicPartition: TopicPartition | null;
+        producerId: bigint | number;
+        producerEpoch: number;
+        coordinatorEpoch: number;
+    });
+    coordinatorEpoch(): number;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    producerEpoch(): number;
+    producerId(): bigint;
+    toJSON(): Record<string, unknown>;
+    topicPartition(): TopicPartition | null;
+    toString(): string;
+}
+
+// @public
 export abstract class AbstractOptions {
     constructor();
     timeoutMs(): number | null;
@@ -20,10 +51,79 @@ export abstract class AbstractOptions {
 // @public
 export interface Admin {
     [Symbol.asyncDispose](): Promise<void>;
+    abortTransaction(spec: AbortTransactionSpec): AbortTransactionResult;
+    abortTransaction(args: {
+        spec: AbortTransactionSpec;
+        options?: never;
+    }): AbortTransactionResult;
+    abortTransaction(args: {
+        spec: AbortTransactionSpec;
+        options: AbortTransactionOptions;
+    }): AbortTransactionResult;
+    alterClientQuotas(entries: Iterable<ClientQuotaAlteration>): AlterClientQuotasResult;
+    alterClientQuotas(args: {
+        entries: Iterable<ClientQuotaAlteration>;
+        options?: never;
+    }): AlterClientQuotasResult;
+    alterClientQuotas(args: {
+        entries: Iterable<ClientQuotaAlteration>;
+        options: AlterClientQuotasOptions;
+    }): AlterClientQuotasResult;
+    alterConsumerGroupOffsets(args: {
+        groupId: string;
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        options?: never;
+    }): AlterConsumerGroupOffsetsResult;
+    alterConsumerGroupOffsets(args: {
+        groupId: string;
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        options: AlterConsumerGroupOffsetsOptions;
+    }): AlterConsumerGroupOffsetsResult;
+    alterPartitionReassignments(reassignments: TopicPartitionMap<NewPartitionReassignment | null>): AlterPartitionReassignmentsResult;
+    alterPartitionReassignments(args: {
+        reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
+        options?: never;
+    }): AlterPartitionReassignmentsResult;
+    alterPartitionReassignments(args: {
+        reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
+        options: AlterPartitionReassignmentsOptions;
+    }): AlterPartitionReassignmentsResult;
+    alterReplicaLogDirs(replicaAssignment: TopicPartitionReplicaMap<string>): AlterReplicaLogDirsResult;
+    alterReplicaLogDirs(args: {
+        replicaAssignment: TopicPartitionReplicaMap<string>;
+        options?: never;
+    }): AlterReplicaLogDirsResult;
+    alterReplicaLogDirs(args: {
+        replicaAssignment: TopicPartitionReplicaMap<string>;
+        options: AlterReplicaLogDirsOptions;
+    }): AlterReplicaLogDirsResult;
+    alterUserScramCredentials(alterations: Iterable<UserScramCredentialAlteration>): AlterUserScramCredentialsResult;
+    alterUserScramCredentials(args: {
+        alterations: Iterable<UserScramCredentialAlteration>;
+        options?: never;
+    }): AlterUserScramCredentialsResult;
+    alterUserScramCredentials(args: {
+        alterations: Iterable<UserScramCredentialAlteration>;
+        options: AlterUserScramCredentialsOptions;
+    }): AlterUserScramCredentialsResult;
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
-    createPartitions(newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>): CreatePartitionsResult;
+    createAcls(acls: Iterable<AclBinding>): CreateAclsResult;
+    createAcls(args: {
+        acls: Iterable<AclBinding>;
+        options?: never;
+    }): CreateAclsResult;
+    createAcls(args: {
+        acls: Iterable<AclBinding>;
+        options: CreateAclsOptions;
+    }): CreateAclsResult;
+    createDelegationToken(): CreateDelegationTokenResult;
+    createDelegationToken(args: {
+        options: CreateDelegationTokenOptions;
+    }): CreateDelegationTokenResult;
+    createDelegationToken(options: CreateDelegationTokenOptions): CreateDelegationTokenResult;
+    createPartitions(newPartitions: ReadonlyMap<string, NewPartitions>): CreatePartitionsResult;
     createPartitions(args: {
         newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
         options?: never;
@@ -41,6 +141,34 @@ export interface Admin {
         newTopics: Iterable<NewTopic>;
         options: CreateTopicsOptions;
     }): CreateTopicsResult;
+    deleteAcls(filters: Iterable<AclBindingFilter>): DeleteAclsResult;
+    deleteAcls(args: {
+        filters: Iterable<AclBindingFilter>;
+        options?: never;
+    }): DeleteAclsResult;
+    deleteAcls(args: {
+        filters: Iterable<AclBindingFilter>;
+        options: DeleteAclsOptions;
+    }): DeleteAclsResult;
+    deleteConsumerGroupOffsets(args: {
+        groupId: string;
+        partitions: Iterable<TopicPartition>;
+        options?: never;
+    }): DeleteConsumerGroupOffsetsResult;
+    deleteConsumerGroupOffsets(args: {
+        groupId: string;
+        partitions: Iterable<TopicPartition>;
+        options: DeleteConsumerGroupOffsetsOptions;
+    }): DeleteConsumerGroupOffsetsResult;
+    deleteConsumerGroups(groupIds: Iterable<string>): DeleteConsumerGroupsResult;
+    deleteConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options?: never;
+    }): DeleteConsumerGroupsResult;
+    deleteConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options: DeleteConsumerGroupsOptions;
+    }): DeleteConsumerGroupsResult;
     deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
     deleteRecords(args: {
         recordsToDelete: TopicPartitionMap<RecordsToDelete>;
@@ -59,11 +187,93 @@ export interface Admin {
         topics: Iterable<string> | TopicCollection;
         options: DeleteTopicsOptions;
     }): DeleteTopicsResult;
+    describeAcls(filter: AclBindingFilter): DescribeAclsResult;
+    describeAcls(args: {
+        filter: AclBindingFilter;
+        options?: never;
+    }): DescribeAclsResult;
+    describeAcls(args: {
+        filter: AclBindingFilter;
+        options: DescribeAclsOptions;
+    }): DescribeAclsResult;
+    describeClassicGroups(groupIds: Iterable<string>): DescribeClassicGroupsResult;
+    describeClassicGroups(args: {
+        groupIds: Iterable<string>;
+        options?: never;
+    }): DescribeClassicGroupsResult;
+    describeClassicGroups(args: {
+        groupIds: Iterable<string>;
+        options: DescribeClassicGroupsOptions;
+    }): DescribeClassicGroupsResult;
+    describeClientQuotas(filter: ClientQuotaFilter): DescribeClientQuotasResult;
+    describeClientQuotas(args: {
+        filter: ClientQuotaFilter;
+        options?: never;
+    }): DescribeClientQuotasResult;
+    describeClientQuotas(args: {
+        filter: ClientQuotaFilter;
+        options: DescribeClientQuotasOptions;
+    }): DescribeClientQuotasResult;
     describeCluster(): DescribeClusterResult;
     describeCluster(args: {
         options: DescribeClusterOptions;
     }): DescribeClusterResult;
     describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
+    describeConfigs(resources: Iterable<ConfigResource>): DescribeConfigsResult;
+    describeConfigs(args: {
+        resources: Iterable<ConfigResource>;
+        options?: never;
+    }): DescribeConfigsResult;
+    describeConfigs(args: {
+        resources: Iterable<ConfigResource>;
+        options: DescribeConfigsOptions;
+    }): DescribeConfigsResult;
+    describeConsumerGroups(groupIds: Iterable<string>): DescribeConsumerGroupsResult;
+    describeConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options?: never;
+    }): DescribeConsumerGroupsResult;
+    describeConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options: DescribeConsumerGroupsOptions;
+    }): DescribeConsumerGroupsResult;
+    describeDelegationToken(): DescribeDelegationTokenResult;
+    describeDelegationToken(args: {
+        options: DescribeDelegationTokenOptions;
+    }): DescribeDelegationTokenResult;
+    describeDelegationToken(options: DescribeDelegationTokenOptions): DescribeDelegationTokenResult;
+    describeFeatures(): DescribeFeaturesResult;
+    describeFeatures(args: {
+        options: DescribeFeaturesOptions;
+    }): DescribeFeaturesResult;
+    describeFeatures(options: DescribeFeaturesOptions): DescribeFeaturesResult;
+    describeLogDirs(brokers: Iterable<number>): DescribeLogDirsResult;
+    describeLogDirs(args: {
+        brokers: Iterable<number>;
+        options?: never;
+    }): DescribeLogDirsResult;
+    describeLogDirs(args: {
+        brokers: Iterable<number>;
+        options: DescribeLogDirsOptions;
+    }): DescribeLogDirsResult;
+    describeProducers(partitions: Iterable<TopicPartition>): DescribeProducersResult;
+    describeProducers(args: {
+        partitions: Iterable<TopicPartition>;
+        options?: never;
+    }): DescribeProducersResult;
+    describeProducers(args: {
+        partitions: Iterable<TopicPartition>;
+        options: DescribeProducersOptions;
+    }): DescribeProducersResult;
+    describeReplicaLogDirs(replicas: Iterable<TopicPartitionReplica>): DescribeReplicaLogDirsResult;
+    describeReplicaLogDirs(args: {
+        replicas: Iterable<TopicPartitionReplica>;
+        options?: never;
+    }): DescribeReplicaLogDirsResult;
+    describeReplicaLogDirs(args: {
+        replicas: Iterable<TopicPartitionReplica>;
+        options: DescribeReplicaLogDirsOptions;
+    }): DescribeReplicaLogDirsResult;
     describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
     describeTopics(args: {
         topicNames: Iterable<string>;
@@ -86,11 +296,168 @@ export interface Admin {
         options: DescribeTopicsOptions;
         topicNames?: never;
     }): DescribeTopicsResult;
+    describeTransactions(transactionalIds: Iterable<string>): DescribeTransactionsResult;
+    describeTransactions(args: {
+        transactionalIds: Iterable<string>;
+        options?: never;
+    }): DescribeTransactionsResult;
+    describeTransactions(args: {
+        transactionalIds: Iterable<string>;
+        options: DescribeTransactionsOptions;
+    }): DescribeTransactionsResult;
+    describeUserScramCredentials(): DescribeUserScramCredentialsResult;
+    describeUserScramCredentials(users: Iterable<string> | null): DescribeUserScramCredentialsResult;
+    describeUserScramCredentials(args: {
+        users: Iterable<string> | null;
+        options?: never;
+    }): DescribeUserScramCredentialsResult;
+    describeUserScramCredentials(args: {
+        users: Iterable<string> | null;
+        options: DescribeUserScramCredentialsOptions;
+    }): DescribeUserScramCredentialsResult;
+    electLeaders(args: {
+        electionType: ElectionType;
+        partitions: Iterable<TopicPartition> | null;
+        options?: never;
+    }): ElectLeadersResult;
+    electLeaders(args: {
+        electionType: ElectionType;
+        partitions: Iterable<TopicPartition> | null;
+        options: ElectLeadersOptions;
+    }): ElectLeadersResult;
+    expireDelegationToken(hmac: Uint8Array): ExpireDelegationTokenResult;
+    expireDelegationToken(args: {
+        hmac: Uint8Array;
+        options?: never;
+    }): ExpireDelegationTokenResult;
+    expireDelegationToken(args: {
+        hmac: Uint8Array;
+        options: ExpireDelegationTokenOptions;
+    }): ExpireDelegationTokenResult;
+    fenceProducers(transactionalIds: Iterable<string>): FenceProducersResult;
+    fenceProducers(args: {
+        transactionalIds: Iterable<string>;
+        options?: never;
+    }): FenceProducersResult;
+    fenceProducers(args: {
+        transactionalIds: Iterable<string>;
+        options: FenceProducersOptions;
+    }): FenceProducersResult;
+    forceTerminateTransaction(transactionalId: string): TerminateTransactionResult;
+    forceTerminateTransaction(args: {
+        transactionalId: string;
+        options?: never;
+    }): TerminateTransactionResult;
+    forceTerminateTransaction(args: {
+        transactionalId: string;
+        options: TerminateTransactionOptions;
+    }): TerminateTransactionResult;
+    incrementalAlterConfigs(configs: ConfigResourceMap<Iterable<AlterConfigOp>>): AlterConfigsResult;
+    incrementalAlterConfigs(args: {
+        configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
+        options?: never;
+    }): AlterConfigsResult;
+    incrementalAlterConfigs(args: {
+        configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
+        options: AlterConfigsOptions;
+    }): AlterConfigsResult;
+    listConfigResources(): ListConfigResourcesResult;
+    listConfigResources(args: {
+        configResourceTypes: Iterable<ConfigResource.Type>;
+        options: ListConfigResourcesOptions;
+    }): ListConfigResourcesResult;
+    listConsumerGroupOffsets(groupId: string): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupId: string;
+        groupSpecs?: never;
+        options?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupId: string;
+        options: ListConsumerGroupOffsetsOptions;
+        groupSpecs?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec>): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
+        groupId?: never;
+        options?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
+        options: ListConsumerGroupOffsetsOptions;
+        groupId?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listGroups(): ListGroupsResult;
+    listGroups(args: {
+        options: ListGroupsOptions;
+    }): ListGroupsResult;
+    listGroups(options: ListGroupsOptions): ListGroupsResult;
+    listOffsets(topicPartitionOffsets: TopicPartitionMap<OffsetSpec>): ListOffsetsResult;
+    listOffsets(args: {
+        topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
+        options?: never;
+    }): ListOffsetsResult;
+    listOffsets(args: {
+        topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
+        options: ListOffsetsOptions;
+    }): ListOffsetsResult;
+    listPartitionReassignments(): ListPartitionReassignmentsResult;
+    listPartitionReassignments(partitions: Iterable<TopicPartition>): ListPartitionReassignmentsResult;
+    listPartitionReassignments(args: {
+        partitions: Iterable<TopicPartition>;
+        options?: never;
+    }): ListPartitionReassignmentsResult;
+    listPartitionReassignments(args: {
+        partitions: Iterable<TopicPartition> | null;
+        options: ListPartitionReassignmentsOptions;
+    }): ListPartitionReassignmentsResult;
+    listPartitionReassignments(args: {
+        options: ListPartitionReassignmentsOptions;
+        partitions?: never;
+    }): ListPartitionReassignmentsResult;
+    listPartitionReassignments(options: ListPartitionReassignmentsOptions): ListPartitionReassignmentsResult;
     listTopics(): ListTopicsResult;
     listTopics(args: {
         options: ListTopicsOptions;
     }): ListTopicsResult;
     listTopics(options: ListTopicsOptions): ListTopicsResult;
+    listTransactions(): ListTransactionsResult;
+    listTransactions(args: {
+        options: ListTransactionsOptions;
+    }): ListTransactionsResult;
+    listTransactions(options: ListTransactionsOptions): ListTransactionsResult;
+    removeMembersFromConsumerGroup(args: {
+        groupId: string;
+        options: RemoveMembersFromConsumerGroupOptions;
+    }): RemoveMembersFromConsumerGroupResult;
+    renewDelegationToken(hmac: Uint8Array): RenewDelegationTokenResult;
+    renewDelegationToken(args: {
+        hmac: Uint8Array;
+        options?: never;
+    }): RenewDelegationTokenResult;
+    renewDelegationToken(args: {
+        hmac: Uint8Array;
+        options: RenewDelegationTokenOptions;
+    }): RenewDelegationTokenResult;
+    unregisterController(controllerId: number): UnregisterControllerResult;
+    unregisterController(args: {
+        controllerId: number;
+        options?: never;
+    }): UnregisterControllerResult;
+    unregisterController(args: {
+        controllerId: number;
+        options: UnregisterControllerOptions;
+    }): UnregisterControllerResult;
+    updateFeatures(featureUpdates: ReadonlyMap<string, FeatureUpdate>): UpdateFeaturesResult;
+    updateFeatures(args: {
+        featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
+        options?: never;
+    }): UpdateFeaturesResult;
+    updateFeatures(args: {
+        featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
+        options: UpdateFeaturesOptions;
+    }): UpdateFeaturesResult;
 }
 
 // @public
@@ -147,6 +514,188 @@ export class AdminClientConfig {
 export type AdminClientConfigs = {
     [key in 'bootstrap.controllers' | 'bootstrap.resolve.timeout.ms' | 'bootstrap.servers' | 'client.dns.lookup' | 'client.id' | 'config.providers' | 'connections.max.idle.ms' | 'default.api.timeout.ms' | 'enable.metrics.push' | 'metadata.cluster.check.enable' | 'metadata.max.age.ms' | 'metadata.recovery.rebootstrap.trigger.ms' | 'metadata.recovery.strategy' | 'metric.reporters' | 'metrics.num.samples' | 'metrics.recording.level' | 'metrics.sample.window.ms' | 'receive.buffer.bytes' | 'reconnect.backoff.max.ms' | 'reconnect.backoff.ms' | 'request.timeout.ms' | 'retries' | 'retry.backoff.max.ms' | 'retry.backoff.ms' | 'sasl.client.callback.handler.class' | 'sasl.jaas.config' | 'sasl.kerberos.kinit.cmd' | 'sasl.kerberos.min.time.before.relogin' | 'sasl.kerberos.service.name' | 'sasl.kerberos.ticket.renew.jitter' | 'sasl.kerberos.ticket.renew.window.factor' | 'sasl.login.callback.handler.class' | 'sasl.login.class' | 'sasl.login.connect.timeout.ms' | 'sasl.login.read.timeout.ms' | 'sasl.login.refresh.buffer.seconds' | 'sasl.login.refresh.min.period.seconds' | 'sasl.login.refresh.window.factor' | 'sasl.login.refresh.window.jitter' | 'sasl.login.retry.backoff.max.ms' | 'sasl.login.retry.backoff.ms' | 'sasl.mechanism' | 'sasl.oauthbearer.allow.unverified.audience' | 'sasl.oauthbearer.allow.unverified.issuer' | 'sasl.oauthbearer.assertion.algorithm' | 'sasl.oauthbearer.assertion.claim.aud' | 'sasl.oauthbearer.assertion.claim.exp.seconds' | 'sasl.oauthbearer.assertion.claim.iss' | 'sasl.oauthbearer.assertion.claim.jti.include' | 'sasl.oauthbearer.assertion.claim.nbf.seconds' | 'sasl.oauthbearer.assertion.claim.sub' | 'sasl.oauthbearer.assertion.file' | 'sasl.oauthbearer.assertion.private.key.file' | 'sasl.oauthbearer.assertion.private.key.passphrase' | 'sasl.oauthbearer.assertion.template.file' | 'sasl.oauthbearer.client.credentials.client.id' | 'sasl.oauthbearer.client.credentials.client.secret' | 'sasl.oauthbearer.clock.skew.seconds' | 'sasl.oauthbearer.expected.audience' | 'sasl.oauthbearer.expected.issuer' | 'sasl.oauthbearer.header.urlencode' | 'sasl.oauthbearer.jwks.endpoint.refresh.ms' | 'sasl.oauthbearer.jwks.endpoint.retry.backoff.max.ms' | 'sasl.oauthbearer.jwks.endpoint.retry.backoff.ms' | 'sasl.oauthbearer.jwks.endpoint.url' | 'sasl.oauthbearer.jwt.retriever.class' | 'sasl.oauthbearer.jwt.validator.class' | 'sasl.oauthbearer.scope' | 'sasl.oauthbearer.scope.claim.name' | 'sasl.oauthbearer.sub.claim.name' | 'sasl.oauthbearer.token.endpoint.url' | 'security.protocol' | 'security.providers' | 'send.buffer.bytes' | 'socket.connection.setup.timeout.max.ms' | 'socket.connection.setup.timeout.ms' | 'ssl.cipher.suites' | 'ssl.enabled.protocols' | 'ssl.endpoint.identification.algorithm' | 'ssl.engine.factory.class' | 'ssl.key.password' | 'ssl.keymanager.algorithm' | 'ssl.keystore.certificate.chain' | 'ssl.keystore.key' | 'ssl.keystore.location' | 'ssl.keystore.password' | 'ssl.keystore.type' | 'ssl.protocol' | 'ssl.provider' | 'ssl.secure.random.implementation' | 'ssl.trustmanager.algorithm' | 'ssl.truststore.certificates' | 'ssl.truststore.location' | 'ssl.truststore.password' | 'ssl.truststore.type' | (string & {})]?: ConfigValue;
 };
+
+// @public
+export class AlterClientQuotasOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        validateOnly?: boolean;
+    });
+    validateOnly(): boolean;
+    validateOnly(validateOnly: boolean): this;
+    validateOnly(options: {
+        validateOnly: boolean;
+    }): this;
+}
+
+// @public
+export class AlterClientQuotasResult {
+    constructor(futures: ClientQuotaEntityMap<KafkaFuture<void>>);
+    constructor(options: {
+        futures: ClientQuotaEntityMap<KafkaFuture<void>>;
+    });
+    all(): KafkaFuture<void>;
+    values(): ClientQuotaEntityMap<KafkaFuture<void>>;
+}
+
+// @public
+export class AlterConfigOp {
+    constructor(options: {
+        configEntry: ConfigEntry | null;
+        operationType: AlterConfigOp.OpType | null;
+    });
+    configEntry(): ConfigEntry | null;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    opType(): AlterConfigOp.OpType | null;
+    toJSON(): {
+        opType: string | null;
+        configEntry: ConfigEntry | null;
+    };
+    toString(): string;
+}
+
+// @public (undocumented)
+export namespace AlterConfigOp {
+    export class OpType {
+        static readonly APPEND: OpType;
+        static readonly DELETE: OpType;
+        static forId(id: number): OpType | null;
+        static forId(options: {
+            id: number;
+        }): OpType | null;
+        id(): number;
+        name(): string;
+        ordinal(): number;
+        static readonly SET: OpType;
+        static readonly SUBTRACT: OpType;
+        toJSON(key?: string): string;
+        toString(): string;
+        static valueOf(name: string): OpType;
+        static valueOf(options: {
+            name: string;
+        }): OpType;
+        static values(): OpType[];
+    }
+}
+
+// @public
+export class AlterConfigsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        validateOnly?: boolean;
+    });
+    shouldValidateOnly(): boolean;
+    validateOnly(validateOnly: boolean): this;
+    validateOnly(options: {
+        validateOnly: boolean;
+    }): this;
+}
+
+// @public
+export class AlterConfigsResult {
+    all(): KafkaFuture<void>;
+    values(): ConfigResourceMap<KafkaFuture<void>>;
+}
+
+// @public
+export class AlterConsumerGroupOffsetsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class AlterConsumerGroupOffsetsResult {
+    all(): KafkaFuture<void>;
+    partitionResult(partition: TopicPartition): KafkaFuture<void>;
+    partitionResult(options: {
+        partition: TopicPartition;
+    }): KafkaFuture<void>;
+}
+
+// @public
+export class AlterPartitionReassignmentsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        allowReplicationFactorChange?: boolean;
+    });
+    allowReplicationFactorChange(): boolean;
+    allowReplicationFactorChange(allow: boolean): this;
+    allowReplicationFactorChange(options: {
+        allow: boolean;
+    }): this;
+}
+
+// @public
+export class AlterPartitionReassignmentsResult {
+    all(): KafkaFuture<void>;
+    values(): TopicPartitionMap<KafkaFuture<void>>;
+}
+
+// @public
+export class AlterReplicaLogDirsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class AlterReplicaLogDirsResult {
+    all(): KafkaFuture<void>;
+    values(): TopicPartitionReplicaMap<KafkaFuture<void>>;
+}
+
+// @public
+export class AlterUserScramCredentialsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class AlterUserScramCredentialsResult {
+    constructor(futures: ReadonlyMap<string, KafkaFuture<void>>);
+    constructor(options: {
+        futures: ReadonlyMap<string, KafkaFuture<void>> | Readonly<Record<string, KafkaFuture<void>>>;
+    });
+    all(): KafkaFuture<void>;
+    values(): Map<string, KafkaFuture<void>>;
+}
+
+// @public
+export class ClassicGroupDescription {
+    constructor(options: {
+        groupId: string | null;
+        protocol: string | null;
+        protocolData: string | null;
+        members: Iterable<MemberDescription> | null;
+        state: ClassicGroupState | null;
+        coordinator: Node | null;
+        authorizedOperations?: never;
+    });
+    constructor(options: {
+        groupId: string | null;
+        protocol: string | null;
+        protocolData: string | null;
+        members: Iterable<MemberDescription> | null;
+        state: ClassicGroupState | null;
+        coordinator: Node | null;
+        authorizedOperations: Iterable<AclOperation> | null;
+    });
+    readonly authorizedOperations: ReadonlySet<AclOperation> | null;
+    readonly coordinator: Node | null;
+    equals(o: unknown): boolean;
+    readonly groupId: string;
+    hashCode(): number;
+    readonly isSimpleConsumerGroup: boolean;
+    readonly members: readonly MemberDescription[];
+    readonly protocol: string | null;
+    readonly protocolData: string;
+    readonly state: ClassicGroupState | null;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+}
 
 // @public
 export type CloseArgs = {
@@ -262,6 +811,79 @@ export namespace ConfigEntry {
 }
 
 // @public
+export class ConsumerGroupDescription {
+    constructor(options: {
+        groupId: string | null;
+        isSimpleConsumerGroup: boolean;
+        members: Iterable<MemberDescription> | null;
+        partitionAssignor: string | null;
+        type: GroupType | null;
+        groupState: GroupState | null;
+        coordinator: Node | null;
+        authorizedOperations: Iterable<AclOperation> | null;
+        groupEpoch: number | null;
+        targetAssignmentEpoch: number | null;
+    });
+    readonly authorizedOperations: ReadonlySet<AclOperation> | null;
+    readonly coordinator: Node | null;
+    equals(o: unknown): boolean;
+    readonly groupEpoch: number | null;
+    readonly groupId: string;
+    readonly groupState: GroupState | null;
+    hashCode(): number;
+    readonly isSimpleConsumerGroup: boolean;
+    readonly members: readonly MemberDescription[];
+    readonly partitionAssignor: string;
+    readonly targetAssignmentEpoch: number | null;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    readonly type: GroupType | null;
+}
+
+// @public
+export class CreateAclsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class CreateAclsResult {
+    all(): KafkaFuture<void>;
+    values(): AclBindingMap<KafkaFuture<void>>;
+}
+
+// @public
+export class CreateDelegationTokenOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        maxLifetimeMs?: bigint | number;
+        renewers?: Iterable<KafkaPrincipal>;
+        owner?: KafkaPrincipal | null;
+    });
+    maxLifetimeMs(): bigint;
+    maxLifetimeMs(maxLifetimeMs: bigint | number): this;
+    maxLifetimeMs(options: {
+        maxLifetimeMs: bigint | number;
+    }): this;
+    owner(): KafkaPrincipal | null;
+    owner(owner: KafkaPrincipal | null): this;
+    owner(options: {
+        owner: KafkaPrincipal | null;
+    }): this;
+    renewers(): KafkaPrincipal[];
+    renewers(renewers: Iterable<KafkaPrincipal>): this;
+    renewers(options: {
+        renewers: Iterable<KafkaPrincipal>;
+    }): this;
+}
+
+// @public
+export class CreateDelegationTokenResult {
+    delegationToken(): KafkaFuture<DelegationToken>;
+}
+
+// @public
 export class CreatePartitionsOptions extends AbstractOptions {
     constructor(options?: {
         timeoutMs?: number | null;
@@ -310,22 +932,18 @@ export class CreateTopicsResult {
     protected constructor(futures: Map<string, KafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>);
     all(): KafkaFuture<void>;
     config(topic: string): KafkaFuture<Config | null>;
-    // (undocumented)
     config(options: {
         topic: string;
     }): KafkaFuture<Config | null>;
     numPartitions(topic: string): KafkaFuture<number>;
-    // (undocumented)
     numPartitions(options: {
         topic: string;
     }): KafkaFuture<number>;
     replicationFactor(topic: string): KafkaFuture<number>;
-    // (undocumented)
     replicationFactor(options: {
         topic: string;
     }): KafkaFuture<number>;
     topicId(topic: string): KafkaFuture<Uuid>;
-    // (undocumented)
     topicId(options: {
         topic: string;
     }): KafkaFuture<Uuid>;
@@ -353,6 +971,61 @@ export namespace CreateTopicsResult {
 }
 
 // @public
+export class DeleteAclsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class DeleteAclsResult {
+    all(): KafkaFuture<AclBinding[]>;
+    values(): AclBindingFilterMap<KafkaFuture<DeleteAclsResult.FilterResults>>;
+}
+
+// @public (undocumented)
+export namespace DeleteAclsResult {
+    export class FilterResult {
+        binding(): AclBinding | null;
+        exception(): ApiError | null;
+        toJSON(): Record<string, unknown>;
+    }
+    export class FilterResults {
+        toJSON(): unknown[];
+        values(): FilterResult[];
+    }
+}
+
+// @public
+export class DeleteConsumerGroupOffsetsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class DeleteConsumerGroupOffsetsResult {
+    all(): KafkaFuture<void>;
+    partitionResult(partition: TopicPartition): KafkaFuture<void>;
+    partitionResult(options: {
+        partition: TopicPartition;
+    }): KafkaFuture<void>;
+}
+
+// @public
+export class DeleteConsumerGroupsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class DeleteConsumerGroupsResult {
+    all(): KafkaFuture<void>;
+    deletedGroups(): Map<string, KafkaFuture<void>>;
+}
+
+// @public
 export class DeletedRecords {
     constructor(lowWatermark: bigint | number);
     constructor(options: {
@@ -371,12 +1044,12 @@ export class DeleteRecordsOptions extends AbstractOptions {
 
 // @public
 export class DeleteRecordsResult {
-    constructor(futures: TopicPartitionMap<KafkaFuture<DeletedRecords>> | null);
+    constructor(futures: TopicPartitionMap<KafkaFuture<DeletedRecords>>);
     constructor(options: {
-        futures: TopicPartitionMap<KafkaFuture<DeletedRecords>> | null;
+        futures: TopicPartitionMap<KafkaFuture<DeletedRecords>>;
     });
     all(): KafkaFuture<void>;
-    lowWatermarks(): TopicPartitionMap<KafkaFuture<DeletedRecords>> | null;
+    lowWatermarks(): TopicPartitionMap<KafkaFuture<DeletedRecords>>;
 }
 
 // @public
@@ -398,6 +1071,57 @@ export class DeleteTopicsResult {
     all(): KafkaFuture<void>;
     topicIdValues(): UuidMap<KafkaFuture<void>> | null;
     topicNameValues(): Map<string, KafkaFuture<void>> | null;
+}
+
+// @public
+export class DescribeAclsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class DescribeAclsResult {
+    values(): KafkaFuture<AclBinding[]>;
+}
+
+// @public
+export class DescribeClassicGroupsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        includeAuthorizedOperations?: boolean;
+    });
+    includeAuthorizedOperations(): boolean;
+    includeAuthorizedOperations(includeAuthorizedOperations: boolean): this;
+    includeAuthorizedOperations(options: {
+        includeAuthorizedOperations: boolean;
+    }): this;
+}
+
+// @public
+export class DescribeClassicGroupsResult {
+    constructor(futures: ReadonlyMap<string, KafkaFuture<ClassicGroupDescription>>);
+    constructor(options: {
+        futures: ReadonlyMap<string, KafkaFuture<ClassicGroupDescription>> | Readonly<Record<string, KafkaFuture<ClassicGroupDescription>>>;
+    });
+    all(): KafkaFuture<Map<string, ClassicGroupDescription>>;
+    describedGroups(): Map<string, KafkaFuture<ClassicGroupDescription>>;
+}
+
+// @public
+export class DescribeClientQuotasOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class DescribeClientQuotasResult {
+    constructor(entities: KafkaFuture<ClientQuotaEntityMap<Map<string, number>>>);
+    constructor(options: {
+        entities: KafkaFuture<ClientQuotaEntityMap<Map<string, number>>>;
+    });
+    entities(): KafkaFuture<ClientQuotaEntityMap<Map<string, number>>>;
 }
 
 // @public
@@ -425,6 +1149,168 @@ export class DescribeClusterResult {
     clusterId(): KafkaFuture<string>;
     controller(): KafkaFuture<Node | null>;
     nodes(): KafkaFuture<Node[]>;
+}
+
+// @public
+export class DescribeConfigsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        includeSynonyms?: boolean;
+        includeDocumentation?: boolean;
+    });
+    includeDocumentation(): boolean;
+    includeDocumentation(includeDocumentation: boolean): this;
+    includeDocumentation(options: {
+        includeDocumentation: boolean;
+    }): this;
+    includeSynonyms(): boolean;
+    includeSynonyms(includeSynonyms: boolean): this;
+    includeSynonyms(options: {
+        includeSynonyms: boolean;
+    }): this;
+}
+
+// @public
+export class DescribeConfigsResult {
+    protected constructor(futures: ConfigResourceMap<KafkaFuture<Config>>);
+    all(): KafkaFuture<ConfigResourceMap<Config>>;
+    values(): ConfigResourceMap<KafkaFuture<Config>>;
+}
+
+// @public
+export class DescribeConsumerGroupsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        includeAuthorizedOperations?: boolean;
+    });
+    includeAuthorizedOperations(): boolean;
+    includeAuthorizedOperations(includeAuthorizedOperations: boolean): this;
+    includeAuthorizedOperations(options: {
+        includeAuthorizedOperations: boolean;
+    }): this;
+}
+
+// @public
+export class DescribeConsumerGroupsResult {
+    constructor(futures: ReadonlyMap<string, KafkaFuture<ConsumerGroupDescription>>);
+    constructor(options: {
+        futures: ReadonlyMap<string, KafkaFuture<ConsumerGroupDescription>> | Readonly<Record<string, KafkaFuture<ConsumerGroupDescription>>>;
+    });
+    all(): KafkaFuture<Map<string, ConsumerGroupDescription>>;
+    describedGroups(): Map<string, KafkaFuture<ConsumerGroupDescription>>;
+}
+
+// @public
+export class DescribeDelegationTokenOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        owners?: Iterable<KafkaPrincipal> | null;
+    });
+    owners(): KafkaPrincipal[] | null;
+    owners(owners: Iterable<KafkaPrincipal> | null): this;
+    owners(options: {
+        owners: Iterable<KafkaPrincipal> | null;
+    }): this;
+}
+
+// @public
+export class DescribeDelegationTokenResult {
+    delegationTokens(): KafkaFuture<DelegationToken[]>;
+}
+
+// @public
+export class DescribeFeaturesOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        nodeId?: number;
+    });
+    nodeId(): number | null;
+    nodeId(nodeId: number): this;
+    nodeId(options: {
+        nodeId: number;
+    }): this;
+}
+
+// @public
+export class DescribeFeaturesResult {
+    protected constructor(future: KafkaFuture<FeatureMetadata>);
+    featureMetadata(): KafkaFuture<FeatureMetadata>;
+}
+
+// @public
+export class DescribeLogDirsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class DescribeLogDirsResult {
+    allDescriptions(): KafkaFuture<Map<number, Map<string, LogDirDescription>>>;
+    descriptions(): Map<number, KafkaFuture<Map<string, LogDirDescription>>>;
+}
+
+// @public
+export class DescribeProducersOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        brokerId?: number;
+    });
+    brokerId(): number | null;
+    brokerId(brokerId: number): this;
+    brokerId(options: {
+        brokerId: number;
+    }): this;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    toString(): string;
+}
+
+// @public
+export class DescribeProducersResult {
+    all(): KafkaFuture<TopicPartitionMap<DescribeProducersResult.PartitionProducerState>>;
+    partitionResult(partition: TopicPartition): KafkaFuture<DescribeProducersResult.PartitionProducerState>;
+    partitionResult(options: {
+        partition: TopicPartition;
+    }): KafkaFuture<DescribeProducersResult.PartitionProducerState>;
+}
+
+// @public (undocumented)
+export namespace DescribeProducersResult {
+    export class PartitionProducerState {
+        constructor(activeProducers: Iterable<ProducerState> | null);
+        constructor(options: {
+            activeProducers: Iterable<ProducerState> | null;
+        });
+        activeProducers(): ProducerState[] | null;
+        toJSON(): Record<string, unknown>;
+        toString(): string;
+    }
+}
+
+// @public
+export class DescribeReplicaLogDirsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class DescribeReplicaLogDirsResult {
+    all(): KafkaFuture<TopicPartitionReplicaMap<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>;
+    values(): TopicPartitionReplicaMap<KafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>;
+}
+
+// @public (undocumented)
+export namespace DescribeReplicaLogDirsResult {
+    export class ReplicaLogDirInfo {
+        getCurrentReplicaLogDir(): string | null;
+        getCurrentReplicaOffsetLag(): bigint;
+        getFutureReplicaLogDir(): string | null;
+        getFutureReplicaOffsetLag(): bigint;
+        toJSON(): Record<string, string | null>;
+        toString(): string;
+    }
 }
 
 // @public
@@ -456,12 +1342,265 @@ export class DescribeTopicsResult {
 }
 
 // @public
+export class DescribeTransactionsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+    toString(): string;
+}
+
+// @public
+export class DescribeTransactionsResult {
+    all(): KafkaFuture<Map<string, TransactionDescription>>;
+    description(transactionalId: string): KafkaFuture<TransactionDescription>;
+    description(options: {
+        transactionalId: string;
+    }): KafkaFuture<TransactionDescription>;
+}
+
+// @public
+export class DescribeUserScramCredentialsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class DescribeUserScramCredentialsResult {
+    all(): KafkaFuture<Map<string, UserScramCredentialsDescription>>;
+    description(userName: string | null): KafkaFuture<UserScramCredentialsDescription>;
+    description(options: {
+        userName: string | null;
+    }): KafkaFuture<UserScramCredentialsDescription>;
+    users(): KafkaFuture<string[]>;
+}
+
+// @public
+export class ElectLeadersOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class ElectLeadersResult {
+    all(): KafkaFuture<void>;
+    partitions(): KafkaFuture<TopicPartitionMap<unknown>>;
+}
+
+// @public
+export class ExpireDelegationTokenOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        expiryTimePeriodMs?: bigint | number;
+    });
+    expiryTimePeriodMs(): bigint;
+    expiryTimePeriodMs(expiryTimePeriodMs: bigint | number): this;
+    expiryTimePeriodMs(options: {
+        expiryTimePeriodMs: bigint | number;
+    }): this;
+}
+
+// @public
+export class ExpireDelegationTokenResult {
+    expiryTimestamp(): KafkaFuture<bigint>;
+}
+
+// @public
+export class FeatureMetadata {
+    equals(other: unknown): boolean;
+    finalizedFeatures(): Map<string, FinalizedVersionRange>;
+    finalizedFeaturesEpoch(): bigint | null;
+    hashCode(): number;
+    supportedFeatures(): Map<string, SupportedVersionRange>;
+    toJSON(): {
+        finalizedFeatures: Record<string, FinalizedVersionRange>;
+        finalizedFeaturesEpoch: string | null;
+        supportedFeatures: Record<string, SupportedVersionRange>;
+    };
+    toString(): string;
+}
+
+// @public
+export class FeatureUpdate {
+    constructor(options: {
+        maxVersionLevel: number;
+        upgradeType: FeatureUpdate.UpgradeType;
+    });
+    equals(other: unknown): boolean;
+    hashCode(): number;
+    maxVersionLevel(): number;
+    toJSON(): {
+        maxVersionLevel: number;
+        upgradeType: string | null;
+    };
+    toString(): string;
+    upgradeType(): FeatureUpdate.UpgradeType;
+}
+
+// @public (undocumented)
+export namespace FeatureUpdate {
+    export class UpgradeType {
+        code(): number;
+        static fromCode(code: number): UpgradeType;
+        static fromCode(options: {
+            code: number;
+        }): UpgradeType;
+        name(): string;
+        ordinal(): number;
+        static readonly SAFE_DOWNGRADE: UpgradeType;
+        toJSON(key?: string): string;
+        toString(): string;
+        static readonly UNKNOWN: UpgradeType;
+        static readonly UNSAFE_DOWNGRADE: UpgradeType;
+        static readonly UPGRADE: UpgradeType;
+        static valueOf(name: string): UpgradeType;
+        static valueOf(options: {
+            name: string;
+        }): UpgradeType;
+        static values(): UpgradeType[];
+    }
+}
+
+// @public
+export class FenceProducersOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+    toString(): string;
+}
+
+// @public
+export class FenceProducersResult {
+    all(): KafkaFuture<void>;
+    epochId(transactionalId: string): KafkaFuture<number>;
+    epochId(options: {
+        transactionalId: string;
+    }): KafkaFuture<number>;
+    fencedProducers(): Map<string, KafkaFuture<void>>;
+    producerId(transactionalId: string): KafkaFuture<bigint>;
+    producerId(options: {
+        transactionalId: string;
+    }): KafkaFuture<bigint>;
+}
+
+// @public
+export class FinalizedVersionRange {
+    constructor(options: {
+        minVersionLevel: number;
+        maxVersionLevel: number;
+    });
+    equals(other: unknown): boolean;
+    hashCode(): number;
+    maxVersionLevel(): number;
+    minVersionLevel(): number;
+    toJSON(): {
+        minVersionLevel: number;
+        maxVersionLevel: number;
+    };
+    toString(): string;
+}
+
+// @public
+export class GroupListing {
+    constructor(options: {
+        groupId: string | null;
+        type: GroupType | null;
+        protocol: string | null;
+        groupState: GroupState | null;
+    });
+    equals(o: unknown): boolean;
+    groupId(): string | null;
+    groupState(): GroupState | null;
+    hashCode(): number;
+    isSimpleConsumerGroup(): boolean;
+    protocol(): string | null;
+    toJSON(): {
+        groupId: string | null;
+        type: GroupType | null;
+        protocol: string | null;
+        groupState: GroupState | null;
+    };
+    toString(): string;
+    type(): GroupType | null;
+}
+
+// @public
 export class KafkaAdminClient implements Admin {
     [Symbol.asyncDispose](): Promise<void>;
+    abortTransaction(spec: AbortTransactionSpec): AbortTransactionResult;
+    abortTransaction(args: {
+        spec: AbortTransactionSpec;
+        options?: never;
+    }): AbortTransactionResult;
+    abortTransaction(args: {
+        spec: AbortTransactionSpec;
+        options: AbortTransactionOptions;
+    }): AbortTransactionResult;
+    alterClientQuotas(entries: Iterable<ClientQuotaAlteration>): AlterClientQuotasResult;
+    alterClientQuotas(args: {
+        entries: Iterable<ClientQuotaAlteration>;
+        options?: never;
+    }): AlterClientQuotasResult;
+    alterClientQuotas(args: {
+        entries: Iterable<ClientQuotaAlteration>;
+        options: AlterClientQuotasOptions;
+    }): AlterClientQuotasResult;
+    alterConsumerGroupOffsets(args: {
+        groupId: string;
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        options?: never;
+    }): AlterConsumerGroupOffsetsResult;
+    alterConsumerGroupOffsets(args: {
+        groupId: string;
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        options: AlterConsumerGroupOffsetsOptions;
+    }): AlterConsumerGroupOffsetsResult;
+    alterPartitionReassignments(reassignments: TopicPartitionMap<NewPartitionReassignment | null>): AlterPartitionReassignmentsResult;
+    alterPartitionReassignments(args: {
+        reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
+        options?: never;
+    }): AlterPartitionReassignmentsResult;
+    alterPartitionReassignments(args: {
+        reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
+        options: AlterPartitionReassignmentsOptions;
+    }): AlterPartitionReassignmentsResult;
+    alterReplicaLogDirs(replicaAssignment: TopicPartitionReplicaMap<string>): AlterReplicaLogDirsResult;
+    alterReplicaLogDirs(args: {
+        replicaAssignment: TopicPartitionReplicaMap<string>;
+        options?: never;
+    }): AlterReplicaLogDirsResult;
+    alterReplicaLogDirs(args: {
+        replicaAssignment: TopicPartitionReplicaMap<string>;
+        options: AlterReplicaLogDirsOptions;
+    }): AlterReplicaLogDirsResult;
+    alterUserScramCredentials(alterations: Iterable<UserScramCredentialAlteration>): AlterUserScramCredentialsResult;
+    alterUserScramCredentials(args: {
+        alterations: Iterable<UserScramCredentialAlteration>;
+        options?: never;
+    }): AlterUserScramCredentialsResult;
+    alterUserScramCredentials(args: {
+        alterations: Iterable<UserScramCredentialAlteration>;
+        options: AlterUserScramCredentialsOptions;
+    }): AlterUserScramCredentialsResult;
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
-    createPartitions(newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>): CreatePartitionsResult;
+    createAcls(acls: Iterable<AclBinding>): CreateAclsResult;
+    createAcls(args: {
+        acls: Iterable<AclBinding>;
+        options?: never;
+    }): CreateAclsResult;
+    createAcls(args: {
+        acls: Iterable<AclBinding>;
+        options: CreateAclsOptions;
+    }): CreateAclsResult;
+    createDelegationToken(): CreateDelegationTokenResult;
+    createDelegationToken(args: {
+        options: CreateDelegationTokenOptions;
+    }): CreateDelegationTokenResult;
+    createDelegationToken(options: CreateDelegationTokenOptions): CreateDelegationTokenResult;
+    createPartitions(newPartitions: ReadonlyMap<string, NewPartitions>): CreatePartitionsResult;
     createPartitions(args: {
         newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
         options?: never;
@@ -479,6 +1618,34 @@ export class KafkaAdminClient implements Admin {
         newTopics: Iterable<NewTopic>;
         options: CreateTopicsOptions;
     }): CreateTopicsResult;
+    deleteAcls(filters: Iterable<AclBindingFilter>): DeleteAclsResult;
+    deleteAcls(args: {
+        filters: Iterable<AclBindingFilter>;
+        options?: never;
+    }): DeleteAclsResult;
+    deleteAcls(args: {
+        filters: Iterable<AclBindingFilter>;
+        options: DeleteAclsOptions;
+    }): DeleteAclsResult;
+    deleteConsumerGroupOffsets(args: {
+        groupId: string;
+        partitions: Iterable<TopicPartition>;
+        options?: never;
+    }): DeleteConsumerGroupOffsetsResult;
+    deleteConsumerGroupOffsets(args: {
+        groupId: string;
+        partitions: Iterable<TopicPartition>;
+        options: DeleteConsumerGroupOffsetsOptions;
+    }): DeleteConsumerGroupOffsetsResult;
+    deleteConsumerGroups(groupIds: Iterable<string>): DeleteConsumerGroupsResult;
+    deleteConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options?: never;
+    }): DeleteConsumerGroupsResult;
+    deleteConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options: DeleteConsumerGroupsOptions;
+    }): DeleteConsumerGroupsResult;
     deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
     deleteRecords(args: {
         recordsToDelete: TopicPartitionMap<RecordsToDelete>;
@@ -497,11 +1664,93 @@ export class KafkaAdminClient implements Admin {
         topics: Iterable<string> | TopicCollection;
         options: DeleteTopicsOptions;
     }): DeleteTopicsResult;
+    describeAcls(filter: AclBindingFilter): DescribeAclsResult;
+    describeAcls(args: {
+        filter: AclBindingFilter;
+        options?: never;
+    }): DescribeAclsResult;
+    describeAcls(args: {
+        filter: AclBindingFilter;
+        options: DescribeAclsOptions;
+    }): DescribeAclsResult;
+    describeClassicGroups(groupIds: Iterable<string>): DescribeClassicGroupsResult;
+    describeClassicGroups(args: {
+        groupIds: Iterable<string>;
+        options?: never;
+    }): DescribeClassicGroupsResult;
+    describeClassicGroups(args: {
+        groupIds: Iterable<string>;
+        options: DescribeClassicGroupsOptions;
+    }): DescribeClassicGroupsResult;
+    describeClientQuotas(filter: ClientQuotaFilter): DescribeClientQuotasResult;
+    describeClientQuotas(args: {
+        filter: ClientQuotaFilter;
+        options?: never;
+    }): DescribeClientQuotasResult;
+    describeClientQuotas(args: {
+        filter: ClientQuotaFilter;
+        options: DescribeClientQuotasOptions;
+    }): DescribeClientQuotasResult;
     describeCluster(): DescribeClusterResult;
     describeCluster(args: {
         options: DescribeClusterOptions;
     }): DescribeClusterResult;
     describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
+    describeConfigs(resources: Iterable<ConfigResource>): DescribeConfigsResult;
+    describeConfigs(args: {
+        resources: Iterable<ConfigResource>;
+        options?: never;
+    }): DescribeConfigsResult;
+    describeConfigs(args: {
+        resources: Iterable<ConfigResource>;
+        options: DescribeConfigsOptions;
+    }): DescribeConfigsResult;
+    describeConsumerGroups(groupIds: Iterable<string>): DescribeConsumerGroupsResult;
+    describeConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options?: never;
+    }): DescribeConsumerGroupsResult;
+    describeConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options: DescribeConsumerGroupsOptions;
+    }): DescribeConsumerGroupsResult;
+    describeDelegationToken(): DescribeDelegationTokenResult;
+    describeDelegationToken(args: {
+        options: DescribeDelegationTokenOptions;
+    }): DescribeDelegationTokenResult;
+    describeDelegationToken(options: DescribeDelegationTokenOptions): DescribeDelegationTokenResult;
+    describeFeatures(): DescribeFeaturesResult;
+    describeFeatures(args: {
+        options: DescribeFeaturesOptions;
+    }): DescribeFeaturesResult;
+    describeFeatures(options: DescribeFeaturesOptions): DescribeFeaturesResult;
+    describeLogDirs(brokers: Iterable<number>): DescribeLogDirsResult;
+    describeLogDirs(args: {
+        brokers: Iterable<number>;
+        options?: never;
+    }): DescribeLogDirsResult;
+    describeLogDirs(args: {
+        brokers: Iterable<number>;
+        options: DescribeLogDirsOptions;
+    }): DescribeLogDirsResult;
+    describeProducers(partitions: Iterable<TopicPartition>): DescribeProducersResult;
+    describeProducers(args: {
+        partitions: Iterable<TopicPartition>;
+        options?: never;
+    }): DescribeProducersResult;
+    describeProducers(args: {
+        partitions: Iterable<TopicPartition>;
+        options: DescribeProducersOptions;
+    }): DescribeProducersResult;
+    describeReplicaLogDirs(replicas: Iterable<TopicPartitionReplica>): DescribeReplicaLogDirsResult;
+    describeReplicaLogDirs(args: {
+        replicas: Iterable<TopicPartitionReplica>;
+        options?: never;
+    }): DescribeReplicaLogDirsResult;
+    describeReplicaLogDirs(args: {
+        replicas: Iterable<TopicPartitionReplica>;
+        options: DescribeReplicaLogDirsOptions;
+    }): DescribeReplicaLogDirsResult;
     describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
     describeTopics(args: {
         topicNames: Iterable<string>;
@@ -524,11 +1773,311 @@ export class KafkaAdminClient implements Admin {
         options: DescribeTopicsOptions;
         topicNames?: never;
     }): DescribeTopicsResult;
+    describeTransactions(transactionalIds: Iterable<string>): DescribeTransactionsResult;
+    describeTransactions(args: {
+        transactionalIds: Iterable<string>;
+        options?: never;
+    }): DescribeTransactionsResult;
+    describeTransactions(args: {
+        transactionalIds: Iterable<string>;
+        options: DescribeTransactionsOptions;
+    }): DescribeTransactionsResult;
+    describeUserScramCredentials(): DescribeUserScramCredentialsResult;
+    describeUserScramCredentials(users: Iterable<string> | null): DescribeUserScramCredentialsResult;
+    describeUserScramCredentials(args: {
+        users: Iterable<string> | null;
+        options?: never;
+    }): DescribeUserScramCredentialsResult;
+    describeUserScramCredentials(args: {
+        users: Iterable<string> | null;
+        options: DescribeUserScramCredentialsOptions;
+    }): DescribeUserScramCredentialsResult;
+    electLeaders(args: {
+        electionType: ElectionType;
+        partitions: Iterable<TopicPartition> | null;
+        options?: never;
+    }): ElectLeadersResult;
+    electLeaders(args: {
+        electionType: ElectionType;
+        partitions: Iterable<TopicPartition> | null;
+        options: ElectLeadersOptions;
+    }): ElectLeadersResult;
+    expireDelegationToken(hmac: Uint8Array): ExpireDelegationTokenResult;
+    expireDelegationToken(args: {
+        hmac: Uint8Array;
+        options?: never;
+    }): ExpireDelegationTokenResult;
+    expireDelegationToken(args: {
+        hmac: Uint8Array;
+        options: ExpireDelegationTokenOptions;
+    }): ExpireDelegationTokenResult;
+    fenceProducers(transactionalIds: Iterable<string>): FenceProducersResult;
+    fenceProducers(args: {
+        transactionalIds: Iterable<string>;
+        options?: never;
+    }): FenceProducersResult;
+    fenceProducers(args: {
+        transactionalIds: Iterable<string>;
+        options: FenceProducersOptions;
+    }): FenceProducersResult;
+    forceTerminateTransaction(transactionalId: string): TerminateTransactionResult;
+    forceTerminateTransaction(args: {
+        transactionalId: string;
+        options?: never;
+    }): TerminateTransactionResult;
+    forceTerminateTransaction(args: {
+        transactionalId: string;
+        options: TerminateTransactionOptions;
+    }): TerminateTransactionResult;
+    incrementalAlterConfigs(configs: ConfigResourceMap<Iterable<AlterConfigOp>>): AlterConfigsResult;
+    incrementalAlterConfigs(args: {
+        configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
+        options?: never;
+    }): AlterConfigsResult;
+    incrementalAlterConfigs(args: {
+        configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
+        options: AlterConfigsOptions;
+    }): AlterConfigsResult;
+    listConfigResources(): ListConfigResourcesResult;
+    listConfigResources(args: {
+        configResourceTypes: Iterable<ConfigResource.Type>;
+        options: ListConfigResourcesOptions;
+    }): ListConfigResourcesResult;
+    listConsumerGroupOffsets(groupId: string): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupId: string;
+        groupSpecs?: never;
+        options?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupId: string;
+        options: ListConsumerGroupOffsetsOptions;
+        groupSpecs?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec>): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
+        groupId?: never;
+        options?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
+        options: ListConsumerGroupOffsetsOptions;
+        groupId?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listGroups(): ListGroupsResult;
+    listGroups(args: {
+        options: ListGroupsOptions;
+    }): ListGroupsResult;
+    listGroups(options: ListGroupsOptions): ListGroupsResult;
+    listOffsets(topicPartitionOffsets: TopicPartitionMap<OffsetSpec>): ListOffsetsResult;
+    listOffsets(args: {
+        topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
+        options?: never;
+    }): ListOffsetsResult;
+    listOffsets(args: {
+        topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
+        options: ListOffsetsOptions;
+    }): ListOffsetsResult;
+    listPartitionReassignments(): ListPartitionReassignmentsResult;
+    listPartitionReassignments(partitions: Iterable<TopicPartition>): ListPartitionReassignmentsResult;
+    listPartitionReassignments(args: {
+        partitions: Iterable<TopicPartition>;
+        options?: never;
+    }): ListPartitionReassignmentsResult;
+    listPartitionReassignments(args: {
+        partitions: Iterable<TopicPartition> | null;
+        options: ListPartitionReassignmentsOptions;
+    }): ListPartitionReassignmentsResult;
+    listPartitionReassignments(args: {
+        options: ListPartitionReassignmentsOptions;
+        partitions?: never;
+    }): ListPartitionReassignmentsResult;
+    listPartitionReassignments(options: ListPartitionReassignmentsOptions): ListPartitionReassignmentsResult;
     listTopics(): ListTopicsResult;
     listTopics(args: {
         options: ListTopicsOptions;
     }): ListTopicsResult;
     listTopics(options: ListTopicsOptions): ListTopicsResult;
+    listTransactions(): ListTransactionsResult;
+    listTransactions(args: {
+        options: ListTransactionsOptions;
+    }): ListTransactionsResult;
+    listTransactions(options: ListTransactionsOptions): ListTransactionsResult;
+    removeMembersFromConsumerGroup(args: {
+        groupId: string;
+        options: RemoveMembersFromConsumerGroupOptions;
+    }): RemoveMembersFromConsumerGroupResult;
+    renewDelegationToken(hmac: Uint8Array): RenewDelegationTokenResult;
+    renewDelegationToken(args: {
+        hmac: Uint8Array;
+        options?: never;
+    }): RenewDelegationTokenResult;
+    renewDelegationToken(args: {
+        hmac: Uint8Array;
+        options: RenewDelegationTokenOptions;
+    }): RenewDelegationTokenResult;
+    unregisterController(controllerId: number): UnregisterControllerResult;
+    unregisterController(args: {
+        controllerId: number;
+        options?: never;
+    }): UnregisterControllerResult;
+    unregisterController(args: {
+        controllerId: number;
+        options: UnregisterControllerOptions;
+    }): UnregisterControllerResult;
+    updateFeatures(featureUpdates: ReadonlyMap<string, FeatureUpdate>): UpdateFeaturesResult;
+    updateFeatures(args: {
+        featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
+        options?: never;
+    }): UpdateFeaturesResult;
+    updateFeatures(args: {
+        featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
+        options: UpdateFeaturesOptions;
+    }): UpdateFeaturesResult;
+}
+
+// @public
+export class ListConfigResourcesOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class ListConfigResourcesResult {
+    all(): KafkaFuture<ConfigResource[]>;
+}
+
+// @public
+export class ListConsumerGroupOffsetsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        requireStable?: boolean;
+    });
+    requireStable(): boolean;
+    requireStable(requireStable: boolean): this;
+    requireStable(options: {
+        requireStable: boolean;
+    }): this;
+}
+
+// @public
+export class ListConsumerGroupOffsetsResult {
+    all(): KafkaFuture<Map<string, TopicPartitionMap<OffsetAndMetadata | null>>>;
+    partitionsToOffsetAndMetadata(): KafkaFuture<TopicPartitionMap<OffsetAndMetadata | null>>;
+    partitionsToOffsetAndMetadata(groupId: string): KafkaFuture<TopicPartitionMap<OffsetAndMetadata | null>>;
+    partitionsToOffsetAndMetadata(options: {
+        groupId: string;
+    }): KafkaFuture<TopicPartitionMap<OffsetAndMetadata | null>>;
+}
+
+// @public
+export class ListConsumerGroupOffsetsSpec {
+    constructor(options?: {
+        topicPartitions?: Iterable<TopicPartition> | null;
+    });
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    toJSON(): {
+        topicPartitions: TopicPartition[] | null;
+    };
+    topicPartitions(): TopicPartition[] | null;
+    topicPartitions(topicPartitions: Iterable<TopicPartition> | null): this;
+    topicPartitions(options: {
+        topicPartitions: Iterable<TopicPartition> | null;
+    }): this;
+    toString(): string;
+}
+
+// @public
+export class ListGroupsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        groupStates?: Iterable<GroupState> | null;
+        types?: Iterable<GroupType> | null;
+        protocolTypes?: Iterable<string> | null;
+    });
+    static forConsumerGroups(): ListGroupsOptions;
+    static forShareGroups(): ListGroupsOptions;
+    static forStreamsGroups(): ListGroupsOptions;
+    groupStates(): Set<GroupState>;
+    inGroupStates(groupStates: Iterable<GroupState> | null): this;
+    inGroupStates(options: {
+        groupStates: Iterable<GroupState> | null;
+    }): this;
+    protocolTypes(): Set<string>;
+    types(): Set<GroupType>;
+    withProtocolTypes(protocolTypes: Iterable<string> | null): this;
+    withProtocolTypes(options: {
+        protocolTypes: Iterable<string> | null;
+    }): this;
+    withTypes(types: Iterable<GroupType> | null): this;
+    withTypes(options: {
+        types: Iterable<GroupType> | null;
+    }): this;
+}
+
+// @public
+export class ListGroupsResult {
+    all(): KafkaFuture<GroupListing[]>;
+    errors(): KafkaFuture<unknown[]>;
+    valid(): KafkaFuture<GroupListing[]>;
+}
+
+// @public
+export class ListOffsetsOptions extends AbstractOptions {
+    constructor();
+    constructor(isolationLevel: IsolationLevel | null);
+    constructor(options: {
+        isolationLevel: IsolationLevel | null;
+    });
+    isolationLevel(): IsolationLevel | null;
+}
+
+// @public
+export class ListOffsetsResult {
+    constructor(futures: TopicPartitionMap<KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>>);
+    constructor(options: {
+        futures: TopicPartitionMap<KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>>;
+    });
+    all(): KafkaFuture<TopicPartitionMap<ListOffsetsResult.ListOffsetsResultInfo>>;
+    partitionResult(partition: TopicPartition | null): KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>;
+    partitionResult(options: {
+        partition: TopicPartition | null;
+    }): KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>;
+}
+
+// @public (undocumented)
+export namespace ListOffsetsResult {
+    export class ListOffsetsResultInfo {
+        constructor(options: {
+            offset: bigint | number;
+            timestamp: bigint | number;
+            leaderEpoch: number | null;
+        });
+        leaderEpoch(): number | null;
+        offset(): bigint;
+        timestamp(): bigint;
+        toJSON(): {
+            offset: string;
+            timestamp: string;
+            leaderEpoch: number | null;
+        };
+        toString(): string;
+    }
+}
+
+// @public
+export class ListPartitionReassignmentsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class ListPartitionReassignmentsResult {
+    reassignments(): KafkaFuture<TopicPartitionMap<PartitionReassignment>>;
 }
 
 // @public
@@ -555,6 +2104,164 @@ export class ListTopicsResult {
 }
 
 // @public
+export class ListTransactionsOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        filteredStates?: Iterable<TransactionState>;
+        filteredProducerIds?: Iterable<bigint | number>;
+        filteredDuration?: bigint | number;
+        filteredTransactionalIdPattern?: string | null;
+    });
+    equals(o: unknown): boolean;
+    filteredDuration(): bigint;
+    filteredProducerIds(): Set<bigint>;
+    filteredStates(): Set<TransactionState>;
+    filteredTransactionalIdPattern(): string | null;
+    filterOnDuration(durationMs: bigint | number): this;
+    filterOnDuration(options: {
+        durationMs: bigint | number;
+    }): this;
+    filterOnTransactionalIdPattern(pattern: string | null): this;
+    filterOnTransactionalIdPattern(options: {
+        pattern: string | null;
+    }): this;
+    filterProducerIds(producerIdFilters: Iterable<bigint | number>): this;
+    filterProducerIds(options: {
+        producerIdFilters: Iterable<bigint | number>;
+    }): this;
+    filterStates(states: Iterable<TransactionState>): this;
+    filterStates(options: {
+        states: Iterable<TransactionState>;
+    }): this;
+    hashCode(): number;
+    toString(): string;
+}
+
+// @public
+export class ListTransactionsResult {
+    all(): KafkaFuture<TransactionListing[]>;
+    allByBrokerId(): KafkaFuture<Map<number, TransactionListing[]>>;
+    byBrokerId(): KafkaFuture<Map<number, KafkaFuture<TransactionListing[]>>>;
+}
+
+// @public
+export class LogDirDescription {
+    constructor(options: {
+        error: ApiError | null;
+        replicaInfos: TopicPartitionMap<ReplicaInfo>;
+        totalBytes?: never;
+        usableBytes?: never;
+        isCordoned?: never;
+    });
+    constructor(options: {
+        error: ApiError | null;
+        replicaInfos: TopicPartitionMap<ReplicaInfo>;
+        totalBytes: bigint | number;
+        usableBytes: bigint | number;
+        isCordoned?: never;
+    });
+    constructor(options: {
+        error: ApiError | null;
+        replicaInfos: TopicPartitionMap<ReplicaInfo>;
+        totalBytes: bigint | number;
+        usableBytes: bigint | number;
+        isCordoned: boolean;
+    });
+    readonly error: ApiError | null;
+    readonly isCordoned: boolean;
+    readonly replicaInfos: TopicPartitionMap<ReplicaInfo>;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    readonly totalBytes: bigint | null;
+    readonly usableBytes: bigint | null;
+}
+
+// @public
+export class MemberAssignment {
+    constructor(topicPartitions: Iterable<TopicPartition> | null);
+    constructor(options: {
+        topicPartitions: Iterable<TopicPartition> | null;
+    });
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    toJSON(): {
+        topicPartitions: TopicPartition[];
+    };
+    topicPartitions(): TopicPartitionSet;
+    toString(): string;
+}
+
+// @public
+export class MemberDescription {
+    constructor(options: {
+        memberId: string | null;
+        groupInstanceId: string | null;
+        rackId: string | null;
+        clientId: string | null;
+        host: string | null;
+        assignment: MemberAssignment | null;
+        targetAssignment: MemberAssignment | null;
+        memberEpoch: number | null;
+        upgraded: boolean | null;
+    });
+    readonly assignment: MemberAssignment;
+    readonly clientId: string;
+    readonly consumerId: string;
+    equals(o: unknown): boolean;
+    readonly groupInstanceId: string | null;
+    hashCode(): number;
+    readonly host: string;
+    readonly memberEpoch: number | null;
+    readonly rackId: string | null;
+    readonly targetAssignment: MemberAssignment | null;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    readonly upgraded: boolean | null;
+}
+
+// @public
+export class MemberToRemove {
+    constructor(groupInstanceId: string | null);
+    constructor(options: {
+        groupInstanceId: string | null;
+    });
+    equals(o: unknown): boolean;
+    groupInstanceId(): string | null;
+    hashCode(): number;
+    toJSON(): {
+        groupInstanceId: string | null;
+    };
+}
+
+// @public
+export class MemberToRemoveSet implements Iterable<MemberToRemove> {
+    [Symbol.iterator](): IterableIterator<MemberToRemove>;
+    constructor();
+    constructor(options: {
+        values: Iterable<MemberToRemove | null>;
+    });
+    constructor(values: Iterable<MemberToRemove | null>);
+    add(options: {
+        value: MemberToRemove | null;
+    }): this;
+    add(value: MemberToRemove | null): this;
+    clear(): void;
+    delete(options: {
+        value: MemberToRemove | null;
+    }): boolean;
+    delete(value: MemberToRemove | null): boolean;
+    forEach(callback: (value: MemberToRemove, key: MemberToRemove, set: MemberToRemoveSet) => void): void;
+    has(options: {
+        value: MemberToRemove | null;
+    }): boolean;
+    has(value: MemberToRemove | null): boolean;
+    size(): number;
+    toJSON(): Array<MemberToRemove | null>;
+    toString(): string;
+    values(): IterableIterator<MemberToRemove>;
+}
+
+// @public
 export class MockAdminClient implements Admin {
     [Symbol.asyncDispose](): Promise<void>;
     constructor();
@@ -562,12 +2269,67 @@ export class MockAdminClient implements Admin {
         brokers: Iterable<Node>;
         controller: Node;
     });
+    abortTransaction(spec: AbortTransactionSpec): AbortTransactionResult;
+    abortTransaction(args: {
+        spec: AbortTransactionSpec;
+        options?: never;
+    }): AbortTransactionResult;
+    abortTransaction(args: {
+        spec: AbortTransactionSpec;
+        options: AbortTransactionOptions;
+    }): AbortTransactionResult;
     addTopic(options: {
         internal: boolean;
         name: string;
         partitions: Iterable<TopicPartitionInfo>;
         configs: ReadonlyMap<string, string | null> | Readonly<Record<string, string | null>> | null;
     }): void;
+    alterClientQuotas(entries: Iterable<ClientQuotaAlteration>): AlterClientQuotasResult;
+    alterClientQuotas(args: {
+        entries: Iterable<ClientQuotaAlteration>;
+        options?: never;
+    }): AlterClientQuotasResult;
+    alterClientQuotas(args: {
+        entries: Iterable<ClientQuotaAlteration>;
+        options: AlterClientQuotasOptions;
+    }): AlterClientQuotasResult;
+    alterConsumerGroupOffsets(args: {
+        groupId: string;
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        options?: never;
+    }): AlterConsumerGroupOffsetsResult;
+    alterConsumerGroupOffsets(args: {
+        groupId: string;
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        options: AlterConsumerGroupOffsetsOptions;
+    }): AlterConsumerGroupOffsetsResult;
+    alterPartitionReassignments(reassignments: TopicPartitionMap<NewPartitionReassignment | null>): AlterPartitionReassignmentsResult;
+    alterPartitionReassignments(args: {
+        reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
+        options?: never;
+    }): AlterPartitionReassignmentsResult;
+    alterPartitionReassignments(args: {
+        reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
+        options: AlterPartitionReassignmentsOptions;
+    }): AlterPartitionReassignmentsResult;
+    alterReplicaLogDirs(replicaAssignment: TopicPartitionReplicaMap<string>): AlterReplicaLogDirsResult;
+    alterReplicaLogDirs(args: {
+        replicaAssignment: TopicPartitionReplicaMap<string>;
+        options?: never;
+    }): AlterReplicaLogDirsResult;
+    alterReplicaLogDirs(args: {
+        replicaAssignment: TopicPartitionReplicaMap<string>;
+        options: AlterReplicaLogDirsOptions;
+    }): AlterReplicaLogDirsResult;
+    alterUserScramCredentials(alterations: Iterable<UserScramCredentialAlteration>): AlterUserScramCredentialsResult;
+    alterUserScramCredentials(args: {
+        alterations: Iterable<UserScramCredentialAlteration>;
+        options?: never;
+    }): AlterUserScramCredentialsResult;
+    alterUserScramCredentials(args: {
+        alterations: Iterable<UserScramCredentialAlteration>;
+        options: AlterUserScramCredentialsOptions;
+    }): AlterUserScramCredentialsResult;
     close(): Promise<void>;
     close(options: CloseArgs): Promise<void>;
     close(timeout: Duration): Promise<void>;
@@ -576,7 +2338,21 @@ export class MockAdminClient implements Admin {
         controller: Node;
     }): void;
     static create(): MockAdminClient.Builder;
-    createPartitions(newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>): CreatePartitionsResult;
+    createAcls(acls: Iterable<AclBinding>): CreateAclsResult;
+    createAcls(args: {
+        acls: Iterable<AclBinding>;
+        options?: never;
+    }): CreateAclsResult;
+    createAcls(args: {
+        acls: Iterable<AclBinding>;
+        options: CreateAclsOptions;
+    }): CreateAclsResult;
+    createDelegationToken(): CreateDelegationTokenResult;
+    createDelegationToken(args: {
+        options: CreateDelegationTokenOptions;
+    }): CreateDelegationTokenResult;
+    createDelegationToken(options: CreateDelegationTokenOptions): CreateDelegationTokenResult;
+    createPartitions(newPartitions: ReadonlyMap<string, NewPartitions>): CreatePartitionsResult;
     createPartitions(args: {
         newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
         options?: never;
@@ -596,6 +2372,34 @@ export class MockAdminClient implements Admin {
     }): CreateTopicsResult;
     static readonly DEFAULT_CLUSTER_ID: string;
     static readonly DEFAULT_LOG_DIRS: ReadonlyArray<string>;
+    deleteAcls(filters: Iterable<AclBindingFilter>): DeleteAclsResult;
+    deleteAcls(args: {
+        filters: Iterable<AclBindingFilter>;
+        options?: never;
+    }): DeleteAclsResult;
+    deleteAcls(args: {
+        filters: Iterable<AclBindingFilter>;
+        options: DeleteAclsOptions;
+    }): DeleteAclsResult;
+    deleteConsumerGroupOffsets(args: {
+        groupId: string;
+        partitions: Iterable<TopicPartition>;
+        options?: never;
+    }): DeleteConsumerGroupOffsetsResult;
+    deleteConsumerGroupOffsets(args: {
+        groupId: string;
+        partitions: Iterable<TopicPartition>;
+        options: DeleteConsumerGroupOffsetsOptions;
+    }): DeleteConsumerGroupOffsetsResult;
+    deleteConsumerGroups(groupIds: Iterable<string>): DeleteConsumerGroupsResult;
+    deleteConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options?: never;
+    }): DeleteConsumerGroupsResult;
+    deleteConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options: DeleteConsumerGroupsOptions;
+    }): DeleteConsumerGroupsResult;
     deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
     deleteRecords(args: {
         recordsToDelete: TopicPartitionMap<RecordsToDelete>;
@@ -614,11 +2418,93 @@ export class MockAdminClient implements Admin {
         topics: Iterable<string> | TopicCollection;
         options: DeleteTopicsOptions;
     }): DeleteTopicsResult;
+    describeAcls(filter: AclBindingFilter): DescribeAclsResult;
+    describeAcls(args: {
+        filter: AclBindingFilter;
+        options?: never;
+    }): DescribeAclsResult;
+    describeAcls(args: {
+        filter: AclBindingFilter;
+        options: DescribeAclsOptions;
+    }): DescribeAclsResult;
+    describeClassicGroups(groupIds: Iterable<string>): DescribeClassicGroupsResult;
+    describeClassicGroups(args: {
+        groupIds: Iterable<string>;
+        options?: never;
+    }): DescribeClassicGroupsResult;
+    describeClassicGroups(args: {
+        groupIds: Iterable<string>;
+        options: DescribeClassicGroupsOptions;
+    }): DescribeClassicGroupsResult;
+    describeClientQuotas(filter: ClientQuotaFilter): DescribeClientQuotasResult;
+    describeClientQuotas(args: {
+        filter: ClientQuotaFilter;
+        options?: never;
+    }): DescribeClientQuotasResult;
+    describeClientQuotas(args: {
+        filter: ClientQuotaFilter;
+        options: DescribeClientQuotasOptions;
+    }): DescribeClientQuotasResult;
     describeCluster(): DescribeClusterResult;
     describeCluster(args: {
         options: DescribeClusterOptions;
     }): DescribeClusterResult;
     describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
+    describeConfigs(resources: Iterable<ConfigResource>): DescribeConfigsResult;
+    describeConfigs(args: {
+        resources: Iterable<ConfigResource>;
+        options?: never;
+    }): DescribeConfigsResult;
+    describeConfigs(args: {
+        resources: Iterable<ConfigResource>;
+        options: DescribeConfigsOptions;
+    }): DescribeConfigsResult;
+    describeConsumerGroups(groupIds: Iterable<string>): DescribeConsumerGroupsResult;
+    describeConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options?: never;
+    }): DescribeConsumerGroupsResult;
+    describeConsumerGroups(args: {
+        groupIds: Iterable<string>;
+        options: DescribeConsumerGroupsOptions;
+    }): DescribeConsumerGroupsResult;
+    describeDelegationToken(): DescribeDelegationTokenResult;
+    describeDelegationToken(args: {
+        options: DescribeDelegationTokenOptions;
+    }): DescribeDelegationTokenResult;
+    describeDelegationToken(options: DescribeDelegationTokenOptions): DescribeDelegationTokenResult;
+    describeFeatures(): DescribeFeaturesResult;
+    describeFeatures(args: {
+        options: DescribeFeaturesOptions;
+    }): DescribeFeaturesResult;
+    describeFeatures(options: DescribeFeaturesOptions): DescribeFeaturesResult;
+    describeLogDirs(brokers: Iterable<number>): DescribeLogDirsResult;
+    describeLogDirs(args: {
+        brokers: Iterable<number>;
+        options?: never;
+    }): DescribeLogDirsResult;
+    describeLogDirs(args: {
+        brokers: Iterable<number>;
+        options: DescribeLogDirsOptions;
+    }): DescribeLogDirsResult;
+    describeProducers(partitions: Iterable<TopicPartition>): DescribeProducersResult;
+    describeProducers(args: {
+        partitions: Iterable<TopicPartition>;
+        options?: never;
+    }): DescribeProducersResult;
+    describeProducers(args: {
+        partitions: Iterable<TopicPartition>;
+        options: DescribeProducersOptions;
+    }): DescribeProducersResult;
+    describeReplicaLogDirs(replicas: Iterable<TopicPartitionReplica>): DescribeReplicaLogDirsResult;
+    describeReplicaLogDirs(args: {
+        replicas: Iterable<TopicPartitionReplica>;
+        options?: never;
+    }): DescribeReplicaLogDirsResult;
+    describeReplicaLogDirs(args: {
+        replicas: Iterable<TopicPartitionReplica>;
+        options: DescribeReplicaLogDirsOptions;
+    }): DescribeReplicaLogDirsResult;
     describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
     describeTopics(args: {
         topicNames: Iterable<string>;
@@ -641,16 +2527,154 @@ export class MockAdminClient implements Admin {
         options: DescribeTopicsOptions;
         topicNames?: never;
     }): DescribeTopicsResult;
+    describeTransactions(transactionalIds: Iterable<string>): DescribeTransactionsResult;
+    describeTransactions(args: {
+        transactionalIds: Iterable<string>;
+        options?: never;
+    }): DescribeTransactionsResult;
+    describeTransactions(args: {
+        transactionalIds: Iterable<string>;
+        options: DescribeTransactionsOptions;
+    }): DescribeTransactionsResult;
+    describeUserScramCredentials(): DescribeUserScramCredentialsResult;
+    describeUserScramCredentials(users: Iterable<string> | null): DescribeUserScramCredentialsResult;
+    describeUserScramCredentials(args: {
+        users: Iterable<string> | null;
+        options?: never;
+    }): DescribeUserScramCredentialsResult;
+    describeUserScramCredentials(args: {
+        users: Iterable<string> | null;
+        options: DescribeUserScramCredentialsOptions;
+    }): DescribeUserScramCredentialsResult;
+    electLeaders(args: {
+        electionType: ElectionType;
+        partitions: Iterable<TopicPartition> | null;
+        options?: never;
+    }): ElectLeadersResult;
+    electLeaders(args: {
+        electionType: ElectionType;
+        partitions: Iterable<TopicPartition> | null;
+        options: ElectLeadersOptions;
+    }): ElectLeadersResult;
+    expireDelegationToken(hmac: Uint8Array): ExpireDelegationTokenResult;
+    expireDelegationToken(args: {
+        hmac: Uint8Array;
+        options?: never;
+    }): ExpireDelegationTokenResult;
+    expireDelegationToken(args: {
+        hmac: Uint8Array;
+        options: ExpireDelegationTokenOptions;
+    }): ExpireDelegationTokenResult;
+    fenceProducers(transactionalIds: Iterable<string>): FenceProducersResult;
+    fenceProducers(args: {
+        transactionalIds: Iterable<string>;
+        options?: never;
+    }): FenceProducersResult;
+    fenceProducers(args: {
+        transactionalIds: Iterable<string>;
+        options: FenceProducersOptions;
+    }): FenceProducersResult;
+    forceTerminateTransaction(transactionalId: string): TerminateTransactionResult;
+    forceTerminateTransaction(args: {
+        transactionalId: string;
+        options?: never;
+    }): TerminateTransactionResult;
+    forceTerminateTransaction(args: {
+        transactionalId: string;
+        options: TerminateTransactionOptions;
+    }): TerminateTransactionResult;
+    incrementalAlterConfigs(configs: ConfigResourceMap<Iterable<AlterConfigOp>>): AlterConfigsResult;
+    incrementalAlterConfigs(args: {
+        configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
+        options?: never;
+    }): AlterConfigsResult;
+    incrementalAlterConfigs(args: {
+        configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
+        options: AlterConfigsOptions;
+    }): AlterConfigsResult;
+    listConfigResources(): ListConfigResourcesResult;
+    listConfigResources(args: {
+        configResourceTypes: Iterable<ConfigResource.Type>;
+        options: ListConfigResourcesOptions;
+    }): ListConfigResourcesResult;
+    listConsumerGroupOffsets(groupId: string): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupId: string;
+        groupSpecs?: never;
+        options?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupId: string;
+        options: ListConsumerGroupOffsetsOptions;
+        groupSpecs?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec>): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
+        groupId?: never;
+        options?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listConsumerGroupOffsets(args: {
+        groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
+        options: ListConsumerGroupOffsetsOptions;
+        groupId?: never;
+    }): ListConsumerGroupOffsetsResult;
+    listGroups(): ListGroupsResult;
+    listGroups(args: {
+        options: ListGroupsOptions;
+    }): ListGroupsResult;
+    listGroups(options: ListGroupsOptions): ListGroupsResult;
+    listOffsets(topicPartitionOffsets: TopicPartitionMap<OffsetSpec>): ListOffsetsResult;
+    listOffsets(args: {
+        topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
+        options?: never;
+    }): ListOffsetsResult;
+    listOffsets(args: {
+        topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
+        options: ListOffsetsOptions;
+    }): ListOffsetsResult;
+    listPartitionReassignments(): ListPartitionReassignmentsResult;
+    listPartitionReassignments(partitions: Iterable<TopicPartition>): ListPartitionReassignmentsResult;
+    listPartitionReassignments(args: {
+        partitions: Iterable<TopicPartition>;
+        options?: never;
+    }): ListPartitionReassignmentsResult;
+    listPartitionReassignments(args: {
+        partitions: Iterable<TopicPartition> | null;
+        options: ListPartitionReassignmentsOptions;
+    }): ListPartitionReassignmentsResult;
+    listPartitionReassignments(args: {
+        options: ListPartitionReassignmentsOptions;
+        partitions?: never;
+    }): ListPartitionReassignmentsResult;
+    listPartitionReassignments(options: ListPartitionReassignmentsOptions): ListPartitionReassignmentsResult;
     listTopics(): ListTopicsResult;
     listTopics(args: {
         options: ListTopicsOptions;
     }): ListTopicsResult;
     listTopics(options: ListTopicsOptions): ListTopicsResult;
+    listTransactions(): ListTransactionsResult;
+    listTransactions(args: {
+        options: ListTransactionsOptions;
+    }): ListTransactionsResult;
+    listTransactions(options: ListTransactionsOptions): ListTransactionsResult;
     markTopicForDeletion(name: string): void;
-    // (undocumented)
     markTopicForDeletion(options: {
         name: string;
     }): void;
+    removeMembersFromConsumerGroup(args: {
+        groupId: string;
+        options: RemoveMembersFromConsumerGroupOptions;
+    }): RemoveMembersFromConsumerGroupResult;
+    renewDelegationToken(hmac: Uint8Array): RenewDelegationTokenResult;
+    renewDelegationToken(args: {
+        hmac: Uint8Array;
+        options?: never;
+    }): RenewDelegationTokenResult;
+    renewDelegationToken(args: {
+        hmac: Uint8Array;
+        options: RenewDelegationTokenOptions;
+    }): RenewDelegationTokenResult;
     setFetchesRemainingUntilVisible(options: {
         topicName: string;
         fetchesRemainingUntilVisible: number;
@@ -659,6 +2683,36 @@ export class MockAdminClient implements Admin {
     timeoutNextRequest(options: {
         numberOfRequest: number;
     }): void;
+    unregisterController(controllerId: number): UnregisterControllerResult;
+    unregisterController(args: {
+        controllerId: number;
+        options?: never;
+    }): UnregisterControllerResult;
+    unregisterController(args: {
+        controllerId: number;
+        options: UnregisterControllerOptions;
+    }): UnregisterControllerResult;
+    updateBeginningOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
+    updateBeginningOffsets(options: {
+        newOffsets: TopicPartitionMap<bigint | number>;
+    }): void;
+    updateConsumerGroupOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
+    updateConsumerGroupOffsets(options: {
+        newOffsets: TopicPartitionMap<bigint | number>;
+    }): void;
+    updateEndOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
+    updateEndOffsets(options: {
+        newOffsets: TopicPartitionMap<bigint | number>;
+    }): void;
+    updateFeatures(featureUpdates: ReadonlyMap<string, FeatureUpdate>): UpdateFeaturesResult;
+    updateFeatures(args: {
+        featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
+        options?: never;
+    }): UpdateFeaturesResult;
+    updateFeatures(args: {
+        featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
+        options: UpdateFeaturesOptions;
+    }): UpdateFeaturesResult;
 }
 
 // @public (undocumented)
@@ -730,6 +2784,18 @@ export namespace MockAdminClient {
 }
 
 // @public
+export class NewPartitionReassignment {
+    constructor(targetReplicas: Iterable<number>);
+    constructor(options: {
+        targetReplicas: Iterable<number>;
+    });
+    targetReplicas(): number[];
+    toJSON(): {
+        targetReplicas: number[];
+    };
+}
+
+// @public
 export class NewPartitions {
     assignments(): number[][] | null;
     static increaseTo(totalCount: number): NewPartitions;
@@ -782,6 +2848,79 @@ export class NewTopic {
 }
 
 // @public
+export class OffsetSpec {
+    constructor();
+    static earliest(): OffsetSpec;
+    static earliestLocal(): OffsetSpec;
+    static earliestPendingUpload(): OffsetSpec;
+    static forTimestamp(timestamp: bigint | number): OffsetSpec;
+    static forTimestamp(options: {
+        timestamp: bigint | number;
+    }): OffsetSpec;
+    static latest(): OffsetSpec;
+    static latestTiered(): OffsetSpec;
+    static maxTimestamp(): OffsetSpec;
+}
+
+// @public (undocumented)
+export namespace OffsetSpec {
+    export class EarliestLocalSpec extends OffsetSpec {
+    }
+    export class EarliestPendingUploadSpec extends OffsetSpec {
+    }
+    export class EarliestSpec extends OffsetSpec {
+    }
+    export class LatestSpec extends OffsetSpec {
+    }
+    export class LatestTieredSpec extends OffsetSpec {
+    }
+    export class MaxTimestampSpec extends OffsetSpec {
+    }
+    export class TimestampSpec extends OffsetSpec {
+    }
+}
+
+// @public
+export class PartitionReassignment {
+    constructor(options: {
+        replicas: Iterable<number>;
+        addingReplicas: Iterable<number>;
+        removingReplicas: Iterable<number>;
+    });
+    addingReplicas(): number[];
+    removingReplicas(): number[];
+    replicas(): number[];
+    toJSON(): {
+        replicas: number[];
+        addingReplicas: number[];
+        removingReplicas: number[];
+    };
+    toString(): string;
+}
+
+// @public
+export class ProducerState {
+    constructor(options: {
+        producerId: bigint | number;
+        producerEpoch: number;
+        lastSequence: number;
+        lastTimestamp: bigint | number;
+        coordinatorEpoch: number | null;
+        currentTransactionStartOffset: bigint | null;
+    });
+    coordinatorEpoch(): number | null;
+    currentTransactionStartOffset(): bigint | null;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    lastSequence(): number;
+    lastTimestamp(): bigint;
+    producerEpoch(): number;
+    producerId(): bigint;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+}
+
+// @public
 export class RecordsToDelete {
     static beforeOffset(offset: bigint | number): RecordsToDelete;
     static beforeOffset(options: {
@@ -792,6 +2931,140 @@ export class RecordsToDelete {
     hashCode(): number;
     toJSON(): Record<string, unknown>;
     toString(): string;
+}
+
+// @public
+export class RemoveMembersFromConsumerGroupOptions extends AbstractOptions {
+    constructor();
+    constructor(members: Iterable<MemberToRemove>);
+    constructor(options: {
+        members: Iterable<MemberToRemove>;
+    });
+    members(): MemberToRemoveSet;
+    reason(): string | null;
+    reason(reason: string | null): void;
+    reason(options: {
+        reason: string | null;
+    }): void;
+    removeAll(): boolean;
+}
+
+// @public
+export class RemoveMembersFromConsumerGroupResult {
+    all(): KafkaFuture<void>;
+    memberResult(member: MemberToRemove): KafkaFuture<void>;
+    memberResult(options: {
+        member: MemberToRemove;
+    }): KafkaFuture<void>;
+}
+
+// @public
+export class RenewDelegationTokenOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        renewTimePeriodMs?: bigint | number;
+    });
+    renewTimePeriodMs(): bigint;
+    renewTimePeriodMs(renewTimePeriodMs: bigint | number): this;
+    renewTimePeriodMs(options: {
+        renewTimePeriodMs: bigint | number;
+    }): this;
+}
+
+// @public
+export class RenewDelegationTokenResult {
+    expiryTimestamp(): KafkaFuture<bigint>;
+}
+
+// @public
+export class ReplicaInfo {
+    constructor(options: {
+        size: bigint | number;
+        offsetLag: bigint | number;
+        isFuture: boolean;
+    });
+    isFuture(): boolean;
+    offsetLag(): bigint;
+    size(): bigint;
+    toJSON(): {
+        size: string;
+        offsetLag: string;
+        isFuture: boolean;
+    };
+    toString(): string;
+}
+
+// @public
+export class ScramCredentialInfo {
+    constructor(options: {
+        mechanism: ScramMechanism;
+        iterations: number;
+    });
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    iterations(): number;
+    mechanism(): ScramMechanism;
+    toJSON(): {
+        mechanism: string;
+        iterations: number;
+    };
+    toString(): string;
+}
+
+// @public
+export class ScramMechanism {
+    static fromMechanismName(mechanismName: string | null): ScramMechanism;
+    static fromMechanismName(options: {
+        mechanismName: string | null;
+    }): ScramMechanism;
+    static fromType(type: number): ScramMechanism;
+    static fromType(options: {
+        type: number;
+    }): ScramMechanism;
+    mechanismName(): string;
+    name(): string;
+    ordinal(): number;
+    static readonly SCRAM_SHA_256: ScramMechanism;
+    static readonly SCRAM_SHA_512: ScramMechanism;
+    toJSON(key?: string): string;
+    toString(): string;
+    type(): number;
+    static readonly UNKNOWN: ScramMechanism;
+    static valueOf(name: string): ScramMechanism;
+    static valueOf(options: {
+        name: string;
+    }): ScramMechanism;
+    static values(): ScramMechanism[];
+}
+
+// @public
+export class SupportedVersionRange {
+    constructor(options: {
+        minVersion: number;
+        maxVersion: number;
+    });
+    equals(other: unknown): boolean;
+    hashCode(): number;
+    maxVersion(): number;
+    minVersion(): number;
+    toJSON(): {
+        minVersion: number;
+        maxVersion: number;
+    };
+    toString(): string;
+}
+
+// @public
+export class TerminateTransactionOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+    toString(): string;
+}
+
+// @public
+export class TerminateTransactionResult {
+    result(): KafkaFuture<void>;
 }
 
 // @public
@@ -844,6 +3117,163 @@ export class TopicListing {
     };
     topicId(): Uuid | null;
     toString(): string;
+}
+
+// @public
+export class TransactionDescription {
+    constructor(options: {
+        coordinatorId: number;
+        state: TransactionState | null;
+        producerId: bigint | number;
+        producerEpoch: number;
+        transactionTimeoutMs: bigint | number;
+        transactionStartTimeMs: bigint | null;
+        topicPartitions: Iterable<TopicPartition> | null;
+    });
+    readonly coordinatorId: number;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    readonly producerEpoch: number;
+    readonly producerId: bigint;
+    readonly state: TransactionState | null;
+    toJSON(): Record<string, unknown>;
+    readonly topicPartitions: TopicPartitionSet | null;
+    toString(): string;
+    readonly transactionStartTimeMs: bigint | null;
+    readonly transactionTimeoutMs: bigint;
+}
+
+// @public
+export class TransactionListing {
+    constructor(options: {
+        transactionalId: string | null;
+        producerId: bigint | number;
+        transactionState: TransactionState | null;
+    });
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    producerId(): bigint;
+    state(): TransactionState | null;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    transactionalId(): string | null;
+}
+
+// @public
+export class TransactionState {
+    static readonly COMPLETE_ABORT: TransactionState;
+    static readonly COMPLETE_COMMIT: TransactionState;
+    static readonly EMPTY: TransactionState;
+    name(): string;
+    static readonly ONGOING: TransactionState;
+    ordinal(): number;
+    static parse(name: string | null): TransactionState;
+    static parse(options: {
+        name: string | null;
+    }): TransactionState;
+    static readonly PREPARE_ABORT: TransactionState;
+    static readonly PREPARE_COMMIT: TransactionState;
+    static readonly PREPARE_EPOCH_FENCE: TransactionState;
+    toJSON(key?: string): string;
+    toString(): string;
+    static readonly UNKNOWN: TransactionState;
+    static valueOf(name: string): TransactionState;
+    static valueOf(options: {
+        name: string;
+    }): TransactionState;
+    static values(): TransactionState[];
+}
+
+// @public
+export class UnregisterControllerOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+    });
+}
+
+// @public
+export class UnregisterControllerResult {
+    all(): KafkaFuture<void>;
+}
+
+// @public
+export class UpdateFeaturesOptions extends AbstractOptions {
+    constructor(options?: {
+        timeoutMs?: number | null;
+        validateOnly?: boolean;
+    });
+    validateOnly(): boolean;
+    validateOnly(validateOnly: boolean): this;
+    validateOnly(options: {
+        validateOnly: boolean;
+    }): this;
+}
+
+// @public
+export class UpdateFeaturesResult {
+    all(): KafkaFuture<void>;
+    values(): Map<string, KafkaFuture<void>>;
+}
+
+// @public
+export abstract class UserScramCredentialAlteration {
+    protected constructor(options: {
+        user: string;
+    });
+    user(): string;
+}
+
+// @public
+export class UserScramCredentialDeletion extends UserScramCredentialAlteration {
+    constructor(options: {
+        user: string;
+        mechanism: ScramMechanism;
+    });
+    mechanism(): ScramMechanism;
+    toJSON(): {
+        user: string;
+        mechanism: string;
+    };
+}
+
+// @public
+export class UserScramCredentialsDescription {
+    constructor(options: {
+        name: string;
+        credentialInfos: Iterable<ScramCredentialInfo>;
+    });
+    readonly credentialInfos: readonly ScramCredentialInfo[];
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    readonly name: string;
+    toJSON(): {
+        name: string;
+        credentialInfos: readonly ScramCredentialInfo[];
+    };
+    toString(): string;
+}
+
+// @public
+export class UserScramCredentialUpsertion extends UserScramCredentialAlteration {
+    constructor(options: {
+        user: string;
+        credentialInfo: ScramCredentialInfo;
+        password: string | Uint8Array;
+        salt?: never;
+    });
+    constructor(options: {
+        user: string;
+        credentialInfo: ScramCredentialInfo;
+        password: Uint8Array;
+        salt: Uint8Array;
+    });
+    credentialInfo(): ScramCredentialInfo;
+    password(): Buffer;
+    salt(): Buffer;
+    toJSON(): {
+        user: string;
+        credentialInfo: ScramCredentialInfo;
+    };
 }
 
 ```

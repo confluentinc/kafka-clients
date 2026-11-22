@@ -10,8 +10,8 @@ export const __esModule: true;
 // @public
 export class DelegationToken {
     constructor(options: {
-        tokenInformation: TokenInformation | null;
-        hmac: Uint8Array | null;
+        tokenInformation: TokenInformation;
+        hmac: Uint8Array;
     });
     equals(o: unknown): boolean;
     hashCode(): number;
@@ -27,19 +27,19 @@ export class DelegationToken {
 // @public
 export class TokenInformation {
     constructor(options: {
-        tokenId: string | null;
-        owner: KafkaPrincipal | null;
+        tokenId: string;
+        owner: KafkaPrincipal;
         tokenRequester?: never;
-        renewers: Iterable<KafkaPrincipal> | null;
+        renewers: Iterable<KafkaPrincipal>;
         issueTimestamp: bigint | number;
         maxTimestamp: bigint | number;
         expiryTimestamp: bigint | number;
     });
     constructor(options: {
-        tokenId: string | null;
-        owner: KafkaPrincipal | null;
-        tokenRequester: KafkaPrincipal | null;
-        renewers: Iterable<KafkaPrincipal> | null;
+        tokenId: string;
+        owner: KafkaPrincipal;
+        tokenRequester: KafkaPrincipal;
+        renewers: Iterable<KafkaPrincipal>;
         issueTimestamp: bigint | number;
         maxTimestamp: bigint | number;
         expiryTimestamp: bigint | number;
@@ -68,7 +68,5 @@ export class TokenInformation {
     tokenRequesterAsString(): string;
     toString(): string;
 }
-
-// (No @packageDocumentation comment for this package)
 
 ```
