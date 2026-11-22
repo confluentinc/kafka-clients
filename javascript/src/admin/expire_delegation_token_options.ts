@@ -70,6 +70,8 @@ export class ExpireDelegationTokenOptions extends AbstractOptions {
    *
    * @param expiryTimePeriodMs - the value in milliseconds, a `long`, on its own
    * @returns This ExpireDelegationTokenOptions object.
+   * @throws `TypeError` when the value is not a whole number
+   * @throws `RangeError` when it is outside Java's `long`
    */
   expiryTimePeriodMs(expiryTimePeriodMs: bigint | number): this;
   /**
@@ -77,6 +79,8 @@ export class ExpireDelegationTokenOptions extends AbstractOptions {
    *
    * @param options - the value in milliseconds
    * @returns This ExpireDelegationTokenOptions object.
+   * @throws `TypeError` when the value is not a whole number
+   * @throws `RangeError` when it is outside Java's `long`
    */
   expiryTimePeriodMs(options: {
     /** The value in milliseconds. */

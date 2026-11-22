@@ -111,10 +111,7 @@ export class ClientQuotaEntity {
   }
 
   /**
-   * The map of entity type to its name.
-   *
-   * @returns a new map of entity type to its name (a null name is the
-   *   default entity)
+   * @returns map of entity type to its name
    * @throws `TypeError` when it is given an argument: it only reads
    */
   entries(): Map<string, string | null> {

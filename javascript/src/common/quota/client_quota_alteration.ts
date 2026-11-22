@@ -108,9 +108,7 @@ export class ClientQuotaAlteration {
   }
 
   /**
-   * The entity whose config will be modified.
-   *
-   * @returns the entity
+   * @returns the entity whose config will be modified
    * @throws `TypeError` when it is given an argument: it only reads
    */
   entity(): ClientQuotaEntity {
@@ -119,9 +117,7 @@ export class ClientQuotaAlteration {
   }
 
   /**
-   * The alteration to perform.
-   *
-   * @returns a new array of the ops
+   * @returns the alteration to perform
    * @throws `TypeError` when it is given an argument: it only reads
    */
   ops(): ClientQuotaAlteration.Op[] {
@@ -162,8 +158,6 @@ export namespace ClientQuotaAlteration {
     readonly #value: number | null;
 
     /**
-     * An alteration of one quota.
-     *
      * @param options - the quota type to alter, and its value: if set then
      *   the existing value is updated, otherwise if null, the existing value
      *   is cleared
@@ -186,9 +180,7 @@ export namespace ClientQuotaAlteration {
     }
 
     /**
-     * The quota type to alter.
-     *
-     * @returns the quota type
+     * @returns the quota type to alter
      * @throws `TypeError` when it is given an argument: it only reads
      */
     key(): string {

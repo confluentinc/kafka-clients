@@ -91,6 +91,8 @@ export class AclPermissionType {
    *
    * @param options - the constant's name
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(options: {
     /** The constant's name */
@@ -127,6 +129,7 @@ export class AclPermissionType {
    *
    * @param options - The string to parse.
    * @returns The AclPermissionType, or UNKNOWN if the string could not be matched.
+   * @throws `TypeError` when the string is null (Java dereferences it)
    */
   static fromString(options: {
     /** The string to parse. */
@@ -163,6 +166,8 @@ export class AclPermissionType {
    *
    * @param options - the code, a Java `byte`
    * @returns the constant
+   * @throws `TypeError` when the code is not an integer
+   * @throws `RangeError` when it is outside Java's `byte`
    */
   static fromCode(options: {
     /** The code, a Java `byte` */
@@ -186,7 +191,7 @@ export class AclPermissionType {
   }
 
   /**
-   * Return the code of this constant.
+   * Return the code of this permission type.
    *
    * @returns the code
    * @throws `TypeError` when it is given an argument: it only reads
@@ -197,7 +202,7 @@ export class AclPermissionType {
   }
 
   /**
-   * Return true if this constant is UNKNOWN.
+   * Return true if this permission type is UNKNOWN.
    *
    * @returns whether this is `UNKNOWN`
    * @throws `TypeError` when it is given an argument: it only reads

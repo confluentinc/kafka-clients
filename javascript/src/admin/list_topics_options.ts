@@ -69,6 +69,7 @@ export class ListTopicsOptions extends AbstractOptions {
    *
    * @param listInternal - Whether we should list internal topics, on its own
    * @returns This ListTopicsOptions object.
+   * @throws `TypeError` when the value is missing or not a boolean
    */
   listInternal(listInternal: boolean): this;
   /**
@@ -76,6 +77,7 @@ export class ListTopicsOptions extends AbstractOptions {
    *
    * @param options - whether we should list internal topics
    * @returns This ListTopicsOptions object.
+   * @throws `TypeError` when the value is missing or not a boolean
    */
   listInternal(options: {
     /** Whether we should list internal topics. */

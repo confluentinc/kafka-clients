@@ -144,9 +144,7 @@ export class ClientQuotaFilterComponent {
   }
 
   /**
-   * The component's entity type.
-   *
-   * @returns the entity type
+   * @returns the component's entity type
    * @throws `TypeError` when it is given an argument: it only reads
    */
   entityType(): string {
@@ -155,15 +153,12 @@ export class ClientQuotaFilterComponent {
   }
 
   /**
-   * The match string: the name that's matched exactly, or null when the
-   * component matches the default name (`ofDefaultEntity`) or any specified
-   * name (`ofEntityType`).
-   *
-   * @returns the name, or null
+   * @returns the optional match string: if present, the name that's matched
+   *   exactly; `null` when it matches the default name or any specified name
    * @throws `TypeError` when it is given an argument: it only reads
    *
-   * @remarks Java's `Optional<String>` is present, empty or null; the Types
-   * rule reads empty and null both as `null`.
+   * @remarks Java's `Optional` is present, empty or null; the Types rule
+   * reads empty and null as `null`.
    */
   match(): string | null {
     if (arguments.length !== 0) MATCH_FORMS.match(undefined, arguments.length);

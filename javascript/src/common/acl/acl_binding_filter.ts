@@ -73,9 +73,7 @@ export class AclBindingFilter {
   });
 
   /**
-   * Whether this filter has any UNKNOWN components.
-   *
-   * @returns `true` if this filter has any UNKNOWN components
+   * @returns `true` if this filter has any UNKNOWN components.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   isUnknown(): boolean {
@@ -84,9 +82,7 @@ export class AclBindingFilter {
   }
 
   /**
-   * The resource pattern filter.
-   *
-   * @returns the resource pattern filter
+   * @returns the resource pattern filter.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   patternFilter(): ResourcePatternFilter {
@@ -95,9 +91,7 @@ export class AclBindingFilter {
   }
 
   /**
-   * The access control entry filter.
-   *
-   * @returns the access control entry filter
+   * @returns the access control entry filter.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   entryFilter(): AccessControlEntryFilter {

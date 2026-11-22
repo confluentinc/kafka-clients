@@ -78,6 +78,7 @@ function describe(error) {
   let text = String(error);
   let cause = error instanceof Error ? error.cause : undefined;
   while (cause !== undefined && cause !== null) {
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string -- an error's cause may be any value, printed as String() prints it
     text += ` (caused by: ${String(cause)})`;
     cause = cause instanceof Error ? cause.cause : undefined;
   }

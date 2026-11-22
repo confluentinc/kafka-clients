@@ -223,6 +223,8 @@ export namespace AlterConfigOp {
      *
      * @param name - the name of the constant to return
      * @returns the constant with the specified name
+     * @throws `IllegalArgumentError` when no constant has that name
+     * @throws `TypeError` when the name is null or not a string
      */
     static valueOf(name: string): OpType;
     /**
@@ -230,6 +232,8 @@ export namespace AlterConfigOp {
      *
      * @param options - the name of the constant to return
      * @returns the constant with the specified name
+     * @throws `IllegalArgumentError` when no constant has that name
+     * @throws `TypeError` when the name is null or not a string
      */
     static valueOf(options: {
       /** The name of the constant to return. */
@@ -260,6 +264,8 @@ export namespace AlterConfigOp {
      *
      * @param id - the byte, on its own or as `{ id }`
      * @returns the operation type, or null
+     * @throws `TypeError` when the id is not an integer
+     * @throws `RangeError` when it is outside Java's `byte`
      */
     static forId(id: number): OpType | null;
     /**
@@ -267,6 +273,8 @@ export namespace AlterConfigOp {
      *
      * @param options - the byte
      * @returns the operation type, or null
+     * @throws `TypeError` when the id is not an integer
+     * @throws `RangeError` when it is outside Java's `byte`
      */
     static forId(options: {
       /** The wire byte. */

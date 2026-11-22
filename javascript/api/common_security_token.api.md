@@ -4,9 +4,7 @@
 
 ```ts
 
-// @public (undocumented)
+// @public
 export const __esModule: true;
-
-// (No @packageDocumentation comment for this package)
 
 ```

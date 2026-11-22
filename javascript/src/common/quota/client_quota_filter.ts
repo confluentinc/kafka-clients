@@ -138,9 +138,7 @@ export class ClientQuotaFilter {
   }
 
   /**
-   * The filter's components.
-   *
-   * @returns a new array of the components
+   * @returns the filter's components
    * @throws `TypeError` when it is given an argument: it only reads
    */
   components(): ClientQuotaFilterComponent[] {
@@ -149,9 +147,7 @@ export class ClientQuotaFilter {
   }
 
   /**
-   * Whether the filter is strict, i.e. only includes specified components.
-   *
-   * @returns whether it is strict
+   * @returns whether the filter is strict, i.e. only includes specified components
    * @throws `TypeError` when it is given an argument: it only reads
    */
   strict(): boolean {

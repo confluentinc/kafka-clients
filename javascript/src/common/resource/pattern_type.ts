@@ -95,6 +95,8 @@ export class PatternType {
    *
    * @param options - the constant's name
    * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
    */
   static valueOf(options: {
     /** The constant's name */
@@ -131,6 +133,7 @@ export class PatternType {
    *
    * @param options - The string to parse.
    * @returns the PatternType, or UNKNOWN
+   * @throws `TypeError` when it is neither a string nor null
    */
   static fromString(options: {
     /** The string to parse. */
@@ -166,6 +169,8 @@ export class PatternType {
    *
    * @param options - the code, a Java `byte`
    * @returns the constant
+   * @throws `TypeError` when the code is not an integer
+   * @throws `RangeError` when it is outside Java's `byte`
    */
   static fromCode(options: {
     /** The code, a Java `byte` */
@@ -189,9 +194,7 @@ export class PatternType {
   }
 
   /**
-   * Return the code of this constant.
-   *
-   * @returns the code
+   * @returns the code of this resource.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   code(): number {
@@ -200,9 +203,7 @@ export class PatternType {
   }
 
   /**
-   * Return true if this constant is UNKNOWN.
-   *
-   * @returns whether this is `UNKNOWN`
+   * @returns whether this resource pattern type is UNKNOWN.
    * @throws `TypeError` when it is given an argument: it only reads
    */
   isUnknown(): boolean {

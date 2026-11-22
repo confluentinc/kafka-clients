@@ -82,6 +82,7 @@ export class DescribeDelegationTokenOptions extends AbstractOptions {
    * @param owners - The owners that we want to describe delegation tokens
    *   for, on its own
    * @returns this instance
+   * @throws `TypeError` when the value is not an iterable of KafkaPrincipal
    */
   owners(owners: Iterable<KafkaPrincipal> | null): this;
   /**
@@ -89,6 +90,7 @@ export class DescribeDelegationTokenOptions extends AbstractOptions {
    *
    * @param options - the owners
    * @returns this instance
+   * @throws `TypeError` when the value is not an iterable of KafkaPrincipal
    */
   owners(options: {
     /** The owners that we want to describe delegation tokens for. */

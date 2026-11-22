@@ -91,6 +91,9 @@ export class NewTopic {
    * partitions.
    *
    * @param options - the topic name, the number of partitions and the replication factor
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type
+   * @throws `RangeError` for a count outside Java's type
    */
   constructor(options: {
     /** The topic name. */
@@ -107,6 +110,9 @@ export class NewTopic {
    * and `default.replication.factor` respectively.
    *
    * @param options - the topic name, the number of partitions and the replication factor
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type
+   * @throws `RangeError` for a count outside Java's type
    */
   constructor(options: {
     /** The topic name. */
@@ -124,6 +130,9 @@ export class NewTopic {
    *   ids (i.e. broker ids). Although not enforced, it is generally a good
    *   idea for all partitions to have the same number of replicas. The first
    *   replica will be treated as the preferred leader.
+   * @throws `IllegalArgumentError` when the given parameters are no Java form
+   * @throws `TypeError` for a value of the wrong type, or a null assignment map
+   * @throws `RangeError` for a partition or broker id outside Java's `int`
    */
   constructor(options: {
     /** The topic name. */
@@ -139,7 +148,7 @@ export class NewTopic {
    * @param options - the fields of one of Java's forms
    * @throws `IllegalArgumentError` when the given parameters are no Java form
    * @throws `TypeError` for a value of the wrong type, or a null assignment map
-   * @throws `RangeError` for a count outside Java's type
+   * @throws `RangeError` for a count, partition id or broker id outside Java's type
    */
   constructor(options: unknown) {
     const form = FORMS.match(options, arguments.length);
@@ -231,6 +240,7 @@ export class NewTopic {
    * @param configs - The configuration map, a `Map` or a plain object of its
    *   keys, on its own
    * @returns This NewTopic object.
+   * @throws `TypeError` when the map is not keyed by strings of string values
    */
   configs(configs: ReadonlyMap<string, string> | Readonly<Record<string, string>>): this;
   /**
@@ -238,6 +248,7 @@ export class NewTopic {
    *
    * @param options - The configuration map.
    * @returns This NewTopic object.
+   * @throws `TypeError` when the map is not keyed by strings of string values
    */
   configs(options: {
     /** The configuration map, a `Map` or a plain object, or null. */

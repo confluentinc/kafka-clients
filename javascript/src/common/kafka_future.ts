@@ -594,19 +594,9 @@ export abstract class KafkaFuture<T> {
    *   `{valueIfAbsent}` (a bare plain object included)
    * @throws `TypeError` when `valueIfAbsent` is `undefined`
    *
-   * @remarks *(deviation)* An admin RPC's future learns its outcome from the
-   * core on a later turn of the event loop. Right after a `MockAdminClient`
-   * call, which Java's mock completes before returning, `isDone()`,
-   * `isCompletedExceptionally()` and `getNow()` don't yet show it (a failed
-   * future is not yet completed exceptionally), and a `thenApply` or
-   * `whenComplete` registered then runs on a later turn, not inside the call;
-   * they show it, and it runs, once the core's task answers. `await get()` is
-   * unaffected. Why: the core's `kafka_common_KafkaFuture_get_cb` answers even
-   * a completed future from a task it spawns, and the binding calls no
-   * blocking C function, such as `kafka_common_KafkaFuture_get`. Goes when:
-   * the core queues a completed future's answer before `get_cb` returns, and
-   * the binding answers its queued callbacks once at the end of each call, as
-   * `MockProducer` does.
+   * @remarks *(deviation)* Right after a `MockAdminClient` call, an admin
+   * RPC's future shows its outcome only on a later turn of the event loop
+   * (see `isDone()`).
    */
   abstract getNow(options: {
     /**
@@ -643,19 +633,9 @@ export abstract class KafkaFuture<T> {
    * @returns whether this future failed or was cancelled
    * @throws `TypeError` when it is given an argument: it only reads
    *
-   * @remarks *(deviation)* An admin RPC's future learns its outcome from the
-   * core on a later turn of the event loop. Right after a `MockAdminClient`
-   * call, which Java's mock completes before returning, `isDone()`,
-   * `isCompletedExceptionally()` and `getNow()` don't yet show it (a failed
-   * future is not yet completed exceptionally), and a `thenApply` or
-   * `whenComplete` registered then runs on a later turn, not inside the call;
-   * they show it, and it runs, once the core's task answers. `await get()` is
-   * unaffected. Why: the core's `kafka_common_KafkaFuture_get_cb` answers even
-   * a completed future from a task it spawns, and the binding calls no
-   * blocking C function, such as `kafka_common_KafkaFuture_get`. Goes when:
-   * the core queues a completed future's answer before `get_cb` returns, and
-   * the binding answers its queued callbacks once at the end of each call, as
-   * `MockProducer` does.
+   * @remarks *(deviation)* Right after a `MockAdminClient` call, an admin
+   * RPC's future shows its outcome only on a later turn of the event loop
+   * (see `isDone()`).
    */
   abstract isCompletedExceptionally(): boolean;
 
@@ -666,19 +646,15 @@ export abstract class KafkaFuture<T> {
    * @returns whether this future is done
    * @throws `TypeError` when it is given an argument: it only reads
    *
-   * @remarks *(deviation)* An admin RPC's future learns its outcome from the
-   * core on a later turn of the event loop. Right after a `MockAdminClient`
-   * call, which Java's mock completes before returning, `isDone()`,
-   * `isCompletedExceptionally()` and `getNow()` don't yet show it (a failed
-   * future is not yet completed exceptionally), and a `thenApply` or
-   * `whenComplete` registered then runs on a later turn, not inside the call;
-   * they show it, and it runs, once the core's task answers. `await get()` is
-   * unaffected. Why: the core's `kafka_common_KafkaFuture_get_cb` answers even
-   * a completed future from a task it spawns, and the binding calls no
-   * blocking C function, such as `kafka_common_KafkaFuture_get`. Goes when:
-   * the core queues a completed future's answer before `get_cb` returns, and
-   * the binding answers its queued callbacks once at the end of each call, as
-   * `MockProducer` does.
+   * @remarks *(deviation)* An admin RPC's future learns its outcome on a
+   * later turn of the event loop: right after a `MockAdminClient` call, which
+   * Java's mock completes before returning, `isDone()`,
+   * `isCompletedExceptionally()` and `getNow()` don't show it yet, and a
+   * `thenApply` or `whenComplete` registered then runs later, not inside the
+   * call. `await get()` is unaffected. Why: the core's `get_cb` answers even a
+   * completed future from a task it spawns, and the binding calls no blocking
+   * C function. Goes when: the core queues that answer before `get_cb`
+   * returns.
    */
   abstract isDone(): boolean;
 

@@ -17,7 +17,7 @@
 // Java's ConfigResourceTest, and the binding's own tests of ConfigResource
 // (Java's equals, hashCode and toString, the forms, toJSON) and of
 // ConfigResourceMap, the js-only map keyed by ConfigResource (root
-// CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; design D2),
+// CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; DECISIONS.md entry 38),
 // which Java has no test of: it stands for Java's HashMap<ConfigResource, V>.
 
 const assert = require('node:assert/strict');

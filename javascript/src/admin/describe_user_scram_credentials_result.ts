@@ -21,7 +21,8 @@
 // `internalOfClient` (root CLAUDE.md, JavaScript Binding Conventions, Class
 // family, Q16). Java's package-private constructor, over the future of the
 // response's per-user results, is `internalCreate`, with Java's composition
-// (as R2's C-future Results keep Java's constructor beside the client's path).
+// (as the other Results over C futures keep Java's constructor beside the
+// client's path).
 
 import { JavaForms, kind } from '../internal/args';
 import { KafkaFuture } from '../common/kafka_future';
