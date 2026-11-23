@@ -1,0 +1,41 @@
+version: v1.0
+name: Chaos runs of the JavaScript producer
+
+# Run as a Semaphore Task (the `chaos-javascript` task in service.yml), on a
+# weekly schedule or by hand. `make chaos-javascript` (rust/Makefile) runs
+# `cargo xtask chaos` twice with the Node.js producer in its gRPC container and
+# the Rust consumer, on the harness's dedicated three-broker cluster: a
+# preferred-leader change and a partition reassignment every cycle without
+# broker restarts, then an unclean broker roll under the idempotent producer.
+# Each run fails the job when its conservation verdict fails (an acknowledged
+# record not read back, a duplicate, or an out-of-order offset).
+#
+# This pipeline is not part of semaphore.yml, so none of its jobs is listed in
+# REQUIRED_CI_JOBS (create-release-tag.yml): a release does not wait for it.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-2
+
+blocks:
+  - name: "Chaos (Linux amd64)"
+    dependencies: []
+    execution_time_limit:
+      minutes: 90
+    task:
+      prologue:
+        commands:
+          - . .semaphore/job-start.sh
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "chaos-javascript (Linux amd64)"
+          commands:
+            # The leader-change and reassignment run, then the unclean roll;
+            # the gRPC image is built first (build-grpc-images-javascript).
+            - make chaos-javascript
+      epilogue:
+        always:
+          commands:
+            # The harness's per-run reports (verdict, leader changes, client
+            # logs), when a run wrote them.
+            - '[ -d rust/target/chaos-runs ] && artifact push job rust/target/chaos-runs || true'
