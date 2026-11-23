@@ -31,7 +31,8 @@ namespace Confluent.Kafka.Common.Header;
 /// </summary>
 /// <remarks>
 /// <see cref="Value()"/> is a <c>byte[]</c>, as Java's <c>Header.value()</c> is; <see cref="ValueMemory()"/> gives
-/// the same bytes as a <see cref="ReadOnlyMemory{T}"/>, which for a polled header is a view of the batch, not a copy.
+/// the same bytes as a <see cref="ReadOnlyMemory{T}"/>, which for a polled header is a view of the batch, not a copy,
+/// until <see cref="Value()"/> has copied the value, and that array afterwards.
 /// </remarks>
 public sealed class Header
 {
@@ -84,7 +85,10 @@ public sealed class Header
     /// <remarks>
     /// <para>
     /// For a header of a polled record the memory is a view of the polled batch, with no copy, and keeps the batch
-    /// alive while it is reachable; for a header built with a <c>byte[]</c> it is that array.
+    /// alive while it is reachable, until <see cref="Value()"/> has been called; from then on it is the array
+    /// <see cref="Value()"/> returns, so a write into that array shows in both, as Java's <c>RecordHeader</c> keeps
+    /// only the array once <c>value()</c> has copied it. A memory taken before the first <see cref="Value()"/> call
+    /// stays a view of the batch. For a header built with a <c>byte[]</c> it is that array.
     /// </para>
     /// <para>
     /// <em>Deviation from Java:</em> Java's <c>Header</c> has only <c>value()</c>. A <c>byte[]</c> cannot view the
@@ -93,7 +97,8 @@ public sealed class Header
     /// </remarks>
     public ReadOnlyMemory<byte>? ValueMemory()
     {
-        if (_batch is null)
+        // _valueRead is set after _value is published, so once it is seen the cached array is the value.
+        if (_batch is null || _valueRead)
         {
             // Not a conditional with a null branch: null converts to ReadOnlyMemory<byte> through its byte[]
             // conversion, giving an empty memory instead of null.
@@ -204,8 +209,9 @@ public sealed class Header
         return bytes;
     }
 
-    // The value, without a copy: the cached or built array, or a view of the batch, which the caller keeps alive (by
-    // keeping this header alive) while it reads the span. False for a null value.
+    // The value, without a copy, by ValueMemory's rule: the built array, the array Value() cached once it was called,
+    // or else a view of the batch, which the caller keeps alive (by keeping this header alive) while it reads the
+    // span. False for a null value.
     internal unsafe bool ValueSpan(out ReadOnlySpan<byte> value)
     {
         if (_batch is null || _valueRead)

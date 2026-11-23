@@ -232,6 +232,126 @@ public sealed class ConsumerRecordWrappedHeadersTests
     }
 
     [Fact]
+    public async Task ValueMemory_IsAViewOfTheBatchBeforeValue_AndTheArrayValueReturnsAfterIt()
+    {
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Assign(new[] { (Topic, Partition) });
+        consumer.Seek(Topic, Partition, offset: 0);
+        using IDisposable blocks = ConsumerPollHeadersTests.AddRecordWithHeaders(
+            consumer, Topic, Partition, offset: 0, key: null, value: null,
+            ("h", s_value), ("empty-value", Array.Empty<byte>()));
+
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(await Poll(consumer));
+        Header header = record.Headers().ToArray()[0];
+
+        ReadOnlyMemory<byte> before = header.ValueMemory()!.Value;
+        Assert.True(MemoryMarshal.TryGetMemoryManager(before, out BytesMemoryManager? _));
+        Assert.Equal(s_value, SpanOf(header));
+
+        byte[] value = header.Value()!;
+        ReadOnlyMemory<byte> after = header.ValueMemory()!.Value;
+        Assert.True(MemoryMarshal.TryGetArray(after, out ArraySegment<byte> segment));
+        Assert.Same(value, segment.Array);
+        Assert.Equal(0, segment.Offset);
+        Assert.Equal(value.Length, segment.Count);
+
+        // A write into the array Value() returns shows through every later form, as Java's RecordHeader keeps only
+        // that array once value() has copied it; the memory taken before stays a view of the batch.
+        value[0] = 0xFE;
+        byte[] written = { 0xFE, 0x00, 0xFF, 0x7F };
+        Assert.Equal(written, header.ValueMemory()!.Value.ToArray());
+        Assert.Equal(written, SpanOf(header));
+        Assert.Equal(s_value, before.ToArray());
+        Assert.True(header.Equals(new Header("h", written)));
+        Assert.False(header.Equals(new Header("h", s_value)));
+
+        Header empty = record.Headers().ToArray()[1];
+        byte[] emptyValue = empty.Value()!;
+        Assert.True(MemoryMarshal.TryGetArray(empty.ValueMemory()!.Value, out ArraySegment<byte> emptySegment));
+        Assert.Same(emptyValue, emptySegment.Array);
+    }
+
+    [Fact]
+    public async Task ValueAndValueMemory_FirstCalledFromManyThreads_AgreeOnTheValue()
+    {
+        const int Records = 32;
+        const int Threads = 8;
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Assign(new[] { (Topic, Partition) });
+        consumer.Seek(Topic, Partition, offset: 0);
+        List<IDisposable> blocks = new List<IDisposable>();
+        try
+        {
+            for (int offset = 0; offset < Records; offset++)
+            {
+                blocks.Add(ConsumerPollHeadersTests.AddRecordWithHeaders(
+                    consumer, Topic, Partition, offset, key: null, value: null, ("h", s_value)));
+            }
+
+            ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
+            Assert.Equal(Records, records.Count());
+            foreach (ConsumerRecord<byte[], byte[]> record in records)
+            {
+                Header header = Assert.Single(record.Headers());
+                byte[]?[] values = new byte[]?[Threads];
+                ReadOnlyMemory<byte>?[] memories = new ReadOnlyMemory<byte>?[Threads];
+                using Barrier barrier = new Barrier(Threads);
+                Task[] tasks = Enumerable.Range(0, Threads).Select(i => Task.Factory.StartNew(
+                    () =>
+                    {
+                        barrier.SignalAndWait();
+                        if (i % 2 == 0)
+                        {
+                            values[i] = header.Value();
+                        }
+                        else
+                        {
+                            memories[i] = header.ValueMemory();
+                        }
+                    },
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default)).ToArray();
+                await Task.WhenAll(tasks);
+
+                byte[] value = header.Value()!;
+                for (int i = 0; i < Threads; i++)
+                {
+                    if (i % 2 == 0)
+                    {
+                        Assert.Same(value, values[i]);
+                        continue;
+                    }
+
+                    // Each memory is either a view of the batch, taken before the array was cached, or that array.
+                    ReadOnlyMemory<byte> memory = memories[i]!.Value;
+                    Assert.Equal(s_value, memory.ToArray());
+                    if (MemoryMarshal.TryGetArray(memory, out ArraySegment<byte> segment))
+                    {
+                        Assert.Same(value, segment.Array);
+                    }
+                    else
+                    {
+                        Assert.True(MemoryMarshal.TryGetMemoryManager(memory, out BytesMemoryManager? _));
+                    }
+                }
+
+                Assert.True(MemoryMarshal.TryGetArray(header.ValueMemory()!.Value, out ArraySegment<byte> last));
+                Assert.Same(value, last.Array);
+            }
+        }
+        finally
+        {
+            foreach (IDisposable block in blocks)
+            {
+                block.Dispose();
+            }
+        }
+    }
+
+    [Fact]
     public unsafe void DecodeKey_DecodesUtf8_KeepingAnEmbeddedNul_AndReplacingInvalidBytes()
     {
         // The mocks reject such keys before the core holds them (a header key crosses as a C string), so the decoding
@@ -257,6 +377,10 @@ public sealed class ConsumerRecordWrappedHeadersTests
             s_pollTimeout,
             new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()),
             new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()));
+
+    // The bytes the internal ValueSpan gives, which the producer send reads.
+    private static byte[]? SpanOf(Header header) =>
+        header.ValueSpan(out ReadOnlySpan<byte> value) ? value.ToArray() : null;
 
     private static object? Field(object target, string name) =>
         target.GetType().GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(target);
