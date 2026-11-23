@@ -1068,8 +1068,9 @@ out of date). The rule:
    type with its bare name. Deviation (M23/P7, ledger 540): Java's `ByteBuffer` serde family is named after the
    .NET type that stands for `ByteBuffer`: `ReadOnlyMemorySerializer`, `ReadOnlyMemoryDeserializer`,
    `Serdes.ReadOnlyMemorySerde`, `Serdes.ReadOnlyMemory()`. The allowlist carries the `unmatched` / `missing` pairs.
-   A type keeps its Java kind, or it is a `kind` finding. A Java interface is a C# interface, which a user can
-   implement as a Java user does; the static class of its static methods (rule 10) is not checked. A Java enum is a
+   A type keeps its Java kind, or it is a `kind` finding. A Java interface is a C# interface named `I` and Java's
+   name (`IHeader`, never `Header`), which a user can implement as a Java user does; the static class of its static
+   methods (rule 10) is not checked. A Java enum is a
    C# enum, a Java abstract class an abstract class, and a Java class a class that is neither abstract nor static:
    never a struct, whose `default` and parameterless constructor Java's class does not have, and which cannot be
    `null` where Java returns `null`.
