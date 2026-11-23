@@ -27,10 +27,10 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="CreateDelegationTokenResult"/>
 public sealed class AsyncCreateDelegationTokenResult
 {
-    private readonly KafkaFutureImpl<Token> _token;
+    private readonly IKafkaFutureImpl<Token> _token;
     private readonly SafeAdminResultHandle _native;
 
-    private AsyncCreateDelegationTokenResult(KafkaFutureImpl<Token> token, SafeAdminResultHandle native)
+    private AsyncCreateDelegationTokenResult(IKafkaFutureImpl<Token> token, SafeAdminResultHandle native)
     {
         _token = token;
         _native = native;
@@ -41,9 +41,9 @@ public sealed class AsyncCreateDelegationTokenResult
     /// <summary>The issued token — Java's <c>delegationToken()</c>.</summary>
     /// <returns>A future over the token.</returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
-    public AsyncKafkaFuture<Token> DelegationToken() => new AsyncKafkaFuture<Token>(_token);
+    public AsyncKafkaFuture<Token> DelegationToken() => AsyncAdminFutures.Of(_token);
 
     internal static AsyncCreateDelegationTokenResult OfClient(
-        (KafkaFutureImpl<Token> Token, SafeAdminResultHandle Result) native) =>
+        (IKafkaFutureImpl<Token> Token, SafeAdminResultHandle Result) native) =>
         new AsyncCreateDelegationTokenResult(native.Token, native.Result);
 }

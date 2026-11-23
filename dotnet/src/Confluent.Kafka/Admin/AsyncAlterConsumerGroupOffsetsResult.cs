@@ -53,13 +53,13 @@ public sealed class AsyncAlterConsumerGroupOffsetsResult
     /// attempted, so its future fails with Java's <see cref="Confluent.Kafka.IllegalArgumentException"/>.
     /// </exception>
     public AsyncKafkaFuture PartitionResult(TopicPartition partition) =>
-        new AsyncKafkaFuture(NativeAdminClient.AlterConsumerGroupOffsetsPartitionResult(_native, partition));
+        AsyncAdminFutures.Of(NativeAdminClient.AlterConsumerGroupOffsetsPartitionResult(_native, partition, AdminFlavour.Async));
 
     /// <summary>
     /// Completes when every partition's offset was altered, and fails otherwise — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A new future over the whole request; its failure is the core's, naming every failed partition.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(NativeAdminClient.AlterConsumerGroupOffsetsAll(_native));
+    public AsyncKafkaFuture All() => AsyncAdminFutures.Of(NativeAdminClient.AlterConsumerGroupOffsetsAll(_native, AdminFlavour.Async));
 
     internal static AsyncAlterConsumerGroupOffsetsResult OfClient(SafeAdminResultHandle native) => new AsyncAlterConsumerGroupOffsetsResult(native);
 }

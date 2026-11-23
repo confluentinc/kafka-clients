@@ -793,13 +793,17 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         }
 
         // What the type must be declared as to have its Java type's kind, or null when it has it. A struct, a static class
-        // or a delegate is never a Java class's kind.
+        // or a delegate is never a Java class's kind. A Java interface is a C# interface whose name is I and Java's name: an
+        // interface declared with Java's bare name (Header for IHeader) pairs with its Java type by that name, so only this
+        // check reports it.
         private static string? KindToDeclare(JavaType java, INamedTypeSymbol type)
         {
             bool isClass = type.TypeKind == TypeKind.Class && !type.IsStatic;
             if (java.IsInterface)
             {
-                return type.TypeKind == TypeKind.Interface ? null : "the interface I" + type.Name;
+                return type.TypeKind == TypeKind.Interface && JavaNameOf(type) != type.Name
+                    ? null
+                    : "the interface I" + JavaNameOf(type);
             }
 
             if (java.IsEnum)

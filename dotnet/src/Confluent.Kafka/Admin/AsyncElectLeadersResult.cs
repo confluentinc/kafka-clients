@@ -36,11 +36,11 @@ public sealed class AsyncElectLeadersResult
     private static readonly Func<IReadOnlyDictionary<TopicPartition, Exception?>, object?> s_firstFailure =
         ElectLeadersResult.FirstFailure;
 
-    private readonly KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> _partitions;
+    private readonly IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> _partitions;
     private readonly SafeAdminResultHandle _native;
 
     private AsyncElectLeadersResult(
-        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> partitions, SafeAdminResultHandle native)
+        IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> partitions, SafeAdminResultHandle native)
     {
         _partitions = partitions;
         _native = native;
@@ -59,7 +59,7 @@ public sealed class AsyncElectLeadersResult
     /// </returns>
     /// <remarks>Every call returns the same future, as Java's accessor returns its stored field.</remarks>
     public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, Exception?>>(_partitions);
+        AsyncAdminFutures.Of(_partitions);
 
     /// <summary>
     /// Completes when every partition's election succeeded, and faults with the first
@@ -71,10 +71,10 @@ public sealed class AsyncElectLeadersResult
     /// partition; Java iterates a <c>HashMap</c> and promises no order. Every call returns a new
     /// future, as Java's <c>all()</c> does.
     /// </remarks>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(_partitions.ThenApply(s_firstFailure));
+    public AsyncKafkaFuture All() => AsyncAdminFutures.Of(_partitions.ThenApplyFunc(s_firstFailure));
 
     internal static AsyncElectLeadersResult OfClient(
-        (KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions, SafeAdminResultHandle Result)
+        (IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions, SafeAdminResultHandle Result)
             native) =>
         new AsyncElectLeadersResult(native.Partitions, native.Result);
 }

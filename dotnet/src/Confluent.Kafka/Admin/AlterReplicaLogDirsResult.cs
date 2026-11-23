@@ -32,7 +32,7 @@ namespace Confluent.Kafka.Admin;
 public sealed class AlterReplicaLogDirsResult
 {
     private readonly IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture> _values;
-    private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
     // The dictionary is held by reference, as Java holds its map.
@@ -43,7 +43,7 @@ public sealed class AlterReplicaLogDirsResult
 
     private AlterReplicaLogDirsResult(
         IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture> values,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -66,18 +66,18 @@ public sealed class AlterReplicaLogDirsResult
     /// <returns>A future representing the whole batch. Its <c>Get()</c> waits for every replica.</returns>
     public KafkaFuture All() =>
         _nativeFutures is not null
-            ? new KafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures))
+            ? FutureState.AllOf(new KafkaFutureImpl<object?>(), _nativeFutures)
             : SyncAdminFutures.AllOf(_values.Values);
 
     internal static AlterReplicaLogDirsResult OfClient(
-        (IReadOnlyDictionary<TopicPartitionReplica, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<TopicPartitionReplica, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<TopicPartitionReplica, KafkaFuture> values =
             new Dictionary<TopicPartitionReplica, KafkaFuture>(native.Values.Count);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
-        foreach (KeyValuePair<TopicPartitionReplica, KafkaFutureImpl<object?>> entry in native.Values)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<TopicPartitionReplica, IKafkaFutureImpl<object?>> entry in native.Values)
         {
-            values.Add(entry.Key, new KafkaFuture(entry.Value));
+            values.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

@@ -35,7 +35,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// Each sync Result and its async twin, built by their constructors over <c>KafkaFutureImpl</c>s that the harness
+/// Each sync Result and its async twin, built by their constructors over <c>IKafkaFutureImpl</c>s that the harness
 /// completes identically, give the same outcome on every row: the same value, or the same exception instance.
 /// </summary>
 /// <remarks>
@@ -1378,12 +1378,12 @@ public sealed class AdminP14SyncCompositionTests
     {
         if (row == "constructor-default-guard")
         {
-            // A default future, bound to no source, is this constructor's null: rejected at construction, before any
-            // accessor, with the same type, parameter name and message on both flavours.
+            // A null future is rejected at construction, before any accessor, with the same type, parameter name and
+            // message on both flavours.
             AssertNullArgument(
                 FlavourOf(flavour) == AdminFlavour.Sync
-                    ? Thrown(() => _ = new DescribeClientQuotasResult(default))
-                    : Thrown(() => _ = new AsyncDescribeClientQuotasResult(default)),
+                    ? Thrown(() => _ = new DescribeClientQuotasResult(null!))
+                    : Thrown(() => _ = new AsyncDescribeClientQuotasResult(null!)),
                 "entities");
             return Task.CompletedTask;
         }
@@ -1435,20 +1435,20 @@ public sealed class AdminP14SyncCompositionTests
     {
         ClientQuotaEntity[] entities = Entities();
         AdminFlavour adminFlavour = FlavourOf(flavour);
-        Dictionary<ClientQuotaEntity, KafkaFutureImpl<object?>> impls =
-            Impls<ClientQuotaEntity, object?>(entities, EqualityComparer<ClientQuotaEntity>.Default);
+        Dictionary<ClientQuotaEntity, IKafkaFutureImpl<object?>> impls =
+            Impls<ClientQuotaEntity, object?>(flavour, entities, EqualityComparer<ClientQuotaEntity>.Default);
         KafkaException failure = new Common.Errors.InvalidReplicationFactorException("the second entity failed");
         if (adminFlavour == AdminFlavour.Sync)
         {
             Dictionary<ClientQuotaEntity, KafkaFuture> map =
-                new Dictionary<ClientQuotaEntity, KafkaFuture> { [entities[0]] = new KafkaFuture(impls[entities[0]]) };
+                new Dictionary<ClientQuotaEntity, KafkaFuture> { [entities[0]] = SyncAdminFutures.Of(impls[entities[0]]) };
             AlterClientQuotasResult result = new AlterClientQuotasResult(map);
             Assert.NotSame(map, result.Values());
 
             impls[entities[0]].Complete(null);
             AssertReturned(await FutureProbe.Of(result.All()).Outcome());
 
-            map.Add(entities[1], new KafkaFuture(impls[entities[1]]));
+            map.Add(entities[1], SyncAdminFutures.Of(impls[entities[1]]));
             impls[entities[1]].CompleteWithError(failure);
             Assert.Single(result.Values());
             AssertReturned(await FutureProbe.Of(result.All()).Outcome());
@@ -1456,14 +1456,14 @@ public sealed class AdminP14SyncCompositionTests
         }
 
         Dictionary<ClientQuotaEntity, AsyncKafkaFuture> asyncMap =
-            new Dictionary<ClientQuotaEntity, AsyncKafkaFuture> { [entities[0]] = new AsyncKafkaFuture(impls[entities[0]]) };
+            new Dictionary<ClientQuotaEntity, AsyncKafkaFuture> { [entities[0]] = AsyncAdminFutures.Of(impls[entities[0]]) };
         AsyncAlterClientQuotasResult asyncResult = new AsyncAlterClientQuotasResult(asyncMap);
         Assert.NotSame(asyncMap, asyncResult.Values());
 
         impls[entities[0]].Complete(null);
         AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
 
-        asyncMap.Add(entities[1], new AsyncKafkaFuture(impls[entities[1]]));
+        asyncMap.Add(entities[1], AsyncAdminFutures.Of(impls[entities[1]]));
         impls[entities[1]].CompleteWithError(failure);
         Assert.Single(asyncResult.Values());
         AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
@@ -1601,19 +1601,19 @@ public sealed class AdminP14SyncCompositionTests
     private static async Task AlterUserScramCredentialsCopies(string flavour)
     {
         AdminFlavour adminFlavour = FlavourOf(flavour);
-        Dictionary<string, KafkaFutureImpl<object?>> impls = Impls<string, object?>(s_users, StringComparer.Ordinal);
+        Dictionary<string, IKafkaFutureImpl<object?>> impls = Impls<string, object?>(flavour, s_users, StringComparer.Ordinal);
         KafkaException failure = new Common.Errors.SaslAuthenticationException("the second user failed");
         if (adminFlavour == AdminFlavour.Sync)
         {
             Dictionary<string, KafkaFuture> map =
-                new Dictionary<string, KafkaFuture>(StringComparer.Ordinal) { [s_users[0]] = new KafkaFuture(impls[s_users[0]]) };
+                new Dictionary<string, KafkaFuture>(StringComparer.Ordinal) { [s_users[0]] = SyncAdminFutures.Of(impls[s_users[0]]) };
             AlterUserScramCredentialsResult result = new AlterUserScramCredentialsResult(map);
             Assert.NotSame(map, result.Values());
 
             impls[s_users[0]].Complete(null);
             AssertReturned(await FutureProbe.Of(result.All()).Outcome());
 
-            map.Add(s_users[1], new KafkaFuture(impls[s_users[1]]));
+            map.Add(s_users[1], SyncAdminFutures.Of(impls[s_users[1]]));
             impls[s_users[1]].CompleteWithError(failure);
             Assert.Single(result.Values());
             AssertReturned(await FutureProbe.Of(result.All()).Outcome());
@@ -1622,7 +1622,7 @@ public sealed class AdminP14SyncCompositionTests
 
         Dictionary<string, AsyncKafkaFuture> asyncMap = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
         {
-            [s_users[0]] = new AsyncKafkaFuture(impls[s_users[0]]),
+            [s_users[0]] = AsyncAdminFutures.Of(impls[s_users[0]]),
         };
         AsyncAlterUserScramCredentialsResult asyncResult = new AsyncAlterUserScramCredentialsResult(asyncMap);
         Assert.NotSame(asyncMap, asyncResult.Values());
@@ -1630,7 +1630,7 @@ public sealed class AdminP14SyncCompositionTests
         impls[s_users[0]].Complete(null);
         AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
 
-        asyncMap.Add(s_users[1], new AsyncKafkaFuture(impls[s_users[1]]));
+        asyncMap.Add(s_users[1], AsyncAdminFutures.Of(impls[s_users[1]]));
         impls[s_users[1]].CompleteWithError(failure);
         Assert.Single(asyncResult.Values());
         AssertReturned(await FutureProbe.Of(asyncResult.All()).Outcome());
@@ -2597,7 +2597,7 @@ public sealed class AdminP14SyncCompositionTests
             case "erasure-identity":
             case "key-identity":
                 {
-                    // A key's future is its key's own KafkaFutureImpl: equal on every read, done the moment the key is.
+                    // A key's future is its key's own engine: equal on every read, done the moment the key is.
                     Assert.True(harness.ValueEqualAcrossReads(keys[0]));
                     FutureProbe value = harness.Value(keys[0]);
                     Assert.False(value.IsDone);
@@ -2635,18 +2635,20 @@ public sealed class AdminP14SyncCompositionTests
         return data;
     }
 
-    private static Dictionary<TKey, KafkaFutureImpl<TValue>> Impls<TKey, TValue>(
-        IReadOnlyList<TKey> keys, IEqualityComparer<TKey> comparer)
+    private static Dictionary<TKey, IKafkaFutureImpl<TValue>> Impls<TKey, TValue>(
+        string flavour, IReadOnlyList<TKey> keys, IEqualityComparer<TKey> comparer)
         where TKey : notnull
     {
-        Dictionary<TKey, KafkaFutureImpl<TValue>> futures = new Dictionary<TKey, KafkaFutureImpl<TValue>>(keys.Count, comparer);
+        Dictionary<TKey, IKafkaFutureImpl<TValue>> futures = new Dictionary<TKey, IKafkaFutureImpl<TValue>>(keys.Count, comparer);
         foreach (TKey key in keys)
         {
-            futures.Add(key, new KafkaFutureImpl<TValue>());
+            futures.Add(key, NewFuture<TValue>(flavour));
         }
 
         return futures;
     }
+
+    private static IKafkaFutureImpl<T> NewFuture<T>(string flavour) => NativeAdminClient.NewFuture<T>(FlavourOf(flavour));
 
     private static SafeAdminResultHandle NoResultHandle() => new SafeAdminResultHandle(IntPtr.Zero, NoDestroy);
 
@@ -2821,10 +2823,10 @@ public sealed class AdminP14SyncCompositionTests
                     new Dictionary<string, KafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>(StringComparer.Ordinal);
                 foreach (string topic in s_topics)
                 {
-                    KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> impl = new KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>();
+                    IKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> impl = NewFuture<CreateTopicsResult.TopicMetadataAndConfig>(flavour);
                     complete.Add(topic, value => impl.Complete(value));
                     fail.Add(topic, failure => impl.CompleteWithError(failure));
-                    futures.Add(topic, new KafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(impl));
+                    futures.Add(topic, SyncAdminFutures.Of(impl));
                 }
 
                 return new CreateTopicsHarness(complete, fail, new CreateTopicsResult(futures), null);
@@ -2834,10 +2836,10 @@ public sealed class AdminP14SyncCompositionTests
                 new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>(StringComparer.Ordinal);
             foreach (string topic in s_topics)
             {
-                KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> impl = new KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>();
+                IKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> impl = NewFuture<CreateTopicsResult.TopicMetadataAndConfig>(flavour);
                 complete.Add(topic, value => impl.Complete(value));
                 fail.Add(topic, failure => impl.CompleteWithError(failure));
-                asyncFutures.Add(topic, new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(impl));
+                asyncFutures.Add(topic, AsyncAdminFutures.Of(impl));
             }
 
             return new CreateTopicsHarness(complete, fail, null, new AsyncCreateTopicsResult(asyncFutures));
@@ -2926,7 +2928,7 @@ public sealed class AdminP14SyncCompositionTests
         internal Exception? CallIndexer(TKey key) => Thrown(() => _ = Value(key));
     }
 
-    /// <summary>A Result whose per-key futures are void, over one <see cref="KafkaFutureImpl{T}"/> per key.</summary>
+    /// <summary>A Result whose per-key futures are void, over one engine of the Result's flavor per key.</summary>
     private sealed class VoidHarness<TKey> : KeyedHarness<TKey>
         where TKey : notnull
     {
@@ -2938,7 +2940,7 @@ public sealed class AdminP14SyncCompositionTests
         private readonly Func<AsyncKafkaFuture>? _asyncAll;
 
         private VoidHarness(
-            IReadOnlyDictionary<TKey, KafkaFutureImpl<object?>> futures,
+            IReadOnlyDictionary<TKey, IKafkaFutureImpl<object?>> futures,
             IReadOnlyList<TKey> keys,
             bool otherSideIsNull,
             Func<IReadOnlyDictionary<TKey, KafkaFuture>>? syncValues,
@@ -2978,8 +2980,8 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static VoidHarness<string> DeleteTopicsByName(string flavour, IReadOnlyList<string> topics)
         {
-            Dictionary<string, KafkaFutureImpl<object?>> futures =
-                Impls<string, object?>(topics, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<object?>> futures =
+                Impls<string, object?>(flavour, topics, StringComparer.Ordinal);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 DeleteTopicsResult result = DeleteTopicsResult.OfClient((futures, null, NoResultHandle()));
@@ -3000,8 +3002,8 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static VoidHarness<Uuid> DeleteTopicsById(string flavour, IReadOnlyList<Uuid> ids)
         {
-            Dictionary<Uuid, KafkaFutureImpl<object?>> futures =
-                Impls<Uuid, object?>(ids, EqualityComparer<Uuid>.Default);
+            Dictionary<Uuid, IKafkaFutureImpl<object?>> futures =
+                Impls<Uuid, object?>(flavour, ids, EqualityComparer<Uuid>.Default);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 DeleteTopicsResult result = DeleteTopicsResult.OfClient((null, futures, NoResultHandle()));
@@ -3022,8 +3024,8 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static VoidHarness<string> CreatePartitions(string flavour, IReadOnlyList<string> topics)
         {
-            Dictionary<string, KafkaFutureImpl<object?>> futures =
-                Impls<string, object?>(topics, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<object?>> futures =
+                Impls<string, object?>(flavour, topics, StringComparer.Ordinal);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 CreatePartitionsResult result = CreatePartitionsResult.OfClient((futures, NoResultHandle()));
@@ -3037,8 +3039,8 @@ public sealed class AdminP14SyncCompositionTests
         internal static VoidHarness<ConfigResource> IncrementalAlterConfigs(
             string flavour, IReadOnlyList<ConfigResource> resources)
         {
-            Dictionary<ConfigResource, KafkaFutureImpl<object?>> futures =
-                Impls<ConfigResource, object?>(resources, EqualityComparer<ConfigResource>.Default);
+            Dictionary<ConfigResource, IKafkaFutureImpl<object?>> futures =
+                Impls<ConfigResource, object?>(flavour, resources, EqualityComparer<ConfigResource>.Default);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 AlterConfigsResult result = AlterConfigsResult.OfClient((futures, NoResultHandle()));
@@ -3053,8 +3055,8 @@ public sealed class AdminP14SyncCompositionTests
         internal static VoidHarness<TopicPartitionReplica> AlterReplicaLogDirs(
             string flavour, IReadOnlyList<TopicPartitionReplica> replicas)
         {
-            Dictionary<TopicPartitionReplica, KafkaFutureImpl<object?>> futures =
-                Impls<TopicPartitionReplica, object?>(replicas, EqualityComparer<TopicPartitionReplica>.Default);
+            Dictionary<TopicPartitionReplica, IKafkaFutureImpl<object?>> futures =
+                Impls<TopicPartitionReplica, object?>(flavour, replicas, EqualityComparer<TopicPartitionReplica>.Default);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 AlterReplicaLogDirsResult result = AlterReplicaLogDirsResult.OfClient((futures, NoResultHandle()));
@@ -3070,11 +3072,11 @@ public sealed class AdminP14SyncCompositionTests
         internal static VoidHarness<TopicPartition> AlterPartitionReassignments(
             string flavour, IReadOnlyList<TopicPartition> partitions)
         {
-            Dictionary<TopicPartition, KafkaFutureImpl<object?>> futures =
-                new Dictionary<TopicPartition, KafkaFutureImpl<object?>>(partitions.Count);
+            Dictionary<TopicPartition, IKafkaFutureImpl<object?>> futures =
+                new Dictionary<TopicPartition, IKafkaFutureImpl<object?>>(partitions.Count);
             foreach (TopicPartition partition in partitions)
             {
-                futures.Add(partition, new KafkaFutureImpl<object?>());
+                futures.Add(partition, NewFuture<object?>(flavour));
             }
 
             Action<TopicPartition> succeed = partition => futures[partition].Complete(null);
@@ -3095,11 +3097,11 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static VoidHarness<string> DeleteConsumerGroups(string flavour, IReadOnlyList<string> groups)
         {
-            Dictionary<string, KafkaFutureImpl<object?>> futures =
-                new Dictionary<string, KafkaFutureImpl<object?>>(groups.Count, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<object?>> futures =
+                new Dictionary<string, IKafkaFutureImpl<object?>>(groups.Count, StringComparer.Ordinal);
             foreach (string group in groups)
             {
-                futures.Add(group, new KafkaFutureImpl<object?>());
+                futures.Add(group, NewFuture<object?>(flavour));
             }
 
             Action<string> succeed = group => futures[group].Complete(null);
@@ -3118,11 +3120,11 @@ public sealed class AdminP14SyncCompositionTests
         internal static VoidHarness<AclBinding> CreateAcls(
             string flavour, IReadOnlyList<AclBinding> requested, IReadOnlyList<AclBinding> keys)
         {
-            Dictionary<AclBinding, KafkaFutureImpl<object?>> futures =
-                new Dictionary<AclBinding, KafkaFutureImpl<object?>>(requested.Count);
+            Dictionary<AclBinding, IKafkaFutureImpl<object?>> futures =
+                new Dictionary<AclBinding, IKafkaFutureImpl<object?>>(requested.Count);
             foreach (AclBinding binding in requested)
             {
-                futures.Add(binding, new KafkaFutureImpl<object?>());
+                futures.Add(binding, NewFuture<object?>(flavour));
             }
 
             Action<AclBinding> succeed = binding => futures[binding].Complete(null);
@@ -3141,11 +3143,11 @@ public sealed class AdminP14SyncCompositionTests
         internal static VoidHarness<ClientQuotaEntity> AlterClientQuotas(
             string flavour, IReadOnlyList<ClientQuotaEntity> requested, IReadOnlyList<ClientQuotaEntity> keys)
         {
-            Dictionary<ClientQuotaEntity, KafkaFutureImpl<object?>> futures =
-                new Dictionary<ClientQuotaEntity, KafkaFutureImpl<object?>>(requested.Count);
+            Dictionary<ClientQuotaEntity, IKafkaFutureImpl<object?>> futures =
+                new Dictionary<ClientQuotaEntity, IKafkaFutureImpl<object?>>(requested.Count);
             foreach (ClientQuotaEntity entity in requested)
             {
-                futures.Add(entity, new KafkaFutureImpl<object?>());
+                futures.Add(entity, NewFuture<object?>(flavour));
             }
 
             Action<ClientQuotaEntity> succeed = entity => futures[entity].Complete(null);
@@ -3163,11 +3165,11 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static VoidHarness<string> AlterUserScramCredentials(string flavour, IReadOnlyList<string> users)
         {
-            Dictionary<string, KafkaFutureImpl<object?>> futures =
-                new Dictionary<string, KafkaFutureImpl<object?>>(users.Count, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<object?>> futures =
+                new Dictionary<string, IKafkaFutureImpl<object?>>(users.Count, StringComparer.Ordinal);
             foreach (string user in users)
             {
-                futures.Add(user, new KafkaFutureImpl<object?>());
+                futures.Add(user, NewFuture<object?>(flavour));
             }
 
             Action<string> succeed = user => futures[user].Complete(null);
@@ -3184,11 +3186,11 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static VoidHarness<string> UpdateFeatures(string flavour, IReadOnlyList<string> features)
         {
-            Dictionary<string, KafkaFutureImpl<object?>> futures =
-                new Dictionary<string, KafkaFutureImpl<object?>>(features.Count, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<object?>> futures =
+                new Dictionary<string, IKafkaFutureImpl<object?>>(features.Count, StringComparer.Ordinal);
             foreach (string feature in features)
             {
-                futures.Add(feature, new KafkaFutureImpl<object?>());
+                futures.Add(feature, NewFuture<object?>(flavour));
             }
 
             Action<string> succeed = feature => futures[feature].Complete(null);
@@ -3230,7 +3232,7 @@ public sealed class AdminP14SyncCompositionTests
             _syncValues is not null ? _syncValues().ContainsKey(key) : _asyncValues!().ContainsKey(key);
     }
 
-    /// <summary>A Result whose per-key futures carry a value, over one <see cref="KafkaFutureImpl{T}"/> per key.</summary>
+    /// <summary>A Result whose per-key futures carry a value, over one engine of the Result's flavor per key.</summary>
     private sealed class ValuedHarness<TKey, TValue> : KeyedHarness<TKey>
         where TKey : notnull
         where TValue : class
@@ -3244,7 +3246,7 @@ public sealed class AdminP14SyncCompositionTests
         private readonly bool _allGathers;
 
         private ValuedHarness(
-            IReadOnlyDictionary<TKey, KafkaFutureImpl<TValue>> futures,
+            IReadOnlyDictionary<TKey, IKafkaFutureImpl<TValue>> futures,
             IReadOnlyList<TKey> keys,
             Func<TKey, TValue> value,
             bool otherSideIsNull,
@@ -3289,8 +3291,8 @@ public sealed class AdminP14SyncCompositionTests
         internal static ValuedHarness<string, TopicDescription> DescribeTopicsByName(string flavour, IReadOnlyList<string> topics)
         {
             AdminFlavour adminFlavour = FlavourOf(flavour);
-            Dictionary<string, KafkaFutureImpl<TopicDescription>> futures =
-                Impls<string, TopicDescription>(topics, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<TopicDescription>> futures =
+                Impls<string, TopicDescription>(flavour, topics, StringComparer.Ordinal);
             if (adminFlavour == AdminFlavour.Sync)
             {
                 DescribeTopicsResult result = DescribeTopicsResult.OfClient((futures, null, NoResultHandle()));
@@ -3301,7 +3303,7 @@ public sealed class AdminP14SyncCompositionTests
                     result.TopicIdValues() is null && result.AllTopicIds() is null,
                     () => result.TopicNameValues()!,
                     null,
-                    () => FutureProbe.Of(result.AllTopicNames()!.Value),
+                    () => FutureProbe.Of(result.AllTopicNames()!),
                     allGathers: true);
             }
 
@@ -3313,15 +3315,15 @@ public sealed class AdminP14SyncCompositionTests
                 asyncResult.TopicIdValues() is null && asyncResult.AllTopicIds() is null,
                 null,
                 () => asyncResult.TopicNameValues()!,
-                () => FutureProbe.Of(asyncResult.AllTopicNames()!.Value),
+                () => FutureProbe.Of(asyncResult.AllTopicNames()!),
                 allGathers: true);
         }
 
         internal static ValuedHarness<Uuid, TopicDescription> DescribeTopicsById(string flavour, IReadOnlyList<Uuid> ids)
         {
             AdminFlavour adminFlavour = FlavourOf(flavour);
-            Dictionary<Uuid, KafkaFutureImpl<TopicDescription>> futures =
-                Impls<Uuid, TopicDescription>(ids, EqualityComparer<Uuid>.Default);
+            Dictionary<Uuid, IKafkaFutureImpl<TopicDescription>> futures =
+                Impls<Uuid, TopicDescription>(flavour, ids, EqualityComparer<Uuid>.Default);
             if (adminFlavour == AdminFlavour.Sync)
             {
                 DescribeTopicsResult result = DescribeTopicsResult.OfClient((null, futures, NoResultHandle()));
@@ -3332,7 +3334,7 @@ public sealed class AdminP14SyncCompositionTests
                     result.TopicNameValues() is null && result.AllTopicNames() is null,
                     () => result.TopicIdValues()!,
                     null,
-                    () => FutureProbe.Of(result.AllTopicIds()!.Value),
+                    () => FutureProbe.Of(result.AllTopicIds()!),
                     allGathers: true);
             }
 
@@ -3344,7 +3346,7 @@ public sealed class AdminP14SyncCompositionTests
                 asyncResult.TopicNameValues() is null && asyncResult.AllTopicNames() is null,
                 null,
                 () => asyncResult.TopicIdValues()!,
-                () => FutureProbe.Of(asyncResult.AllTopicIds()!.Value),
+                () => FutureProbe.Of(asyncResult.AllTopicIds()!),
                 allGathers: true);
         }
 
@@ -3352,8 +3354,8 @@ public sealed class AdminP14SyncCompositionTests
             string flavour, IReadOnlyList<TopicPartition> partitions)
         {
             AdminFlavour adminFlavour = FlavourOf(flavour);
-            Dictionary<TopicPartition, KafkaFutureImpl<DeletedRecords>> futures =
-                Impls<TopicPartition, DeletedRecords>(partitions, EqualityComparer<TopicPartition>.Default);
+            Dictionary<TopicPartition, IKafkaFutureImpl<DeletedRecords>> futures =
+                Impls<TopicPartition, DeletedRecords>(flavour, partitions, EqualityComparer<TopicPartition>.Default);
             if (adminFlavour == AdminFlavour.Sync)
             {
                 DeleteRecordsResult result = DeleteRecordsResult.OfClient((futures, NoResultHandle()));
@@ -3384,8 +3386,8 @@ public sealed class AdminP14SyncCompositionTests
             string flavour, IReadOnlyList<ConfigResource> resources)
         {
             AdminFlavour adminFlavour = FlavourOf(flavour);
-            Dictionary<ConfigResource, KafkaFutureImpl<Config>> futures =
-                Impls<ConfigResource, Config>(resources, EqualityComparer<ConfigResource>.Default);
+            Dictionary<ConfigResource, IKafkaFutureImpl<Config>> futures =
+                Impls<ConfigResource, Config>(flavour, resources, EqualityComparer<ConfigResource>.Default);
             if (adminFlavour == AdminFlavour.Sync)
             {
                 DescribeConfigsResult result = DescribeConfigsResult.OfClient((futures, NoResultHandle()));
@@ -3409,8 +3411,8 @@ public sealed class AdminP14SyncCompositionTests
             string flavour, IReadOnlyList<int> brokers)
         {
             AdminFlavour adminFlavour = FlavourOf(flavour);
-            Dictionary<int, KafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> futures =
-                Impls<int, IReadOnlyDictionary<string, LogDirDescription>>(brokers, EqualityComparer<int>.Default);
+            Dictionary<int, IKafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> futures =
+                Impls<int, IReadOnlyDictionary<string, LogDirDescription>>(flavour, brokers, EqualityComparer<int>.Default);
             if (adminFlavour == AdminFlavour.Sync)
             {
                 DescribeLogDirsResult result = DescribeLogDirsResult.OfClient((futures, NoResultHandle()));
@@ -3441,8 +3443,8 @@ public sealed class AdminP14SyncCompositionTests
             string flavour, IReadOnlyList<TopicPartitionReplica> replicas)
         {
             AdminFlavour adminFlavour = FlavourOf(flavour);
-            Dictionary<TopicPartitionReplica, KafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> futures =
-                Impls<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(replicas, EqualityComparer<TopicPartitionReplica>.Default);
+            Dictionary<TopicPartitionReplica, IKafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> futures =
+                Impls<TopicPartitionReplica, DescribeReplicaLogDirsResult.ReplicaLogDirInfo>(flavour, replicas, EqualityComparer<TopicPartitionReplica>.Default);
             if (adminFlavour == AdminFlavour.Sync)
             {
                 DescribeReplicaLogDirsResult result =
@@ -3474,11 +3476,11 @@ public sealed class AdminP14SyncCompositionTests
         internal static ValuedHarness<string, ConsumerGroupDescription> DescribeConsumerGroups(
             string flavour, IReadOnlyList<string> groups)
         {
-            Dictionary<string, KafkaFutureImpl<ConsumerGroupDescription>> futures =
-                new Dictionary<string, KafkaFutureImpl<ConsumerGroupDescription>>(groups.Count, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<ConsumerGroupDescription>> futures =
+                new Dictionary<string, IKafkaFutureImpl<ConsumerGroupDescription>>(groups.Count, StringComparer.Ordinal);
             foreach (string group in groups)
             {
-                futures.Add(group, new KafkaFutureImpl<ConsumerGroupDescription>());
+                futures.Add(group, NewFuture<ConsumerGroupDescription>(flavour));
             }
 
             Action<string, ConsumerGroupDescription> succeed = (group, value) => futures[group].Complete(value);
@@ -3515,11 +3517,11 @@ public sealed class AdminP14SyncCompositionTests
         internal static ValuedHarness<string, ClassicGroupDescription> DescribeClassicGroups(
             string flavour, IReadOnlyList<string> groups)
         {
-            Dictionary<string, KafkaFutureImpl<ClassicGroupDescription>> futures =
-                new Dictionary<string, KafkaFutureImpl<ClassicGroupDescription>>(groups.Count, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<ClassicGroupDescription>> futures =
+                new Dictionary<string, IKafkaFutureImpl<ClassicGroupDescription>>(groups.Count, StringComparer.Ordinal);
             foreach (string group in groups)
             {
-                futures.Add(group, new KafkaFutureImpl<ClassicGroupDescription>());
+                futures.Add(group, NewFuture<ClassicGroupDescription>(flavour));
             }
 
             Action<string, ClassicGroupDescription> succeed = (group, value) => futures[group].Complete(value);
@@ -3620,13 +3622,13 @@ public sealed class AdminP14SyncCompositionTests
     /// </summary>
     private sealed class FenceProducersHarness : KeyedHarness<string>
     {
-        private readonly Dictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> _futures;
+        private readonly Dictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> _futures;
         private readonly Dictionary<string, ProducerIdAndEpoch> _values;
         private readonly FenceProducersResult? _sync;
         private readonly AsyncFenceProducersResult? _async;
 
         private FenceProducersHarness(
-            Dictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures,
+            Dictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> futures,
             IReadOnlyList<string> ids,
             FenceProducersResult? sync,
             AsyncFenceProducersResult? async)
@@ -3647,11 +3649,11 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static FenceProducersHarness For(string flavour, IReadOnlyList<string> ids)
         {
-            Dictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures =
-                new Dictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>>(ids.Count, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> futures =
+                new Dictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>>(ids.Count, StringComparer.Ordinal);
             foreach (string id in ids)
             {
-                futures.Add(id, new KafkaFutureImpl<ProducerIdAndEpoch>());
+                futures.Add(id, NewFuture<ProducerIdAndEpoch>(flavour));
             }
 
             return FlavourOf(flavour) == AdminFlavour.Sync
@@ -3758,11 +3760,11 @@ public sealed class AdminP14SyncCompositionTests
         internal static LookupHarness<string, TransactionDescription?> DescribeTransactions(
             string flavour, IReadOnlyList<string> ids)
         {
-            Dictionary<string, KafkaFutureImpl<TransactionDescription?>> futures =
-                new Dictionary<string, KafkaFutureImpl<TransactionDescription?>>(ids.Count, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<TransactionDescription?>> futures =
+                new Dictionary<string, IKafkaFutureImpl<TransactionDescription?>>(ids.Count, StringComparer.Ordinal);
             foreach (string id in ids)
             {
-                futures.Add(id, new KafkaFutureImpl<TransactionDescription?>());
+                futures.Add(id, NewFuture<TransactionDescription?>(flavour));
             }
 
             Action<string, TransactionDescription?> succeed = (id, value) => futures[id].Complete(value);
@@ -3782,11 +3784,11 @@ public sealed class AdminP14SyncCompositionTests
         internal static LookupHarness<TopicPartition, DescribeProducersResult.PartitionProducerState> DescribeProducers(
             string flavour, IReadOnlyList<TopicPartition> partitions)
         {
-            Dictionary<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> futures =
-                new Dictionary<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>>(partitions.Count);
+            Dictionary<TopicPartition, IKafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> futures =
+                new Dictionary<TopicPartition, IKafkaFutureImpl<DescribeProducersResult.PartitionProducerState>>(partitions.Count);
             foreach (TopicPartition partition in partitions)
             {
-                futures.Add(partition, new KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>());
+                futures.Add(partition, NewFuture<DescribeProducersResult.PartitionProducerState>(flavour));
             }
 
             Action<TopicPartition, DescribeProducersResult.PartitionProducerState> succeed =
@@ -3861,7 +3863,7 @@ public sealed class AdminP14SyncCompositionTests
         private readonly AsyncListTopicsResult? _async;
 
         private ListTopicsHarness(
-            KafkaFutureImpl<IReadOnlyDictionary<string, TopicListing>> impl,
+            IKafkaFutureImpl<IReadOnlyDictionary<string, TopicListing>> impl,
             ListTopicsResult? sync,
             AsyncListTopicsResult? async)
         {
@@ -3870,17 +3872,17 @@ public sealed class AdminP14SyncCompositionTests
             _async = async;
         }
 
-        internal KafkaFutureImpl<IReadOnlyDictionary<string, TopicListing>> Impl { get; }
+        internal IKafkaFutureImpl<IReadOnlyDictionary<string, TopicListing>> Impl { get; }
 
         internal static ListTopicsHarness For(string flavour)
         {
-            KafkaFutureImpl<IReadOnlyDictionary<string, TopicListing>> impl =
-                new KafkaFutureImpl<IReadOnlyDictionary<string, TopicListing>>();
+            IKafkaFutureImpl<IReadOnlyDictionary<string, TopicListing>> impl =
+                NewFuture<IReadOnlyDictionary<string, TopicListing>>(flavour);
             return FlavourOf(flavour) == AdminFlavour.Sync
                 ? new ListTopicsHarness(
-                    impl, new ListTopicsResult(new KafkaFuture<IReadOnlyDictionary<string, TopicListing>>(impl)), null)
+                    impl, new ListTopicsResult(SyncAdminFutures.Of(impl)), null)
                 : new ListTopicsHarness(
-                    impl, null, new AsyncListTopicsResult(new AsyncKafkaFuture<IReadOnlyDictionary<string, TopicListing>>(impl)));
+                    impl, null, new AsyncListTopicsResult(AsyncAdminFutures.Of(impl)));
         }
 
         internal FutureProbe NamesToListings() =>
@@ -3903,15 +3905,17 @@ public sealed class AdminP14SyncCompositionTests
     /// </summary>
     private sealed class ListTransactionsHarness
     {
-        private readonly KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> _discovery =
-            new KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>>();
-        private readonly Dictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> _brokers =
-            new Dictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>();
+        private readonly AdminFlavour _flavour;
+        private readonly IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> _discovery;
+        private readonly Dictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> _brokers =
+            new Dictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>();
         private readonly ListTransactionsResult? _sync;
         private readonly AsyncListTransactionsResult? _async;
 
         private ListTransactionsHarness(AdminFlavour flavour)
         {
+            _flavour = flavour;
+            _discovery = NativeAdminClient.NewFuture<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>>(flavour);
             if (flavour == AdminFlavour.Sync)
             {
                 _sync = ListTransactionsResult.OfClient((_discovery, NoResultHandle()));
@@ -3928,7 +3932,7 @@ public sealed class AdminP14SyncCompositionTests
         {
             foreach (int broker in brokers)
             {
-                _brokers.Add(broker, new KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>());
+                _brokers.Add(broker, NativeAdminClient.NewFuture<IReadOnlyCollection<TransactionListing>>(_flavour));
             }
 
             Assert.True(_discovery.Complete(_brokers));
@@ -3984,32 +3988,35 @@ public sealed class AdminP14SyncCompositionTests
     /// </summary>
     private sealed class DescribeClusterHarness
     {
-        private readonly KafkaFutureImpl<IReadOnlyCollection<Node>> _nodes = new KafkaFutureImpl<IReadOnlyCollection<Node>>();
-        private readonly KafkaFutureImpl<Node?> _controller = new KafkaFutureImpl<Node?>();
-        private readonly KafkaFutureImpl<string> _clusterId = new KafkaFutureImpl<string>();
-        private readonly KafkaFutureImpl<IReadOnlyCollection<AclOperation>?> _authorizedOperations =
-            new KafkaFutureImpl<IReadOnlyCollection<AclOperation>?>();
+        private readonly IKafkaFutureImpl<IReadOnlyCollection<Node>> _nodes;
+        private readonly IKafkaFutureImpl<Node?> _controller;
+        private readonly IKafkaFutureImpl<string> _clusterId;
+        private readonly IKafkaFutureImpl<IReadOnlyCollection<AclOperation>?> _authorizedOperations;
 
         private readonly DescribeClusterResult? _sync;
         private readonly AsyncDescribeClusterResult? _async;
 
         private DescribeClusterHarness(AdminFlavour flavour)
         {
+            _nodes = NativeAdminClient.NewFuture<IReadOnlyCollection<Node>>(flavour);
+            _controller = NativeAdminClient.NewFuture<Node?>(flavour);
+            _clusterId = NativeAdminClient.NewFuture<string>(flavour);
+            _authorizedOperations = NativeAdminClient.NewFuture<IReadOnlyCollection<AclOperation>?>(flavour);
             if (flavour == AdminFlavour.Sync)
             {
                 _sync = new DescribeClusterResult(
-                    new KafkaFuture<IReadOnlyCollection<Node>>(_nodes),
-                    new KafkaFuture<Node?>(_controller),
-                    new KafkaFuture<string>(_clusterId),
-                    new KafkaFuture<IReadOnlyCollection<AclOperation>?>(_authorizedOperations));
+                    SyncAdminFutures.Of(_nodes),
+                    SyncAdminFutures.Of(_controller),
+                    SyncAdminFutures.Of(_clusterId),
+                    SyncAdminFutures.Of(_authorizedOperations));
             }
             else
             {
                 _async = new AsyncDescribeClusterResult(
-                    new AsyncKafkaFuture<IReadOnlyCollection<Node>>(_nodes),
-                    new AsyncKafkaFuture<Node?>(_controller),
-                    new AsyncKafkaFuture<string>(_clusterId),
-                    new AsyncKafkaFuture<IReadOnlyCollection<AclOperation>?>(_authorizedOperations));
+                    AsyncAdminFutures.Of(_nodes),
+                    AsyncAdminFutures.Of(_controller),
+                    AsyncAdminFutures.Of(_clusterId),
+                    AsyncAdminFutures.Of(_authorizedOperations));
             }
         }
 
@@ -4073,7 +4080,7 @@ public sealed class AdminP14SyncCompositionTests
         private readonly AsyncListConfigResourcesResult? _async;
 
         private ListConfigResourcesHarness(
-            KafkaFutureImpl<IReadOnlyCollection<ConfigResource>> impl,
+            IKafkaFutureImpl<IReadOnlyCollection<ConfigResource>> impl,
             ListConfigResourcesResult? sync,
             AsyncListConfigResourcesResult? async)
         {
@@ -4082,11 +4089,11 @@ public sealed class AdminP14SyncCompositionTests
             _async = async;
         }
 
-        internal KafkaFutureImpl<IReadOnlyCollection<ConfigResource>> Impl { get; }
+        internal IKafkaFutureImpl<IReadOnlyCollection<ConfigResource>> Impl { get; }
 
         internal static ListConfigResourcesHarness For(string flavour)
         {
-            KafkaFutureImpl<IReadOnlyCollection<ConfigResource>> impl = new KafkaFutureImpl<IReadOnlyCollection<ConfigResource>>();
+            IKafkaFutureImpl<IReadOnlyCollection<ConfigResource>> impl = NewFuture<IReadOnlyCollection<ConfigResource>>(flavour);
             return FlavourOf(flavour) == AdminFlavour.Sync
                 ? new ListConfigResourcesHarness(impl, ListConfigResourcesResult.OfClient((impl, NoResultHandle())), null)
                 : new ListConfigResourcesHarness(impl, null, AsyncListConfigResourcesResult.OfClient((impl, NoResultHandle())));
@@ -4118,7 +4125,7 @@ public sealed class AdminP14SyncCompositionTests
         private readonly AsyncElectLeadersResult? _async;
 
         private ElectLeadersHarness(
-            KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> impl,
+            IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> impl,
             ElectLeadersResult? sync,
             AsyncElectLeadersResult? async)
         {
@@ -4127,12 +4134,12 @@ public sealed class AdminP14SyncCompositionTests
             _async = async;
         }
 
-        internal KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> Impl { get; }
+        internal IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> Impl { get; }
 
         internal static ElectLeadersHarness For(string flavour)
         {
-            KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> impl =
-                new KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>>();
+            IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> impl =
+                NewFuture<IReadOnlyDictionary<TopicPartition, Exception?>>(flavour);
             return FlavourOf(flavour) == AdminFlavour.Sync
                 ? new ElectLeadersHarness(impl, ElectLeadersResult.OfClient((impl, NoResultHandle())), null)
                 : new ElectLeadersHarness(impl, null, AsyncElectLeadersResult.OfClient((impl, NoResultHandle())));
@@ -4171,7 +4178,7 @@ public sealed class AdminP14SyncCompositionTests
         private readonly AsyncListPartitionReassignmentsResult? _async;
 
         private ListPartitionReassignmentsHarness(
-            KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> impl,
+            IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> impl,
             ListPartitionReassignmentsResult? sync,
             AsyncListPartitionReassignmentsResult? async)
         {
@@ -4180,12 +4187,12 @@ public sealed class AdminP14SyncCompositionTests
             _async = async;
         }
 
-        internal KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> Impl { get; }
+        internal IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> Impl { get; }
 
         internal static ListPartitionReassignmentsHarness For(string flavour)
         {
-            KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> impl =
-                new KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>();
+            IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> impl =
+                NewFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(flavour);
             return FlavourOf(flavour) == AdminFlavour.Sync
                 ? new ListPartitionReassignmentsHarness(impl, ListPartitionReassignmentsResult.OfClient((impl, NoResultHandle())), null)
                 : new ListPartitionReassignmentsHarness(
@@ -4208,13 +4215,13 @@ public sealed class AdminP14SyncCompositionTests
     /// </summary>
     private sealed class ListOffsetsHarness : KeyedHarness<TopicPartition>
     {
-        private readonly IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> _futures;
+        private readonly IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> _futures;
         private readonly Dictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo> _values;
         private readonly ListOffsetsResult? _sync;
         private readonly AsyncListOffsetsResult? _async;
 
         private ListOffsetsHarness(
-            IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> futures,
+            IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> futures,
             IReadOnlyList<TopicPartition> partitions,
             ListOffsetsResult? sync,
             AsyncListOffsetsResult? async)
@@ -4230,8 +4237,8 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static ListOffsetsHarness For(string flavour, IReadOnlyList<TopicPartition> partitions)
         {
-            Dictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> futures =
-                Impls<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>(partitions, EqualityComparer<TopicPartition>.Default);
+            Dictionary<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> futures =
+                Impls<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>(flavour, partitions, EqualityComparer<TopicPartition>.Default);
             return FlavourOf(flavour) == AdminFlavour.Sync
                 ? new ListOffsetsHarness(futures, partitions, ListOffsetsResult.OfClient((futures, NoResultHandle())), null)
                 : new ListOffsetsHarness(futures, partitions, null, AsyncListOffsetsResult.OfClient((futures, NoResultHandle())));
@@ -4283,9 +4290,9 @@ public sealed class AdminP14SyncCompositionTests
         private readonly AsyncListGroupsResult? _async;
 
         private ListGroupsHarness(
-            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
-            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
-            KafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
+            IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
+            IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
+            IKafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
             ListGroupsResult? sync,
             AsyncListGroupsResult? async)
         {
@@ -4296,17 +4303,17 @@ public sealed class AdminP14SyncCompositionTests
             _async = async;
         }
 
-        internal KafkaFutureImpl<IReadOnlyCollection<GroupListing>> AllFuture { get; }
+        internal IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> AllFuture { get; }
 
-        internal KafkaFutureImpl<IReadOnlyCollection<GroupListing>> ValidFuture { get; }
+        internal IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> ValidFuture { get; }
 
-        internal KafkaFutureImpl<IReadOnlyCollection<Exception>> ErrorsFuture { get; }
+        internal IKafkaFutureImpl<IReadOnlyCollection<Exception>> ErrorsFuture { get; }
 
         internal static ListGroupsHarness For(string flavour)
         {
-            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all = new KafkaFutureImpl<IReadOnlyCollection<GroupListing>>();
-            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid = new KafkaFutureImpl<IReadOnlyCollection<GroupListing>>();
-            KafkaFutureImpl<IReadOnlyCollection<Exception>> errors = new KafkaFutureImpl<IReadOnlyCollection<Exception>>();
+            IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> all = NewFuture<IReadOnlyCollection<GroupListing>>(flavour);
+            IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid = NewFuture<IReadOnlyCollection<GroupListing>>(flavour);
+            IKafkaFutureImpl<IReadOnlyCollection<Exception>> errors = NewFuture<IReadOnlyCollection<Exception>>(flavour);
             return FlavourOf(flavour) == AdminFlavour.Sync
                 ? new ListGroupsHarness(all, valid, errors, ListGroupsResult.OfClient((all, valid, errors, NoResultHandle())), null)
                 : new ListGroupsHarness(all, valid, errors, null, AsyncListGroupsResult.OfClient((all, valid, errors, NoResultHandle())));
@@ -4331,13 +4338,13 @@ public sealed class AdminP14SyncCompositionTests
     /// </summary>
     private sealed class ListConsumerGroupOffsetsHarness : KeyedHarness<string>
     {
-        private readonly Dictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> _futures;
+        private readonly Dictionary<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> _futures;
         private readonly Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> _values;
         private readonly ListConsumerGroupOffsetsResult? _sync;
         private readonly AsyncListConsumerGroupOffsetsResult? _async;
 
         private ListConsumerGroupOffsetsHarness(
-            Dictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures,
+            Dictionary<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures,
             IReadOnlyList<string> groups,
             ListConsumerGroupOffsetsResult? sync,
             AsyncListConsumerGroupOffsetsResult? async)
@@ -4360,11 +4367,11 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static ListConsumerGroupOffsetsHarness For(string flavour, IReadOnlyList<string> groups)
         {
-            Dictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures =
-                new Dictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(groups.Count, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures =
+                new Dictionary<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(groups.Count, StringComparer.Ordinal);
             foreach (string group in groups)
             {
-                futures[group] = new KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>();
+                futures[group] = NewFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(flavour);
             }
 
             return FlavourOf(flavour) == AdminFlavour.Sync
@@ -4430,13 +4437,13 @@ public sealed class AdminP14SyncCompositionTests
     /// </summary>
     private sealed class DeleteAclsHarness : KeyedHarness<AclBindingFilter>
     {
-        private readonly Dictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> _futures;
+        private readonly Dictionary<AclBindingFilter, IKafkaFutureImpl<DeleteAclsResult.FilterResults>> _futures;
         private readonly Dictionary<AclBindingFilter, DeleteAclsResult.FilterResults> _values;
         private readonly DeleteAclsResult? _sync;
         private readonly AsyncDeleteAclsResult? _async;
 
         private DeleteAclsHarness(
-            Dictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> futures,
+            Dictionary<AclBindingFilter, IKafkaFutureImpl<DeleteAclsResult.FilterResults>> futures,
             IReadOnlyList<AclBindingFilter> keys,
             DeleteAclsResult? sync,
             AsyncDeleteAclsResult? async)
@@ -4460,11 +4467,11 @@ public sealed class AdminP14SyncCompositionTests
         internal static DeleteAclsHarness For(
             string flavour, IReadOnlyList<AclBindingFilter> requested, IReadOnlyList<AclBindingFilter> keys)
         {
-            Dictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> futures =
-                new Dictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>>(requested.Count);
+            Dictionary<AclBindingFilter, IKafkaFutureImpl<DeleteAclsResult.FilterResults>> futures =
+                new Dictionary<AclBindingFilter, IKafkaFutureImpl<DeleteAclsResult.FilterResults>>(requested.Count);
             foreach (AclBindingFilter filter in requested)
             {
-                futures.Add(filter, new KafkaFutureImpl<DeleteAclsResult.FilterResults>());
+                futures.Add(filter, NewFuture<DeleteAclsResult.FilterResults>(flavour));
             }
 
             return FlavourOf(flavour) == AdminFlavour.Sync
@@ -4515,7 +4522,7 @@ public sealed class AdminP14SyncCompositionTests
     /// <summary>
     /// A Result over one future and no keys, of either flavour — <see cref="DescribeAclsResult"/>'s
     /// <c>Values()</c>, <see cref="DescribeClientQuotasResult"/>'s <c>Entities()</c>, or the single accessor of a
-    /// delegation-token or <c>DescribeFeatures</c> Result — driven through its <c>KafkaFutureImpl</c>.
+    /// delegation-token or <c>DescribeFeatures</c> Result — driven through its <c>IKafkaFutureImpl</c>.
     /// <typeparamref name="T"/> may be a value type (the expiry timestamps). A void Result (<c>AbortTransaction</c>,
     /// <c>ForceTerminateTransaction</c>, <c>UnregisterController</c>) is a <see cref="SingleHarness{T}"/> of
     /// <see langword="object"/> with <see cref="IsVoid"/> set.
@@ -4528,7 +4535,7 @@ public sealed class AdminP14SyncCompositionTests
         private readonly Func<bool> _equalAcrossCalls;
 
         private SingleHarness(
-            KafkaFutureImpl<T> impl, Func<FutureProbe> future, Func<bool> equalAcrossCalls, bool isVoid = false)
+            IKafkaFutureImpl<T> impl, Func<FutureProbe> future, Func<bool> equalAcrossCalls, bool isVoid = false)
             : this(value => impl.Complete(value), failure => impl.CompleteWithError(failure), future, equalAcrossCalls, isVoid)
         {
         }
@@ -4547,7 +4554,7 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static SingleHarness<object?> AbortTransaction(string flavour)
         {
-            KafkaFutureImpl<object?> impl = new KafkaFutureImpl<object?>();
+            IKafkaFutureImpl<object?> impl = NewFuture<object?>(flavour);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 AbortTransactionResult result = AbortTransactionResult.OfClient((impl, NoResultHandle()));
@@ -4562,7 +4569,7 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static SingleHarness<object?> ForceTerminateTransaction(string flavour)
         {
-            KafkaFutureImpl<object?> impl = new KafkaFutureImpl<object?>();
+            IKafkaFutureImpl<object?> impl = NewFuture<object?>(flavour);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 TerminateTransactionResult result = TerminateTransactionResult.OfClient((impl, NoResultHandle()));
@@ -4577,7 +4584,7 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static SingleHarness<IReadOnlyCollection<AclBinding>> DescribeAcls(string flavour)
         {
-            KafkaFutureImpl<IReadOnlyCollection<AclBinding>> impl = new KafkaFutureImpl<IReadOnlyCollection<AclBinding>>();
+            IKafkaFutureImpl<IReadOnlyCollection<AclBinding>> impl = NewFuture<IReadOnlyCollection<AclBinding>>(flavour);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 DescribeAclsResult result = DescribeAclsResult.OfClient((impl, NoResultHandle()));
@@ -4593,8 +4600,8 @@ public sealed class AdminP14SyncCompositionTests
         internal static SingleHarness<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>
             DescribeClientQuotas(string flavour)
         {
-            KafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> impl =
-                new KafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>();
+            IKafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> impl =
+                NewFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(flavour);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 DescribeClientQuotasResult result = DescribeClientQuotasResult.OfClient((impl, NoResultHandle()));
@@ -4611,7 +4618,7 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static SingleHarness<DelegationToken> CreateDelegationToken(string flavour)
         {
-            KafkaFutureImpl<DelegationToken> impl = new KafkaFutureImpl<DelegationToken>();
+            IKafkaFutureImpl<DelegationToken> impl = NewFuture<DelegationToken>(flavour);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 CreateDelegationTokenResult result = CreateDelegationTokenResult.OfClient((impl, NoResultHandle()));
@@ -4628,7 +4635,7 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static SingleHarness<long> RenewDelegationToken(string flavour)
         {
-            KafkaFutureImpl<long> impl = new KafkaFutureImpl<long>();
+            IKafkaFutureImpl<long> impl = NewFuture<long>(flavour);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 RenewDelegationTokenResult result = RenewDelegationTokenResult.OfClient((impl, NoResultHandle()));
@@ -4645,7 +4652,7 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static SingleHarness<long> ExpireDelegationToken(string flavour)
         {
-            KafkaFutureImpl<long> impl = new KafkaFutureImpl<long>();
+            IKafkaFutureImpl<long> impl = NewFuture<long>(flavour);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 ExpireDelegationTokenResult result = ExpireDelegationTokenResult.OfClient((impl, NoResultHandle()));
@@ -4662,7 +4669,7 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static SingleHarness<IReadOnlyList<DelegationToken>> DescribeDelegationToken(string flavour)
         {
-            KafkaFutureImpl<IReadOnlyList<DelegationToken>> impl = new KafkaFutureImpl<IReadOnlyList<DelegationToken>>();
+            IKafkaFutureImpl<IReadOnlyList<DelegationToken>> impl = NewFuture<IReadOnlyList<DelegationToken>>(flavour);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 DescribeDelegationTokenResult result = DescribeDelegationTokenResult.OfClient((impl, NoResultHandle()));
@@ -4681,7 +4688,7 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static SingleHarness<FeatureMetadata?> DescribeFeatures(string flavour)
         {
-            KafkaFutureImpl<FeatureMetadata?> impl = new KafkaFutureImpl<FeatureMetadata?>();
+            IKafkaFutureImpl<FeatureMetadata?> impl = NewFuture<FeatureMetadata?>(flavour);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 DescribeFeaturesResult result = DescribeFeaturesResult.OfClient((impl, NoResultHandle()));
@@ -4698,7 +4705,7 @@ public sealed class AdminP14SyncCompositionTests
 
         internal static SingleHarness<object?> UnregisterController(string flavour)
         {
-            KafkaFutureImpl<object?> impl = new KafkaFutureImpl<object?>();
+            IKafkaFutureImpl<object?> impl = NewFuture<object?>(flavour);
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {
                 UnregisterControllerResult result = UnregisterControllerResult.OfClient((impl, NoResultHandle()));

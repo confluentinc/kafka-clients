@@ -756,11 +756,10 @@ internal sealed partial class NativeConsumer
     private static NativeConsumer Start(
         SafeConsumerHandle handle,
         bool groupIdDefined,
-        bool defaultApiTimeoutZero,
         bool withPump,
         SerdeDisposal? serdes)
     {
-        NativeConsumer consumer = new NativeConsumer(handle, groupIdDefined, defaultApiTimeoutZero, withPump, serdes);
+        NativeConsumer consumer = new NativeConsumer(handle, groupIdDefined, withPump, serdes);
         try
         {
             if (consumer._pump is not null)
@@ -865,12 +864,10 @@ internal sealed partial class NativeConsumer
         CancellationToken cancellationToken)
     {
         ((string Topic, int Partition)[]? snapshot, long? timeoutMs) =
-            CheckInAUse(() => (SnapshotOffsetPartitions(partitions, timeout), OptionalTimeoutMs(timeout)));
+            CheckInAUse(() => (SnapshotOffsetPartitions(partitions), OptionalTimeoutMs(timeout)));
         if (snapshot is null)
         {
-            return IsMock
-                ? Task.FromException<IReadOnlyDictionary<TopicPartition, long>>(NoOffsetOnMock(beginning))
-                : Task.FromResult<IReadOnlyDictionary<TopicPartition, long>>(new Dictionary<TopicPartition, long>());
+            return Task.FromException<IReadOnlyDictionary<TopicPartition, long>>(NoOffsetOnMock(beginning));
         }
 
         if (RoutesToTheHandle)

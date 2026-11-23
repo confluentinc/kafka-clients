@@ -320,18 +320,19 @@ public sealed class PublicAdminCreateTopicsTests
             KafkaFutureImpl<object?> key = new KafkaFutureImpl<object?>();
             CreateTopicsRefinements refinements = new CreateTopicsRefinements(
                 result.Native!,
-                new Dictionary<string, KafkaFutureImpl<object?>>(StringComparer.Ordinal) { ["linked"] = key });
-            KafkaFutureImpl<int> numPartitions = refinements.NumPartitions("linked");
-            KafkaFutureImpl<object?> dependant = key.ThenApply(static _ => (object?)null);
-            Assert.False(numPartitions.IsDone);
+                new Dictionary<string, IKafkaFutureImpl<object?>>(StringComparer.Ordinal) { ["linked"] = key },
+                AdminFlavour.Sync);
+            KafkaFutureImpl<int> numPartitions = (KafkaFutureImpl<int>)refinements.NumPartitions("linked");
+            KafkaFutureImpl<object?> dependant = key.ThenApplyFunc(static _ => (object?)null);
+            Assert.False(numPartitions.IsDone());
 
             Assert.True(key.Cancel(true));
 
-            Assert.True(dependant.IsCancelled);
+            Assert.True(dependant.IsCancelled());
             Assert.False(dependant.Cancel(true));
-            Assert.True(numPartitions.IsCancelled);
+            Assert.True(numPartitions.IsCancelled());
             Assert.False(numPartitions.Cancel(true));
-            Assert.Throws<OperationCanceledException>(() => numPartitions.Get());
+            Assert.Throws<OperationCanceledException>(() => numPartitions.GetUnwrapped());
         }
         finally
         {
@@ -918,12 +919,13 @@ public sealed class PublicAdminCreateTopicsTests
         return (CompletionThread)typeof(NativeAdminClient).GetField("_completion", Private)!.GetValue(native)!;
     }
 
-    private static KafkaFutureImpl<object?> KeyOf(CreateTopicsResult result, string topic) =>
+    private static IKafkaFutureImpl<object?> KeyOf(CreateTopicsResult result, string topic) =>
         ((CreateTopicsRefinements)typeof(CreateTopicsResult).GetField("_native", Private)!.GetValue(result)!).Values[topic];
 
-    private static SafeKafkaFutureHandle HandleOf(KafkaFutureImpl<object?> future)
+    private static SafeKafkaFutureHandle HandleOf(IKafkaFutureImpl<object?> future)
     {
-        object source = typeof(KafkaFutureImpl<object?>).GetField("_source", Private)!.GetValue(future)!;
+        object state = future.GetType().GetField("_state", Private)!.GetValue(future)!;
+        object source = typeof(FutureState<object?>).GetField("_source", Private)!.GetValue(state)!;
         return (SafeKafkaFutureHandle)typeof(NativeFutureSource<object?>).GetField("_handle", Private)!.GetValue(source)!;
     }
 

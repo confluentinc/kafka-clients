@@ -28,12 +28,12 @@ namespace Confluent.Kafka.Admin;
 public sealed class UpdateFeaturesResult
 {
     private readonly IReadOnlyDictionary<string, KafkaFuture> _values;
-    private readonly IReadOnlyList<KafkaFutureImpl> _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl> _nativeFutures;
     private readonly SafeAdminResultHandle _native;
 
     private UpdateFeaturesResult(
         IReadOnlyDictionary<string, KafkaFuture> values,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -54,16 +54,16 @@ public sealed class UpdateFeaturesResult
     /// feature failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    public KafkaFuture All() => new KafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures));
+    public KafkaFuture All() => FutureState.AllOf(new KafkaFutureImpl<object?>(), _nativeFutures);
 
     internal static UpdateFeaturesResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<string, KafkaFuture> values = new Dictionary<string, KafkaFuture>(native.Values.Count, StringComparer.Ordinal);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
-        foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in native.Values)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<string, IKafkaFutureImpl<object?>> entry in native.Values)
         {
-            values.Add(entry.Key, new KafkaFuture(entry.Value));
+            values.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

@@ -72,9 +72,9 @@ public sealed class CreateTopicsResult
         {
             Dictionary<string, KafkaFuture> futures =
                 new Dictionary<string, KafkaFuture>(_native.Values.Count, StringComparer.Ordinal);
-            foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in _native.Values)
+            foreach (KeyValuePair<string, IKafkaFutureImpl<object?>> entry in _native.Values)
             {
-                futures.Add(entry.Key, new KafkaFuture(entry.Value.ThenApply(static _ => (object?)null)));
+                futures.Add(entry.Key, SyncAdminFutures.Of(entry.Value.ThenApplyFunc(static _ => (object?)null)));
             }
 
             return futures;
@@ -86,7 +86,7 @@ public sealed class CreateTopicsResult
             new Dictionary<string, KafkaFuture>(_values!.Count, StringComparer.Ordinal);
         foreach (KeyValuePair<string, KafkaFuture<TopicMetadataAndConfig>> entry in _values)
         {
-            erased.Add(entry.Key, entry.Value.Erase());
+            erased.Add(entry.Key, entry.Value);
         }
 
         return erased;
@@ -100,7 +100,7 @@ public sealed class CreateTopicsResult
     public KafkaFuture All() =>
         _native is null
             ? SyncAdminFutures.AllOf(_values!.Values)
-            : new KafkaFuture(KafkaFutureImpl.AllOf(new List<KafkaFutureImpl>(_native.Values.Values)));
+            : FutureState.AllOf(new KafkaFutureImpl<object?>(), new List<IKafkaFutureImpl>(_native.Values.Values));
 
     /// <summary>
     /// The topic's configuration once it is created — Java's <c>config(String)</c>.
@@ -110,7 +110,7 @@ public sealed class CreateTopicsResult
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
     public KafkaFuture<Config> Config(string topic) =>
-        _native is null ? Apply(topic, static value => value.Config()) : new KafkaFuture<Config>(_native.Config(topic));
+        _native is null ? Apply(topic, static value => value.Config()) : SyncAdminFutures.Of(_native.Config(topic));
 
     /// <summary>
     /// The topic's id once it is created — Java's <c>topicId(String)</c>.
@@ -120,7 +120,7 @@ public sealed class CreateTopicsResult
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
     public KafkaFuture<Uuid> TopicId(string topic) =>
-        _native is null ? Apply(topic, static value => value.TopicId()) : new KafkaFuture<Uuid>(_native.TopicId(topic));
+        _native is null ? Apply(topic, static value => value.TopicId()) : SyncAdminFutures.Of(_native.TopicId(topic));
 
     /// <summary>
     /// The topic's partition count once it is created — Java's
@@ -131,7 +131,7 @@ public sealed class CreateTopicsResult
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
     public KafkaFuture<int> NumPartitions(string topic) =>
-        _native is null ? Apply(topic, static value => value.NumPartitions()) : new KafkaFuture<int>(_native.NumPartitions(topic));
+        _native is null ? Apply(topic, static value => value.NumPartitions()) : SyncAdminFutures.Of(_native.NumPartitions(topic));
 
     /// <summary>
     /// The topic's replication factor once it is created — Java's
@@ -142,7 +142,7 @@ public sealed class CreateTopicsResult
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
     public KafkaFuture<int> ReplicationFactor(string topic) =>
-        _native is null ? Apply(topic, static value => value.ReplicationFactor()) : new KafkaFuture<int>(_native.ReplicationFactor(topic));
+        _native is null ? Apply(topic, static value => value.ReplicationFactor()) : SyncAdminFutures.Of(_native.ReplicationFactor(topic));
 
     private KafkaFuture<TResult> Apply<TResult>(string topic, Func<TopicMetadataAndConfig, TResult> map)
     {
@@ -152,7 +152,7 @@ public sealed class CreateTopicsResult
             throw new ArgumentNullException(nameof(topic));
         }
 
-        if (!_values!.TryGetValue(topic, out KafkaFuture<TopicMetadataAndConfig> source))
+        if (!_values!.TryGetValue(topic, out KafkaFuture<TopicMetadataAndConfig>? source))
         {
             throw new ArgumentException(
                 string.Format(
@@ -162,7 +162,7 @@ public sealed class CreateTopicsResult
                 nameof(topic));
         }
 
-        return new KafkaFuture<TResult>(source.Impl.ThenApply(map));
+        return SyncAdminFutures.Of(((IKafkaFutureImpl<TopicMetadataAndConfig>)source).ThenApplyFunc(map));
     }
 
     /// <summary>
