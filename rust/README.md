@@ -189,6 +189,63 @@ confluent-kafka = { version = "1.0.0", default-features = false, features = ["lz
 
 See [./examples/README.md](./examples/README.md).
 
+## Share consumer (KIP-932)
+
+`KafkaShareConsumer` consumes from a share group, translated from Java 4.4.0's
+`KafkaShareConsumer`. Records are acquired by one consumer at a time and
+acknowledged one by one, instead of committing offsets per partition. The
+integration tests run it against Apache Kafka 4.2.0 and 4.4.0 brokers; some
+broker features, such as the dead-letter queue, need 4.4.
+
+```rust,no_run
+use std::collections::HashMap;
+use std::time::Duration;
+
+use confluent_kafka::common::Error;
+use confluent_kafka::common::serialization::StringDeserializer;
+use confluent_kafka::consumer::{AcknowledgeType, KafkaShareConsumer, ShareConsumer};
+
+async fn run() -> Result<(), Error> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+        ("group.id".to_string(), "my-share-group".to_string()),
+        ("share.acknowledgement.mode".to_string(), "explicit".to_string()),
+    ]);
+    let mut consumer = KafkaShareConsumer::new(&props, StringDeserializer::new(), StringDeserializer::new())?;
+    consumer.subscribe(vec!["orders".to_string()]).await?;
+    loop {
+        let records = consumer.poll(Duration::from_millis(1000)).await?;
+        for record in &records {
+            // Accept, Release (deliver again) or Reject (archive) each record.
+            consumer.acknowledge_with_record_type(record, AcknowledgeType::Accept)?;
+        }
+        consumer.commit_sync().await?;
+    }
+}
+```
+
+In the default `implicit` acknowledgement mode, the next `poll`,
+`commit_sync` or `commit_async` accepts every record the previous `poll`
+returned, so no `acknowledge_*` call is needed.
+
+- **API:** the `ShareConsumer` trait, with `KafkaShareConsumer` and
+  `MockShareConsumer` (for tests) implementing it, and `DynShareConsumer` to
+  hold different implementations behind one type. `ShareConsumerHandle`
+  (`ShareConsumer::handle`) calls `wakeup` from another task while `poll`
+  holds the consumer. `AcknowledgementCommitCallback` reports the outcome of
+  each acknowledgement, on the task that calls `poll`, `commit_*` or `close`.
+- **Admin:** `Admin::describe_share_groups`, `list_share_group_offsets`,
+  `alter_share_group_offsets`, `delete_share_group_offsets` and
+  `delete_share_groups`, each with its `_with_options` form.
+- **Differences from Java:** the rustdoc of `KafkaShareConsumer` and
+  `ShareConsumer` lists them under *Translation notes*. The notable one: a
+  record acknowledged with `AcknowledgeType::Renew` comes back from a later
+  `poll` as a new `ConsumerRecord`, deserialized again.
+- **Not included yet:** the C FFI and the Python, C and .NET bindings of the
+  share consumer and of the Admin share-group methods; the KIP-714 telemetry
+  methods (`clientInstanceId`, `registerMetricForSubscription`,
+  `unregisterMetricFromSubscription`), which `Consumer` does not have either.
+
 ## Known limitations
 
 The 1.0 release does not include the following Java client features:
@@ -197,8 +254,9 @@ The 1.0 release does not include the following Java client features:
   (`group.protocol=consumer`). The classic protocol (`group.protocol=classic`)
   and client-side partition assignors are not supported, and
   `KafkaConsumer::new` returns `LocalUnsupportedOperationError` for them.
-- **Share groups:** KIP-932 share groups and the share consumer are not
-  included.
+- **Share groups:** the share consumer (see [Share consumer
+  (KIP-932)](#share-consumer-kip-932)) is Rust only: it has no C FFI and no
+  Python, C or .NET binding yet.
 - **SASL:** only `PLAIN`, over `SASL_PLAINTEXT` and `SASL_SSL`. SCRAM, GSSAPI
   (Kerberos) and OAUTHBEARER are not supported, and any other `sasl.mechanism`
   fails the configuration.

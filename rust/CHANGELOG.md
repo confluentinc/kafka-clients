@@ -12,7 +12,13 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
   deserializers), `MockShareConsumer`, `ShareConsumerHandle` (`wakeup` from
   another task while `poll` holds the consumer) and `AcknowledgeOptions` /
   `AcknowledgeOptionsBuilder` for acknowledging by topic, partition and
-  offset. The KIP-714 telemetry methods are not included, as for `Consumer`.
+  offset, with the value types `AcknowledgeType` and
+  `AcknowledgementCommitCallback` (and `acknowledgement_commit_callback::new`
+  for a closure). The KIP-714 telemetry methods are not included, as for
+  `Consumer`. Rust only: there is no C FFI or binding for it yet. Behaviour
+  that differs from Java is listed under *Translation notes* in the rustdoc;
+  the notable one is that a record acknowledged with `AcknowledgeType::Renew`
+  is delivered again as a new `ConsumerRecord`, deserialized again.
 - Fix: partition revocation now follows Java 4.4.0's
   `AbstractMembershipManager#revokePartitions`, which the consumer had not
   translated. No API or signature changes. What changes:
@@ -45,6 +51,22 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
   requests list partitions in. It used to be random, changing from one
   assignment to the next. A manual `assign()` is unchanged. No API or
   signature changes.
+
+### Admin client
+
+- New: the share-group methods of Java 4.4.0's `Admin`:
+  `describe_share_groups`, `list_share_group_offsets`,
+  `alter_share_group_offsets`, `delete_share_group_offsets` and
+  `delete_share_groups`, each with its `_with_options` form, and their public
+  types (`ShareGroupDescription`, `ShareMemberDescription`,
+  `ShareMemberAssignment`, `SharePartitionOffsetInfo`,
+  `ListShareGroupOffsetsSpec`, five `*Options` and five `*Result` types).
+  `MockAdminClient` returns `LocalUnsupportedOperationError` ("Not implemented
+  yet") for all five, as Java's mock throws `UnsupportedOperationException`.
+  Rust only: there is no C FFI or binding for them yet.
+- **Breaking** for code that implements `Admin` itself: the five
+  `_with_options` methods are required trait methods, as they are abstract in
+  Java's `Admin`.
 
 ### C FFI
 
