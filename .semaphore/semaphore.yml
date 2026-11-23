@@ -306,8 +306,8 @@ blocks:
     #     Node.js 22 on the host.
     #
     # Node.js comes from `sem-version node 22`, as confluent-kafka-javascript's
-    # CI installs it; Node 24 and 26 run the tests that need no broker, and
-    # Node 24 the broker-backed ones too. npm packages come from the public npm registry, as pip's
+    # CI installs it; Node 24 and 26 run the static, unit and typing tests and
+    # the broker-backed ones too. npm packages come from the public npm registry, as pip's
     # come from public PyPI: NPM_CONFIG_REGISTRY overrides any registry the
     # agent's npm config names, and package-lock.json resolves every package
     # there.
@@ -480,10 +480,9 @@ blocks:
             - (cd javascript && npm ci --no-audit --no-fund)
             - make test-integration-javascript-sasl-ssl
         # The supported Node.js versions besides 22 (package.json's engines,
-        # >=22.14.0): the static, unit and typing tests, which need no broker,
-        # on Node 24 and 26, and on Node 24, where `await using` is native, the
-        # broker-backed tests too, against the scratch broker test-integration
-        # starts (the gRPC arms run on 22 above).
+        # >=22.14.0): the static, unit and typing tests and the broker-backed
+        # tests, against the scratch broker test-integration starts, on both
+        # (the gRPC arms and the SSL and SASL_SSL tests run on 22 above).
         # Two jobs with fixed names rather than a matrix, so that
         # REQUIRED_CI_JOBS in create-release-tag.yml can name them exactly.
         - name: "verify-javascript (Linux amd64) — node 24"
@@ -509,7 +508,7 @@ blocks:
             - node --version && npm --version
             - (cd javascript && npm ci --no-audit --no-fund)
             - make build-javascript
-            - make -C javascript test-static test-unit test-typing
+            - make -C javascript test-static test-unit test-typing test-integration
 
   - name: "Verify Rust and language bindings (macOS arm64)"
     # verify-rust runs the native Rust unit, integration and perf tests
