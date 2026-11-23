@@ -1113,10 +1113,12 @@ out of date). The rule:
    called. CKRDA0015 checks the class's `s_values` or `VALUES`, Java's `values()` or `VALUES` written out, since
    `Enum.GetValues(Type)` is not Native AOT safe: it lists every member of the enum once, as `Enum.MEMBER`, in
    declaration order. A list of anything else about the members is built from that list (`SecurityProtocol`'s
-   `s_names`, ledger 640). CKRDA0015 also checks each `switch` expression of the class that names a member of
+   `s_names`, `ElectionType`'s "must be one of" text, ledger 640). CKRDA0015 also checks each `switch` expression of the class that names a member of
    its enum, the lookups written out for the same reason (`FromString`, `ForId`, `MechanismName`): every member
    has an arm, in its pattern or its answer, or is the default arm's answer (`_ => UNKNOWN`), and no member has
-   two arms; the arms' order is free.
+   two arms; the arms' order is free. A lookup written another way is not checked: the `FromCode` range casts of
+   `AclOperation`, `AclPermissionType`, `PatternType` and `ResourceType`, and `ScramMechanism`'s
+   `FromMechanismName` (follow-up F13).
 10. A Java interface's `default` method is not declared on the .NET interface, which cannot hold a body on
     netstandard2.0. It is an extension method in a top-level static class named after the interface without
     its `I` plus `Extensions`, beside it (`ConsumerRebalanceListenerExtensions`). An interface

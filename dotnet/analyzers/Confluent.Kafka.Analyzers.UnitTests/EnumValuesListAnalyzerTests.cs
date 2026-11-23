@@ -149,6 +149,34 @@ public sealed class EnumValuesListAnalyzerTests
             Finding(0, "EMethods.Name has no arm for E.B"));
 
     [Fact]
+    public Task AGuardedDiscardArm_IsAnArmAndCanGiveAMemberItsSecondArm() =>
+        Verifier.VerifyAsync(
+            Methods("public static E? ForId(int id) => id switch { 0 => E.A, {|#0:_ when id > 9 => E.A|}, 1 => E.B, 2 => E.C, _ => null };"),
+            Finding(0, "EMethods.ForId gives E.A two arms"));
+
+    [Fact]
+    public Task ALookupOfAnotherEnum_InAMethodsClass_IsNotChecked() =>
+        Verifier.VerifyAsync(
+            """
+            public enum E
+            {
+                A,
+                B,
+                C,
+            }
+
+            public enum F
+            {
+                X,
+            }
+
+            public static class FMethods
+            {
+                public static string Name(E e) => e switch { E.A => "a", _ => "?" };
+            }
+            """);
+
+    [Fact]
     public Task ALookupOfAnotherClass_IsNotChecked() =>
         Verifier.VerifyAsync(
             Methods("public static string Name(E e) => e switch { E.A => \"a\", _ => \"?\" };", "Other"));
