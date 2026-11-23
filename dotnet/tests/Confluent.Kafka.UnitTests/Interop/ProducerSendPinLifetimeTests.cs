@@ -261,7 +261,7 @@ public sealed class ProducerSendPinLifetimeTests
                 MemorySerializer.Instance, MemorySerializer.Instance);
         using (TestTimeout.Disposal(producer))
         {
-            KafkaFuture<RecordMetadata> future = default;
+            KafkaFuture<RecordMetadata> future = null!;
             TestTimeout.Run(() => future = producer.Send(MemoryRecord(Topic, key, value)), s_deadline);
 
             Assert.Equal(1, key.PinCount);
@@ -306,7 +306,7 @@ public sealed class ProducerSendPinLifetimeTests
                 MemorySerializer.Instance, MemorySerializer.Instance);
         using (TestTimeout.Disposal(producer))
         {
-            KafkaFuture<RecordMetadata> future = default;
+            KafkaFuture<RecordMetadata> future = null!;
             TestTimeout.Run(() => future = producer.Send(MemoryRecord(Topic, key, value)), s_deadline);
             TestTimeout.Run(() => _ = future.Get(), s_deadline);
 

@@ -134,7 +134,7 @@ internal sealed partial class NativeAdminClient
     private static readonly Func<IntPtr, IReadOnlyCollection<TransactionListing>> s_copyOutTransactionListings =
         TransactionMarshal.CopyOutListings;
 
-    internal (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> Partitions, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> Partitions, SafeAdminResultHandle Result)
         DescribeProducers(IReadOnlyCollection<TopicPartition> partitions, DescribeProducersOptions? options)
     {
         EnterUse();
@@ -206,20 +206,20 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    private static Dictionary<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>>
+    private Dictionary<TopicPartition, IKafkaFutureImpl<DescribeProducersResult.PartitionProducerState>>
         StartPartitionProducerStates(SafeAdminResultHandle result, List<TopicPartition> keys, IntPtr[] partitions)
     {
         try
         {
-            Dictionary<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> futures =
-                new Dictionary<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>>(keys.Count);
+            Dictionary<TopicPartition, IKafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> futures =
+                new Dictionary<TopicPartition, IKafkaFutureImpl<DescribeProducersResult.PartitionProducerState>>(keys.Count);
             for (int i = 0; i < keys.Count; i++)
             {
                 IntPtr future = CallAccessor(result, s_describeProducersPartitionResult, partitions[i]);
                 futures.Add(
                     keys[i],
                     NativeFutureSource<DescribeProducersResult.PartitionProducerState>.Start(
-                        SafeKafkaFutureHandle.Owned(future), s_copyOutPartitionProducerState));
+                        SafeKafkaFutureHandle.Owned(future), s_copyOutPartitionProducerState, _flavour));
             }
 
             return futures;
@@ -231,7 +231,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<TransactionDescription?>> Descriptions, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<string, IKafkaFutureImpl<TransactionDescription?>> Descriptions, SafeAdminResultHandle Result)
         DescribeTransactions(IReadOnlyCollection<string> transactionalIds, DescribeTransactionsOptions? options)
     {
         EnterUse();
@@ -281,13 +281,13 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    private static Dictionary<string, KafkaFutureImpl<TransactionDescription?>> StartTransactionDescriptions(
+    private Dictionary<string, IKafkaFutureImpl<TransactionDescription?>> StartTransactionDescriptions(
         SafeAdminResultHandle result, List<string> transactionalIds)
     {
         try
         {
-            Dictionary<string, KafkaFutureImpl<TransactionDescription?>> futures =
-                new Dictionary<string, KafkaFutureImpl<TransactionDescription?>>(transactionalIds.Count, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<TransactionDescription?>> futures =
+                new Dictionary<string, IKafkaFutureImpl<TransactionDescription?>>(transactionalIds.Count, StringComparer.Ordinal);
             foreach (string transactionalId in transactionalIds)
             {
                 IntPtr future;
@@ -299,7 +299,7 @@ internal sealed partial class NativeAdminClient
                 futures.Add(
                     transactionalId,
                     NativeFutureSource<TransactionDescription?>.Start(
-                        SafeKafkaFutureHandle.Owned(future), s_copyOutTransactionDescription));
+                        SafeKafkaFutureHandle.Owned(future), s_copyOutTransactionDescription, _flavour));
             }
 
             return futures;
@@ -311,7 +311,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (KafkaFutureImpl<object?> All, SafeAdminResultHandle Result) AbortTransaction(
+    internal (IKafkaFutureImpl<object?> All, SafeAdminResultHandle Result) AbortTransaction(
         AbortTransactionSpec spec, AbortTransactionOptions? options)
     {
         EnterUse();
@@ -408,7 +408,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> Producers, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> Producers, SafeAdminResultHandle Result)
         FenceProducers(IReadOnlyCollection<string> transactionalIds, FenceProducersOptions? options)
     {
         EnterUse();
@@ -446,11 +446,11 @@ internal sealed partial class NativeAdminClient
         AdminOptionsMarshal.Free(native, s_destroyFenceProducersOptions);
 
     // As Python builds it: once both futures settle, the producer id's failure wins, then the epoch's.
-    internal static KafkaFutureImpl<ProducerIdAndEpoch> CombineProducerIdAndEpoch(
-        KafkaFutureImpl<long> producerId, KafkaFutureImpl<short> epoch)
+    internal static IKafkaFutureImpl<ProducerIdAndEpoch> CombineProducerIdAndEpoch(
+        IKafkaFutureImpl<long> producerId, IKafkaFutureImpl<short> epoch, AdminFlavour flavour)
     {
-        KafkaFutureImpl<ProducerIdAndEpoch> combined = new KafkaFutureImpl<ProducerIdAndEpoch>();
-        void Settle(KafkaFutureImpl _)
+        IKafkaFutureImpl<ProducerIdAndEpoch> combined = NewFuture<ProducerIdAndEpoch>(flavour);
+        void Settle(IKafkaFutureImpl _)
         {
             if (!producerId.IsSettled || !epoch.IsSettled)
             {
@@ -467,7 +467,7 @@ internal sealed partial class NativeAdminClient
             }
             else
             {
-                combined.Complete(new ProducerIdAndEpoch(producerId.GetNow(default), epoch.GetNow(default)));
+                combined.Complete(new ProducerIdAndEpoch(producerId.GetNowUnwrapped(default), epoch.GetNowUnwrapped(default)));
             }
         }
 
@@ -489,26 +489,26 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    private static Dictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> StartFencedProducers(
+    private Dictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> StartFencedProducers(
         SafeAdminResultHandle result, List<string> transactionalIds)
     {
         try
         {
-            Dictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures =
-                new Dictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>>(transactionalIds.Count, StringComparer.Ordinal);
+            Dictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> futures =
+                new Dictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>>(transactionalIds.Count, StringComparer.Ordinal);
             foreach (string transactionalId in transactionalIds)
             {
                 using (Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(transactionalId))
                 {
                     IntPtr producerId = CallAccessor(result, s_fenceProducersProducerId, pinned.Pointer);
-                    KafkaFutureImpl<long> producerIdFuture = NativeFutureSource<long>.Start(
-                        SafeKafkaFutureHandle.Owned(producerId), s_copyOutProducerId);
+                    IKafkaFutureImpl<long> producerIdFuture = NativeFutureSource<long>.Start(
+                        SafeKafkaFutureHandle.Owned(producerId), s_copyOutProducerId, _flavour);
 
                     IntPtr epoch = CallAccessor(result, s_fenceProducersEpochId, pinned.Pointer);
-                    KafkaFutureImpl<short> epochFuture = NativeFutureSource<short>.Start(
-                        SafeKafkaFutureHandle.Owned(epoch), s_copyOutEpoch);
+                    IKafkaFutureImpl<short> epochFuture = NativeFutureSource<short>.Start(
+                        SafeKafkaFutureHandle.Owned(epoch), s_copyOutEpoch, _flavour);
 
-                    futures.Add(transactionalId, CombineProducerIdAndEpoch(producerIdFuture, epochFuture));
+                    futures.Add(transactionalId, CombineProducerIdAndEpoch(producerIdFuture, epochFuture, _flavour));
                 }
             }
 
@@ -521,7 +521,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (KafkaFutureImpl<object?> Future, SafeAdminResultHandle Result) ForceTerminateTransaction(
+    internal (IKafkaFutureImpl<object?> Future, SafeAdminResultHandle Result) ForceTerminateTransaction(
         string transactionalId, TerminateTransactionOptions? options)
     {
         EnterUse();
@@ -573,7 +573,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> ByBrokerId, SafeAdminResultHandle Result)
+    internal (IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> ByBrokerId, SafeAdminResultHandle Result)
         ListTransactions(ListTransactionsOptions? options)
     {
         EnterUse();
@@ -685,14 +685,14 @@ internal sealed partial class NativeAdminClient
         NativeMethods.ListTransactionsOptionsFilterOnTransactionalIdPattern(native, pinned.Pointer, ref outErr);
     }
 
-    private static KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>>
+    private IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>>
         StartBrokerListings(SafeAdminResultHandle result)
     {
         try
         {
             IntPtr outer = CallAccessor(result, s_listTransactionsByBrokerId);
-            NativeFutureSource<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> source =
-                BrokerListings.Create(SafeKafkaFutureHandle.Owned(outer));
+            NativeFutureSource<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> source =
+                BrokerListings.Create(SafeKafkaFutureHandle.Owned(outer), _flavour);
             source.Issue();
             return source.Future;
         }
@@ -711,23 +711,25 @@ internal sealed partial class NativeAdminClient
     {
         private readonly object _lock = new object();
         private readonly SafeKafkaFutureHandle _outer;
+        private readonly AdminFlavour _flavour;
         private Dictionary<int, NativeFutureSource<IReadOnlyCollection<TransactionListing>>>? _sources;
-        private IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>? _futures;
+        private IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>? _futures;
 
-        private BrokerListings(SafeKafkaFutureHandle outer)
+        private BrokerListings(SafeKafkaFutureHandle outer, AdminFlavour flavour)
         {
             _outer = outer;
+            _flavour = flavour;
         }
 
-        internal static NativeFutureSource<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>>
-            Create(SafeKafkaFutureHandle outer)
+        internal static NativeFutureSource<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>>
+            Create(SafeKafkaFutureHandle outer, AdminFlavour flavour)
         {
-            BrokerListings listings = new BrokerListings(outer);
-            return NativeFutureSource<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>>
-                .Create(outer, listings.Build, listings.Issue);
+            BrokerListings listings = new BrokerListings(outer, flavour);
+            return NativeFutureSource<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>>
+                .Create(outer, listings.Build, flavour, listings.Issue);
         }
 
-        private IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> Build(IntPtr map)
+        private IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> Build(IntPtr map)
         {
             lock (_lock)
             {
@@ -754,7 +756,7 @@ internal sealed partial class NativeAdminClient
                         handles.Add(handle);
                         sources.Add(
                             Marshal.ReadInt32(key),
-                            NativeFutureSource<IReadOnlyCollection<TransactionListing>>.Create(handle, s_copyOutTransactionListings));
+                            NativeFutureSource<IReadOnlyCollection<TransactionListing>>.Create(handle, s_copyOutTransactionListings, _flavour));
                     }
                 }
                 catch
@@ -767,8 +769,8 @@ internal sealed partial class NativeAdminClient
                     throw;
                 }
 
-                Dictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> futures =
-                    new Dictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>(sources.Count);
+                Dictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> futures =
+                    new Dictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>(sources.Count);
                 foreach (KeyValuePair<int, NativeFutureSource<IReadOnlyCollection<TransactionListing>>> entry in sources)
                 {
                     futures.Add(entry.Key, entry.Value.Future);

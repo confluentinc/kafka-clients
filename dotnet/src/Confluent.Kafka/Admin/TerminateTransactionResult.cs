@@ -25,10 +25,10 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="AsyncTerminateTransactionResult"/>
 public sealed class TerminateTransactionResult
 {
-    private readonly KafkaFutureImpl<object?> _future;
+    private readonly IKafkaFutureImpl<object?> _future;
     private readonly SafeAdminResultHandle _native;
 
-    private TerminateTransactionResult(KafkaFutureImpl<object?> future, SafeAdminResultHandle native)
+    private TerminateTransactionResult(IKafkaFutureImpl<object?> future, SafeAdminResultHandle native)
     {
         _future = future;
         _native = native;
@@ -41,8 +41,8 @@ public sealed class TerminateTransactionResult
     /// </summary>
     /// <returns>A future that completes when the termination has.</returns>
     /// <remarks>Every call returns an equal future over the call's one future, as Java's returns its own.</remarks>
-    public KafkaFuture Result() => new KafkaFuture(_future);
+    public KafkaFuture Result() => SyncAdminFutures.Of(_future);
 
-    internal static TerminateTransactionResult OfClient((KafkaFutureImpl<object?> Future, SafeAdminResultHandle Result) native) =>
+    internal static TerminateTransactionResult OfClient((IKafkaFutureImpl<object?> Future, SafeAdminResultHandle Result) native) =>
         new TerminateTransactionResult(native.Future, native.Result);
 }

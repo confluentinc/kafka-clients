@@ -79,7 +79,7 @@ public sealed class TopicSetupTests
     private static async Task<int> PartitionCount(IAsyncAdmin admin, string topic)
     {
         IReadOnlyDictionary<string, TopicDescription> described =
-            await admin.DescribeTopics(new[] { topic }).AllTopicNames()!.Value.Get();
+            await admin.DescribeTopics(new[] { topic }).AllTopicNames()!.Get();
         return described[topic].Partitions().Count;
     }
 
@@ -130,7 +130,7 @@ public sealed class TopicSetupTests
         Assert.Equal(new[] { "CreateTopics", "Dispose" }, recorder.Calls);
         Assert.Equal(new[] { new NewTopic("t", (int?)1, sentReplicationFactor) }, Created(recorder.Arguments[0][0]));
         IReadOnlyDictionary<string, TopicDescription> described =
-            await mock.DescribeTopics(new[] { "t" }).AllTopicNames()!.Value.Get();
+            await mock.DescribeTopics(new[] { "t" }).AllTopicNames()!.Get();
         Assert.Equal(createdReplicationFactor, Assert.Single(described["t"].Partitions()).Replicas().Count);
     }
 

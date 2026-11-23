@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -25,23 +26,19 @@ namespace Confluent.Kafka.Common;
 /// <summary>
 /// A future you wait for by awaiting the task its <see cref="Get()"/> returns: Java's <c>KafkaFuture&lt;T&gt;</c>, also
 /// standing for the <c>Future&lt;RecordMetadata&gt;</c> that <c>IAsyncProducer.Send</c> returns;
-/// <see cref="KafkaFuture{T}"/> is the sync counterpart. A <c>default</c> value is bound to no operation and throws
-/// <see cref="InvalidOperationException"/>, synchronously, from every member but equality, conversion and
-/// <see cref="ToString"/>.
+/// <see cref="KafkaFuture{T}"/> is the sync counterpart. It is an <see cref="AsyncKafkaFuture"/>: the same future, seen
+/// without its value.
 /// </summary>
 /// <remarks>
-/// It is a struct over the task rather than the bare <see cref="Task{TResult}"/>, so the two stages of a producer send
-/// stay distinct values. Equality is identity: two values are equal when they are copies of the same future, this one
-/// and its <see cref="AsyncKafkaFuture"/> conversion included, and every <c>default</c> async future equals every
-/// other, typed or untyped.
+/// It is a type of its own rather than the bare <see cref="Task{TResult}"/>, so the two stages of a producer send stay
+/// distinct values. Equality is identity. The binding synchronizes on the future object itself. Do not lock on a
+/// future: a <c>lock (future)</c> can delay its completion and every later one of the same client, and a
+/// <see cref="Get()"/> inside it can wait forever.
 /// </remarks>
-public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
+public abstract class AsyncKafkaFuture<T> : AsyncKafkaFuture, IEquatable<AsyncKafkaFuture<T>>
 {
-    private readonly KafkaFutureImpl<T>? _impl;
-
-    internal AsyncKafkaFuture(KafkaFutureImpl<T> impl)
+    private protected AsyncKafkaFuture()
     {
-        _impl = impl;
     }
 
     /// <summary>
@@ -49,22 +46,14 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
     /// with the value, faults with the future's failure itself, as Java's stage completes, or is canceled when the
     /// future is cancelled.
     /// </summary>
-    public Task<T> ToCompletionStage() => Impl.GetAsync();
+    public new abstract Task<T> ToCompletionStage();
 
     /// <summary>
     /// Java's <c>thenApply</c>: a future completed with <paramref name="function"/> applied to this future's value, or
     /// failed with this future's failure or the function's exception. The function runs on the thread that completes
     /// this future, or inside this call if this future already holds its outcome.
     /// </summary>
-    public AsyncKafkaFuture<TR> ThenApply<TR>(KafkaFuture.BaseFunction<T, TR> function)
-    {
-        if (function is null)
-        {
-            throw new ArgumentNullException(nameof(function));
-        }
-
-        return new AsyncKafkaFuture<TR>(Impl.ThenApply<TR>(function.Invoke));
-    }
+    public abstract AsyncKafkaFuture<TR> ThenApply<TR>(KafkaFuture.BaseFunction<T, TR> function);
 
     /// <summary>
     /// Java's <c>whenComplete</c>: a future completed as this one is, once <paramref name="action"/> has run with the
@@ -72,29 +61,14 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
     /// this future succeeded and the action throws, the returned future fails with that exception. The action runs on
     /// the thread that completes this future, or inside this call if this future already holds its outcome.
     /// </summary>
-    public AsyncKafkaFuture<T> WhenComplete(KafkaFuture.BiConsumer<T?, Exception?> action)
-    {
-        if (action is null)
-        {
-            throw new ArgumentNullException(nameof(action));
-        }
-
-        return new AsyncKafkaFuture<T>(Impl.WhenComplete(action.Invoke));
-    }
-
-    /// <summary>
-    /// Java's <c>cancel</c>: cancels this future if it is not yet done, and the futures that depend on it, never the
-    /// operation behind it, and answers whether it is cancelled, by this call or by an earlier cancellation of its own.
-    /// On a future returned by <c>IAsyncProducer.Send</c> it answers <see langword="false"/> and changes nothing.
-    /// </summary>
-    public bool Cancel(bool mayInterruptIfRunning) => Impl.Cancel(mayInterruptIfRunning);
+    public abstract AsyncKafkaFuture<T> WhenComplete(KafkaFuture.BiConsumer<T?, Exception?> action);
 
     /// <summary>
     /// The result's task, the same one on every call, to await as Java's <c>future.get()</c>: it resolves with the
     /// value, faults with <see cref="ExecutionException"/> around the future's failure, or is canceled when the future
     /// is cancelled. Never blocks.
     /// </summary>
-    public Task<T> Get() => Impl.GetWrappedAsync();
+    public new abstract Task<T> Get();
 
     /// <summary>
     /// Java's <c>get(long, TimeUnit)</c>: a task completed as <see cref="Get()"/>'s is, or faulted with Java's
@@ -102,92 +76,73 @@ public readonly struct AsyncKafkaFuture<T> : IEquatable<AsyncKafkaFuture<T>>
     /// <paramref name="timeout"/>. A zero or negative timeout checks once; <see cref="Timeout.InfiniteTimeSpan"/>
     /// waits as <see cref="Get()"/> does.
     /// </summary>
-    public Task<T> Get(TimeSpan timeout) => Impl.GetWrappedAsync(timeout);
+    public new abstract Task<T> Get(TimeSpan timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early by <paramref name="cancellationToken"/>: the returned task is canceled when the
     /// token fires first. The token ends only this wait, never the future.
     /// </summary>
-    public Task<T> Get(CancellationToken cancellationToken) => Impl.GetWrappedAsync(cancellationToken);
+    public new abstract Task<T> Get(CancellationToken cancellationToken);
 
     /// <inheritdoc cref="KafkaFuture{T}.GetNow"/>
-    public T GetNow(T valueIfAbsent) => Impl.GetNowWrapped(valueIfAbsent);
-
-    /// <inheritdoc cref="KafkaFuture{T}.IsCancelled()"/>
-    public bool IsCancelled() => Impl.IsCancelled;
-
-    /// <inheritdoc cref="KafkaFuture{T}.IsCompletedExceptionally()"/>
-    public bool IsCompletedExceptionally() => Impl.IsCompletedExceptionally;
-
-    /// <inheritdoc cref="KafkaFuture{T}.IsDone()"/>
-    public bool IsDone() => Impl.IsDone;
-
-    /// <inheritdoc/>
-    public override string ToString() =>
-        _impl is null ? base.ToString() ?? string.Empty : _impl.ToString();
+    public abstract T GetNow(T valueIfAbsent);
 
     /// <summary>
-    /// This future without its value, as Java's <c>KafkaFuture&lt;?&gt;</c>: the same future, so it completes when this
-    /// one does, with the same failure. A <c>default</c> value converts to a <c>default</c> one.
+    /// Determines whether two <see cref="AsyncKafkaFuture{T}"/> references are the same future.
     /// </summary>
-    public static implicit operator AsyncKafkaFuture(AsyncKafkaFuture<T> future) => future.Erase();
+    public static bool operator ==(AsyncKafkaFuture<T>? left, AsyncKafkaFuture<T>? right) =>
+        ReferenceEquals(left, right);
 
     /// <summary>
-    /// Determines whether two <see cref="AsyncKafkaFuture{T}"/> values are equal — they are copies of the same future.
+    /// Determines whether two <see cref="AsyncKafkaFuture{T}"/> references are different futures.
     /// </summary>
-    public static bool operator ==(AsyncKafkaFuture<T> left, AsyncKafkaFuture<T> right) => left.Equals(right);
-
-    /// <summary>
-    /// Determines whether two <see cref="AsyncKafkaFuture{T}"/> values are not equal — they are different futures.
-    /// </summary>
-    public static bool operator !=(AsyncKafkaFuture<T> left, AsyncKafkaFuture<T> right) => !left.Equals(right);
+    public static bool operator !=(AsyncKafkaFuture<T>? left, AsyncKafkaFuture<T>? right) =>
+        !ReferenceEquals(left, right);
 
     /// <inheritdoc/>
-    public bool Equals(AsyncKafkaFuture<T> other) => ReferenceEquals(_impl, other._impl);
+    public bool Equals(AsyncKafkaFuture<T>? other) => ReferenceEquals(this, other);
 
     /// <inheritdoc/>
-    public override bool Equals(object? obj) =>
-        obj is AsyncKafkaFuture<T> other ? Equals(other) : Erase().Equals(obj);
+    public override bool Equals(object? obj) => ReferenceEquals(this, obj);
 
     /// <inheritdoc/>
-    public override int GetHashCode() => _impl?.GetHashCode() ?? 0;
+    public override int GetHashCode() => RuntimeHelpers.GetHashCode(this);
 
-    internal AsyncKafkaFuture Erase() => _impl is not null ? new AsyncKafkaFuture(_impl) : default;
+    private protected sealed override Task CompletionStageTask() => ToCompletionStage();
 
-    internal KafkaFutureImpl<T> Impl =>
-        _impl ?? throw new InvalidOperationException(AsyncKafkaFuture.DefaultValueMessage);
+    private protected sealed override Task GetTask() => Get();
+
+    private protected sealed override Task GetTask(TimeSpan timeout) => Get(timeout);
+
+    private protected sealed override Task GetTask(CancellationToken cancellationToken) => Get(cancellationToken);
 }
 
 /// <summary>
 /// A future of no value that you wait for by awaiting the task its <see cref="Get()"/> returns: Java's
-/// <c>KafkaFuture&lt;Void&gt;</c>; <see cref="KafkaFuture"/> is the sync counterpart. It also holds Java's static
-/// factories. A <c>default</c> value is bound to no operation and throws <see cref="InvalidOperationException"/>,
-/// synchronously, from every instance member but equality and <see cref="ToString"/>.
+/// <c>KafkaFuture&lt;Void&gt;</c>; <see cref="KafkaFuture"/> is the sync counterpart. Every
+/// <see cref="AsyncKafkaFuture{T}"/> is one. It also holds Java's static factories.
 /// </summary>
 /// <remarks>
-/// Equality is identity: two values are equal when they are copies of the same future, an
-/// <see cref="AsyncKafkaFuture{T}"/> and its conversion to this type included, and every <c>default</c> async future
-/// equals every other, typed or untyped.
+/// Equality is identity. The binding synchronizes on the future object itself. Do not lock on a future: a
+/// <c>lock (future)</c> can delay its completion and every later one of the same client, and a <see cref="Get()"/>
+/// inside it can wait forever.
 /// </remarks>
-public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
+public abstract class AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
 {
-    internal const string DefaultValueMessage = "This AsyncKafkaFuture is a default value and is bound to no operation.";
-
-    private readonly KafkaFutureImpl? _impl;
-
-    internal AsyncKafkaFuture(KafkaFutureImpl impl)
+    // Only the binding's engines derive from the futures, so every future is one of them.
+    private protected AsyncKafkaFuture()
     {
-        _impl = impl;
     }
 
     /// <inheritdoc cref="KafkaFuture.CompletedFuture{TU}"/>
     public static AsyncKafkaFuture<TU> CompletedFuture<TU>(TU value) =>
-        new AsyncKafkaFuture<TU>(KafkaFutureImpl.CompletedFuture(value));
+        FutureState.CompletedFuture(new AsyncKafkaFutureImpl<TU>(), value);
 
     /// <summary>
     /// Java's <c>allOf</c>: a future completed once every one of <paramref name="futures"/>, of any value types, has
     /// completed, failed with one of their failures when any of them failed; with no futures it is completed at once.
     /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is or contains <see langword="null"/>.</exception>
     public static AsyncKafkaFuture AllOf(params AsyncKafkaFuture[] futures)
     {
         if (futures is null)
@@ -195,40 +150,28 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
             throw new ArgumentNullException(nameof(futures));
         }
 
-        var impls = new KafkaFutureImpl[futures.Length];
+        var engines = new IKafkaFutureImpl[futures.Length];
         for (int i = 0; i < futures.Length; i++)
         {
-            impls[i] = futures[i].Impl;
+            engines[i] = (IKafkaFutureImpl?)futures[i]
+                ?? throw new ArgumentNullException(nameof(futures), FutureState.ContainsNullMessage);
         }
 
-        return new AsyncKafkaFuture(KafkaFutureImpl.AllOf(impls));
+        return FutureState.AllOf(new AsyncKafkaFutureImpl<object?>(), engines);
     }
 
     /// <summary>
     /// Java's <c>allOf</c> for futures of one value type, such as an array of them.
     /// </summary>
-    public static AsyncKafkaFuture AllOf<T>(params AsyncKafkaFuture<T>[] futures)
-    {
-        if (futures is null)
-        {
-            throw new ArgumentNullException(nameof(futures));
-        }
-
-        var erased = new AsyncKafkaFuture[futures.Length];
-        for (int i = 0; i < futures.Length; i++)
-        {
-            erased[i] = futures[i];
-        }
-
-        return AllOf(erased);
-    }
+    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is or contains <see langword="null"/>.</exception>
+    public static AsyncKafkaFuture AllOf<T>(params AsyncKafkaFuture<T>[] futures) => AllOf((AsyncKafkaFuture[])futures);
 
     /// <summary>
     /// Java's <c>toCompletionStage</c>: a task, the same on every call, which user code cannot complete; it completes
     /// when the operation succeeds, faults with the future's failure itself, as Java's stage completes, or is canceled
     /// when the future is cancelled.
     /// </summary>
-    public Task ToCompletionStage() => Impl.WaitAsync();
+    public Task ToCompletionStage() => CompletionStageTask();
 
     /// <summary>
     /// Java's <c>thenApply</c> on a future of no value: a future completed with what <paramref name="function"/>
@@ -236,15 +179,7 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     /// function runs on the thread that completes this future, or inside this call if this future already holds its
     /// outcome.
     /// </summary>
-    public AsyncKafkaFuture<TR> ThenApply<TR>(Func<TR> function)
-    {
-        if (function is null)
-        {
-            throw new ArgumentNullException(nameof(function));
-        }
-
-        return new AsyncKafkaFuture<TR>(Impl.ThenApply(function));
-    }
+    public abstract AsyncKafkaFuture<TR> ThenApply<TR>(Func<TR> function);
 
     /// <summary>
     /// Java's <c>whenComplete</c> on a future of no value: a future completed as this one is, once
@@ -252,30 +187,21 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     /// this future succeeded and the action throws, the returned future fails with that exception. The action runs on
     /// the thread that completes this future, or inside this call if this future already holds its outcome.
     /// </summary>
-    public AsyncKafkaFuture WhenComplete(Action<Exception?> action)
-    {
-        if (action is null)
-        {
-            throw new ArgumentNullException(nameof(action));
-        }
-
-        return new AsyncKafkaFuture(Impl.WhenComplete(action));
-    }
+    public abstract AsyncKafkaFuture WhenComplete(Action<Exception?> action);
 
     /// <summary>
     /// Java's <c>cancel</c>: cancels this future if it is not yet done, and the futures that depend on it, never the
     /// operation behind it, and answers whether it is cancelled, by this call or by an earlier cancellation of its own.
-    /// On a future that <c>IAsyncProducer.Send</c> returned, or one converted from it, it answers
-    /// <see langword="false"/> and changes nothing.
+    /// On a future that <c>IAsyncProducer.Send</c> returned it answers <see langword="false"/> and changes nothing.
     /// </summary>
-    public bool Cancel(bool mayInterruptIfRunning) => Impl.Cancel(mayInterruptIfRunning);
+    public abstract bool Cancel(bool mayInterruptIfRunning);
 
     /// <summary>
     /// The operation's task, the same one on every call, to await as Java's <c>future.get()</c>: it completes when the
     /// operation succeeds, faults with <see cref="ExecutionException"/> around the future's failure, or is canceled
     /// when the future is cancelled. Never blocks.
     /// </summary>
-    public Task Get() => Impl.WaitWrappedAsync();
+    public Task Get() => GetTask();
 
     /// <summary>
     /// Java's <c>get(long, TimeUnit)</c>: a task completed as <see cref="Get()"/>'s is, or faulted with Java's
@@ -283,52 +209,54 @@ public readonly struct AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
     /// <paramref name="timeout"/>. A zero or negative timeout checks once; <see cref="Timeout.InfiniteTimeSpan"/>
     /// waits as <see cref="Get()"/> does.
     /// </summary>
-    public Task Get(TimeSpan timeout) => Impl.WaitWrappedAsync(timeout);
+    public Task Get(TimeSpan timeout) => GetTask(timeout);
 
     /// <summary>
     /// <see cref="Get()"/>, ended early by <paramref name="cancellationToken"/>: the returned task is canceled when the
     /// token fires first. The token ends only this wait, never the future.
     /// </summary>
-    public Task Get(CancellationToken cancellationToken) => Impl.WaitWrappedAsync(cancellationToken);
+    public Task Get(CancellationToken cancellationToken) => GetTask(cancellationToken);
 
     /// <inheritdoc cref="KafkaFuture.GetNow"/>
-    public void GetNow() => Impl.GetNowWrapped();
+    public abstract void GetNow();
 
     /// <inheritdoc cref="KafkaFuture.IsCancelled()"/>
-    public bool IsCancelled() => Impl.IsCancelled;
+    public abstract bool IsCancelled();
 
     /// <inheritdoc cref="KafkaFuture.IsCompletedExceptionally()"/>
-    public bool IsCompletedExceptionally() => Impl.IsCompletedExceptionally;
+    public abstract bool IsCompletedExceptionally();
 
     /// <inheritdoc cref="KafkaFuture.IsDone()"/>
-    public bool IsDone() => Impl.IsDone;
+    public abstract bool IsDone();
 
     /// <inheritdoc/>
-    public override string ToString() =>
-        _impl is null ? base.ToString() ?? string.Empty : _impl.ToString() ?? string.Empty;
+    public abstract override string ToString();
 
     /// <summary>
-    /// Determines whether two <see cref="AsyncKafkaFuture"/> values are equal — they are copies of the same future.
+    /// Determines whether two <see cref="AsyncKafkaFuture"/> references are the same future.
     /// </summary>
-    public static bool operator ==(AsyncKafkaFuture left, AsyncKafkaFuture right) => left.Equals(right);
+    public static bool operator ==(AsyncKafkaFuture? left, AsyncKafkaFuture? right) => ReferenceEquals(left, right);
 
     /// <summary>
-    /// Determines whether two <see cref="AsyncKafkaFuture"/> values are not equal — they are different futures.
+    /// Determines whether two <see cref="AsyncKafkaFuture"/> references are different futures.
     /// </summary>
-    public static bool operator !=(AsyncKafkaFuture left, AsyncKafkaFuture right) => !left.Equals(right);
+    public static bool operator !=(AsyncKafkaFuture? left, AsyncKafkaFuture? right) => !ReferenceEquals(left, right);
 
     /// <inheritdoc/>
-    public bool Equals(AsyncKafkaFuture other) => ReferenceEquals(_impl, other._impl);
+    public bool Equals(AsyncKafkaFuture? other) => ReferenceEquals(this, other);
 
     /// <inheritdoc/>
-    public override bool Equals(object? obj) =>
-        obj is AsyncKafkaFuture other
-            ? Equals(other)
-            : obj is not null && obj.GetType() is { IsGenericType: true } type
-                && type.GetGenericTypeDefinition() == typeof(AsyncKafkaFuture<>) && obj.Equals(this);
+    public override bool Equals(object? obj) => ReferenceEquals(this, obj);
 
     /// <inheritdoc/>
-    public override int GetHashCode() => _impl?.GetHashCode() ?? 0;
+    public override int GetHashCode() => RuntimeHelpers.GetHashCode(this);
 
-    internal KafkaFutureImpl Impl => _impl ?? throw new InvalidOperationException(DefaultValueMessage);
+    // The tasks behind the plain ToCompletionStage and Get forms: a future of a value hands out its own typed tasks.
+    private protected abstract Task CompletionStageTask();
+
+    private protected abstract Task GetTask();
+
+    private protected abstract Task GetTask(TimeSpan timeout);
+
+    private protected abstract Task GetTask(CancellationToken cancellationToken);
 }

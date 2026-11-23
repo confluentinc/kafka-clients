@@ -44,7 +44,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         AclBinding binding = Binding(column, 99);
         Assert.Equal(0, Code(column, binding.Pattern().ResourceType(), binding.Pattern().PatternType(), binding.Entry().Operation(), binding.Entry().PermissionType()));
 
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(new[] { binding }, options: new CreateAclsOptions()));
@@ -65,7 +65,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         AclBinding first = Binding(column, 98);
         AclBinding second = Binding(column, 99);
 
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateAclsResult result = AsyncCreateAclsResult.OfClient(admin.CreateAcls(new[] { first, second }, options: new CreateAclsOptions()));
@@ -84,7 +84,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         AclBindingFilter filter = Filter(column, 99);
         Assert.Equal(0, Code(column, filter.PatternFilter().ResourceType(), filter.PatternFilter().PatternType(), filter.EntryFilter().Operation(), filter.EntryFilter().PermissionType()));
 
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteAclsResult result = AsyncDeleteAclsResult.OfClient(admin.DeleteAcls(new[] { filter }, options: new DeleteAclsOptions()));
@@ -105,7 +105,7 @@ public sealed class AdminAclUndefinedCodeKeyingTests
         AclBindingFilter first = Filter(column, 98);
         AclBindingFilter second = Filter(column, 99);
 
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteAclsResult result = AsyncDeleteAclsResult.OfClient(admin.DeleteAcls(new[] { first, second }, options: new DeleteAclsOptions()));

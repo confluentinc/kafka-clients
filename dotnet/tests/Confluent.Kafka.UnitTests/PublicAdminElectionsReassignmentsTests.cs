@@ -262,8 +262,8 @@ public sealed class PublicAdminElectionsReassignmentsTests
 
     private static AsyncElectLeadersResult ElectionOf(IReadOnlyDictionary<TopicPartition, Exception?> outcomes)
     {
-        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> partitions =
-            new KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>>();
+        AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> partitions =
+            new AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>>();
         partitions.Complete(outcomes);
         return AsyncElectLeadersResult.OfClient((partitions, new SafeAdminResultHandle(IntPtr.Zero, NoDestroy)));
     }

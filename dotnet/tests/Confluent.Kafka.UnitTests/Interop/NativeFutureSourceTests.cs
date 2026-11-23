@@ -27,9 +27,9 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <summary>
 /// The native-future value source over client-less <c>kafka_common_KafkaFuture_completed_future</c> futures, whose
 /// <c>get_cb</c> delivers inline: the delivery settles the managed future, then releases the handle, and a read of a
-/// released handle answers from the settled state.
+/// released handle answers from the settled state. Each derived class runs them on its flavor's engine.
 /// </summary>
-public sealed class NativeFutureSourceTests
+public abstract class NativeFutureSourceTestBase
 {
     private static readonly IntPtr s_value = new IntPtr(42);
 
@@ -38,12 +38,13 @@ public sealed class NativeFutureSourceTests
     {
         SafeKafkaFutureHandle handle = SafeKafkaFutureHandle.Owned(Completed(s_value, IntPtr.Zero));
 
-        KafkaFutureImpl<long> future = NativeFutureSource<long>.Start(handle, value => value.ToInt64());
+        IKafkaFutureImpl<long> future = NativeFutureSource<long>.Start(handle, value => value.ToInt64(), Flavour);
 
+        Assert.IsAssignableFrom(Flavour == AdminFlavour.Sync ? typeof(KafkaFuture<long>) : typeof(AsyncKafkaFuture<long>), future);
         Assert.True(future.IsSettled);
         Assert.True(handle.IsClosed);
-        Assert.Equal(42L, future.GetNow(-1L));
-        Assert.Equal(42L, new KafkaFuture<long>(future).Get());
+        Assert.Equal(42L, future.GetNowUnwrapped(-1L));
+        Assert.Equal(42L, future.GetUnwrapped());
     }
 
     [Fact]
@@ -52,10 +53,10 @@ public sealed class NativeFutureSourceTests
         IntPtr error = Native.ErrorKafkaMessage("boom");
         SafeKafkaFutureHandle handle = SafeKafkaFutureHandle.Owned(Completed(IntPtr.Zero, error));
 
-        KafkaFutureImpl<long> future = NativeFutureSource<long>.Start(handle, value => value.ToInt64());
+        IKafkaFutureImpl<long> future = NativeFutureSource<long>.Start(handle, value => value.ToInt64(), Flavour);
 
         Assert.True(handle.IsClosed);
-        Assert.True(future.IsCompletedExceptionally);
+        Assert.True(future.IsCompletedExceptionally());
         KafkaException failure = Assert.IsType<KafkaException>(future.Failure);
         Assert.Equal("boom", failure.Message);
     }
@@ -66,7 +67,7 @@ public sealed class NativeFutureSourceTests
         InvalidOperationException thrown = new InvalidOperationException("converter");
         SafeKafkaFutureHandle handle = SafeKafkaFutureHandle.Owned(Completed(s_value, IntPtr.Zero));
 
-        KafkaFutureImpl<long> future = NativeFutureSource<long>.Start(handle, _ => throw thrown);
+        IKafkaFutureImpl<long> future = NativeFutureSource<long>.Start(handle, _ => throw thrown, Flavour);
 
         Assert.True(handle.IsClosed);
         Assert.Same(thrown, future.Failure);
@@ -76,14 +77,14 @@ public sealed class NativeFutureSourceTests
     public void AReleasedHandle_ReadsAsDone_AndTryReadLeavesTheSettledStateToTheFuture()
     {
         SafeKafkaFutureHandle handle = SafeKafkaFutureHandle.Owned(Completed(s_value, IntPtr.Zero));
-        KafkaFutureImpl<long> future = NativeFutureSource<long>.Start(handle, value => value.ToInt64());
+        IKafkaFutureImpl<long> future = NativeFutureSource<long>.Start(handle, value => value.ToInt64(), Flavour);
         IFutureValueSource<long> source = SourceOf(future);
 
         Assert.True(handle.IsClosed);
         Assert.True(source.IsDone);
         Assert.False(source.TryRead(out _, out Exception? error));
         Assert.Null(error);
-        Assert.Equal(42L, future.GetNow(-1L));
+        Assert.Equal(42L, future.GetNowUnwrapped(-1L));
     }
 
     [Fact]
@@ -98,9 +99,9 @@ public sealed class NativeFutureSourceTests
         owner.Dispose();
         Assert.False(owner.IsClosed);
 
-        KafkaFutureImpl<long> future = NativeFutureSource<long>.Start(borrowed, value => value.ToInt64());
+        IKafkaFutureImpl<long> future = NativeFutureSource<long>.Start(borrowed, value => value.ToInt64(), Flavour);
 
-        Assert.Equal(42L, future.GetNow(-1L));
+        Assert.Equal(42L, future.GetNowUnwrapped(-1L));
         Assert.True(borrowed.IsClosed);
         Assert.True(owner.IsClosed);
 
@@ -109,10 +110,14 @@ public sealed class NativeFutureSourceTests
         KafkaException.ThrowIfFfiFailed(ref outErr);
     }
 
-    internal static IFutureValueSource<long> SourceOf(KafkaFutureImpl<long> future) =>
-        (IFutureValueSource<long>)typeof(KafkaFutureImpl<long>)
+    private protected abstract AdminFlavour Flavour { get; }
+
+    private static IFutureValueSource<long> SourceOf(IKafkaFutureImpl<long> future) =>
+        (IFutureValueSource<long>)typeof(FutureState<long>)
             .GetField("_source", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .GetValue(future)!;
+            .GetValue(future.GetType()
+                .GetField("_state", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(future))!;
 
     private static IntPtr Completed(IntPtr value, IntPtr error)
     {
@@ -139,4 +144,20 @@ public sealed class NativeFutureSourceTests
         [DllImport(DllName, EntryPoint = "kafka_common_Error_kafka_message_err", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr ErrorKafkaMessageErr(IntPtr message, ref IntPtr outErr);
     }
+}
+
+/// <summary>
+/// The native-future value source tests on the sync admin client's engine.
+/// </summary>
+public sealed class NativeFutureSourceTests : NativeFutureSourceTestBase
+{
+    private protected override AdminFlavour Flavour => AdminFlavour.Sync;
+}
+
+/// <summary>
+/// The native-future value source tests on the async admin client's engine.
+/// </summary>
+public sealed class AsyncNativeFutureSourceTests : NativeFutureSourceTestBase
+{
+    private protected override AdminFlavour Flavour => AdminFlavour.Async;
 }
