@@ -40,7 +40,7 @@ Conventions:
 | `common/requests/DeleteShareGroupOffsetsRequest.java` | 96 | P1 (used by P9) | A | `common/requests/delete_share_group_offsets_request.rs` | crate | done |
 | `common/requests/DeleteShareGroupOffsetsResponse.java` | 65 | P1 (used by P9) | A | `common/requests/delete_share_group_offsets_response.rs` | crate | done |
 | `ConcreteRequest` / `ConcreteResponse` arms (Java `AbstractRequest#parseRequest`, `AbstractResponse#parseResponse` share cases) for the 7 client APIs above | edits | P1 | A | `common/requests/abstract_request.rs`, `abstract_response.rs` | crate | done (every match arm, incl. `parse_request` / `parse` and the schema-derived `should_client_throttle` arm; the 7 response types join `RequestResponseTest#testClientThrottlesResponsesWithThrottleTime`) |
-| Inter-broker share-state wrappers (`Initialize/Read/Write/DeleteShareGroupState*`, `ReadShareGroupStateSummary*`, 10 files) | — | — | — | — | — | skipped: `ApiKeys` marks them `cluster_action` (broker-to-broker); no client code sends them. Re-check at P11 that no client test needs their `ConcreteResponse` arm. |
+| Inter-broker share-state wrappers (`Initialize/Read/Write/DeleteShareGroupState*`, `ReadShareGroupStateSummary*`, 10 files) | — | — | — | — | — | skipped: `ApiKeys` marks them `cluster_action` (broker-to-broker); no client code sends them. Re-checked at P11: no Java client main code outside `common/requests` / `common/message` refers to them; the only client test is `RequestResponseTest`'s serialization helpers, the same broker-side coverage the other `cluster_action` APIs have without Rust wrappers; no Rust code needs a `ConcreteResponse` arm. |
 
 The three admin share-offsets request/response pairs (6 files) are **missing from PLAN §4 P1**,
 which lists only ShareFetch / ShareAcknowledge / ShareGroupHeartbeat / ShareGroupDescribe. They are
@@ -65,8 +65,8 @@ ledger assigns them to P1. Together they are 564 Java lines.
 
 | Java file | Lines | Phase | PR | Rust target | Status |
 |---|---|---|---|---|---|
-| `internals/ShareAcknowledgementMode.java` | 116 | P2 | A | `consumer/internals/share_acknowledgement_mode.rs` | crate | done: the nested `Validator` moved to the type's file; `consumer_config.rs` validates with it |
-| `internals/ShareAcquireMode.java` | 93 | P2 | A | `consumer/internals/share_acquire_mode.rs` | crate | done: the nested `Validator` moved to the type's file; `consumer_config.rs` validates with it |
+| `internals/ShareAcknowledgementMode.java` | 116 | P2 | A | `consumer/internals/share_acknowledgement_mode.rs` | done: the nested `Validator` moved to the type's file; `consumer_config.rs` validates with it |
+| `internals/ShareAcquireMode.java` | 93 | P2 | A | `consumer/internals/share_acquire_mode.rs` | done: the nested `Validator` moved to the type's file; `consumer_config.rs` validates with it |
 | `internals/Acknowledgements.java` | 331 | P2 | A | `consumer/internals/acknowledgements.rs` | done |
 | `internals/AcknowledgementBatch.java` | 108 | P2 | A | `consumer/internals/acknowledgement_batch.rs` | done |
 | `internals/NodeAcknowledgements.java` | 40 | P2 | A | `consumer/internals/node_acknowledgements.rs` | done |
@@ -152,6 +152,7 @@ The `events/` directory holds 8 `Share*Event` classes that are application event
 | `errors/ShareSessionLimitReachedException.java` | — | `common/errors/share_session_limit_reached_error.rs` | pub | exists (verified) |
 | `errors/InvalidShareSessionEpochException.java` (not `Share*`-named, but share-only) | — | `common/errors/invalid_share_session_epoch_error.rs` | pub | exists (verified) |
 | `errors/InvalidRecordStateException.java` (share-only) | — | `common/errors/invalid_record_state_error.rs` | pub | exists (verified) |
+| `errors/FencedStateEpochException.java` (error code 124; thrown only on the inter-broker share-state path) | — | `common/errors/fenced_state_epoch_error.rs` | pub | exists (verified; row added in P11) |
 
 ## 2. Java test files
 
@@ -194,6 +195,7 @@ test file uses `@RepeatedTest`, `@Disabled` or `@Flaky`.
 | `consumer/internals/WakeupTriggerTest#testWakeupFromShareFetchAction` | 1 `@Test` | P6 | C | done (P6): `wakeup_trigger.rs::tests::wakeup_ends_a_wait_on_the_share_fetch_buffer`, a wait on `ShareFetchBuffer::await_not_empty` that `select!`s on the token ends on `wakeup()` and the wakeup stays pending (deviation noted at the test). Done (P7): `ShareConsumerImpl::await_not_empty` waits this way; `test_wakeup_after_empty_fetch` / `test_wakeup_after_non_empty_fetch` exercise it |
 | `consumer/internals/metrics/AsyncConsumerMetricsTest` | 11 tests parameterised by `groupNameProvider` = {`CONSUMER_METRIC_GROUP`, `CONSUMER_SHARE_METRIC_GROUP`} | — | — | exists: `async_consumer_metrics.rs` `group_name_provider()` already loops both groups |
 | `admin/ListGroupsOptionsTest#testForShareGroups` | 1 `@Test` | — | — | exists: `list_groups_options.rs::test_for_share_groups` |
+| `clients/GroupRebalanceConfigTest` (`testRackIdIsEmptyIfNoDefined`, `testRackIdIsEmptyIfValueIsEmptyString`, `testRackIdIsNotEmptyIfDefined`, each `@EnumSource` `CONSUMER` / `SHARE`; added at P11) | the `SHARE` arm of 3 `@ParameterizedTest`s | P7 | C | done (adapted): Rust has no `GroupRebalanceConfig` (G8); the `SHARE` arm's three rack cases (unset, empty string, set) are covered through the production constructor by `share_consumer_impl.rs::new_passes_the_group_id_and_the_rack_id_to_the_share_managers` |
 | `ConsumerConfigTest`, `SubscriptionStateTest`, `RequestManagersTest`, `ApplicationEventHandlerTest`, `ConsumerNetworkThreadTest`, `CompletedFetchTest` | no share tests (`grep -i 'share\|acknowledg'`: 0 hits, or only the English word "shared") | — | — | n/a. P6 adds Rust-only share tests to three of them: `subscription_state.rs` (`subscribe_to_share_group*`, `share_assignment_is_fetchable_without_a_position`), `request_managers.rs` (`share_group_request_managers_and_listeners_wired`, the share counterpart of `RequestManagersTest#testConsumerGroupRequestManagersAndListenersWired`; `close_closes_the_share_consume_manager`) and `consumer_network_thread.rs` (the response hook) |
 
 ### 2.3 Admin tests (P9)
@@ -247,9 +249,9 @@ against `rust/src`. "Plan?" says whether PLAN §4 already names it.
 | G7 | `WakeupTrigger#setShareFetchAction` / `ShareFetchAction` | no fetch-action concept in Rust (token + `select!`); nothing added to `wakeup_trigger.rs`. P6 translated `testWakeupFromShareFetchAction` against a buffer wait that `select!`s on the token; the share `poll` doing so is P7 (deferral row) | P6 (done) / P7 (done: the share `poll` ends its buffer wait on the token) | done |
 | G8 | `GroupRebalanceConfig` with `ProtocolType.SHARE` (rack id, group id, etc.) | no `GroupRebalanceConfig` type; `async_kafka_consumer.rs` inlines the reads it needs | P7 (done: `ShareConsumerImpl::new_inner` reads `group.id` and `client.rack` and passes them to the share supplier) | done |
 | G9 | `ShareFetchException` / `ShareInFlightBatchException` both `extends SerializationException` and carry payload (`ShareFetchException` holds a generic `ShareFetch<?, ?>`); neither reaches the user. `ShareInFlightBatchException` is never thrown: `ShareCompletedFetch` stores it on the batch (`ShareInFlightBatch#setException`), and `ShareFetch#acknowledge(String, int, long, AcknowledgeType)` / `ShareFetchCollector#collect` read it back. `ShareFetchException` is thrown by `ShareFetchCollector#collect` (`new ShareFetchException(fetch, batch.getException().cause())`) and caught in `ShareConsumerImpl#poll`, which sets `currentFetch = e.shareFetch()` and rethrows `e.cause()` (e.g. a `RecordDeserializationException` or `CorruptRecordException`) | no counterpart. Both become **crate-private carriers**, not `Error` variants. At the `poll` boundary Rust sets `current_fetch` from the carried fetch and returns the carried cause `Error` unchanged; it does **not** map to `Error::Serialization`. A test asserts that the error `poll` returns has the cause's variant and message, and that `current_fetch` was replaced | P3a/P3b (carriers, done: `ConsumerShareInFlightBatchError`, `ConsumerShareFetchError::into_parts`), P7 (`poll` catch site, done) | done |
-| G10 | `ConsumerConfig` `CLASSIC_` / `CONSUMER_PROTOCOL_UNSUPPORTED_CONFIGS` include the two share keys | exists (`consumer_config.rs` lists `SHARE_ACKNOWLEDGEMENT_MODE_CONFIG` in both) | — | exists |
-| G11 | `AbstractRequest` / `AbstractResponse` parse arms for the client share APIs | missing | P1 | yes (as `ConcreteRequest` arms) |
-| G12 | Admin share-offsets wire wrappers (6 files, §1.1) | missing | P1 | **no** (plan P1 lists only the 4 consumer APIs) |
+| G10 | `ConsumerConfig` `CLASSIC_` / `CONSUMER_PROTOCOL_UNSUPPORTED_CONFIGS` include the two share keys | exists (`consumer_config.rs` lists `SHARE_ACKNOWLEDGEMENT_MODE_CONFIG` and `SHARE_ACQUIRE_MODE_CONFIG` in both) | — | exists |
+| G11 | `AbstractRequest` / `AbstractResponse` parse arms for the client share APIs | **done in P1**: the `ConcreteRequest` / `ConcreteResponse` arms (§1.1) | P1 (done) | yes (as `ConcreteRequest` arms) |
+| G12 | Admin share-offsets wire wrappers (6 files, §1.1) | **done in P1** (§1.1) | P1 (done) | **no** (plan P1 lists only the 4 consumer APIs) |
 | G13 | `ErrorEvent` (`BackgroundEvent`) used by share code | exists as `BackgroundEvent::Error` | — | exists |
 | G14 | `IdempotentCloser` (used by `ShareFetchBuffer`, `ShareConsumeRequestManager`) | not translated; consumer precedent uses a flag (`fetch_buffer.rs`, `request_managers.rs` "Why a flag, not `IdempotentCloser`") | follow precedent in P3b/P5 | n/a |
 | G15 | `CloseableIterator` (used by `ShareCompletedFetch` over record batches) | done in P3a: the shared `batch_cursor::BatchCursor` record source, as `CompletedFetch` | P3a (done) | n/a |
@@ -293,3 +295,34 @@ share code gets a row. A phase cannot close with an unowned row.
 | C FFI for the P8 public share consumer API: `ShareConsumer`, `KafkaShareConsumer`, `MockShareConsumer`, `ShareConsumerHandle`, `AcknowledgeOptions` / `AcknowledgeOptionsBuilder`, and `AcknowledgementCommitCallback` (flagged once `ShareConsumer` takes it) | `rust/xtask/ffi-baseline.txt` (`prefix:kafka_consumer_<Type>`, `prefix:kafka_consumer_ShareConsumer_` for the trait's methods) | the share-consumer FFI milestone (after M18) | M18 is Rust-only (PLAN §1); same treatment as `AcknowledgeType` and the P9 admin types. `DynShareConsumer` needs none (the lint skips `Dyn*` companions, as `DynConsumer`) |
 | Proposed doc contract change `crate::consumer::ShareConsumer::poll` (`Duration::MAX` waits without limit where Java throws `ArithmeticException`) and its two `rust/xtask/doc-baseline.txt` lines (`errors`, `warning`) | `design/current/doc-contract-changes.md` | the user (acceptance), then whoever drops the two baseline lines | documentation.md §6: only the user fills `Accepted`; it mirrors the accepted `Consumer::poll` entry |
 | Proposed doc contract change `crate::consumer::AcknowledgeType::Renew` (D5: the deserializers run again once per redelivery; a failed re-deserialization releases the record and is reported by `poll` only when it has no other record to return) and its `warning` line in `rust/xtask/doc-baseline.txt` | `design/current/doc-contract-changes.md`, `rust/src/consumer/acknowledge_type.rs` | the user (acceptance), then whoever drops the baseline line | documentation.md §6: only the user fills `Accepted` (Critic 300 Issue 1) |
+
+## 5. P11 audit (2026-11-23)
+
+**Coverage.** The closure was derived again from the 4.4.0 tree (`git -C kafka ls-files` and grep,
+not from this file): 95 main files, each with a row (the 10 inter-broker share-state wrappers
+under one grouped row). Every `done` row's Rust file exists. Every Java unit and integration test
+method maps to a Rust test or to a stated skip, and no share integration test is `#[ignore]`d.
+Rows the audit added or corrected: `FencedStateEpochException` (§1.6), `GroupRebalanceConfigTest`'s
+`SHARE` arm (§2.2), G10's wording and G11 / G12 (done in P1, §3), the closed "re-check at P11"
+note (§1.1), and two malformed §1.3 rows. Rows marked `exists` or `n/a` cover pre-existing code or
+files with no share content; they need no work. `method-coverage.md` gained the P1 and P2 tables,
+which predate the check; across all 75 classes it maps every Java method to a Rust function or a
+reason, and no row names a function that does not exist. No untranslated method or test was found.
+
+**Deferrals (R2).** Every row of §4 is closed except five, each owned:
+- the three C FFI rows (`AcknowledgeType`, the P8 share consumer API, the P9 admin share types):
+  the share-consumer FFI milestone. They are the 27 `prefix:` waivers the milestone added to
+  `rust/xtask/ffi-baseline.txt`, one per public type or `Admin` method pair;
+- the two proposed doc contract changes (`ShareConsumer::poll`, `AcknowledgeType::Renew`): the
+  user, then whoever drops their three `rust/xtask/doc-baseline.txt` lines. The `errors` line is
+  the rules gap `rules-promotion.md` §2.2 addresses.
+
+No other baseline file changed. The code carries no `todo!`, `unimplemented!`, TODO, FIXME or
+phase-owned `expect`; the remaining item-level `expect(dead_code)` attributes are permanent, each
+with Java's reason (only Java's tests use the item, or a Rust-only path replaces it). One stale
+"(ledger deferral row)" reference in a `ShareCompletedFetch` test doc was corrected.
+
+**Outside the share closure, noted only:** `DynamicGroupConfigIntegrationTest` uses
+`GroupConfig.SHARE_AUTO_OFFSET_RESET_CONFIG` as data in an admin group-config test (admin parity,
+not M18). The consumer follow-ups of PLAN §8 are owned by "consumer follow-up, out of M18", not by
+a named milestone; scheduling them is the user's call.

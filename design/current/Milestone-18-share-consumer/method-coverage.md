@@ -6,7 +6,398 @@ included) and the Rust function that translates it, found by name or by
 `#[doc(alias = "...#method")]`, or a one-line reason it has none. An unmapped
 row without a reason is a Critic finding.
 
-Java reference: Kafka 4.4.0. Paths are under `rust/src/consumer/internals/`.
+Java reference: Kafka 4.4.0. Paths are under `rust/src/consumer/internals/` unless a section says otherwise. P1 and P2
+predate the method-coverage check (PLAN §8, from P4b on); P11 added their tables.
+
+## P1 (tables added in P11)
+
+Wire wrappers (`org.apache.kafka.common.requests`). Paths are under
+`rust/src/common/requests/`. Every request and response also gets the
+Rust-only `version()` / `api_key()` / `data_mut()` accessors the crate's
+`ConcreteRequest` / `ConcreteResponse` enums dispatch through (as every
+existing wrapper), `toString` maps to `Display`, and `Builder#build(short)`
+maps to `RequestBuilder::build_version` (with `api_key` /
+`oldest_allowed_version` / `latest_allowed_version`, Java's `AbstractRequest.Builder`
+fields). `getErrorResponse(int, Throwable)` takes the crate's `&Errors` (or
+`&Error`) as every other wrapper does.
+
+### `ShareFetchRequest` (`share_fetch_request.rs`)
+
+| Java method | Rust |
+|---|---|
+| `Builder(ShareFetchRequestData)` | `Builder::new` |
+| `Builder#forConsumer(String, ShareRequestMetadata, int, int, int, int, int, byte, boolean, List, List, Map)` (static) | `Builder::for_consumer` (12 parameters, crate-private type, so CLAUDE.md §2's `Options` rule does not bite: `common::requests` is `pub(crate)`) |
+| `Builder#updateForgottenData(List)` | `Builder::update_forgotten_data` |
+| `Builder#data()` | `Builder::data` |
+| `Builder#build(short)` | `RequestBuilder::build_version` impl |
+| `Builder#toString()` | `impl Display for Builder` |
+| `ShareFetchRequest(ShareFetchRequestData, short)` | `ShareFetchRequest::new` |
+| `data()` | `ShareFetchRequest::data` |
+| `getErrorResponse(int, Throwable)` | `ShareFetchRequest::get_error_response` |
+| `parse(Readable, short)` (static) | `ShareFetchRequest::parse` |
+| `minBytes()` / `maxBytes()` / `maxWait()` | `min_bytes` / `max_bytes` / `max_wait` |
+| `shareFetchData(Map)` | `ShareFetchRequest::share_fetch_data` |
+| `forgottenTopics(Map)` | `ShareFetchRequest::forgotten_topics` |
+| *(Rust-only)* | free fns `find_or_add_fetch_topic`, `find_or_add_fetch_partition` (helpers of `for_consumer`, inlined lambdas in Java) |
+
+### `ShareFetchResponse` (`share_fetch_response.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareFetchResponse(ShareFetchResponseData)` (private) | `ShareFetchResponse::new` (private) |
+| `error()` | `ShareFetchResponse::error` |
+| `data()` | `ShareFetchResponse::data` |
+| `errorCounts()` | `ShareFetchResponse::error_counts` |
+| `responseData(Map)` | `ShareFetchResponse::response_data` (`IndexMap` for Java's `LinkedHashMap`) |
+| `throttleTimeMs()` | `ShareFetchResponse::throttle_time_ms` |
+| `maybeSetThrottleTimeMs(int)` | `ShareFetchResponse::maybe_set_throttle_time_ms` |
+| `parse(Readable, short)` (static) | `ShareFetchResponse::parse` |
+| `recordsOrFail(PartitionData)` (static) | `ShareFetchResponse::records_or_fail` |
+| `sizeOf(short, Iterator)` (static) | `ShareFetchResponse::size_of` |
+| `recordsSize(PartitionData)` (static) | `ShareFetchResponse::records_size` |
+| `of(Errors, int, LinkedHashMap, List, int)` (static) | `ShareFetchResponse::of` |
+| `toMessage(Errors, int, Iterator, List, int)` (private static) | `ShareFetchResponse::to_message` (private) |
+| `partitionResponse(TopicIdPartition, Errors)` (public static) | `ShareFetchResponse::partition_response_with_topic_id_partition` |
+| `partitionResponse(int, Errors)` (private static) | `ShareFetchResponse::partition_response_with_partition` (private) |
+| `toString()` (inherited `AbstractResponse`) | `impl Display` |
+
+### `ShareAcknowledgeRequest` (`share_acknowledge_request.rs`)
+
+| Java method | Rust |
+|---|---|
+| `Builder(ShareAcknowledgeRequestData)` | `Builder::new` |
+| `Builder#forConsumer(String, ShareRequestMetadata, boolean, Map)` (static) | `Builder::for_consumer` |
+| `Builder#data()` | `Builder::data` |
+| `Builder#build(short)` | `RequestBuilder::build_version` impl |
+| `Builder#toString()` | `impl Display for Builder` |
+| `ShareAcknowledgeRequest(ShareAcknowledgeRequestData, short)` | `ShareAcknowledgeRequest::new` |
+| `data()` | `ShareAcknowledgeRequest::data` |
+| `getErrorResponse(int, Throwable)` | `ShareAcknowledgeRequest::get_error_response` |
+| `parse(Readable, short)` (static) | `ShareAcknowledgeRequest::parse` |
+
+### `ShareAcknowledgeResponse` (`share_acknowledge_response.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareAcknowledgeResponse(ShareAcknowledgeResponseData)` | `ShareAcknowledgeResponse::new` |
+| `error()` | `ShareAcknowledgeResponse::error` |
+| `data()` | `ShareAcknowledgeResponse::data` |
+| `errorCounts()` | `ShareAcknowledgeResponse::error_counts` |
+| `throttleTimeMs()` | `ShareAcknowledgeResponse::throttle_time_ms` |
+| `maybeSetThrottleTimeMs(int)` | `ShareAcknowledgeResponse::maybe_set_throttle_time_ms` |
+| `parse(Readable, short)` (static) | `ShareAcknowledgeResponse::parse` |
+| `matchingTopic(ShareAcknowledgeTopicResponse, TopicIdPartition)` (private static) | none: dead code in Java 4.4.0 (no caller; `toMessage` looks the topic up with `topicResponses.find(topicId)`, which `to_message` translates as a `position` search) |
+| `partitionResponse(TopicIdPartition, Errors)` (static) | `ShareAcknowledgeResponse::partition_response_with_topic_id_partition` |
+| `partitionResponse(int, Errors)` (static) | `ShareAcknowledgeResponse::partition_response_with_partition` |
+| `of(Errors, int, LinkedHashMap, List, int)` (static) | `ShareAcknowledgeResponse::of` |
+| `toMessage(Errors, int, Iterator, List, int)` (public static) | `ShareAcknowledgeResponse::to_message` |
+| `toString()` (inherited) | `impl Display` |
+
+### `ShareGroupHeartbeatRequest` (`share_group_heartbeat_request.rs`)
+
+| Java method | Rust |
+|---|---|
+| `LEAVE_GROUP_MEMBER_EPOCH`, `JOIN_GROUP_MEMBER_EPOCH` (constants) | `ShareGroupHeartbeatRequest::LEAVE_GROUP_MEMBER_EPOCH`, `::JOIN_GROUP_MEMBER_EPOCH` |
+| `Builder(ShareGroupHeartbeatRequestData)` | `Builder::new` |
+| `Builder#build(short)` | `RequestBuilder::build_version` impl |
+| `Builder#toString()` | `impl Display for Builder` |
+| `ShareGroupHeartbeatRequest(ShareGroupHeartbeatRequestData, short)` | `ShareGroupHeartbeatRequest::new` |
+| `getErrorResponse(int, Throwable)` | `ShareGroupHeartbeatRequest::get_error_response` |
+| `data()` | `ShareGroupHeartbeatRequest::data` |
+| `parse(Readable, short)` (static) | `ShareGroupHeartbeatRequest::parse` |
+
+### `ShareGroupHeartbeatResponse` (`share_group_heartbeat_response.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareGroupHeartbeatResponse(ShareGroupHeartbeatResponseData)` | `ShareGroupHeartbeatResponse::new` |
+| `data()` | `ShareGroupHeartbeatResponse::data` |
+| `errorCounts()` | `ShareGroupHeartbeatResponse::error_counts` |
+| `throttleTimeMs()` | `ShareGroupHeartbeatResponse::throttle_time_ms` |
+| `maybeSetThrottleTimeMs(int)` | `ShareGroupHeartbeatResponse::maybe_set_throttle_time_ms` |
+| `parse(Readable, short)` (static) | `ShareGroupHeartbeatResponse::parse` |
+| `createAssignment(Map)` (static) | `ShareGroupHeartbeatResponse::create_assignment` |
+
+### `ShareGroupDescribeRequest` (`share_group_describe_request.rs`)
+
+| Java method | Rust |
+|---|---|
+| `Builder(ShareGroupDescribeRequestData)` | `Builder::new` |
+| `Builder#build(short)` | `RequestBuilder::build_version` impl |
+| `Builder#toString()` | `impl Display for Builder` |
+| `ShareGroupDescribeRequest(ShareGroupDescribeRequestData, short)` | `ShareGroupDescribeRequest::new` |
+| `getErrorResponse(int, Throwable)` | `ShareGroupDescribeRequest::get_error_response` |
+| `data()` | `ShareGroupDescribeRequest::data` |
+| `parse(Readable, short)` (static) | `ShareGroupDescribeRequest::parse` |
+| `getErrorDescribedGroupList(List, Errors)` (static) | `ShareGroupDescribeRequest::get_error_described_group_list` |
+
+### `ShareGroupDescribeResponse` (`share_group_describe_response.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ShareGroupDescribeResponse(ShareGroupDescribeResponseData)` | `ShareGroupDescribeResponse::new` |
+| `data()` | `ShareGroupDescribeResponse::data` |
+| `errorCounts()` | `ShareGroupDescribeResponse::error_counts` |
+| `throttleTimeMs()` | `ShareGroupDescribeResponse::throttle_time_ms` |
+| `maybeSetThrottleTimeMs(int)` | `ShareGroupDescribeResponse::maybe_set_throttle_time_ms` |
+| `parse(Readable, short)` (static) | `ShareGroupDescribeResponse::parse` |
+
+### `ShareRequestMetadata` (`share_request_metadata.rs`)
+
+| Java method | Rust |
+|---|---|
+| `INITIAL_EPOCH`, `FINAL_EPOCH` (constants) | `ShareRequestMetadata::INITIAL_EPOCH`, `::FINAL_EPOCH` |
+| `ShareRequestMetadata(Uuid, int)` | `ShareRequestMetadata::new` |
+| `isNewSession()` | `ShareRequestMetadata::is_new_session` |
+| `nextEpoch(int)` (static) | `ShareRequestMetadata::do_next_epoch` (NAMING: CLAUDE.md §2 would give `next_epoch_with_prev_epoch`; the rustdoc says "the `do_` prefix the crate uses for such a collision", but the crate's other `do_*` fns are Java's own `doSend` etc., so there is no such precedent. Compare `FetchMetadata::next_epoch(prev_epoch)`, which has no instance overload) |
+| `initialEpoch(Uuid)` (static) | `ShareRequestMetadata::initial_epoch` |
+| `nextEpoch()` | `ShareRequestMetadata::next_epoch` |
+| `nextCloseExistingAttemptNew()` | `ShareRequestMetadata::next_close_existing_attempt_new` |
+| `finalEpoch()` | `ShareRequestMetadata::final_epoch` |
+| `memberId()` | `ShareRequestMetadata::member_id` |
+| `epoch()` | `ShareRequestMetadata::epoch` |
+| `isFinalEpoch()` | `ShareRequestMetadata::is_final_epoch` |
+| `toString()` | `impl Display` |
+
+### `DescribeShareGroupOffsetsRequest` (`describe_share_group_offsets_request.rs`)
+
+| Java method | Rust |
+|---|---|
+| `Builder(DescribeShareGroupOffsetsRequestData)` | `Builder::new` |
+| `Builder#build(short)` | `RequestBuilder::build_version` impl |
+| `Builder#toString()` | `impl Display for Builder` |
+| `DescribeShareGroupOffsetsRequest(DescribeShareGroupOffsetsRequestData, short)` | `DescribeShareGroupOffsetsRequest::new` |
+| `groupIds()` | `DescribeShareGroupOffsetsRequest::group_ids` |
+| `groups()` | `DescribeShareGroupOffsetsRequest::groups` |
+| `getErrorResponse(int, Throwable)` | `DescribeShareGroupOffsetsRequest::get_error_response` (takes `&Error`, keeping the message, as Java's `Throwable`) |
+| `data()` | `DescribeShareGroupOffsetsRequest::data` |
+| `parse(Readable, short)` (static) | `DescribeShareGroupOffsetsRequest::parse` |
+| `getErrorDescribedGroup(String, Errors)` (static) | `DescribeShareGroupOffsetsRequest::get_error_described_group` |
+
+### `DescribeShareGroupOffsetsResponse` (`describe_share_group_offsets_response.rs`)
+
+| Java method | Rust |
+|---|---|
+| `DescribeShareGroupOffsetsResponse(DescribeShareGroupOffsetsResponseData)` | `DescribeShareGroupOffsetsResponse::new` |
+| `DescribeShareGroupOffsetsResponse(int, List, Throwable)` | `DescribeShareGroupOffsetsResponse::with_throttle_time_ms_group_ids_all_groups_error` |
+| `hasGroupError(String)` | `DescribeShareGroupOffsetsResponse::has_group_error` |
+| `groupError(String)` | `DescribeShareGroupOffsetsResponse::group_error` |
+| `data()` | `DescribeShareGroupOffsetsResponse::data` |
+| `errorCounts()` | `DescribeShareGroupOffsetsResponse::error_counts` |
+| `throttleTimeMs()` | `DescribeShareGroupOffsetsResponse::throttle_time_ms` |
+| `maybeSetThrottleTimeMs(int)` | `DescribeShareGroupOffsetsResponse::maybe_set_throttle_time_ms` |
+| `parse(Readable, short)` (static) | `DescribeShareGroupOffsetsResponse::parse` |
+
+### `AlterShareGroupOffsetsRequest` (`alter_share_group_offsets_request.rs`)
+
+| Java method | Rust |
+|---|---|
+| `AlterShareGroupOffsetsRequest(AlterShareGroupOffsetsRequestData, short)` (private) | `AlterShareGroupOffsetsRequest::new` (private) |
+| `Builder(AlterShareGroupOffsetsRequestData)` | `Builder::new` |
+| `Builder#build(short)` | `RequestBuilder::build_version` impl |
+| `Builder#toString()` | `impl Display for Builder` |
+| `getErrorResponse(int, Throwable)`, `getErrorResponse(int, Errors)` | `AlterShareGroupOffsetsRequest::get_error_response` (one Rust form: the crate's `&Errors` covers both) |
+| `getErrorResponse(int, short, String)` | `AlterShareGroupOffsetsRequest::get_error_response_with_error_code_message` |
+| `getErrorResponseData(Errors)`, `getErrorResponseData(Errors, String)` (static) | `AlterShareGroupOffsetsRequest::get_error_response_data(Errors, Option<&str>)` (the two differ only by an optional parameter, CLAUDE.md §2) |
+| `parse(Readable, short)` (static) | `AlterShareGroupOffsetsRequest::parse` |
+| `data()` | `AlterShareGroupOffsetsRequest::data` |
+
+### `AlterShareGroupOffsetsResponse` (`alter_share_group_offsets_response.rs`)
+
+| Java method | Rust |
+|---|---|
+| `AlterShareGroupOffsetsResponse(AlterShareGroupOffsetsResponseData)` | `AlterShareGroupOffsetsResponse::new` |
+| `errorCounts()` | `AlterShareGroupOffsetsResponse::error_counts` |
+| `throttleTimeMs()` | `AlterShareGroupOffsetsResponse::throttle_time_ms` |
+| `maybeSetThrottleTimeMs(int)` | `AlterShareGroupOffsetsResponse::maybe_set_throttle_time_ms` |
+| `data()` | `AlterShareGroupOffsetsResponse::data` |
+| `parse(Readable, short)` (static) | `AlterShareGroupOffsetsResponse::parse` |
+| `Builder()` (implicit) | `Builder::new` (+ `Default`) |
+| `Builder#getOrCreateTopic(String, Uuid)` (private) | `Builder::get_or_create_topic` (private) |
+| `Builder#addPartition(String, int, Map, ApiError)` | `Builder::add_partition` |
+| `Builder#build()` | `Builder::build` |
+| `Builder#merge(AlterShareGroupOffsetsResponseData, Map)` | `Builder::merge` |
+
+### `DeleteShareGroupOffsetsRequest` (`delete_share_group_offsets_request.rs`)
+
+| Java method | Rust |
+|---|---|
+| `Builder(DeleteShareGroupOffsetsRequestData)` | `Builder::new` |
+| `Builder#build(short)` | `RequestBuilder::build_version` impl |
+| `Builder#toString()` | `impl Display for Builder` |
+| `DeleteShareGroupOffsetsRequest(DeleteShareGroupOffsetsRequestData, short)` | `DeleteShareGroupOffsetsRequest::new` |
+| `getErrorResponse(int, Throwable)`, `getErrorResponse(int, Errors)` (package-private) | `DeleteShareGroupOffsetsRequest::get_error_response` |
+| `getErrorResponse(int, short, String)` | `DeleteShareGroupOffsetsRequest::get_error_response_with_error_code_error_message` |
+| `data()` | `DeleteShareGroupOffsetsRequest::data` |
+| `parse(Readable, short)` (static) | `DeleteShareGroupOffsetsRequest::parse` |
+| `getErrorDeleteResponseData(Errors)`, `getErrorDeleteResponseData(Errors, String)` (static) | `DeleteShareGroupOffsetsRequest::get_error_delete_response_data(Errors, Option<&str>)` |
+| `getErrorDeleteResponseData(short, String)` (static) | `DeleteShareGroupOffsetsRequest::get_error_delete_response_data_with_error_code_error_message` |
+
+### `DeleteShareGroupOffsetsResponse` (`delete_share_group_offsets_response.rs`)
+
+| Java method | Rust |
+|---|---|
+| `DeleteShareGroupOffsetsResponse(DeleteShareGroupOffsetsResponseData)` | `DeleteShareGroupOffsetsResponse::new` |
+| `data()` | `DeleteShareGroupOffsetsResponse::data` |
+| `errorCounts()` | `DeleteShareGroupOffsetsResponse::error_counts` |
+| `throttleTimeMs()` | `DeleteShareGroupOffsetsResponse::throttle_time_ms` |
+| `maybeSetThrottleTimeMs(int)` | `DeleteShareGroupOffsetsResponse::maybe_set_throttle_time_ms` |
+| `parse(Readable, short)` (static) | `DeleteShareGroupOffsetsResponse::parse` |
+
+### Summary (P1)
+
+| Class | Java members | Mapped to a Rust function | No Rust function, with reason |
+|---|---|---|---|
+| `ShareFetchRequest` (+ `Builder`) | 15 | 15 | 0 |
+| `ShareFetchResponse` | 15 | 15 | 0 |
+| `ShareAcknowledgeRequest` (+ `Builder`) | 9 | 9 | 0 |
+| `ShareAcknowledgeResponse` | 12 | 11 | 1: `matchingTopic` (private, no caller in Java) |
+| `ShareGroupHeartbeatRequest` (+ `Builder`) | 7 + 2 constants | 7 + 2 | 0 |
+| `ShareGroupHeartbeatResponse` | 7 | 7 | 0 |
+| `ShareGroupDescribeRequest` (+ `Builder`) | 8 | 8 | 0 |
+| `ShareGroupDescribeResponse` | 6 | 6 | 0 |
+| `ShareRequestMetadata` | 11 + 2 constants | 11 + 2 | 0 (`do_next_epoch` name to settle) |
+| `DescribeShareGroupOffsetsRequest` (+ `Builder`) | 10 | 10 | 0 |
+| `DescribeShareGroupOffsetsResponse` | 9 | 9 | 0 |
+| `AlterShareGroupOffsetsRequest` (+ `Builder`) | 11 | 11 (two overload pairs collapsed) | 0 |
+| `AlterShareGroupOffsetsResponse` (+ `Builder`) | 10 | 10 | 0 |
+| `DeleteShareGroupOffsetsRequest` (+ `Builder`) | 12 | 12 (two overload pairs collapsed) | 0 |
+| `DeleteShareGroupOffsetsResponse` | 6 | 6 | 0 |
+
+## P2 (tables added in P11)
+
+Public value types and the acknowledgement internals. Paths are under
+`rust/src/consumer/` (`internals/` for the crate-private ones).
+
+### `AcknowledgeType` (`acknowledge_type.rs`, pub)
+
+| Java method | Rust |
+|---|---|
+| `ACCEPT`, `RELEASE`, `REJECT`, `RENEW` | variants `Accept`, `Release`, `Reject`, `Renew` (`#[non_exhaustive]`) |
+| `public final byte id` (field) | `AcknowledgeType::id()` (CLAUDE.md §3: no public fields) |
+| `AcknowledgeType(byte)` (enum constructor) | none: the discriminant is matched in `id()` |
+| `toString()` (lower-case name) | `impl Display` |
+| `forId(byte)` (static) | `AcknowledgeType::for_id` (`Result`, for Java's `IllegalArgumentException`) |
+| `equals` / `hashCode` (enum) | `#[derive(PartialEq, Eq, Hash)]` |
+
+### `AcknowledgementCommitCallback` (`acknowledgement_commit_callback.rs`, pub trait)
+
+| Java method | Rust |
+|---|---|
+| `onComplete(Map<TopicIdPartition, Set<Long>>, Exception)` | `AcknowledgementCommitCallback::on_complete(&HashMap<TopicIdPartition, HashSet<i64>>, Option<&Error>)` (`#[async_trait]`, `share-consumer.md`) |
+| *(Rust-only)* | free fn `acknowledgement_commit_callback::new` (closure adapter, `#[doc(alias = "rust-only")]`) |
+
+### `ShareConsumerConfig` (`share_consumer_config.rs`, crate)
+
+| Java method | Rust |
+|---|---|
+| `SHARE_GROUP_UNSUPPORTED_CONFIGS` (private constant) | module const `SHARE_GROUP_UNSUPPORTED_CONFIGS` (plus `INTERCEPTOR_CLASSES_CONFIG`, a local key constant because `ConsumerConfig` does not define the class-valued key) |
+| `ShareConsumerConfig(Properties)`, `ShareConsumerConfig(Map)` (package-private) | `ShareConsumerConfig::new(&HashMap<String, String>)` (one string map for both, as `KafkaShareConsumer::new`) |
+| `ShareConsumerConfig(Map, boolean doLog)` (protected) | none: no Java caller in the client (only a subclass hook); `new` always logs as Java's public constructors do |
+| `preProcessParsedConfig(Map)` (protected override) | `ShareConsumerConfig::pre_process_parsed_config` (passed to `ConsumerConfig::build_with_hooks`) |
+| `checkUnsupportedConfigsPreProcess(Map)` (private) | `ShareConsumerConfig::check_unsupported_configs_pre_process` |
+| `checkUnsupportedConfigsPostProcess()` (protected override) | `ShareConsumerConfig::check_unsupported_configs_post_process` (no-op, as Java) |
+| *(Rust-only)* | `into_consumer_config`, `impl Deref<Target = ConsumerConfig>` (Java's `extends ConsumerConfig`) |
+
+### `ShareAcknowledgementMode` (`internals/share_acknowledgement_mode.rs`)
+
+| Java method | Rust |
+|---|---|
+| `AcknowledgementMode` (nested enum: `IMPLICIT`, `EXPLICIT`) | `AcknowledgementMode` (`Implicit`, `Explicit`) |
+| `AcknowledgementMode#toString()` | `impl Display for AcknowledgementMode` (via `as_str`) |
+| `IMPLICIT`, `EXPLICIT` (static constants) | `ShareAcknowledgementMode::IMPLICIT`, `::EXPLICIT` |
+| `ShareAcknowledgementMode(AcknowledgementMode)` (private) | none: the two constants are struct literals |
+| `fromString(String)` (static) | `ShareAcknowledgementMode::from_string(Option<&str>)` (`None` is Java's `null`) |
+| `name()` | `ShareAcknowledgementMode::name` (test-only in Java; item-level expect) |
+| `equals(Object)` / `hashCode()` | `#[derive(PartialEq, Eq, Hash)]` |
+| `toString()` | `impl Display` |
+| `Validator#ensureValid(String, Object)` | `impl config_def::Validator for Validator` → `ensure_valid` |
+| `Validator#toString()` | `impl Display for Validator` |
+
+### `ShareAcquireMode` (`internals/share_acquire_mode.rs`)
+
+| Java method | Rust |
+|---|---|
+| `BATCH_OPTIMIZED`, `RECORD_LIMIT` | variants `BatchOptimized`, `RecordLimit` |
+| `public final String name` (field) | `ShareAcquireMode::name()` |
+| `final byte id` (field) / `id()` | `ShareAcquireMode::id()` |
+| `ShareAcquireMode(String, byte)` (enum constructor) | none: matched in `name()` / `id()` |
+| `of(String)` (static) | `ShareAcquireMode::of(Option<&str>)` (Java's `valueOf` through the Rust-only `constant_name` and `VALUES`) |
+| `forId(byte)` (static) | `ShareAcquireMode::for_id` (broker/tests only in Java; item-level expect) |
+| `toString()` | `impl Display` |
+| `Validator#ensureValid(String, Object)` | `impl config_def::Validator for Validator` → `ensure_valid` |
+| `Validator#toString()` | `impl Display for Validator` |
+
+### `Acknowledgements` (`internals/acknowledgements.rs`)
+
+| Java method | Rust |
+|---|---|
+| `ACKNOWLEDGE_TYPE_GAP`, `MAX_RECORDS_WITH_SAME_ACKNOWLEDGE_TYPE` (constants) | `Acknowledgements::ACKNOWLEDGE_TYPE_GAP`, `::MAX_RECORDS_WITH_SAME_ACKNOWLEDGE_TYPE` |
+| `empty()` (static) | `Acknowledgements::empty` |
+| `Acknowledgements(Map)` (private) | none: `empty` builds the struct directly (Java's only caller) |
+| `add(long, AcknowledgeType)` | `Acknowledgements::add(i64, Option<AcknowledgeType>)` (`None` is Java's `null` gap entry) |
+| `addIfAbsent(long, AcknowledgeType)` | `Acknowledgements::add_if_absent` |
+| `addGap(long)` | `Acknowledgements::add_gap` |
+| `get(long)` | `Acknowledgements::get` (test-only in Java; item-level expect) |
+| `isEmpty()` | `Acknowledgements::is_empty` |
+| `size()` | `Acknowledgements::size` |
+| `isCompleted()` | `Acknowledgements::is_completed` |
+| `complete(KafkaException)` | `Acknowledgements::complete(Option<Error>)` |
+| `getAcknowledgeException()` | `Acknowledgements::acknowledge_error` (CLAUDE.md §2: no "exception"; `get_` dropped) |
+| `isCompletedExceptionally()` | `Acknowledgements::is_completed_with_error` |
+| `merge(Acknowledgements)` | `Acknowledgements::merge` |
+| `getAcknowledgementsTypeMap()` | `Acknowledgements::acknowledgements_type_map` (`get_` dropped) |
+| `getAcknowledgementBatches()` | `Acknowledgements::acknowledgement_batches` (`get_` dropped) |
+| `maybeCreateNewBatch(AcknowledgementBatch, Long, List)` (private) | `Acknowledgements::maybe_create_new_batch` |
+| `maybeOptimiseAcknowledgeTypes(AcknowledgementBatch)` (private) | `Acknowledgements::maybe_optimise_acknowledge_types` |
+| `canOptimiseForSingleAcknowledgeType(AcknowledgementBatch)` (private) | `Acknowledgements::can_optimise_for_single_acknowledge_type` |
+| `toString()` | `impl Display` |
+| *(Rust-only)* | `add_optimal_batches` (private helper factored out of `getAcknowledgementBatches`) |
+
+### `AcknowledgementBatch` (`internals/acknowledgement_batch.rs`)
+
+| Java method | Rust |
+|---|---|
+| `AcknowledgementBatch()` | `AcknowledgementBatch::new` |
+| `firstOffset()` / `lastOffset()` / `acknowledgeTypes()` | `first_offset` / `last_offset` / `acknowledge_types` |
+| `setFirstOffset(long)` / `setLastOffset(long)` / `setAcknowledgeTypes(List)` | `set_first_offset` / `set_last_offset` / `set_acknowledge_types` |
+| `toShareAcknowledgeRequest()` | `AcknowledgementBatch::to_share_acknowledge_request` |
+| `toShareFetchRequest()` | `AcknowledgementBatch::to_share_fetch_request` |
+| `equals(Object)` / `hashCode()` | `#[derive(PartialEq, Eq, Hash)]` |
+| `toString()` | `impl Display` |
+| *(Rust-only)* | `acknowledge_types_mut` (Java mutates the list `acknowledgeTypes()` returns) |
+
+### `NodeAcknowledgements` (`internals/node_acknowledgements.rs`)
+
+| Java method | Rust |
+|---|---|
+| `NodeAcknowledgements(int, Acknowledgements)` | `NodeAcknowledgements::new` |
+| `nodeId()` | `NodeAcknowledgements::node_id` |
+| `acknowledgements()` | `NodeAcknowledgements::acknowledgements` |
+| *(Rust-only)* | `into_acknowledgements` (moves the value out) |
+
+### `AcknowledgementCommitCallbackHandler` (`internals/acknowledgement_commit_callback_handler.rs`)
+
+| Java method | Rust |
+|---|---|
+| `AcknowledgementCommitCallbackHandler(AcknowledgementCommitCallback)` (package-private) | `AcknowledgementCommitCallbackHandler::new(Arc<dyn AcknowledgementCommitCallback>)` |
+| `hasEnteredCallback()` | `AcknowledgementCommitCallbackHandler::has_entered_callback` (Java's `ShareConsumerImpl#acquire` reads it; Rust rejects re-entry at compile time, D6; item-level expect) |
+| `onComplete(List<Map<TopicIdPartition, Acknowledgements>>)` (package-private) | `AcknowledgementCommitCallbackHandler::on_complete` (async) |
+| *(Rust-only)* | `ResetOnDrop` (private guard: Java's `finally { enteredCallback = false; }`, also on a dropped future) |
+
+### Summary (P2)
+
+| Class | Java members | Mapped to a Rust function | No Rust function, with reason |
+|---|---|---|---|
+| `AcknowledgeType` | 3 methods + field + 4 constants | all but the enum constructor | enum constructor (discriminant matched) |
+| `AcknowledgementCommitCallback` | 1 | 1 | 0 |
+| `ShareConsumerConfig` | 6 + 1 constant | 5 + 1 | `ShareConsumerConfig(Map, boolean doLog)` (protected subclass hook, no caller) |
+| `ShareAcknowledgementMode` (+ `AcknowledgementMode`, `Validator`) | 9 + 2 constants | 8 + 2 | private constructor (constants are literals) |
+| `ShareAcquireMode` (+ `Validator`) | 7 + 2 fields | 6 + 2 | enum constructor |
+| `Acknowledgements` | 19 + 2 constants | 18 + 2 | private constructor (inlined in `empty`) |
+| `AcknowledgementBatch` | 12 | 12 | 0 |
+| `NodeAcknowledgements` | 3 | 3 | 0 |
+| `AcknowledgementCommitCallbackHandler` | 3 | 3 | 0 |
 
 ## P4b
 
