@@ -29,12 +29,15 @@ const ALL_BY_BROKER_ID_FORMS = new JavaForms('allByBrokerId', [[]], { reader: tr
 
 /**
  * The result of the `Admin.listTransactions()` call.
- *
- * Instances come from the admin client's `listTransactions()`.
  */
 export class ListTransactionsResult {
   readonly #future: KafkaFuture<ReadonlyMap<number, KafkaFuture<TransactionListing[]>>>;
 
+  /**
+   * Instances come from the admin client's `listTransactions()`.
+   *
+   * @param future - the future of each broker's future, by broker id
+   */
   private constructor(future: KafkaFuture<ReadonlyMap<number, KafkaFuture<TransactionListing[]>>>) {
     this.#future = future;
   }

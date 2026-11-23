@@ -29,8 +29,6 @@ const AUTHORIZED_OPERATIONS_FORMS = new JavaForms('authorizedOperations', [[]], 
 
 /**
  * The result of the `KafkaAdminClient.describeCluster()` call.
- *
- * Instances come from the admin client's `describeCluster()`.
  */
 export class DescribeClusterResult {
   readonly #nodes: KafkaFuture<Node[]>;
@@ -38,6 +36,14 @@ export class DescribeClusterResult {
   readonly #clusterId: KafkaFuture<string>;
   readonly #authorizedOperations: KafkaFuture<Set<AclOperation> | null>;
 
+  /**
+   * Instances come from the admin client's `describeCluster()`.
+   *
+   * @param nodes - the nodes' future
+   * @param controller - the controller's future
+   * @param clusterId - the cluster id's future
+   * @param authorizedOperations - the authorized operations' future
+   */
   private constructor(
     nodes: KafkaFuture<Node[]>,
     controller: KafkaFuture<Node | null>,

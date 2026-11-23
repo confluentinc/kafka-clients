@@ -27,12 +27,15 @@ const REASSIGNMENTS_FORMS = new JavaForms('reassignments', [[]], { reader: true 
 
 /**
  * The result of `Admin.listPartitionReassignments(options)`.
- *
- * Instances come from the admin client's `listPartitionReassignments()`.
  */
 export class ListPartitionReassignmentsResult {
   readonly #future: KafkaFuture<TopicPartitionMap<PartitionReassignment>>;
 
+  /**
+   * Instances come from the admin client's `listPartitionReassignments()`.
+   *
+   * @param reassignments - the future of the reassignments, by partition
+   */
   private constructor(reassignments: KafkaFuture<TopicPartitionMap<PartitionReassignment>>) {
     this.#future = reassignments;
   }

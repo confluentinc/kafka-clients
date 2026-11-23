@@ -166,7 +166,7 @@ export interface Admin {
   /**
    * Close the Admin and release all associated resources.
    *
-   * See `close({ timeout })`.
+   * See `close({ timeout })`: this is `close({ timeout: Infinity })`.
    *
    * @returns resolving once the client closed
    */
@@ -2287,11 +2287,11 @@ export interface Admin {
 /**
  * The runtime object of the `Admin` interface: its static `create`.
  */
-export const Admin = {
+export const Admin: {
   /**
    * Create a new Admin with the given configuration.
    *
-   * @param options - The configuration, as `{ configs }` or on its own
+   * @param options - The configuration
    * @returns The new KafkaAdminClient.
    * @throws `KafkaError` when the client cannot be created ("Failed to
    *   create new KafkaAdminClient")
@@ -2302,14 +2302,24 @@ export const Admin = {
    *   one of (configs); got ()")
    * @throws `TypeError` when the configuration is not a plain object
    */
-  create(
-    options:
-      | {
-          /** The configuration. */
-          configs: AdminClientConfigs;
-        }
-      | AdminClientConfigs,
-  ): Admin {
+  create(options: {
+    /** The configuration. */
+    configs: AdminClientConfigs;
+  }): Admin;
+  /**
+   * The same as `create({ configs })`, the configuration on its own.
+   *
+   * @param configs - The configuration
+   * @returns The new KafkaAdminClient.
+   * @throws `KafkaError` when the client cannot be created ("Failed to
+   *   create new KafkaAdminClient")
+   * @throws `ConfigError` for a key that is not a string, or a value the
+   *   core refuses, with Java's message naming the key
+   * @throws `TypeError` when the configuration is not a plain object
+   */
+  create(configs: AdminClientConfigs): Admin;
+} = {
+  create(options: unknown): Admin {
     CREATE_FORMS.match(options, arguments.length);
     return KafkaAdminClient.internalCreate(CREATE_FORMS.value(options, 'configs'));
   },

@@ -40,12 +40,15 @@ type ProducerIdAndEpoch = { readonly producerId: bigint; readonly epoch: number 
 
 /**
  * The result of the `Admin.fenceProducers(transactionalIds)` call.
- *
- * Instances come from the admin client's `fenceProducers()`.
  */
 export class FenceProducersResult {
   readonly #futures: ReadonlyMap<string, KafkaFuture<ProducerIdAndEpoch>>;
 
+  /**
+   * Instances come from the admin client's `fenceProducers()`.
+   *
+   * @param futures - the futures of each id's producer id and epoch
+   */
   private constructor(futures: ReadonlyMap<string, KafkaFuture<ProducerIdAndEpoch>>) {
     this.#futures = futures;
   }

@@ -39,12 +39,15 @@ const ACTIVE_PRODUCERS_FORMS = new JavaForms('activeProducers', [[]], { reader: 
 
 /**
  * The result of the `Admin.describeProducers(partitions)` call.
- *
- * Instances come from the admin client's `describeProducers()`.
  */
 export class DescribeProducersResult {
   readonly #futures: TopicPartitionMap<KafkaFuture<DescribeProducersResult.PartitionProducerState>>;
 
+  /**
+   * Instances come from the admin client's `describeProducers()`.
+   *
+   * @param futures - the futures, by partition
+   */
   private constructor(futures: TopicPartitionMap<KafkaFuture<DescribeProducersResult.PartitionProducerState>>) {
     this.#futures = futures;
   }

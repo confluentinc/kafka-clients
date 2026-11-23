@@ -17,13 +17,13 @@
 // `cargo xtask check-generated` checks it is up to date.
 
 /**
- * The constants of Java's `org.apache.kafka.common.config.TopicConfig`: every
- * `public static final` field, evaluated from the Java source, is a static
- * property of the same name; a deprecated one is left out. A `List` constant is
- * a frozen array and a `Set` constant a read-only set whose `add`, `delete` and
- * `clear` throw `UnsupportedOperationError`, both in Java's order.
+ * Keys that can be used to configure a topic. These keys are useful when
+ * creating or reconfiguring a topic using the AdminClient.
  *
- * Java: `org.apache.kafka.common.config.TopicConfig`.
+ * The intended pattern is for broker configs to include a `log.` prefix. For
+ * example, to set the default broker cleanup policy, one would set
+ * `log.cleanup.policy` instead of `cleanup.policy`. Unfortunately, there are
+ * many cases where this pattern is not followed.
  */
 export class TopicConfig {
   /**

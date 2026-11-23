@@ -30,12 +30,15 @@ const VOID = null as unknown as void;
 
 /**
  * The result of `Admin.electLeaders(electionType, partitions, options)`.
- *
- * Instances come from the admin client's `electLeaders()`.
  */
 export class ElectLeadersResult {
   readonly #electionFuture: KafkaFuture<TopicPartitionMap<unknown>>;
 
+  /**
+   * Instances come from the admin client's `electLeaders()`.
+   *
+   * @param electionFuture - the future of the elections' outcomes
+   */
   private constructor(electionFuture: KafkaFuture<TopicPartitionMap<unknown>>) {
     this.#electionFuture = electionFuture;
   }

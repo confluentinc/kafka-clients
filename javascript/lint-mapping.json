@@ -105,6 +105,7 @@
     "Headers.hashCode": "org.apache.kafka.common.header.internals.RecordHeaders#hashCode"
   },
   "nativeCallers": {
-    "src/common/kafka_future.ts:KafkaFutureImpl": "the record's future (Java's FutureRecordMetadata) over the native future of its hand-over: on a future over a native handle, get() calls kafka_common_KafkaFuture_get_cb and get({ timeout }) kafka_common_KafkaFuture_get_with_timeout_cb (javascript/CLAUDE.md, JavaScript Binding Conventions, Futures and waiting)"
+    "src/common/kafka_future.ts:KafkaFutureImpl": "a future over a native handle, a record's (Java's FutureRecordMetadata, over the native future of its hand-over) or an admin RPC's: on a future over a native handle, get() calls kafka_common_KafkaFuture_get_cb and get({ timeout }) kafka_common_KafkaFuture_get_with_timeout_cb (javascript/CLAUDE.md, JavaScript Binding Conventions, Futures and waiting)",
+    "src/admin/mock_admin_client.ts:Builder": "MockAdminClient's nested Builder, over the FFI's mock builder (kafka_admin_MockAdminClient_Builder_new_err, its set_<field> functions and kafka_admin_MockAdminClient_Builder_build): the mock wraps the FFI's mock (javascript/CLAUDE.md, JavaScript Binding Conventions, Implementation over the FFI: Only KafkaProducer, KafkaConsumer, the admin client and the three mocks call the addon, because the mocks wrap the FFI's mocks), its setters making the FFI's set_<field> call only for the setters that ran (Class family, the option classes)"
   }
 }

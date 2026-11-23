@@ -519,13 +519,14 @@ function javaMember(index, cls, m, { anyStatic = false } = {}) {
 }
 
 /**
- * The members of an exported interface, or of a type alias of an object
- * type, in the shape `publicMembers` gives a class's: property and method
- * signatures (never static). Any other type alias has none.
+ * The members of an exported interface, of a type alias of an object type,
+ * or of an object type, in the shape `publicMembers` gives a class's:
+ * property and method signatures (never static). Any other type alias has
+ * none.
  */
 function shapeMembers(ts, node) {
   let elements = null;
-  if (ts.isInterfaceDeclaration(node)) elements = node.members;
+  if (ts.isInterfaceDeclaration(node) || ts.isTypeLiteralNode(node)) elements = node.members;
   else if (ts.isTypeAliasDeclaration(node) && ts.isTypeLiteralNode(node.type)) elements = node.type.members;
   if (elements === null) return [];
   const out = [];
@@ -549,12 +550,18 @@ function shapeMembers(ts, node) {
  * the const of its name in its module, or null.
  */
 function staticsObject(ts, item) {
+  const d = staticsDeclaration(ts, item);
+  return d === null ? null : d.initializer;
+}
+
+/** The const declaration of `staticsObject`, or null. */
+function staticsDeclaration(ts, item) {
   if (!ts.isInterfaceDeclaration(item.node)) return null;
   for (const st of item.node.getSourceFile().statements) {
     if (!ts.isVariableStatement(st)) continue;
     for (const d of st.declarationList.declarations) {
       if (ts.isIdentifier(d.name) && d.name.text === item.name && d.initializer && ts.isObjectLiteralExpression(d.initializer)) {
-        return d.initializer;
+        return d;
       }
     }
   }
@@ -564,12 +571,16 @@ function staticsObject(ts, item) {
 /**
  * The members of the runtime object beside exported interface `item`
  * (`staticsObject`), in the shape `publicMembers` gives a class's, each
- * static: a method (a method or a function-valued property), an accessor or
- * a property. A spread has none.
+ * static: those of the object type the const is declared with, whose method
+ * signatures are a static's overloads (`create(options)`, `create(configs)`),
+ * else the object literal's: a method (a method or a function-valued
+ * property), an accessor or a property. A spread has none.
  */
 function staticsMembers(ts, item) {
-  const object = staticsObject(ts, item);
-  if (object === null) return [];
+  const d = staticsDeclaration(ts, item);
+  if (d === null) return [];
+  if (d.type && ts.isTypeLiteralNode(d.type)) return shapeMembers(ts, d.type).map((m) => ({ ...m, isStatic: true }));
+  const object = d.initializer;
   const out = [];
   for (const p of object.properties) {
     const name = p.name ? memberName(ts, p.name) : null;

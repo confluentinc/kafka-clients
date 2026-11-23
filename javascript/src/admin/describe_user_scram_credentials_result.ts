@@ -52,14 +52,19 @@ const DESCRIPTION_FORMS = new JavaForms('description', [['userName']], {
 
 /**
  * The result of the `Admin.describeUserScramCredentials()` call.
- *
- * Instances come from the admin client's `describeUserScramCredentials()`.
  */
 export class DescribeUserScramCredentialsResult {
   readonly #all: () => KafkaFuture<Map<string, UserScramCredentialsDescription>>;
   readonly #users: () => KafkaFuture<string[]>;
   readonly #description: (userName: string | null) => KafkaFuture<UserScramCredentialsDescription>;
 
+  /**
+   * Instances come from the admin client's `describeUserScramCredentials()`.
+   *
+   * @param all - the core's `all()`
+   * @param users - the core's `users()`
+   * @param description - the core's `description(userName)`
+   */
   private constructor(
     all: () => KafkaFuture<Map<string, UserScramCredentialsDescription>>,
     users: () => KafkaFuture<string[]>,
