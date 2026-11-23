@@ -53,7 +53,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         byte[] key = Encoding.UTF8.GetBytes("key");
         byte[] value = Encoding.UTF8.GetBytes("value-original");
 
-        KafkaFuture<RecordMetadata> firstFuture = default;
+        KafkaFuture<RecordMetadata> firstFuture = null!;
         TestTimeout.Run(
             () => firstFuture = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: value, key: key, partition: 0)),
             s_deadline);
@@ -114,7 +114,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
-        // Pre-allocated OUTSIDE every measured window; storing a struct into it allocates nothing.
+        // Pre-allocated OUTSIDE every measured window; storing a future into it allocates nothing.
         KafkaFuture<RecordMetadata>[] futures = new KafkaFuture<RecordMetadata>[SendCount];
 
         // Warm up so the measured runs are steady-state.
@@ -151,8 +151,8 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
             perSend <= AbsolutePerSendBudgetBytes,
             $"Sync Send per-send caller-thread allocation {perSend} B exceeded the budget " +
             $"{AbsolutePerSendBudgetBytes} B ({callerBytes} B over {SendCount} sends, best of " +
-            $"{AbsoluteMeasurementAttempts}) — the caller's per-send allocations are the record, the latch, " +
-            "the pump entry and the topic pin; KafkaFuture<RecordMetadata> must stay an unboxed struct.");
+            $"{AbsoluteMeasurementAttempts}) — the record's future, a KafkaFutureImpl, must stay one engine object " +
+            "per send.");
     }
 
     [Fact]

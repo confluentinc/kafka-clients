@@ -51,7 +51,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
     [Fact]
     public async Task ARepeatedEntity_IsOneKey_AnsweredWithTheMocksFailure()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.OfClient(
@@ -64,7 +64,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
     [Fact]
     public async Task TwoEmptyEntities_AreOneKey()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaAlteration.Op[] noOps = Array.Empty<ClientQuotaAlteration.Op>();
@@ -79,7 +79,7 @@ public sealed class AdminAlterClientQuotasRepeatedEntityTests
     [Fact]
     public async Task DistinctEntities_AreOneKeyEach_TheDefaultEntityIncluded()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterClientQuotasResult result = AsyncAlterClientQuotasResult.OfClient(admin.AlterClientQuotas(

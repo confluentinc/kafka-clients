@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -37,7 +36,7 @@ public sealed class KafkaFutureTests : KafkaFutureTestBase
     {
     }
 
-    private protected override FutureView<T> Wrap<T>(KafkaFutureImpl<T> impl) => new View<T>(new KafkaFuture<T>(impl));
+    private protected override FutureView<T> New<T>() => new View<T>(new KafkaFutureImpl<T>());
 
     private protected override FutureView<T> CompletedFuture<T>(T value) => new View<T>(KafkaFuture.CompletedFuture(value));
 
@@ -74,14 +73,11 @@ public sealed class KafkaFutureTests : KafkaFutureTestBase
     /// <summary>A <see cref="KafkaFuture{T}"/> as the shared tests see it.</summary>
     private sealed class View<T> : FutureView<T>
     {
-        private static readonly FieldInfo s_impl =
-            typeof(KafkaFuture<T>).GetField("_impl", BindingFlags.NonPublic | BindingFlags.Instance)!;
-
         internal View(KafkaFuture<T> future) => Future = future;
 
         internal KafkaFuture<T> Future { get; }
 
-        internal override KafkaFutureImpl<T> Impl => (KafkaFutureImpl<T>)s_impl.GetValue(Future)!;
+        internal override IKafkaFutureImpl<T> Impl => (IKafkaFutureImpl<T>)Future;
 
         internal override bool IsDone => Future.IsDone();
 

@@ -96,8 +96,8 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 
         Dictionary<string, AsyncKafkaFuture> sources = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
         {
-            ["good"] = new AsyncKafkaFuture(TestFutures.Done()),
-            ["bad"] = new AsyncKafkaFuture(TestFutures.Failed(error)),
+            ["good"] = TestFutures.AsyncDone(),
+            ["bad"] = TestFutures.AsyncFailed(error),
         };
 
         AsyncDeleteConsumerGroupsResult result = new AsyncDeleteConsumerGroupsResult(sources);
@@ -116,8 +116,8 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
 
         Dictionary<string, AsyncKafkaFuture> sources = new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal)
         {
-            ["good"] = new AsyncKafkaFuture(TestFutures.Done()),
-            ["bad"] = new AsyncKafkaFuture(TestFutures.Failed(error)),
+            ["good"] = TestFutures.AsyncDone(),
+            ["bad"] = TestFutures.AsyncFailed(error),
         };
 
         AsyncDeleteConsumerGroupsResult mixed = new AsyncDeleteConsumerGroupsResult(sources);
@@ -127,7 +127,7 @@ public sealed class PublicAdminDeleteConsumerGroupsTests
         Assert.Same(error, thrown);
 
         AsyncDeleteConsumerGroupsResult clean = new AsyncDeleteConsumerGroupsResult(
-            new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal) { ["good"] = new AsyncKafkaFuture(TestFutures.Done()) });
+            new Dictionary<string, AsyncKafkaFuture>(StringComparer.Ordinal) { ["good"] = TestFutures.AsyncDone() });
         await TestTimeout.Run(() => clean.All().Get(), s_deadline);
     }
 }

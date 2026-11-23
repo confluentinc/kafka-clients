@@ -78,7 +78,7 @@ internal sealed partial class NativeAdminClient
         LogDirMarshal.CopyOutReplicaLogDirInfo;
 
     internal (
-        IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions,
+        IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions,
         SafeAdminResultHandle Result) DescribeLogDirs(IReadOnlyCollection<int> brokers, DescribeLogDirsOptions? options)
     {
         EnterUse();
@@ -165,7 +165,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<TopicPartitionReplica, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<TopicPartitionReplica, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result)
         AlterReplicaLogDirs(
             IReadOnlyDictionary<TopicPartitionReplica, string> replicaAssignment, AlterReplicaLogDirsOptions? options)
     {
@@ -276,7 +276,7 @@ internal sealed partial class NativeAdminClient
     }
 
     internal (
-        IReadOnlyDictionary<TopicPartitionReplica, KafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> Values,
+        IReadOnlyDictionary<TopicPartitionReplica, IKafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> Values,
         SafeAdminResultHandle Result) DescribeReplicaLogDirs(
         IReadOnlyCollection<TopicPartitionReplica> replicas, DescribeReplicaLogDirsOptions? options)
     {

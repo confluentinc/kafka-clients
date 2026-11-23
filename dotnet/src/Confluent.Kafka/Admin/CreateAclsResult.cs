@@ -32,12 +32,12 @@ namespace Confluent.Kafka.Admin;
 public sealed class CreateAclsResult
 {
     private readonly IReadOnlyDictionary<AclBinding, KafkaFuture> _values;
-    private readonly IReadOnlyList<KafkaFutureImpl> _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl> _nativeFutures;
     private readonly SafeAdminResultHandle _native;
 
     private CreateAclsResult(
         IReadOnlyDictionary<AclBinding, KafkaFuture> values,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -58,16 +58,16 @@ public sealed class CreateAclsResult
     /// complete if any binding failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    public KafkaFuture All() => new KafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures));
+    public KafkaFuture All() => FutureState.AllOf(new KafkaFutureImpl<object?>(), _nativeFutures);
 
     internal static CreateAclsResult OfClient(
-        (IReadOnlyDictionary<AclBinding, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<AclBinding, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<AclBinding, KafkaFuture> values = new Dictionary<AclBinding, KafkaFuture>(native.Values.Count);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
-        foreach (KeyValuePair<AclBinding, KafkaFutureImpl<object?>> entry in native.Values)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<AclBinding, IKafkaFutureImpl<object?>> entry in native.Values)
         {
-            values.Add(entry.Key, new KafkaFuture(entry.Value));
+            values.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

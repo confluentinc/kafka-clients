@@ -69,10 +69,10 @@ public sealed class PublicAdminP2aShapeParityTests
             method => method.Name == "All");
 
         Assert.Equal(
-            typeof(KafkaFuture<IReadOnlyDictionary<string, TopicDescription>>?),
+            typeof(KafkaFuture<IReadOnlyDictionary<string, TopicDescription>>),
             typeof(DescribeTopicsResult).GetMethod("AllTopicNames", Type.EmptyTypes)!.ReturnType);
         Assert.Equal(
-            typeof(KafkaFuture<IReadOnlyDictionary<Uuid, TopicDescription>>?),
+            typeof(KafkaFuture<IReadOnlyDictionary<Uuid, TopicDescription>>),
             typeof(DescribeTopicsResult).GetMethod("AllTopicIds", Type.EmptyTypes)!.ReturnType);
     }
 
@@ -232,7 +232,8 @@ public sealed class PublicAdminP2aShapeParityTests
 
     private static void AssertNullableFutureReturn<TValue>(MethodInfo method)
     {
-        Assert.Equal(typeof(KafkaFuture<TValue>), Nullable.GetUnderlyingType(method.ReturnType));
+        Assert.Equal(typeof(KafkaFuture<TValue>), method.ReturnType);
+        Assert.Equal(2, NullableAnnotation.Flag(method.ReturnParameter, 0));
         Assert.Equal(1, NullableAnnotation.Flag(method.ReturnParameter, 1));
     }
 

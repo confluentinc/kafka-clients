@@ -38,11 +38,11 @@ public sealed class PublicAdminListGroupsResultTests
     [Fact]
     public void EachAccessor_YieldsItsOwnFuture_Sync()
     {
-        (KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
-            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
-            KafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
+        (IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
+            IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
+            IKafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
             IReadOnlyCollection<GroupListing> listings,
-            IReadOnlyCollection<Exception> failures) = PartialFailure();
+            IReadOnlyCollection<Exception> failures) = PartialFailure(AdminFlavour.Sync);
 
         ListGroupsResult result = ListGroupsResult.OfClient((all, valid, errors, NoResult()));
 
@@ -54,11 +54,11 @@ public sealed class PublicAdminListGroupsResultTests
     [Fact]
     public async Task EachAccessor_YieldsItsOwnFuture_Async()
     {
-        (KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
-            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
-            KafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
+        (IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
+            IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
+            IKafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
             IReadOnlyCollection<GroupListing> listings,
-            IReadOnlyCollection<Exception> failures) = PartialFailure();
+            IReadOnlyCollection<Exception> failures) = PartialFailure(AdminFlavour.Async);
 
         AsyncListGroupsResult result = AsyncListGroupsResult.OfClient((all, valid, errors, NoResult()));
 
@@ -101,10 +101,10 @@ public sealed class PublicAdminListGroupsResultTests
         // Java's Collection<Throwable>.
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<Exception>>), errors.ReturnType);
 
-        // Nullability positions: 0 = the KafkaFuture (a struct, so oblivious), 1 = the collection, 2 = its element.
+        // Nullability positions: 0 = the KafkaFuture, 1 = the collection, 2 = its element.
         foreach (MethodInfo accessor in new[] { all, valid, errors })
         {
-            Assert.Equal(NullableAnnotation.Oblivious, NullableFlag(accessor.ReturnParameter, 0));
+            Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(accessor.ReturnParameter, 0));
             Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(accessor.ReturnParameter, 1));
             Assert.Equal(NullableAnnotation.NotAnnotated, NullableFlag(accessor.ReturnParameter, 2));
         }
@@ -132,17 +132,17 @@ public sealed class PublicAdminListGroupsResultTests
     }
 
     private static (
-        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
-        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
-        KafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
+        IKafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
         IReadOnlyCollection<GroupListing> Listings,
-        IReadOnlyCollection<Exception> Failures) PartialFailure()
+        IReadOnlyCollection<Exception> Failures) PartialFailure(AdminFlavour flavour)
     {
         IReadOnlyCollection<GroupListing> listings = new[] { Listing("g1") };
         IReadOnlyCollection<Exception> failures = new[] { Error("first"), Error("second"), Error("third") };
-        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all = new KafkaFutureImpl<IReadOnlyCollection<GroupListing>>();
-        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid = new KafkaFutureImpl<IReadOnlyCollection<GroupListing>>();
-        KafkaFutureImpl<IReadOnlyCollection<Exception>> errors = new KafkaFutureImpl<IReadOnlyCollection<Exception>>();
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> all = NativeAdminClient.NewFuture<IReadOnlyCollection<GroupListing>>(flavour);
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid = NativeAdminClient.NewFuture<IReadOnlyCollection<GroupListing>>(flavour);
+        IKafkaFutureImpl<IReadOnlyCollection<Exception>> errors = NativeAdminClient.NewFuture<IReadOnlyCollection<Exception>>(flavour);
         all.CompleteWithError(failures.First());
         valid.Complete(listings);
         errors.Complete(failures);

@@ -95,8 +95,8 @@ public sealed class PublicAdminP3ShapeParityTests
         Assert.Equal(typeof(KafkaFuture<string>), clusterId.ReturnType);
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<AclOperation>>), authorizedOperations.ReturnType);
 
-        // The nullability under test is the future's value, position 1 of the flattened return type; the future is a struct,
-        // so position 0 carries no annotation.
+        // The nullability under test is the future's value, position 1 of the flattened return type; position 0 is the
+        // future's own.
 
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(nodes.ReturnParameter, 1));
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(clusterId.ReturnParameter, 1));

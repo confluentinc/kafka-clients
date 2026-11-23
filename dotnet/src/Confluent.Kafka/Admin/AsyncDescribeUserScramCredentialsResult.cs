@@ -47,8 +47,8 @@ public sealed class AsyncDescribeUserScramCredentialsResult
     /// </summary>
     /// <returns>A future over the whole map.</returns>
     public AsyncKafkaFuture<IReadOnlyDictionary<string, UserScramCredentialsDescription>> All() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<string, UserScramCredentialsDescription>>(
-            NativeAdminClient.DescribeUserScramCredentialsAll(_native));
+        AsyncAdminFutures.Of(
+            NativeAdminClient.DescribeUserScramCredentialsAll(_native, AdminFlavour.Async));
 
     /// <summary>
     /// The users the response carried — Java's <c>users()</c>.
@@ -59,7 +59,7 @@ public sealed class AsyncDescribeUserScramCredentialsResult
     /// </remarks>
     /// <returns>A future over the user names.</returns>
     public AsyncKafkaFuture<IReadOnlyList<string>> Users() =>
-        new AsyncKafkaFuture<IReadOnlyList<string>>(NativeAdminClient.DescribeUserScramCredentialsUsers(_native));
+        AsyncAdminFutures.Of(NativeAdminClient.DescribeUserScramCredentialsUsers(_native, AdminFlavour.Async));
 
     /// <summary>
     /// One user's credentials — Java's <c>description(String)</c>. Faults with <c>RESOURCE_NOT_FOUND</c> when
@@ -75,8 +75,8 @@ public sealed class AsyncDescribeUserScramCredentialsResult
     {
         AdminStrings.Validate(userName, nameof(userName));
 
-        return new AsyncKafkaFuture<UserScramCredentialsDescription>(
-            NativeAdminClient.DescribeUserScramCredentialsDescription(_native, userName));
+        return AsyncAdminFutures.Of(
+            NativeAdminClient.DescribeUserScramCredentialsDescription(_native, userName, AdminFlavour.Async));
     }
 
     internal static AsyncDescribeUserScramCredentialsResult OfClient(SafeAdminResultHandle native) =>

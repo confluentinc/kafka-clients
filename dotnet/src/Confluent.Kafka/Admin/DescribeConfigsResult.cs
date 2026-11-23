@@ -33,7 +33,7 @@ public sealed class DescribeConfigsResult
 {
     private readonly IReadOnlyDictionary<ConfigResource, KafkaFuture<Config>> _values;
     private readonly IEqualityComparer<ConfigResource> _comparer;
-    private readonly IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<Config>>? _nativeValues;
+    private readonly IReadOnlyDictionary<ConfigResource, IKafkaFutureImpl<Config>>? _nativeValues;
     private readonly SafeAdminResultHandle? _native;
 
     // Internal, unlike Java's protected constructor: a recorded deviation.
@@ -45,14 +45,14 @@ public sealed class DescribeConfigsResult
     }
 
     private DescribeConfigsResult(
-        IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<Config>> nativeValues, SafeAdminResultHandle native)
+        IReadOnlyDictionary<ConfigResource, IKafkaFutureImpl<Config>> nativeValues, SafeAdminResultHandle native)
     {
         IEqualityComparer<ConfigResource> comparer = EqualityComparer<ConfigResource>.Default;
         Dictionary<ConfigResource, KafkaFuture<Config>> values =
             new Dictionary<ConfigResource, KafkaFuture<Config>>(nativeValues.Count, comparer);
-        foreach (KeyValuePair<ConfigResource, KafkaFutureImpl<Config>> entry in nativeValues)
+        foreach (KeyValuePair<ConfigResource, IKafkaFutureImpl<Config>> entry in nativeValues)
         {
-            values.Add(entry.Key, new KafkaFuture<Config>(entry.Value));
+            values.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
         }
 
         _values = values;
@@ -76,10 +76,10 @@ public sealed class DescribeConfigsResult
     /// <returns>A future yielding the whole map, or failing with the first failure to complete.</returns>
     public KafkaFuture<IReadOnlyDictionary<ConfigResource, Config>> All() =>
         _nativeValues is not null
-            ? new KafkaFuture<IReadOnlyDictionary<ConfigResource, Config>>(KafkaFutureImpl.GatherAll(_nativeValues, _comparer))
+            ? SyncAdminFutures.Of(FutureState.GatherAll(new KafkaFutureImpl<object?>(), _nativeValues, _comparer))
             : SyncAdminFutures.GatherAll(_values, _comparer);
 
     internal static DescribeConfigsResult OfClient(
-        (IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<Config>> Values, SafeAdminResultHandle Result) native) =>
+        (IReadOnlyDictionary<ConfigResource, IKafkaFutureImpl<Config>> Values, SafeAdminResultHandle Result) native) =>
         new DescribeConfigsResult(native.Values, native.Result);
 }

@@ -390,12 +390,19 @@ public sealed class PublicAdminP7Tests
 
         // Once the response arrives, no user in it is null.
         KafkaFutureImpl<object?> response = new KafkaFutureImpl<object?>();
-        KafkaFutureImpl<UserScramCredentialsDescription> missing = NativeAdminClient.NoSuchNullUser(response);
-        Assert.False(missing.IsDone);
+        KafkaFuture<UserScramCredentialsDescription> missing =
+            SyncAdminFutures.Of(NativeAdminClient.NoSuchNullUser(response, AdminFlavour.Sync));
+        AsyncKafkaFuture<UserScramCredentialsDescription> asyncMissing =
+            AsyncAdminFutures.Of(NativeAdminClient.NoSuchNullUser(response, AdminFlavour.Async));
+        Assert.False(missing.IsDone());
+        Assert.False(asyncMissing.IsDone());
         response.Complete(null);
         ResourceNotFoundException noSuchUser =
-            await FutureAssert.ThrowsAsync<ResourceNotFoundException>(() => new AsyncKafkaFuture<UserScramCredentialsDescription>(missing).Get());
+            await FutureAssert.ThrowsAsync<ResourceNotFoundException>(() => asyncMissing.Get());
         Assert.Equal("No such user: null", noSuchUser.Message);
+        Assert.Equal(
+            "No such user: null",
+            FutureAssert.Throws<ResourceNotFoundException>(() => missing.Get(TimeSpan.FromSeconds(30))).Message);
     }
 
     [Fact]

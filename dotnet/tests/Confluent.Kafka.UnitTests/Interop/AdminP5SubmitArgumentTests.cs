@@ -197,9 +197,9 @@ public sealed class AdminP5SubmitArgumentTests
 
         var listed = admin.ListGroups(ListGroupsOptions.ForConsumerGroups());
 
-        Assert.Empty(listed.All.Get(s_deadline));
-        Assert.Empty(listed.Valid.Get(s_deadline));
-        Assert.Empty(listed.Errors.Get(s_deadline));
+        Assert.Empty(listed.All.GetUnwrapped(s_deadline));
+        Assert.Empty(listed.Valid.GetUnwrapped(s_deadline));
+        Assert.Empty(listed.Errors.GetUnwrapped(s_deadline));
         listed.Result.Dispose();
     }
 
@@ -306,7 +306,7 @@ public sealed class AdminP5SubmitArgumentTests
             described.DescribedGroups.Keys.OrderBy(key => key, StringComparer.Ordinal));
         foreach (KafkaFutureImpl<ConsumerGroupDescription> future in described.DescribedGroups.Values)
         {
-            AssertNotImplemented(Record.Exception(() => future.Get(s_deadline)));
+            AssertNotImplemented(Record.Exception(() => future.GetUnwrapped(s_deadline)));
         }
 
         described.Result.Dispose();
@@ -325,7 +325,7 @@ public sealed class AdminP5SubmitArgumentTests
             new[] { "GROUP", "group" }, described.DescribedGroups.Keys.OrderBy(key => key, StringComparer.Ordinal));
         foreach (KafkaFutureImpl<ClassicGroupDescription> future in described.DescribedGroups.Values)
         {
-            AssertNotImplemented(Record.Exception(() => future.Get(s_deadline)));
+            AssertNotImplemented(Record.Exception(() => future.GetUnwrapped(s_deadline)));
         }
 
         described.Result.Dispose();

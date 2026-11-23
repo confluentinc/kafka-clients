@@ -158,7 +158,7 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
             new Dictionary<string, KafkaFuture<ConsumerGroupDescription>>
             {
                 ["healthy"] = KafkaFuture.CompletedFuture(healthy),
-                ["broken"] = new KafkaFuture<ConsumerGroupDescription>(broken),
+                ["broken"] = broken,
             });
         Assert.Same(healthy, result.DescribedGroups()["healthy"].Get(s_deadline));
         Assert.Same(failure, FutureAssert.Throws<InvalidOperationException>(() => result.All().Get(s_deadline)));
@@ -167,7 +167,7 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
             new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>
             {
                 ["healthy"] = AsyncKafkaFuture.CompletedFuture(healthy),
-                ["broken"] = new AsyncKafkaFuture<ConsumerGroupDescription>(broken),
+                ["broken"] = TestFutures.AsyncFailed<ConsumerGroupDescription>(failure),
             });
         Assert.Same(healthy, await asyncResult.DescribedGroups()["healthy"].Get());
         Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => asyncResult.All().Get()));
@@ -180,18 +180,19 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
         KafkaFutureImpl<ConsumerGroupDescription> broken = new KafkaFutureImpl<ConsumerGroupDescription>();
         broken.CompleteWithError(failure);
         KafkaFutureImpl<ConsumerGroupDescription> stillRunning = new KafkaFutureImpl<ConsumerGroupDescription>();
+        AsyncKafkaFutureImpl<ConsumerGroupDescription> asyncStillRunning = new AsyncKafkaFutureImpl<ConsumerGroupDescription>();
 
         DescribeConsumerGroupsResult result = new DescribeConsumerGroupsResult(
             new Dictionary<string, KafkaFuture<ConsumerGroupDescription>>
             {
-                ["broken"] = new KafkaFuture<ConsumerGroupDescription>(broken),
-                ["still-running"] = new KafkaFuture<ConsumerGroupDescription>(stillRunning),
+                ["broken"] = broken,
+                ["still-running"] = stillRunning,
             });
         AsyncDescribeConsumerGroupsResult asyncResult = new AsyncDescribeConsumerGroupsResult(
             new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>
             {
-                ["broken"] = new AsyncKafkaFuture<ConsumerGroupDescription>(broken),
-                ["still-running"] = new AsyncKafkaFuture<ConsumerGroupDescription>(stillRunning),
+                ["broken"] = TestFutures.AsyncFailed<ConsumerGroupDescription>(failure),
+                ["still-running"] = asyncStillRunning,
             });
         KafkaFuture<IReadOnlyDictionary<string, ConsumerGroupDescription>> all = result.All();
         AsyncKafkaFuture<IReadOnlyDictionary<string, ConsumerGroupDescription>> asyncAll = asyncResult.All();
@@ -199,6 +200,7 @@ public sealed class PublicAdminDescribeConsumerGroupsResultTests
         Assert.False(asyncAll.IsDone());
 
         stillRunning.Complete(Description("still-running"));
+        asyncStillRunning.Complete(Description("still-running"));
 
         Assert.Same(failure, FutureAssert.Throws<InvalidOperationException>(() => all.Get(s_deadline)));
         Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => asyncAll.Get()));
