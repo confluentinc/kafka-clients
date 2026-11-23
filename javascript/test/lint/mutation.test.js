@@ -128,6 +128,59 @@ const MUTATIONS = [
     apply: (root) =>
       edit(root, 'src/producer/record_metadata.ts', LICENSE_END, [LICENSE_END, "// As Java's Record", 'Metadata.java', ':49.\n'].join('')),
   },
+  {
+    rule: 'check-java-line',
+    what: 'a verifiable client citing a Java line',
+    apply: (root) => add(root, 'verifiable_clients/x.js', ['// As Java', "'s Sender", '.java:120 does.\n'].join('')),
+  },
+  {
+    rule: 'check-source-line',
+    what: 'a comment citing a Rust line',
+    apply: (root) =>
+      fs.appendFileSync(path.join(root, 'src/internal/duration.ts'), ["\n// As the core's mod", '.rs:120 reads it.\n'].join('')),
+  },
+  {
+    rule: 'check-no-tracking-ids',
+    what: 'a question ID beside a rule group',
+    apply: (root) =>
+      fs.appendFileSync(path.join(root, 'src/internal/duration.ts'), ['\n// (JS conventions, Signatures, ', 'Q', '22)\n'].join('')),
+  },
+  {
+    rule: 'check-summaries',
+    what: "a class's TSDoc summary removed",
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/topic_partition.ts',
+        '/**\n * A topic name and partition number\n */\nexport class TopicPartition {',
+        'export class TopicPartition {',
+      ),
+  },
+  {
+    rule: 'check-summaries',
+    what: "code before a native file's summary",
+    apply: (root) => edit(root, 'native/record.c', `${LICENSE_END}\n`, `${LICENSE_END}\n\nstatic int first_line;\n`),
+  },
+  {
+    rule: 'check-implementation-docs',
+    what: 'a doc comment on a member implementing an interface member',
+    apply: (root) =>
+      edit(
+        root,
+        'src/producer/kafka_producer.ts',
+        '  [Symbol.asyncDispose](): Promise<void> {',
+        '  /** Closes the producer. */\n  [Symbol.asyncDispose](): Promise<void> {',
+      ),
+  },
+  {
+    rule: 'check-implementation-docs',
+    what: 'a doc comment of one @remarks alone on a function implementing nothing',
+    apply: (root) =>
+      fs.appendFileSync(
+        path.join(root, 'src/internal/duration.ts'),
+        '\n/** @remarks Only a remark. */\nexport function remarked(x: number): number {\n  return x;\n}\n',
+      ),
+  },
 ];
 
 /**
@@ -877,7 +930,7 @@ MUTATIONS.push(
         root,
         'src/internal/send_queue.ts',
         `${fs.readFileSync(path.join(root, 'src/internal/native.ts'), 'utf8').split(LICENSE_END)[0]}${LICENSE_END}\n` +
-          '// Holds records back.\nexport class SendQueue {\n  private readonly records: unknown[] = [];\n}\n',
+          '/** Holds records back. */\nexport class SendQueue {\n  private readonly records: unknown[] = [];\n}\n',
       ),
   },
   {
@@ -1124,7 +1177,11 @@ MUTATIONS.push(
     what: 'a helper class of Java default methods that no interface asks for',
     apply: (root) => {
       const header = fs.readFileSync(path.join(root, 'src/internal/encode.ts'), 'utf8').split(LICENSE_END)[0] + LICENSE_END;
-      add(root, 'src/internal/callback_defaults.ts', `${header}\nexport class CallbackDefaults {}\n`);
+      add(
+        root,
+        'src/internal/callback_defaults.ts',
+        `${header}\n/** Java's default methods of Callback. */\nexport class CallbackDefaults {}\n`,
+      );
     },
   },
   {

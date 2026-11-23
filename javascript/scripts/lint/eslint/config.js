@@ -36,7 +36,13 @@ const plugin = require('./plugin');
 // (`TSMethodSignature`).
 const FUNCTION_CONTEXTS = ['ArrowFunctionExpression', 'FunctionDeclaration', 'FunctionExpression', 'TSDeclareFunction'];
 const BODYLESS_CONTEXTS = ['TSEmptyBodyFunctionExpression', 'TSMethodSignature'];
-const PARAM_CONTEXTS = [...FUNCTION_CONTEXTS, ...BODYLESS_CONTEXTS];
+// A doc comment of one `@remarks` alone is not read: it is the remark of a
+// class member that implements an interface member, whose interface carries
+// the tags (javascript/CLAUDE.md, Comments, point 1), and check-implementation-docs
+// allows it nowhere else. The selector is over the comment's own syntax tree
+// (eslint-plugin-jsdoc's `comment`): a summary, no `@remarks`, or another tag.
+const NOT_REMARKS_ONLY = 'JsdocBlock:not([description=""]:not(:has(JsdocTag:not([tag="remarks"]))))';
+const PARAM_CONTEXTS = [...FUNCTION_CONTEXTS, ...BODYLESS_CONTEXTS].map((context) => ({ context, comment: NOT_REMARKS_ONLY }));
 // A body-less declaration has no body to read a return from, so its
 // `@returns` is required by its return type: any but one that returns no
 // value, `void`, `undefined` and `never`, alone or in a `Promise`
@@ -53,8 +59,12 @@ const RETURNS_VALUE = [
   ":not([kind='set'])",
 ].join('');
 const RETURNS_CONTEXTS = [
-  ...FUNCTION_CONTEXTS.filter((c) => c !== 'TSDeclareFunction'),
-  ...['TSDeclareFunction', ...BODYLESS_CONTEXTS].map((c) => ({ context: `${c}${RETURNS_VALUE}`, forceRequireReturn: true })),
+  ...FUNCTION_CONTEXTS.filter((c) => c !== 'TSDeclareFunction').map((context) => ({ context, comment: NOT_REMARKS_ONLY })),
+  ...['TSDeclareFunction', ...BODYLESS_CONTEXTS].map((c) => ({
+    context: `${c}${RETURNS_VALUE}`,
+    comment: NOT_REMARKS_ONLY,
+    forceRequireReturn: true,
+  })),
 ];
 
 /** Every `kafka` rule, as an error. */

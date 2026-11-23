@@ -18,7 +18,7 @@
 // (javascript/design/current/rule-linter/PLAN.md §3): the rules that read
 // TypeScript run in ESLint (scripts/lint/eslint/, `kafka/<name>`); the
 // addon's C rules and the checks of the other files stay in the runner
-// (scripts/lint_rules.js). Three rules read both kinds of file and are split
+// (scripts/lint_rules.js). Six rules read both kinds of file and are split
 // by file type under one name: their TypeScript and JavaScript half runs in
 // ESLint, their other half in the runner.
 
@@ -30,6 +30,9 @@ function part(check, PART) {
 const noTodo = require('./rules/no_todo');
 const exceptionWord = require('./rules/exception_word');
 const javaLine = require('./rules/java_line');
+const sourceLine = require('./rules/source_line');
+const noTrackingIds = require('./rules/no_tracking_ids');
+const summaries = require('./rules/summaries');
 
 /** The checks ESLint runs, in report order. */
 const ESLINT_CHECKS = [
@@ -37,6 +40,10 @@ const ESLINT_CHECKS = [
   part(exceptionWord, 'ts'),
   require('./rules/internal_members'),
   part(javaLine, 'ts'),
+  part(sourceLine, 'ts'),
+  part(noTrackingIds, 'ts'),
+  part(summaries, 'ts'),
+  require('./rules/implementation_docs'),
   require('./rules/java_name'),
   require('./rules/java_members'),
   require('./rules/java_completeness'),
@@ -57,7 +64,10 @@ const ESLINT_CHECKS = [
 const RUNNER_CHECKS = [
   part(noTodo, 'other'),
   part(exceptionWord, 'c'),
-  part(javaLine, 'c'),
+  part(javaLine, 'other'),
+  part(sourceLine, 'other'),
+  part(noTrackingIds, 'other'),
+  part(summaries, 'other'),
   require('./rules/out_err'),
   require('./rules/cb_twin_only'),
   require('./rules/notify_hook'),

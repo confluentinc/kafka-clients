@@ -1682,7 +1682,11 @@ asks for a `@param` for each parameter, an options object as one parameter
 `@returns` unless the declaration returns no value (`void`, `undefined` or
 `never`, alone or in a `Promise`; a union of them, such as
 `void | Promise<void>`, is not exempted yet) or is an interface's setter (a
-bodied function's only when its body returns a value). Not checked: a member with no
+bodied function's only when its body returns a value). A doc comment of one
+`@remarks` block alone asks for no tag: it is the remark of a class member
+that implements an interface member, whose interface carries the tags
+("Comments", point 1), and `check-implementation-docs` allows it nowhere
+else. Not checked: a member with no
 doc comment (which members need one is not the lint's), and function types
 (a type alias or a property). A generated file gets its tags from its
 generator. `test/lint/docs_lint.test.js` pins the configuration; the runner
@@ -1710,7 +1714,44 @@ The rules, each named in its finding:
   design documents under `design/` are not read.
 - `check-exception-word`: no identifier contains the word "exception" (root
   §2, §4), Java's member names the rules keep aside.
-- `check-java-line`: no comment cites a Java source line.
+- `check-java-line`: no comment cites a Java source line ("Comments", point
+  4), in the forms of the Rust lint's own check
+  (`.claude/rules/documentation.md` §7). The rules on comments read every
+  file of the directories of point 7 whose comments the linter can read
+  (`scripts/lint/comment_sources.js`): a TypeScript or JavaScript file through
+  the TypeScript parser, a C source or header, a Java source, a linker map or
+  a JSON file through the C tokenizer, and a gyp file's `#` comments, never a
+  string or a document such as a README.
+- `check-source-line`: no comment cites a line of a Python, C#, Rust, Scala
+  or C++ source (point 4): a file name of those languages followed by a colon
+  and a line or range, by a range, or by the word `line` and a line or range,
+  or the word `line` and a number, or `at` and a range, next to such a file
+  name or a language's name. A single number after a file name and a space is
+  read as a count, so it is not checked.
+- `check-no-tracking-ids`: no comment holds a phase, review or question ID
+  (point 5): `Q` and a number; one capital, a number and an optional
+  lowercase letter (`A8`, `P8a`), as a whole word, but `V8` and the C
+  standards (`C11`, ...); `Critic` or `Actor` and a
+  number, and a `COMMENTS.<n>` file; and a test plan's row label, two to five
+  capitals or digits, a dash and two digits, but `UTF-16`, `UTF-32` and
+  `CRC-32`. An ID inside an identifier, a hex number, a colour or a code
+  point is none.
+- `check-summaries`: every class, class expression and interface in the
+  directories of point 7, exported or not, has a TSDoc (Javadoc, in the Java
+  tool) summary, the text of its doc comment before the first tag (point 2),
+  and every file of `native/` opens, after its licence header, with a
+  comment (not checked: that the comment says what the file does).
+- `check-implementation-docs`: a member of a class of `src/` that implements
+  a member of an interface of `src/` the class `implements` (found through
+  the type checker, an inherited member included) carries no doc comment, or
+  one holding a single `@remarks` block and nothing else (point 1); a doc
+  comment of one `@remarks` alone sits nowhere else, since the docs lint asks
+  no tags of it. A member implementing an interface outside `src/`, such as
+  TypeScript's `Iterable`, keeps its own TSDoc, and so do the keys of an
+  options object in a member's signature, which document the options type.
+  Not checked: that the interface's TSDoc is the one TypeDoc shows (TypeDoc
+  shows only the remark on a signature that carries one), and that a public
+  member no interface declares has TSDoc (not the lint's, as above).
 - `check-internal-members`: a library-only member is a public `@internal`
   member named `internal...`, called with dot access; no member is
   `_`-prefixed, but `_ffiId` on an error class, which `KafkaError` declares.
@@ -1819,6 +1860,11 @@ The rules, each named in its finding:
   targeted and explained disable that names no `kafka/` rule, and one ESLint
   configuration.
 
+Of "Comments", points 3, 6, 7 and 8 are not checked: whether a comment
+records a decision that needs it (point 3) and which commit of a phase cleans
+its area (point 8) are a reviewer's to judge, a licence header (point 6) is
+left as it is, and point 7 sets where the rules on comments read.
+
 ### How the client is used, in tests and reviews
 
 - **Callers await what the client returns.** Every method that returns a
@@ -1848,6 +1894,36 @@ The rules, each named in its finding:
     between them (JS conventions, Threads and callbacks; rule 7);
   - a callback that returns a Promise is awaited by the binding (JS
     conventions, Threads and callbacks).
+
+### Comments
+
+1. TSDoc goes only on the public API, as the JS conventions' Documentation
+   group sets it out: translated from the Javadoc, with the tags the docs lint
+   requires. It sits on the interface that declares a member. A class member
+   that implements an interface member carries no TSDoc of its own, because
+   TypeDoc shows the interface's. The exception is one `@remarks` for what
+   that class does differently, such as `MockProducer`'s completion. A public
+   member that no interface declares gets its own TSDoc, which the docs lint
+   checks.
+2. Every class and interface, internal ones included, gets one concise
+   summary of what it does, and so does every file in `native/`, at its top.
+3. Every other comment goes. The exceptions are a concise comment for a
+   recorded or very important decision or deviation, where it is needed, and
+   the *(deviation)* and *(js-only)* marks in a `@remarks`. A comment states
+   the decision, not its history.
+4. No references to Java, Python, .NET or Rust code with line numbers: line
+   numbers change and cause needless edits. A reference may name the class,
+   member or file.
+5. No phase, review or question IDs in comments, such as `A8`, `Critic 140`
+   or `Q21`. The design notes and the rules hold them.
+6. Licence headers stay as they are.
+7. The rule covers `src/`, `native/`, the tests, `verifiable_clients/`,
+   `grpc-server/`, `scripts/` and `tools/`. It doesn't cover rule files or
+   design notes.
+8. Each phase cleans its own area in one commit at the end of the phase: its
+   comments and TSDoc by this rule, and the user docs it changed
+   (`README.md`, `MIGRATION.md`, `CHANGELOG.md`). Commits before that one
+   leave both alone.
 
 ### Files and process
 
