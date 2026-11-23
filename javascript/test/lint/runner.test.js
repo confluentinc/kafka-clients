@@ -77,7 +77,6 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-no-repeated-precondition',
     'check-tsfn-lifetime',
     'check-default-helpers',
-    'check-mock-native',
     'check-encode-callers',
     'check-commonjs-pin',
   ]);
@@ -91,6 +90,8 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-summaries',
     'check-implementation-docs',
     'check-java-name',
+    'check-java-kind',
+    'check-java-supertypes',
     'check-java-members',
     'check-java-completeness',
     'check-public-audience',
@@ -102,6 +103,8 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-type-mapping',
     'check-waiting-call-promise',
     'check-native-registry',
+    'check-native-wrappers',
+    'check-doc-size',
     'check-directives',
     'check-config',
   ]);

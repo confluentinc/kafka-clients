@@ -91,6 +91,7 @@ module.exports = {
     "lint-mapping.json's `invented`, the list of invented names " +
     '(javascript/CLAUDE.md "Java shape, JS idiom").',
   mappedMembers,
+  taggedMember,
   check(ctx) {
     const { ts } = ctx.program();
     const index = javaIndexOf(ctx);

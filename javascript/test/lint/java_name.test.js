@@ -98,7 +98,7 @@ test('each finding kind, with its exact text', () => {
   assert.ok(r.err.includes('❌ check-java-name: 7 finding(s).'), r.text);
 });
 
-test('every export the type checker lists is seen: re-exports, ambient classes, enums, functions, constants', () => {
+test("every export the type checker lists is seen: re-exports, ambient classes, functions, constants (an enum is check-java-kind's)", () => {
   const r = lint(
     fixture({
       'src/producer/widget.ts': 'class Widget {}\nexport { Widget };\n',
@@ -118,7 +118,6 @@ test('every export the type checker lists is seen: re-exports, ambient classes, 
   assert.deepEqual(findings(r), [
     "src/producer/foo_bar.ts:FooBar: exports FooBar, which names no Java class of clients.producer: list it in lint-mapping.json's invented, or javaTargets",
     "src/producer/widget.ts:Widget: exports Widget, which names no Java class of clients.producer: list it in lint-mapping.json's invented, or javaTargets",
-    'src/producer/acks.ts:Acks: exports Acks as a TypeScript enum, a form no Java type translates to: make it a class',
     "src/producer/create.ts:createProducer: exports the function createProducer, which no Java class translates to: list it in lint-mapping.json's invented",
     "src/producer/create.ts:DEFAULT_ACKS: exports the variable DEFAULT_ACKS, which no Java class translates to: list it in lint-mapping.json's invented",
     'src/producer/space.ts:Space: exports Space as a TypeScript namespace, a form no Java type translates to: make it a class',

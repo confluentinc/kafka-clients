@@ -21,11 +21,12 @@
 // name snake_cased; a file holds one public Java type; a Java exception's
 // class is named `...Error`. An error class takes its Java class from
 // src/internal/error_registry.ts, the generated hierarchy's list. A function or
-// constant export is on the list of invented names; an enum, or a namespace
-// that does not merge with its class (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Names: a namespace with the class's name holds its types), is a
-// form the translation does not use. The exports are the type checker's, so a
-// re-export (`export { X }`) and an ambient one (`export declare class`) count.
+// constant export is on the list of invented names; a namespace that does not
+// merge with its class (javascript/CLAUDE.md, JavaScript Binding Conventions,
+// Names: a namespace with the class's name holds its types) is a form the
+// translation does not use, and a TypeScript enum is check-java-kind's. The
+// exports are the type checker's, so a re-export (`export { X }`) and an
+// ambient one (`export declare class`) count.
 
 const { atNode } = require('../location');
 const path = require('node:path');
@@ -104,14 +105,13 @@ module.exports = {
       }
     }
     // The exports no Java class translates by form: a function or a constant
-    // is the client's own (listed), an enum or a namespace a form the
-    // translation does not use (a Java enum is a class of static readonly
-    // constants, javascript/CLAUDE.md "Java shape, JS idiom").
+    // is the client's own (listed), a namespace a form the translation does
+    // not use. A TypeScript enum is check-java-kind's.
     for (const item of exportedItems(ctx)) {
-      if (item.kind === 'class' || item.kind === 'interface' || item.kind === 'type') continue;
+      if (item.kind === 'class' || item.kind === 'interface' || item.kind === 'type' || item.kind === 'enum') continue;
       checked += 1;
       const subject = `${item.rel}:${item.name}`;
-      if (item.kind === 'enum' || item.kind === 'namespace') {
+      if (item.kind === 'namespace') {
         findings.push({
           kind: 'export-form',
           subject,
