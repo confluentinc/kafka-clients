@@ -20,6 +20,9 @@ using System.Globalization;
 using System.Numerics;
 using System.Text;
 
+using Confluent.Kafka.Common;
+using Confluent.Kafka.Consumer;
+
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
@@ -72,6 +75,24 @@ internal static class JavaText
         Exception exception => ToString(exception),
         _ => CollectionText(value, ValueOf) ?? InvariantText(value),
     };
+
+    // Java's String.trim(): every char up to U+0020 removed from both ends.
+    internal static string Trim(string text)
+    {
+        int start = 0;
+        int end = text.Length;
+        while (start < end && text[start] <= ' ')
+        {
+            start++;
+        }
+
+        while (end > start && text[end - 1] <= ' ')
+        {
+            end--;
+        }
+
+        return text.Substring(start, end - start);
+    }
 
     internal static string ToString(Exception exception) =>
         exception is IExceptionText text ? text.TypeAndMessage() : TypeAndMessage(exception, exception.Message);
@@ -180,7 +201,9 @@ internal static class JavaText
 
     // A map that is only a generic IDictionary<,> or IReadOnlyDictionary<,> prints as the list of its pairs
     // ([[a, 1]]), not Java's {a=1}, unless its keys are strings and its values objects (ExpandoObject): reading other
-    // keys and values would need their type arguments at run time, which Native AOT cannot provide.
+    // keys and values would need their type arguments at run time, which Native AOT cannot provide. Any sequence of
+    // TopicPartition pairs, to long or to OffsetAndMetadata, a list of them included, prints as Java's map ({t-0=1}),
+    // as the binding's exceptions print their partition maps.
     [UnconditionalSuppressMessage(
         "ReflectionAnalysis",
         "IL2075",
@@ -195,6 +218,16 @@ internal static class JavaText
         if (value is IDictionary<string, object?> or IReadOnlyDictionary<string, object?>)
         {
             return PairsText((IEnumerable<KeyValuePair<string, object?>>)value, element);
+        }
+
+        if (value is IEnumerable<KeyValuePair<TopicPartition, long>> partitionValues)
+        {
+            return PairsText(partitionValues, element);
+        }
+
+        if (value is IEnumerable<KeyValuePair<TopicPartition, OffsetAndMetadata>> partitionOffsets)
+        {
+            return PairsText(partitionOffsets, element);
         }
 
         if (value is not IEnumerable sequence)
@@ -289,11 +322,12 @@ internal static class JavaText
         return text.Append('}').ToString();
     }
 
-    private static string PairsText(IEnumerable<KeyValuePair<string, object?>> pairs, Func<object?, string> element)
+    private static string PairsText<TKey, TValue>(
+        IEnumerable<KeyValuePair<TKey, TValue>> pairs, Func<object?, string> element)
     {
         var text = new StringBuilder("{");
         string separator = string.Empty;
-        foreach (KeyValuePair<string, object?> pair in pairs)
+        foreach (KeyValuePair<TKey, TValue> pair in pairs)
         {
             text.Append(separator).Append(Element(pair.Key, pairs, element)).Append('=').Append(Element(pair.Value, pairs, element));
             separator = ", ";

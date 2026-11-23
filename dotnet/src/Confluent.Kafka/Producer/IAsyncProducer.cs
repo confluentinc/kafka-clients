@@ -213,7 +213,9 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <returns>A task that completes when the coordinator has acknowledged the offsets.</returns>
     /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
     /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null, a key of it is null or has a null
+    /// topic, or a value is null. For a null key the <see cref="Task"/> faults with it, after the checks an empty
+    /// <paramref name="offsets"/> makes.</exception>
     /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
     /// been started, or the producer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">Another transaction method is running on this

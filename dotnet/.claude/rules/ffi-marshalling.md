@@ -820,6 +820,15 @@ call and raise the class Java raises there — never `KafkaException`.
     not be null" (→ `ArgumentNullException`, without the binding's `ParamName`) and any other
     panic as -4 (→ `IllegalStateException`), neither of them Java's error; the binding's own
     check throws Java's.
+  - **A null element of a collection of value classes** (`TopicPartition`, `Uuid`), or a null key
+    of a map of them, is checked like a null collection, before the argument crosses the C ABI, by
+    the five cases of `dotnet/CLAUDE.md` §3 (**A null `TopicPartition` or `Uuid`**): Java's class
+    and message where Java checks the null or looks it up and finds nothing, else
+    `ArgumentNullException` "<param> must not contain null". It never reaches `Topic()` or a BCL
+    dictionary key. On the producer that is `SendOffsetsToTransaction`'s `offsets`: they cross as an
+    empty map, for which the core makes the checks Java makes before it reads a key, and then the
+    binding throws `ArgumentNullException("offsets", "offsets must not contain null")`; the
+    asynchronous producers fault the `Task` with it.
   - **Configuration errors are not preconditions.** A value of a type its key does not accept, a
     `null` its key's validator refuses, or a `null` key throws `ConfigException`
     (`Confluent.Kafka.Common.Config`, code −10) with Java's message, before any P/Invoke; the core's
@@ -853,6 +862,10 @@ class, so one condition never has two types.
   - Null record → `ArgumentNullException`; null topic, negative partition and negative timestamp →
     `IllegalArgumentException` with Java's message; post-`Dispose` → `IllegalStateException`
     with the producer's closed message — each before any native call.
+  - A null key in `SendOffsetsToTransaction`'s `offsets` → `ArgumentNullException` with its message
+    and `ParamName`, after the checks Java makes first (closed, group metadata, transaction state, a
+    mock's injected exception), thrown by the sync producers and faulting the asynchronous `Task`;
+    nothing is sent or recorded.
   - A config value of the wrong type and a `null` its validator refuses → `ConfigException` with
     Java's exact message, before any native call; a configuration the core refuses →
     `ConfigException` too.
@@ -1999,7 +2012,14 @@ the binding *before* the FFI call and raise the class Java raises there — neve
     or nothing, keeps `ArgumentNullException` (a null `PartitionsFor` topic; a null
     `Pause` / `Resume`, `Committed`, `BeginningOffsets` or `EndOffsets` collection or
     `OffsetsForTimes` map; a null config; a `SubscriptionPattern` whose `Pattern()` is
-    null) or `ArgumentOutOfRangeException`. **Mandatory**, not
+    null) or `ArgumentOutOfRangeException`. A null element of a collection of value classes
+    (`TopicPartition`), or a null key of a map of them, is checked like a null collection, before
+    the argument crosses the C ABI, by the five cases of `dotnet/CLAUDE.md` §3 (**A null
+    `TopicPartition` or `Uuid`**): Java's class and message where Java checks the null (`Assign`:
+    "Topic partitions to assign to cannot have null or empty topic") or looks it up and finds
+    nothing (`Pause`: `IllegalStateException` "No current assignment for partition null"), else
+    `ArgumentNullException` "<param> must not contain null"; it never reaches `Topic()` or a BCL
+    dictionary key. **Mandatory**, not
     optional: a `NULL` where the header asks for a mandatory pointer comes back as -32
     "<param> must not be null" (`LocalNullPointerError`), which the error table maps to
     `ArgumentNullException` with the core's message and no `ParamName`. Any other panic in
@@ -2157,6 +2177,9 @@ same `ConcurrentModificationException`, sync or async (decision 17).
     `Pattern()` is null → `ArgumentNullException`; a negative timeout → `IllegalArgumentException`
     with Java's or the core's message; post-`Dispose` → `IllegalStateException` with the
     closed message; each before any native call.
+  - A null element or key in each `TopicPartition` argument, on every consumer class → the class,
+    message and `ParamName` its case gives, after the closed and owner checks and before the
+    argument crosses the C ABI.
   - A config value of the wrong type and a `null` its validator refuses → `ConfigException` with
     Java's exact message, before any native call; a configuration the core refuses →
     `ConfigException` too.

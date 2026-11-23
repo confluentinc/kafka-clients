@@ -129,7 +129,7 @@ public sealed class PublicConsumerCommitTests
 
         Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
         {
-            [default] = new OffsetAndMetadata(1),
+            [new TopicPartition(null!, 0)] = new OffsetAndMetadata(1),
         };
 
         ArgumentNullException ex = await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.Commit(offsets));

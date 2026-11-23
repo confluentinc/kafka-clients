@@ -33,7 +33,9 @@ public sealed class AsyncDeleteRecordsResult
 
     /// <summary>Creates a result over the given futures, keyed by topic partition.</summary>
     /// <param name="futures">The future of each partition's deleted records. The map is copied.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="futures"/> is <see langword="null"/>, or has a <see langword="null"/> key.
+    /// </exception>
     public AsyncDeleteRecordsResult(IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> futures)
     {
         if (futures is null)
@@ -45,6 +47,11 @@ public sealed class AsyncDeleteRecordsResult
             new Dictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>>(futures.Count);
         foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<DeletedRecords>> entry in futures)
         {
+            if (entry.Key is null)
+            {
+                throw new ArgumentNullException(nameof(futures), "futures must not contain null");
+            }
+
             copy.Add(entry.Key, entry.Value);
         }
 

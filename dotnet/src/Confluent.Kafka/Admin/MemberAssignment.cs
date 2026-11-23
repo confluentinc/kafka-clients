@@ -40,6 +40,9 @@ public sealed class MemberAssignment
     /// The assigned partitions, or <see langword="null"/> for none, as in Java. Duplicates are
     /// collapsed and the collection is copied, as Java's <c>Set.copyOf</c>.
     /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topicPartitions"/> contains a <see langword="null"/>, which Java's <c>Set.copyOf</c> rejects.
+    /// </exception>
     public MemberAssignment(IEnumerable<TopicPartition>? topicPartitions)
     {
         if (topicPartitions is null)
@@ -52,6 +55,11 @@ public sealed class MemberAssignment
         _topicPartitions = new List<TopicPartition>();
         foreach (var topicPartition in topicPartitions)
         {
+            if (topicPartition is null)
+            {
+                throw new ArgumentNullException(nameof(topicPartitions), "topicPartitions must not contain null");
+            }
+
             if (seen.Add(topicPartition))
             {
                 _topicPartitions.Add(topicPartition);

@@ -230,7 +230,7 @@ public sealed class PublicConsumerPartitionOpsTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        TopicPartition[] withNullTopic = { default };
+        TopicPartition[] withNullTopic = { new TopicPartition(null!, 0) };
 
         ArgumentNullException assign = await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.Assign(withNullTopic));
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.SeekToBeginning(withNullTopic));
@@ -247,7 +247,7 @@ public sealed class PublicConsumerPartitionOpsTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        TopicPartition[] withNullTopic = { default };
+        TopicPartition[] withNullTopic = { new TopicPartition(null!, 0) };
 
         Assert.Equal(
             "No current assignment for partition null-0",

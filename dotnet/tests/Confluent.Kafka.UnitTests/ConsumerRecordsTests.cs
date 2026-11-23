@@ -251,6 +251,47 @@ public sealed class ConsumerRecordsTests
         Assert.Equal("nextOffsets", e.ParamName);
     }
 
+    // Java's constructor stores the records map as given, which a C# dictionary cannot do with a null key.
+    [Fact]
+    public void ANullPartitionInRecords_ThrowsArgumentNullException_AtConstruction()
+    {
+        EntryMap<TopicPartition, IReadOnlyList<ConsumerRecord<int?, string>>> records =
+            new EntryMap<TopicPartition, IReadOnlyList<ConsumerRecord<int?, string>>>(
+                new KeyValuePair<TopicPartition, IReadOnlyList<ConsumerRecord<int?, string>>>(s_tp, OneRecord()),
+                new KeyValuePair<TopicPartition, IReadOnlyList<ConsumerRecord<int?, string>>>(null!, OneRecord()));
+
+        ArgumentNullException e = Assert.Throws<ArgumentNullException>(
+            () => new ConsumerRecords<int?, string>(records, new Dictionary<TopicPartition, OffsetAndMetadata>()));
+        Assert.Equal("records", e.ParamName);
+        Assert.Equal(new ArgumentNullException("records", "records must not contain null").Message, e.Message);
+    }
+
+    // Java's Map.copyOf throws NullPointerException for a null key.
+    [Fact]
+    public void ANullPartitionInNextOffsets_ThrowsArgumentNullException_AtConstruction()
+    {
+        EntryMap<TopicPartition, OffsetAndMetadata> nextOffsets = new EntryMap<TopicPartition, OffsetAndMetadata>(
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(s_tp, new OffsetAndMetadata(1L)),
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(null!, new OffsetAndMetadata(2L)));
+
+        ArgumentNullException e = Assert.Throws<ArgumentNullException>(
+            () => new ConsumerRecords<int?, string>(Records(s_tp, OneRecord()), nextOffsets));
+        Assert.Equal("nextOffsets", e.ParamName);
+        Assert.Equal(new ArgumentNullException("nextOffsets", "nextOffsets must not contain null").Message, e.Message);
+    }
+
+    // Java's records(TopicPartition) finds nothing for a null partition and returns an empty list.
+    [Fact]
+    public void RecordsOfANullPartition_IsEmpty()
+    {
+        ConsumerRecords<int?, string> records = new ConsumerRecords<int?, string>(
+            Records(s_tp, OneRecord()), new Dictionary<TopicPartition, OffsetAndMetadata>());
+
+        Assert.Empty(records.Records((TopicPartition)null!));
+        Assert.Empty(ConsumerRecords<int?, string>.EMPTY.Records((TopicPartition)null!));
+        Assert.Single(records.Records(s_tp));
+    }
+
     [Fact]
     public void ANullRecordInAList_IsKept()
     {

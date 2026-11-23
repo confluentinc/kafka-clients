@@ -414,7 +414,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// </summary>
     /// <param name="newOffsets">The offset of each partition.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="newOffsets"/> is null, or a partition in it has a null topic.
+    /// <paramref name="newOffsets"/> or a partition in it is null, or a partition in it has a null topic.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
@@ -459,7 +459,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// </param>
     /// <returns>A <see cref="Task"/> that completes when the rebalance is done.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="newAssignment"/> is null.</exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentException">An element or an element topic is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     public Task Rebalance(
@@ -476,8 +476,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <c>OnPartitionsLost</c> extension method (<see cref="ConsumerRebalanceListenerExtensions"/> or
     /// <see cref="AsyncConsumerRebalanceListenerExtensions"/>) runs with them on the consumer's drain thread; then they
     /// leave the <see cref="Assignment"/>. The <see cref="Task"/> completes after the listener has ended; an exception from
-    /// it faults the <see cref="Task"/> with the same instance. A partition not currently assigned faults it with
-    /// <see cref="IllegalStateException"/>, as Java's.
+    /// it faults the <see cref="Task"/> with the same instance. A partition not currently assigned, a null one included,
+    /// faults it with <see cref="IllegalStateException"/>, as Java's.
     /// </remarks>
     /// <param name="partitionsLost">The partitions to lose; every one must be currently assigned.</param>
     /// <param name="cancellationToken">

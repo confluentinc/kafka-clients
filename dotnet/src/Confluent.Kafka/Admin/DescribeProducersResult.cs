@@ -50,16 +50,17 @@ public sealed class DescribeProducersResult
     /// <param name="partition">A topic partition from the request.</param>
     /// <returns>That partition's future; every call returns an equal future.</returns>
     /// <exception cref="IllegalArgumentException">
-    /// The partition was not in the request, thrown at the call with Java's message.
+    /// The partition was not in the request (a <see langword="null"/> one included), thrown at the call with Java's
+    /// message.
     /// </exception>
     public KafkaFuture<PartitionProducerState> PartitionResult(TopicPartition partition) =>
-        _futures.TryGetValue(partition, out KafkaFuture<PartitionProducerState> future)
+        partition is not null && _futures.TryGetValue(partition, out KafkaFuture<PartitionProducerState> future)
             ? future
             : throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "Topic partition {0} was not included in the request",
-                    partition));
+                    JavaText.ValueOf(partition)));
 
     /// <summary>
     /// Every partition's producers in one map, succeeding only if every partition did —

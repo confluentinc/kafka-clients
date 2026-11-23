@@ -97,9 +97,10 @@ public sealed class PublicAdminP4Stage2ShapeParityTests
             typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>),
             reassignments.ReturnType);
 
-        // Nullability positions: 0 = the KafkaFuture (a struct, so oblivious), 1 = the dictionary, 2 = its value.
+        // Nullability positions: 0 = the KafkaFuture (a struct, so oblivious), 1 = the dictionary, 2 = its
+        // TopicPartition key, 3 = its value.
         Assert.Equal(NullableAnnotation.Oblivious, NullableAnnotation.Flag(reassignments.ReturnParameter, 0));
-        for (int position = 1; position <= 2; position++)
+        for (int position = 1; position <= 3; position++)
         {
             Assert.Equal(
                 NullableAnnotation.NotAnnotated,

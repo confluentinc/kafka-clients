@@ -221,15 +221,15 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
 
     /// <inheritdoc/>
     public void Seek(TopicPartition partition, long offset) =>
-        _native.Seek(partition.Topic(), partition.Partition(), offset);
+        _native.Seek(partition, offset);
 
     /// <inheritdoc/>
     public void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata) =>
-        _native.SeekWithMetadata(partition.Topic(), partition.Partition(), offsetAndMetadata);
+        _native.SeekWithMetadata(partition, offsetAndMetadata);
 
     /// <inheritdoc/>
     public long? CurrentLag(TopicPartition topicPartition) =>
-        _native.CurrentLag(topicPartition.Topic(), topicPartition.Partition());
+        _native.CurrentLag(topicPartition);
 
     /// <inheritdoc/>
     public void Wakeup() => _native.Wakeup();
@@ -346,7 +346,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// </summary>
     /// <param name="newOffsets">The offset of each partition.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="newOffsets"/> is null, or a partition in it has a null topic.
+    /// <paramref name="newOffsets"/> or a partition in it is null, or a partition in it has a null topic.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
@@ -386,7 +386,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <param name="newAssignment">The new full assignment.</param>
     /// <exception cref="ArgumentNullException"><paramref name="newAssignment"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// An element topic is null, or the consumer is manually assigned (Java's <c>IllegalArgumentException</c>).
+    /// An element or an element topic is null, or the consumer is manually assigned (Java's
+    /// <c>IllegalArgumentException</c>).
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment) => _native.Rebalance(newAssignment);
@@ -405,7 +406,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <exception cref="ArgumentNullException"><paramref name="partitionsLost"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="IllegalStateException">
-    /// The consumer is closed, or a partition is not currently assigned.
+    /// The consumer is closed, or a partition, a null one included, is not currently assigned.
     /// </exception>
     public void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost) => _native.LosePartitions(partitionsLost);
 

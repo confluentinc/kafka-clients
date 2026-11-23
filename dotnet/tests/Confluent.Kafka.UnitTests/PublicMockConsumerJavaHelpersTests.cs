@@ -276,7 +276,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
         Assert.Equal(
             "newOffsets",
             Assert.Throws<ArgumentNullException>(
-                () => consumer.UpdateDurationOffsets(new Dictionary<TopicPartition, long> { [default] = 1L })).ParamName);
+                () => consumer.UpdateDurationOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(null!, 0)] = 1L })).ParamName);
     }
 
     // Java's MockConsumerTest builds its consumer with the earliest reset strategy.

@@ -714,7 +714,7 @@ public sealed class AdminP5SubmitArgumentTests
             admin,
             new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
             {
-                ["g1"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { default(TopicPartition) }),
+                ["g1"] = new ListConsumerGroupOffsetsSpec().TopicPartitions(new[] { new TopicPartition(null!, 0) }),
             },
             "groupSpecs must not contain a TopicPartition with a null topic");
     }

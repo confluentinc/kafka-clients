@@ -873,13 +873,116 @@ each goes when the reason it gives goes:
   `InvalidPartitionsException` / `InvalidReplicationFactorException`. The C ABI reads any negative
   as unset, so passing the value on would create the topic with the broker's defaults. Goes when
   the C ABI carries the value.
-- **Admin null names.** An admin RPC with a null topic name or group id inside an argument throws
-  at the call, as Python's does; Java fails that key's future with `InvalidTopicException` /
-  `InvalidGroupIdException`. The C ABI cannot carry the null. Two lookups on a Result answer as
-  Java: `AlterConsumerGroupOffsetsResult.PartitionResult` of a null-topic partition returns a
-  future already failed with Java's `IllegalArgumentException` *(deviation: Java fails it only
-  after the call, and with the call's error if the call failed; the Result cannot see that)*, and
-  `DeleteConsumerGroupOffsetsResult.PartitionResult` throws it at the call, as Java's.
+- **Admin null names.** An admin RPC with a null topic name, group id, partition or topic id inside an
+  argument throws at the call, on all four clients, as Python's does. Where Java does not throw at the
+  call too, it fails that key's future with `InvalidTopicException` / `InvalidGroupIdException` (a null
+  id in `DescribeTopics`: `InvalidTopicException` "The given topic id 'null' cannot be represented in a
+  request."; on Java's mock, `UnknownTopicOrPartitionException` / `UnknownTopicIdException`), or, for a
+  null partition, fails a group's future when it builds the request (`AlterConsumerGroupOffsets`,
+  `DeleteConsumerGroupOffsets`, `ListConsumerGroupOffsets`) or stops its admin thread (`ElectLeaders`).
+  The C ABI cannot carry the null. On a closed client the closed check comes first, as in Python. Java's
+  real client makes no closed check at the call and reads the argument first: an NPE at the call, or
+  that key's failed future. Java's mock has no closed state. Two lookups on a Result answer
+  as Java: `AlterConsumerGroupOffsetsResult.PartitionResult` of a null partition or a null-topic
+  partition returns a future already failed with Java's `IllegalArgumentException` *(deviation: Java
+  fails it only after the call, and with the call's error if the call failed; the Result cannot see
+  that)*, and `DeleteConsumerGroupOffsetsResult.PartitionResult` throws it at the call, as Java's.
+  `ListOffsetsResult.PartitionResult` of a null partition throws Java's `IllegalArgumentException` too,
+  as Java's Result over a `HashMap` (a user's, or its mock's) does. Java's client-built Result throws
+  `NullPointerException` first, from its immutable map. `DescribeProducersResult.PartitionResult` of a
+  null partition throws `IllegalArgumentException` with Java's text, as Python's does. Every Java
+  `DescribeProducersResult` throws `NullPointerException`: only Java's real client builds one, over an
+  immutable map. Both stay: the binding's Results are not Java's immutable maps.
+- **A null `TopicPartition` or `Uuid`.** Both are classes, as Java's (sealed, where Java's `Uuid` is
+  not final), so a `null` can come in, alone, as an element or as a map key. Each method answers it
+  before the argument reaches the C ABI, after the checks Java makes first (closed, owner, group, …),
+  by the first case that fits:
+  1. Java checks for null: the same class and message (`Assign` on the real consumers:
+     `IllegalArgumentException` "Topic partitions to assign to cannot have null or empty topic").
+  2. Java looks the null up and finds nothing: Java's answer, `null` printed as Java prints it (`Pause`:
+     `IllegalStateException` "No current assignment for partition null";
+     `ConsumerRecords.Records(null)`: an empty list).
+  3. Java dereferences it, at the call or later in a future or on its own thread:
+     `ArgumentNullException` at the call, as Python's `TypeError` ("partitions must not contain null";
+     "reassignments must not contain a null key" where the map's values may be null).
+  4. Java accepts it, but the C ABI or a .NET `Dictionary` cannot hold it: the same
+     `ArgumentNullException` (the next bullet).
+  5. Java accepts it and .NET can hold it: it is kept, and `Equals`, `GetHashCode` and `ToString` treat
+     it as Java's do.
+
+  A `null` never reaches `Topic()` or a BCL dictionary key. On an asynchronous client the binding's
+  answer is thrown at the call where its answer for a null topic is, and otherwise comes as its answer
+  for any other partition does: the asynchronous mocks fault the `Task` for `OffsetsForTimes`,
+  `BeginningOffsets`, `EndOffsets` and `LosePartitions`. A Java check that comes before an answer thrown
+  at the call is thrown at the call too: on `AsyncKafkaConsumer`, with a null key, the group error of a
+  `Commit` and the negative-target error of an `OffsetsForTimes`, which fault the `Task` for any other
+  key. The asynchronous producers fault the `Task` of `SendOffsetsToTransaction` with the
+  `ArgumentNullException`, after the core's checks. A `TopicPartition` or `Uuid` parameter or return is
+  annotated nullable where Python's stub says `| None` (`TopicMetadataAndConfig`'s topic id is `Uuid`,
+  as the stub types it). `Equals` and `CompareTo` take a nullable argument because `IEquatable<T>` and
+  `IComparable<T>` require it (CS8767); `CompareTo(null)` throws `ArgumentNullException`, as Java's
+  throws.
+- **A null partition Java keeps.** These throw case 4's `ArgumentNullException` where Java stores or
+  skips the null. The consumer mocks throw it for `Commit` and `CommitAsync` with a null key and for
+  `UpdateDurationOffsets` (Java's mock stores it with `putAll`). The producer mocks throw it for
+  `SendOffsetsToTransaction`, after the checks Java's mock makes first. The admin mocks throw it for
+  `ListPartitionReassignments` (Java's mock looks the null up and skips it), `ListConsumerGroupOffsets`
+  with one group spec (Java's mock never matches it), and `UpdateBeginningOffsets`, `UpdateEndOffsets`
+  and `UpdateConsumerGroupOffsets` (Java's `putAll` stores it; .NET seeds nothing, the map's other keys
+  included). A null topic id is **Admin null names**. Goes when the C ABI carries a null partition.
+  These stay, as a .NET `Dictionary` cannot hold a null key: the `ConsumerRecords`,
+  `DeleteRecordsResult` and `ListOffsetsResult` constructors and their asynchronous twins, which Java
+  stores as given; and a real `OffsetsForTimes` with a zero timeout, given or from
+  `default.api.timeout.ms`, whose Java answer is a map with the null key.
+- **A refused call does nothing.** Java works through the argument in order and throws when it reaches
+  the null; the binding answers the null first, so the work Java does before it is not done. `Pause`,
+  `Resume`, `SeekToBeginning` and `SeekToEnd` pause, resume or reset none of the partitions before the
+  null (on the mocks, a `Pause` with a partition that is not assigned and not null still pauses the ones
+  before it, as Java's does). The consumer mocks' `Assign` keeps the mock's committed offsets and its
+  subscription type, so a later `Subscribe` succeeds. Java's mock clears the offsets and switches to
+  manual assignment first, so its next `subscribe` throws `IllegalStateException` "Subscription to
+  topics, partitions and pattern are mutually exclusive". The consumer mocks' `Rebalance` clears no
+  records, calls no `OnPartitionsRevoked` and keeps the assignment. Java's mock clears the records,
+  calls `onPartitionsRevoked` for the removed partitions and is left with no assignment. On a real
+  consumer a `Commit` or `CommitAsync` with a null key runs none of the
+  callbacks earlier `CommitAsync` calls left queued, which Java's `commit()` runs first; the next call
+  that delivers callbacks runs them. The admin mocks' `AlterPartitionReassignments` stores or cancels
+  none of the entries before the null key. `DeleteTopics` and `DescribeTopics` with a null id send
+  nothing: Java's mock deletes or describes the other ids and takes a pending `TimeoutNextRequest`,
+  which on .NET is left for the next call, and Java's real `DescribeTopics` sends the request for the
+  other ids. Goes when the C ABI carries a null partition and a null id.
+- **A null partition's error comes first.** The binding checks the null before the call, so where Java
+  meets another error first, .NET reports the null. A subscribed `MockConsumer`'s `Assign` throws the
+  `ArgumentNullException` where Java's mock throws `IllegalStateException` "Subscription to topics,
+  partitions and pattern are mutually exclusive"; a manually assigned mock's `Rebalance` throws it where
+  Java's mock throws `IllegalArgumentException` "Attempt to dynamically assign partitions while manual
+  assignment in use" (the core mock's check). The consumer mocks' `BeginningOffsets` and `EndOffsets`
+  answer the null before the mock's pending offsets exception and before an earlier partition's missing
+  offset. A real `ListPartitionReassignments` checks every element before it sends, so a null after an
+  empty-topic or negative-partition element is an `ArgumentNullException`, where Java fails the Result
+  with `InvalidTopicException` at the first bad element, as a null topic already does. The admin mocks
+  refuse the null where Java's mock throws `UnsupportedOperationException` "Not implemented yet" for the
+  call: `DeleteRecords` with a non-empty map, `ElectLeaders`, `AlterConsumerGroupOffsets`,
+  `DeleteConsumerGroupOffsets`, `DescribeProducers`, `AbortTransaction`, `ListConsumerGroupOffsets` with
+  more than one group spec, and `ListOffsets` when an entry with a timestamp spec comes before the null
+  key (Java's text is "Not implement yet" for `AlterConsumerGroupOffsets` and `ListOffsets`). Goes when
+  the C ABI carries a null partition. Two orders are .NET's own and stay. With a null options and a null
+  element or key, `ElectLeaders`, `AlterConsumerGroupOffsets`, `DeleteConsumerGroupOffsets` and
+  `ListConsumerGroupOffsets` report the element, as for any other null argument, where Java's
+  `options.timeoutMs()` throws first. `AsyncKafkaConsumer.CommitAsync(offsets, callback)` with an
+  `IAsyncOffsetCommitCallback` reports a null callback before a null key, which comes after its group
+  check, while `AsyncMockConsumer` reports the null key first, as Java's `MockConsumer#commitAsync`
+  reads the map before the callback (Java has no asynchronous callback).
+- **A zero timeout.** A real `BeginningOffsets` or `EndOffsets` with a null element and a zero timeout
+  (or, without a timeout, `default.api.timeout.ms` at 0) returns an empty map without a native call, as
+  Java does. A timeout under 1 ms counts as zero, for any partition, where Java's `beginningOffsets`
+  tests `Duration.isZero()`. Goes when the C ABI takes a timeout finer than a millisecond.
+- **Sorting a null `Uuid`.** `CompareTo(null)` throws, so `List.Sort()`, `Array.Sort` and
+  `BinarySearch`, with or without `Comparer<Uuid>.Default`, throw `InvalidOperationException` around its
+  `ArgumentNullException`, as Java's sort throws. `OrderBy`, `SortedSet<Uuid>` and a comparer that calls
+  `Comparer<Uuid>.Default.Compare` put the null first, and `List.Sort()` accepts a list in which it
+  never compares the null (`[null, x]`, only nulls), where Java's sort throws. It stays: .NET's default
+  comparer orders null first without calling `CompareTo`.
 - **Undefined enum values.** A number cast to an enum that names no member (`(ResourceType)99`), which a Java
   or Python enum cannot hold, is read as the enum's own Java lookup reads that number: `UNKNOWN` for the four
   ACL enums, `ConfigResourceType`, `ScramMechanism` and `UpgradeType` (`fromCode`, `forId`, `fromType`), and

@@ -170,7 +170,7 @@ public sealed class AsyncConsumerDeserializerFormsTests
     private static IDisposable Seed(NativeConsumer consumer)
     {
         consumer.Assign(new[] { (Topic, 0) });
-        consumer.Seek(Topic, 0, offset: 0);
+        consumer.Seek(new TopicPartition(Topic, 0), offset: 0);
         return ConsumerPollHeadersTests.AddRecordWithHeaders(
             consumer, Topic, 0, offset: 0, key: Bytes("key"), value: Bytes("value"), ("h", Bytes("one")));
     }

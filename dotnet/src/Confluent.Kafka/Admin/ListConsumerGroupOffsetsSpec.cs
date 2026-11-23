@@ -124,7 +124,7 @@ public sealed class ListConsumerGroupOffsetsSpec
             int elements = 1;
             foreach (var topicPartition in _topicPartitions)
             {
-                elements = (elements * 31) + topicPartition.GetHashCode();
+                elements = (elements * 31) + (topicPartition?.GetHashCode() ?? 0);
             }
 
             return (hash * 31) + elements;
@@ -143,5 +143,8 @@ public sealed class ListConsumerGroupOffsetsSpec
             "ListConsumerGroupOffsetsSpec(topicPartitions={0})",
             _topicPartitions is null
                 ? "null"
-                : "[" + string.Join(", ", _topicPartitions.Select(static topicPartition => topicPartition.ToString())) + "]");
+                : "["
+                    + string.Join(
+                        ", ", _topicPartitions.Select(static topicPartition => topicPartition?.ToString() ?? "null"))
+                    + "]");
 }
