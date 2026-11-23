@@ -59,7 +59,7 @@ complete list is here (also in `rust/CHANGELOG.md` under `[Unreleased]`).
 
 Everything else in shared consumer code is behaviour-neutral for the consumer, each in its own
 commit: the abstract membership and heartbeat managers reshaped for a second subclass (P4a,
-`3923672ad`..`50c4735f6`, and `114534c6e`), the record-batch decoder extracted from
+`49c190a7a`..`50c4735f6`, and `114534c6e`), the record-batch decoder extracted from
 `CompletedFetch` (`7deea5d8a`), a response hook after every network poll that no consumer manager
 overrides (`f22581ee2`), `AbstractConfig`'s pre-process hook returning a `Result` (crate-private,
 `3a05f902d`), crate-private helpers reused by the share consumer (`41ed87c26`), and a corrected
@@ -94,7 +94,7 @@ Each phase ran an Actor/Critic loop until the Critic had no open comments.
 
 ## Where to review
 
-- `design/current/Milestone-18-share-consumer/PLAN.md` **§8.1**: 27 deviations from the consumer
+- `design/current/Milestone-18-share-consumer/PLAN.md` **§8.1**: 26 deviations (row 23 was removed) from the consumer
   design, for review at this PR; each is to keep or revert. §8 lists the consumer gaps found
   during the milestone and their dispositions (consumer follow-ups, out of this PR).
 - `ledger.md`: the Java→Rust file and test map (every row done or skipped with a reason) and the
@@ -123,18 +123,22 @@ integration test methods run as 130 Rust tests (`ledger.md` §2, §5).
 
 ## Open decisions for the user
 
-1. **PLAN §8.1**: keep or revert each of the 27 deviations. Three carry an explicit question:
+Decided at the close-out (PLAN §7 D11, user, 2026-11-23): **stay on Apache Kafka 4.4.0.** Three
+share fixes Java landed on trunk after 4.4.0 apply to this translation and are not ported
+(`post-4.4.0-java.md`); with KAFKA-21455 (consumer) they wait for the next version bump. The first
+to take then is KAFKA-21558, a correctness fix: acknowledgements piggy-backed for a node that lost
+its share session never complete, so their callback never runs.
+
+1. **PLAN §8.1**: keep or revert each of the 26 deviations. Three carry an explicit question:
    - row 5 / D5: the provisional renew scheme (team review at the D5 artifact) and its proposed contract change;
    - row 17: keep Java's loss of the acknowledgements `pollForFetches` took when the collector fails (and report it upstream), or send them as the drop guard does;
    - row 19: re-enable wakeups when a `close` is dropped. That would change both consumers.
-2. **D11, the share fixes Java landed after 4.4.0** (`post-4.4.0-java.md`). Three trunk commits apply and are not ported. KAFKA-21558 is a real correctness fix: acknowledgements piggy-backed for a node that lost its share session never complete, so their callback never runs. The other two are the accumulated renew-acknowledgement check and KAFKA-19804, the initial heartbeat interval, which the consumer shares. Port them now, or after a release carries them?
-3. **Two proposed contract changes** in `design/current/doc-contract-changes.md`, both with `Accepted` empty: `ShareConsumer::poll` (a timeout over `i64::MAX` ms waits without limit) and `AcknowledgeType::Renew` (redelivered as a new, re-deserialized record).
-4. **Rules** (`rules-promotion.md`, D4): promote R1–R8, as proposed or not. Also four drafted edits: share-consumer.md's settled decisions, documentation.md §8's `errors` line, admin-client.md §9's "cite the Java method", and two stale CLAUDE.md lines.
-5. **`Admin` and semver at 1.x**: the five required `_with_options` share methods break external `impl Admin`. That is faithful to Java and to the trait's existing shape. CLAUDE.md §3 asks that what is minor in Java stay minor in Rust; giving them default bodies would avoid the break, as a policy for every future `Admin` method.
-6. **Consumer follow-ups** (PLAN §8): owned by "consumer follow-up, out of M18" with no named milestone. Add KAFKA-21455's `notifyAssignmentChange` in `clearAssignmentAndLeaveGroup`, found in the post-4.4.0 check.
-7. **Harness memory**: the Docker VM's OOM killer (`global_oom`) killed one broker JVM in the 4.2.0 gate run, where it failed two producer transaction tests that passed on a rerun, and one in the 4.4.0 run, with no failure. The peak was 26 containers / 6.9 GiB of the VM's 7.75 GiB. The decision on the harness was deferred.
-8. **Master**: `origin/master` is 5 commits ahead and merges without conflicts (`git merge-tree`). 11 files changed on both sides, among them the test harness (`tests/common`, `consumer_test.rs`, `Makefile`, `.semaphore/semaphore.yml`). Merge it with a merge commit before opening the PR and run the gate again.
-9. **Archive**: move `design/current/Milestone-18-share-consumer/` to `design/history/` once §8.1 is reviewed, as Milestone 15 did.
-10. **Naming, cosmetic**: `ShareRequestMetadata::do_next_epoch` (Java's static `nextEpoch(int)`, CLAUDE.md §2 would give `next_epoch_with_prev_epoch`) and the crate-private renames that drop `get` in `Acknowledgements`.
+2. **Two proposed contract changes** in `design/current/doc-contract-changes.md`, both with `Accepted` empty: `ShareConsumer::poll` (a timeout over `i64::MAX` ms waits without limit) and `AcknowledgeType::Renew` (redelivered as a new, re-deserialized record).
+3. **Rules** (`rules-promotion.md`, D4): promote R1–R8, as proposed or not. Also four drafted edits: share-consumer.md's settled decisions, documentation.md §8's `errors` line, admin-client.md §9's "cite the Java method", and two stale CLAUDE.md lines.
+4. **`Admin` and semver at 1.x**: the five required `_with_options` share methods break external `impl Admin`. That is faithful to Java and to the trait's existing shape. CLAUDE.md §3 asks that what is minor in Java stay minor in Rust; giving them default bodies would avoid the break, as a policy for every future `Admin` method.
+5. **Consumer follow-ups** (PLAN §8): owned by "consumer follow-up, out of M18" with no named milestone. (KAFKA-21455, found in the post-4.4.0 check, waits for the version bump with D11.)
+6. **Harness memory**: the Docker VM's OOM killer (`global_oom`) killed one broker JVM in the 4.2.0 gate run, where it failed two producer transaction tests that passed on a rerun, and one in the 4.4.0 run, with no failure. The peak was 26 containers / 6.9 GiB of the VM's 7.75 GiB. The decision on the harness was deferred.
+7. **Master**: `origin/master` is 5 commits ahead and merges without conflicts (`git merge-tree`). 12 files changed on both sides, among them `rust/README.md` and the test harness (`tests/common`, `consumer_test.rs`, `Makefile`, `.semaphore/semaphore.yml`). Merge it with a merge commit before opening the PR and run the gate again.
+8. **Archive**: move `design/current/Milestone-18-share-consumer/` to `design/history/` once §8.1 is reviewed, as Milestone 15 did.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
