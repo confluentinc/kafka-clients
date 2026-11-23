@@ -37,18 +37,24 @@ export abstract class RetriableError extends ApiError {
    * Java's `(String message, Throwable cause)` constructor.
    *
    * @param options - the message and the cause
+   * @throws `TypeError` when `new.target` is `RetriableError` itself, a
+   *   catch-only base
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; /** The cause (`Error`'s `cause`). */ cause: unknown; name?: never });
   /**
    * Java's `(String message)` constructor.
    *
    * @param options - the message
+   * @throws `TypeError` when `new.target` is `RetriableError` itself, a
+   *   catch-only base
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
    * Java's `(String message)` constructor, given the message alone.
    *
    * @param message - the message; `null` reads as `''`
+   * @throws `TypeError` when `new.target` is `RetriableError` itself, a
+   *   catch-only base
    */
   constructor(message: string | null);
   /**
@@ -56,6 +62,8 @@ export abstract class RetriableError extends ApiError {
    * `String()`, as Java's is `cause.toString()` (`''` for a null cause).
    *
    * @param options - the cause
+   * @throws `TypeError` when `new.target` is `RetriableError` itself, a
+   *   catch-only base
    */
   constructor(options: { /** The cause (`Error`'s `cause`). */ cause: unknown; name?: never });
   /**
@@ -64,10 +72,15 @@ export abstract class RetriableError extends ApiError {
    * cause).
    *
    * @param cause - the cause (`Error`'s `cause`)
+   * @throws `TypeError` when `new.target` is `RetriableError` itself, a
+   *   catch-only base
    */
   constructor(cause: Error);
   /**
    * Java's no-argument constructor. The message is empty, Java's null.
+   *
+   * @throws `TypeError` when `new.target` is `RetriableError` itself, a
+   *   catch-only base
    */
   constructor();
   constructor(...args: unknown[]) {

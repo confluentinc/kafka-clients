@@ -259,8 +259,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * @remarks *(deviation)* The serializers and the null check run before the
-   * closed check.
+   * @remarks Adds the record to `history()`. *(deviation)* The null check and
+   * serializers run first.
    */
   send(options: {
     /** The record to send. */

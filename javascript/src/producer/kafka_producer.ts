@@ -325,13 +325,14 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    *   which the C ABI would read as the end of the string, or a serializer is
    *   neither null nor an object with a `serialize` method
    *
-   * @remarks Java's `Map` and `Properties` constructors are the one
-   * `configs`. `key.serializer` and `value.serializer` take a function
-   * `({ configs, isKey }) => serializer`, called once with the configuration
-   * as given, before the core checks it *(deviation: Java takes a class)*;
-   * these keys, and the keys it reads, don't reach the core. Without
-   * serializers a key or value is sent as its bytes *(deviation)*. The first
-   * client a process builds emits one `ExperimentalWarning`.
+   * @remarks Java's `Map` and `Properties` forms are `configs`.
+   * `key.serializer` and `value.serializer` take a function
+   * `({ configs, isKey }) => serializer` *(deviation: Java takes a class)*.
+   * These keys, and any non-producer key the function reads, don't reach the
+   * core. *(deviation)* The function gets the configuration as given, without
+   * Java's `client.id`, before the core checks it. Without serializers, keys
+   * and values are sent as bytes *(deviation)*. Once per process it emits an
+   * `ExperimentalWarning`.
    */
   constructor(options: {
     /** The producer configs: a plain object of Java's ProducerConfig keys. */
