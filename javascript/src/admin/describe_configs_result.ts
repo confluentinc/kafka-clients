@@ -28,14 +28,14 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `KafkaAdminClient.describeConfigs(resources)` call.
- *
- * Instances come from the admin client's `describeConfigs()`.
  */
 export class DescribeConfigsResult {
   readonly #futures: ConfigResourceMap<KafkaFuture<Config>>;
 
   /**
    * Java's protected constructor.
+   *
+   * Instances come from the admin client's `describeConfigs()`.
    *
    * @param futures - the futures, by resource
    */

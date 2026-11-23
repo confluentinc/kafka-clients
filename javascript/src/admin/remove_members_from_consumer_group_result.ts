@@ -56,14 +56,19 @@ interface ClientFutures {
 /**
  * The result of the `Admin.removeMembersFromConsumerGroup(groupId, options)`
  * call.
- *
- * Instances come from the admin client's `removeMembersFromConsumerGroup()`.
  */
 export class RemoveMembersFromConsumerGroupResult {
   readonly #future: KafkaFuture<Map<string | null, Error | null>> | null;
   readonly #memberInfos: MemberToRemoveSet;
   readonly #client: ClientFutures | null;
 
+  /**
+   * Instances come from the admin client's `removeMembersFromConsumerGroup()`.
+   *
+   * @param future - the future of each member's error, or null
+   * @param memberInfos - the members of the request (none: every member)
+   * @param client - the core's futures, or null for Java's composition
+   */
   private constructor(
     future: KafkaFuture<Map<string | null, Error | null>> | null,
     memberInfos: MemberToRemoveSet,
@@ -154,7 +159,7 @@ export class RemoveMembersFromConsumerGroupResult {
    */
   memberResult(member: MemberToRemove): KafkaFuture<void>;
   /**
-   * The same as `memberResult(member)`, the member given by name.
+   * The same as `memberResult(member)`.
    *
    * @param options - the member
    * @returns the future

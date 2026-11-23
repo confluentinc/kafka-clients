@@ -25,12 +25,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `Admin.createPartitions(newPartitions)` call.
- *
- * Instances come from the admin client's `createPartitions()`.
  */
 export class CreatePartitionsResult {
   readonly #values: Map<string, KafkaFuture<void>>;
 
+  /**
+   * Instances come from the admin client's `createPartitions()`.
+   *
+   * @param values - the futures, by topic name
+   */
   private constructor(values: Map<string, KafkaFuture<void>>) {
     this.#values = values;
   }

@@ -30,13 +30,17 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `Admin.alterConsumerGroupOffsets(groupId, offsets)` call.
- *
- * Instances come from the admin client's `alterConsumerGroupOffsets()`.
  */
 export class AlterConsumerGroupOffsetsResult {
   readonly #partitionResult: (partition: TopicPartition) => KafkaFuture<void>;
   readonly #all: () => KafkaFuture<void>;
 
+  /**
+   * Instances come from the admin client's `alterConsumerGroupOffsets()`.
+   *
+   * @param partitionResult - the core's `partitionResult(partition)`
+   * @param all - the core's `all()`
+   */
   private constructor(partitionResult: (partition: TopicPartition) => KafkaFuture<void>, all: () => KafkaFuture<void>) {
     this.#partitionResult = partitionResult;
     this.#all = all;
@@ -67,8 +71,7 @@ export class AlterConsumerGroupOffsetsResult {
    * @throws `TypeError` when the partition is null, has a null topic or is
    *   not a TopicPartition
    *
-   * @remarks *(deviation)* Java fails the future for a null partition or
-   * topic. Why: the C API cannot carry the null. Goes when: the FFI takes it.
+   * @remarks *(deviation)* Java fails the future instead.
    */
   partitionResult(partition: TopicPartition): KafkaFuture<void>;
   /**

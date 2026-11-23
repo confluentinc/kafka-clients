@@ -32,12 +32,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `Admin.describeTransactions(transactionalIds)` call.
- *
- * Instances come from the admin client's `describeTransactions()`.
  */
 export class DescribeTransactionsResult {
   readonly #futures: ReadonlyMap<string, KafkaFuture<TransactionDescription>>;
 
+  /**
+   * Instances come from the admin client's `describeTransactions()`.
+   *
+   * @param futures - the futures, by transactional id
+   */
   private constructor(futures: ReadonlyMap<string, KafkaFuture<TransactionDescription>>) {
     this.#futures = futures;
   }

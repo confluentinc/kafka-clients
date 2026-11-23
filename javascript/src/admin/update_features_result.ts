@@ -26,12 +26,16 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `Admin.updateFeatures(featureUpdates)` call.
- *
- * Instances come from the admin client's `updateFeatures()`.
  */
 export class UpdateFeaturesResult {
   readonly #futures: Map<string, KafkaFuture<void>>;
 
+  /**
+   * Instances come from the admin client's `updateFeatures()`.
+   *
+   * @param futures - a map from feature name to future, which can be used to
+   *   check the status of individual feature updates
+   */
   private constructor(futures: Map<string, KafkaFuture<void>>) {
     this.#futures = futures;
   }

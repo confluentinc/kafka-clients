@@ -24,12 +24,15 @@ const EXPIRY_TIMESTAMP_FORMS = new JavaForms('expiryTimestamp', [[]], { reader: 
 
 /**
  * The result of the `Admin.renewDelegationToken(hmac)` call.
- *
- * Instances come from the admin client's `renewDelegationToken()`.
  */
 export class RenewDelegationTokenResult {
   readonly #future: KafkaFuture<bigint>;
 
+  /**
+   * Instances come from the admin client's `renewDelegationToken()`.
+   *
+   * @param future - the future
+   */
   private constructor(future: KafkaFuture<bigint>) {
     this.#future = future;
   }

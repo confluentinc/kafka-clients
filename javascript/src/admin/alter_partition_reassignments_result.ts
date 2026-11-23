@@ -27,12 +27,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of `Admin.alterPartitionReassignments(reassignments, options)`.
- *
- * Instances come from the admin client's `alterPartitionReassignments()`.
  */
 export class AlterPartitionReassignmentsResult {
   readonly #futures: TopicPartitionMap<KafkaFuture<void>>;
 
+  /**
+   * Instances come from the admin client's `alterPartitionReassignments()`.
+   *
+   * @param futures - the futures, by partition
+   */
   private constructor(futures: TopicPartitionMap<KafkaFuture<void>>) {
     this.#futures = futures;
   }

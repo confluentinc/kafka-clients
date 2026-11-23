@@ -36,13 +36,17 @@ const VOID = null as unknown as void;
 /**
  * The result of the `Admin.deleteConsumerGroupOffsets(groupId, partitions)`
  * call.
- *
- * Instances come from the admin client's `deleteConsumerGroupOffsets()`.
  */
 export class DeleteConsumerGroupOffsetsResult {
   readonly #future: KafkaFuture<TopicPartitionMap<Error | null>>;
   readonly #partitions: TopicPartitionSet;
 
+  /**
+   * Instances come from the admin client's `deleteConsumerGroupOffsets()`.
+   *
+   * @param future - the future of each partition's error, or null
+   * @param partitions - the partitions of the request
+   */
   private constructor(future: KafkaFuture<TopicPartitionMap<Error | null>>, partitions: TopicPartitionSet) {
     this.#future = future;
     this.#partitions = partitions;

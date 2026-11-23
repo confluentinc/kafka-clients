@@ -27,12 +27,15 @@ const ALL_DESCRIPTIONS_FORMS = new JavaForms('allDescriptions', [[]], { reader: 
 
 /**
  * The result of the `Admin.describeLogDirs(brokers)` call.
- *
- * Instances come from the admin client's `describeLogDirs()`.
  */
 export class DescribeLogDirsResult {
   readonly #futures: Map<number, KafkaFuture<Map<string, LogDirDescription>>>;
 
+  /**
+   * Instances come from the admin client's `describeLogDirs()`.
+   *
+   * @param futures - the futures, by broker id
+   */
   private constructor(futures: Map<number, KafkaFuture<Map<string, LogDirDescription>>>) {
     this.#futures = futures;
   }

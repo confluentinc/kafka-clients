@@ -17,38 +17,18 @@
 // `cargo xtask check-generated` checks it is up to date.
 
 /**
- * The constants of Java's `org.apache.kafka.clients.admin.AdminClientConfig`:
- * every `public static final` field, evaluated from the Java source, is a
- * static property of the same name; a deprecated one is left out. A `List`
- * constant is a frozen array and a `Set` constant a read-only set whose `add`,
- * `delete` and `clear` throw `UnsupportedOperationError`, both in Java's order.
- * The constants Java's class inherits from `AbstractConfig`
- * (`CONFIG_PROVIDERS_CONFIG`, ...) are properties of the class too. The
- * `ConfigDef` machinery is not translated (a configuration is a plain object of
- * these keys, and the `ConfigDef` types are the types the client checks), so
- * `AdminClientConfig` is not instantiable: constructing it throws `TypeError`.
- * Not generated: `AdminClientConfig(Map<?, ?>)`, `configNames()`,
- * `configDef()`, `main(String[])`, the `ConfigDef` machinery or methods that
- * take a type the client does not translate (`ConfigDef`, `AbstractConfig`).
+ * The AdminClient configuration class, which also contains constants for
+ * configuration entry names.
  *
- * Java: `org.apache.kafka.clients.admin.AdminClientConfig`.
+ * @remarks *(deviation)* Constants only: `new` throws `TypeError`.
  */
 export class AdminClientConfig {
   /**
-   * A list of host/port pairs used to establish the initial connection to the
-   * Kafka cluster. Clients use this list to bootstrap and discover the full set
-   * of Kafka brokers. While the order of servers in the list does not matter,
-   * we recommend including more than one server to ensure resilience if any
-   * servers are down. This list does not need to contain the entire set of
-   * brokers, as Kafka clients automatically manage and update connections to
-   * the cluster efficiently. This list must be in the form
-   * `host1:port1,host2:port2,...`.
+   * `bootstrap.servers`
    */
   static readonly BOOTSTRAP_SERVERS_CONFIG: string = 'bootstrap.servers';
   /**
-   * A list of host/port pairs to use for establishing the initial connection to
-   * the KRaft controller quorum. This list should be in the form
-   * `host1:port1,host2:port2,...`.
+   * `bootstrap.controllers`
    */
   static readonly BOOTSTRAP_CONTROLLERS_CONFIG: string = 'bootstrap.controllers';
   /**
@@ -56,68 +36,31 @@ export class AdminClientConfig {
    */
   static readonly BOOTSTRAP_CONTROLLERS_DOC: string = 'A list of host/port pairs to use for establishing the initial connection to the KRaft controller quorum. This list should be in the form <code>host1:port1,host2:port2,...</code>.';
   /**
-   * Controls how the client uses DNS lookups. If set to `use_all_dns_ips`,
-   * connect to each returned IP address in sequence until a successful
-   * connection is established. After a disconnection, the next IP is used. Once
-   * all IPs have been used once, the client resolves the IP(s) from the
-   * hostname again (both the JVM and the OS cache DNS name lookups, however).
-   * If set to `resolve_canonical_bootstrap_servers_only`, resolve each
-   * bootstrap address into a list of canonical names. After the bootstrap
-   * phase, this behaves the same as `use_all_dns_ips`.
+   * `client.dns.lookup`
    */
   static readonly CLIENT_DNS_LOOKUP_CONFIG: string = 'client.dns.lookup';
   /**
-   * The base amount of time to wait before attempting to reconnect to a given
-   * host. This avoids repeatedly connecting to a host in a tight loop. This
-   * backoff applies to all connection attempts by the client to a broker. This
-   * value is the initial backoff value and will increase exponentially for each
-   * consecutive connection failure, up to the `reconnect.backoff.max.ms` value.
+   * `reconnect.backoff.ms`
    */
   static readonly RECONNECT_BACKOFF_MS_CONFIG: string = 'reconnect.backoff.ms';
   /**
-   * The maximum amount of time in milliseconds to wait when reconnecting to a
-   * broker that has repeatedly failed to connect. If provided, the backoff per
-   * host will increase exponentially for each consecutive connection failure,
-   * up to this maximum. After calculating the backoff increase, 20% random
-   * jitter is added to avoid connection storms.
+   * `reconnect.backoff.max.ms`
    */
   static readonly RECONNECT_BACKOFF_MAX_MS_CONFIG: string = 'reconnect.backoff.max.ms';
   /**
-   * The amount of time to wait before attempting to retry a failed request to a
-   * given topic partition. This avoids repeatedly sending requests in a tight
-   * loop under some failure scenarios. This value is the initial backoff value
-   * and will increase exponentially for each failed request, up to the
-   * `retry.backoff.max.ms` value.
+   * `retry.backoff.ms`
    */
   static readonly RETRY_BACKOFF_MS_CONFIG: string = 'retry.backoff.ms';
   /**
-   * The maximum amount of time in milliseconds to wait when retrying a request
-   * to the broker that has repeatedly failed. If provided, the backoff per
-   * client will increase exponentially for each failed request, up to this
-   * maximum. To prevent all clients from being synchronized upon retry, a
-   * randomized jitter with a factor of 0.2 will be applied to the backoff,
-   * resulting in the backoff falling within a range between 20% below and 20%
-   * above the computed value. If `retry.backoff.ms` is set to be higher than
-   * `retry.backoff.max.ms`, then `retry.backoff.max.ms` will be used as a
-   * constant backoff from the beginning without any exponential increase
+   * `retry.backoff.max.ms`
    */
   static readonly RETRY_BACKOFF_MAX_MS_CONFIG: string = 'retry.backoff.max.ms';
   /**
-   * Selects the client's bootstrap DNS resolution mode. When set to `0` (the
-   * default), DNS is resolved synchronously during client construction; any
-   * failure surfaces as `ConfigError` and no client instance is created. When
-   * set to a positive value, DNS is resolved asynchronously and this is the
-   * maximum amount of time the client will spend retrying resolution before
-   * failing with an unrecoverable `BootstrapResolutionError` from subsequent
-   * API calls (the client must then be closed and re-created after fixing the
-   * underlying DNS or `bootstrap.servers` configuration issue). Setting this
-   * config to a positive value enables an evolving feature whose compatibility
-   * may be broken in a minor release.
+   * `bootstrap.resolve.timeout.ms`
    */
   static readonly BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: string = 'bootstrap.resolve.timeout.ms';
   /**
-   * Whether to enable pushing of client metrics to the cluster, if the cluster
-   * has a client metrics subscription which matches this client.
+   * `enable.metrics.push`
    */
   static readonly ENABLE_METRICS_PUSH_CONFIG: string = 'enable.metrics.push';
   /**
@@ -125,32 +68,19 @@ export class AdminClientConfig {
    */
   static readonly ENABLE_METRICS_PUSH_DOC: string = 'Whether to enable pushing of client metrics to the cluster, if the cluster has a client metrics subscription which matches this client.';
   /**
-   * The amount of time the client will wait for the socket connection to be
-   * established. If the connection is not built before the timeout elapses,
-   * clients will close the socket channel. This value is the initial backoff
-   * value and will increase exponentially for each consecutive connection
-   * failure, up to the `socket.connection.setup.timeout.max.ms` value.
+   * `socket.connection.setup.timeout.ms`
    */
   static readonly SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: string = 'socket.connection.setup.timeout.ms';
   /**
-   * The maximum amount of time the client will wait for the socket connection
-   * to be established. The connection setup timeout will increase exponentially
-   * for each consecutive connection failure up to this maximum. To avoid
-   * connection storms, a randomization factor of 0.2 will be applied to the
-   * timeout resulting in a random range between 20% below and 20% above the
-   * computed value.
+   * `socket.connection.setup.timeout.max.ms`
    */
   static readonly SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: string = 'socket.connection.setup.timeout.max.ms';
   /**
-   * Close idle connections after the number of milliseconds specified by this
-   * config.
+   * `connections.max.idle.ms`
    */
   static readonly CONNECTIONS_MAX_IDLE_MS_CONFIG: string = 'connections.max.idle.ms';
   /**
-   * The configuration controls the maximum amount of time the client will wait
-   * for the response of a request. If the response is not received before the
-   * timeout elapses the client will resend the request if necessary or fail the
-   * request if retries are exhausted.
+   * `request.timeout.ms`
    */
   static readonly REQUEST_TIMEOUT_MS_CONFIG: string = 'request.timeout.ms';
   /**
@@ -284,9 +214,7 @@ export class AdminClientConfig {
    */
   static readonly METADATA_CLUSTER_CHECK_ENABLE_DOC: string = 'Whether the client should send cluster and node information when connecting to a broker to enable it to check for a misrouted connection. This configuration is ignored if rebootstrapping is disabled by setting the configuration <code>metadata.recovery.strategy=none</code>. If the client is connecting to a broker older than Apache Kafka 4.4, no checking is performed and this configuration has no effect.';
   /**
-   * A list of configurable creator classes each returning a provider
-   * implementing security algorithms. These classes should implement the
-   * `org.apache.kafka.common.security.auth.SecurityProviderCreator` interface.
+   * `security.providers`
    */
   static readonly SECURITY_PROVIDERS_CONFIG: string = 'security.providers';
   /**
