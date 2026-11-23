@@ -26,6 +26,7 @@ using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
+using Confluent.Kafka.Producer;
 
 using Xunit;
 
@@ -349,6 +350,37 @@ public sealed class ConsumerRecordWrappedHeadersTests
                 block.Dispose();
             }
         }
+    }
+
+    [Fact]
+    public void AKeyDecodedWithAnEmbeddedNul_IsRefusedByAProducer_NotForwardedCutAtTheNul()
+    {
+        // A fetched key keeps a NUL byte (DecodeKey above), so forwarding such a header refuses the send, as the
+        // producer refuses any header key the C ABI would cut. The mocks cannot hold such a key (it crosses as a C
+        // string), so the decoded key is given to a built header, whose Key() the send reads the same way.
+        string key;
+        unsafe
+        {
+            byte[] withNul = { (byte)'a', 0x00, (byte)'b' };
+            fixed (byte* nul = withNul)
+            {
+                key = Header.DecodeKey(new KafkaBytes((IntPtr)nul, withNul.Length));
+            }
+        }
+
+        MockProducer<byte[], byte[]> producer =
+            new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(
+            "t", (int?)null, (byte[]?)null, (byte[]?)null, new[] { new Header(key, s_value) });
+
+        ArgumentException e = Assert.Throws<ArgumentException>(() => producer.Send(record));
+
+        Assert.StartsWith(
+            "A header key must not contain a NUL character: such a string cannot be passed to the native client "
+                + "unchanged.",
+            e.Message);
+        Assert.Equal(0, producer.HistoryCount());
     }
 
     [Fact]
