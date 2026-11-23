@@ -46,7 +46,8 @@ public sealed class EnumValuesListAnalyzer : DiagnosticAnalyzer
             + "Only a field named s_values or VALUES, of type Enum[] or IReadOnlyList<Enum>, in a class named "
             + "<Enum>Methods is checked. A switch expression of that class that names a member of the enum, a lookup "
             + "built by hand for the same reason, gives every member an arm (or names it as its default arm's answer, "
-            + "as a FromString that answers UNKNOWN) and no member two arms; the order of its arms is free.");
+            + "as a FromString that answers UNKNOWN) and no member two arms; the order of its arms is free. A lookup "
+            + "written another way (an if, a ternary, a range cast) is not checked.");
 
     /// <inheritdoc/>
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(s_rule);
