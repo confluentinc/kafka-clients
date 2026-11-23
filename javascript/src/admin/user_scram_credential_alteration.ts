@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.UserScramCredentialAlteration: a
 // TypeScript abstract class whose constructor throws TypeError when called
 // for the abstract class itself (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). Java's constructor is protected, and so is
+// Conventions, Class family). Java's constructor is protected, and so is
 // this one. Java's protected `user` field is read through `user()`: a
 // TypeScript class cannot have a field and a method of one name.
 

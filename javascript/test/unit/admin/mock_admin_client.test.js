@@ -260,7 +260,7 @@ test('builder_setters_reach_the_built_mock: the cluster id', async () => {
 });
 
 test('builder: a string-keyed map given by name is a Map or a plain object, never another object', () => {
-  // A class instance is no map keyed by strings (Q25): it is refused, not read as an empty map.
+  // A class instance is no map keyed by strings: it is refused, not read as an empty map.
   // @ts-expect-error a value the types forbid
   assert.throws(() => MockAdminClient.create().featureLevels({ featureLevels: new Set([1]) }), {
     name: 'TypeError',

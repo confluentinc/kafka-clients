@@ -16,10 +16,10 @@
 // `CoordinatorKey`, which Java keys by its group id: a private constructor
 // here over the futures by group id, the client building it through
 // `internalCreate` (javascript/CLAUDE.md, JavaScript Binding Conventions, Class
-// family, Q16), each group's future the core's
+// family), each group's future the core's
 // `partitionsToOffsetAndMetadata(groupId)`, as Python's. Java's
 // `Map<TopicPartition, OffsetAndMetadata>` is a TopicPartitionMap whose value
-// is null for a partition the group has no committed offset of (Q25).
+// is null for a partition the group has no committed offset of.
 
 import { JavaForms } from '../internal/args';
 import { illegalArgument, illegalState } from '../internal/errors';
@@ -88,12 +88,6 @@ export class ListConsumerGroupOffsetsResult {
     /** The group id. */
     groupId: string;
   }): KafkaFuture<TopicPartitionMap<OffsetAndMetadata | null>>;
-  /**
-   * The future of one group's offsets.
-   *
-   * @param options - nothing, or the group id
-   * @returns the future
-   */
   partitionsToOffsetAndMetadata(options?: unknown): KafkaFuture<TopicPartitionMap<OffsetAndMetadata | null>> {
     const form = PARTITIONS_FORMS.match(options, arguments.length);
     if (form === 0) {

@@ -13,8 +13,8 @@
 // limitations under the License.
 // Java's org.apache.kafka.clients.admin.ListConsumerGroupOffsetsSpec, a class
 // Java builds with its setter (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q19): a keyed constructor, and Java's getter /
-// setter pair `topicPartitions` as one method (Q17). Java's
+// Conventions, Class family): a keyed constructor, and Java's getter /
+// setter pair `topicPartitions` as one method. Java's
 // `Collection<TopicPartition>` is taken as any iterable, copied, and returned
 // as a new array (Types); null lists every partition of the group.
 
@@ -49,7 +49,7 @@ export class ListConsumerGroupOffsetsSpec {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the spec through its setter only.
-   * Why: one call builds a configured object (Q19); the setter stays.
+   * Why: one call builds a configured object; the setter stays.
    */
   constructor(options?: {
     /**
@@ -93,13 +93,6 @@ export class ListConsumerGroupOffsetsSpec {
     /** List of topic partitions to include, or null for all. */
     topicPartitions: Iterable<TopicPartition> | null;
   }): this;
-  /**
-   * Reads or sets the topic partitions.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the value, or this object
-   * @throws `TypeError` when the value is not an iterable of TopicPartition or null
-   */
   topicPartitions(options?: unknown): TopicPartition[] | null | this {
     if (!TOPIC_PARTITIONS.sets(options, arguments.length)) return this.#topicPartitions === null ? null : [...this.#topicPartitions];
     const value = TOPIC_PARTITIONS.value(options);

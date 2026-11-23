@@ -15,8 +15,8 @@
 // Java's org.apache.kafka.clients.admin.CreateAclsResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). Java's map keyed by AclBinding is an
-// AclBindingMap (Q25); `all()` is Java's `allOf` over its futures.
+// Conventions, Class family). Java's map keyed by AclBinding is an
+// AclBindingMap; `all()` is Java's `allOf` over its futures.
 
 import { JavaForms } from '../internal/args';
 import { AclBindingMap } from '../common/acl/acl_binding_map';

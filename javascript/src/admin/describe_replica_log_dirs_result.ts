@@ -14,10 +14,10 @@
 
 // Java's org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult, with its
 // nested ReplicaLogDirInfo, a class of the namespace merged with it
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names, Q11). Both Java
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names). Both Java
 // constructors are package-private: private constructors here, the client
-// building them through `internalCreate` (Class family, Q16). Java's map
-// keyed by TopicPartitionReplica is a TopicPartitionReplicaMap (Q25).
+// building them through `internalCreate` (Class family). Java's map
+// keyed by TopicPartitionReplica is a TopicPartitionReplicaMap.
 
 import { JavaForms } from '../internal/args';
 import { javaString } from '../internal/java_string';

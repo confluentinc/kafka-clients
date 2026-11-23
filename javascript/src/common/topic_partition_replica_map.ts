@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // TopicPartitionReplicaMap (js-only): Java's Map<TopicPartitionReplica, V>, which JavaScript cannot key by
-// value (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; the
+// value (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family; the
 // admin client's value-keyed maps). It is built as
 // TopicPartitionMap is: it wraps a Map keyed by the JSON text of the fields
 // TopicPartitionReplica.equals compares (the topic, the partition and the broker id; TopicPartitionReplica.internalKey), and keeps each original

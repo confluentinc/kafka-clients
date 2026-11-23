@@ -14,8 +14,8 @@
 
 // Java's org.apache.kafka.clients.admin.AlterConfigOp, a value class that
 // keeps Java's methods, with its nested OpType enum, a class of the namespace
-// merged with it (javascript/CLAUDE.md, JavaScript Binding Conventions, Names,
-// Q11). equals, hashCode and toString are Java's.
+// merged with it (javascript/CLAUDE.md, JavaScript Binding Conventions, Names).
+// equals, hashCode and toString are Java's.
 
 import { JavaForms, kind } from '../internal/args';
 import { objectHashCode, objectsEquals, sameClass } from '../internal/java_object';
@@ -239,14 +239,6 @@ export namespace AlterConfigOp {
       /** The name of the constant to return. */
       name: string;
     }): OpType;
-    /**
-     * Looks the constant up.
-     *
-     * @param name - the name, on its own or as `{ name }`
-     * @returns the constant with the specified name
-     * @throws `IllegalArgumentError` when no constant has that name
-     * @throws `TypeError` when the name is null or not a string
-     */
     static valueOf(name: unknown): OpType {
       OP_VALUE_OF_FORMS.match(name, arguments.length);
       const value = OP_VALUE_OF_FORMS.value(name, 'name');
@@ -280,14 +272,6 @@ export namespace AlterConfigOp {
       /** The wire byte. */
       id: number;
     }): OpType | null;
-    /**
-     * Looks the operation type up.
-     *
-     * @param id - the byte, on its own or as `{ id }`
-     * @returns the operation type, or null for an unknown byte
-     * @throws `TypeError` when the id is not an integer
-     * @throws `RangeError` when it is outside Java's `byte`
-     */
     static forId(id: unknown): OpType | null {
       OP_FOR_ID_FORMS.match(id, arguments.length);
       const value = OP_FOR_ID_FORMS.value(id, 'id');

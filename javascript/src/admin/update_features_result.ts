@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.UpdateFeaturesResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). `all()` is Java's `allOf` over the
+// Conventions, Class family). `all()` is Java's `allOf` over the
 // futures.
 
 import { JavaForms } from '../internal/args';

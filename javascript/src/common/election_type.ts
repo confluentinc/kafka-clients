@@ -122,16 +122,6 @@ export class ElectionType {
     value: number;
     name?: never;
   }): ElectionType;
-  /**
-   * Looks the constant up by its name or its `value`.
-   *
-   * @param options - the name or the byte, on its own or by name
-   * @returns the constant
-   * @throws `IllegalArgumentError` when no constant has that name, or "Value
-   *   <value> must be one of [PREFERRED, UNCLEAN]" for a byte no constant has
-   * @throws `TypeError` when the name is null or the value of the wrong type
-   * @throws `RangeError` when the byte is outside Java's `byte`
-   */
   static valueOf(options: unknown): ElectionType {
     const form = VALUE_OF_FORMS.match(options, arguments.length);
     if (form === 1) {

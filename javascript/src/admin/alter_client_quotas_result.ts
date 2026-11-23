@@ -16,7 +16,7 @@
 // constructor is public and stores its map as given, a null included, which
 // `all()` dereferences. Java's map keyed by ClientQuotaEntity is a
 // ClientQuotaEntityMap (javascript/CLAUDE.md, JavaScript Binding Conventions, Class
-// family, Q25); `all()` is Java's `allOf` over its futures.
+// family); `all()` is Java's `allOf` over its futures.
 
 import { JavaForms, kind } from '../internal/args';
 import { KafkaFuture } from '../common/kafka_future';
@@ -49,12 +49,6 @@ export class AlterClientQuotasResult {
     /** Maps entity to its alteration result. */
     futures: ClientQuotaEntityMap<KafkaFuture<void>>;
   });
-  /**
-   * Builds the result.
-   *
-   * @param options - the futures
-   * @throws `TypeError` when they are not a ClientQuotaEntityMap
-   */
   constructor(options: unknown) {
     FORMS.match(options, arguments.length);
     const futures = FORMS.value(options, 'futures');
