@@ -127,19 +127,33 @@ public sealed class PolledConsumerRecordTests
     {
         MockConsumer<string, string> consumer = Ready();
         List<IntPtr> recordBytes = RecordBytes(consumer);
+        StrongBox<ConsumerRecord<string, string>?> held = new StrongBox<ConsumerRecord<string, string>?>();
         WeakReference batch;
         using (TestTimeout.Disposal(consumer))
         {
             consumer.AddRecord(Topic, 0, 0, Bytes("key"), Bytes("kept"));
-            batch = PollFirstRecord(consumer);
+            batch = PollFirstRecord(consumer, held);
         }
 
-        Assert.NotEmpty(recordBytes);
+        // The held record roots its batch, so no finalizer releases it and the list is read while nothing else
+        // touches it: the consumer is disposed, but the batch it handed out is not released yet.
+        Collect();
+        Assert.True(batch.IsAlive);
+        lock (recordBytes)
+        {
+            Assert.NotEmpty(recordBytes);
+        }
 
+        Assert.Equal("kept", ValueOf(held));
+
+        held.Value = null;
         Collect();
 
         Assert.False(batch.IsAlive);
-        Assert.Empty(recordBytes);
+        lock (recordBytes)
+        {
+            Assert.Empty(recordBytes);
+        }
     }
 
     private static void AssertFields(ConsumerRecord<string, string> record, long offset, string key, string value)
@@ -164,9 +178,18 @@ public sealed class PolledConsumerRecordTests
         return BatchOf(held.Value);
     }
 
+    // Not inlined, so no reference to the held record is left in the caller's frame once it returns.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference PollFirstRecord(MockConsumer<string, string> consumer) =>
-        BatchOf(Assert.Single(consumer.Poll(s_pollTimeout)));
+    private static string? ValueOf(StrongBox<ConsumerRecord<string, string>?> held) => held.Value!.Value();
+
+    // Not inlined, so the records are unreachable once it returns and only the held record roots the batch.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference PollFirstRecord(
+        MockConsumer<string, string> consumer, StrongBox<ConsumerRecord<string, string>?> held)
+    {
+        held.Value = Assert.Single(consumer.Poll(s_pollTimeout));
+        return BatchOf(held.Value);
+    }
 
     // The reference tracks resurrection, so it dies only after the finalizer that releases the batch.
     private static WeakReference BatchOf(ConsumerRecord<string, string> record)
