@@ -3005,6 +3005,7 @@ mod tests {
             supertypes: Vec::new(),
             javadoc: None,
             field_docs: BTreeMap::new(),
+            field_decls: BTreeMap::new(),
         }
     }
 
