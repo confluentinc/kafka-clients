@@ -50,8 +50,7 @@ export class InvalidSessionTimeoutError extends ApiError {
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. Given the message on its own, the
-   * same as `{ message }`.
+   * Java's `(String message)` constructor, given the message alone.
    *
    * @param message - the message; `null` reads as `''`
    */

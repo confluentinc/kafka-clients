@@ -62,8 +62,8 @@ export class GroupAuthorizationError extends AuthorizationError {
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. With it, `groupId()` returns `null`.
-   * Given the message on its own, the same as `{ message }`.
+   * Java's `(String message)` constructor, given the message alone. With it,
+   * `groupId()` returns `null`.
    *
    * @param message - the message; `null` reads as `''`
    */

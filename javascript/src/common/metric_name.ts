@@ -94,10 +94,8 @@ export class MetricName {
    * @throws `TypeError` when an argument is null (Java's
    *   `Objects.requireNonNull`), `undefined` or of the wrong type
    *
-   * @remarks The tags, Java's `Map<String, String>`, are a `Map` or a plain
-   * object. A `Map` is kept as given, as Java keeps the map, so `tags()`
-   * returns it and a later change to it shows in the name; a plain object
-   * is read into a new `Map` when the name is built.
+   * @remarks The tags are a `Map`, kept as given, as Java keeps it, or a plain
+   * object, read into a new `Map`.
    */
   constructor(options: {
     /** The name of the metric */

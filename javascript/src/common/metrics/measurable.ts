@@ -19,10 +19,6 @@
 /**
  * A measurable quantity that can be registered as a metric
  *
- * @remarks *(deviation)* A placeholder: Java's `Measurable` is not
- * translated, so its value is the metric's own value provider, read as a
- * `measure(config, now)` method. Why: a placeholder typed `unknown` checks
- * nothing, but `KafkaMetric.measurable()`, which returns it, cannot be
- * dropped. Goes when: `Measurable` is translated.
+ * @remarks *(deviation)* A placeholder, not translated.
  */
 export type Measurable = unknown;

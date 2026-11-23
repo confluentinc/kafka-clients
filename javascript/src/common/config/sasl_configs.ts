@@ -30,8 +30,8 @@
  */
 export class SaslConfigs {
   /**
-   * SASL mechanism used for client connections. This may be any mechanism for
-   * which a security provider is available. GSSAPI is the default mechanism.
+   * SASL mechanism configuration - standard mechanism names are listed
+   * [here](http://www.iana.org/assignments/sasl-mechanisms/sasl-mechanisms.xhtml).
    */
   static readonly SASL_MECHANISM: string = 'sasl.mechanism';
   /**
