@@ -74,7 +74,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         await using AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            await AsyncKafkaProducer<byte[], byte[]>.Create(Configs(), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(Record(topic, 0, "a"));
         Assert.False(firstStage.IsCompleted, "the first record was taken inside the call");
@@ -92,7 +92,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         using KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            KafkaProducer<byte[], byte[]>.Create(Configs(maxBlockMs: 60000), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
         KafkaFuture<RecordMetadata> warmUp = producer.Send(Record(topic, 0, "warm-up"));
         Assert.Equal(0L, warmUp.Get(s_get).Offset());
@@ -130,7 +130,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         await using AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(maxBlockMs: 60000), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            await AsyncKafkaProducer<byte[], byte[]>.Create(Configs(maxBlockMs: 60000), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
         AsyncKafkaFuture<RecordMetadata> warmUp = await producer.Send(Record(topic, 0, "warm-up"));
         Assert.Equal(0L, (await warmUp.Get(s_get)).Offset());
@@ -154,7 +154,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         using KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            KafkaProducer<byte[], byte[]>.Create(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
 
         AssertDelivered(producer.Send(SizedRecord(topic)).Get(s_get), keySize: 3, valueSize: 5);
         AssertDelivered(producer.Send(TombstoneRecord(topic)).Get(s_get), keySize: -1, valueSize: -1);
@@ -165,7 +165,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         await using AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            await AsyncKafkaProducer<byte[], byte[]>.Create(Configs(), new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
         AssertDelivered(await (await producer.Send(SizedRecord(topic))).Get(s_get), keySize: 3, valueSize: 5);
         AssertDelivered(await (await producer.Send(TombstoneRecord(topic))).Get(s_get), keySize: -1, valueSize: -1);
@@ -176,7 +176,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         using (KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
+            KafkaProducer<byte[], byte[]>.Create(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
         {
             Assert.Equal(0L, producer.Send(HeadersRecord(topic, HeadersOf(s_headers))).Get(s_get).Offset());
         }
@@ -189,7 +189,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         using (KafkaProducer<byte[], byte[]> producer =
-            new KafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
+            KafkaProducer<byte[], byte[]>.Create(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
         {
             ProducerRecord<byte[], byte[]> record =
                 HeadersRecord(topic, new[] { new Header("given", Encoding.UTF8.GetBytes("1")) });
@@ -211,7 +211,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         await using (AsyncKafkaProducer<byte[], byte[]> producer =
-            new AsyncKafkaProducer<byte[], byte[]>(Configs(), Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer()))
+            await AsyncKafkaProducer<byte[], byte[]>.Create(Configs(), new AsyncByteArraySerializer(), new AsyncByteArraySerializer()))
         {
             AsyncKafkaFuture<RecordMetadata> future = await producer.Send(HeadersRecord(topic, HeadersOf(s_headers)));
             Assert.Equal(0L, (await future.Get(s_get)).Offset());
@@ -226,7 +226,7 @@ public sealed class KafkaProducerBrokerTests
         string topic = await TopicAsync();
         using NativeMemoryManager value = new NativeMemoryManager(NativeValueLength);
         using (KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
-            new KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+            KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
                 Configs(), MemorySerializer.Instance, MemorySerializer.Instance))
         {
             RecordMetadata metadata = producer.Send(MemoryRecord(topic, SliceKey(), value.Memory)).Get(s_get);
@@ -245,8 +245,8 @@ public sealed class KafkaProducerBrokerTests
         string topic = await TopicAsync();
         using NativeMemoryManager value = new NativeMemoryManager(NativeValueLength);
         await using (AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
-            new AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
-                Configs(), MemorySerializer.Instance, MemorySerializer.Instance))
+            await AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
+                Configs(), new AsyncReadOnlyMemorySerializer(), new AsyncReadOnlyMemorySerializer()))
         {
             AsyncKafkaFuture<RecordMetadata> delivery =
                 await producer.Send(MemoryRecord(topic, SliceKey(), value.Memory));
@@ -267,7 +267,7 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         using (KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
-            new KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+            KafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
                 Configs(), MemorySerializer.Instance, MemorySerializer.Instance))
         {
             RecordMetadata emptyKey = producer.Send(MemoryRecord(topic, ReadOnlyMemory<byte>.Empty, null)).Get(s_get);
@@ -284,8 +284,8 @@ public sealed class KafkaProducerBrokerTests
     {
         string topic = await TopicAsync();
         await using (AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer =
-            new AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
-                Configs(), MemorySerializer.Instance, MemorySerializer.Instance))
+            await AsyncKafkaProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>.Create(
+                Configs(), new AsyncReadOnlyMemorySerializer(), new AsyncReadOnlyMemorySerializer()))
         {
             AsyncKafkaFuture<RecordMetadata> emptyKey =
                 await producer.Send(MemoryRecord(topic, ReadOnlyMemory<byte>.Empty, null));
@@ -465,7 +465,7 @@ public sealed class KafkaProducerBrokerTests
             ["enable.auto.commit"] = "false",
         };
         KafkaConsumer<byte[], byte[]> consumer =
-            new KafkaConsumer<byte[], byte[]>(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            KafkaConsumer<byte[], byte[]>.Create(configs, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         try
         {
             TopicPartition tp = new TopicPartition(topic, partition);

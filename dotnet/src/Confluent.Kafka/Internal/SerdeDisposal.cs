@@ -16,30 +16,46 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The key and value serializers or deserializers a client was given, disposed once, key then value: each one that is
-/// <see cref="IDisposable"/> is disposed, and a <c>Dispose</c> that throws is written to one trace warning and never
-/// rethrown.
+/// The key and value serializers or deserializers a client was given, or built from its configuration, disposed once,
+/// key then value: each one that is <see cref="IDisposable"/> is disposed, and a <c>Dispose</c> that throws is written
+/// to one trace warning and never rethrown. The serdes of an asynchronous client are disposed only through
+/// <see cref="IAsyncDisposable"/>: one without it is left alone, and no <see cref="IDisposable.Dispose"/> is called on
+/// them. A member that is null, one a failed construction never built, is skipped.
 /// </summary>
 internal sealed class SerdeDisposal
 {
     private const string DisposeFailedMessage = "Exception while closing serde {0}: {1}";
 
-    private readonly object _key;
+    private readonly object? _key;
 
-    private readonly object _value;
+    private readonly object? _value;
+
+    private readonly bool _asynchronous;
 
     private int _disposed;
 
-    internal SerdeDisposal(object key, object value)
+    internal SerdeDisposal(object? key, object? value)
+        : this(key, value, asynchronous: false)
+    {
+    }
+
+    private SerdeDisposal(object? key, object? value, bool asynchronous)
     {
         _key = key;
         _value = value;
+        _asynchronous = asynchronous;
     }
 
+    internal static SerdeDisposal OfAsyncSerdes(object? key, object? value) =>
+        new SerdeDisposal(key, value, asynchronous: true);
+
+    // The blocking form, for a teardown that runs on a thread it may block: an asynchronous serde's DisposeAsync is
+    // waited for here, so the serde is disposed when the client's Dispose returns, as it is when DisposeAsync does.
     internal void DisposeOnce()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -47,12 +63,109 @@ internal sealed class SerdeDisposal
             return;
         }
 
-        DisposeIfDisposable(_key);
-        DisposeIfDisposable(_value);
+        DisposeBlocking(_key);
+        DisposeBlocking(_value);
     }
 
-    // Only IDisposable: a serde that is only IAsyncDisposable is left alone, on every path.
-    internal static void DisposeIfDisposable(object serde)
+    internal ValueTask DisposeOnceAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return default;
+        }
+
+        if (!_asynchronous)
+        {
+            DisposeIfDisposable(_key);
+            DisposeIfDisposable(_value);
+            return default;
+        }
+
+        return DisposeBothAsync();
+    }
+
+    private async ValueTask DisposeBothAsync()
+    {
+        await DisposeAsync(_key).ConfigureAwait(false);
+        await DisposeAsync(_value).ConfigureAwait(false);
+    }
+
+    private static async ValueTask DisposeAsync(object? serde)
+    {
+        if (serde is not IAsyncDisposable disposable)
+        {
+            return;
+        }
+
+        try
+        {
+            await Start(disposable).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            TraceDisposeFailure(serde, exception);
+        }
+    }
+
+    // A serde's DisposeAsync starts with no synchronization context and with the default task scheduler current. A
+    // synchronous Dispose of the client waits for it on the calling thread, which could never run a continuation that
+    // an await in the serde posted to that thread's own context or scheduler. The call stays on the calling thread, so
+    // the wait needs no pool thread of its own.
+    private static ValueTask Start(IAsyncDisposable disposable)
+    {
+        SynchronizationContext? context = SynchronizationContext.Current;
+        if (context is null && TaskScheduler.Current == TaskScheduler.Default)
+        {
+            return disposable.DisposeAsync();
+        }
+
+        SynchronizationContext.SetSynchronizationContext(null);
+        try
+        {
+            Task<ValueTask> start = new Task<ValueTask>(disposable.DisposeAsync);
+            start.RunSynchronously(TaskScheduler.Default);
+            return start.GetAwaiter().GetResult();
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(context);
+        }
+    }
+
+    private void DisposeBlocking(object? serde)
+    {
+        if (!_asynchronous)
+        {
+            DisposeIfDisposable(serde);
+            return;
+        }
+
+        if (serde is not IAsyncDisposable disposable)
+        {
+            return;
+        }
+
+        try
+        {
+            ValueTask disposed = Start(disposable);
+            if (disposed.IsCompleted)
+            {
+                disposed.GetAwaiter().GetResult();
+            }
+            else
+            {
+                disposed.AsTask().GetAwaiter().GetResult();
+            }
+        }
+        catch (Exception exception)
+        {
+            TraceDisposeFailure(serde, exception);
+        }
+    }
+
+    // Only IDisposable: a synchronous client leaves a serde that is only IAsyncDisposable alone, on every path, as an
+    // asynchronous client leaves one that is only IDisposable alone.
+    internal static void DisposeIfDisposable(object? serde)
     {
         if (serde is not IDisposable disposable)
         {

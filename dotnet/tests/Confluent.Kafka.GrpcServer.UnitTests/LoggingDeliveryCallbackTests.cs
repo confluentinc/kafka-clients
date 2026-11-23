@@ -48,5 +48,31 @@ public sealed class LoggingDeliveryCallbackTests
         Assert.Equal("t--1", offset.Key);
         Assert.Equal(-1L, offset.Value);
         Assert.Equal("the record failed", entry.Error);
+        Assert.Equal(13, entry.ErrorCode);
+        Assert.Equal((13, "the record failed"), (entry.ErrorDetail.Code, entry.ErrorDetail.Message));
+    }
+
+    [Fact]
+    public void OnCompletion_OfASuccessfulSend_LogsNoError()
+    {
+        CallbackLog log = new CallbackLog();
+
+        new LoggingDeliveryCallback(log, 7).OnCompletion(TestValues.Metadata(), null);
+
+        Proto.CallbackLogEntry entry = Assert.Single(log.Response(7).Entries);
+        Assert.Equal((string.Empty, 0), (entry.Error, entry.ErrorCode));
+        Assert.Null(entry.ErrorDetail);
+    }
+
+    [Fact]
+    public void Append_OfAServerMessage_LogsItAsLocalIllegalState()
+    {
+        CallbackLog log = new CallbackLog();
+
+        log.Append(7, "listener_action", error: "no position", method: "assigned", step: "COMMIT_SYNC_POSITION");
+
+        Proto.CallbackLogEntry entry = Assert.Single(log.Response(7).Entries);
+        Assert.Equal(("no position", -4), (entry.Error, entry.ErrorCode));
+        Assert.Equal(("assigned", "COMMIT_SYNC_POSITION"), (entry.Method, entry.Step));
     }
 }

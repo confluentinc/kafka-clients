@@ -33,7 +33,7 @@ Update the design documentation in design/current/ of this Rust Kafka client
 so that it describes the CURRENT code.
 
 Read every markdown document in design/current/, then verify their claims
-against the code in rust/src/ (and the bindings in python/ and c/) and the conventions in CLAUDE.md and .claude/rules/.
+against the code in rust/src/ (and the bindings in python/, c/ and dotnet/, and the test harness in rust/tests/) and the conventions in CLAUDE.md and .claude/rules/.
 Correct whatever has drifted: renamed types, moved modules, mechanisms that
 were replaced by another, wrong counts, dead file paths. Cite file:line for
 structural claims so the next reader can re-verify them.

@@ -321,7 +321,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public async Task AsyncPoll_ReadsByPartitionAndTopic_AndAnEmptyPollReturnsEMPTY()
     {
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(Deserializer(), Deserializer());
+        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(Deserializer().AsAsync(), Deserializer().AsAsync());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(s_all), s_deadline);

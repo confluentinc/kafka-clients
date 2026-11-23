@@ -59,7 +59,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         }
         else
         {
-            AsyncKafkaProducer<byte[], byte[]> producer = Async(60000);
+            AsyncKafkaProducer<byte[], byte[]> producer = await Async(60000);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = producer.Close(s_negative); }));
 
@@ -83,7 +83,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         }
         else
         {
-            AsyncKafkaProducer<byte[], byte[]> producer = Async(60000);
+            AsyncKafkaProducer<byte[], byte[]> producer = await Async(60000);
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             await TestTimeout.Run(() => producer.Close(), Deadline);
             AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = producer.Close(s_negative); }));
@@ -142,7 +142,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         else
         {
             AsyncMockProducer<byte[], byte[]> producer =
-                new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AsyncKafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => producer.Send(Record(topic)).AsTask(), Deadline);
             Assert.Equal(0L, (await TestTimeout.Run(() => future.Get(), Deadline)).Offset());
@@ -171,7 +171,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         if (flavor == SyncFlavor)
         {
             KafkaProducer<byte[], byte[]> producer =
-                new KafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                KafkaProducer<byte[], byte[]>.Create(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
             using IDisposable disposal = TestTimeout.Disposal(producer);
             KafkaTimeoutException timeout = Assert.Throws<KafkaTimeoutException>(producer.InitTransactions);
             Assert.Contains(initTransactionsTimeout, timeout.Message);
@@ -187,7 +187,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
         else
         {
             AsyncKafkaProducer<byte[], byte[]> producer =
-                new AsyncKafkaProducer<byte[], byte[]>(configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+                await AsyncKafkaProducer<byte[], byte[]>.Create(configs, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
             await using IAsyncDisposable disposal = TestTimeout.AsyncDisposal(producer);
             KafkaTimeoutException timeout = await Assert.ThrowsAsync<KafkaTimeoutException>(
                 () => TestTimeout.Run(() => producer.InitTransactions(), Deadline));

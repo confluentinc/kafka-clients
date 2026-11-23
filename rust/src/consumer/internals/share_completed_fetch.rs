@@ -933,7 +933,7 @@ pub(crate) mod tests {
     fn transaction_marker(offset: i64) -> Vec<u8> {
         let marker = EndTransactionMarker::new(ControlRecordType::Commit, 0).expect("COMMIT is a marker type");
         MemoryRecords::write_end_transactional_marker(
-            Vec::with_capacity(128),
+            bytes::BytesMut::with_capacity(128),
             offset,
             0,
             0,

@@ -3,15 +3,18 @@ set -euo pipefail
 #
 # Job-scoped .NET SDK provisioning, shared by the "verify-dotnet (Linux amd64)
 # — plaintext" job in the "Verify Rust and language bindings (Linux amd64)" CI block
-# (M10/P1, Decision 1) and the "verify-dotnet (macOS arm64)" job in "Verify Rust and
-# language bindings (macOS arm64)". The Linux "verify-dotnet (Linux amd64) —
-# ssl" and "— sasl_ssl (plain)" jobs (M17/P1) do NOT run this script: they run
-# only the gRPC multilanguage arm, whose .NET server runs inside the gRPC Docker
-# images, so they need no host .NET. This lives OUTSIDE the shared
+# (M10/P1, Decision 1) and the "verify-dotnet (macOS arm64)", "verify-dotnet (macOS arm64)
+# — plaintext gRPC arm" and "verify-dotnet (macOS arm64) — plaintext Native AOT gRPC arm"
+# jobs in "Verify Rust and language bindings (macOS arm64)". The
+# Linux "verify-dotnet (Linux amd64) —
+# plaintext gRPC arm", "— plaintext Native AOT gRPC arm", "— ssl" and "— sasl_ssl
+# (plain)" jobs do NOT run this script: they run only the gRPC multilanguage arm,
+# whose .NET server runs
+# inside the gRPC Docker images, so they need no host .NET. This lives OUTSIDE the shared
 # dependency-install scripts -- `.semaphore/dependencies.sh` on Linux,
 # `.semaphore/dependencies-macos.sh` on macOS -- and outside either block's
 # shared task prologue, on purpose: no other job in either block needs a host
-# .NET SDK, so the install stays local to the one job per block that does. The
+# .NET SDK, so the install stays local to the jobs that do. The
 # official `dotnet-install.sh` this script fetches
 # is cross-platform (Linux + macOS, both have bash + curl), so the same
 # script and the same job-level export sequence work unmodified on both.
@@ -71,8 +74,9 @@ retry "${INSTALL_SCRIPT}" --channel 8.0 --runtime dotnet --install-dir "${DOTNET
 # This script INSTALLS only -- it deliberately does NOT export DOTNET_ROOT/PATH.
 # Semaphore runs a job's prologue + job `commands:` in ONE persistent shell
 # session, but this script executes in a child subshell, so any `export` here
-# would die on return and never reach the later `make -C dotnet verify` /
-# `make -C dotnet verify-macos` command. The SDK env is therefore set by
+# would die on return and never reach the later
+# `make -C dotnet verify-except-grpc-arm` (Linux) /
+# `make -C dotnet verify-macos` (macOS) command. The SDK env is therefore set by
 # top-level `export` commands in each verify-dotnet job's own `commands:`
 # (`.semaphore/semaphore.yml`, right after this script runs), which mutate
 # that shared session directly. This matches the

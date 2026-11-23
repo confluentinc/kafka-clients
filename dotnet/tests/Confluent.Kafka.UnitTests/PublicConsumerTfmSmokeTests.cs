@@ -38,7 +38,7 @@ public sealed class PublicConsumerTfmSmokeTests
     [Fact]
     public async Task MockConsumer_AssignAddPollClose_RoundTrips()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
@@ -62,7 +62,7 @@ public sealed class PublicConsumerTfmSmokeTests
     [Fact]
     public async Task MockConsumer_SubscribeUnsubscribeClose_RoundTrips()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }), s_deadline);
@@ -77,7 +77,7 @@ public sealed class PublicConsumerTfmSmokeTests
     [Fact]
     public async Task MockConsumer_OffsetMapQueries_MarshalOnTheTfmMatrix()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             consumer.UpdateBeginningOffset(Topic, Partition, 5);
@@ -111,7 +111,7 @@ public sealed class PublicConsumerTfmSmokeTests
     [Fact]
     public async Task MockConsumer_PartitionMetadataQueries_MarshalOnTheTfmMatrix()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
@@ -271,7 +271,7 @@ public sealed class PublicConsumerTfmSmokeTests
             Assert.Empty(metrics);
         }
 
-        AsyncMockConsumer<byte[], byte[]> async = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> async = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using (TestTimeout.Disposal(async))
         {
             Assert.Empty(async.Metrics());

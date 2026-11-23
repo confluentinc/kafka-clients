@@ -79,6 +79,19 @@ public enum TransactionState
 /// </summary>
 public static class TransactionStateMethods
 {
+    // Java's values(), written out: Enum.GetValues(Type) is not Native AOT safe.
+    private static readonly TransactionState[] s_values =
+    {
+        TransactionState.ONGOING,
+        TransactionState.PREPARE_ABORT,
+        TransactionState.PREPARE_COMMIT,
+        TransactionState.COMPLETE_ABORT,
+        TransactionState.COMPLETE_COMMIT,
+        TransactionState.EMPTY,
+        TransactionState.PREPARE_EPOCH_FENCE,
+        TransactionState.UNKNOWN,
+    };
+
     private static readonly Dictionary<string, TransactionState> s_byText = ByText();
 
     extension(TransactionState)
@@ -120,7 +133,7 @@ public static class TransactionStateMethods
     private static Dictionary<string, TransactionState> ByText()
     {
         var table = new Dictionary<string, TransactionState>(StringComparer.Ordinal);
-        foreach (TransactionState state in (TransactionState[])Enum.GetValues(typeof(TransactionState)))
+        foreach (TransactionState state in s_values)
         {
             table.Add(TextOf(state)!, state);
         }

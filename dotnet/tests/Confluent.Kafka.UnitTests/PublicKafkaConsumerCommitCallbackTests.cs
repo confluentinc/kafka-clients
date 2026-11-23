@@ -446,7 +446,7 @@ public sealed class PublicKafkaConsumerCommitCallbackTests
             config["enable.auto.commit"] = autoCommit ? "true" : "false";
         }
 
-        return new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        return KafkaConsumer<byte[], byte[]>.Create(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
     }
 
     private static KafkaConsumer<byte[], byte[]> NewListenerConsumer()

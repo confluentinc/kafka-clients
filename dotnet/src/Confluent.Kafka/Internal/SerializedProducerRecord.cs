@@ -13,6 +13,8 @@
 // limitations under the License.
 
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
 using Confluent.Kafka.Common.Serialization;
@@ -83,6 +85,80 @@ internal readonly struct SerializedProducerRecord
             headers);
     }
 
+    // The asynchronous producers' form when a serializer is awaited: the key, then the value. A built-in side is
+    // called through its synchronous class. mock is as on Serialize: an awaited serializer's headers form gets a new,
+    // empty Headers on a mock and the record's own on a client, and its form without headers gets none.
+    internal static async ValueTask<SerializedProducerRecord> SerializeAsync<TKey, TValue>(
+        ProducerRecord<TKey, TValue> record,
+        AsyncSerializerCall<TKey> key,
+        AsyncSerializerCall<TValue> value,
+        bool mock,
+        CancellationToken cancellationToken)
+    {
+        Headers headers = record.Headers();
+        ReadOnlyMemory<byte>? keyBytes =
+            await SerializeFieldAsync(key, record.Topic(), headers, record.Key(), isKey: true, mock, cancellationToken)
+                .ConfigureAwait(false);
+        ReadOnlyMemory<byte>? valueBytes =
+            await SerializeFieldAsync(value, record.Topic(), headers, record.Value(), isKey: false, mock, cancellationToken)
+                .ConfigureAwait(false);
+
+        return new SerializedProducerRecord(
+            record.Topic(),
+            record.Partition(),
+            record.Timestamp(),
+            keyBytes,
+            valueBytes,
+            headers);
+    }
+
+    private static ValueTask<ReadOnlyMemory<byte>?> SerializeFieldAsync<T>(
+        AsyncSerializerCall<T> call,
+        string topic,
+        Headers headers,
+        T? data,
+        bool isKey,
+        bool mock,
+        CancellationToken cancellationToken)
+    {
+        if (call.Inner is { } inner)
+        {
+            return new ValueTask<ReadOnlyMemory<byte>?>(mock
+                ? SerializeOnMock(inner, call.InnerWithHeaders, topic, data)
+                : SerializeField(inner, call.InnerWithHeaders, topic, headers, data, isKey));
+        }
+
+        if (mock)
+        {
+            return call.WithHeaders is null
+                ? call.Serializer.Serialize(topic, data, cancellationToken)
+                : call.WithHeaders.Serialize(topic, new Headers(), data, cancellationToken);
+        }
+
+        return AwaitField(call, topic, headers, data, isKey, cancellationToken);
+    }
+
+    private static async ValueTask<ReadOnlyMemory<byte>?> AwaitField<T>(
+        AsyncSerializerCall<T> call,
+        string topic,
+        Headers headers,
+        T? data,
+        bool isKey,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await (call.WithHeaders is null
+                    ? call.Serializer.Serialize(topic, data, cancellationToken)
+                    : call.WithHeaders.Serialize(topic, headers, data, cancellationToken))
+                .ConfigureAwait(false);
+        }
+        catch (InvalidCastException exception)
+        {
+            throw CannotConvert(call.Serializer, data, isKey, exception);
+        }
+    }
+
     // The serializer is called also for a null key or value, as Java's doSend and MockProducer.send call it.
     private static ReadOnlyMemory<byte>? SerializeOnMock<T>(
         ISerializer<T> serializer, ISerializerWithHeaders<T>? withHeaders, string topic, T? data) =>
@@ -97,14 +173,20 @@ internal readonly struct SerializedProducerRecord
         }
         catch (InvalidCastException exception)
         {
-            // Java's doSend wraps only a ClassCastException; any other throw, an ApiException included, leaves
-            // the serializer unchanged.
-            string field = isKey ? "key" : "value";
-            throw new SerializationException(
-                $"Can't convert {field} of class {ClassName(data?.GetType())} to class "
-                + $"{ClassName(serializer.GetType())} specified in {field}.serializer",
-                exception);
+            throw CannotConvert(serializer, data, isKey, exception);
         }
+    }
+
+    // Java's doSend wraps only a ClassCastException; any other throw, an ApiException included, leaves the serializer
+    // unchanged.
+    private static SerializationException CannotConvert<T>(
+        object serializer, T? data, bool isKey, InvalidCastException exception)
+    {
+        string field = isKey ? "key" : "value";
+        return new SerializationException(
+            $"Can't convert {field} of class {ClassName(data?.GetType())} to class "
+            + $"{ClassName(serializer.GetType())} specified in {field}.serializer",
+            exception);
     }
 
     private static string ClassName(Type? type) => type is null ? "null" : type.FullName ?? type.Name;

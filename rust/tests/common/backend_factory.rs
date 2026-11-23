@@ -242,10 +242,11 @@ mod grpc_backends {
     /// [`ProducerLog`] at its server-local id.
     async fn producer_with_log(
         channel: &Channel,
+        untimed_channel: &Channel,
         config: HashMap<String, String>,
         backend: &'static str,
     ) -> Result<(MultilanguageProducer, ProducerCallbackLog), Error> {
-        let producer = MultilanguageProducer::new(channel.clone(), config, backend).await?;
+        let producer = MultilanguageProducer::new(channel.clone(), untimed_channel.clone(), config, backend).await?;
         let log = ProducerCallbackLog::Grpc(ProducerLog::new(channel.clone(), producer.producer_id(), backend));
         Ok((producer, log))
     }
@@ -253,24 +254,28 @@ mod grpc_backends {
     /// Consumer twin of [`producer_with_log`].
     async fn consumer_with_log(
         channel: &Channel,
+        untimed_channel: &Channel,
         config: HashMap<String, String>,
         backend: &'static str,
     ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-        let consumer = MultilanguageConsumer::new(channel.clone(), config, backend).await?;
+        let consumer = MultilanguageConsumer::new(channel.clone(), untimed_channel.clone(), config, backend).await?;
         let log = ConsumerCallbackLog::Grpc(ConsumerLog::new(channel.clone(), consumer.consumer_id(), backend));
         Ok((Box::new(consumer), log))
     }
 
     /// Backend that drives python/producer.py through a gRPC
     /// server running in the
-    /// `confluent-kafka-rust/python-grpc-server:dev` Docker image.
+    /// `confluent-kafka-rust/python-grpc-server:<MULTILANG_IMAGE_TAG>` Docker image.
     pub struct PythonGrpcFactory {
         channel: Channel,
+        /// The same backend without the channel's per-request timeout, for the
+        /// producer's blocking RPCs, which set their own deadline.
+        untimed_channel: Channel,
     }
 
     impl PythonGrpcFactory {
-        pub fn new(channel: Channel) -> Self {
-            Self { channel }
+        pub fn new(channel: Channel, untimed_channel: Channel) -> Self {
+            Self { channel, untimed_channel }
         }
     }
 
@@ -280,14 +285,14 @@ mod grpc_backends {
         async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
             // Caller is responsible for passing a backend-reachable
             // bootstrap — see `needs_container_bootstrap`.
-            MultilanguageProducer::new(self.channel.clone(), config, "python").await
+            MultilanguageProducer::new(self.channel.clone(), self.untimed_channel.clone(), config, "python").await
         }
 
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
-            producer_with_log(&self.channel, config, "python").await
+            producer_with_log(&self.channel, &self.untimed_channel, config, "python").await
         }
 
         fn name(&self) -> &'static str {
@@ -305,7 +310,8 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
-                MultilanguageConsumer::new(self.channel.clone(), config, "python").await?,
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "python")
+                    .await?,
             ))
         }
 
@@ -313,7 +319,7 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-            consumer_with_log(&self.channel, config, "python").await
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "python").await
         }
 
         fn name(&self) -> &'static str {
@@ -347,16 +353,19 @@ mod grpc_backends {
 
     /// Backend that drives the *asyncio-native* python client
     /// (`AsyncKafkaProducer` / `AsyncKafkaConsumer`) through a gRPC server
-    /// running in the `confluent-kafka-rust/python-async-grpc-server:dev`
+    /// running in the `confluent-kafka-rust/python-async-grpc-server:<MULTILANG_IMAGE_TAG>`
     /// Docker image. Identical wiring to [`PythonGrpcFactory`] — only the
     /// backend label (used in logs) differs.
     pub struct PythonAsyncGrpcFactory {
         channel: Channel,
+        /// The same backend without the channel's per-request timeout, for the
+        /// producer's blocking RPCs, which set their own deadline.
+        untimed_channel: Channel,
     }
 
     impl PythonAsyncGrpcFactory {
-        pub fn new(channel: Channel) -> Self {
-            Self { channel }
+        pub fn new(channel: Channel, untimed_channel: Channel) -> Self {
+            Self { channel, untimed_channel }
         }
     }
 
@@ -364,14 +373,14 @@ mod grpc_backends {
         type Producer = MultilanguageProducer;
 
         async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
-            MultilanguageProducer::new(self.channel.clone(), config, "python_async").await
+            MultilanguageProducer::new(self.channel.clone(), self.untimed_channel.clone(), config, "python_async").await
         }
 
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
-            producer_with_log(&self.channel, config, "python_async").await
+            producer_with_log(&self.channel, &self.untimed_channel, config, "python_async").await
         }
 
         fn name(&self) -> &'static str {
@@ -389,7 +398,8 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
-                MultilanguageConsumer::new(self.channel.clone(), config, "python_async").await?,
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "python_async")
+                    .await?,
             ))
         }
 
@@ -397,7 +407,7 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-            consumer_with_log(&self.channel, config, "python_async").await
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "python_async").await
         }
 
         fn name(&self) -> &'static str {
@@ -430,15 +440,18 @@ mod grpc_backends {
     }
 
     /// Backend that drives the public C FFI through a gRPC server running
-    /// in the `confluent-kafka-rust/c-grpc-server:dev` Docker image (a
+    /// in the `confluent-kafka-rust/c-grpc-server:<MULTILANG_IMAGE_TAG>` Docker image (a
     /// thin grpc++ wrapper that calls `kafka_producer_*`).
     pub struct CGrpcFactory {
         channel: Channel,
+        /// The same backend without the channel's per-request timeout, for the
+        /// producer's blocking RPCs, which set their own deadline.
+        untimed_channel: Channel,
     }
 
     impl CGrpcFactory {
-        pub fn new(channel: Channel) -> Self {
-            Self { channel }
+        pub fn new(channel: Channel, untimed_channel: Channel) -> Self {
+            Self { channel, untimed_channel }
         }
     }
 
@@ -446,14 +459,14 @@ mod grpc_backends {
         type Producer = MultilanguageProducer;
 
         async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
-            MultilanguageProducer::new(self.channel.clone(), config, "c").await
+            MultilanguageProducer::new(self.channel.clone(), self.untimed_channel.clone(), config, "c").await
         }
 
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
-            producer_with_log(&self.channel, config, "c").await
+            producer_with_log(&self.channel, &self.untimed_channel, config, "c").await
         }
 
         fn name(&self) -> &'static str {
@@ -470,14 +483,16 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
-            Ok(Box::new(MultilanguageConsumer::new(self.channel.clone(), config, "c").await?))
+            Ok(Box::new(
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "c").await?,
+            ))
         }
 
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-            consumer_with_log(&self.channel, config, "c").await
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "c").await
         }
 
         fn name(&self) -> &'static str {
@@ -491,7 +506,7 @@ mod grpc_backends {
 
     /// Backend that drives the .NET binding's synchronous
     /// `KafkaProducer<Vec<u8>, Vec<u8>>` / `KafkaConsumer<Vec<u8>, Vec<u8>>` through a
-    /// gRPC server running in the `confluent-kafka-rust/dotnet-grpc-server:dev` Docker
+    /// gRPC server running in the `confluent-kafka-rust/dotnet-grpc-server:<MULTILANG_IMAGE_TAG>` Docker
     /// image (consumer M8/P1; producer M12/P1).
     ///
     /// The image serves `ProducerService`, `ConsumerService` and `AdminService` (Python-parity
@@ -502,11 +517,12 @@ mod grpc_backends {
     /// matrix (M8); the admin arm lands in M15/P12.
     pub struct DotnetGrpcFactory {
         channel: Channel,
+        untimed_channel: Channel,
     }
 
     impl DotnetGrpcFactory {
-        pub fn new(channel: Channel) -> Self {
-            Self { channel }
+        pub fn new(channel: Channel, untimed_channel: Channel) -> Self {
+            Self { channel, untimed_channel }
         }
     }
 
@@ -514,14 +530,14 @@ mod grpc_backends {
         type Producer = MultilanguageProducer;
 
         async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
-            MultilanguageProducer::new(self.channel.clone(), config, "dotnet").await
+            MultilanguageProducer::new(self.channel.clone(), self.untimed_channel.clone(), config, "dotnet").await
         }
 
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
-            producer_with_log(&self.channel, config, "dotnet").await
+            producer_with_log(&self.channel, &self.untimed_channel, config, "dotnet").await
         }
 
         fn name(&self) -> &'static str {
@@ -539,7 +555,8 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
-                MultilanguageConsumer::new(self.channel.clone(), config, "dotnet").await?,
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "dotnet")
+                    .await?,
             ))
         }
 
@@ -547,7 +564,7 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-            consumer_with_log(&self.channel, config, "dotnet").await
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "dotnet").await
         }
 
         fn name(&self) -> &'static str {
@@ -561,7 +578,7 @@ mod grpc_backends {
 
     /// Backend that drives the .NET binding's *asynchronous*
     /// `AsyncKafkaProducer<Vec<u8>, Vec<u8>>` / `AsyncKafkaConsumer<Vec<u8>, Vec<u8>>` through
-    /// a gRPC server running in the `confluent-kafka-rust/dotnet-async-grpc-server:dev` Docker
+    /// a gRPC server running in the `confluent-kafka-rust/dotnet-async-grpc-server:<MULTILANG_IMAGE_TAG>` Docker
     /// image (consumer M8/P2; producer M12/P1). The async twin of [`DotnetGrpcFactory`] —
     /// identical wiring, only the backend label (used in logs / client-id defaults) differs,
     /// mirroring [`PythonGrpcFactory`] vs [`PythonAsyncGrpcFactory`].
@@ -571,11 +588,12 @@ mod grpc_backends {
     /// [`AdminBackendFactory`] (M15/P14, over the binding's `IAsyncAdmin`).
     pub struct DotnetAsyncGrpcFactory {
         channel: Channel,
+        untimed_channel: Channel,
     }
 
     impl DotnetAsyncGrpcFactory {
-        pub fn new(channel: Channel) -> Self {
-            Self { channel }
+        pub fn new(channel: Channel, untimed_channel: Channel) -> Self {
+            Self { channel, untimed_channel }
         }
     }
 
@@ -583,14 +601,14 @@ mod grpc_backends {
         type Producer = MultilanguageProducer;
 
         async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
-            MultilanguageProducer::new(self.channel.clone(), config, "dotnet_async").await
+            MultilanguageProducer::new(self.channel.clone(), self.untimed_channel.clone(), config, "dotnet_async").await
         }
 
         async fn create_with_callback_log(
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
-            producer_with_log(&self.channel, config, "dotnet_async").await
+            producer_with_log(&self.channel, &self.untimed_channel, config, "dotnet_async").await
         }
 
         fn name(&self) -> &'static str {
@@ -608,7 +626,8 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
-                MultilanguageConsumer::new(self.channel.clone(), config, "dotnet_async").await?,
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "dotnet_async")
+                    .await?,
             ))
         }
 
@@ -616,7 +635,7 @@ mod grpc_backends {
             &self,
             config: HashMap<String, String>,
         ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
-            consumer_with_log(&self.channel, config, "dotnet_async").await
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "dotnet_async").await
         }
 
         fn name(&self) -> &'static str {

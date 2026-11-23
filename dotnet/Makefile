@@ -10,8 +10,15 @@
 # directory, so `cargo --manifest-path rust/Cargo.toml` from here would lose both.
 REPO_ROOT ?= $(realpath ..)
 RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
-GRPC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-grpc-server:dev
-GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-async-grpc-server:dev
+# The tag of the gRPC images; rust/tests/common/backend_pool.rs reads the same
+# variable. Override it per worktree so concurrent sessions do not share images.
+MULTILANG_IMAGE_TAG ?= dev
+GRPC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-grpc-server:$(MULTILANG_IMAGE_TAG)
+GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/dotnet-async-grpc-server:$(MULTILANG_IMAGE_TAG)
+# The Native AOT builds of the two images: the same repositories, under the tag
+# $(MULTILANG_IMAGE_TAG)-aot, which test-integration-aot runs the harness with.
+GRPC_AOT_IMAGE_TAG ?= confluent-kafka-rust/dotnet-grpc-server:$(MULTILANG_IMAGE_TAG)-aot
+GRPC_ASYNC_AOT_IMAGE_TAG ?= confluent-kafka-rust/dotnet-async-grpc-server:$(MULTILANG_IMAGE_TAG)-aot
 # Native (non-container) gRPC server build for the multilanguage harness,
 # written under the Rust target dir, where rust/tests/common/backend_pool.rs
 # looks for it in MULTILANG_BACKEND_MODE=native (rust/target/grpc-native/dotnet).
@@ -51,9 +58,11 @@ SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 # through `env`.
 selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURDIR) $(1))
 
-.PHONY: grpc-image grpc-image-async grpc-native rust-lib test-integration test-integration-ssl test-integration-sasl-ssl \
-	test-integration-native build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
-	test-examples-dotnet test-dotnet-macos verify verify-macos pack-dotnet package-check-dotnet coverage-dotnet
+.PHONY: grpc-image grpc-image-async grpc-image-aot grpc-image-async-aot grpc-native grpc-native-aot rust-lib \
+	test-integration test-integration-ssl test-integration-sasl-ssl test-integration-aot \
+	test-integration-native test-integration-native-aot build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
+	test-examples-dotnet test-verifiable-clients-dotnet test-dotnet-macos verify verify-except-grpc-arm verify-macos \
+	pack-dotnet package-check-dotnet coverage-dotnet test-aot-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
 # by the multilanguage integration test harness. The build context is the repo
@@ -81,6 +90,25 @@ grpc-image-async: rust-lib
 		-f $(REPO_ROOT)/dotnet/Dockerfile.grpc.async \
 		$(REPO_ROOT)
 
+# The Native AOT builds of the same two images (Dockerfile.grpc.aot,
+# Dockerfile.grpc.async.aot): the server and binding compiled to one native
+# executable, which runs in runtime-deps, an image with no .NET runtime. Same build
+# context and prerequisites as grpc-image; the async build reuses the sync one's
+# cached builder stage.
+grpc-image-aot: rust-lib
+	docker build \
+		-t $(GRPC_AOT_IMAGE_TAG) \
+		--build-arg RUST_PROFILE=$(RUST_PROFILE) \
+		-f $(REPO_ROOT)/dotnet/Dockerfile.grpc.aot \
+		$(REPO_ROOT)
+
+grpc-image-async-aot: rust-lib
+	docker build \
+		-t $(GRPC_ASYNC_AOT_IMAGE_TAG) \
+		--build-arg RUST_PROFILE=$(RUST_PROFILE) \
+		-f $(REPO_ROOT)/dotnet/Dockerfile.grpc.async.aot \
+		$(REPO_ROOT)
+
 # Build the .NET gRPC server for the native (host-process) multilanguage arm
 # (M17/P1): the net10.0 leg of grpc-server into rust/target/grpc-native/dotnet,
 # where rust/tests/common/backend_pool.rs runs it with `dotnet`. net10.0 because SDK 10
@@ -95,6 +123,15 @@ grpc-image-async: rust-lib
 # pinned to Release.
 grpc-native: rust-lib
 	$(DOTNET) build -c Release $(CARGO_PROFILE_PROP) -f net10.0 $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(GRPC_NATIVE_DIR)/dotnet
+
+# The Native AOT build of the same server (GrpcServerAot,
+# Confluent.Kafka.GrpcServer.csproj) into rust/target/grpc-native/dotnet-aot, for
+# test-integration-native-aot: one executable with the native library beside it,
+# which needs no .NET runtime. A Native AOT publish needs the platform's C
+# toolchain, and fails on a trim or AOT warning (TreatWarningsAsErrors). `-c
+# Release` and $(CARGO_PROFILE_PROP) are pinned for the reason given above.
+grpc-native-aot: rust-lib
+	$(DOTNET) publish -c Release $(CARGO_PROFILE_PROP) -f net10.0 --use-current-runtime -p:GrpcServerAot=true $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj -o $(GRPC_NATIVE_DIR)/dotnet-aot
 
 # The .NET-backend arms of the multilanguage suite: build the sync and async gRPC
 # server images, then run the `__grpc_dotnet` tests of the Rust harness against
@@ -147,12 +184,33 @@ test-integration-ssl:
 test-integration-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration
 
+# The same container arm against the Native AOT images (grpc-image-aot,
+# grpc-image-async-aot), which the harness runs under the tag
+# $(MULTILANG_IMAGE_TAG)-aot. Off Linux it skips, for test-integration's reason;
+# there the AOT arms run natively (test-integration-native-aot). The images go
+# with `MULTILANG_IMAGE_TAG=<tag>-aot make clean-grpc-images`.
+test-integration-aot: rust-lib
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+		printf '\nSKIP .NET test-integration-aot: host is %s, not Linux. The AOT gRPC-server images COPY the\n' "$$(uname -s)"; \
+		printf 'host-built Linux rust/target/$(RUST_PROFILE)/libconfluent_kafka.so, as the regular images do.\n'; \
+		printf 'Run the AOT arms natively on this host with: make -C dotnet test-integration-native-aot\n\n'; \
+	else \
+		$(call selected_run,--section dotnet.grpc -- $(MAKE) -C $(CURDIR) grpc-image-aot grpc-image-async-aot) && \
+		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet MULTILANG_IMAGE_TAG=$(MULTILANG_IMAGE_TAG)-aot; \
+	fi
+
 # The .NET arms with the gRPC server as a host process instead of a container
 # (MULTILANG_BACKEND_MODE=native, rust/tests/common/backend_pool.rs): only the
 # broker runs in Docker. Used on macOS; also works on Linux. Needs the .NET 10
 # SDK on PATH (grpc-native).
 test-integration-native: grpc-native
 	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet-native
+
+# The same arms against the Native AOT build of the server and binding
+# (grpc-native-aot), which the harness runs without the dotnet host. Besides the
+# .NET 10 SDK it needs the platform's C toolchain.
+test-integration-native-aot: grpc-native-aot
+	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet-native-aot
 
 # The Rust library the .NET binding loads, built by rust/Makefile: the debug
 # all-features build, or the release one for RUST_PROFILE=release; a cargo
@@ -210,13 +268,19 @@ test-dotnet: build-dotnet
 test-dotnet-macos:
 	$(MAKE) DOTNET_TEST_FILTER='FullyQualifiedName!~Confluent.Kafka.IntegrationTests' test-dotnet
 
-# The .NET gate CI runs on Linux ("verify-dotnet (Linux amd64) — plaintext"):
-# the tests, the gRPC container arms, then the Docker-gated net10.0 p99 perf
-# stage. Recipe lines rather than prerequisites so each stage runs after the one
-# before. The checks that are not tests are check-dotnet, which CI runs in
-# "check-dotnet (Linux amd64)".
+# The .NET gate (dotnet/CLAUDE.md §7.5): the tests, the gRPC container arms,
+# then the Docker-gated net10.0 p99 perf stage. Recipe lines rather than
+# prerequisites so each stage runs after the one before. The checks that are not
+# tests are check-dotnet, which CI runs in "check-dotnet (Linux amd64)".
 verify: test-dotnet
 	$(MAKE) test-integration
+	$(MAKE) test-integration-perf-dotnet
+
+# `verify` without the gRPC container arms: the CI job "verify-dotnet (Linux
+# amd64) — plaintext". CI runs the arms in "verify-dotnet (Linux amd64) —
+# plaintext gRPC arm" (`test-integration`), as it does for C and Python and as
+# it runs the ssl / sasl_ssl arms.
+verify-except-grpc-arm: test-dotnet
 	$(MAKE) test-integration-perf-dotnet
 
 # The macOS gate: the unit and soak tests, then the gRPC multilanguage arm with
@@ -226,14 +290,15 @@ verify-macos: test-dotnet-macos
 
 # The checks that are not tests: `dotnet format --verify-no-changes`, which
 # enforces the checked-in .editorconfig, over the solution and over the soak
-# projects, which are outside it (built first, as the soak tests build them), then
-# the examples' build and format check. CI runs them in their own job,
-# "check-dotnet (Linux amd64)".
+# projects and tools/AotSmoke, which are outside it (the soak projects built
+# first, as the soak tests build them), then the examples' build and format
+# check. CI runs them in their own job, "check-dotnet (Linux amd64)".
 check-dotnet: build-dotnet
 	$(DOTNET) format $(SOLUTION) --verify-no-changes
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(SOAK_TESTS)
 	$(DOTNET) format $(SOAK_CLIENT) --verify-no-changes
 	$(DOTNET) format $(SOAK_TESTS) --verify-no-changes
+	$(DOTNET) format $(AOT_SMOKE) --verify-no-changes
 	$(MAKE) test-examples-dotnet
 
 # ---------------------------------------------------------------------------
@@ -317,6 +382,18 @@ coverage-dotnet: build-dotnet
 	@sed -n '2,/^$$/p' $(COVERAGE_DIR)/report-without-errors/Summary.txt
 
 # ---------------------------------------------------------------------------
+# The verifiable clients (dotnet/tools/VerifiableClients), the producer and consumer
+# tools Kafka's system tests drive. Their tests alone, on net8.0 and net10.0. The
+# projects are in the solution, so test-dotnet runs these tests too; this target
+# does not need calling from it.
+# ---------------------------------------------------------------------------
+VERIFIABLE_CLIENTS_TESTS := $(REPO_ROOT)/dotnet/tools/VerifiableClients/VerifiableClients.Tests/VerifiableClients.Tests.csproj
+
+test-verifiable-clients-dotnet: build-dotnet
+	$(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(VERIFIABLE_CLIENTS_TESTS)
+	$(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(VERIFIABLE_CLIENTS_TESTS)
+
+# ---------------------------------------------------------------------------
 # The Confluent.Kafka NuGet package.
 #
 # pack-dotnet packs dotnet/artifacts/package/Confluent.Kafka.<version>.nupkg with
@@ -343,6 +420,32 @@ pack-dotnet:
 
 package-check-dotnet: pack-dotnet
 	cd $(REPO_ROOT) && sh .semaphore/test-nupkg.sh --smoke $(PACKAGE_DIR)
+
+# ---------------------------------------------------------------------------
+# Native AOT check of the library (net8.0 and net10.0).
+#
+# tools/AotSmoke is published with PublishAot for this machine's runtime, with the
+# whole Confluent.Kafka assembly rooted (TrimmerRootAssembly): the AOT compiler
+# analyzes every member of the library, and any trim or AOT warning fails the
+# publish (TreatWarningsAsErrors). It catches what the library's own analyzers
+# (IsAotCompatible) cannot see, such as a warning silenced with #pragma. Each
+# published executable then runs, and fails on a check that does not hold.
+#
+# Outside the solution, as a Native AOT publish needs the platform's C toolchain
+# (Xcode's command line tools on macOS; clang, and zlib for net8.0, on Linux), so
+# `dotnet format $(SOLUTION)` does not reach it: check-dotnet formats it. Depends
+# on build-dotnet, as the executables P/Invoke the native library it builds
+# (CLAUDE.md §7.1); $(CARGO_PROFILE_PROP) makes the publish copy that library. No
+# test selection applies: like the builds, the check runs in full.
+# ---------------------------------------------------------------------------
+AOT_SMOKE := $(REPO_ROOT)/dotnet/tools/AotSmoke/AotSmoke.csproj
+AOT_SMOKE_OUT := $(REPO_ROOT)/dotnet/artifacts/aot-smoke
+
+test-aot-dotnet: build-dotnet
+	$(DOTNET) publish -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 --use-current-runtime $(AOT_SMOKE) -o $(AOT_SMOKE_OUT)/net8.0
+	$(DOTNET) publish -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 --use-current-runtime $(AOT_SMOKE) -o $(AOT_SMOKE_OUT)/net10.0
+	$(AOT_SMOKE_OUT)/net8.0/AotSmoke
+	$(AOT_SMOKE_OUT)/net10.0/AotSmoke
 
 # ---------------------------------------------------------------------------
 # gRPC-server unit tests (M18/P1, PLAN §7.1): the chaos-harness service

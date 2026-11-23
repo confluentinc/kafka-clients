@@ -9,7 +9,10 @@ RUST_PROFILE ?= debug
 # all-features build.
 RUST_BUILD_TARGET = $(if $(filter release,$(RUST_PROFILE)),build-all-features,devel-build-all-features)
 BUILD_DIR = build
-GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:dev
+# The tag of the gRPC image; rust/tests/common/backend_pool.rs reads the same
+# variable. Override it per worktree so concurrent sessions do not share images.
+MULTILANG_IMAGE_TAG ?= dev
+GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:$(MULTILANG_IMAGE_TAG)
 # Native (non-container) gRPC server builds for the multilanguage harness,
 # written under the Rust target dir, where rust/tests/common/backend_pool.rs
 # looks for them in MULTILANG_BACKEND_MODE=native.
@@ -36,7 +39,7 @@ selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURD
 # Every target builds what it needs first: the Rust library of $(RUST_PROFILE)
 # (rust-lib) and, for the host build, the Unity submodule the unit tests use.
 .PHONY: rust-lib build devel-build test test-unit test-integration test-integration-ssl \
-	test-integration-sasl-ssl test-integration-native verify verify-macos producer-perf-test \
+	test-integration-sasl-ssl test-integration-native verify verify-except-grpc-arm verify-macos producer-perf-test \
 	grpc-image grpc-native clean
 
 # The Rust library and its headers, built by rust/Makefile; a cargo no-op once
@@ -58,8 +61,14 @@ devel-build: build
 # integration suite.
 test: test-unit test-integration
 
-# The C gate CI runs on Linux ("verify-c (Linux amd64) — plaintext").
+# The C gate: the unit tests, then the gRPC multilanguage arm.
 verify: test
+
+# `verify` without the gRPC multilanguage arm: the CI job "verify-c (Linux
+# amd64) — plaintext". CI runs the arm in "verify-c (Linux amd64) — plaintext
+# gRPC arm" (`test-integration`), as it runs the ssl / sasl_ssl arms in jobs of
+# their own.
+verify-except-grpc-arm: test-unit
 
 # The macOS gate: the unit tests, then the gRPC multilanguage arm with the gRPC
 # server as a native host process, since the Linux container arm cannot run on
@@ -93,7 +102,7 @@ test-integration: rust-lib
 		printf '  rust/target/$(RUST_PROFILE)/libconfluent_kafka.a\n'; \
 		printf 'into a Linux container and links it with GNU ld. On this host that\n'; \
 		printf 'artifact is Mach-O, so the image cannot build/link.\n'; \
-		printf 'This container arm runs only in CI'"'"'s Linux verify-c job.\n'; \
+		printf 'This container arm runs only in CI'"'"'s Linux verify-c gRPC arm jobs.\n'; \
 		printf 'Run it natively on this host with: %smake -C c test-integration-native\n' \
 			"$${INTEGRATION_TEST_PROTOCOL:+INTEGRATION_TEST_PROTOCOL=$$INTEGRATION_TEST_PROTOCOL }"; \
 		printf '========================================================================\n\n'; \

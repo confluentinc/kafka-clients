@@ -113,9 +113,11 @@ cargo test --features integration-tests --test integration
 cargo test --all-features -- --skip __grpc   # everything, minus the gRPC arms
 ```
 
-The `__grpc_python` / `__grpc_c` arms of the multilanguage suite need the
-bindings' gRPC images; `make -C python test-integration` and
-`make -C c test-integration`, from the repository root, build those first.
+The five `__grpc_*` arms of the multilanguage suite need the bindings' gRPC
+images; `make -C python test-integration`, `make -C c test-integration` and
+`make -C dotnet test-integration`, from the repository root, build those first.
+[design/current/multilanguage-tests.md](../design/current/multilanguage-tests.md)
+explains how the harness works.
 
 ## Make targets
 

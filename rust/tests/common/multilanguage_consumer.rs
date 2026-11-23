@@ -72,7 +72,10 @@ use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceCl
 use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
 
-use crate::common::multilanguage_producer::{kafka_error_from_proto, partition_info_from_proto, status_to_kafka_error};
+use crate::common::multilanguage_producer::{
+    BLOCKING_DEADLINE_MARGIN, DEFAULT_RPC_DEADLINE, kafka_error_from_proto, partition_info_from_proto,
+    status_to_kafka_error,
+};
 
 /// Where each live [`MultilanguageGroupMetadata`] came from, keyed by the
 /// address of the object: `(server-side handle id, backend label)`.
@@ -215,14 +218,30 @@ impl Drop for GroupMetadataRelease {
 /// language that ultimately calls the same Rust client through a binding.
 pub struct MultilanguageConsumer {
     consumer_id: u64,
+    /// The client for the calls that do not wait on the broker (the state
+    /// reads, `wakeup`, `metrics`), with the channel's 30 s per-request timeout.
     client: ConsumerServiceClient<Channel>,
+    /// The client for the calls that wait on the broker, over a channel with
+    /// no per-request timeout: each request carries its own deadline
+    /// ([`Self::waiting`]).
+    blocking_client: ConsumerServiceClient<Channel>,
+    /// [`api_deadline`] of this consumer's config.
+    api_deadline: Duration,
     backend: &'static str,
 }
 
 impl MultilanguageConsumer {
     /// Connect to `channel` and create a server-side consumer from `config`
-    /// (empty config selects a MockConsumer server-side).
-    pub async fn new(channel: Channel, config: HashMap<String, String>, backend: &'static str) -> Result<Self, Error> {
+    /// (empty config selects a MockConsumer server-side). `untimed_channel`
+    /// reaches the same server with no per-request timeout; the calls that
+    /// wait on the broker go over it.
+    pub async fn new(
+        channel: Channel,
+        untimed_channel: Channel,
+        config: HashMap<String, String>,
+        backend: &'static str,
+    ) -> Result<Self, Error> {
+        let api_deadline = api_deadline(&config);
         let mut client = ConsumerServiceClient::new(channel);
         let response = client
             .create_consumer(proto::CreateConsumerRequest { config })
@@ -232,7 +251,27 @@ impl MultilanguageConsumer {
         if let Some(err) = response.error {
             return Err(kafka_error_from_proto(err));
         }
-        Ok(Self { consumer_id: response.consumer_id, client, backend })
+        Ok(Self {
+            consumer_id: response.consumer_id,
+            client,
+            blocking_client: ConsumerServiceClient::new(untimed_channel),
+            api_deadline,
+            backend,
+        })
+    }
+
+    /// `message` as a request on [`Self::blocking_client`] whose deadline
+    /// covers the wait the call may make: `timeout` plus
+    /// [`BLOCKING_DEADLINE_MARGIN`] for a timed overload, [`Self::api_deadline`]
+    /// for an untimed one, never less than [`DEFAULT_RPC_DEADLINE`].
+    fn waiting<T>(&self, message: T, timeout: Option<Duration>) -> tonic::Request<T> {
+        let deadline = match timeout {
+            Some(timeout) => timeout.saturating_add(BLOCKING_DEADLINE_MARGIN).max(DEFAULT_RPC_DEADLINE),
+            None => self.api_deadline,
+        };
+        let mut request = tonic::Request::new(message);
+        request.set_timeout(deadline);
+        request
     }
 
     /// The server-local consumer id. Needed by
@@ -266,7 +305,7 @@ impl MultilanguageConsumer {
     /// The plain `subscribe(topics)` or, with `pattern`, the plain
     /// `subscribe(SubscriptionPattern)`.
     async fn subscribe_rpc(&self, topics: Vec<String>, pattern: Option<&SubscriptionPattern>) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         // with_listener stays false here: this is the listener-less form. The
         // listener-registering variant lives on ConsumerCallbackLog, since the
         // listener must be created by the server's own binding.
@@ -276,35 +315,35 @@ impl MultilanguageConsumer {
             with_listener: false,
             pattern: pattern.map(|p| p.pattern().to_string()),
         };
-        self.status_rpc(client.subscribe(req)).await
+        self.status_rpc(client.subscribe(self.waiting(req, None))).await
     }
 
     async fn assign_rpc(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req = proto::AssignRequest { consumer_id: self.consumer_id, partitions: tps_to_proto(partitions) };
-        self.status_rpc(client.assign(req)).await
+        self.status_rpc(client.assign(self.waiting(req, None))).await
     }
 
     async fn tp_list_rpc(&self, partitions: &[TopicPartition], which: TpListOp) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req = proto::TopicPartitionListRequest {
             consumer_id: self.consumer_id,
             partitions: tps_to_proto(partitions),
             timeout_ms: None,
         };
         match which {
-            TpListOp::SeekToBeginning => self.status_rpc(client.seek_to_beginning(req)).await,
-            TpListOp::SeekToEnd => self.status_rpc(client.seek_to_end(req)).await,
-            TpListOp::Pause => self.status_rpc(client.pause(req)).await,
-            TpListOp::Resume => self.status_rpc(client.resume(req)).await,
+            TpListOp::SeekToBeginning => self.status_rpc(client.seek_to_beginning(self.waiting(req, None))).await,
+            TpListOp::SeekToEnd => self.status_rpc(client.seek_to_end(self.waiting(req, None))).await,
+            TpListOp::Pause => self.status_rpc(client.pause(self.waiting(req, None))).await,
+            TpListOp::Resume => self.status_rpc(client.resume(self.waiting(req, None))).await,
         }
     }
 
     async fn poll_rpc(&self, timeout: Duration) -> Result<ConsumerRecords<Vec<u8>, Vec<u8>>, Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req = proto::PollRequest { consumer_id: self.consumer_id, timeout_ms: timeout.as_millis() as i64 };
         let response = client
-            .poll(req)
+            .poll(self.waiting(req, Some(timeout)))
             .await
             .map_err(|s| status_to_kafka_error(&s, self.backend))?
             .into_inner();
@@ -315,10 +354,21 @@ impl MultilanguageConsumer {
         }
     }
 
-    async fn commit_rpc(&self, offsets: Vec<proto::OffsetMapEntry>, timeout: Option<Duration>) -> Result<(), Error> {
-        let mut client = self.client.clone();
-        let req = proto::CommitSyncRequest { consumer_id: self.consumer_id, offsets, timeout_ms: timeout_ms(timeout) };
-        self.status_rpc(client.commit_sync(req)).await
+    /// `CommitSync`: `offsets` `None` is Java's `commitSync([Duration])`,
+    /// `Some` its `commitSync(Map[, Duration])`, an empty map included.
+    async fn commit_rpc(
+        &self,
+        offsets: Option<Vec<proto::OffsetMapEntry>>,
+        timeout: Option<Duration>,
+    ) -> Result<(), Error> {
+        let mut client = self.blocking_client.clone();
+        let req = proto::CommitSyncRequest {
+            consumer_id: self.consumer_id,
+            with_offsets: offsets.is_some(),
+            offsets: offsets.unwrap_or_default(),
+            timeout_ms: timeout_ms(timeout),
+        };
+        self.status_rpc(client.commit_sync(self.waiting(req, timeout))).await
     }
 
     async fn committed_rpc(
@@ -326,14 +376,14 @@ impl MultilanguageConsumer {
         partitions: &[TopicPartition],
         timeout: Option<Duration>,
     ) -> Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req = proto::CommittedRequest {
             consumer_id: self.consumer_id,
             partitions: tps_to_proto(partitions),
             timeout_ms: timeout_ms(timeout),
         };
         let response = client
-            .committed(req)
+            .committed(self.waiting(req, timeout))
             .await
             .map_err(|s| status_to_kafka_error(&s, self.backend))?
             .into_inner();
@@ -345,14 +395,14 @@ impl MultilanguageConsumer {
     }
 
     async fn position_rpc(&self, partition: &TopicPartition, timeout: Option<Duration>) -> Result<i64, Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req = proto::PositionRequest {
             consumer_id: self.consumer_id,
             partition: Some(tp_to_proto(partition)),
             timeout_ms: timeout_ms(timeout),
         };
         let response = client
-            .position(req)
+            .position(self.waiting(req, timeout))
             .await
             .map_err(|s| status_to_kafka_error(&s, self.backend))?
             .into_inner();
@@ -369,12 +419,13 @@ impl MultilanguageConsumer {
         end: bool,
         timeout: Option<Duration>,
     ) -> Result<HashMap<TopicPartition, i64>, Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req = proto::TopicPartitionListRequest {
             consumer_id: self.consumer_id,
             partitions: tps_to_proto(partitions),
             timeout_ms: timeout_ms(timeout),
         };
+        let req = self.waiting(req, timeout);
         let response = if end {
             client.end_offsets(req).await
         } else {
@@ -394,7 +445,7 @@ impl MultilanguageConsumer {
         timestamps_to_search: &HashMap<TopicPartition, i64>,
         timeout: Option<Duration>,
     ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let timestamps = timestamps_to_search
             .iter()
             .map(|(tp, ts)| proto::TimestampSpecEntry { partition: Some(tp_to_proto(tp)), timestamp: *ts })
@@ -405,7 +456,7 @@ impl MultilanguageConsumer {
             timeout_ms: timeout_ms(timeout),
         };
         let response = client
-            .offsets_for_times(req)
+            .offsets_for_times(self.waiting(req, timeout))
             .await
             .map_err(|s| status_to_kafka_error(&s, self.backend))?
             .into_inner();
@@ -419,21 +470,24 @@ impl MultilanguageConsumer {
     }
 
     async fn close_rpc(&self, options: Option<&CloseOptions>) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req = proto::ConsumerCloseRequest {
             consumer_id: self.consumer_id,
             group_membership_operation: options
                 .map(|o| group_membership_operation_name(o.group_membership_operation()).to_string()),
             close_timeout_ms: timeout_ms(options.and_then(CloseOptions::timeout)),
         };
+        // Without a timeout, close waits up to Java's 30 s default, within
+        // `api_deadline`.
+        let req = self.waiting(req, options.and_then(CloseOptions::timeout));
         self.status_rpc(client.close(req)).await
     }
 
     async fn partitions_for_rpc(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req = proto::ConsumerPartitionsForRequest { consumer_id: self.consumer_id, topic: topic.to_string() };
         let response = client
-            .partitions_for(req)
+            .partitions_for(self.waiting(req, None))
             .await
             .map_err(|s| status_to_kafka_error(&s, self.backend))?
             .into_inner();
@@ -478,7 +532,10 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
                 Some(proto::topic_partition_list_response::Result::Partitions(list)) => {
                     list.partitions.into_iter().map(tp_from_proto).collect()
                 },
-                _ => HashSet::new(),
+                Some(proto::topic_partition_list_response::Result::Error(err)) => {
+                    panic!("{backend} backend failed assignment: {}", kafka_error_from_proto(err))
+                },
+                None => HashSet::new(),
             }
         })
     }
@@ -496,7 +553,10 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
                 .into_inner();
             match resp.result {
                 Some(proto::subscription_response::Result::Topics(list)) => list.values.into_iter().collect(),
-                _ => HashSet::new(),
+                Some(proto::subscription_response::Result::Error(err)) => {
+                    panic!("{backend} backend failed subscription: {}", kafka_error_from_proto(err))
+                },
+                None => HashSet::new(),
             }
         })
     }
@@ -516,7 +576,10 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
                 Some(proto::topic_partition_list_response::Result::Partitions(list)) => {
                     list.partitions.into_iter().map(tp_from_proto).collect()
                 },
-                _ => HashSet::new(),
+                Some(proto::topic_partition_list_response::Result::Error(err)) => {
+                    panic!("{backend} backend failed paused: {}", kafka_error_from_proto(err))
+                },
+                None => HashSet::new(),
             }
         })
     }
@@ -548,12 +611,12 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         // IllegalStateException for an unassigned partition or a closed consumer,
         // TimeoutException past default.api.timeout.ms, ConcurrentModificationException;
         // the trait carries them as the `Result`'s error.
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req =
             proto::CurrentLagRequest { consumer_id: self.consumer_id, partition: Some(tp_to_proto(topic_partition)) };
         let backend = self.backend;
         let resp = client
-            .current_lag(req)
+            .current_lag(self.waiting(req, None))
             .await
             .map_err(|s| status_to_kafka_error(&s, backend))?
             .into_inner();
@@ -645,9 +708,9 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     }
 
     async fn unsubscribe(&mut self) -> Result<(), Error> {
-        let mut client = self.client.clone();
-        self.status_rpc(client.unsubscribe(proto::ConsumerIdRequest { consumer_id: self.consumer_id }))
-            .await
+        let mut client = self.blocking_client.clone();
+        let req = proto::ConsumerIdRequest { consumer_id: self.consumer_id };
+        self.status_rpc(client.unsubscribe(self.waiting(req, None))).await
     }
 
     // ── poll ──
@@ -657,18 +720,18 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
 
     // ── commit ──
     async fn commit_sync(&mut self) -> Result<(), Error> {
-        self.commit_rpc(Vec::new(), None).await
+        self.commit_rpc(None, None).await
     }
 
     async fn commit_sync_with_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
-        self.commit_rpc(Vec::new(), Some(timeout)).await
+        self.commit_rpc(None, Some(timeout)).await
     }
 
     async fn commit_sync_with_offsets(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Result<(), Error> {
-        self.commit_rpc(offset_map_to_proto(&offsets), None).await
+        self.commit_rpc(Some(offset_map_to_proto(&offsets)), None).await
     }
 
     async fn commit_sync_with_offsets_timeout(
@@ -676,14 +739,14 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         timeout: Duration,
     ) -> Result<(), Error> {
-        self.commit_rpc(offset_map_to_proto(&offsets), Some(timeout)).await
+        self.commit_rpc(Some(offset_map_to_proto(&offsets)), Some(timeout)).await
     }
 
     async fn commit_async(&mut self) -> Result<(), Error> {
         // Mapped to a synchronous commit server-side; the offset ends up
         // committed. Tests that depend on async-not-yet-committed timing are
         // native-Rust-only and never reach this backend.
-        self.commit_rpc(Vec::new(), None).await
+        self.commit_rpc(None, None).await
     }
 
     async fn commit_async_with_callback(&mut self, _callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error> {
@@ -700,7 +763,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
 
     // ── seek ──
     async fn seek_with_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req = proto::SeekRequest {
             consumer_id: self.consumer_id,
             partition: Some(tp_to_proto(&partition)),
@@ -708,7 +771,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
             leader_epoch: None,
             metadata: None,
         };
-        self.status_rpc(client.seek(req)).await
+        self.status_rpc(client.seek(self.waiting(req, None))).await
     }
 
     async fn seek_with_offset_and_metadata(
@@ -716,7 +779,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
     ) -> Result<(), Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let req = proto::SeekRequest {
             consumer_id: self.consumer_id,
             partition: Some(tp_to_proto(&partition)),
@@ -724,7 +787,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
             leader_epoch: offset_and_metadata.leader_epoch(),
             metadata: Some(offset_and_metadata.metadata().to_string()),
         };
-        self.status_rpc(client.seek(req)).await
+        self.status_rpc(client.seek(self.waiting(req, None))).await
     }
 
     async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
@@ -773,9 +836,9 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     }
 
     async fn list_topics(&mut self) -> Result<HashMap<String, Vec<PartitionInfo>>, Error> {
-        let mut client = self.client.clone();
+        let mut client = self.blocking_client.clone();
         let response = client
-            .list_topics(proto::ConsumerIdRequest { consumer_id: self.consumer_id })
+            .list_topics(self.waiting(proto::ConsumerIdRequest { consumer_id: self.consumer_id }, None))
             .await
             .map_err(|s| status_to_kafka_error(&s, self.backend))?
             .into_inner();
@@ -869,6 +932,26 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
 // Wire <-> domain conversions
 // ---------------------------------------------------------------------------
 
+/// The deadline of an untimed consumer call that waits on the broker: the
+/// longest wait the native call may legitimately make under `config`, plus
+/// [`BLOCKING_DEADLINE_MARGIN`], and never less than [`DEFAULT_RPC_DEADLINE`].
+///
+/// The longest wait is the larger of `default.api.timeout.ms` (what Java's
+/// untimed `commitSync`, `position`, `committed`, `seek` and the offset
+/// lookups wait) and `request.timeout.ms` (one request in flight), each at
+/// Java's default (60 s, 30 s) when the config does not set it. The two are
+/// equal to the channel's 30 s timeout at their defaults only by accident: a
+/// single coordinator request that times out during a broker bounce takes
+/// the whole of `request.timeout.ms`, after which the call still retries
+/// within `default.api.timeout.ms`.
+fn api_deadline(config: &HashMap<String, String>) -> Duration {
+    let ms = |key: &str, default: u64| config.get(key).and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(default);
+    let longest = ms("default.api.timeout.ms", 60_000).max(ms("request.timeout.ms", 30_000));
+    Duration::from_millis(longest)
+        .saturating_add(BLOCKING_DEADLINE_MARGIN)
+        .max(DEFAULT_RPC_DEADLINE)
+}
+
 /// A timed overload's `Duration` as the wire's optional milliseconds; `None`
 /// selects the overload without a timeout.
 fn timeout_ms(timeout: Option<Duration>) -> Option<i64> {
@@ -886,7 +969,7 @@ fn group_membership_operation_name(operation: GroupMembershipOperation) -> &'sta
     }
 }
 
-fn tp_to_proto(tp: &TopicPartition) -> proto::TopicPartition {
+pub(crate) fn tp_to_proto(tp: &TopicPartition) -> proto::TopicPartition {
     proto::TopicPartition { topic: tp.topic().to_string(), partition: tp.partition() }
 }
 
@@ -1005,8 +1088,14 @@ fn timestamp_type_from_id(id: i32) -> TimestampType {
 fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
     let headers =
         RecordHeaders::with_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
-    let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
-    let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
+    // The binding's own sizes, as it reports them: computing them here from the
+    // key and value would make every size assertion pass on the gRPC arms.
+    let serialized_key_size = r
+        .serialized_key_size
+        .expect("the gRPC server sent a ConsumerRecord without serialized_key_size (a stale image?)");
+    let serialized_value_size = r
+        .serialized_value_size
+        .expect("the gRPC server sent a ConsumerRecord without serialized_value_size (a stale image?)");
     let options = ConsumerRecordOptionsBuilder::new()
         .set_topic(r.topic)
         .set_partition(r.partition)
@@ -1044,4 +1133,27 @@ fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecor
         }
     }
     ConsumerRecords::with_next_offsets(by_partition, next_offsets)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The untimed-call deadline is the longer of `default.api.timeout.ms`
+    /// and `request.timeout.ms` plus the margin, at Java's defaults when
+    /// unset, and never below the channel's default.
+    #[test]
+    fn api_deadline_from_config() {
+        assert_eq!(api_deadline(&HashMap::new()), Duration::from_secs(90));
+        let config = HashMap::from([
+            ("default.api.timeout.ms".to_string(), "5000".to_string()),
+            ("request.timeout.ms".to_string(), "200000".to_string()),
+        ]);
+        assert_eq!(api_deadline(&config), Duration::from_secs(230));
+        let small = HashMap::from([
+            ("default.api.timeout.ms".to_string(), "0".to_string()),
+            ("request.timeout.ms".to_string(), "0".to_string()),
+        ]);
+        assert_eq!(api_deadline(&small), Duration::from_secs(30));
+    }
 }

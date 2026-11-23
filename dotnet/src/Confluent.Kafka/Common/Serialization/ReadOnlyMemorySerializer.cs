@@ -17,13 +17,13 @@ using System;
 namespace Confluent.Kafka.Common.Serialization;
 
 /// <summary>
-/// Java's <c>ByteBufferSerializer</c>, over <see cref="ReadOnlyMemory{T}"/> for Java's <c>ByteBuffer</c>: the memory
-/// as given, not copied, whether it is an array, a slice of one or native memory, and <see langword="null"/> as
-/// <see langword="null"/>, so an empty memory stays apart from a <see langword="null"/> one. The producer reads the
-/// bytes where they are, so they must stay unchanged until the send has read them
+/// Java's <c>ByteBufferSerializer</c>, named after <see cref="ReadOnlyMemory{T}"/>, the .NET type that stands for
+/// Java's <c>ByteBuffer</c>: the memory as given, not copied, whether it is an array, a slice of one or native memory,
+/// and <see langword="null"/> as <see langword="null"/>, so an empty memory stays apart from a <see langword="null"/>
+/// one. The producer reads the bytes where they are, so they must stay unchanged until the send has read them
 /// (<see cref="ISerializer{T}.Serialize"/>).
 /// </summary>
-public sealed class ByteBufferSerializer : ISerializer<ReadOnlyMemory<byte>?>
+public sealed class ReadOnlyMemorySerializer : ISerializer<ReadOnlyMemory<byte>?>
 {
     /// <inheritdoc/>
     public ReadOnlyMemory<byte>? Serialize(string topic, ReadOnlyMemory<byte>? data) => data;

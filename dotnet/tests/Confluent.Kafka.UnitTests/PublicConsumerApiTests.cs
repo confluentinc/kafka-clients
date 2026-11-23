@@ -58,7 +58,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Subscribe_ReturnsTask_Completes()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await TestTimeout.Run(() => consumer.Subscribe(ProofTopic()), s_deadline);
     }
@@ -66,7 +66,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Unsubscribe_ReturnsTask_Completes()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await consumer.Subscribe(ProofTopic());
         await TestTimeout.Run(() => consumer.Unsubscribe(), s_deadline);
@@ -75,7 +75,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task SubscribeUnsubscribe_Churned_NoLeakOrHang()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         for (int i = 0; i < 50; i++)
         {
@@ -87,7 +87,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Seek_UnassignedPartition_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
@@ -98,15 +98,15 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public void Wakeup_IsSync_AndSafeWhenIdle()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Wakeup();
     }
 
     [Fact]
-    public void GroupMetadata_IsSync_ReturnsSynchronously()
+    public async Task GroupMetadata_IsSync_ReturnsSynchronously()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(RealConfig("sync-group"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(RealConfig("sync-group"), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
         Assert.Equal("sync-group", meta.GroupId());
@@ -116,7 +116,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Seek_NegativeOffset_OnTheMock_UnassignedPartition_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
@@ -128,16 +128,16 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Seek_NegativeOffset_OnAClosedConsumer_ReportsTheClosedConsumerFirst()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await TestTimeout.DisposeAsync(consumer);
 
         Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -3); });
     }
 
     [Fact]
-    public void GroupMetadata_RealConsumer_PreJoinDefaults()
+    public async Task GroupMetadata_RealConsumer_PreJoinDefaults()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(RealConfig("public-group"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(RealConfig("public-group"), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
@@ -149,9 +149,9 @@ public sealed class PublicConsumerApiTests
     }
 
     [Fact]
-    public void GroupMetadata_RealConsumer_NonAsciiGroupId_RoundTrips()
+    public async Task GroupMetadata_RealConsumer_NonAsciiGroupId_RoundTrips()
     {
-        AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(RealConfig("café-Ω-日本語-😀"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(RealConfig("café-Ω-日本語-😀"), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.Equal("café-Ω-日本語-😀", consumer.GroupMetadata().GroupId());
@@ -160,7 +160,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public void GroupMetadata_MockConsumer_ReturnsMockSentinels()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
@@ -174,7 +174,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public void GroupMetadata_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
@@ -183,9 +183,9 @@ public sealed class PublicConsumerApiTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void GroupMetadata_RealConsumer_WithoutGroupId_ThrowsInvalidGroupId(bool sync)
+    public async Task GroupMetadata_RealConsumer_WithoutGroupId_ThrowsInvalidGroupId(bool sync)
     {
-        IConsumerCommon consumer = CreateRealConsumer(sync, ConfigWithoutGroupId());
+        IConsumerCommon consumer = await CreateRealConsumer(sync, ConfigWithoutGroupId());
         try
         {
             InvalidGroupIdException failure = Assert.Throws<InvalidGroupIdException>(() => consumer.GroupMetadata());
@@ -203,9 +203,9 @@ public sealed class PublicConsumerApiTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void GroupMetadata_RealConsumer_WithoutGroupId_AfterDispose_ThrowsIllegalState(bool sync)
+    public async Task GroupMetadata_RealConsumer_WithoutGroupId_AfterDispose_ThrowsIllegalState(bool sync)
     {
-        IConsumerCommon consumer = CreateRealConsumer(sync, ConfigWithoutGroupId());
+        IConsumerCommon consumer = await CreateRealConsumer(sync, ConfigWithoutGroupId());
         DisposeConsumer(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
@@ -214,7 +214,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public void GroupMetadata_SyncRealConsumer_PreJoinDefaults()
     {
-        KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<byte[], byte[]>(
+        KafkaConsumer<byte[], byte[]> consumer = KafkaConsumer<byte[], byte[]>.Create(
             RealConfig("sync-public-group"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
@@ -233,7 +233,7 @@ public sealed class PublicConsumerApiTests
     {
         IConsumerCommon consumer = sync
             ? new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer())
-            : new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            : new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         try
         {
             ConsumerGroupMetadata meta = consumer.GroupMetadata();
@@ -252,13 +252,13 @@ public sealed class PublicConsumerApiTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void Ctor_InvalidGroupInstanceId_WithoutClientId_ThrowsInvalidConfig(bool sync)
+    public async Task Ctor_InvalidGroupInstanceId_WithoutClientId_ThrowsInvalidConfig(bool sync)
     {
         Dictionary<string, object?> config = ConfigWithoutGroupId();
         config["group.id"] = "clientid-invalid";
         config["group.instance.id"] = "bad/id";
 
-        InvalidConfigurationException ex = Assert.Throws<InvalidConfigurationException>(() => DisposeConsumer(CreateRealConsumer(sync, config)));
+        InvalidConfigurationException ex = await Assert.ThrowsAsync<InvalidConfigurationException>(async () => DisposeConsumer(await CreateRealConsumer(sync, config)));
 
         Assert.Equal(InvalidGroupInstanceIdMessage, ex.Message);
         Assert.Equal(InvalidConfigCode, ex.Code);
@@ -268,14 +268,14 @@ public sealed class PublicConsumerApiTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void Ctor_InvalidGroupInstanceId_WithExplicitClientId_ThrowsFailedToConstructWithTheCause(bool sync)
+    public async Task Ctor_InvalidGroupInstanceId_WithExplicitClientId_ThrowsFailedToConstructWithTheCause(bool sync)
     {
         Dictionary<string, object?> config = ConfigWithoutGroupId();
         config["group.id"] = "clientid-invalid";
         config["group.instance.id"] = "bad/id";
         config["client.id"] = "explicit-client";
 
-        KafkaException ex = Assert.Throws<KafkaException>(() => DisposeConsumer(CreateRealConsumer(sync, config)));
+        KafkaException ex = await Assert.ThrowsAsync<KafkaException>(async () => DisposeConsumer(await CreateRealConsumer(sync, config)));
 
         Assert.Equal("Failed to construct kafka consumer", ex.Message);
         InvalidConfigurationException cause = Assert.IsType<InvalidConfigurationException>(ex.InnerException);
@@ -289,9 +289,9 @@ public sealed class PublicConsumerApiTests
         ["group.protocol"] = "consumer",
     };
 
-    private static IConsumerCommon CreateRealConsumer(bool sync, IReadOnlyDictionary<string, object?> config) => sync
-        ? new KafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer())
-        : new AsyncKafkaConsumer<byte[], byte[]>(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+    private static async Task<IConsumerCommon> CreateRealConsumer(bool sync, IReadOnlyDictionary<string, object?> config) => sync
+        ? KafkaConsumer<byte[], byte[]>.Create(config, Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer())
+        : await AsyncKafkaConsumer<byte[], byte[]>.Create(config, new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
 
     private static void DisposeConsumer(IConsumerCommon consumer) => ((IDisposable)consumer).Dispose();
 }
