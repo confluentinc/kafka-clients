@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
 
 using Confluent.Kafka.Internal;
 
@@ -48,13 +49,17 @@ public static class SecurityProtocolMethods
 {
     private const string JavaClass = "org.apache.kafka.common.security.auth.SecurityProtocol";
 
-    private static readonly IReadOnlyList<string> s_names = new ReadOnlyCollection<string>(new[]
+    private static readonly SecurityProtocol[] s_values =
     {
-        nameof(SecurityProtocol.PLAINTEXT),
-        nameof(SecurityProtocol.SSL),
-        nameof(SecurityProtocol.SASL_PLAINTEXT),
-        nameof(SecurityProtocol.SASL_SSL),
-    });
+        SecurityProtocol.PLAINTEXT,
+        SecurityProtocol.SSL,
+        SecurityProtocol.SASL_PLAINTEXT,
+        SecurityProtocol.SASL_SSL,
+    };
+
+    // Built from s_values, which CKRDA0015 checks, so a member added to the enum cannot be missing from it.
+    private static readonly IReadOnlyList<string> s_names =
+        new ReadOnlyCollection<string>(s_values.Select(protocol => protocol.ToString()).ToArray());
 
     extension(SecurityProtocol)
     {
