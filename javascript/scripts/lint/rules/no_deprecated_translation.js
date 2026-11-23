@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J5 check-no-deprecated-translation (root CLAUDE.md §3: deprecated API is
+// check-no-deprecated-translation (root CLAUDE.md §3: deprecated API is
 // not translated): no exported class translates a Java class deprecated at
 // the Kafka versions the Rust lint reads (`java::DEPRECATION_REFS`, the
 // `kafka/` tree plus design/current/java-deprecated.txt, merged into the Java

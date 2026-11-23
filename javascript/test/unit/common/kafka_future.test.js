@@ -700,7 +700,7 @@ test('each member takes the bare value or its options object, as Java names the 
   // A future of a nullable number: completedFuture(null) alone would infer a future of null.
   assert.equal(/** @type {KafkaFuture<number | null>} */ (KafkaFuture.completedFuture(null)).getNow(1), null);
   // Anything but a plain object may be given bare: a class instance, an array, a primitive.
-  const instance = new (class Box {})();
+  const instance = new /** A class of the caller's own. */ (class Box {})();
   // @ts-expect-error a class instance given bare: tsc cannot tell a class instance from a plain object, which the run time reads as the options object, so the types take it only by name, as { value }; plain JavaScript may pass it bare
   assert.equal(KafkaFuture.completedFuture(instance).getNow(null), instance);
   const array = [1, 2];
@@ -1368,12 +1368,15 @@ test("KafkaFuture is abstract, as Java's: constructing it throws; a subclass may
   assert.ok(made instanceof KafkaFuture);
   assert.equal(made.constructor.name, 'KafkaFuture');
   assert.notEqual(made.constructor, KafkaFuture);
-  // A caller's own subclass: allOf reads it through its whenComplete.
   /**
    * @typedef {(value: unknown, error: unknown) => void} Action
    * @typedef {Action | { action: Action }} ActionForms
    */
-  /** @extends {KafkaFuture<unknown>} */
+  /**
+   * A caller's own subclass, which allOf reads through its whenComplete.
+   *
+   * @extends {KafkaFuture<unknown>}
+   */
   // @ts-expect-error a subclass that implements only whenComplete, the one member allOf reads
   class Own extends KafkaFuture {
     constructor() {

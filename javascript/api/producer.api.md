@@ -31,6 +31,7 @@ export type CloseArgs = {
 
 // @public
 export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K, V> {
+    // (undocumented)
     [Symbol.asyncDispose](): Promise<void>;
     constructor(options: {
         configs: ProducerConfigs & SerdeConfigs<K, V>;
@@ -43,30 +44,41 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
         valueSerializer: Serializer<V> | null;
     });
     constructor(configs: ProducerConfigs & SerdeConfigs<K, V>);
+    // (undocumented)
     close(): Promise<void>;
+    // (undocumented)
     close(options: CloseArgs): Promise<void>;
+    // (undocumented)
     close(timeout: Duration): Promise<void>;
+    // (undocumented)
     flush(): Promise<void>;
+    // (undocumented)
     metrics(): MetricNameMap<Metric>;
     static readonly NETWORK_THREAD_PREFIX: string;
+    // (undocumented)
     partitionsFor(options: {
         topic: string;
     }): Promise<PartitionInfo[]>;
+    // (undocumented)
     partitionsFor(topic: string): Promise<PartitionInfo[]>;
     static readonly PRODUCER_METRIC_GROUP_NAME: string;
+    // (undocumented)
     send(options: {
         record: ProducerRecord<K, V>;
         callback: Callback | null;
     }): Promise<KafkaFuture<RecordMetadata>>;
+    // (undocumented)
     send(options: {
         record: ProducerRecord<K, V>;
         callback?: never;
     }): Promise<KafkaFuture<RecordMetadata>>;
+    // (undocumented)
     send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
 }
 
 // @public
 export class MockProducer<K, V> implements Producer<K, V> {
+    // (undocumented)
     [Symbol.asyncDispose](): Promise<void>;
     constructor();
     constructor(options: {
@@ -76,8 +88,11 @@ export class MockProducer<K, V> implements Producer<K, V> {
         valueSerializer: Serializer<V> | null;
     });
     clear(): void;
+    // (undocumented)
     close(): Promise<void>;
+    // (undocumented)
     close(options: CloseArgs): Promise<void>;
+    // (undocumented)
     close(timeout: Duration): Promise<void>;
     closed(): boolean;
     completeNext(): boolean;
@@ -85,22 +100,29 @@ export class MockProducer<K, V> implements Producer<K, V> {
         e: Error | null;
     }): boolean;
     errorNext(e: Error | null): boolean;
+    // (undocumented)
     flush(): Promise<void>;
     flushed(): boolean;
     history(): Array<ProducerRecord<K, V>>;
+    // (undocumented)
     metrics(): MetricNameMap<Metric>;
+    // (undocumented)
     partitionsFor(options: {
         topic: string;
     }): Promise<PartitionInfo[]>;
+    // (undocumented)
     partitionsFor(topic: string): Promise<PartitionInfo[]>;
+    // (undocumented)
     send(options: {
         record: ProducerRecord<K, V>;
         callback: Callback | null;
     }): Promise<KafkaFuture<RecordMetadata>>;
+    // (undocumented)
     send(options: {
         record: ProducerRecord<K, V>;
         callback?: never;
     }): Promise<KafkaFuture<RecordMetadata>>;
+    // (undocumented)
     send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
     setCloseException(options: {
         closeException: Error | null;

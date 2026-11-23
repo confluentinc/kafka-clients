@@ -106,6 +106,7 @@ const INPUTS = {
       : `no bindings header at ${ctx.headerPath} ` + '(build the Rust library first: `make build-javascript` from the repository root)',
 };
 
+/** What the rules read, each input loaded once and only when a rule asks for it. */
 class Context {
   /**
    * @param options.root - the client's directory (javascript/)

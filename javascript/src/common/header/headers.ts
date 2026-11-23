@@ -18,7 +18,7 @@
 // headers (`setReadOnly`).
 //
 // It wraps the FFI's RecordHeaders (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Serialization, Q31): every method goes to the addon
+// Conventions, Serialization): every method goes to the addon
 // (native/headers.c), so the core holds the headers and refuses a change once
 // they are read-only, with Java's text. Option 1 (owner's decision,
 // javascript/design/current/producer/DECISIONS.md, entry 21): a Header read

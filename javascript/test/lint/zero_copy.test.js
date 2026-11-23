@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N7 check-zero-copy (scripts/lint/rules/zero_copy.js).
+// check-zero-copy (scripts/lint/rules/zero_copy.js).
 
 const assert = require('node:assert/strict');
 

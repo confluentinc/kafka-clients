@@ -14,7 +14,7 @@
 
 'use strict';
 
-// A1 check-waiting-call-promise (javascript/CLAUDE.md boundary rule 4 and
+// check-waiting-call-promise (javascript/CLAUDE.md boundary rule 4 and
 // "Java shape, JS idiom": a blocking Java method returns a Promise, and a
 // waiting call uses the FFI's `_cb` twin): a public method of an exported
 // class whose native path reaches a `_cb` twin of the bindings header returns

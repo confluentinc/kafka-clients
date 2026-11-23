@@ -40,6 +40,7 @@ import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.Utils;
 
+/** Writes the values the unit tests compare the client against. */
 public class JavaVectors {
     private static final StringBuilder OUT = new StringBuilder();
 

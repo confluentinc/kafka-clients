@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N9 check-string-encoding (scripts/lint/rules/string_encoding.js).
+// check-string-encoding (scripts/lint/rules/string_encoding.js).
 
 const assert = require('node:assert/strict');
 

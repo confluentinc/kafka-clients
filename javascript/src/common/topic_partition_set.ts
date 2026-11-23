@@ -14,7 +14,7 @@
 
 // TopicPartitionSet (js-only): the Set<TopicPartition> the client returns,
 // the set form of TopicPartitionMap (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family and Types, Q25). It wraps a Map keyed by
+// Conventions, Class family and Types). It wraps a Map keyed by
 // TopicPartition.internalKey and keeps each original TopicPartition, so its
 // members compare by value, as Java's HashSet compares them with equals. A
 // null member, which Java's HashSet holds, is the key 'null', which no

@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N7 check-zero-copy (javascript/CLAUDE.md boundary rule 8: no copy of the
+// check-zero-copy (javascript/CLAUDE.md boundary rule 8: no copy of the
 // app's key and value; the addon borrows each Buffer until the hand-over). A
 // heuristic (PLAN.md §8 decision 13), on the send path (native/record.c,
 // native/producer.c):

@@ -112,7 +112,7 @@ test('testToStringWithLambdaProvider', () => {
 
 test('testToStringWithAnonymousClassProvider', () => {
   testToStringOnLambdaOrAnonymousClass(
-    new (class {
+    new /** A provider of an anonymous class. */ (class {
       measure() {
         return 0;
       }
@@ -121,6 +121,7 @@ test('testToStringWithAnonymousClassProvider', () => {
 });
 
 test('testToStringWithStatProvider', () => {
+  /** A provider of a named class, as Java's Avg stat. */
   class Avg {
     measure() {
       return 0;
@@ -163,7 +164,7 @@ test("metricValue passes the config and the time's milliseconds; a Measurable's 
   assert.equal(measured.metricValue(), 4.5);
   assert.deepEqual(seen, [[config, 1000]]);
   assert.equal(measured.config(), config);
-  // Java's setter config(MetricConfig) is left out (Q30): the getter only reads.
+  // Java's setter config(MetricConfig) is left out: the getter only reads.
   // @ts-expect-error an argument to a reader: the read-only check throws TypeError, as Java's setter is left out
   assert.throws(() => measured.config({ config: {} }), { constructor: TypeError, message: 'config() only reads: it takes no argument' });
   assert.equal(measured.metricName(), METRIC_NAME_1);

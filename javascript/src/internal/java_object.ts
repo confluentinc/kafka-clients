@@ -14,7 +14,7 @@
 
 // Java's equals and hashCode of the values the translated classes hold
 // (private), so their own `equals` and `hashCode` are Java's bodies, word for
-// word (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q29:
+// word (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family:
 // "`equals` and `hashCode` stay methods"). Every hash is Java's `int`
 // arithmetic, in 32 bits.
 //

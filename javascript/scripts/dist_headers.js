@@ -15,7 +15,7 @@
 'use strict';
 
 // Puts each compiled file's licence header first (javascript/CLAUDE.md, Build,
-// packaging and release, Q76: every `.js` and `.d.ts` file in each tarball
+// packaging and release: every `.js` and `.d.ts` file in each tarball
 // starts with it). `make build-ts` runs it after tsc. tsc keeps a source's
 // header in its `.js`, but after the `"use strict";` it emits first, and
 // drops it from the `.d.ts`; so this moves the header above `"use strict";`
@@ -33,7 +33,7 @@ const path = require('node:path');
 
 /**
  * The licence headers a source may start with (root CLAUDE.md, Translation
- * Rules 1.3 and 9, and javascript/CLAUDE.md, Build, packaging and release, Q76), as `//` comment
+ * Rules 1.3 and 9, and javascript/CLAUDE.md, Build, packaging and release), as `//` comment
  * lines:
  *   - Confluent's copyright line with the Apache 2.0 text, every translated
  *     file's: exactly 13 lines;

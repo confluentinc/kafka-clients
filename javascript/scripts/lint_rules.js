@@ -18,11 +18,11 @@
 // the rules of javascript/CLAUDE.md, and the root CLAUDE.md rules it inherits,
 // checked from the sources, as `cargo xtask lint-custom` checks the Rust
 // crate's. This runner holds the half ESLint does not (PLAN.md §3): the
-// addon's C rules (N1 to N8) and the C and other non-TypeScript files of the
-// six rules split by file type; the rules that read TypeScript are ESLint's
-// `kafka/` rules (eslint.config.cjs). Every rule runs and reports every
-// finding; a rule that cannot run, or checks nothing, fails; the run exits 1
-// if anything failed.
+// addon's C rules and the C and other non-TypeScript files of the six rules
+// split by file type; the rules that read TypeScript are ESLint's `kafka/`
+// rules (eslint.config.cjs). Every rule runs and reports every finding; a
+// rule that cannot run, or checks nothing, fails; the run exits 1 if
+// anything failed.
 //
 // Usage: node scripts/lint_rules.js [check-<name>] [--no-baseline]
 //

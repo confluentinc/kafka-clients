@@ -97,7 +97,7 @@ test("configs is a plain object: a Map is refused, and a symbol key rejected wit
   for (const configs of [new Map([['acks', 'all']]), new Map()]) {
     assert.throws(() => configEntries(configs), { name: 'TypeError', message: 'configs must be a plain object, not a Map' });
   }
-  assert.throws(() => configEntries(new (class Configs {})()), {
+  assert.throws(() => configEntries(new /** A class whose instance is no plain object. */ (class Configs {})()), {
     name: 'TypeError',
     message: 'configs must be a plain object, not a class instance',
   });
@@ -229,7 +229,7 @@ test("the core checks the values, with Java's messages naming the key", () => {
 });
 
 test('an unknown key, a kafkaJS block included, reaches the core, which builds the producer', async () => {
-  // @ts-expect-error an object for a config value, which ConfigValue refuses: the run time writes it as text, [object Object] (Q52)
+  // @ts-expect-error an object for a config value, which ConfigValue refuses: the run time writes it as text, [object Object]
   const producer = new KafkaProducer({
     configs: { 'bootstrap.servers': 'localhost:1', 'not.a.key': 'x', kafkaJS: { brokers: ['localhost:9092'] } },
   });

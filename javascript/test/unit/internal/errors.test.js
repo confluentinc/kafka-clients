@@ -415,7 +415,7 @@ test('an error has no public field but name, message and cause: classify with in
       assert.ok(!(gone in cls), `${cls.name}.${gone} (static)`);
     }
     assert.deepEqual(Object.getOwnPropertyNames(e).sort(), ['message', 'name', 'stack'], cls.name);
-    // Java's payload getters are methods over private fields (Q39).
+    // Java's payload getters are methods over private fields.
     const java = JAVA_OF.get(cls);
     assert.ok(java !== undefined, cls.name);
     const payload = PAYLOAD_MEMBERS.get(java) ?? [];
@@ -452,7 +452,7 @@ test("each form gives Java's message and cause, and a call no form takes is refu
     assert.ok(java !== undefined, cls.name);
     // An abstract base refuses to be constructed (the test below), but its
     // forms are what a subclass takes: check them through a throwaway one.
-    const target = isAbstract(java) ? class Sub extends cls {} : cls;
+    const target = isAbstract(java) ? /** A throwaway subclass of the abstract base. */ class Sub extends cls {} : cls;
     /** @type {ReadonlyArray<ErrorForm>} */
     const registered = ownForms(cls) ?? [];
     if (registered.length === 0) {
@@ -518,6 +518,7 @@ test('the abstract bases are Java-abstract, have no id and cannot be constructed
       message: `${cls.name} is an abstract catch-only base; it is never thrown directly`,
     });
   }
+  /** A user's subclass of an abstract base. */
   class Mine extends RetriableError {}
   const mine = new Mine('a subclass of an abstract base');
   assert.equal(mine.message, 'a subclass of an abstract base');
@@ -533,6 +534,7 @@ test('the abstract bases are Java-abstract, have no id and cannot be constructed
     message: 'RetriableError() takes one of (), (message), (cause), ({ message, cause }); got (reason)',
   });
   assert.equal(errorFfiId(mine), ownFfiId(ApiError));
+  /** A user's subclass of Kafka's TimeoutError. */
   class MyTimeout extends common.errors.TimeoutError {}
   assert.equal(errorFfiId(new MyTimeout('t')), 7);
 });
@@ -823,7 +825,7 @@ test("every error class's form error lists its forms as JavaScript calls them, b
     // An abstract base's forms are its subclasses': check them through one.
     const java = JAVA_OF.get(cls);
     assert.ok(java !== undefined, cls.name);
-    const target = isAbstract(java) ? class Sub extends cls {} : cls;
+    const target = isAbstract(java) ? /** A throwaway subclass of the abstract base. */ class Sub extends cls {} : cls;
     const shapes = [...forms]
       .map(([params]) => params)
       .sort((a, b) => a.length - b.length)

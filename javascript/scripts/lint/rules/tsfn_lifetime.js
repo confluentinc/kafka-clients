@@ -15,7 +15,7 @@
 'use strict';
 
 // check-tsfn-lifetime (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Lifetime, Q21: a client keeps Node running from its creation until
+// Lifetime: a client keeps Node running from its creation until
 // `close()` closes it, "so no pending send or poll is cut off";
 // javascript/CLAUDE.md "Threads and liveness", which reads it as: the
 // thread-safe function is referenced while the client is open or one of its

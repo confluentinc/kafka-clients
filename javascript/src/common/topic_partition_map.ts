@@ -14,7 +14,7 @@
 
 // TopicPartitionMap (js-only): Java's Map<TopicPartition, V>, which JavaScript
 // cannot key by value (javascript/CLAUDE.md, JavaScript Binding Conventions, Class
-// family, Q25). It wraps a Map keyed by the string `<topic>:<partition>`
+// family). It wraps a Map keyed by the string `<topic>:<partition>`
 // (TopicPartition.internalKey), such as 'orders:3', and keeps each original
 // TopicPartition, so keys() and entries() return TopicPartition objects. The
 // partition is an integer, so the text after the last ':' is always the
@@ -22,7 +22,7 @@
 // '-<partition>', which has no ':'. A null key, which Java's HashMap holds, is
 // the key 'null', which no TopicPartition gives. No key is an integer-like
 // property name, so toJSON() keeps the entries' order. A value is never
-// undefined (javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures, Q18):
+// undefined (javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures):
 // null is Java's null. A TopicPartition is frozen, so its key never changes
 // once stored.
 

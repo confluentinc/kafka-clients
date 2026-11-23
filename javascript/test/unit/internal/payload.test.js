@@ -15,7 +15,7 @@
 'use strict';
 
 // The payloads of the generated error classes (javascript/CLAUDE.md, JavaScript
-// Binding Conventions, Errors, Q39; Types, Q23 and Q25): Java's constructors
+// Binding Conventions, Errors; Types): Java's constructors
 // that take a payload, in the { message, cause, ...Java's parameters } shape,
 // and the payload getters over private fields. Java has no test of its own
 // for these exception classes; the messages asserted are the ones Java's
@@ -83,7 +83,7 @@ test("TopicAuthorizationError: Java's three constructors and unauthorizedTopics(
     constructor: TypeError,
     message: 'unauthorizedTopics must be an iterable of strings, not string',
   });
-  // undefined is no element (root Signatures, Q18), and an element is a string or null.
+  // undefined is no element (JS conventions, Signatures), and an element is a string or null.
   // @ts-expect-error undefined in the topics: the element check throws TypeError
   assert.throws(() => new TopicAuthorizationError({ unauthorizedTopics: ['a', undefined] }), {
     constructor: TypeError,

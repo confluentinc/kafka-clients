@@ -21,7 +21,7 @@
 // JavaScript thread is the only one, so it is kept and never taken.
 //
 // Not translated: the package-private measurableValue(long). Left out
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Scope, Q30): the setter
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Scope): the setter
 // config(MetricConfig), whose only extra parameter over the getter is
 // `config`, and which Java says is for the server only.
 
@@ -134,23 +134,17 @@ export class KafkaMetric implements Metric {
     return this.#config;
   }
 
-  /**
-   * Get the metric name
-   *
-   * @returns Return the name of this metric
-   * @throws `TypeError` when it is given an argument
-   */
+  /** @remarks It throws `TypeError` when it is given an argument. */
   metricName(): MetricName {
     METRIC_NAME_FORMS.match(undefined, arguments.length);
     return this.#metricName;
   }
 
   /**
-   * Take the metric and return the value via `MetricValueProvider.value(MetricConfig, long)`.
-   *
-   * @returns Return the metric value
-   * @throws `TypeError` when it is given an argument, or the time is null
-   *   (Java's `time.milliseconds()` on a null)
+   * @remarks The value is the metric's `MetricValueProvider`'s, read as
+   * `value(MetricConfig, long)` reads it. It throws `TypeError` when it is
+   * given an argument, or the time is null (Java's `time.milliseconds()` on
+   * a null).
    */
   metricValue(): unknown {
     METRIC_VALUE_FORMS.match(undefined, arguments.length);

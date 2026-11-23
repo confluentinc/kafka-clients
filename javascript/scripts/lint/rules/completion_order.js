@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N5 check-completion-order (javascript/CLAUDE.md boundary rule 6: one
+// check-completion-order (javascript/CLAUDE.md boundary rule 6: one
 // `Callback_t` per record; the user callback, then the future, then one
 // `__set_callback_result_err`). Lexical, not path-sensitive (PLAN.md §8
 // decision 13):

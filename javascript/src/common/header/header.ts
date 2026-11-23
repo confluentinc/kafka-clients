@@ -23,7 +23,7 @@
 // name it), so it keeps Java's methods, `key()` and `value()`.
 //
 // It wraps the C RecordHeader (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Serialization, Q31): a private handle object
+// Conventions, Serialization): a private handle object
 // (native/headers.c), either an owned header (one the app made, or the
 // binding's copy of a header read from a Headers that can still change) or a
 // view of a header inside a read-only Headers, which keeps those headers

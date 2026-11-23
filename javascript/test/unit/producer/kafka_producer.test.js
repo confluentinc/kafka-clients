@@ -1334,7 +1334,7 @@ test("a late close() and flush() settle while nothing else holds Node, after a r
 // pairs flush has been answered first in every round run, so those two check
 // Java's answer and the exit. Each round's producer stays reachable until
 // its calls settled (`kept`): one collected with a call pending is the JS
-// conventions' Future improvements entry (Q49), not these tests' subject.
+// conventions' Future improvements entry, not these tests' subject.
 for (const pair of ['p.close(), p.close()', 'p.close(), p.close(0)', 'p.close(), p.flush()', 'p.flush(), p.close()']) {
   test(`${pair} at once on an open producer both settle, in each of 25 rounds`, () => {
     const r = runNode(
@@ -1768,7 +1768,7 @@ test('a null serializer sends the record bytes as they are, as no serializer doe
       calls.map((c) => c.data),
       ['anything'],
     );
-    // Without a key serializer the key must be bytes; a string points to stringSerializer() (root Q24, Q27).
+    // Without a key serializer the key must be bytes; a string points to stringSerializer() (JS conventions, Types and Class family).
     // @ts-expect-error a number key without a key serializer: the bytes check rejects with TypeError
     await assert.rejects(producer.send(new ProducerRecord({ topic: 'unit-serde-n', key: 3, value: 'v' })), {
       name: 'TypeError',
@@ -2063,6 +2063,7 @@ test("the callback of a serializer's ApiError: a Promise it returns is awaited, 
 });
 
 test("a serializer's TypeError rejects send() with SerializationError, Java's message and the TypeError as its cause", async () => {
+  /** A serializer that throws a TypeError, Java's ClassCastException. */
   class WrongSerializer {
     /** @returns {Uint8Array} */
     serialize() {
@@ -2280,7 +2281,7 @@ test("a producer whose construction fails closes the serializers; a ConfigError 
 });
 
 // The serde config keys (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Serialization, Q53): a synchronous function ({ configs, isKey }) =>
+// Serialization): a synchronous function ({ configs, isKey }) =>
 // serializer, called once with the whole configuration, in place of Java's
 // class and its configure(configs, isKey).
 test('key.serializer and value.serializer take a function the producer calls once with the configuration', async () => {
@@ -2340,6 +2341,7 @@ test('a serde config key that is no synchronous function throws ConfigError, say
   /** @param {string} argument */
   const pass = (argument) =>
     `pass a synchronous function ({ configs, isKey }) => serializer, such as stringSerializer, or the serializer itself as the ${argument} argument of the constructor`;
+  /** A serializer class, which a serde config key refuses. */
   class StringSerializer {
     serialize() {
       return null;

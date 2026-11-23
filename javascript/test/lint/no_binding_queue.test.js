@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N8 check-no-binding-queue (scripts/lint/rules/no_binding_queue.js).
+// check-no-binding-queue (scripts/lint/rules/no_binding_queue.js).
 
 const assert = require('node:assert/strict');
 

@@ -19,7 +19,9 @@ export class KafkaMetric implements Metric {
     config(): MetricConfig;
     isMeasurable(): boolean;
     measurable(): Measurable;
+    // (undocumented)
     metricName(): MetricName;
+    // (undocumented)
     metricValue(): unknown;
     toString(): string;
 }

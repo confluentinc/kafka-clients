@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J4 check-public-audience (root CLAUDE.md §2, §3): what src/ exports is
+// check-public-audience (root CLAUDE.md §2, §3): what src/ exports is
 // public in Java.
 //   - An exported class, interface or type translates a class annotated
 //     `@InterfaceAudience.Public` at the Kafka version the Rust lint reads

@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J8 check-data-objects (javascript/CLAUDE.md "Java shape, JS idiom": a data
+// check-data-objects (javascript/CLAUDE.md "Java shape, JS idiom": a data
 // object's Java getters are public `readonly` fields; every other class keeps
 // Java's getters as methods; root CLAUDE.md §3: no public mutable field). On
 // every class src/ exports:

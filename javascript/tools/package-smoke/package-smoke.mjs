@@ -15,7 +15,7 @@
 // The ES module half of package-smoke.js: @confluentinc/kafka-javascript as
 // an ES module app imports it, a CommonJS package that ES modules use through
 // named imports (javascript/CLAUDE.md, JavaScript Binding Conventions, Layout and
-// modules, Q13). An ES module resolves a bare specifier from its own
+// modules). An ES module resolves a bare specifier from its own
 // location, so this file is copied into the project that installed the
 // package and run there (.semaphore/test-npm.sh, test-published-npm.sh):
 //

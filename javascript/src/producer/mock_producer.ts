@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Java's MockProducer over the C FFI's MockProducer (javascript/CLAUDE.md,
-// JavaScript Binding Conventions, Implementation over the FFI, Q62): the mock
+// JavaScript Binding Conventions, Implementation over the FFI): the mock
 // is the core's, reached through the addon as KafkaProducer is, and the
 // records it keeps are the app's own: each key and value crosses as the FFI's
 // `void *`, which the FFI's mock keeps without reading, and the addon holds
@@ -21,7 +21,7 @@
 // MockRecord). The serializers the mock is given run here, on every send, as
 // Java's mock runs them.
 //
-// Left out (Scope, Q30): Java's MockProducer(Cluster, boolean, Partitioner,
+// Left out (Scope): Java's MockProducer(Cluster, boolean, Partitioner,
 // Serializer, Serializer), whose only extra parameter is the untranslated
 // Cluster, so the mock's cluster is always Java's Cluster.empty(). Left out by
 // request: the transaction calls (initTransactions, beginTransaction,
@@ -294,7 +294,7 @@ export class MockProducer<K, V> implements Producer<K, V> {
      */
     autoComplete: boolean;
     /** The partition strategy, or null. */
-    // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents -- javascript/CLAUDE.md, JavaScript Binding Conventions, Scope (Q30) types it Partitioner | null: Partitioner is a placeholder of unknown until it is translated
+    // eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents -- javascript/CLAUDE.md, JavaScript Binding Conventions, Scope types it Partitioner | null: Partitioner is a placeholder of unknown until it is translated
     partitioner: Partitioner | null;
     /** The serializer for key that implements `Serializer`, or null. */
     keySerializer: Serializer<K> | null;
@@ -320,42 +320,29 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * Adds the record to the list of sent records.
-   *
-   * @param options - the record, and the callback to execute when it has
-   *   been acknowledged
-   * @returns resolving at hand-over to the future of the record's metadata,
-   *   rejecting with the error the mock's send() throws
-   * @throws `IllegalStateError` rejects with it when the mock is closed
-   *   ("MockProducer is already closed.")
-   * @throws `KafkaError` rejects with it when the mock is fenced
-   * @throws `IllegalArgumentError` rejects with it when the given parameters
-   *   are not `{record}` or `{record, callback}`, or a bare value is not a
-   *   ProducerRecord
-   * @throws `TypeError` rejects with it when `record` is null or not a
-   *   ProducerRecord, `callback` not a function, or the topic holds a null
-   *   byte
-   *
-   * @remarks The error set with `setSendException` rejects the send as it is,
-   * the very same value. The serializers run first, key then value, and what
-   * one throws rejects the send as it is, an `ApiError` or a `TypeError`
-   * included, as Java's mock serializes with no `try` *(deviation: Java's mock checks
-   * that it is closed, fenced or has a send error before it serializes. Why:
-   * the serializers run in JavaScript before the call reaches the core's
-   * mock)*. A null `record` rejects with `TypeError` even on a closed mock
-   * *(deviation: Java's mock checks that it is closed first. Why: the
-   * binding keeps no closed state, and the record is checked in JavaScript
-   * before the call reaches the core's mock, which holds it, as for
-   * `KafkaProducer.send`)*. With `autoComplete`, the callback runs inside the call, before
-   * the returned Promise resolves, and a Promise it returns is awaited, its
-   * rejection rejecting the send; made from a callback's synchronous part,
-   * or while an earlier callback's Promise is pending, the send runs its
-   * callback in its turn, once the callbacks before it settled, and only then
-   * settles, so a callback that awaits a send it made never settles. The
-   * record's headers stay writable, as Java's mock leaves them. An error a
-   * callback's Promise rejected with after `completeNext()` or `errorNext()`,
-   * or a callback that waited for its turn threw, rejects the next send,
-   * once, before it sends anything.
+   * @remarks The mock adds the record to the list of sent records,
+   * `history()`, as Java's mock does, and rejects with `IllegalStateError`
+   * "MockProducer is already closed." when it is closed, and with a
+   * `KafkaError` when it is fenced. The error set with `setSendException`
+   * rejects the send as it is, the very same value. The serializers run
+   * first, key then value, and what one throws rejects the send as it is, an
+   * `ApiError` or a `TypeError` included, as Java's mock serializes with no
+   * `try` *(deviation: Java's mock checks that it is closed, fenced or has a
+   * send error before it serializes. Why: the serializers run in JavaScript
+   * before the call reaches the core's mock)*. A null `record` rejects with
+   * `TypeError` even on a closed mock *(deviation: Java's mock checks that
+   * it is closed first. Why: the binding keeps no closed state, and the
+   * record is checked in JavaScript before the call reaches the core's mock,
+   * which holds it, as for `KafkaProducer.send`)*. With `autoComplete`, the
+   * callback runs inside the call, before the returned Promise resolves, and
+   * a Promise it returns is awaited, its rejection rejecting the send; made
+   * from a callback's synchronous part, or while an earlier callback's
+   * Promise is pending, the send runs its callback in its turn, once the
+   * callbacks before it settled, and only then settles, so a callback that
+   * awaits a send it made never settles. The record's headers stay writable,
+   * as Java's mock leaves them. An error a callback's Promise rejected with
+   * after `completeNext()` or `errorNext()`, or a callback that waited for
+   * its turn threw, rejects the next send, once, before it sends anything.
    */
   send(options: {
     /** The record to send. */
@@ -366,25 +353,11 @@ export class MockProducer<K, V> implements Producer<K, V> {
      */
     callback: Callback | null;
   }): Promise<KafkaFuture<RecordMetadata>>;
-  /**
-   * Adds the record to the list of sent records, Java's `send(record)`: the
-   * same as `send({ record, callback: null })`.
-   *
-   * @param options - the record
-   * @returns resolving at hand-over to the future of the record's metadata
-   */
   send(options: {
     /** The record to send. */
     record: ProducerRecord<K, V>;
     callback?: never;
   }): Promise<KafkaFuture<RecordMetadata>>;
-  /**
-   * Adds the record to the list of sent records: the record on its own, the
-   * same as `send({record})`.
-   *
-   * @param record - The record to send
-   * @returns resolving at hand-over to the future of the record's metadata
-   */
   send(record: ProducerRecord<K, V>): Promise<KafkaFuture<RecordMetadata>>;
   send(options: unknown): Promise<KafkaFuture<RecordMetadata>> {
     try {
@@ -676,31 +649,23 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * Completes every send still waiting, successfully, as `completeNext()`
-   * does for each.
-   *
-   * @returns resolving once the sends completed and their callbacks ran
-   * @throws `IllegalStateError` rejects with it when the mock is closed
-   *   ("MockProducer is already closed.")
-   * @throws `IllegalArgumentError` rejects with it when it is given an
-   *   argument
-   * @throws `TypeError` rejects with it when it is given `undefined`
-   *
-   * @remarks The error set with `setFlushException` rejects it as it is. A
-   * callback that throws rejects it, after every waiting record completed
-   * *(deviation: Java's stops at the first throw. Why: the core's mock
-   * completes them all in one call. Goes when: the core's mock stops at the
-   * first throw)*. It completes the waiting records and settles once their
-   * callbacks ran, one at a time, and every callback Promise already started
-   * has, those `completeNext()` and `errorNext()` started included, also when
-   * an error is kept from earlier; a throw, else the oldest error kept (a
-   * callback Promise's rejection, or the throw of a callback that waited for
-   * its turn), is then the rejection, the others kept for later calls. Made
-   * from one of the mock's callbacks, it waits for that callback, so a
-   * callback that awaits it never settles, unless an error is set with
-   * `setFlushException`, which it rejects with at once; `KafkaProducer`
-   * refuses it before the first `await`, from a callback the core runs in
-   * its drain.
+   * @remarks The mock completes every send still waiting, successfully, as
+   * `completeNext()` does for each, and rejects with `IllegalStateError`
+   * "MockProducer is already closed." when it is closed. The error set with
+   * `setFlushException` rejects it as it is. A callback that throws rejects
+   * it, after every waiting record completed *(deviation: Java's stops at
+   * the first throw. Why: the core's mock completes them all in one call.
+   * Goes when: the core's mock stops at the first throw)*. It completes the
+   * waiting records and settles once their callbacks ran, one at a time, and
+   * every callback Promise already started has, those `completeNext()` and
+   * `errorNext()` started included, also when an error is kept from earlier;
+   * a throw, else the oldest error kept (a callback Promise's rejection, or
+   * the throw of a callback that waited for its turn), is then the
+   * rejection, the others kept for later calls. Made from one of the mock's
+   * callbacks, it waits for that callback, so a callback that awaits it
+   * never settles, unless an error is set with `setFlushException`, which it
+   * rejects with at once; `KafkaProducer` refuses it before the first
+   * `await`, from a callback the core runs in its drain.
    */
   flush(): Promise<void>;
   flush(options?: unknown): Promise<void> {
@@ -731,33 +696,17 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * The partitions of the topic in the mock's cluster: none, its cluster
-   * being empty.
-   *
-   * @param options - the topic
-   * @returns resolving to the topic's partitions, a new array
-   * @throws `IllegalArgumentError` rejects with it when the given parameters
-   *   are not `{topic}`
-   * @throws `TypeError` rejects with it when `topic` is null (the FFI's
-   *   "topic cannot be null"), `undefined` or not a string
-   *
-   * @remarks Java's mock answers `[]` for a null topic *(deviation. Why:
-   * the FFI checks its mandatory parameters, and the binding repeats no
-   * precondition. Goes when: the FFI's mock accepts a null topic)*. The
-   * error set with `setPartitionsForException` rejects it as it
-   * is.
+   * @remarks The mock answers the partitions of the topic in its cluster:
+   * none, its cluster being empty. Java's mock answers `[]` for a null topic
+   * *(deviation. Why: the FFI checks its mandatory parameters, and the
+   * binding repeats no precondition. Goes when: the FFI's mock accepts a
+   * null topic)*. The error set with `setPartitionsForException` rejects it
+   * as it is.
    */
   partitionsFor(options: {
     /** The topic to get partition metadata for. */
     topic: string;
   }): Promise<PartitionInfo[]>;
-  /**
-   * The partitions of the topic: the topic on its own, the same as
-   * `partitionsFor({topic})`.
-   *
-   * @param topic - The topic to get partition metadata for
-   * @returns resolving to the topic's partitions
-   */
   partitionsFor(topic: string): Promise<PartitionInfo[]>;
   partitionsFor(options: unknown): Promise<PartitionInfo[]> {
     let topic: unknown;
@@ -794,12 +743,7 @@ export class MockProducer<K, V> implements Producer<K, V> {
     });
   }
 
-  /**
-   * The mock's metrics: none, as `setMockMetrics` is left out.
-   *
-   * @returns the mock's metrics, by name
-   * @throws `TypeError` when it is given an argument
-   */
+  /** @remarks The mock has no metrics, as `setMockMetrics` is left out. */
   metrics(): MetricNameMap<Metric> {
     METRICS_FORMS.match(undefined, arguments.length);
     const entries: Array<[MetricName, Metric]> = native.producerMetrics(this.#handle).map((m) => {
@@ -810,45 +754,22 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * Closes the mock: Java's `close()`, which is `close(Duration.ofMillis(0))`.
-   *
-   * @returns resolving once the mock is closed
-   * @throws `TypeError` rejects with it when it is given `undefined`
-   *
-   * @remarks The error set with `setCloseException` rejects it as it is,
-   * and the mock stays open. Once closed, the mock holds Node only while a
-   * call made on it waits for its answer. It
-   * settles once the callbacks waiting for their turn ran and every callback
-   * Promise already started has, then rejects with the oldest error kept
-   * that no call raised yet. Made from one of the mock's callbacks before its
-   * first `await`, it does not wait for the callbacks, its own among them, as
+   * @remarks The mock closes at once, as Java's mock does: its `close()` is
+   * `close(Duration.ofMillis(0))`, and a timeout given, a negative one
+   * included, is not waited for. The error set with `setCloseException`
+   * rejects it as it is, and the mock stays open. Once closed, the mock
+   * holds Node only while a call made on it waits for its answer. It settles
+   * once the callbacks waiting for their turn ran and every callback Promise
+   * already started has, then rejects with the oldest error kept that no
+   * call raised yet. Made from one of the mock's callbacks before its first
+   * `await`, it does not wait for the callbacks, its own among them, as
    * Python's `AsyncMockProducer`, but only from a callback the core runs in
    * its drain: one that waited for its turn behind an earlier callback's
    * Promise is as after that `await`, where it waits for the callback, so a
    * callback that awaits it never settles, as on `KafkaProducer`.
    */
   close(): Promise<void>;
-  /**
-   * Closes the mock; the timeout is not waited for.
-   *
-   * @param options - the timeout
-   * @returns resolving once the mock is closed
-   * @throws `IllegalArgumentError` rejects with it if the given parameters
-   *   are not `{}` or `{timeout}`, or a bare value is neither a number nor a
-   *   `Temporal.Duration`
-   * @throws `TypeError` rejects with it when `timeout` is null, `undefined`,
-   *   or neither a number nor a `Temporal.Duration`
-   * @throws `RangeError` rejects with it when `timeout` is `NaN`,
-   *   `-Infinity`, holds years, months or weeks, or is above
-   *   `Number.MAX_SAFE_INTEGER` milliseconds
-   */
   close(options: CloseArgs): Promise<void>;
-  /**
-   * Closes the mock: the timeout on its own, the same as `close({timeout})`.
-   *
-   * @param timeout - The timeout, not waited for
-   * @returns resolving once the mock is closed
-   */
   close(timeout: Duration): Promise<void>;
   close(options?: unknown): Promise<void> {
     let timeoutMs: number | bigint | null;
@@ -876,16 +797,6 @@ export class MockProducer<K, V> implements Producer<K, V> {
     });
   }
 
-  /**
-   * Closes the mock as `close()` does, so that a mock declared with `await
-   * using` is closed when its scope ends.
-   *
-   * @returns resolving once the mock is closed, rejecting as `close()`
-   *   rejects
-   *
-   * @remarks *(js-only)* JavaScript's async disposal protocol, the form Java's
-   * `AutoCloseable.close()` takes in a `try`-with-resources block.
-   */
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
   }

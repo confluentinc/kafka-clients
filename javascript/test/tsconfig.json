@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // The type check of the tests (`make typecheck-tests`, scripts/typecheck_tests.js;
-// JS conventions, Tests, Q67, and Build, packaging and release, Q74): `tsc
+// JS conventions, Tests, and Build, packaging and release): `tsc
 // --strict` over every test file, under test/ and verifiable_clients/test/,
 // the JavaScript tests through `checkJs`, as Jest runs them (jest.config.cjs).
 // `include` names every extension of both directories, as the script checks;

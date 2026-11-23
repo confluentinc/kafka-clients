@@ -14,8 +14,8 @@
 
 // The payloads of the generated error classes (private): Java's constructor
 // parameters other than the message and the cause, and the fields its payload
-// getters read (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors, Q39;
-// Types, Q23 and Q25). Each Java type a payload has is a `Kind`: how the
+// getters read (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors;
+// Types). Each Java type a payload has is a `Kind`: how the
 // constructor takes a value of it (its run-time check, the copy Java's
 // constructor makes or a collection read once), how a field of it is read
 // from the plain value the native layer reads through the FFI's accessors
@@ -101,7 +101,7 @@ export const string: Kind = {
 /** Java's `int`: a whole number in Java's range. */
 export const int: Kind = { take: (value, name) => checkInt(value, name), core: same, copy: same };
 
-/** Java's `long`: a bigint, or a whole number up to 2^53 (javascript/CLAUDE.md, Types, Q23). */
+/** Java's `long`: a bigint, or a whole number up to 2^53 (javascript/CLAUDE.md, Types). */
 export const long: Kind = { take: (value, name) => checkLong(value, name), core: same, copy: same };
 
 /** Java's `double`: a number. */
@@ -139,7 +139,7 @@ function iterableOf(value: unknown, name: string, what: string): unknown[] | nul
 /**
  * The elements of a collection argument, each one `test` accepts or null; an
  * `undefined` element throws, as Java has no such value (javascript/CLAUDE.md,
- * JavaScript Binding Conventions, Signatures, Q18).
+ * JavaScript Binding Conventions, Signatures).
  *
  * @param items - the elements
  * @param name - the argument's name, for the error
@@ -246,7 +246,7 @@ export const topicPartition: Kind = {
  * Java's `Map<TopicPartition, Long>`: a `TopicPartitionMap` only, whose
  * values are each a bigint or a whole number (or null), kept as a new
  * `TopicPartitionMap<bigint>`; a `Map` or a plain object is refused with a
- * hint (javascript/CLAUDE.md, JavaScript Binding Conventions, Types, Q25).
+ * hint (javascript/CLAUDE.md, JavaScript Binding Conventions, Types).
  */
 export const topicPartitionLongMap: Kind = {
   take(value, name) {
@@ -320,7 +320,7 @@ export function singleton(x: unknown): TopicPartitionSet {
  * A value Java dereferences (`Set.copyOf(x)`, `Collections.unmodifiableMap(x)`,
  * `x.keySet()`): `TypeError` "<name> must not be null" for null, as Java's
  * NullPointerException (javascript/CLAUDE.md, JavaScript Binding Conventions,
- * Errors, Q36).
+ * Errors).
  *
  * @param x - the value given
  * @param name - the argument's name, for the error
@@ -333,8 +333,8 @@ export function nonNull<T>(x: T | null, name: string): T {
 
 /**
  * The check of a payload getter, a method that only reads: an argument is a
- * `TypeError` (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family,
- * Q17).
+ * `TypeError` (javascript/CLAUDE.md, JavaScript Binding Conventions, Class
+ * family).
  *
  * @param method - the method's name, for the error
  * @param count - the number of arguments given
