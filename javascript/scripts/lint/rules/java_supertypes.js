@@ -23,8 +23,10 @@
 //     an interface in `implements` (in an interface's `extends`);
 //   - a JDK type by the JS conventions' JDK table (JDK below), which a type
 //     missing from it stops (`jdk-unmapped`);
-//   - a type the client does not translate (an internal one, `AbstractConfig`)
-//     by nothing.
+//   - a type of the index the client does not translate (an internal one,
+//     `AbstractConfig`, `AdminClient`) by its own supertypes, recursively:
+//     Java's `KafkaAdminClient extends AdminClient`, and `AdminClient
+//     implements Admin`, so `KafkaAdminClient` implements `Admin`.
 // Type arguments are not checked, nor is an export whose form
 // check-java-kind refuses, or whose Java class the index does not hold (the
 // root's built-in errors).
@@ -160,21 +162,36 @@ module.exports = {
         return w;
       };
       const members = symbol ? memberNames(ts, checker.getDeclaredTypeOfSymbol(symbol)) : new Map();
-      for (let i = 0; i < cls.supertypes.length; i++) {
-        const javaSuper = cls.supertypes[i].replace(/<.*$/, '');
+      // Java's supertypes, each with the class declaring it: the direct ones,
+      // then, for one of the index the client does not translate, its own
+      // (`via`, the untranslated types in between), each type once.
+      const supertypesOf = (c, via) => c.supertypes.map((written, i) => ({ owner: c, written, fqn: c.supertype_fqns[i], via }));
+      const work = supertypesOf(cls, []);
+      const seen = new Set();
+      while (work.length > 0) {
+        const { owner, written: writtenSuper, fqn: resolvedFqn, via } = work.shift();
+        const javaSuper = writtenSuper.replace(/<.*$/, '');
         // The index's resolution, else (a hand-written index) the loader's; a
         // name it leaves unresolved may be a type nested in an enclosing class.
-        let fqn = cls.supertype_fqns[i];
+        let fqn = resolvedFqn;
         if (fqn === undefined) {
-          const resolved = index.supertype(cls, javaSuper);
+          const resolved = index.supertype(owner, javaSuper);
           fqn = resolved ? resolved.fqn : null;
         }
-        if (fqn === null) fqn = nestedFqn(index, cls, javaSuper);
+        if (fqn === null) fqn = nestedFqn(index, owner, javaSuper);
+        const through = via.length > 0 ? `, through ${via.map(shortName).join(' and ')}, which the client does not translate` : '';
         if (fqn) {
+          if (seen.has(fqn)) continue;
+          seen.add(fqn);
           const sup = index.byFqn.get(fqn);
+          if (!sup) continue;
           const target = translation.get(fqn);
-          // Not translated, or a form no class extends: nothing.
-          if (!sup || !target) continue;
+          // Not translated: its own supertypes in its place.
+          if (!target) {
+            work.push(...supertypesOf(sup, [...via, sup]));
+            continue;
+          }
+          // A form no class extends: nothing.
           const supForm = expectedForm(sup).form;
           if (supForm !== 'class' && supForm !== 'interface') continue;
           const want = isClass && supForm === 'class' ? 'extends' : isClass ? 'implements' : 'extends';
@@ -185,7 +202,7 @@ module.exports = {
               kind: 'supertype-missing',
               subject,
               at,
-              message: `does not ${want === 'extends' ? 'extend' : 'implement'} ${target.name}, which translates ${shortName(sup)}, a direct supertype of Java's ${javaName}`,
+              message: `does not ${want === 'extends' ? 'extend' : 'implement'} ${target.name}, which translates ${shortName(sup)}, a ${via.length > 0 ? '' : 'direct '}supertype of Java's ${javaName}${through}`,
             });
           } else if (found.where !== want) {
             findings.push({
@@ -198,6 +215,8 @@ module.exports = {
           continue;
         }
         const simple = javaSuper.split('.').pop();
+        if (seen.has(simple)) continue;
+        seen.add(simple);
         const root = roots.get(simple);
         if (root !== undefined) {
           const target = byKey.get(root);
@@ -207,7 +226,7 @@ module.exports = {
               kind: 'supertype-missing',
               subject,
               at,
-              message: `does not extend ${target.name}, the root's class of Java's ${simple}, a direct supertype of Java's ${javaName} (${ERRORS})`,
+              message: `does not extend ${target.name}, the root's class of Java's ${simple}, a ${via.length > 0 ? '' : 'direct '}supertype of Java's ${javaName}${through} (${ERRORS})`,
             });
           }
           continue;
@@ -218,7 +237,7 @@ module.exports = {
             kind: 'jdk-unmapped',
             subject,
             at,
-            message: `Java's ${javaName} has the supertype ${javaSuper}, which the JS conventions' JDK table does not translate: it needs a row (${TABLE}, Q29)`,
+            message: `Java's ${shortName(owner)} has the supertype ${javaSuper}, which the JS conventions' JDK table does not translate: it needs a row (${TABLE}, Q29)`,
           });
           continue;
         }
@@ -262,7 +281,7 @@ module.exports = {
           kind: 'supertype-extra',
           subject,
           at,
-          message: `${w.where} ${w.target.name}, which translates no direct supertype of Java's ${javaName}${cls.supertypes.length > 0 ? ` (${cls.supertypes.join(', ')})` : ' (it has none)'}`,
+          message: `${w.where} ${w.target.name}, which translates no supertype of Java's ${javaName}${cls.supertypes.length > 0 ? ` (${cls.supertypes.join(', ')})` : ' (it has none)'}`,
         });
       }
     }
