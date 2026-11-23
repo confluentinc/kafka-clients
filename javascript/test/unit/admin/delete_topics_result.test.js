@@ -32,6 +32,7 @@ const factories = topicResultFactories(DeleteTopicsResult);
  * @typedef {import('@confluentinc/kafka-javascript/common').KafkaFuture<T>} Future
  */
 
+/** A subclass that reaches Java's protected constructor. */
 class Subclass extends DeleteTopicsResult {
   /**
    * @param {UuidMap<Future<void>> | null} topicIdFutures

@@ -15,10 +15,10 @@
 'use strict';
 
 // The option classes (javascript/CLAUDE.md, JavaScript Binding Conventions, Class
-// family, Q17, Q19): AbstractOptions, abstract; the keyed constructors; a
+// family): AbstractOptions, abstract; the keyed constructors; a
 // getter and setter of one name as one method, and a pair of two names kept;
 // the setters recorded in the order they last ran, which the client runs on
-// the native options; Java's timeoutMs as an Integer (Q22). Java ships no
+// the native options; Java's timeoutMs as an Integer. Java ships no
 // test of these classes.
 
 const assert = require('node:assert/strict');

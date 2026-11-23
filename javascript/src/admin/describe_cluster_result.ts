@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.DescribeClusterResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16).
+// Conventions, Class family).
 
 import { JavaForms } from '../internal/args';
 import type { AclOperation } from '../common/acl/acl_operation';

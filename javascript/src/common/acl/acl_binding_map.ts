@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // AclBindingMap (js-only): Java's Map<AclBinding, V>, which JavaScript cannot key by
-// value (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; the
+// value (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family; the
 // admin client's value-keyed maps). It is built as
 // TopicPartitionMap is: it wraps a Map keyed by the JSON text of the fields
 // AclBinding.equals compares (its resource pattern and its entry; AclBinding.internalKey), and keeps each original

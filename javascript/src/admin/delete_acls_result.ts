@@ -14,10 +14,10 @@
 
 // Java's org.apache.kafka.clients.admin.DeleteAclsResult, with its nested
 // FilterResult and FilterResults, classes of the namespace merged with it
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names, Q11). The three Java
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names). The three Java
 // constructors are package-private: private constructors here, the client
-// building them through `internalCreate` (Class family, Q16). Java's map
-// keyed by AclBindingFilter is an AclBindingFilterMap (Q25); `all()` is
+// building them through `internalCreate` (Class family). Java's map
+// keyed by AclBindingFilter is an AclBindingFilterMap; `all()` is
 // Java's `allOf` then `thenApply` over its futures.
 
 import { JavaForms } from '../internal/args';

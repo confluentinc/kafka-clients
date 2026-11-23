@@ -100,14 +100,6 @@ export class GroupType {
     /** The name of the constant to return. */
     name: string;
   }): GroupType;
-  /**
-   * Looks the constant up by its name.
-   *
-   * @param name - the name, on its own or as `{ name }`
-   * @returns the constant
-   * @throws `IllegalArgumentError` when no constant has that name
-   * @throws `TypeError` when the name is null or not a string
-   */
   static valueOf(name: unknown): GroupType {
     VALUE_OF_FORMS.match(name, arguments.length);
     const value = VALUE_OF_FORMS.value(name, 'name');
@@ -136,12 +128,6 @@ export class GroupType {
     /** The name to parse. */
     name: string | null;
   }): GroupType;
-  /**
-   * Parses the name.
-   *
-   * @param name - the name, on its own or as `{ name }`
-   * @returns the constant
-   */
   static parse(name: unknown): GroupType {
     PARSE_FORMS.match(name, arguments.length);
     const value = PARSE_FORMS.value(name, 'name');

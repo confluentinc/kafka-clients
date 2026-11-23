@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.OffsetSpec, a class hierarchy: the
 // base class, with Java's public no-argument constructor and its static
 // factories, and its nested subclasses, classes of the namespace merged with
-// it (javascript/CLAUDE.md, JavaScript Binding Conventions, Names, Q11).
+// it (javascript/CLAUDE.md, JavaScript Binding Conventions, Names).
 // TimestampSpec's Java constructor and `timestamp()` are package-private: a
 // private constructor built through `internalCreate`, and the `@internal`
 // `internalTimestamp()` the admin client reads. The specs hold no public
@@ -98,15 +98,6 @@ export class OffsetSpec {
     /** In milliseconds, a `bigint` or a whole number. */
     timestamp: bigint | number;
   }): OffsetSpec;
-  /**
-   * Makes the spec.
-   *
-   * @param timestamp - the timestamp, on its own or as `{ timestamp }`
-   * @returns a new `TimestampSpec`
-   * @throws `TypeError` when the timestamp is not a `bigint` or a whole number
-   * @throws `RangeError` for a number beyond 2^53 - 1 or a bigint beyond
-   *   Java's `long`
-   */
   static forTimestamp(timestamp: unknown): OffsetSpec {
     FOR_TIMESTAMP_FORMS.match(timestamp, arguments.length);
     return OffsetSpec.TimestampSpec.internalCreate(checkLong(FOR_TIMESTAMP_FORMS.value(timestamp, 'timestamp'), 'timestamp'));

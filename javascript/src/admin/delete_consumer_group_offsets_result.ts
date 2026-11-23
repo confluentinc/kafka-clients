@@ -84,12 +84,6 @@ export class DeleteConsumerGroupOffsetsResult {
     /** The partition. */
     partition: TopicPartition;
   }): KafkaFuture<void>;
-  /**
-   * The future of one partition.
-   *
-   * @param options - the partition
-   * @returns the future
-   */
   partitionResult(options: unknown): KafkaFuture<void> {
     PARTITION_RESULT_FORMS.match(options, arguments.length);
     const partition = PARTITION_RESULT_FORMS.value(options, 'partition');

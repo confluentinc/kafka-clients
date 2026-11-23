@@ -13,8 +13,8 @@
 // limitations under the License.
 // Java's org.apache.kafka.clients.admin.DescribeConsumerGroupsResult, whose Java constructor is
 // public: it takes Java's `Map<String, KafkaFuture<ConsumerGroupDescription>>` as a `Map`
-// or a plain object (javascript/CLAUDE.md, JavaScript Binding Conventions, Types,
-// Q25), and `describedGroups()` returns it as a `Map`.
+// or a plain object (javascript/CLAUDE.md, JavaScript Binding Conventions, Types),
+// and `describedGroups()` returns it as a `Map`.
 
 import { isPlainObject, JavaForms, kind } from '../internal/args';
 import { KafkaFuture } from '../common/kafka_future';
@@ -51,13 +51,6 @@ export class DescribeConsumerGroupsResult {
     /** The futures, by group id. */
     futures: ReadonlyMap<string, KafkaFuture<ConsumerGroupDescription>> | Readonly<Record<string, KafkaFuture<ConsumerGroupDescription>>>;
   });
-  /**
-   * Builds the result.
-   *
-   * @param options - the futures
-   * @throws `TypeError` when they are not a map of futures (null is stored,
-   *   as Java's constructor stores it)
-   */
   constructor(options: unknown) {
     FORMS.match(options, arguments.length);
     const futures = FORMS.value(options, 'futures');

@@ -15,7 +15,7 @@
 'use strict';
 
 // AlterConfigsOptions, an option class (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q17, Q19): Java's setter validateOnly, whose
+// Conventions, Class family): Java's setter validateOnly, whose
 // reader has its own name, shouldValidateOnly. Java has no test of it.
 
 const assert = require('node:assert/strict');
