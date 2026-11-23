@@ -16,7 +16,7 @@
 // (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family): Java's two
 // public constructors as one keyed form each, its getters (`getName`,
 // `getPrincipalType`, which keep Java's names), the `tokenAuthenticated`
-// getter and setter pair as one method (Q17), and Java's equals, hashCode and
+// getter and setter pair as one method, and Java's equals, hashCode and
 // toString. Java's `implements Principal` is not translated (the JDK
 // interface table: Principal is dropped, the class keeps its own methods).
 
@@ -139,13 +139,6 @@ export class KafkaPrincipal {
     /** Whether the principal was authenticated with a delegation token. */
     tokenAuthenticated: boolean;
   }): void;
-  /**
-   * Reads or sets whether the principal was token-authenticated.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the value when it reads
-   * @throws `TypeError` when the value is not a boolean
-   */
   tokenAuthenticated(options?: unknown): boolean | void {
     if (!TOKEN_AUTHENTICATED.sets(options, arguments.length)) return this.#tokenAuthenticated;
     this.#tokenAuthenticated = checkBoolean(TOKEN_AUTHENTICATED.value(options), 'tokenAuthenticated');

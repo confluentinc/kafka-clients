@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.DescribeClientQuotasResult, whose
 // Java constructor is public and stores its future as given, a null
 // included. Java's map keyed by ClientQuotaEntity is a ClientQuotaEntityMap
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q25); each
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family); each
 // entity's quotas are a `Map` of quota name to value.
 
 import { JavaForms, kind } from '../internal/args';
@@ -54,12 +54,6 @@ export class DescribeClientQuotasResult {
     /** Future for the collection of entities that matched the filter. */
     entities: KafkaFuture<ClientQuotaEntityMap<Map<string, number>>>;
   });
-  /**
-   * Builds the result.
-   *
-   * @param options - the future
-   * @throws `TypeError` when it is not a KafkaFuture
-   */
   constructor(options: unknown) {
     FORMS.match(options, arguments.length);
     const entities = FORMS.value(options, 'entities');

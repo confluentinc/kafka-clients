@@ -1527,410 +1527,553 @@ export class GroupListing {
 
 // @public
 export class KafkaAdminClient implements Admin {
+    // (undocumented)
     [Symbol.asyncDispose](): Promise<void>;
+    // (undocumented)
     abortTransaction(spec: AbortTransactionSpec): AbortTransactionResult;
+    // (undocumented)
     abortTransaction(args: {
         spec: AbortTransactionSpec;
         options?: never;
     }): AbortTransactionResult;
+    // (undocumented)
     abortTransaction(args: {
         spec: AbortTransactionSpec;
         options: AbortTransactionOptions;
     }): AbortTransactionResult;
+    // (undocumented)
     alterClientQuotas(entries: Iterable<ClientQuotaAlteration>): AlterClientQuotasResult;
+    // (undocumented)
     alterClientQuotas(args: {
         entries: Iterable<ClientQuotaAlteration>;
         options?: never;
     }): AlterClientQuotasResult;
+    // (undocumented)
     alterClientQuotas(args: {
         entries: Iterable<ClientQuotaAlteration>;
         options: AlterClientQuotasOptions;
     }): AlterClientQuotasResult;
+    // (undocumented)
     alterConsumerGroupOffsets(args: {
         groupId: string;
         offsets: TopicPartitionMap<OffsetAndMetadata>;
         options?: never;
     }): AlterConsumerGroupOffsetsResult;
+    // (undocumented)
     alterConsumerGroupOffsets(args: {
         groupId: string;
         offsets: TopicPartitionMap<OffsetAndMetadata>;
         options: AlterConsumerGroupOffsetsOptions;
     }): AlterConsumerGroupOffsetsResult;
+    // (undocumented)
     alterPartitionReassignments(reassignments: TopicPartitionMap<NewPartitionReassignment | null>): AlterPartitionReassignmentsResult;
+    // (undocumented)
     alterPartitionReassignments(args: {
         reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
         options?: never;
     }): AlterPartitionReassignmentsResult;
+    // (undocumented)
     alterPartitionReassignments(args: {
         reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
         options: AlterPartitionReassignmentsOptions;
     }): AlterPartitionReassignmentsResult;
+    // (undocumented)
     alterReplicaLogDirs(replicaAssignment: TopicPartitionReplicaMap<string>): AlterReplicaLogDirsResult;
+    // (undocumented)
     alterReplicaLogDirs(args: {
         replicaAssignment: TopicPartitionReplicaMap<string>;
         options?: never;
     }): AlterReplicaLogDirsResult;
+    // (undocumented)
     alterReplicaLogDirs(args: {
         replicaAssignment: TopicPartitionReplicaMap<string>;
         options: AlterReplicaLogDirsOptions;
     }): AlterReplicaLogDirsResult;
+    // (undocumented)
     alterUserScramCredentials(alterations: Iterable<UserScramCredentialAlteration>): AlterUserScramCredentialsResult;
+    // (undocumented)
     alterUserScramCredentials(args: {
         alterations: Iterable<UserScramCredentialAlteration>;
         options?: never;
     }): AlterUserScramCredentialsResult;
+    // (undocumented)
     alterUserScramCredentials(args: {
         alterations: Iterable<UserScramCredentialAlteration>;
         options: AlterUserScramCredentialsOptions;
     }): AlterUserScramCredentialsResult;
+    // (undocumented)
     close(): Promise<void>;
+    // (undocumented)
     close(options: CloseArgs): Promise<void>;
+    // (undocumented)
     close(timeout: Duration): Promise<void>;
+    // (undocumented)
     createAcls(acls: Iterable<AclBinding>): CreateAclsResult;
+    // (undocumented)
     createAcls(args: {
         acls: Iterable<AclBinding>;
         options?: never;
     }): CreateAclsResult;
+    // (undocumented)
     createAcls(args: {
         acls: Iterable<AclBinding>;
         options: CreateAclsOptions;
     }): CreateAclsResult;
+    // (undocumented)
     createDelegationToken(): CreateDelegationTokenResult;
+    // (undocumented)
     createDelegationToken(args: {
         options: CreateDelegationTokenOptions;
     }): CreateDelegationTokenResult;
+    // (undocumented)
     createDelegationToken(options: CreateDelegationTokenOptions): CreateDelegationTokenResult;
+    // (undocumented)
     createPartitions(newPartitions: ReadonlyMap<string, NewPartitions>): CreatePartitionsResult;
+    // (undocumented)
     createPartitions(args: {
         newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
         options?: never;
     }): CreatePartitionsResult;
+    // (undocumented)
     createPartitions(args: {
         newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
         options: CreatePartitionsOptions;
     }): CreatePartitionsResult;
+    // (undocumented)
     createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
+    // (undocumented)
     createTopics(args: {
         newTopics: Iterable<NewTopic>;
         options?: never;
     }): CreateTopicsResult;
+    // (undocumented)
     createTopics(args: {
         newTopics: Iterable<NewTopic>;
         options: CreateTopicsOptions;
     }): CreateTopicsResult;
+    // (undocumented)
     deleteAcls(filters: Iterable<AclBindingFilter>): DeleteAclsResult;
+    // (undocumented)
     deleteAcls(args: {
         filters: Iterable<AclBindingFilter>;
         options?: never;
     }): DeleteAclsResult;
+    // (undocumented)
     deleteAcls(args: {
         filters: Iterable<AclBindingFilter>;
         options: DeleteAclsOptions;
     }): DeleteAclsResult;
+    // (undocumented)
     deleteConsumerGroupOffsets(args: {
         groupId: string;
         partitions: Iterable<TopicPartition>;
         options?: never;
     }): DeleteConsumerGroupOffsetsResult;
+    // (undocumented)
     deleteConsumerGroupOffsets(args: {
         groupId: string;
         partitions: Iterable<TopicPartition>;
         options: DeleteConsumerGroupOffsetsOptions;
     }): DeleteConsumerGroupOffsetsResult;
+    // (undocumented)
     deleteConsumerGroups(groupIds: Iterable<string>): DeleteConsumerGroupsResult;
+    // (undocumented)
     deleteConsumerGroups(args: {
         groupIds: Iterable<string>;
         options?: never;
     }): DeleteConsumerGroupsResult;
+    // (undocumented)
     deleteConsumerGroups(args: {
         groupIds: Iterable<string>;
         options: DeleteConsumerGroupsOptions;
     }): DeleteConsumerGroupsResult;
+    // (undocumented)
     deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
+    // (undocumented)
     deleteRecords(args: {
         recordsToDelete: TopicPartitionMap<RecordsToDelete>;
         options?: never;
     }): DeleteRecordsResult;
+    // (undocumented)
     deleteRecords(args: {
         recordsToDelete: TopicPartitionMap<RecordsToDelete>;
         options: DeleteRecordsOptions;
     }): DeleteRecordsResult;
+    // (undocumented)
     deleteTopics(topics: Iterable<string> | TopicCollection): DeleteTopicsResult;
+    // (undocumented)
     deleteTopics(args: {
         topics: Iterable<string> | TopicCollection;
         options?: never;
     }): DeleteTopicsResult;
+    // (undocumented)
     deleteTopics(args: {
         topics: Iterable<string> | TopicCollection;
         options: DeleteTopicsOptions;
     }): DeleteTopicsResult;
+    // (undocumented)
     describeAcls(filter: AclBindingFilter): DescribeAclsResult;
+    // (undocumented)
     describeAcls(args: {
         filter: AclBindingFilter;
         options?: never;
     }): DescribeAclsResult;
+    // (undocumented)
     describeAcls(args: {
         filter: AclBindingFilter;
         options: DescribeAclsOptions;
     }): DescribeAclsResult;
+    // (undocumented)
     describeClassicGroups(groupIds: Iterable<string>): DescribeClassicGroupsResult;
+    // (undocumented)
     describeClassicGroups(args: {
         groupIds: Iterable<string>;
         options?: never;
     }): DescribeClassicGroupsResult;
+    // (undocumented)
     describeClassicGroups(args: {
         groupIds: Iterable<string>;
         options: DescribeClassicGroupsOptions;
     }): DescribeClassicGroupsResult;
+    // (undocumented)
     describeClientQuotas(filter: ClientQuotaFilter): DescribeClientQuotasResult;
+    // (undocumented)
     describeClientQuotas(args: {
         filter: ClientQuotaFilter;
         options?: never;
     }): DescribeClientQuotasResult;
+    // (undocumented)
     describeClientQuotas(args: {
         filter: ClientQuotaFilter;
         options: DescribeClientQuotasOptions;
     }): DescribeClientQuotasResult;
+    // (undocumented)
     describeCluster(): DescribeClusterResult;
+    // (undocumented)
     describeCluster(args: {
         options: DescribeClusterOptions;
     }): DescribeClusterResult;
+    // (undocumented)
     describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
+    // (undocumented)
     describeConfigs(resources: Iterable<ConfigResource>): DescribeConfigsResult;
+    // (undocumented)
     describeConfigs(args: {
         resources: Iterable<ConfigResource>;
         options?: never;
     }): DescribeConfigsResult;
+    // (undocumented)
     describeConfigs(args: {
         resources: Iterable<ConfigResource>;
         options: DescribeConfigsOptions;
     }): DescribeConfigsResult;
+    // (undocumented)
     describeConsumerGroups(groupIds: Iterable<string>): DescribeConsumerGroupsResult;
+    // (undocumented)
     describeConsumerGroups(args: {
         groupIds: Iterable<string>;
         options?: never;
     }): DescribeConsumerGroupsResult;
+    // (undocumented)
     describeConsumerGroups(args: {
         groupIds: Iterable<string>;
         options: DescribeConsumerGroupsOptions;
     }): DescribeConsumerGroupsResult;
+    // (undocumented)
     describeDelegationToken(): DescribeDelegationTokenResult;
+    // (undocumented)
     describeDelegationToken(args: {
         options: DescribeDelegationTokenOptions;
     }): DescribeDelegationTokenResult;
+    // (undocumented)
     describeDelegationToken(options: DescribeDelegationTokenOptions): DescribeDelegationTokenResult;
+    // (undocumented)
     describeFeatures(): DescribeFeaturesResult;
+    // (undocumented)
     describeFeatures(args: {
         options: DescribeFeaturesOptions;
     }): DescribeFeaturesResult;
+    // (undocumented)
     describeFeatures(options: DescribeFeaturesOptions): DescribeFeaturesResult;
+    // (undocumented)
     describeLogDirs(brokers: Iterable<number>): DescribeLogDirsResult;
+    // (undocumented)
     describeLogDirs(args: {
         brokers: Iterable<number>;
         options?: never;
     }): DescribeLogDirsResult;
+    // (undocumented)
     describeLogDirs(args: {
         brokers: Iterable<number>;
         options: DescribeLogDirsOptions;
     }): DescribeLogDirsResult;
+    // (undocumented)
     describeProducers(partitions: Iterable<TopicPartition>): DescribeProducersResult;
+    // (undocumented)
     describeProducers(args: {
         partitions: Iterable<TopicPartition>;
         options?: never;
     }): DescribeProducersResult;
+    // (undocumented)
     describeProducers(args: {
         partitions: Iterable<TopicPartition>;
         options: DescribeProducersOptions;
     }): DescribeProducersResult;
+    // (undocumented)
     describeReplicaLogDirs(replicas: Iterable<TopicPartitionReplica>): DescribeReplicaLogDirsResult;
+    // (undocumented)
     describeReplicaLogDirs(args: {
         replicas: Iterable<TopicPartitionReplica>;
         options?: never;
     }): DescribeReplicaLogDirsResult;
+    // (undocumented)
     describeReplicaLogDirs(args: {
         replicas: Iterable<TopicPartitionReplica>;
         options: DescribeReplicaLogDirsOptions;
     }): DescribeReplicaLogDirsResult;
+    // (undocumented)
     describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
+    // (undocumented)
     describeTopics(args: {
         topicNames: Iterable<string>;
         topics?: never;
         options?: never;
     }): DescribeTopicsResult;
+    // (undocumented)
     describeTopics(args: {
         topicNames: Iterable<string>;
         options: DescribeTopicsOptions;
         topics?: never;
     }): DescribeTopicsResult;
+    // (undocumented)
     describeTopics(topics: TopicCollection): DescribeTopicsResult;
+    // (undocumented)
     describeTopics(args: {
         topics: TopicCollection;
         topicNames?: never;
         options?: never;
     }): DescribeTopicsResult;
+    // (undocumented)
     describeTopics(args: {
         topics: TopicCollection;
         options: DescribeTopicsOptions;
         topicNames?: never;
     }): DescribeTopicsResult;
+    // (undocumented)
     describeTransactions(transactionalIds: Iterable<string>): DescribeTransactionsResult;
+    // (undocumented)
     describeTransactions(args: {
         transactionalIds: Iterable<string>;
         options?: never;
     }): DescribeTransactionsResult;
+    // (undocumented)
     describeTransactions(args: {
         transactionalIds: Iterable<string>;
         options: DescribeTransactionsOptions;
     }): DescribeTransactionsResult;
+    // (undocumented)
     describeUserScramCredentials(): DescribeUserScramCredentialsResult;
+    // (undocumented)
     describeUserScramCredentials(users: Iterable<string> | null): DescribeUserScramCredentialsResult;
+    // (undocumented)
     describeUserScramCredentials(args: {
         users: Iterable<string> | null;
         options?: never;
     }): DescribeUserScramCredentialsResult;
+    // (undocumented)
     describeUserScramCredentials(args: {
         users: Iterable<string> | null;
         options: DescribeUserScramCredentialsOptions;
     }): DescribeUserScramCredentialsResult;
+    // (undocumented)
     electLeaders(args: {
         electionType: ElectionType;
         partitions: Iterable<TopicPartition> | null;
         options?: never;
     }): ElectLeadersResult;
+    // (undocumented)
     electLeaders(args: {
         electionType: ElectionType;
         partitions: Iterable<TopicPartition> | null;
         options: ElectLeadersOptions;
     }): ElectLeadersResult;
+    // (undocumented)
     expireDelegationToken(hmac: Uint8Array): ExpireDelegationTokenResult;
+    // (undocumented)
     expireDelegationToken(args: {
         hmac: Uint8Array;
         options?: never;
     }): ExpireDelegationTokenResult;
+    // (undocumented)
     expireDelegationToken(args: {
         hmac: Uint8Array;
         options: ExpireDelegationTokenOptions;
     }): ExpireDelegationTokenResult;
+    // (undocumented)
     fenceProducers(transactionalIds: Iterable<string>): FenceProducersResult;
+    // (undocumented)
     fenceProducers(args: {
         transactionalIds: Iterable<string>;
         options?: never;
     }): FenceProducersResult;
+    // (undocumented)
     fenceProducers(args: {
         transactionalIds: Iterable<string>;
         options: FenceProducersOptions;
     }): FenceProducersResult;
+    // (undocumented)
     forceTerminateTransaction(transactionalId: string): TerminateTransactionResult;
+    // (undocumented)
     forceTerminateTransaction(args: {
         transactionalId: string;
         options?: never;
     }): TerminateTransactionResult;
+    // (undocumented)
     forceTerminateTransaction(args: {
         transactionalId: string;
         options: TerminateTransactionOptions;
     }): TerminateTransactionResult;
+    // (undocumented)
     incrementalAlterConfigs(configs: ConfigResourceMap<Iterable<AlterConfigOp>>): AlterConfigsResult;
+    // (undocumented)
     incrementalAlterConfigs(args: {
         configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
         options?: never;
     }): AlterConfigsResult;
+    // (undocumented)
     incrementalAlterConfigs(args: {
         configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
         options: AlterConfigsOptions;
     }): AlterConfigsResult;
+    // (undocumented)
     listConfigResources(): ListConfigResourcesResult;
+    // (undocumented)
     listConfigResources(args: {
         configResourceTypes: Iterable<ConfigResource.Type>;
         options: ListConfigResourcesOptions;
     }): ListConfigResourcesResult;
+    // (undocumented)
     listConsumerGroupOffsets(groupId: string): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listConsumerGroupOffsets(args: {
         groupId: string;
         groupSpecs?: never;
         options?: never;
     }): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listConsumerGroupOffsets(args: {
         groupId: string;
         options: ListConsumerGroupOffsetsOptions;
         groupSpecs?: never;
     }): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listConsumerGroupOffsets(groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec>): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listConsumerGroupOffsets(args: {
         groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
         groupId?: never;
         options?: never;
     }): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listConsumerGroupOffsets(args: {
         groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
         options: ListConsumerGroupOffsetsOptions;
         groupId?: never;
     }): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listGroups(): ListGroupsResult;
+    // (undocumented)
     listGroups(args: {
         options: ListGroupsOptions;
     }): ListGroupsResult;
+    // (undocumented)
     listGroups(options: ListGroupsOptions): ListGroupsResult;
+    // (undocumented)
     listOffsets(topicPartitionOffsets: TopicPartitionMap<OffsetSpec>): ListOffsetsResult;
+    // (undocumented)
     listOffsets(args: {
         topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
         options?: never;
     }): ListOffsetsResult;
+    // (undocumented)
     listOffsets(args: {
         topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
         options: ListOffsetsOptions;
     }): ListOffsetsResult;
+    // (undocumented)
     listPartitionReassignments(): ListPartitionReassignmentsResult;
+    // (undocumented)
     listPartitionReassignments(partitions: Iterable<TopicPartition>): ListPartitionReassignmentsResult;
+    // (undocumented)
     listPartitionReassignments(args: {
         partitions: Iterable<TopicPartition>;
         options?: never;
     }): ListPartitionReassignmentsResult;
+    // (undocumented)
     listPartitionReassignments(args: {
         partitions: Iterable<TopicPartition> | null;
         options: ListPartitionReassignmentsOptions;
     }): ListPartitionReassignmentsResult;
+    // (undocumented)
     listPartitionReassignments(args: {
         options: ListPartitionReassignmentsOptions;
         partitions?: never;
     }): ListPartitionReassignmentsResult;
+    // (undocumented)
     listPartitionReassignments(options: ListPartitionReassignmentsOptions): ListPartitionReassignmentsResult;
+    // (undocumented)
     listTopics(): ListTopicsResult;
+    // (undocumented)
     listTopics(args: {
         options: ListTopicsOptions;
     }): ListTopicsResult;
+    // (undocumented)
     listTopics(options: ListTopicsOptions): ListTopicsResult;
+    // (undocumented)
     listTransactions(): ListTransactionsResult;
+    // (undocumented)
     listTransactions(args: {
         options: ListTransactionsOptions;
     }): ListTransactionsResult;
+    // (undocumented)
     listTransactions(options: ListTransactionsOptions): ListTransactionsResult;
+    // (undocumented)
     removeMembersFromConsumerGroup(args: {
         groupId: string;
         options: RemoveMembersFromConsumerGroupOptions;
     }): RemoveMembersFromConsumerGroupResult;
+    // (undocumented)
     renewDelegationToken(hmac: Uint8Array): RenewDelegationTokenResult;
+    // (undocumented)
     renewDelegationToken(args: {
         hmac: Uint8Array;
         options?: never;
     }): RenewDelegationTokenResult;
+    // (undocumented)
     renewDelegationToken(args: {
         hmac: Uint8Array;
         options: RenewDelegationTokenOptions;
     }): RenewDelegationTokenResult;
+    // (undocumented)
     unregisterController(controllerId: number): UnregisterControllerResult;
+    // (undocumented)
     unregisterController(args: {
         controllerId: number;
         options?: never;
     }): UnregisterControllerResult;
+    // (undocumented)
     unregisterController(args: {
         controllerId: number;
         options: UnregisterControllerOptions;
     }): UnregisterControllerResult;
+    // (undocumented)
     updateFeatures(featureUpdates: ReadonlyMap<string, FeatureUpdate>): UpdateFeaturesResult;
+    // (undocumented)
     updateFeatures(args: {
         featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
         options?: never;
     }): UpdateFeaturesResult;
+    // (undocumented)
     updateFeatures(args: {
         featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
         options: UpdateFeaturesOptions;
@@ -2263,17 +2406,21 @@ export class MemberToRemoveSet implements Iterable<MemberToRemove> {
 
 // @public
 export class MockAdminClient implements Admin {
+    // (undocumented)
     [Symbol.asyncDispose](): Promise<void>;
     constructor();
     constructor(options: {
         brokers: Iterable<Node>;
         controller: Node;
     });
+    // (undocumented)
     abortTransaction(spec: AbortTransactionSpec): AbortTransactionResult;
+    // (undocumented)
     abortTransaction(args: {
         spec: AbortTransactionSpec;
         options?: never;
     }): AbortTransactionResult;
+    // (undocumented)
     abortTransaction(args: {
         spec: AbortTransactionSpec;
         options: AbortTransactionOptions;
@@ -2284,393 +2431,526 @@ export class MockAdminClient implements Admin {
         partitions: Iterable<TopicPartitionInfo>;
         configs: ReadonlyMap<string, string | null> | Readonly<Record<string, string | null>> | null;
     }): void;
+    // (undocumented)
     alterClientQuotas(entries: Iterable<ClientQuotaAlteration>): AlterClientQuotasResult;
+    // (undocumented)
     alterClientQuotas(args: {
         entries: Iterable<ClientQuotaAlteration>;
         options?: never;
     }): AlterClientQuotasResult;
+    // (undocumented)
     alterClientQuotas(args: {
         entries: Iterable<ClientQuotaAlteration>;
         options: AlterClientQuotasOptions;
     }): AlterClientQuotasResult;
+    // (undocumented)
     alterConsumerGroupOffsets(args: {
         groupId: string;
         offsets: TopicPartitionMap<OffsetAndMetadata>;
         options?: never;
     }): AlterConsumerGroupOffsetsResult;
+    // (undocumented)
     alterConsumerGroupOffsets(args: {
         groupId: string;
         offsets: TopicPartitionMap<OffsetAndMetadata>;
         options: AlterConsumerGroupOffsetsOptions;
     }): AlterConsumerGroupOffsetsResult;
+    // (undocumented)
     alterPartitionReassignments(reassignments: TopicPartitionMap<NewPartitionReassignment | null>): AlterPartitionReassignmentsResult;
+    // (undocumented)
     alterPartitionReassignments(args: {
         reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
         options?: never;
     }): AlterPartitionReassignmentsResult;
+    // (undocumented)
     alterPartitionReassignments(args: {
         reassignments: TopicPartitionMap<NewPartitionReassignment | null>;
         options: AlterPartitionReassignmentsOptions;
     }): AlterPartitionReassignmentsResult;
+    // (undocumented)
     alterReplicaLogDirs(replicaAssignment: TopicPartitionReplicaMap<string>): AlterReplicaLogDirsResult;
+    // (undocumented)
     alterReplicaLogDirs(args: {
         replicaAssignment: TopicPartitionReplicaMap<string>;
         options?: never;
     }): AlterReplicaLogDirsResult;
+    // (undocumented)
     alterReplicaLogDirs(args: {
         replicaAssignment: TopicPartitionReplicaMap<string>;
         options: AlterReplicaLogDirsOptions;
     }): AlterReplicaLogDirsResult;
+    // (undocumented)
     alterUserScramCredentials(alterations: Iterable<UserScramCredentialAlteration>): AlterUserScramCredentialsResult;
+    // (undocumented)
     alterUserScramCredentials(args: {
         alterations: Iterable<UserScramCredentialAlteration>;
         options?: never;
     }): AlterUserScramCredentialsResult;
+    // (undocumented)
     alterUserScramCredentials(args: {
         alterations: Iterable<UserScramCredentialAlteration>;
         options: AlterUserScramCredentialsOptions;
     }): AlterUserScramCredentialsResult;
+    // (undocumented)
     close(): Promise<void>;
+    // (undocumented)
     close(options: CloseArgs): Promise<void>;
+    // (undocumented)
     close(timeout: Duration): Promise<void>;
     controller(controller: Node): void;
     controller(options: {
         controller: Node;
     }): void;
     static create(): MockAdminClient.Builder;
+    // (undocumented)
     createAcls(acls: Iterable<AclBinding>): CreateAclsResult;
+    // (undocumented)
     createAcls(args: {
         acls: Iterable<AclBinding>;
         options?: never;
     }): CreateAclsResult;
+    // (undocumented)
     createAcls(args: {
         acls: Iterable<AclBinding>;
         options: CreateAclsOptions;
     }): CreateAclsResult;
+    // (undocumented)
     createDelegationToken(): CreateDelegationTokenResult;
+    // (undocumented)
     createDelegationToken(args: {
         options: CreateDelegationTokenOptions;
     }): CreateDelegationTokenResult;
+    // (undocumented)
     createDelegationToken(options: CreateDelegationTokenOptions): CreateDelegationTokenResult;
+    // (undocumented)
     createPartitions(newPartitions: ReadonlyMap<string, NewPartitions>): CreatePartitionsResult;
+    // (undocumented)
     createPartitions(args: {
         newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
         options?: never;
     }): CreatePartitionsResult;
+    // (undocumented)
     createPartitions(args: {
         newPartitions: ReadonlyMap<string, NewPartitions> | Readonly<Record<string, NewPartitions>>;
         options: CreatePartitionsOptions;
     }): CreatePartitionsResult;
+    // (undocumented)
     createTopics(newTopics: Iterable<NewTopic>): CreateTopicsResult;
+    // (undocumented)
     createTopics(args: {
         newTopics: Iterable<NewTopic>;
         options?: never;
     }): CreateTopicsResult;
+    // (undocumented)
     createTopics(args: {
         newTopics: Iterable<NewTopic>;
         options: CreateTopicsOptions;
     }): CreateTopicsResult;
     static readonly DEFAULT_CLUSTER_ID: string;
     static readonly DEFAULT_LOG_DIRS: ReadonlyArray<string>;
+    // (undocumented)
     deleteAcls(filters: Iterable<AclBindingFilter>): DeleteAclsResult;
+    // (undocumented)
     deleteAcls(args: {
         filters: Iterable<AclBindingFilter>;
         options?: never;
     }): DeleteAclsResult;
+    // (undocumented)
     deleteAcls(args: {
         filters: Iterable<AclBindingFilter>;
         options: DeleteAclsOptions;
     }): DeleteAclsResult;
+    // (undocumented)
     deleteConsumerGroupOffsets(args: {
         groupId: string;
         partitions: Iterable<TopicPartition>;
         options?: never;
     }): DeleteConsumerGroupOffsetsResult;
+    // (undocumented)
     deleteConsumerGroupOffsets(args: {
         groupId: string;
         partitions: Iterable<TopicPartition>;
         options: DeleteConsumerGroupOffsetsOptions;
     }): DeleteConsumerGroupOffsetsResult;
+    // (undocumented)
     deleteConsumerGroups(groupIds: Iterable<string>): DeleteConsumerGroupsResult;
+    // (undocumented)
     deleteConsumerGroups(args: {
         groupIds: Iterable<string>;
         options?: never;
     }): DeleteConsumerGroupsResult;
+    // (undocumented)
     deleteConsumerGroups(args: {
         groupIds: Iterable<string>;
         options: DeleteConsumerGroupsOptions;
     }): DeleteConsumerGroupsResult;
+    // (undocumented)
     deleteRecords(recordsToDelete: TopicPartitionMap<RecordsToDelete>): DeleteRecordsResult;
+    // (undocumented)
     deleteRecords(args: {
         recordsToDelete: TopicPartitionMap<RecordsToDelete>;
         options?: never;
     }): DeleteRecordsResult;
+    // (undocumented)
     deleteRecords(args: {
         recordsToDelete: TopicPartitionMap<RecordsToDelete>;
         options: DeleteRecordsOptions;
     }): DeleteRecordsResult;
+    // (undocumented)
     deleteTopics(topics: Iterable<string> | TopicCollection): DeleteTopicsResult;
+    // (undocumented)
     deleteTopics(args: {
         topics: Iterable<string> | TopicCollection;
         options?: never;
     }): DeleteTopicsResult;
+    // (undocumented)
     deleteTopics(args: {
         topics: Iterable<string> | TopicCollection;
         options: DeleteTopicsOptions;
     }): DeleteTopicsResult;
+    // (undocumented)
     describeAcls(filter: AclBindingFilter): DescribeAclsResult;
+    // (undocumented)
     describeAcls(args: {
         filter: AclBindingFilter;
         options?: never;
     }): DescribeAclsResult;
+    // (undocumented)
     describeAcls(args: {
         filter: AclBindingFilter;
         options: DescribeAclsOptions;
     }): DescribeAclsResult;
+    // (undocumented)
     describeClassicGroups(groupIds: Iterable<string>): DescribeClassicGroupsResult;
+    // (undocumented)
     describeClassicGroups(args: {
         groupIds: Iterable<string>;
         options?: never;
     }): DescribeClassicGroupsResult;
+    // (undocumented)
     describeClassicGroups(args: {
         groupIds: Iterable<string>;
         options: DescribeClassicGroupsOptions;
     }): DescribeClassicGroupsResult;
+    // (undocumented)
     describeClientQuotas(filter: ClientQuotaFilter): DescribeClientQuotasResult;
+    // (undocumented)
     describeClientQuotas(args: {
         filter: ClientQuotaFilter;
         options?: never;
     }): DescribeClientQuotasResult;
+    // (undocumented)
     describeClientQuotas(args: {
         filter: ClientQuotaFilter;
         options: DescribeClientQuotasOptions;
     }): DescribeClientQuotasResult;
+    // (undocumented)
     describeCluster(): DescribeClusterResult;
+    // (undocumented)
     describeCluster(args: {
         options: DescribeClusterOptions;
     }): DescribeClusterResult;
+    // (undocumented)
     describeCluster(options: DescribeClusterOptions): DescribeClusterResult;
+    // (undocumented)
     describeConfigs(resources: Iterable<ConfigResource>): DescribeConfigsResult;
+    // (undocumented)
     describeConfigs(args: {
         resources: Iterable<ConfigResource>;
         options?: never;
     }): DescribeConfigsResult;
+    // (undocumented)
     describeConfigs(args: {
         resources: Iterable<ConfigResource>;
         options: DescribeConfigsOptions;
     }): DescribeConfigsResult;
+    // (undocumented)
     describeConsumerGroups(groupIds: Iterable<string>): DescribeConsumerGroupsResult;
+    // (undocumented)
     describeConsumerGroups(args: {
         groupIds: Iterable<string>;
         options?: never;
     }): DescribeConsumerGroupsResult;
+    // (undocumented)
     describeConsumerGroups(args: {
         groupIds: Iterable<string>;
         options: DescribeConsumerGroupsOptions;
     }): DescribeConsumerGroupsResult;
+    // (undocumented)
     describeDelegationToken(): DescribeDelegationTokenResult;
+    // (undocumented)
     describeDelegationToken(args: {
         options: DescribeDelegationTokenOptions;
     }): DescribeDelegationTokenResult;
+    // (undocumented)
     describeDelegationToken(options: DescribeDelegationTokenOptions): DescribeDelegationTokenResult;
+    // (undocumented)
     describeFeatures(): DescribeFeaturesResult;
+    // (undocumented)
     describeFeatures(args: {
         options: DescribeFeaturesOptions;
     }): DescribeFeaturesResult;
+    // (undocumented)
     describeFeatures(options: DescribeFeaturesOptions): DescribeFeaturesResult;
+    // (undocumented)
     describeLogDirs(brokers: Iterable<number>): DescribeLogDirsResult;
+    // (undocumented)
     describeLogDirs(args: {
         brokers: Iterable<number>;
         options?: never;
     }): DescribeLogDirsResult;
+    // (undocumented)
     describeLogDirs(args: {
         brokers: Iterable<number>;
         options: DescribeLogDirsOptions;
     }): DescribeLogDirsResult;
+    // (undocumented)
     describeProducers(partitions: Iterable<TopicPartition>): DescribeProducersResult;
+    // (undocumented)
     describeProducers(args: {
         partitions: Iterable<TopicPartition>;
         options?: never;
     }): DescribeProducersResult;
+    // (undocumented)
     describeProducers(args: {
         partitions: Iterable<TopicPartition>;
         options: DescribeProducersOptions;
     }): DescribeProducersResult;
+    // (undocumented)
     describeReplicaLogDirs(replicas: Iterable<TopicPartitionReplica>): DescribeReplicaLogDirsResult;
+    // (undocumented)
     describeReplicaLogDirs(args: {
         replicas: Iterable<TopicPartitionReplica>;
         options?: never;
     }): DescribeReplicaLogDirsResult;
+    // (undocumented)
     describeReplicaLogDirs(args: {
         replicas: Iterable<TopicPartitionReplica>;
         options: DescribeReplicaLogDirsOptions;
     }): DescribeReplicaLogDirsResult;
+    // (undocumented)
     describeTopics(topicNames: Iterable<string>): DescribeTopicsResult;
+    // (undocumented)
     describeTopics(args: {
         topicNames: Iterable<string>;
         topics?: never;
         options?: never;
     }): DescribeTopicsResult;
+    // (undocumented)
     describeTopics(args: {
         topicNames: Iterable<string>;
         options: DescribeTopicsOptions;
         topics?: never;
     }): DescribeTopicsResult;
+    // (undocumented)
     describeTopics(topics: TopicCollection): DescribeTopicsResult;
+    // (undocumented)
     describeTopics(args: {
         topics: TopicCollection;
         topicNames?: never;
         options?: never;
     }): DescribeTopicsResult;
+    // (undocumented)
     describeTopics(args: {
         topics: TopicCollection;
         options: DescribeTopicsOptions;
         topicNames?: never;
     }): DescribeTopicsResult;
+    // (undocumented)
     describeTransactions(transactionalIds: Iterable<string>): DescribeTransactionsResult;
+    // (undocumented)
     describeTransactions(args: {
         transactionalIds: Iterable<string>;
         options?: never;
     }): DescribeTransactionsResult;
+    // (undocumented)
     describeTransactions(args: {
         transactionalIds: Iterable<string>;
         options: DescribeTransactionsOptions;
     }): DescribeTransactionsResult;
+    // (undocumented)
     describeUserScramCredentials(): DescribeUserScramCredentialsResult;
+    // (undocumented)
     describeUserScramCredentials(users: Iterable<string> | null): DescribeUserScramCredentialsResult;
+    // (undocumented)
     describeUserScramCredentials(args: {
         users: Iterable<string> | null;
         options?: never;
     }): DescribeUserScramCredentialsResult;
+    // (undocumented)
     describeUserScramCredentials(args: {
         users: Iterable<string> | null;
         options: DescribeUserScramCredentialsOptions;
     }): DescribeUserScramCredentialsResult;
+    // (undocumented)
     electLeaders(args: {
         electionType: ElectionType;
         partitions: Iterable<TopicPartition> | null;
         options?: never;
     }): ElectLeadersResult;
+    // (undocumented)
     electLeaders(args: {
         electionType: ElectionType;
         partitions: Iterable<TopicPartition> | null;
         options: ElectLeadersOptions;
     }): ElectLeadersResult;
+    // (undocumented)
     expireDelegationToken(hmac: Uint8Array): ExpireDelegationTokenResult;
+    // (undocumented)
     expireDelegationToken(args: {
         hmac: Uint8Array;
         options?: never;
     }): ExpireDelegationTokenResult;
+    // (undocumented)
     expireDelegationToken(args: {
         hmac: Uint8Array;
         options: ExpireDelegationTokenOptions;
     }): ExpireDelegationTokenResult;
+    // (undocumented)
     fenceProducers(transactionalIds: Iterable<string>): FenceProducersResult;
+    // (undocumented)
     fenceProducers(args: {
         transactionalIds: Iterable<string>;
         options?: never;
     }): FenceProducersResult;
+    // (undocumented)
     fenceProducers(args: {
         transactionalIds: Iterable<string>;
         options: FenceProducersOptions;
     }): FenceProducersResult;
+    // (undocumented)
     forceTerminateTransaction(transactionalId: string): TerminateTransactionResult;
+    // (undocumented)
     forceTerminateTransaction(args: {
         transactionalId: string;
         options?: never;
     }): TerminateTransactionResult;
+    // (undocumented)
     forceTerminateTransaction(args: {
         transactionalId: string;
         options: TerminateTransactionOptions;
     }): TerminateTransactionResult;
+    // (undocumented)
     incrementalAlterConfigs(configs: ConfigResourceMap<Iterable<AlterConfigOp>>): AlterConfigsResult;
+    // (undocumented)
     incrementalAlterConfigs(args: {
         configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
         options?: never;
     }): AlterConfigsResult;
+    // (undocumented)
     incrementalAlterConfigs(args: {
         configs: ConfigResourceMap<Iterable<AlterConfigOp>>;
         options: AlterConfigsOptions;
     }): AlterConfigsResult;
+    // (undocumented)
     listConfigResources(): ListConfigResourcesResult;
+    // (undocumented)
     listConfigResources(args: {
         configResourceTypes: Iterable<ConfigResource.Type>;
         options: ListConfigResourcesOptions;
     }): ListConfigResourcesResult;
+    // (undocumented)
     listConsumerGroupOffsets(groupId: string): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listConsumerGroupOffsets(args: {
         groupId: string;
         groupSpecs?: never;
         options?: never;
     }): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listConsumerGroupOffsets(args: {
         groupId: string;
         options: ListConsumerGroupOffsetsOptions;
         groupSpecs?: never;
     }): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listConsumerGroupOffsets(groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec>): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listConsumerGroupOffsets(args: {
         groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
         groupId?: never;
         options?: never;
     }): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listConsumerGroupOffsets(args: {
         groupSpecs: ReadonlyMap<string, ListConsumerGroupOffsetsSpec> | Readonly<Record<string, ListConsumerGroupOffsetsSpec>>;
         options: ListConsumerGroupOffsetsOptions;
         groupId?: never;
     }): ListConsumerGroupOffsetsResult;
+    // (undocumented)
     listGroups(): ListGroupsResult;
+    // (undocumented)
     listGroups(args: {
         options: ListGroupsOptions;
     }): ListGroupsResult;
+    // (undocumented)
     listGroups(options: ListGroupsOptions): ListGroupsResult;
+    // (undocumented)
     listOffsets(topicPartitionOffsets: TopicPartitionMap<OffsetSpec>): ListOffsetsResult;
+    // (undocumented)
     listOffsets(args: {
         topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
         options?: never;
     }): ListOffsetsResult;
+    // (undocumented)
     listOffsets(args: {
         topicPartitionOffsets: TopicPartitionMap<OffsetSpec>;
         options: ListOffsetsOptions;
     }): ListOffsetsResult;
+    // (undocumented)
     listPartitionReassignments(): ListPartitionReassignmentsResult;
+    // (undocumented)
     listPartitionReassignments(partitions: Iterable<TopicPartition>): ListPartitionReassignmentsResult;
+    // (undocumented)
     listPartitionReassignments(args: {
         partitions: Iterable<TopicPartition>;
         options?: never;
     }): ListPartitionReassignmentsResult;
+    // (undocumented)
     listPartitionReassignments(args: {
         partitions: Iterable<TopicPartition> | null;
         options: ListPartitionReassignmentsOptions;
     }): ListPartitionReassignmentsResult;
+    // (undocumented)
     listPartitionReassignments(args: {
         options: ListPartitionReassignmentsOptions;
         partitions?: never;
     }): ListPartitionReassignmentsResult;
+    // (undocumented)
     listPartitionReassignments(options: ListPartitionReassignmentsOptions): ListPartitionReassignmentsResult;
+    // (undocumented)
     listTopics(): ListTopicsResult;
+    // (undocumented)
     listTopics(args: {
         options: ListTopicsOptions;
     }): ListTopicsResult;
+    // (undocumented)
     listTopics(options: ListTopicsOptions): ListTopicsResult;
+    // (undocumented)
     listTransactions(): ListTransactionsResult;
+    // (undocumented)
     listTransactions(args: {
         options: ListTransactionsOptions;
     }): ListTransactionsResult;
+    // (undocumented)
     listTransactions(options: ListTransactionsOptions): ListTransactionsResult;
     markTopicForDeletion(name: string): void;
     markTopicForDeletion(options: {
         name: string;
     }): void;
+    // (undocumented)
     removeMembersFromConsumerGroup(args: {
         groupId: string;
         options: RemoveMembersFromConsumerGroupOptions;
     }): RemoveMembersFromConsumerGroupResult;
+    // (undocumented)
     renewDelegationToken(hmac: Uint8Array): RenewDelegationTokenResult;
+    // (undocumented)
     renewDelegationToken(args: {
         hmac: Uint8Array;
         options?: never;
     }): RenewDelegationTokenResult;
+    // (undocumented)
     renewDelegationToken(args: {
         hmac: Uint8Array;
         options: RenewDelegationTokenOptions;
@@ -2683,11 +2963,14 @@ export class MockAdminClient implements Admin {
     timeoutNextRequest(options: {
         numberOfRequest: number;
     }): void;
+    // (undocumented)
     unregisterController(controllerId: number): UnregisterControllerResult;
+    // (undocumented)
     unregisterController(args: {
         controllerId: number;
         options?: never;
     }): UnregisterControllerResult;
+    // (undocumented)
     unregisterController(args: {
         controllerId: number;
         options: UnregisterControllerOptions;
@@ -2704,11 +2987,14 @@ export class MockAdminClient implements Admin {
     updateEndOffsets(options: {
         newOffsets: TopicPartitionMap<bigint | number>;
     }): void;
+    // (undocumented)
     updateFeatures(featureUpdates: ReadonlyMap<string, FeatureUpdate>): UpdateFeaturesResult;
+    // (undocumented)
     updateFeatures(args: {
         featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
         options?: never;
     }): UpdateFeaturesResult;
+    // (undocumented)
     updateFeatures(args: {
         featureUpdates: ReadonlyMap<string, FeatureUpdate> | Readonly<Record<string, FeatureUpdate>>;
         options: UpdateFeaturesOptions;

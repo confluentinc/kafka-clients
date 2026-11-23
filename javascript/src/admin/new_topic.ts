@@ -17,7 +17,7 @@
 // Optional<Integer>, Optional<Short>) take one form here, `null` standing for
 // an empty Optional (javascript/CLAUDE.md, JavaScript Binding Conventions, Types:
 // `Optional<T>` is `T | null`); (name, replicasAssignments) is the other.
-// configs() is a getter and setter of one name (Q17), the setter of a config
+// configs() is a getter and setter of one name, the setter of a config
 // map, which also takes the bare map.
 
 import { JavaForms, kind } from '../internal/args';
@@ -142,14 +142,6 @@ export class NewTopic {
     numPartitions?: never;
     replicationFactor?: never;
   });
-  /**
-   * Builds the new topic.
-   *
-   * @param options - the fields of one of Java's forms
-   * @throws `IllegalArgumentError` when the given parameters are no Java form
-   * @throws `TypeError` for a value of the wrong type, or a null assignment map
-   * @throws `RangeError` for a count, partition id or broker id outside Java's type
-   */
   constructor(options: unknown) {
     const form = FORMS.match(options, arguments.length);
     const name = FORMS.value(options, 'name');
@@ -254,13 +246,6 @@ export class NewTopic {
     /** The configuration map, a `Map` or a plain object, or null. */
     configs: ReadonlyMap<string, string> | Readonly<Record<string, string>> | null;
   }): this;
-  /**
-   * Reads or sets the configuration.
-   *
-   * @param options - nothing to read, or the configuration map
-   * @returns the configuration, or this object
-   * @throws `TypeError` when the map is not keyed by strings of string values
-   */
   configs(options?: unknown): Map<string, string> | null | this {
     if (arguments.length === 0) return this.#configs;
     if (CONFIGS_FORMS.match(options, arguments.length) === 0) {

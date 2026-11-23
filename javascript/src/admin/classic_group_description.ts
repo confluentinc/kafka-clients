@@ -194,13 +194,6 @@ export class ClassicGroupDescription {
     /** The authorized operations, or null when not known. */
     authorizedOperations: Iterable<AclOperation> | null;
   });
-  /**
-   * Java's two constructors.
-   *
-   * @param options - the group's fields
-   * @throws `IllegalArgumentError` when the given parameters are not Java's
-   * @throws `TypeError` for a value of the wrong type
-   */
   constructor(options: unknown) {
     const form = FORMS.match(options, arguments.length);
     const value = (name: string): unknown => FORMS.value(options, name);

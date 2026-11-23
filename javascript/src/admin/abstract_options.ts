@@ -15,8 +15,8 @@
 // Java's org.apache.kafka.clients.admin.AbstractOptions: a TypeScript
 // abstract class whose constructor throws TypeError when called for
 // AbstractOptions itself (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Class family, Q16). Its type parameter `T extends AbstractOptions` stands
-// for the class itself, so the setter returns `this` (Q26). The options
+// Class family). Its type parameter `T extends AbstractOptions` stands
+// for the class itself, so the setter returns `this`. The options
 // record the setters that ran, in the order they last ran, which the client
 // runs again on the native options (`<X>Options_new`, then `set_<field>`).
 
@@ -83,17 +83,6 @@ export abstract class AbstractOptions {
     /** The timeout in milliseconds, or null for the default api timeout. */
     timeoutMs: number | null;
   }): this;
-  /**
-   * Reads or sets the timeout.
-   *
-   * @param options - the timeout to set, or nothing to read it
-   * @returns the timeout, or this object
-   * @throws `RangeError` for `NaN`, an infinity, or a value outside 32 bits
-   * @throws `TypeError` when it is neither null nor a whole number
-   *
-   * @remarks A negative timeout is sent as 0, which Java's deadline makes of
-   * it.
-   */
   timeoutMs(options?: unknown): number | null | this {
     if (!TIMEOUT_MS.sets(options, arguments.length)) return this.#timeoutMs;
     this.#timeoutMs = checkTimeoutMs(TIMEOUT_MS.value(options));

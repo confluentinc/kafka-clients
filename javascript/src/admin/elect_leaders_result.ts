@@ -15,9 +15,9 @@
 // Java's org.apache.kafka.clients.admin.ElectLeadersResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). Java's `Map<TopicPartition,
-// Optional<Throwable>>` is a TopicPartitionMap of the error or null (Q25,
-// Types: `Optional<T>` is `T | null`).
+// Conventions, Class family). Java's `Map<TopicPartition,
+// Optional<Throwable>>` is a TopicPartitionMap of the error or null (Types:
+// `Optional<T>` is `T | null`).
 
 import { JavaForms } from '../internal/args';
 import { KafkaFuture } from '../common/kafka_future';

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.UnregisterControllerOptions, an
-// option class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family,
-// Q19) with no field of its own.
+// option class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family)
+// with no field of its own.
 
 import { applyOptionKeys } from '../internal/options';
 import { AbstractOptions } from './abstract_options';
@@ -31,7 +31,7 @@ export class UnregisterControllerOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**

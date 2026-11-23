@@ -42,7 +42,7 @@ test("DescribeClassicGroupsResult: Java's constructor stores a null map, which i
 });
 
 test('DescribeClassicGroupsResult: futures is a Map or a plain object, never another object', () => {
-  // A class instance is no map keyed by strings (Q25): it is refused, not read as an empty map.
+  // A class instance is no map keyed by strings: it is refused, not read as an empty map.
   for (const [futures, name] of [
     [new Set(), 'a Set'],
     [new Date(0), 'a Date'],

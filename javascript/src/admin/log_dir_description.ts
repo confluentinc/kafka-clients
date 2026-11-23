@@ -161,20 +161,6 @@ export class LogDirDescription {
     /** Whether this log directory is cordoned. */
     isCordoned: boolean;
   });
-  /**
-   * Builds the description.
-   *
-   * @param options - the fields of one of Java's three constructors
-   * @throws `IllegalArgumentError` when the given parameters are no Java form
-   * @throws `TypeError` for a value of the wrong type, or null replicaInfos
-   * @throws `RangeError` for a size beyond 2^53 - 1 as a number, or beyond
-   *   Java's `long`
-   *
-   * @remarks The map is copied into a read-only one, so a null map is a
-   * `TypeError` here *(deviation: Java stores it, and its getter's
-   * `unmodifiableMap(null)` throws `NullPointerException`. Why: the field is
-   * set once, frozen, in the constructor)*.
-   */
   constructor(options: unknown) {
     const form = FORMS.match(options, arguments.length);
     const error = FORMS.value(options, 'error');

@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.DescribeLogDirsResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). Java's Map<Integer, ...> keyed by broker
+// Conventions, Class family). Java's Map<Integer, ...> keyed by broker
 // id is a Map of numbers.
 
 import { JavaForms } from '../internal/args';

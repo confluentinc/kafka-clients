@@ -19,7 +19,7 @@
 // asked for (Python's Futures rule names this Result), so each call hands out
 // a new future. A private constructor, the client building it through
 // `internalOfClient` (javascript/CLAUDE.md, JavaScript Binding Conventions, Class
-// family, Q16). Java's package-private constructor, over the future of the
+// family). Java's package-private constructor, over the future of the
 // response's per-user results, is `internalCreate`, with Java's composition
 // (as the other Results over C futures keep Java's constructor beside the
 // client's path).

@@ -13,9 +13,8 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.CreateTopicsOptions, an option class
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19). Java's setters
-// validateOnly and retryOnQuotaViolation keep their readers' own names
-// (Q17).
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family). Java's setters
+// validateOnly and retryOnQuotaViolation keep their readers' own names.
 
 import { JavaForms } from '../internal/args';
 import { Setter, applyOptionKeys, checkBoolean } from '../internal/options';
@@ -41,7 +40,7 @@ export class CreateTopicsOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -90,13 +89,6 @@ export class CreateTopicsOptions extends AbstractOptions {
     /** Whether the request is only validated. */
     validateOnly: boolean;
   }): this;
-  /**
-   * Sets the value.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing or not a boolean
-   */
   validateOnly(options: unknown): this {
     this.#validateOnly = checkBoolean(VALIDATE_ONLY.value(options, arguments.length), 'validateOnly');
     this.internalRecord('validateOnly', this.#validateOnly);
@@ -133,13 +125,6 @@ export class CreateTopicsOptions extends AbstractOptions {
     /** Whether a quota violation is retried. */
     retryOnQuotaViolation: boolean;
   }): this;
-  /**
-   * Sets the value.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing or not a boolean
-   */
   retryOnQuotaViolation(options: unknown): this {
     this.#retryOnQuotaViolation = checkBoolean(RETRY_ON_QUOTA_VIOLATION.value(options, arguments.length), 'retryOnQuotaViolation');
     this.internalRecord('retryOnQuotaViolation', this.#retryOnQuotaViolation);

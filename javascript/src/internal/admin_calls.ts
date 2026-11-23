@@ -110,7 +110,7 @@ export function optionSetters(
 
 /**
  * Java's first dereference, `options`, checked before the arguments Java only
- * stores (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors, Q36: the
+ * stores (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors: the
  * checks run in Java's order), for the RPCs whose Java body reads the options
  * first. Options left out are Java's `new XxxOptions()`.
  *

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.DescribeConsumerGroupsOptions, an option class
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19). Java's getter /
-// setter pairs are one method each (Q17).
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family). Java's getter /
+// setter pairs are one method each.
 
 import { GetterSetter, applyOptionKeys, checkBoolean } from '../internal/options';
 import { AbstractOptions } from './abstract_options';
@@ -35,7 +35,7 @@ export class DescribeConsumerGroupsOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -83,13 +83,6 @@ export class DescribeConsumerGroupsOptions extends AbstractOptions {
     /** Whether authorized operations are included. */
     includeAuthorizedOperations: boolean;
   }): this;
-  /**
-   * Reads or sets the value.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the value, or this object
-   * @throws `TypeError` when the value is not a boolean
-   */
   includeAuthorizedOperations(options?: unknown): boolean | this {
     if (!INCLUDE_AUTHORIZED_OPERATIONS.sets(options, arguments.length)) return this.#includeAuthorizedOperations;
     this.#includeAuthorizedOperations = checkBoolean(INCLUDE_AUTHORIZED_OPERATIONS.value(options), 'includeAuthorizedOperations');

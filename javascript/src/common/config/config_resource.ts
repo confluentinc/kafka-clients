@@ -14,8 +14,8 @@
 
 // Java's org.apache.kafka.common.config.ConfigResource, a value class that
 // keeps Java's methods, with its nested Type enum, a class of the namespace
-// merged with it (javascript/CLAUDE.md, JavaScript Binding Conventions, Names,
-// Q11). equals, hashCode and toString are Java's.
+// merged with it (javascript/CLAUDE.md, JavaScript Binding Conventions, Names).
+// equals, hashCode and toString are Java's.
 
 import { JavaForms } from '../../internal/args';
 import { objectHashCode, sameClass, stringHashCode } from '../../internal/java_object';
@@ -239,14 +239,6 @@ export namespace ConfigResource {
       /** The name of the constant to return. */
       name: string;
     }): Type;
-    /**
-     * Looks the constant up.
-     *
-     * @param name - the name, on its own or as `{ name }`
-     * @returns the constant with the specified name
-     * @throws `IllegalArgumentError` when no constant has that name
-     * @throws `TypeError` when the name is null or not a string
-     */
     static valueOf(name: unknown): Type {
       TYPE_VALUE_OF_FORMS.match(name, arguments.length);
       const value = TYPE_VALUE_OF_FORMS.value(name, 'name');
@@ -280,14 +272,6 @@ export namespace ConfigResource {
       /** The wire byte. */
       id: number;
     }): Type;
-    /**
-     * Looks the type up.
-     *
-     * @param id - the byte, on its own or as `{ id }`
-     * @returns the type, `UNKNOWN` for an unknown byte
-     * @throws `TypeError` when the id is not an integer
-     * @throws `RangeError` when it is outside Java's `byte`
-     */
     static forId(id: unknown): Type {
       TYPE_FOR_ID_FORMS.match(id, arguments.length);
       const value = TYPE_FOR_ID_FORMS.value(id, 'id');

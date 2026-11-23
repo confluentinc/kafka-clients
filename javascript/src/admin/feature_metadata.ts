@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.FeatureMetadata, a value class that
 // keeps Java's methods. Its Java constructor is package-private: a private
 // constructor here, the client building it through `internalCreate`
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q16). Java's
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family). Java's
 // `Optional<Long>` epoch is `bigint | null` (Types). The getters return a new
 // `Map` on each call, as Java's return a new `HashMap`. equals, hashCode and
 // toString are Java's; Java's HashMap order is unspecified, so the maps keep
