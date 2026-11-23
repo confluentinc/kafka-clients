@@ -145,19 +145,21 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// </para>
     /// <para>
     /// A null <paramref name="groupMetadata"/> is refused before <paramref name="offsets"/> is read, and a null
-    /// <paramref name="offsets"/> before the state is checked. With an empty <paramref name="offsets"/>,
-    /// <see cref="KafkaProducer{TKey, TValue}"/> and <see cref="AsyncKafkaProducer{TKey, TValue}"/> return without
-    /// contacting the coordinator and without checking the transaction state, as Java's does: beyond those null
-    /// checks they throw only on a closed producer, or on one with no transaction support
-    /// (<c>enable.idempotence=false</c>). The mocks make their state checks first, as Java's mock does.
+    /// <paramref name="offsets"/> before the state is checked; a null key after the checks an empty
+    /// <paramref name="offsets"/> makes, as Java reads a key only after them. With an empty
+    /// <paramref name="offsets"/>, <see cref="KafkaProducer{TKey, TValue}"/> and
+    /// <see cref="AsyncKafkaProducer{TKey, TValue}"/> return without contacting the coordinator and without checking
+    /// the transaction state, as Java's does: beyond those null checks they throw only on a closed producer, or on one
+    /// with no transaction support (<c>enable.idempotence=false</c>). The mocks make their state checks first, as
+    /// Java's mock does.
     /// </para>
     /// </remarks>
     /// <param name="offsets">The offsets to commit with the transaction.</param>
     /// <param name="groupMetadata">The consumer group metadata, from the consumer's <c>GroupMetadata()</c>.</param>
     /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
     /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null, a key of it has a null topic, or a
-    /// value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null, a key of it is null or has a null
+    /// topic, or a value is null.</exception>
     /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
     /// been started, or the producer is closed.</exception>
     /// <exception cref="ProducerFencedException">Fatal error indicating another producer with the same

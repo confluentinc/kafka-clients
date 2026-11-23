@@ -322,6 +322,11 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(spec));
             }
 
+            if (spec.TopicPartition() is null)
+            {
+                throw new ArgumentNullException(nameof(spec), "spec must not have a null TopicPartition");
+            }
+
             if (spec.TopicPartition().Topic() is null)
             {
                 throw new ArgumentNullException(nameof(spec), "spec must not have a TopicPartition with a null topic");

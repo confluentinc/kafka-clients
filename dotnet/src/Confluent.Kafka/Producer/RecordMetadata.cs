@@ -32,7 +32,9 @@ public sealed class RecordMetadata
     private const long InvalidOffset = -1L;
     private const long NoTimestamp = -1L;
 
-    private readonly TopicPartition? _topicPartition;
+    private readonly string? _topic;
+    private readonly int _partition;
+    private readonly bool _hasTopicPartition;
     private readonly long _offset;
     private readonly long _timestamp;
     private readonly int _serializedKeySize;
@@ -56,7 +58,13 @@ public sealed class RecordMetadata
         int serializedKeySize,
         int serializedValueSize)
     {
-        _topicPartition = topicPartition;
+        if (topicPartition is not null)
+        {
+            _topic = topicPartition.Topic();
+            _partition = topicPartition.Partition();
+            _hasTopicPartition = true;
+        }
+
         _offset = baseOffset == InvalidOffset ? baseOffset : baseOffset + batchIndex;
         _timestamp = timestamp;
         _serializedKeySize = serializedKeySize;
@@ -64,13 +72,16 @@ public sealed class RecordMetadata
     }
 
     internal RecordMetadata(
-        TopicPartition topicPartition,
+        string topic,
+        int partition,
         long offset,
         long timestamp,
         int serializedKeySize,
         int serializedValueSize)
     {
-        _topicPartition = topicPartition;
+        _topic = topic;
+        _partition = partition;
+        _hasTopicPartition = true;
         _offset = offset;
         _timestamp = timestamp;
         _serializedKeySize = serializedKeySize;
@@ -108,18 +119,34 @@ public sealed class RecordMetadata
     /// <summary>The topic the record was appended to.</summary>
     /// <returns>The topic the record was appended to.</returns>
     /// <exception cref="InvalidOperationException">The instance was constructed with a null topic partition.</exception>
-    public string Topic() => StoredTopicPartition().Topic();
+    public string Topic()
+    {
+        EnsureTopicPartition();
+        return _topic!;
+    }
 
     /// <summary>The partition the record was sent to.</summary>
     /// <returns>The partition the record was sent to.</returns>
     /// <exception cref="InvalidOperationException">The instance was constructed with a null topic partition.</exception>
-    public int Partition() => StoredTopicPartition().Partition();
+    public int Partition()
+    {
+        EnsureTopicPartition();
+        return _partition;
+    }
 
     /// <inheritdoc/>
     /// <exception cref="InvalidOperationException">The instance was constructed with a null topic partition.</exception>
-    public override string ToString() =>
-        StoredTopicPartition().ToString() + "@" + Offset().ToString(CultureInfo.InvariantCulture);
+    public override string ToString()
+    {
+        EnsureTopicPartition();
+        return TopicPartition.Format(_topic, _partition) + "@" + Offset().ToString(CultureInfo.InvariantCulture);
+    }
 
-    private TopicPartition StoredTopicPartition() =>
-        _topicPartition ?? throw new InvalidOperationException("topicPartition must not be null");
+    private void EnsureTopicPartition()
+    {
+        if (!_hasTopicPartition)
+        {
+            throw new InvalidOperationException("topicPartition must not be null");
+        }
+    }
 }

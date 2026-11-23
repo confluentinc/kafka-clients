@@ -139,18 +139,18 @@ public sealed class AdminP4SubmitArgumentTests
         Assert.Equal(
             "partitions",
             Assert.Throws<ArgumentNullException>(
-                () => admin.ElectLeaders(ElectionType.PREFERRED, new[] { default(TopicPartition) }, options: new ElectLeadersOptions()))
+                () => admin.ElectLeaders(ElectionType.PREFERRED, new[] { new TopicPartition(null!, 0) }, options: new ElectLeadersOptions()))
                 .ParamName);
         Assert.Equal(
             "reassignments",
             Assert.Throws<ArgumentNullException>(
                 () => admin.AlterPartitionReassignments(
-                    new Dictionary<TopicPartition, NewPartitionReassignment?> { [default] = null }, options: new AlterPartitionReassignmentsOptions()))
+                    new Dictionary<TopicPartition, NewPartitionReassignment?> { [new TopicPartition(null!, 0)] = null }, options: new AlterPartitionReassignmentsOptions()))
                 .ParamName);
         Assert.Equal(
             "partitions",
             Assert.Throws<ArgumentNullException>(
-                () => admin.ListPartitionReassignments(new[] { default(TopicPartition) }, options: new ListPartitionReassignmentsOptions()))
+                () => admin.ListPartitionReassignments(new[] { new TopicPartition(null!, 0) }, options: new ListPartitionReassignmentsOptions()))
                 .ParamName);
     }
 
@@ -346,7 +346,7 @@ public sealed class AdminP4SubmitArgumentTests
     /// <summary>Treats no two partitions as equal, so two equal partitions stay two entries.</summary>
     private sealed class NeverEqualComparer : IEqualityComparer<TopicPartition>
     {
-        public bool Equals(TopicPartition x, TopicPartition y) => false;
+        public bool Equals(TopicPartition? x, TopicPartition? y) => false;
 
         public int GetHashCode(TopicPartition obj) => 0;
     }

@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -114,7 +115,7 @@ public sealed class PublicProducerSendStringTests
         string message = field == TopicField ? TopicMessage : HeaderKeyMessage;
         Assert.Equal(new ArgumentException(message, "record").Message, rejected.Message);
 
-        Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
+        Assert.Equal(!subject.IsMock, ((RecordHeaders)record.Headers()).IsReadOnly());
 
         if (subject.IsMock)
         {
@@ -160,7 +161,7 @@ public sealed class PublicProducerSendStringTests
 
         RecordMetadata? metadata = await subject.Deliver(record);
 
-        Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
+        Assert.Equal(!subject.IsMock, ((RecordHeaders)record.Headers()).IsReadOnly());
         if (subject.IsMock)
         {
             Assert.Equal(NonAsciiTopic, metadata!.Topic());
@@ -180,7 +181,7 @@ public sealed class PublicProducerSendStringTests
 
             RecordMetadata? metadata = await subject.Deliver(record);
 
-            Assert.Equal(!subject.IsMock, record.Headers().IsReadOnly);
+            Assert.Equal(!subject.IsMock, ((RecordHeaders)record.Headers()).IsReadOnly());
             if (subject.IsMock)
             {
                 // The topic the core holds, read back: the surrogate crossed as '?'.
@@ -218,7 +219,7 @@ public sealed class PublicProducerSendStringTests
             topic,
             value: "value",
             key: "key",
-            headers: new[] { new Header("first", Bytes("1")), new Header(headerKey, Bytes("2")) }, partition: null);
+            headers: new[] { new RecordHeader("first", Bytes("1")), new RecordHeader(headerKey, Bytes("2")) }, partition: null);
 
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?>

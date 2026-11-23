@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
@@ -216,7 +217,7 @@ internal static class ConsumerRecordsMarshal
 
                         IntPtr record = Get(partitionRecords, i);
                         RecordFields fields = reader.Fields(record);
-                        Headers headers = CopyHeaders(record);
+                        RecordHeaders headers = CopyHeaders(record);
                         batch.AddBytes((long)Length(fields.Key) + Length(fields.Value));
 
                         TKey? deserializedKey = default;
@@ -461,14 +462,14 @@ internal static class ConsumerRecordsMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
     }
 
-    private static Headers CopyHeaders(IntPtr record)
+    private static RecordHeaders CopyHeaders(IntPtr record)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr recordHeaders = NativeMethods.ConsumerRecordHeaders(record, ref outErr);
         KafkaException.ThrowIfFfiFailed(ref outErr);
         if (recordHeaders == IntPtr.Zero)
         {
-            return new Headers();
+            return new RecordHeaders();
         }
 
         IntPtr view = NativeMethods.RecordHeadersAsHeaders(recordHeaders, ref outErr);
@@ -477,7 +478,7 @@ internal static class ConsumerRecordsMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
         if (array == IntPtr.Zero)
         {
-            return new Headers();
+            return new RecordHeaders();
         }
 
         try
@@ -485,10 +486,10 @@ internal static class ConsumerRecordsMarshal
             int count = Size(array);
             if (count <= 0)
             {
-                return new Headers();
+                return new RecordHeaders();
             }
 
-            List<Header> headers = new List<Header>(count);
+            List<IHeader> headers = new List<IHeader>(count);
             for (int i = 0; i < count; i++)
             {
                 IntPtr header = NativeMethods.RecordHeaderAsHeader(Get(array, i), ref outErr);
@@ -497,10 +498,10 @@ internal static class ConsumerRecordsMarshal
                 KafkaException.ThrowIfFfiFailed(ref outErr);
                 KafkaBytes value = NativeMethods.HeaderValue(header, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
-                headers.Add(new Header(Utf8Marshal.PtrToString(key) ?? string.Empty, CopyBytes(value)));
+                headers.Add(new RecordHeader(Utf8Marshal.PtrToString(key) ?? string.Empty, CopyBytes(value)));
             }
 
-            return Headers.Wrap(headers);
+            return RecordHeaders.Wrap(headers);
         }
         finally
         {
@@ -536,7 +537,7 @@ internal static class ConsumerRecordsMarshal
         IDeserializerWithReadOnlyMemory<T>? withMemory,
         SafeConsumerRecordsHandle? batch,
         string topic,
-        Headers headers,
+        IHeaders headers,
         IntPtr bytes)
     {
         KafkaBytes* view = (KafkaBytes*)bytes;
@@ -557,7 +558,7 @@ internal static class ConsumerRecordsMarshal
         AsyncDeserializerCall<T> call,
         SafeConsumerRecordsHandle batch,
         string topic,
-        Headers headers,
+        IHeaders headers,
         IntPtr bytes,
         CancellationToken cancellationToken)
     {
@@ -584,7 +585,7 @@ internal static class ConsumerRecordsMarshal
         AsyncDeserializerCall<T> call,
         BytesMemoryManager lent,
         string topic,
-        Headers headers,
+        IHeaders headers,
         CancellationToken cancellationToken)
     {
         try
@@ -605,7 +606,7 @@ internal static class ConsumerRecordsMarshal
         RecordFields fields,
         TKey? key,
         TValue? value,
-        Headers headers)
+        IHeaders headers)
     {
         IntPtr outErr = IntPtr.Zero;
         int serializedKeySize = NativeMethods.ConsumerRecordSerializedKeySize(record, ref outErr);
@@ -627,7 +628,7 @@ internal static class ConsumerRecordsMarshal
         TimestampType timestampType,
         IntPtr key,
         IntPtr value,
-        Headers headers,
+        IHeaders headers,
         Exception cause) =>
         new RecordDeserializationException(
             origin,
@@ -721,7 +722,7 @@ internal static class ConsumerRecordsMarshal
             KafkaException.ThrowIfFfiFailed(ref outErr);
             IntPtr value = NativeMethods.ConsumerRecordValue(record, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            Headers headers = CopyHeaders(record);
+            RecordHeaders headers = CopyHeaders(record);
             batch?.AddBytes((long)Length(key) + Length(value));
 
             TKey? deserializedKey = default;

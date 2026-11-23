@@ -50,7 +50,17 @@ internal readonly struct OffsetsSnapshot
 
     internal int Count { get; }
 
-    internal static OffsetsSnapshot Of(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
+    internal static OffsetsSnapshot Of(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
+        Snapshot(offsets, nullKeyGivesNone: false).GetValueOrDefault();
+
+    // The snapshot, or null when a key is null, for the caller to answer it where Java does; the entries after it are
+    // not read.
+    internal static OffsetsSnapshot? TryOf(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
+        Snapshot(offsets, nullKeyGivesNone: true);
+
+    internal static ArgumentNullException NullKey() => new ArgumentNullException("offsets", "offsets must not contain null");
+
+    private static OffsetsSnapshot? Snapshot(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, bool nullKeyGivesNone)
     {
         if (offsets is null)
         {
@@ -66,7 +76,12 @@ internal readonly struct OffsetsSnapshot
         int index = 0;
         foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in offsets)
         {
-            TopicPartition tp = entry.Key;
+            TopicPartition? tp = entry.Key;
+            if (tp is null)
+            {
+                return nullKeyGivesNone ? null : throw NullKey();
+            }
+
             if (tp.Topic() is null)
             {
                 throw new ArgumentNullException(nameof(offsets), "offsets must not contain a TopicPartition with a null topic");
