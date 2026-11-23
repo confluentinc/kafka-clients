@@ -35,11 +35,11 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="AsyncFenceProducersResult"/>
 public sealed class FenceProducersResult
 {
-    private readonly IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> _futures;
+    private readonly IReadOnlyDictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> _futures;
     private readonly SafeAdminResultHandle _native;
 
     private FenceProducersResult(
-        IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures, SafeAdminResultHandle native)
+        IReadOnlyDictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> futures, SafeAdminResultHandle native)
     {
         _futures = futures;
         _native = native;
@@ -56,9 +56,9 @@ public sealed class FenceProducersResult
     public IReadOnlyDictionary<string, KafkaFuture> FencedProducers()
     {
         Dictionary<string, KafkaFuture> fenced = new Dictionary<string, KafkaFuture>(_futures.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, KafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
+        foreach (KeyValuePair<string, IKafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
         {
-            fenced.Add(entry.Key, new KafkaFuture(entry.Value.ThenApply<object?>(static _ => null)));
+            fenced.Add(entry.Key, SyncAdminFutures.Of(entry.Value.ThenApplyFunc<object?>(static _ => null)));
         }
 
         return fenced;
@@ -75,7 +75,7 @@ public sealed class FenceProducersResult
     /// with Java's message, as Java's is.
     /// </exception>
     public KafkaFuture<long> ProducerId(string transactionalId) =>
-        new KafkaFuture<long>(Find(_futures, transactionalId).ThenApply(static value => value.ProducerId));
+        SyncAdminFutures.Of(Find(_futures, transactionalId).ThenApplyFunc(static value => value.ProducerId));
 
     /// <summary>
     /// The epoch generated while initializing that transaction — Java's
@@ -88,7 +88,7 @@ public sealed class FenceProducersResult
     /// <see cref="ProducerId"/>.
     /// </exception>
     public KafkaFuture<short> EpochId(string transactionalId) =>
-        new KafkaFuture<short>(Find(_futures, transactionalId).ThenApply(static value => value.Epoch));
+        SyncAdminFutures.Of(Find(_futures, transactionalId).ThenApplyFunc(static value => value.Epoch));
 
     /// <summary>
     /// Completes when every producer has been fenced, and fails with the first failure to complete
@@ -96,17 +96,17 @@ public sealed class FenceProducersResult
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
     /// <remarks>Each call builds a new future.</remarks>
-    public KafkaFuture All() => new KafkaFuture(KafkaFutureImpl.AllOf(new List<KafkaFutureImpl>(_futures.Values)));
+    public KafkaFuture All() => FutureState.AllOf(new KafkaFutureImpl<object?>(), new List<IKafkaFutureImpl>(_futures.Values));
 
     internal static FenceProducersResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> Producers, SafeAdminResultHandle Result) native) =>
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> Producers, SafeAdminResultHandle Result) native) =>
         new FenceProducersResult(native.Producers, native.Result);
 
-    internal static KafkaFutureImpl<ProducerIdAndEpoch> Find(
-        IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures, string transactionalId)
+    internal static IKafkaFutureImpl<ProducerIdAndEpoch> Find(
+        IReadOnlyDictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> futures, string transactionalId)
     {
         // Java's map holds no null key, so a null id was not requested either.
-        return transactionalId is not null && futures.TryGetValue(transactionalId, out KafkaFutureImpl<ProducerIdAndEpoch>? future)
+        return transactionalId is not null && futures.TryGetValue(transactionalId, out IKafkaFutureImpl<ProducerIdAndEpoch>? future)
             ? future
             : throw new IllegalArgumentException(
                 "TransactionalId `" + JavaText.ValueOf(transactionalId) + "` was not included in the request");

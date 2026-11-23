@@ -154,7 +154,7 @@ public sealed class MockAdminClient : IAdmin
     public ListTopicsResult ListTopics(ListTopicsOptions options)
     {
         var (namesToListings, result) = _native.ListTopics(options ?? new ListTopicsOptions());
-        return new ListTopicsResult(new KafkaFuture<IReadOnlyDictionary<string, TopicListing>>(namesToListings), result);
+        return new ListTopicsResult(SyncAdminFutures.Of(namesToListings), result);
     }
 
     /// <inheritdoc/>

@@ -304,7 +304,7 @@ per-send thread and no poll loop (M19/P1, decisions 4 and 9).
    CompletionThread (1 per producer):          │       │  callback queue
      wait for the signal ◄─────────────────────│◄──────│    notify hook (empty → non-empty)
      Producer__execute_callbacks ──────────────│──────►│    runs a queued handover cb / on_completion here
-       user callback → KafkaFutureImpl.Complete│       │
+       user callback → the record's future     │       │
        Producer__set_callback_result ──────────│──────►│
    Close/Dispose: refuse calls → close → join the thread → wait for uses → destroy
 ```
@@ -421,7 +421,7 @@ awaits it (decision 9).
   - An async `Send` whose record is taken at once (`AsyncMockProducer`) completes its first
     stage synchronously, before `Send` returns.
   - Teardown settles both stages of every send exactly once, and leaves no uncompleted
-    `TaskCompletionSource` or `KafkaFutureImpl`. Two exceptions, as in Java and Python: a mock
+    `TaskCompletionSource` or record future. Two exceptions, as in Java and Python: a mock
     send left uncompleted at `Close` stays pending (`Dispose` flushes first); and a record whose
     batch a produce response did not complete, still in flight when a graceful `Close` ends, is
     dropped by the core without a delivery, so its second stage stays pending
@@ -939,7 +939,7 @@ callback of M14/P1 (the old form C) is replaced by `Callback_t`.
     `self_` is the only per-record identity, and `callback_id` appears only when the callback
     fires.
   - **`self_` lifetime** (decision 10): a `GCHandle` over the record's state (the user callback,
-    if any, and the record's `KafkaFutureImpl`). Keep it until `on_completion` fires, and free it
+    if any, and the record's future). Keep it until `on_completion` fires, and free it
     there, after reporting. After a send error (`out_err` set, or a handover `cb` with an error)
     keep it until the producer's destroy has returned, then free it: the callback may still fire
     once if the record reached the accumulator (BH:38221-38227, BH:38251-38254).
@@ -947,7 +947,7 @@ callback of M14/P1 (the old form C) is replaced by `Callback_t`.
     them. `metadata` is non-null on failure too: the record's placeholder, offset -1
     (`rust/src/ffi/producer/callback.rs:29-30` at `0035d9ff`).
   - **Order** (decision 36): run the user delivery callback, if there is one; then complete the
-    record's `KafkaFutureImpl` (`Complete` / `CompleteWithError`, which releases every `Get` and
+    record's future (`Complete` / `CompleteWithError`, which releases every `Get` and
     runs the `WhenComplete` actions); then report with
     `Producer__set_callback_result(view, callback_id, NULL, error)`. On the async producer, a
     completion handled by the chain (queued behind a running async callback, or the callback's own
@@ -1030,14 +1030,15 @@ as success.
 
 ---
 
-## A7 Async / Future completion → `KafkaFutureImpl`, `Completion`, `TaskCompletionSource`
+## A7 Async / Future completion → the future engines, `Completion`, `TaskCompletionSource`
 
 **Decision (M19/P1):** one completion model. The pull-pump (the old Option A) and the push
 dispatcher (the old Option B) are both gone with the pre-`0035d9ff` ABI.
 
-  - **A record's outcome:** `on_completion` (§A6) completes the record's `KafkaFutureImpl`.
-    `KafkaFuture<RecordMetadata>` (sync) and `AsyncKafkaFuture<RecordMetadata>` (async) are views
-    over it (`dotnet/CLAUDE.md` §4 futures). The owned `KafkaFuture_t *` a send returns is freed at
+  - **A record's outcome:** `on_completion` (§A6) completes the record's future, which is its
+    flavor's engine: a `KafkaFutureImpl<RecordMetadata>`, the sync `KafkaFuture<RecordMetadata>`,
+    or an `AsyncKafkaFutureImpl<RecordMetadata>`, the async `AsyncKafkaFuture<RecordMetadata>`
+    (`dotnet/CLAUDE.md` §4 futures). The owned `KafkaFuture_t *` a send returns is freed at
     once and never read.
   - **Sync waits** (decisions 4, 4b): `Send` is the blocking `send_with_callback` (§A1). `Flush`,
     the five transaction ops, `PartitionsFor` and `Close` call their `_cb` form and wait on a
@@ -2551,10 +2552,11 @@ the core's flag's (§B1, ledger 136).
 ## C1 Drain thread, futures and teardown
 
 **Decision (M19/P1, decisions 5, 8, 4a):** every RPC returns its Result at once, as Java's
-does (`.claude/rules/admin-client.md` §1). Each future in it is a `KafkaFutureImpl`. When the
-Result is built, each native future gets one `kafka_common_KafkaFuture_get_cb`, and its delivery
-completes the `KafkaFutureImpl` on the client's drain thread. Both flavours share this path; only
-the public struct differs (`KafkaFuture` or `AsyncKafkaFuture`, `dotnet/CLAUDE.md` §4).
+does (`.claude/rules/admin-client.md` §1). Each future in it is its flavour's engine: a
+`KafkaFutureImpl` (a `KafkaFuture`) on the sync client, an `AsyncKafkaFutureImpl` (an `AsyncKafkaFuture`)
+on the async one. When the Result is built, each native future gets one `kafka_common_KafkaFuture_get_cb`,
+and its delivery completes the engine on the client's drain thread. Both flavours share this path; each
+flavour has its own engine, and the two share `FutureState<T>` (`dotnet/CLAUDE.md` §4).
 
 The C shapes (BH at `25a4d475`):
 
@@ -2608,8 +2610,9 @@ The C shapes (BH at `25a4d475`):
   - **No own-thread guard** (ledger 39). A native-backed future answers a `Get` on the drain thread
     from its handle. A derived future (`ThenApply`, `WhenComplete`, `AllOf`) has no handle: a `Get`
     on the thread that must complete it waits, as in Java and Python.
-  - **Composition** (decision 4a): `All()` and the refinements are built over `KafkaFutureImpl`
-    (`AllOf`, `ThenApply`) where Java builds them with `allOf` / `thenApply`. A Result whose Java
+  - **Composition** (decision 4a): `All()` and the refinements are built over the Result's flavour's
+    engine, `KafkaFutureImpl` or `AsyncKafkaFutureImpl` (`AllOf`, `ThenApply`), where Java builds them
+    with `allOf` / `thenApply`. A Result whose Java
     `all()` is its own future takes that future. This is Python's split (root `CLAUDE.md`,
     Futures). The C `kafka_common_KafkaFuture_all_of` and `_then_apply` are not used.
   - **Options** (ledger 176): each RPC builds its C options with `<X>Options_new`, which carries
@@ -2660,7 +2663,8 @@ lag and no drain-thread guard (decision 8).
   - A sync Result composed over Tasks (`Task.WhenAll`, an `async` projection, `ContinueWith`)
     and then blocked on (`GetAwaiter().GetResult()`, `.Wait()`, `.Result`). With
     `RunContinuationsAsynchronously` the composite needs a pool thread to complete, so a saturated
-    pool starves it. Compose over `KafkaFutureImpl` instead: its `Get` waits on the calling thread.
+    pool starves it. Compose over the sync engine, `KafkaFutureImpl`, instead: its `Get` waits on the
+    calling thread.
   - A `cb` that throws into native, or leaves its owned `error` unfreed.
   - Destroying the client inside `__execute_callbacks` (§0.3).
   - A mock `Close` that closes, frees or checks anything.

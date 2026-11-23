@@ -56,16 +56,16 @@ public sealed class DescribeClusterResult
     internal SafeAdminResultHandle? Native { get; }
 
     internal static DescribeClusterResult OfClient(
-        (KafkaFutureImpl<IReadOnlyCollection<Node>> Nodes,
-            KafkaFutureImpl<Node?> Controller,
-            KafkaFutureImpl<string> ClusterId,
-            KafkaFutureImpl<IReadOnlyCollection<AclOperation>?> AuthorizedOperations,
+        (IKafkaFutureImpl<IReadOnlyCollection<Node>> Nodes,
+            IKafkaFutureImpl<Node?> Controller,
+            IKafkaFutureImpl<string> ClusterId,
+            IKafkaFutureImpl<IReadOnlyCollection<AclOperation>?> AuthorizedOperations,
             SafeAdminResultHandle Result) native) =>
         new DescribeClusterResult(
-            new KafkaFuture<IReadOnlyCollection<Node>>(native.Nodes),
-            new KafkaFuture<Node?>(native.Controller),
-            new KafkaFuture<string>(native.ClusterId),
-            new KafkaFuture<IReadOnlyCollection<AclOperation>?>(native.AuthorizedOperations),
+            SyncAdminFutures.Of(native.Nodes),
+            SyncAdminFutures.Of(native.Controller),
+            SyncAdminFutures.Of(native.ClusterId),
+            SyncAdminFutures.Of(native.AuthorizedOperations),
             native.Result);
 
     /// <summary>The cluster's nodes — Java's <c>nodes()</c>.</summary>

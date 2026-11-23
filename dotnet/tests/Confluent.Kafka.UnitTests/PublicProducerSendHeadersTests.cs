@@ -118,11 +118,11 @@ public sealed class PublicProducerSendHeadersTests
             Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<string, string> record = Record();
-        KafkaFuture<RecordMetadata> first = default;
+        KafkaFuture<RecordMetadata> first = null!;
         TestTimeout.Run(() => first = producer.Send(record), s_deadline);
         Assert.True(((RecordHeaders)record.Headers()).IsReadOnly());
 
-        KafkaFuture<RecordMetadata> again = default;
+        KafkaFuture<RecordMetadata> again = null!;
         TestTimeout.Run(() => again = producer.Send(record), s_deadline);
 
         Assert.True(((RecordHeaders)record.Headers()).IsReadOnly());

@@ -73,7 +73,7 @@ public sealed class AsyncDescribeConsumerGroupsResult
             Dictionary<string, ConsumerGroupDescription> descriptions = new Dictionary<string, ConsumerGroupDescription>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, AsyncKafkaFuture<ConsumerGroupDescription>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null!));
+                descriptions.Add(entry.Key, AsyncAdminFutures.Engine(entry.Value).GetNowUnwrapped(null!));
             }
 
             return descriptions;
@@ -81,13 +81,13 @@ public sealed class AsyncDescribeConsumerGroupsResult
     }
 
     internal static AsyncDescribeConsumerGroupsResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<ConsumerGroupDescription>> DescribedGroups, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<ConsumerGroupDescription>> DescribedGroups, SafeAdminResultHandle Result) native)
     {
         Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>> futures =
             new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>>(native.DescribedGroups.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, KafkaFutureImpl<ConsumerGroupDescription>> entry in native.DescribedGroups)
+        foreach (KeyValuePair<string, IKafkaFutureImpl<ConsumerGroupDescription>> entry in native.DescribedGroups)
         {
-            futures.Add(entry.Key, new AsyncKafkaFuture<ConsumerGroupDescription>(entry.Value));
+            futures.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
         }
 
         return new AsyncDescribeConsumerGroupsResult(futures, native.Result);

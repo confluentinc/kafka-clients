@@ -72,6 +72,80 @@ public sealed class PublicAdminResultConstructorTests
         },
     };
 
+    [Fact]
+    public void All_OverANullFuture_ThrowsArgumentNullException_AtTheCall()
+    {
+        string expected = new ArgumentNullException("futures", "futures must not contain null").Message;
+        KafkaFuture done = KafkaFuture.CompletedFuture<object?>(null);
+        foreach (Func<KafkaFuture> all in new Func<KafkaFuture>[]
+        {
+            () => new AlterClientQuotasResult(
+                new Dictionary<ClientQuotaEntity, KafkaFuture> { [s_alice] = done, [s_bob] = null! }).All(),
+            () => new AlterUserScramCredentialsResult(new Dictionary<string, KafkaFuture> { ["alice"] = null! }).All(),
+            () => new DeleteRecordsResult(new Dictionary<TopicPartition, KafkaFuture<DeletedRecords>> { [s_p0] = null! }).All(),
+            () => new DescribeClassicGroupsResult(
+                new Dictionary<string, KafkaFuture<ClassicGroupDescription>> { ["g"] = null! }).All(),
+            () => new DescribeConsumerGroupsResult(
+                new Dictionary<string, KafkaFuture<ConsumerGroupDescription>> { ["g"] = null! }).All(),
+            () => new ListOffsetsResult(
+                new Dictionary<TopicPartition, KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> { [s_p0] = null! }).All(),
+        })
+        {
+            ArgumentNullException thrown = Assert.Throws<ArgumentNullException>(() => all());
+            Assert.Equal("futures", thrown.ParamName);
+            Assert.Equal(expected, thrown.Message);
+        }
+    }
+
+    [Fact]
+    public void ListOffsetsResult_PartitionResult_OfANullFuture_ThrowsJavasIllegalArgumentException()
+    {
+        ListOffsetsResult result = new ListOffsetsResult(
+            new Dictionary<TopicPartition, KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> { [s_p0] = null! });
+
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(() => result.PartitionResult(s_p0));
+        Assert.Equal("List Offsets for partition \"t-0\" was not attempted", thrown.Message);
+        Assert.Null(thrown.ParamName);
+    }
+
+    [Fact]
+    public void AsyncAll_OverANullFuture_ThrowsArgumentNullException_AtTheCall()
+    {
+        string expected = new ArgumentNullException("futures", "futures must not contain null").Message;
+        AsyncKafkaFuture done = AsyncKafkaFuture.CompletedFuture<object?>(null);
+        foreach (Func<AsyncKafkaFuture> all in new Func<AsyncKafkaFuture>[]
+        {
+            () => new AsyncAlterClientQuotasResult(
+                new Dictionary<ClientQuotaEntity, AsyncKafkaFuture> { [s_alice] = done, [s_bob] = null! }).All(),
+            () => new AsyncAlterUserScramCredentialsResult(new Dictionary<string, AsyncKafkaFuture> { ["alice"] = null! }).All(),
+            () => new AsyncDeleteRecordsResult(
+                new Dictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> { [s_p0] = null! }).All(),
+            () => new AsyncDescribeClassicGroupsResult(
+                new Dictionary<string, AsyncKafkaFuture<ClassicGroupDescription>> { ["g"] = null! }).All(),
+            () => new AsyncDescribeConsumerGroupsResult(
+                new Dictionary<string, AsyncKafkaFuture<ConsumerGroupDescription>> { ["g"] = null! }).All(),
+            () => new AsyncListOffsetsResult(
+                new Dictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> { [s_p0] = null! })
+                .All(),
+        })
+        {
+            ArgumentNullException thrown = Assert.Throws<ArgumentNullException>(() => all());
+            Assert.Equal("futures", thrown.ParamName);
+            Assert.Equal(expected, thrown.Message);
+        }
+    }
+
+    [Fact]
+    public void AsyncListOffsetsResult_PartitionResult_OfANullFuture_ThrowsJavasIllegalArgumentException()
+    {
+        AsyncListOffsetsResult result = new AsyncListOffsetsResult(
+            new Dictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> { [s_p0] = null! });
+
+        IllegalArgumentException thrown = Assert.Throws<IllegalArgumentException>(() => result.PartitionResult(s_p0));
+        Assert.Equal("List Offsets for partition \"t-0\" was not attempted", thrown.Message);
+        Assert.Null(thrown.ParamName);
+    }
+
     [Theory]
     [MemberData(nameof(Constructors))]
     public void Constructor_IsJavasOnePublicConstructor(Type result, Type parameterType, string parameterName)
@@ -93,8 +167,8 @@ public sealed class PublicAdminResultConstructorTests
             (() => _ = new AsyncAlterUserScramCredentialsResult(null!), "futures"),
             (() => _ = new DeleteRecordsResult(null!), "futures"),
             (() => _ = new AsyncDeleteRecordsResult(null!), "futures"),
-            (() => _ = new DescribeClientQuotasResult(default), "entities"),
-            (() => _ = new AsyncDescribeClientQuotasResult(default), "entities"),
+            (() => _ = new DescribeClientQuotasResult(null!), "entities"),
+            (() => _ = new AsyncDescribeClientQuotasResult(null!), "entities"),
             (() => _ = new ListOffsetsResult(null!), "futures"),
             (() => _ = new AsyncListOffsetsResult(null!), "futures"),
         })
@@ -110,7 +184,7 @@ public sealed class PublicAdminResultConstructorTests
     {
         KafkaException failure = new KafkaException("bob failed");
         KafkaFuture done = KafkaFuture.CompletedFuture<object?>(null);
-        KafkaFuture failed = new KafkaFuture(TestFutures.Failed(failure));
+        KafkaFuture failed = TestFutures.Failed(failure);
         Dictionary<ClientQuotaEntity, KafkaFuture> source = new Dictionary<ClientQuotaEntity, KafkaFuture> { [s_alice] = done };
 
         AlterClientQuotasResult result = new AlterClientQuotasResult(source);
@@ -133,7 +207,7 @@ public sealed class PublicAdminResultConstructorTests
     {
         KafkaException failure = new KafkaException("bob failed");
         AsyncKafkaFuture done = AsyncKafkaFuture.CompletedFuture<object?>(null);
-        AsyncKafkaFuture failed = new AsyncKafkaFuture(TestFutures.Failed(failure));
+        AsyncKafkaFuture failed = TestFutures.AsyncFailed(failure);
         Dictionary<ClientQuotaEntity, AsyncKafkaFuture> source = new Dictionary<ClientQuotaEntity, AsyncKafkaFuture> { [s_alice] = done };
 
         AsyncAlterClientQuotasResult result = new AsyncAlterClientQuotasResult(source);
@@ -160,7 +234,7 @@ public sealed class PublicAdminResultConstructorTests
     {
         KafkaException failure = new KafkaException("bob failed");
         KafkaFuture done = KafkaFuture.CompletedFuture<object?>(null);
-        KafkaFuture failed = new KafkaFuture(TestFutures.Failed(failure));
+        KafkaFuture failed = TestFutures.Failed(failure);
         Dictionary<string, KafkaFuture> source =
             new Dictionary<string, KafkaFuture>(StringComparer.OrdinalIgnoreCase) { ["Alice"] = done };
 
@@ -185,7 +259,7 @@ public sealed class PublicAdminResultConstructorTests
     {
         KafkaException failure = new KafkaException("bob failed");
         AsyncKafkaFuture done = AsyncKafkaFuture.CompletedFuture<object?>(null);
-        AsyncKafkaFuture failed = new AsyncKafkaFuture(TestFutures.Failed(failure));
+        AsyncKafkaFuture failed = TestFutures.AsyncFailed(failure);
         Dictionary<string, AsyncKafkaFuture> source =
             new Dictionary<string, AsyncKafkaFuture>(StringComparer.OrdinalIgnoreCase) { ["Alice"] = done };
 
@@ -215,7 +289,7 @@ public sealed class PublicAdminResultConstructorTests
         KafkaException failure = new KafkaException("t-1 failed");
         DeletedRecords deleted = new DeletedRecords(42);
         KafkaFuture<DeletedRecords> done = KafkaFuture.CompletedFuture(deleted);
-        KafkaFuture<DeletedRecords> failed = new KafkaFuture<DeletedRecords>(TestFutures.Failed<DeletedRecords>(failure));
+        KafkaFuture<DeletedRecords> failed = TestFutures.Failed<DeletedRecords>(failure);
         Dictionary<TopicPartition, KafkaFuture<DeletedRecords>> source =
             new Dictionary<TopicPartition, KafkaFuture<DeletedRecords>> { [s_p0] = done };
 
@@ -241,7 +315,7 @@ public sealed class PublicAdminResultConstructorTests
         KafkaException failure = new KafkaException("t-1 failed");
         DeletedRecords deleted = new DeletedRecords(42);
         AsyncKafkaFuture<DeletedRecords> done = AsyncKafkaFuture.CompletedFuture(deleted);
-        AsyncKafkaFuture<DeletedRecords> failed = new AsyncKafkaFuture<DeletedRecords>(TestFutures.Failed<DeletedRecords>(failure));
+        AsyncKafkaFuture<DeletedRecords> failed = TestFutures.AsyncFailed<DeletedRecords>(failure);
         Dictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> source =
             new Dictionary<TopicPartition, AsyncKafkaFuture<DeletedRecords>> { [s_p0] = done };
 
@@ -279,8 +353,7 @@ public sealed class PublicAdminResultConstructorTests
 
         KafkaException failure = new KafkaException("describe failed");
         DescribeClientQuotasResult failedResult = new DescribeClientQuotasResult(
-            new KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(
-                TestFutures.Failed<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(failure)));
+            TestFutures.Failed<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(failure));
         Assert.Same(failure, FutureAssert.Throws<KafkaException>(() => failedResult.Entities().Get(s_deadline)));
     }
 
@@ -298,8 +371,7 @@ public sealed class PublicAdminResultConstructorTests
 
         KafkaException failure = new KafkaException("describe failed");
         AsyncDescribeClientQuotasResult failedResult = new AsyncDescribeClientQuotasResult(
-            new AsyncKafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(
-                TestFutures.Failed<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(failure)));
+            TestFutures.AsyncFailed<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(failure));
         Assert.Same(
             failure,
             await FutureAssert.ThrowsAsync<KafkaException>(() => TestTimeout.Run(() => failedResult.Entities().Get(), s_deadline)));
@@ -311,8 +383,8 @@ public sealed class PublicAdminResultConstructorTests
         KafkaException failure = new KafkaException("t-1 failed");
         ListOffsetsResult.ListOffsetsResultInfo info = new ListOffsetsResult.ListOffsetsResultInfo(5, 100, 3);
         KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo> done = KafkaFuture.CompletedFuture(info);
-        KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo> failed = new KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>(
-            TestFutures.Failed<ListOffsetsResult.ListOffsetsResultInfo>(failure));
+        KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo> failed =
+            TestFutures.Failed<ListOffsetsResult.ListOffsetsResultInfo>(failure);
         Dictionary<TopicPartition, KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> source =
             new Dictionary<TopicPartition, KafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> { [s_p0] = done };
 
@@ -341,8 +413,7 @@ public sealed class PublicAdminResultConstructorTests
         KafkaException failure = new KafkaException("t-1 failed");
         ListOffsetsResult.ListOffsetsResultInfo info = new ListOffsetsResult.ListOffsetsResultInfo(5, 100, 3);
         AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo> done = AsyncKafkaFuture.CompletedFuture(info);
-        AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo> failed = new AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>(
-            TestFutures.Failed<ListOffsetsResult.ListOffsetsResultInfo>(failure));
+        AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo> failed = TestFutures.AsyncFailed<ListOffsetsResult.ListOffsetsResultInfo>(failure);
         Dictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> source =
             new Dictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> { [s_p0] = done };
 

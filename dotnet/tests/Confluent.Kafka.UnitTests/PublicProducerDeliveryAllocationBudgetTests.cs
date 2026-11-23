@@ -72,7 +72,7 @@ public sealed class PublicProducerDeliveryAllocationBudgetTests
             new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
-        // Pre-allocated outside every attempt; storing a struct into it allocates nothing.
+        // Pre-allocated outside every attempt; storing a future into it allocates nothing.
         KafkaFuture<RecordMetadata>[] futures = new KafkaFuture<RecordMetadata>[RecordCount];
 
         Measurement best = Measure(callback, () =>

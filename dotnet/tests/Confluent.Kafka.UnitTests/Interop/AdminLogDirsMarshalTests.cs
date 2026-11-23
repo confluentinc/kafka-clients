@@ -151,7 +151,7 @@ public sealed class AdminLogDirsMarshalTests
         await SeedTopic(admin, partitions: 2);
 
         var described = admin.DescribeLogDirs(new[] { 0 }, new DescribeLogDirsOptions());
-        IReadOnlyDictionary<string, LogDirDescription> directories = described.Descriptions[0].Get(s_deadline);
+        IReadOnlyDictionary<string, LogDirDescription> directories = described.Descriptions[0].GetUnwrapped(s_deadline);
         described.Result.Dispose();
 
         LogDirDescription description = Assert.Contains(DefaultLogDir, directories);
@@ -177,7 +177,7 @@ public sealed class AdminLogDirsMarshalTests
         TopicPartitionReplica replica = new TopicPartitionReplica(Topic, 0, 0);
 
         var described = admin.DescribeReplicaLogDirs(new[] { replica }, new DescribeReplicaLogDirsOptions());
-        DescribeReplicaLogDirsResult.ReplicaLogDirInfo info = described.Values[replica].Get(s_deadline);
+        DescribeReplicaLogDirsResult.ReplicaLogDirInfo info = described.Values[replica].GetUnwrapped(s_deadline);
         described.Result.Dispose();
 
         Assert.Equal(new[] { replica }, described.Values.Keys);
@@ -200,7 +200,7 @@ public sealed class AdminLogDirsMarshalTests
         var altered = admin.AlterReplicaLogDirs(
             new Dictionary<TopicPartitionReplica, string> { [replica] = "/not-a-configured-dir" }, new AlterReplicaLogDirsOptions());
 
-        KafkaStorageException failure = Assert.Throws<KafkaStorageException>(() => altered.Values[replica].Get(s_deadline));
+        KafkaStorageException failure = Assert.Throws<KafkaStorageException>(() => altered.Values[replica].GetUnwrapped(s_deadline));
         Assert.Equal("Log directory /not-a-configured-dir is offline", failure.Message);
         altered.Result.Dispose();
     }

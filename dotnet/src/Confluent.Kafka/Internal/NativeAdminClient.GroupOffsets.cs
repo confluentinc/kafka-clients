@@ -111,7 +111,7 @@ internal sealed partial class NativeAdminClient
     private static readonly Func<IntPtr, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> s_copyOutGroupOffsets =
         OffsetMapMarshal.CopyOutNullable;
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> Futures, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> Futures, SafeAdminResultHandle Result)
         ListConsumerGroupOffsets(string groupId, ListConsumerGroupOffsetsOptions? options)
     {
         EnterUse();
@@ -143,7 +143,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> Futures, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> Futures, SafeAdminResultHandle Result)
         ListConsumerGroupOffsets(
             IReadOnlyDictionary<string, ListConsumerGroupOffsetsSpec> groupSpecs, ListConsumerGroupOffsetsOptions? options)
     {
@@ -333,13 +333,13 @@ internal sealed partial class NativeAdminClient
         ReleaseError(outErr);
     }
 
-    private static Dictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>
+    private Dictionary<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>
         StartGroupOffsetsFutures(SafeAdminResultHandle result, List<string> groupIds)
     {
         try
         {
-            Dictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures =
-                new Dictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(
+            Dictionary<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures =
+                new Dictionary<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(
                     groupIds.Count, StringComparer.Ordinal);
             foreach (string groupId in groupIds)
             {
@@ -351,7 +351,7 @@ internal sealed partial class NativeAdminClient
                 }
 
                 futures[groupId] = NativeFutureSource<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>.Start(
-                    SafeKafkaFutureHandle.Owned(future), s_copyOutGroupOffsets);
+                    SafeKafkaFutureHandle.Owned(future), s_copyOutGroupOffsets, _flavour);
             }
 
             return futures;
@@ -451,15 +451,15 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal static KafkaFutureImpl<object?> AlterConsumerGroupOffsetsPartitionResult(
-        SafeAdminResultHandle result, TopicPartition partition)
+    internal static IKafkaFutureImpl<object?> AlterConsumerGroupOffsetsPartitionResult(
+        SafeAdminResultHandle result, TopicPartition partition, AdminFlavour flavour)
     {
         if (partition is null || partition.Topic() is null)
         {
             // No request partition is null or has a null topic, so Java's future fails as for one not attempted. A
             // recorded deviation: Java fails it only once the call has answered, with the call's own error if it
             // failed.
-            KafkaFutureImpl<object?> notAttempted = new KafkaFutureImpl<object?>();
+            IKafkaFutureImpl<object?> notAttempted = NewFuture<object?>(flavour);
             notAttempted.CompleteWithError(new IllegalArgumentException(
                 "Alter offset for partition \"" + JavaText.ValueOf(partition) + "\" was not attempted"));
             return notAttempted;
@@ -472,7 +472,8 @@ internal sealed partial class NativeAdminClient
                 result,
                 (IntPtr self, ref IntPtr outErr) =>
                     s_alterConsumerGroupOffsetsPartitionResult(self, native, ref outErr),
-                s_noValue);
+                s_noValue,
+                flavour);
         }
         finally
         {
@@ -480,8 +481,9 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal static KafkaFutureImpl<object?> AlterConsumerGroupOffsetsAll(SafeAdminResultHandle result) =>
-        StartResultFuture(result, s_alterConsumerGroupOffsetsAll, s_noValue);
+    internal static IKafkaFutureImpl<object?> AlterConsumerGroupOffsetsAll(
+        SafeAdminResultHandle result, AdminFlavour flavour) =>
+        StartResultFuture(result, s_alterConsumerGroupOffsetsAll, s_noValue, flavour);
 
     internal static IntPtr NewAlterConsumerGroupOffsetsOptions(AlterConsumerGroupOffsetsOptions? options) =>
         AdminOptionsMarshal.Build(
@@ -618,8 +620,8 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal static KafkaFutureImpl<object?> DeleteConsumerGroupOffsetsPartitionResult(
-        SafeAdminResultHandle result, TopicPartition partition)
+    internal static IKafkaFutureImpl<object?> DeleteConsumerGroupOffsetsPartitionResult(
+        SafeAdminResultHandle result, TopicPartition partition, AdminFlavour flavour)
     {
         if (partition is null || partition.Topic() is null)
         {
@@ -635,7 +637,8 @@ internal sealed partial class NativeAdminClient
                 result,
                 (IntPtr self, ref IntPtr outErr) =>
                     s_deleteConsumerGroupOffsetsPartitionResult(self, native, ref outErr),
-                s_noValue);
+                s_noValue,
+                flavour);
         }
         finally
         {
@@ -643,8 +646,9 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal static KafkaFutureImpl<object?> DeleteConsumerGroupOffsetsAll(SafeAdminResultHandle result) =>
-        StartResultFuture(result, s_deleteConsumerGroupOffsetsAll, s_noValue);
+    internal static IKafkaFutureImpl<object?> DeleteConsumerGroupOffsetsAll(
+        SafeAdminResultHandle result, AdminFlavour flavour) =>
+        StartResultFuture(result, s_deleteConsumerGroupOffsetsAll, s_noValue, flavour);
 
     internal static IntPtr NewDeleteConsumerGroupOffsetsOptions(DeleteConsumerGroupOffsetsOptions? options) =>
         AdminOptionsMarshal.Build(
@@ -670,7 +674,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> DeletedGroups, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<string, IKafkaFutureImpl<object?>> DeletedGroups, SafeAdminResultHandle Result)
         DeleteConsumerGroups(IReadOnlyCollection<string> groupIds, DeleteConsumerGroupsOptions? options)
     {
         EnterUse();
@@ -781,8 +785,8 @@ internal sealed partial class NativeAdminClient
             : "Member null was not included in the original request");
     }
 
-    internal static KafkaFutureImpl<object?> RemoveMembersFromConsumerGroupMemberResult(
-        SafeAdminResultHandle result, MemberToRemove member)
+    internal static IKafkaFutureImpl<object?> RemoveMembersFromConsumerGroupMemberResult(
+        SafeAdminResultHandle result, MemberToRemove member, AdminFlavour flavour)
     {
         AdminStrings.Validate(member.GroupInstanceId(), nameof(member));
         IntPtr native = NewNativeMemberToRemove(member);
@@ -792,7 +796,8 @@ internal sealed partial class NativeAdminClient
                 result,
                 (IntPtr self, ref IntPtr outErr) =>
                     s_removeMembersFromConsumerGroupMemberResult(self, native, ref outErr),
-                s_noValue);
+                s_noValue,
+                flavour);
         }
         finally
         {
@@ -800,8 +805,9 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal static KafkaFutureImpl<object?> RemoveMembersFromConsumerGroupAll(SafeAdminResultHandle result) =>
-        StartResultFuture(result, s_removeMembersFromConsumerGroupAll, s_noValue);
+    internal static IKafkaFutureImpl<object?> RemoveMembersFromConsumerGroupAll(
+        SafeAdminResultHandle result, AdminFlavour flavour) =>
+        StartResultFuture(result, s_removeMembersFromConsumerGroupAll, s_noValue, flavour);
 
     internal static IntPtr NewRemoveMembersFromConsumerGroupOptions(RemoveMembersFromConsumerGroupOptions options) =>
         AdminOptionsMarshal.Build(

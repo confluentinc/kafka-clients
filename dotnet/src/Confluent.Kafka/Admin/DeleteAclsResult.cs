@@ -35,12 +35,12 @@ namespace Confluent.Kafka.Admin;
 public sealed class DeleteAclsResult
 {
     private readonly IReadOnlyDictionary<AclBindingFilter, KafkaFuture<FilterResults>> _values;
-    private readonly IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<FilterResults>> _nativeFutures;
+    private readonly IReadOnlyDictionary<AclBindingFilter, IKafkaFutureImpl<FilterResults>> _nativeFutures;
     private readonly SafeAdminResultHandle _native;
 
     private DeleteAclsResult(
         IReadOnlyDictionary<AclBindingFilter, KafkaFuture<FilterResults>> values,
-        IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<FilterResults>> nativeFutures,
+        IReadOnlyDictionary<AclBindingFilter, IKafkaFutureImpl<FilterResults>> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -65,21 +65,21 @@ public sealed class DeleteAclsResult
     /// matched nothing are not an error — the result is then a successful empty collection.
     /// </returns>
     public KafkaFuture<IReadOnlyCollection<AclBinding>> All() =>
-        new KafkaFuture<IReadOnlyCollection<AclBinding>>(AllOf(_nativeFutures));
+        SyncAdminFutures.Of(AllOf(new KafkaFutureImpl<object?>(), _nativeFutures));
 
-    internal static KafkaFutureImpl<IReadOnlyCollection<AclBinding>> AllOf(
-        IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<FilterResults>> futures) =>
-        KafkaFutureImpl.GatherAll(futures, EqualityComparer<AclBindingFilter>.Default)
-            .ThenApply<IReadOnlyCollection<AclBinding>>(resolved => AclBindings(futures.Keys, resolved));
+    internal static IKafkaFutureImpl<IReadOnlyCollection<AclBinding>> AllOf(
+        IKafkaFutureImpl<object?> all, IReadOnlyDictionary<AclBindingFilter, IKafkaFutureImpl<FilterResults>> futures) =>
+        FutureState.GatherAll(all, futures, EqualityComparer<AclBindingFilter>.Default)
+            .ThenApplyFunc<IReadOnlyCollection<AclBinding>>(resolved => AclBindings(futures.Keys, resolved));
 
     internal static DeleteAclsResult OfClient(
-        (IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<FilterResults>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<AclBindingFilter, IKafkaFutureImpl<FilterResults>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<AclBindingFilter, KafkaFuture<FilterResults>> values =
             new Dictionary<AclBindingFilter, KafkaFuture<FilterResults>>(native.Values.Count);
-        foreach (KeyValuePair<AclBindingFilter, KafkaFutureImpl<FilterResults>> entry in native.Values)
+        foreach (KeyValuePair<AclBindingFilter, IKafkaFutureImpl<FilterResults>> entry in native.Values)
         {
-            values.Add(entry.Key, new KafkaFuture<FilterResults>(entry.Value));
+            values.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
         }
 
         return new DeleteAclsResult(values, native.Values, native.Result);

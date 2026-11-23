@@ -34,11 +34,11 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="ListTransactionsResult"/>
 public sealed class AsyncListTransactionsResult
 {
-    private readonly KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> _future;
+    private readonly IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> _future;
     private readonly SafeAdminResultHandle _native;
 
     private AsyncListTransactionsResult(
-        KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> future,
+        IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> future,
         SafeAdminResultHandle native)
     {
         _future = future;
@@ -53,9 +53,9 @@ public sealed class AsyncListTransactionsResult
     /// <returns>A future yielding every broker's listings, flattened.</returns>
     /// <remarks>Each call builds a new future.</remarks>
     public AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>> All() =>
-        new AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>(
-            ListTransactionsResult.AllByBroker(_future)
-                .ThenApply<IReadOnlyCollection<TransactionListing>>(ListTransactionsResult.Flatten));
+        AsyncAdminFutures.Of(
+            ListTransactionsResult.AllByBroker(_future, AdminFlavour.Async)
+                .ThenApplyFunc<IReadOnlyCollection<TransactionListing>>(ListTransactionsResult.Flatten));
 
     /// <summary>
     /// One future per broker, keeping each broker's own outcome — Java's <c>byBrokerId()</c>.
@@ -66,9 +66,9 @@ public sealed class AsyncListTransactionsResult
     /// </returns>
     /// <remarks>Each call builds a new future over the same per-broker futures, as Java's <c>byBrokerId()</c> does.</remarks>
     public AsyncKafkaFuture<IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>>> ByBrokerId() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>>>(
+        AsyncAdminFutures.Of(
             ListTransactionsResult.ByBroker(
-                _future, static broker => new AsyncKafkaFuture<IReadOnlyCollection<TransactionListing>>(broker)));
+                _future, static broker => AsyncAdminFutures.Of(broker), AdminFlavour.Async));
 
     /// <summary>
     /// Every listing keyed by the broker hosting it, failing with the first error — Java's
@@ -81,11 +81,11 @@ public sealed class AsyncListTransactionsResult
     /// Each call builds a new future.
     /// </remarks>
     public AsyncKafkaFuture<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> AllByBrokerId() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>>(
-            ListTransactionsResult.AllByBroker(_future));
+        AsyncAdminFutures.Of(
+            ListTransactionsResult.AllByBroker(_future, AdminFlavour.Async));
 
     internal static AsyncListTransactionsResult OfClient(
-        (KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> ByBrokerId,
+        (IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> ByBrokerId,
             SafeAdminResultHandle Result) native) =>
         new AsyncListTransactionsResult(native.ByBrokerId, native.Result);
 }

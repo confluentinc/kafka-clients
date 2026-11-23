@@ -26,10 +26,10 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="AsyncExpireDelegationTokenResult"/>
 public sealed class ExpireDelegationTokenResult
 {
-    private readonly KafkaFutureImpl<long> _expiryTimestamp;
+    private readonly IKafkaFutureImpl<long> _expiryTimestamp;
     private readonly SafeAdminResultHandle _native;
 
-    private ExpireDelegationTokenResult(KafkaFutureImpl<long> expiryTimestamp, SafeAdminResultHandle native)
+    private ExpireDelegationTokenResult(IKafkaFutureImpl<long> expiryTimestamp, SafeAdminResultHandle native)
     {
         _expiryTimestamp = expiryTimestamp;
         _native = native;
@@ -42,9 +42,9 @@ public sealed class ExpireDelegationTokenResult
     /// </summary>
     /// <returns>A future over the timestamp.</returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
-    public KafkaFuture<long> ExpiryTimestamp() => new KafkaFuture<long>(_expiryTimestamp);
+    public KafkaFuture<long> ExpiryTimestamp() => SyncAdminFutures.Of(_expiryTimestamp);
 
     internal static ExpireDelegationTokenResult OfClient(
-        (KafkaFutureImpl<long> ExpiryTimestamp, SafeAdminResultHandle Result) native) =>
+        (IKafkaFutureImpl<long> ExpiryTimestamp, SafeAdminResultHandle Result) native) =>
         new ExpireDelegationTokenResult(native.ExpiryTimestamp, native.Result);
 }

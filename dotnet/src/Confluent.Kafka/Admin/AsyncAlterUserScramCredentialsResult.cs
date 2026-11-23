@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Admin;
 public sealed class AsyncAlterUserScramCredentialsResult
 {
     private readonly IReadOnlyDictionary<string, AsyncKafkaFuture> _values;
-    private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
     /// <summary>Creates a result over the given futures, keyed by user name.</summary>
@@ -53,7 +53,7 @@ public sealed class AsyncAlterUserScramCredentialsResult
 
     private AsyncAlterUserScramCredentialsResult(
         IReadOnlyDictionary<string, AsyncKafkaFuture> values,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -72,20 +72,23 @@ public sealed class AsyncAlterUserScramCredentialsResult
     /// any user failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// A future the Result was constructed with is <see langword="null"/>.
+    /// </exception>
     public AsyncKafkaFuture All() =>
         _nativeFutures is not null
-            ? new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures))
+            ? AsyncAdminFutures.Of(FutureState.AllOf(new AsyncKafkaFutureImpl<object?>(), _nativeFutures))
             : AsyncAdminFutures.AllOf(_values.Values);
 
     internal static AsyncAlterUserScramCredentialsResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<string, AsyncKafkaFuture> values =
             new Dictionary<string, AsyncKafkaFuture>(native.Values.Count, StringComparer.Ordinal);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
-        foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in native.Values)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<string, IKafkaFutureImpl<object?>> entry in native.Values)
         {
-            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            values.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

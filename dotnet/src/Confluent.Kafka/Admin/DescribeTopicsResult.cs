@@ -37,8 +37,8 @@ public sealed class DescribeTopicsResult
     private readonly IReadOnlyDictionary<string, KafkaFuture<TopicDescription>>? _topicNameValues;
     private readonly IEqualityComparer<Uuid> _topicIdComparer;
     private readonly IEqualityComparer<string> _topicNameComparer;
-    private readonly IReadOnlyDictionary<Uuid, KafkaFutureImpl<TopicDescription>>? _nativeById;
-    private readonly IReadOnlyDictionary<string, KafkaFutureImpl<TopicDescription>>? _nativeByName;
+    private readonly IReadOnlyDictionary<Uuid, IKafkaFutureImpl<TopicDescription>>? _nativeById;
+    private readonly IReadOnlyDictionary<string, IKafkaFutureImpl<TopicDescription>>? _nativeByName;
     private readonly SafeAdminResultHandle? _native;
 
     // Internal, unlike Java's protected constructor: a recorded deviation. Exactly one of the two
@@ -53,8 +53,8 @@ public sealed class DescribeTopicsResult
     }
 
     private DescribeTopicsResult(
-        IReadOnlyDictionary<string, KafkaFutureImpl<TopicDescription>>? byName,
-        IReadOnlyDictionary<Uuid, KafkaFutureImpl<TopicDescription>>? byId,
+        IReadOnlyDictionary<string, IKafkaFutureImpl<TopicDescription>>? byName,
+        IReadOnlyDictionary<Uuid, IKafkaFutureImpl<TopicDescription>>? byId,
         SafeAdminResultHandle native)
         : this(
             byId is null ? null : Views(byId, EqualityComparer<Uuid>.Default),
@@ -134,32 +134,31 @@ public sealed class DescribeTopicsResult
     internal SafeAdminResultHandle? Native => _native;
 
     internal static DescribeTopicsResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<TopicDescription>>? ByName,
-            IReadOnlyDictionary<Uuid, KafkaFutureImpl<TopicDescription>>? ById,
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<TopicDescription>>? ByName,
+            IReadOnlyDictionary<Uuid, IKafkaFutureImpl<TopicDescription>>? ById,
             SafeAdminResultHandle Result) native) =>
         new DescribeTopicsResult(native.ByName, native.ById, native.Result);
 
     private static Dictionary<TKey, KafkaFuture<TopicDescription>> Views<TKey>(
-        IReadOnlyDictionary<TKey, KafkaFutureImpl<TopicDescription>> futures, IEqualityComparer<TKey> comparer)
+        IReadOnlyDictionary<TKey, IKafkaFutureImpl<TopicDescription>> futures, IEqualityComparer<TKey> comparer)
         where TKey : notnull
     {
         Dictionary<TKey, KafkaFuture<TopicDescription>> views =
             new Dictionary<TKey, KafkaFuture<TopicDescription>>(futures.Count, comparer);
-        foreach (KeyValuePair<TKey, KafkaFutureImpl<TopicDescription>> entry in futures)
+        foreach (KeyValuePair<TKey, IKafkaFutureImpl<TopicDescription>> entry in futures)
         {
-            views.Add(entry.Key, new KafkaFuture<TopicDescription>(entry.Value));
+            views.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
         }
 
         return views;
     }
 
     private static KafkaFuture<IReadOnlyDictionary<TKey, TopicDescription>>? NativeAll<TKey>(
-        IReadOnlyDictionary<TKey, KafkaFutureImpl<TopicDescription>>? futures, IEqualityComparer<TKey> comparer)
+        IReadOnlyDictionary<TKey, IKafkaFutureImpl<TopicDescription>>? futures, IEqualityComparer<TKey> comparer)
         where TKey : notnull =>
         futures is null
             ? null
-            : new KafkaFuture<IReadOnlyDictionary<TKey, TopicDescription>>(
-                KafkaFutureImpl.GatherAll(futures, comparer));
+            : SyncAdminFutures.Of(FutureState.GatherAll(new KafkaFutureImpl<object?>(), futures, comparer));
 
     private static KafkaFuture<IReadOnlyDictionary<TKey, TopicDescription>>? All<TKey>(
         IReadOnlyDictionary<TKey, KafkaFuture<TopicDescription>>? values, IEqualityComparer<TKey> comparer)
