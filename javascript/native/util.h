@@ -306,6 +306,10 @@ kafka_common_header_internals_RecordHeaders_t* headers_handle(napi_env env, napi
 // the caller's typed arrays `key` and `value`. A no-op otherwise.
 void record_spy_capture(napi_env env, const kafka_producer_ProducerRecord_t* record, napi_value key, napi_value value);
 
+// producer.c: a borrowed node as its fields ({ id, host, port, rack,
+// isFenced }), `null` for NULL; NULL when Node-API failed.
+napi_value node_to_js(napi_env env, const kafka_common_Node_t* n);
+
 // producer.c: the JS value an error JS gave a mock carries, for the
 // LocalCallbackError `opaque` the mock's error holds, or NULL when `opaque`
 // is not one (another callback's error) or its value is gone (the mock
@@ -335,6 +339,72 @@ napi_value js_producer_close(napi_env env, napi_callback_info info);
 napi_value js_producer_pump(napi_env env, napi_callback_info info);
 napi_value js_record_future_get(napi_env env, napi_callback_info info);
 napi_value js_producer_stats(napi_env env, napi_callback_info info);
+
+// admin.c and admin_values.c: the admin client handle, its futures, the RPCs
+// and the mock.
+napi_value js_admin_create(napi_env env, napi_callback_info info);
+napi_value js_admin_close(napi_env env, napi_callback_info info);
+napi_value js_admin_result_future(napi_env env, napi_callback_info info);
+napi_value js_admin_result_futures(napi_env env, napi_callback_info info);
+napi_value js_admin_future_wait(napi_env env, napi_callback_info info);
+napi_value js_admin_future_get(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_cluster(napi_env env, napi_callback_info info);
+napi_value js_admin_list_topics(napi_env env, napi_callback_info info);
+napi_value js_admin_create_topics(napi_env env, napi_callback_info info);
+napi_value js_admin_delete_topics(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_topics(napi_env env, napi_callback_info info);
+napi_value js_admin_create_partitions(napi_env env, napi_callback_info info);
+napi_value js_admin_delete_records(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_configs(napi_env env, napi_callback_info info);
+napi_value js_admin_incremental_alter_configs(napi_env env, napi_callback_info info);
+napi_value js_admin_list_config_resources(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_log_dirs(napi_env env, napi_callback_info info);
+napi_value js_admin_alter_replica_log_dirs(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_replica_log_dirs(napi_env env, napi_callback_info info);
+napi_value js_admin_elect_leaders(napi_env env, napi_callback_info info);
+napi_value js_admin_alter_partition_reassignments(napi_env env, napi_callback_info info);
+napi_value js_admin_list_partition_reassignments(napi_env env, napi_callback_info info);
+napi_value js_admin_list_offsets(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_update_offsets(napi_env env, napi_callback_info info);
+napi_value js_admin_list_groups(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_consumer_groups(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_classic_groups(napi_env env, napi_callback_info info);
+napi_value js_admin_list_consumer_group_offsets(napi_env env, napi_callback_info info);
+napi_value js_admin_alter_consumer_group_offsets(napi_env env, napi_callback_info info);
+napi_value js_admin_delete_consumer_group_offsets(napi_env env, napi_callback_info info);
+napi_value js_admin_delete_consumer_groups(napi_env env, napi_callback_info info);
+napi_value js_admin_remove_members_from_consumer_group(napi_env env, napi_callback_info info);
+napi_value js_admin_create_acls(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_acls(napi_env env, napi_callback_info info);
+napi_value js_admin_delete_acls(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_client_quotas(napi_env env, napi_callback_info info);
+napi_value js_admin_alter_client_quotas(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_user_scram_credentials(napi_env env, napi_callback_info info);
+napi_value js_admin_alter_user_scram_credentials(napi_env env, napi_callback_info info);
+napi_value js_admin_create_delegation_token(napi_env env, napi_callback_info info);
+napi_value js_admin_renew_delegation_token(napi_env env, napi_callback_info info);
+napi_value js_admin_expire_delegation_token(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_delegation_token(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_producers(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_transactions(napi_env env, napi_callback_info info);
+napi_value js_admin_abort_transaction(napi_env env, napi_callback_info info);
+napi_value js_admin_force_terminate_transaction(napi_env env, napi_callback_info info);
+napi_value js_admin_list_transactions(napi_env env, napi_callback_info info);
+napi_value js_admin_fence_producers(napi_env env, napi_callback_info info);
+napi_value js_admin_describe_features(napi_env env, napi_callback_info info);
+napi_value js_admin_update_features(napi_env env, napi_callback_info info);
+napi_value js_admin_unregister_controller(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_update_consumer_group_offsets(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_add_topic(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_mark_topic_for_deletion(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_set_fetches_remaining_until_visible(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_create(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_controller(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_timeout_next_request(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_builder_new(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_builder_set(napi_env env, napi_callback_info info);
+napi_value js_mock_admin_builder_build(napi_env env, napi_callback_info info);
+napi_value js_admin_stats(napi_env env, napi_callback_info info);
 
 // headers.c: Headers and Header over RecordHeaders and RecordHeader.
 napi_value js_headers_new(napi_env env, napi_callback_info info);

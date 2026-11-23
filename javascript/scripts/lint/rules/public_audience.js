@@ -26,14 +26,28 @@
 // The error classes are exempt from the audience: there is one per Java
 // exception the FFI enum names, Public or not (javascript/CLAUDE.md "Errors",
 // as the Python client's errors). Invented items (lint-mapping.json's
-// `invented`) translate nothing.
+// `invented`) translate nothing. A test-fixture class the client keeps public
+// (`TEST_FIXTURES`) is exempt from the audience, as in the Rust core.
 
 const { atNode } = require('../location');
 const { javaIndexOf, mappedItems, shortName } = require('../java_ts');
 const { mappedMembers } = require('./java_members');
 
+/**
+ * The Java test-fixture classes the client exports although Java ships them
+ * in its test jar, by fully qualified name, with the reason.
+ */
+const TEST_FIXTURES = new Map([
+  [
+    'org.apache.kafka.clients.admin.MockAdminClient',
+    "Java's MockAdminClient, public in the Rust core, C, Python and .NET (.claude/rules/admin-client.md §9): " +
+      'the client has no separate test artifact',
+  ],
+]);
+
 module.exports = {
   name: 'check-public-audience',
+  TEST_FIXTURES,
   kinds: ['not-public-audience', 'internal-package', 'unsupported-package', 'member-not-public'],
   needs: ['program', 'java'],
   hint:
@@ -49,7 +63,7 @@ module.exports = {
       checked += 1;
       const cls = java.cls;
       const subject = `${item.rel}:${item.name}`;
-      if (!cls.public_audience) {
+      if (!cls.public_audience && !TEST_FIXTURES.has(cls.fqn)) {
         findings.push({
           kind: 'not-public-audience',
           subject,
