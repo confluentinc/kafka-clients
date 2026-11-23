@@ -429,7 +429,7 @@ module.exports = {
         });
       }
       // A nested class is a class of the namespace merged with its outer
-      // class's, exported with it (Names, Q11): its TypeScript name is Java's.
+      // class's, exported with it (Names): its TypeScript name is Java's.
       if (!tsNames.has(j.name) && t.symbol && t.symbol.flags & ts.SymbolFlags.Class && t.symbol.name === j.name) return true;
       if (tsNames.has(j.name)) {
         const want = tsNames.get(j.name);

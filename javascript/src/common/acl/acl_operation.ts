@@ -164,14 +164,6 @@ export class AclOperation {
     /** The constant's name */
     name: string;
   }): AclOperation;
-  /**
-   * The constant named exactly `name`, Java's `valueOf(String)`.
-   *
-   * @param name - the name, on its own or as `{ name }`
-   * @returns the constant with the specified name
-   * @throws `IllegalArgumentError` when no constant has that name
-   * @throws `TypeError` when the name is null or not a string
-   */
   static valueOf(name: unknown): AclOperation {
     VALUE_OF_FORMS.match(name, arguments.length);
     const value = VALUE_OF_FORMS.value(name, 'name');
@@ -201,13 +193,6 @@ export class AclOperation {
     /** The string to parse. */
     str: string;
   }): AclOperation;
-  /**
-   * Parse the given string as an ACL operation.
-   *
-   * @param str - The string to parse, on its own or as `{ str }`.
-   * @returns The AclOperation, or UNKNOWN if the string could not be matched.
-   * @throws `TypeError` when the string is null (Java dereferences it)
-   */
   static fromString(str: unknown): AclOperation {
     FROM_STRING_FORMS.match(str, arguments.length);
     const value = FROM_STRING_FORMS.value(str, 'str');
@@ -239,15 +224,6 @@ export class AclOperation {
     /** The code, a Java `byte` */
     code: number;
   }): AclOperation;
-  /**
-   * Return the AclOperation with the provided code or `AclOperation.UNKNOWN`
-   * if one cannot be found.
-   *
-   * @param code - the code, a Java `byte`, on its own or as `{ code }`
-   * @returns the operation
-   * @throws `TypeError` when the code is not an integer
-   * @throws `RangeError` when it is outside Java's `byte`
-   */
   static fromCode(code: unknown): AclOperation {
     FROM_CODE_FORMS.match(code, arguments.length);
     const value = FROM_CODE_FORMS.value(code, 'code');

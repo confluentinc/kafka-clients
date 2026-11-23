@@ -16,7 +16,7 @@
 // constructor is protected: a protected constructor here, and Java's
 // package-private factories ofTopicIds and ofTopicNames are `@internal`
 // statics the client calls (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Class family, Q16). Java's map keyed by Uuid is a UuidMap (Q25).
+// Class family). Java's map keyed by Uuid is a UuidMap.
 
 import { JavaForms } from '../internal/args';
 import { IllegalArgumentError } from '../illegal_argument_error';

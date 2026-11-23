@@ -14,7 +14,7 @@
 
 // Java's org.apache.kafka.common.quota.ClientQuotaAlteration, with its nested
 // Op, value classes (javascript/CLAUDE.md, JavaScript Binding Conventions, Class
-// family; a nested class is a class of the namespace merged with it, Q11): Java's public constructors,
+// family; a nested class is a class of the namespace merged with it): Java's public constructors,
 // getters, and Java's equals, hashCode (Op's) and toString. Java stores what
 // it is given, a null included; the ops are held as a copy and handed out as
 // a new array. ClientQuotaAlteration has no equals or hashCode in Java, so

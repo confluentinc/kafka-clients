@@ -13,7 +13,7 @@
 // limitations under the License.
 // MemberToRemoveSet (js-only): Java's Set<MemberToRemove>, the set form of the
 // value-keyed maps (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family
-// and Types, Q25; the admin client's value-keyed maps, decided by the owner on
+// and Types; the admin client's value-keyed maps, decided by the owner on
 // 2026-11-20). It wraps a Map keyed by MemberToRemove.internalKey, the group
 // instance id Java's equals compares, and keeps each original MemberToRemove,
 // so its members compare by value, as Java's HashSet compares them. A null

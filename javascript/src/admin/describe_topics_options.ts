@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.DescribeTopicsOptions, an option class
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19). Java's getter /
-// setter pairs are one method each (Q17).
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family). Java's getter /
+// setter pairs are one method each.
 
 import { checkInt } from '../internal/java_number';
 import { GetterSetter, applyOptionKeys, checkBoolean } from '../internal/options';
@@ -38,7 +38,7 @@ export class DescribeTopicsOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -93,13 +93,6 @@ export class DescribeTopicsOptions extends AbstractOptions {
     /** Whether authorized operations are included. */
     includeAuthorizedOperations: boolean;
   }): this;
-  /**
-   * Reads or sets the value.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the value, or this object
-   * @throws `TypeError` when the value is not a boolean
-   */
   includeAuthorizedOperations(options?: unknown): boolean | this {
     if (!INCLUDE_AUTHORIZED_OPERATIONS.sets(options, arguments.length)) return this.#includeAuthorizedOperations;
     this.#includeAuthorizedOperations = checkBoolean(INCLUDE_AUTHORIZED_OPERATIONS.value(options), 'includeAuthorizedOperations');
@@ -132,13 +125,6 @@ export class DescribeTopicsOptions extends AbstractOptions {
     /** The maximum number of partitions per response. */
     partitionSizeLimitPerResponse: number;
   }): this;
-  /**
-   * Reads or sets the value.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the value, or this object
-   * @throws `TypeError` when the value is not a 32-bit integer
-   */
   partitionSizeLimitPerResponse(options?: unknown): number | this {
     if (!PARTITION_SIZE_LIMIT_PER_RESPONSE.sets(options, arguments.length)) return this.#partitionSizeLimitPerResponse;
     this.#partitionSizeLimitPerResponse = checkInt(PARTITION_SIZE_LIMIT_PER_RESPONSE.value(options), 'partitionSizeLimitPerResponse');

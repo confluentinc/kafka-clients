@@ -16,8 +16,8 @@
 // constructor is protected, taking one future of TopicMetadataAndConfig per
 // topic, which `values()`, `config()`, `topicId()`, `numPartitions()` and
 // `replicationFactor()` refine with thenApply: a protected constructor here,
-// as Java's (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family,
-// Q16). The C FFI hands out each refinement as a future of its own instead,
+// as Java's (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
+// The C FFI hands out each refinement as a future of its own instead,
 // so the client builds the Result through the `@internal` `internalCreate`,
 // over the C result's per-topic futures and its refinements; `values()` and
 // `all()` work alike on both.
@@ -350,13 +350,6 @@ export namespace CreateTopicsResult {
       /** The error. */
       exception: ApiError | null;
     });
-    /**
-     * Builds the metadata, or the failure.
-     *
-     * @param options - the fields of one of Java's two constructors
-     * @throws `IllegalArgumentError` when the given parameters are no Java form
-     * @throws `TypeError` for a value of the wrong type
-     */
     constructor(options: unknown) {
       const form = METADATA_FORMS.match(options, arguments.length);
       if (form === 1) {

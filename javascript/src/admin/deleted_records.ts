@@ -47,12 +47,6 @@ export class DeletedRecords {
     /** "low watermark" for the topic partition on which the deletion was executed. */
     lowWatermark: bigint | number;
   });
-  /**
-   * Builds the deleted records.
-   *
-   * @param options - the low watermark
-   * @throws `TypeError` or `RangeError` when it is not a Java `long`
-   */
   constructor(options: unknown) {
     FORMS.match(options, arguments.length);
     this.#lowWatermark = checkLong(FORMS.value(options, 'lowWatermark'), 'lowWatermark');

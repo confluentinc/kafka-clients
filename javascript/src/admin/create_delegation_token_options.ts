@@ -13,9 +13,9 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.CreateDelegationTokenOptions, an
-// option class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family,
-// Q19): a keyed constructor, one key per setter field, in Java's field order.
-// Java's getter / setter pairs are one method each (Q17); the deprecated
+// option class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family):
+// a keyed constructor, one key per setter field, in Java's field order.
+// Java's getter / setter pairs are one method each; the deprecated
 // `maxlifeTimeMs` pair is not translated (root §3). Java stores the renewers
 // list as given, a null included, which the admin client's call refuses as
 // Java's does; this class holds a copy and hands out a new array. `owner()`
@@ -71,7 +71,7 @@ export class CreateDelegationTokenOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -134,13 +134,6 @@ export class CreateDelegationTokenOptions extends AbstractOptions {
     /** The principals allowed to renew the token. */
     renewers: Iterable<KafkaPrincipal>;
   }): this;
-  /**
-   * Reads or sets the renewers.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the renewers, or this object
-   * @throws `TypeError` when the value is not an iterable of KafkaPrincipal
-   */
   renewers(options?: unknown): KafkaPrincipal[] | this {
     if (!RENEWERS.sets(options, arguments.length)) {
       return (this.#renewers === null ? null : [...this.#renewers]) as KafkaPrincipal[];
@@ -178,13 +171,6 @@ export class CreateDelegationTokenOptions extends AbstractOptions {
     /** The token's owner, or null for the request's principal. */
     owner: KafkaPrincipal | null;
   }): this;
-  /**
-   * Reads or sets the owner.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the owner, or this object
-   * @throws `TypeError` when the value is neither a KafkaPrincipal nor null
-   */
   owner(options?: unknown): KafkaPrincipal | null | this {
     if (!OWNER.sets(options, arguments.length)) return this.#owner;
     const owner = OWNER.value(options);
@@ -222,14 +208,6 @@ export class CreateDelegationTokenOptions extends AbstractOptions {
     /** The token's maximum lifetime in milliseconds. */
     maxLifetimeMs: bigint | number;
   }): this;
-  /**
-   * Reads or sets the maximum lifetime.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the lifetime, or this object
-   * @throws `TypeError` when the value is not a whole number
-   * @throws `RangeError` when it is outside Java's `long`
-   */
   maxLifetimeMs(options?: unknown): bigint | this {
     if (!MAX_LIFETIME_MS.sets(options, arguments.length)) return this.#maxLifetimeMs;
     this.#maxLifetimeMs = checkLong(MAX_LIFETIME_MS.value(options), 'maxLifetimeMs');

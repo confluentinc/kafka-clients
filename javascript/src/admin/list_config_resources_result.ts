@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.ListConfigResourcesResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). `all()` is Java's: a new future completed
+// Conventions, Class family). `all()` is Java's: a new future completed
 // from the one the call made, on each call.
 
 import { JavaForms } from '../internal/args';

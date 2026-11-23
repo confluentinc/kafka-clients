@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.RecordsToDelete: its constructor is
 // private, so the static `beforeOffset(offset)` builds it, beside the
 // instance `beforeOffset()` of the same name (javascript/CLAUDE.md, JavaScript
-// Binding Conventions, Names, Q17).
+// Binding Conventions, Names).
 
 import { JavaForms } from '../internal/args';
 import { checkLong } from '../internal/java_number';
@@ -61,13 +61,6 @@ export class RecordsToDelete {
     /** The offset before which all records will be deleted; `-1` truncates to the high watermark. */
     offset: bigint | number;
   }): RecordsToDelete;
-  /**
-   * Builds the records to delete.
-   *
-   * @param options - the offset
-   * @returns the records to delete
-   * @throws `TypeError` or `RangeError` when it is not a Java `long`
-   */
   static beforeOffset(options: unknown): RecordsToDelete {
     BEFORE_OFFSET_FORMS.match(options, arguments.length);
     return new RecordsToDelete(checkLong(BEFORE_OFFSET_FORMS.value(options, 'offset'), 'offset'));

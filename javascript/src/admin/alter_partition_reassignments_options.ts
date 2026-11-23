@@ -14,7 +14,7 @@
 
 // Java's org.apache.kafka.clients.admin.AlterPartitionReassignmentsOptions,
 // an option class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class
-// family, Q19). Java's getter / setter pair is one method (Q17), its setter's
+// family). Java's getter / setter pair is one method, its setter's
 // parameter keeping Java's name, `allow`.
 
 import { GetterSetter, applyOptionKeys, checkBoolean } from '../internal/options';
@@ -36,7 +36,7 @@ export class AlterPartitionReassignmentsOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -90,13 +90,6 @@ export class AlterPartitionReassignmentsOptions extends AbstractOptions {
     /** Whether the replication factor may change. */
     allow: boolean;
   }): this;
-  /**
-   * Reads or sets the value.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the value, or this object
-   * @throws `TypeError` when the value is not a boolean
-   */
   allowReplicationFactorChange(options?: unknown): boolean | this {
     if (!ALLOW_REPLICATION_FACTOR_CHANGE.sets(options, arguments.length)) return this.#allowReplicationFactorChange;
     this.#allowReplicationFactorChange = checkBoolean(ALLOW_REPLICATION_FACTOR_CHANGE.value(options), 'allow');

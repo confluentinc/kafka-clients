@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.ConfigEntry, a value class that keeps
 // Java's methods, with its nested ConfigType and ConfigSource enums and its
 // ConfigSynonym class, classes of the namespace merged with it
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names, Q11). ConfigSynonym's
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names). ConfigSynonym's
 // Java constructor is package-private: the client builds one through
 // `internalCreate`.
 
@@ -116,14 +116,6 @@ export class ConfigEntry {
     /** The config documentation, or null. */
     documentation: string | null;
   });
-  /**
-   * Builds the entry.
-   *
-   * @param options - the fields of one of Java's two constructors
-   * @throws `IllegalArgumentError` when the given parameters are no Java form
-   * @throws `TypeError` when the name is null ("name should not be null"),
-   *   or a value has the wrong type
-   */
   constructor(options: unknown) {
     const form = FORMS.match(options, arguments.length);
     const name = FORMS.value(options, 'name');
@@ -461,14 +453,6 @@ export namespace ConfigEntry {
       /** The name of the constant to return. */
       name: string;
     }): ConfigType;
-    /**
-     * Looks the constant up.
-     *
-     * @param name - the name, on its own or as `{ name }`
-     * @returns the constant with the specified name
-     * @throws `IllegalArgumentError` when no constant has that name
-     * @throws `TypeError` when the name is null or not a string
-     */
     static valueOf(name: unknown): ConfigType {
       TYPE_VALUE_OF_FORMS.match(name, arguments.length);
       const value = TYPE_VALUE_OF_FORMS.value(name, 'name');
@@ -613,14 +597,6 @@ export namespace ConfigEntry {
       /** The name of the constant to return. */
       name: string;
     }): ConfigSource;
-    /**
-     * Looks the constant up.
-     *
-     * @param name - the name, on its own or as `{ name }`
-     * @returns the constant with the specified name
-     * @throws `IllegalArgumentError` when no constant has that name
-     * @throws `TypeError` when the name is null or not a string
-     */
     static valueOf(name: unknown): ConfigSource {
       SOURCE_VALUE_OF_FORMS.match(name, arguments.length);
       const value = SOURCE_VALUE_OF_FORMS.value(name, 'name');

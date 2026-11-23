@@ -14,9 +14,9 @@
 
 // Java's org.apache.kafka.clients.admin.ListOffsetsResult, with its nested
 // ListOffsetsResultInfo, a class of the namespace merged with it
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names, Q11). Both Java
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names). Both Java
 // constructors are public. Java's map keyed by TopicPartition is a
-// TopicPartitionMap (Q25); the client builds it from the native result's
+// TopicPartitionMap; the client builds it from the native result's
 // `partitionResult` of each partition it asked for, as the Python client
 // does.
 

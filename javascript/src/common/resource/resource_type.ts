@@ -119,14 +119,6 @@ export class ResourceType {
     /** The constant's name */
     name: string;
   }): ResourceType;
-  /**
-   * The constant named exactly `name`, Java's `valueOf(String)`.
-   *
-   * @param name - the name, on its own or as `{ name }`
-   * @returns the constant with the specified name
-   * @throws `IllegalArgumentError` when no constant has that name
-   * @throws `TypeError` when the name is null or not a string
-   */
   static valueOf(name: unknown): ResourceType {
     VALUE_OF_FORMS.match(name, arguments.length);
     const value = VALUE_OF_FORMS.value(name, 'name');
@@ -156,13 +148,6 @@ export class ResourceType {
     /** The string to parse. */
     str: string;
   }): ResourceType;
-  /**
-   * Parse the given string as an ACL resource type.
-   *
-   * @param str - The string to parse, on its own or as `{ str }`.
-   * @returns The ResourceType, or UNKNOWN if the string could not be matched.
-   * @throws `TypeError` when the string is null (Java dereferences it)
-   */
   static fromString(str: unknown): ResourceType {
     FROM_STRING_FORMS.match(str, arguments.length);
     const value = FROM_STRING_FORMS.value(str, 'str');
@@ -194,15 +179,6 @@ export class ResourceType {
     /** The code, a Java `byte` */
     code: number;
   }): ResourceType;
-  /**
-   * Return the ResourceType with the provided code or `ResourceType.UNKNOWN` if one
-   * cannot be found.
-   *
-   * @param code - the code, a Java `byte`, on its own or as `{ code }`
-   * @returns the constant
-   * @throws `TypeError` when the code is not an integer
-   * @throws `RangeError` when it is outside Java's `byte`
-   */
   static fromCode(code: unknown): ResourceType {
     FROM_CODE_FORMS.match(code, arguments.length);
     const value = FROM_CODE_FORMS.value(code, 'code');

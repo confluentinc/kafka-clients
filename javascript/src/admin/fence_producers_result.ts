@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.FenceProducersResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). Java keys its futures of the internal
+// Conventions, Class family). Java keys its futures of the internal
 // `ProducerIdAndEpoch` by the internal `CoordinatorKey.byTransactionalId`,
 // which compares by the id alone: here a `Map` keyed by the id, of futures of
 // `{ producerId, epoch }`. Each method composes over them as Java's does:

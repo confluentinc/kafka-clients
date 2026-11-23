@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // The option classes' keyed constructors and their getter / setter methods
-// (private): javascript/CLAUDE.md, JavaScript Binding Conventions, Class family
-// (Q17, Q19). An option class takes one object of keys, one per setter field,
+// (private): javascript/CLAUDE.md, JavaScript Binding Conventions, Class family.
+// An option class takes one object of keys, one per setter field,
 // named after the Java field; each key given, null included, calls its setter
 // after construction, in the class's fixed order (the parent's fields first,
 // then Java's field order, a setter reading a field after the one setting
@@ -152,7 +152,7 @@ export function checkBoolean(value: unknown, name: string): boolean {
 
 /**
  * Java's `Integer timeoutMs` (javascript/CLAUDE.md, JavaScript Binding Conventions,
- * Signatures, Q22): null, or a whole number in 32 bits; the addon sends a
+ * Signatures): null, or a whole number in 32 bits; the addon sends a
  * negative one as 0.
  *
  * @param value - the value given

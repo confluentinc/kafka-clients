@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.DescribeProducersOptions, an option
-// class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19).
-// Java's getter / setter pair `brokerId` is one method (Q17); its
+// class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
+// Java's getter / setter pair `brokerId` is one method; its
 // `OptionalInt` reads as `number | null` (Types). `equals`, `hashCode` and
 // `toString` are Java's.
 
@@ -42,7 +42,7 @@ export class DescribeProducersOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -94,15 +94,6 @@ export class DescribeProducersOptions extends AbstractOptions {
     /** The broker id. */
     brokerId: number;
   }): this;
-  /**
-   * Reads or sets the broker id.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the value, or this object
-   * @throws `TypeError` when the value is not an integer (null included:
-   *   Java's `int` cannot hold null)
-   * @throws `RangeError` when it is beyond Java's `int`
-   */
   brokerId(options?: unknown): number | null | this {
     if (!BROKER_ID.sets(options, arguments.length)) return this.#brokerId;
     this.#brokerId = checkInt(BROKER_ID.value(options), 'brokerId');

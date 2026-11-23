@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.AlterReplicaLogDirsOptions, an option class
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19) with no
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family) with no
 // field of its own.
 
 import { applyOptionKeys } from '../internal/options';
@@ -31,7 +31,7 @@ export class AlterReplicaLogDirsOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**

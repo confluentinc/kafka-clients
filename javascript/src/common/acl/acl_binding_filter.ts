@@ -143,13 +143,6 @@ export class AclBindingFilter {
     /** The binding. */
     binding: AclBinding;
   }): boolean;
-  /**
-   * Return true if the resource filter matches the binding's resource and the
-   * entry filter matches binding's entry.
-   *
-   * @param binding - the binding, on its own or as `{ binding }`
-   * @returns whether it matches
-   */
   matches(binding: unknown): boolean {
     MATCHES_FORMS.match(binding, arguments.length);
     const given = MATCHES_FORMS.value(binding, 'binding');

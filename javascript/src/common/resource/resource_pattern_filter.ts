@@ -142,10 +142,6 @@ export class ResourcePatternFilter {
     /** The pattern. */
     pattern: ResourcePattern;
   }): boolean;
-  /**
-   * @param pattern - the pattern, on its own or as `{ pattern }`
-   * @returns `true` if this filter matches the given pattern.
-   */
   matches(pattern: unknown): boolean {
     MATCHES_FORMS.match(pattern, arguments.length);
     const given = MATCHES_FORMS.value(pattern, 'pattern');

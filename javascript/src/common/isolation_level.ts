@@ -94,14 +94,6 @@ export class IsolationLevel {
     /** The name of the constant to return. */
     name: string;
   }): IsolationLevel;
-  /**
-   * Looks the constant up.
-   *
-   * @param name - the name, on its own or as `{ name }`
-   * @returns the constant with the specified name
-   * @throws `IllegalArgumentError` when no constant has that name
-   * @throws `TypeError` when the name is null or not a string
-   */
   static valueOf(name: unknown): IsolationLevel {
     VALUE_OF_FORMS.match(name, arguments.length);
     const value = VALUE_OF_FORMS.value(name, 'name');
@@ -137,16 +129,6 @@ export class IsolationLevel {
     /** The id. */
     id: number;
   }): IsolationLevel;
-  /**
-   * Looks the isolation level up.
-   *
-   * @param id - the byte, on its own or as `{ id }`
-   * @returns the isolation level
-   * @throws `IllegalArgumentError` "Unknown isolation level <id>" for an id
-   *   no level has
-   * @throws `TypeError` when the id is not an integer
-   * @throws `RangeError` when it is outside Java's `byte`
-   */
   static forId(id: unknown): IsolationLevel {
     FOR_ID_FORMS.match(id, arguments.length);
     const value = FOR_ID_FORMS.value(id, 'id');

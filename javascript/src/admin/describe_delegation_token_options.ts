@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.DescribeDelegationTokenOptions, an
-// option class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family,
-// Q19). Java's getter / setter pair is one method (Q17). Java stores the
+// option class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
+// Java's getter / setter pair is one method. Java stores the
 // owners as given, null (every token the caller may describe) included; this
 // class holds a copy and hands out a new array, or null.
 
@@ -45,7 +45,7 @@ export class DescribeDelegationTokenOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -96,13 +96,6 @@ export class DescribeDelegationTokenOptions extends AbstractOptions {
     /** The owners that we want to describe delegation tokens for. */
     owners: Iterable<KafkaPrincipal> | null;
   }): this;
-  /**
-   * Reads or sets the owners.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the owners, or this object
-   * @throws `TypeError` when the value is not an iterable of KafkaPrincipal
-   */
   owners(options?: unknown): KafkaPrincipal[] | null | this {
     if (!OWNERS.sets(options, arguments.length)) return (this.#owners === null ? null : [...this.#owners]) as KafkaPrincipal[] | null;
     const value = OWNERS.value(options);

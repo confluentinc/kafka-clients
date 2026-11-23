@@ -52,12 +52,6 @@ export class Config {
     /** The entries, any iterable of ConfigEntry. */
     entries: Iterable<ConfigEntry>;
   });
-  /**
-   * Builds the configuration.
-   *
-   * @param options - the entries
-   * @throws `TypeError` when they are null (Java iterates them) or not ConfigEntry objects
-   */
   constructor(options: unknown) {
     FORMS.match(options, arguments.length);
     const entries = FORMS.value(options, 'entries');
@@ -98,12 +92,6 @@ export class Config {
     /** The entry's name. */
     name: string | null;
   }): ConfigEntry | null;
-  /**
-   * Looks the entry up.
-   *
-   * @param name - the name
-   * @returns the entry, or null
-   */
   get(name: unknown): ConfigEntry | null {
     GET_FORMS.match(name, arguments.length);
     const key = GET_FORMS.value(name, 'name');
