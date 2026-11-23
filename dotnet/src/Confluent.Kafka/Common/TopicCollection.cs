@@ -41,6 +41,12 @@ public abstract class TopicCollection
     /// <param name="topics">The topic ids. Copied, so later mutation cannot affect a request.</param>
     /// <returns>The collection.</returns>
     /// <exception cref="System.ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <remarks>
+    /// A <see langword="null"/> element is accepted here, as Java's <c>ofTopicIds</c> accepts one;
+    /// <see cref="Admin.IAdmin.DeleteTopics(TopicCollection, Admin.DeleteTopicsOptions)"/> and
+    /// <see cref="Admin.IAdmin.DescribeTopics(TopicCollection, Admin.DescribeTopicsOptions)"/> reject it with
+    /// <see cref="System.ArgumentNullException"/>.
+    /// </remarks>
     public static TopicIdCollection OfTopicIds(IEnumerable<Uuid> topics) => new TopicIdCollection(topics);
 
     /// <summary>

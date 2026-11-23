@@ -48,8 +48,8 @@ public sealed class DeleteConsumerGroupOffsetsResult
     /// with the call's error when the whole request failed.
     /// </returns>
     /// <exception cref="Confluent.Kafka.IllegalArgumentException">
-    /// <paramref name="partition"/> (one with a null topic included) was not part of the request, as Java throws at
-    /// the call.
+    /// <paramref name="partition"/> (a null one, or one with a null topic, included) was not part of the request, as
+    /// Java throws at the call.
     /// </exception>
     /// <exception cref="ArgumentException"><paramref name="partition"/> has a topic with a NUL character.</exception>
     public KafkaFuture PartitionResult(TopicPartition partition) =>

@@ -196,8 +196,8 @@ dotnet_diagnostic.CKRDA0001.severity = warning
 [tests/**.cs]
 dotnet_diagnostic.CKRDA0001.severity = warning
 
-# The P/Invoke, handle, native-callback and comment rules, on everywhere. Each rule's description says what it
-# does not cover.
+# The P/Invoke, handle, native-callback, comment and enum-list rules, on everywhere. Each rule's description says
+# what it does not cover.
 #   CKRDA0002  a delegate type passed to native code is Cdecl (ffi-marshalling.md §A6, §B6)
 #   CKRDA0003  a delegate passed to native code is a static readonly field (§A6, §B6)
 #   CKRDA0004  a native callback cannot throw into native code, wherever it is created (§A6, §B6)
@@ -209,6 +209,7 @@ dotnet_diagnostic.CKRDA0001.severity = warning
 #   CKRDA0010  no nint, nuint or UIntPtr in a P/Invoke (§0.1)
 #   CKRDA0011  no Java or Python source-line reference in a comment (CLAUDE.md §4 Comments)
 #   CKRDA0012  no phase or review id in a comment (CLAUDE.md §4 Comments)
+#   CKRDA0015  an <Enum>Methods class's s_values or VALUES lists each member once, in order (CLAUDE.md §3 rule 9)
 [*.cs]
 dotnet_diagnostic.CKRDA0002.severity = warning
 dotnet_diagnostic.CKRDA0003.severity = warning
@@ -221,3 +222,12 @@ dotnet_diagnostic.CKRDA0009.severity = warning
 dotnet_diagnostic.CKRDA0010.severity = warning
 dotnet_diagnostic.CKRDA0011.severity = warning
 dotnet_diagnostic.CKRDA0012.severity = warning
+dotnet_diagnostic.CKRDA0015.severity = warning
+
+# CKRDA0016: a public async method ends with CancellationToken cancellationToken = default (CLAUDE.md §4
+# Cancellation). Off by default, on in src/: an async test method is a public Task too.
+[*.cs]
+dotnet_diagnostic.CKRDA0016.severity = none
+
+[src/**.cs]
+dotnet_diagnostic.CKRDA0016.severity = warning

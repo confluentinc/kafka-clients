@@ -170,7 +170,7 @@ internal static class AdminEarlyReturns
     {
         foreach (TopicPartition partition in partitions)
         {
-            if (string.IsNullOrEmpty(partition.Topic()) || partition.Partition() < 0)
+            if (partition is null || string.IsNullOrEmpty(partition.Topic()) || partition.Partition() < 0)
             {
                 return true;
             }

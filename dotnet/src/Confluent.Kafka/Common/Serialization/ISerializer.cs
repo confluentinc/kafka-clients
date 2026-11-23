@@ -22,7 +22,7 @@ namespace Confluent.Kafka.Common.Serialization;
 /// <summary>
 /// Converts a <typeparamref name="T"/> to the bytes of a record key or value: Java's
 /// <c>Serializer&lt;T&gt;</c>. Its headers overload is
-/// <see cref="SerializerExtensions.Serialize{T}(ISerializer{T}, string, Headers, T)"/>, which a serializer replaces by
+/// <see cref="SerializerExtensions.Serialize{T}(ISerializer{T}, string, IHeaders, T)"/>, which a serializer replaces by
 /// implementing <see cref="ISerializerWithHeaders{T}"/>, and its <c>configure</c> is
 /// <see cref="SerializerExtensions.Configure{T}(ISerializer{T}, IReadOnlyDictionary{string, object}, bool)"/>, which a
 /// serializer replaces by implementing <see cref="ISerializerWithConfigure{T}"/>. Java's <c>close</c> is
@@ -61,7 +61,7 @@ public interface ISerializer<T>
 /// for a serializer that implements this interface, and <see cref="ISerializer{T}.Serialize(string, T)"/> otherwise.
 /// </summary>
 /// <remarks>
-/// A producer refuses, when it is built, a serializer that declares a public <c>Serialize(string, Headers, T)</c> but
+/// A producer refuses, when it is built, a serializer that declares a public <c>Serialize(string, IHeaders, T)</c> but
 /// does not implement this interface, since it would never call that method. The check reads the type's metadata, so
 /// under trimming or Native AOT, which can remove a method nothing calls, it is best effort.
 /// </remarks>
@@ -83,7 +83,7 @@ public interface ISerializerWithHeaders<T> : ISerializer<T>
     /// <param name="data">The value to encode; may be <see langword="null"/>.</param>
     /// <returns>The bytes, or <see langword="null"/>, as <see cref="ISerializer{T}.Serialize(string, T)"/> returns
     /// them.</returns>
-    ReadOnlyMemory<byte>? Serialize(string topic, Headers headers, T? data);
+    ReadOnlyMemory<byte>? Serialize(string topic, IHeaders headers, T? data);
 }
 
 /// <summary>
@@ -112,7 +112,7 @@ public static class SerializerExtensions
 {
     /// <summary>
     /// Encodes <paramref name="data"/> with the record's headers, Java's <c>Serializer.serialize(String, Headers, T)</c>:
-    /// <see cref="ISerializerWithHeaders{T}.Serialize(string, Headers, T)"/> when <paramref name="serializer"/>
+    /// <see cref="ISerializerWithHeaders{T}.Serialize(string, IHeaders, T)"/> when <paramref name="serializer"/>
     /// implements it, and otherwise <see cref="ISerializer{T}.Serialize(string, T)"/>, the headers unused.
     /// </summary>
     /// <typeparam name="T">The type encoded.</typeparam>
@@ -122,7 +122,7 @@ public static class SerializerExtensions
     /// <param name="data">The value to encode; may be <see langword="null"/>.</param>
     /// <returns>The bytes, or <see langword="null"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="serializer"/> is null.</exception>
-    public static ReadOnlyMemory<byte>? Serialize<T>(this ISerializer<T> serializer, string topic, Headers headers, T? data)
+    public static ReadOnlyMemory<byte>? Serialize<T>(this ISerializer<T> serializer, string topic, IHeaders headers, T? data)
     {
         if (serializer is null)
         {

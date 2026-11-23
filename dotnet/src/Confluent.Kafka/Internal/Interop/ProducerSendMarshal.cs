@@ -33,6 +33,8 @@ internal static unsafe class ProducerSendMarshal
 
     private const string RecordParameter = "record";
 
+    private const string NullHeaderKeyMessage = "Invalid null header key found in headers";
+
     internal static IntPtr Send(
         SafeProducerHandle producer,
         in SerializedProducerRecord record,
@@ -125,12 +127,13 @@ internal static unsafe class ProducerSendMarshal
     }
 
     // Java sends a NUL in a topic or a header key whole, with no error; the C ABI would cut the string at the NUL, so
-    // the string is rejected before anything is pinned. An unpaired surrogate crosses as '?', as Java writes it.
+    // the topic and each header key's first read are rejected before anything is pinned, and HeaderKey checks every
+    // later read, after the async send's pin. An unpaired surrogate crosses as '?', as Java writes it.
     // Python's mocks, pure Python, accept such a record; the mocks here build it through the C ABI and reject it too.
     private static void RejectAlteredStrings(in SerializedProducerRecord record)
     {
         AdminStrings.Validate(record.Topic, AdminStrings.InvalidTopicMessage, RecordParameter);
-        List<Header>? entries = record.Headers?.Entries;
+        List<IHeader>? entries = record.Headers?.Entries;
         if (entries is null)
         {
             return;
@@ -138,8 +141,22 @@ internal static unsafe class ProducerSendMarshal
 
         for (int i = 0; i < entries.Count; i++)
         {
-            AdminStrings.Validate(entries[i].Key(), AdminStrings.InvalidHeaderKeyMessage, RecordParameter);
+            _ = HeaderKey(entries[i]);
         }
+    }
+
+    // A null key throws Java's IllegalArgumentException, as Java's size estimate does, on the mocks too, since the C
+    // ABI cannot carry it. Every read of a user header's key is checked, as it may answer differently each time.
+    private static string HeaderKey(IHeader header)
+    {
+        string? key = header.Key();
+        if (key is null)
+        {
+            throw new IllegalArgumentException(NullHeaderKeyMessage);
+        }
+
+        AdminStrings.Validate(key, AdminStrings.InvalidHeaderKeyMessage, RecordParameter);
+        return key;
     }
 
     internal static IntPtr BuildRecord(in SerializedProducerRecord record, IntPtr key, IntPtr value, ref IntPtr outErr)
@@ -222,7 +239,7 @@ internal static unsafe class ProducerSendMarshal
             return false;
         }
 
-        List<Header>? entries = record.Headers?.Entries;
+        List<IHeader>? entries = record.Headers?.Entries;
         if (entries is null || entries.Count == 0)
         {
             return true;
@@ -266,8 +283,9 @@ internal static unsafe class ProducerSendMarshal
 
     // Headers_add_with_key_value copies the key and the value, so both are pinned for the call only. An empty value
     // crosses as a non-null pointer: fixed over an empty array yields NULL, which the ABI reads as a null value.
-    private static void AddHeader(IntPtr view, Header header, ref IntPtr outErr)
+    private static void AddHeader(IntPtr view, IHeader header, ref IntPtr outErr)
     {
+        string key = HeaderKey(header);
         byte[]? value = header.Value();
         byte empty = 0;
         fixed (byte* valueData = value)
@@ -275,7 +293,6 @@ internal static unsafe class ProducerSendMarshal
             KafkaBytes valueBytes = value is null
                 ? default
                 : new KafkaBytes(value.Length == 0 ? (IntPtr)(&empty) : (IntPtr)valueData, value.Length);
-            string key = header.Key();
             int capacity = Utf8Marshal.QuestionMarkUtf8.GetMaxByteCount(key.Length) + 1;
             if (capacity <= MaxStackStringBytes)
             {

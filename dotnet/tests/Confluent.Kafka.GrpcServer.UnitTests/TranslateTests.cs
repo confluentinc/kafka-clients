@@ -175,7 +175,7 @@ public sealed class TranslateTests
 
         ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(proto);
 
-        Header[] headers = record.Headers().ToArray();
+        IHeader[] headers = record.Headers().ToArray();
         Assert.Equal(3, headers.Length);
         Assert.Equal("b", headers[0].Key());
         Assert.Equal(new byte[] { 1, 2 }, headers[0].Value());
@@ -194,7 +194,7 @@ public sealed class TranslateTests
 
         ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(proto);
 
-        Header header = Assert.Single(record.Headers());
+        IHeader header = Assert.Single(record.Headers());
         Assert.Equal("empty", header.Key());
         byte[]? value = header.Value();
         Assert.NotNull(value);

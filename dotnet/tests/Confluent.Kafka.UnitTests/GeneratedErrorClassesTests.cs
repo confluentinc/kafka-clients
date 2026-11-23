@@ -69,6 +69,48 @@ public sealed class GeneratedErrorClassesTests
         Assert.Same(topics, error.InvalidTopics());
     }
 
+    [Fact]
+    public void NoOffsetForPartitionException_RejectsANullElement()
+    {
+        var partitions = new List<TopicPartition> { new("t", 0), null! };
+
+        ArgumentNullException error =
+            Assert.Throws<ArgumentNullException>(() => new Consumer.NoOffsetForPartitionException(partitions));
+
+        Assert.Equal("partitions", error.ParamName);
+        Assert.StartsWith("partitions must not contain null", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NoOffsetForPartitionException_RejectsANullCollection()
+    {
+        ArgumentNullException error = Assert.Throws<ArgumentNullException>(
+            () => new Consumer.NoOffsetForPartitionException((IReadOnlyCollection<TopicPartition>)null!));
+
+        Assert.Equal("partitions", error.ParamName);
+        Assert.DoesNotContain("must not contain", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NoOffsetForPartitionException_CopiesTheCollection()
+    {
+        var partitions = new List<TopicPartition> { new("t", 0), new("t", 1) };
+
+        var error = new Consumer.NoOffsetForPartitionException(partitions);
+        partitions.Clear();
+
+        Assert.Equal(new[] { new TopicPartition("t", 0), new TopicPartition("t", 1) }, error.Partitions().OrderBy(tp => tp.Partition()));
+    }
+
+    [Fact]
+    public void NoOffsetForPartitionException_AcceptsANullPartition()
+    {
+        var error = new Consumer.NoOffsetForPartitionException((TopicPartition)null!);
+
+        Assert.Equal("Undefined offset with no reset policy for partition: null", error.Message);
+        Assert.Null(Assert.Single(error.Partitions()));
+    }
+
     [Theory]
     [InlineData(typeof(DuplicateResourceException), "Resource")]
     [InlineData(typeof(GroupAuthorizationException), "GroupId")]

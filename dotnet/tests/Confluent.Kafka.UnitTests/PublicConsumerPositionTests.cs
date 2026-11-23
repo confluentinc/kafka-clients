@@ -129,7 +129,7 @@ public sealed class PublicConsumerPositionTests
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Position(default); });
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(() => { _ = consumer.Position(new TopicPartition(null!, 0)); });
         Assert.Equal("You can only check the position for partitions assigned to this consumer.", ex.Message);
     }
 

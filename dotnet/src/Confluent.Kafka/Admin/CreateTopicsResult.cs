@@ -209,6 +209,7 @@ public sealed class CreateTopicsResult
         public TopicMetadataAndConfig(ApiException exception)
         {
             _exception = exception ?? throw new ArgumentNullException(nameof(exception));
+            _topicId = Uuid.ZERO_UUID;
         }
 
         /// <summary>The topic id — Java's <c>topicId()</c>.</summary>

@@ -98,11 +98,10 @@ public sealed class PublicSyncConsumerPreconditionTests
     [InlineData("seekToEnd")]
     public void PartitionOps_NullElementTopic_ThrowArgumentNull(string op)
     {
-        // default(TopicPartition) has a null Topic, as a TopicPartition built with a null topic does.
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
-            () => InvokePartitionOp(consumer, op, new[] { default(TopicPartition) }));
+            () => InvokePartitionOp(consumer, op, new[] { new TopicPartition(null!, 0) }));
         Assert.Equal("partitions", ex.ParamName);
         Assert.Contains("partitions must not contain a TopicPartition with a null topic", ex.Message, StringComparison.Ordinal);
     }
@@ -150,7 +149,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(() => consumer.Position(default));
+        IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(() => consumer.Position(new TopicPartition(null!, 0)));
         Assert.Equal("You can only check the position for partitions assigned to this consumer.", ex.Message);
     }
 

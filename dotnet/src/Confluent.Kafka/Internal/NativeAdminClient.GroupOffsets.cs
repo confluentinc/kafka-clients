@@ -14,7 +14,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
@@ -259,6 +258,11 @@ internal sealed partial class NativeAdminClient
             {
                 foreach (TopicPartition partition in selected)
                 {
+                    if (partition is null)
+                    {
+                        throw new ArgumentNullException(nameof(groupSpecs), "groupSpecs must not contain null");
+                    }
+
                     if (partition.Topic() is null)
                     {
                         throw new ArgumentNullException(
@@ -382,6 +386,11 @@ internal sealed partial class NativeAdminClient
                 new List<KeyValuePair<TopicPartition, OffsetAndMetadata>>(offsets.Count);
             foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in offsets)
             {
+                if (entry.Key is null)
+                {
+                    throw new ArgumentNullException(nameof(offsets), "offsets must not contain null");
+                }
+
                 if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentNullException(
@@ -445,14 +454,14 @@ internal sealed partial class NativeAdminClient
     internal static KafkaFutureImpl<object?> AlterConsumerGroupOffsetsPartitionResult(
         SafeAdminResultHandle result, TopicPartition partition)
     {
-        if (partition.Topic() is null)
+        if (partition is null || partition.Topic() is null)
         {
-            // No request partition has a null topic, so Java's future fails as for one not attempted. A recorded
-            // deviation: Java fails it only once the call has answered, with the call's own error if it failed.
+            // No request partition is null or has a null topic, so Java's future fails as for one not attempted. A
+            // recorded deviation: Java fails it only once the call has answered, with the call's own error if it
+            // failed.
             KafkaFutureImpl<object?> notAttempted = new KafkaFutureImpl<object?>();
             notAttempted.CompleteWithError(new IllegalArgumentException(
-                "Alter offset for partition \"null-" + partition.Partition().ToString(CultureInfo.InvariantCulture) +
-                "\" was not attempted"));
+                "Alter offset for partition \"" + JavaText.ValueOf(partition) + "\" was not attempted"));
             return notAttempted;
         }
 
@@ -557,6 +566,11 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (TopicPartition partition in partitions)
             {
+                if (partition is null)
+                {
+                    throw new ArgumentNullException(nameof(partitions), "partitions must not contain null");
+                }
+
                 if (partition.Topic() is null)
                 {
                     throw new ArgumentNullException(
@@ -607,12 +621,11 @@ internal sealed partial class NativeAdminClient
     internal static KafkaFutureImpl<object?> DeleteConsumerGroupOffsetsPartitionResult(
         SafeAdminResultHandle result, TopicPartition partition)
     {
-        if (partition.Topic() is null)
+        if (partition is null || partition.Topic() is null)
         {
-            // No request partition has a null topic: Java's membership check throws at the call.
+            // No request partition is null or has a null topic: Java's membership check throws at the call.
             throw new IllegalArgumentException(
-                "Partition null-" + partition.Partition().ToString(CultureInfo.InvariantCulture) +
-                " was not included in the original request");
+                "Partition " + JavaText.ValueOf(partition) + " was not included in the original request");
         }
 
         IntPtr native = NewResultTopicPartition(partition);

@@ -41,7 +41,8 @@ internal static class RecordMetadataMarshal
         KafkaException.ThrowIfFfiFailed(ref outErr);
 
         return new RecordMetadata(
-            new TopicPartition(Utf8Marshal.PtrToString(topic) ?? string.Empty, partition),
+            Utf8Marshal.PtrToString(topic) ?? string.Empty,
+            partition,
             offset,
             timestamp,
             serializedKeySize,

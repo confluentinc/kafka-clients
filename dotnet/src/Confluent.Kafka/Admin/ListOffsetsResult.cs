@@ -38,7 +38,9 @@ public sealed class ListOffsetsResult
 
     /// <summary>Creates a result over the given futures, keyed by partition.</summary>
     /// <param name="futures">The future of each partition's offsets. The map is copied.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="futures"/> is <see langword="null"/>.</exception>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="futures"/> is <see langword="null"/>, or has a <see langword="null"/> key.
+    /// </exception>
     public ListOffsetsResult(IReadOnlyDictionary<TopicPartition, KafkaFuture<ListOffsetsResultInfo>> futures)
     {
         if (futures is null)
@@ -50,6 +52,11 @@ public sealed class ListOffsetsResult
             new Dictionary<TopicPartition, KafkaFuture<ListOffsetsResultInfo>>(futures.Count);
         foreach (KeyValuePair<TopicPartition, KafkaFuture<ListOffsetsResultInfo>> entry in futures)
         {
+            if (entry.Key is null)
+            {
+                throw new ArgumentNullException(nameof(futures), "futures must not contain null");
+            }
+
             copy.Add(entry.Key, entry.Value);
         }
 
@@ -74,17 +81,17 @@ public sealed class ListOffsetsResult
     /// <param name="partition">A partition that was part of the request.</param>
     /// <returns>That partition's future, carrying its own value or its own failure.</returns>
     /// <exception cref="IllegalArgumentException">
-    /// <paramref name="partition"/> was not requested, with Java's message.
+    /// <paramref name="partition"/> was not requested (a <see langword="null"/> one included), with Java's message.
     /// </exception>
     public KafkaFuture<ListOffsetsResultInfo> PartitionResult(TopicPartition partition)
     {
-        if (!_futures.TryGetValue(partition, out KafkaFuture<ListOffsetsResultInfo> future))
+        if (partition is null || !_futures.TryGetValue(partition, out KafkaFuture<ListOffsetsResultInfo> future))
         {
             throw new IllegalArgumentException(
                 string.Format(
                     CultureInfo.InvariantCulture,
                     "List Offsets for partition \"{0}\" was not attempted",
-                    partition));
+                    JavaText.ValueOf(partition)));
         }
 
         return future;
