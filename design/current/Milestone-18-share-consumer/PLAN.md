@@ -1,7 +1,8 @@
 # Milestone 18 — Share consumer (KIP-932), Rust only
 
-Status: **DRAFT for approval** (2026-11-16). Nothing in this milestone has started. The rule changes in
-§6 need human approval before Phase 1. CLAUDE.md is changed only through the agent-roles process.
+Status: **P0–P11 done** (2026-11-23); the milestone PR (`PR-BODY.md`) awaits the user's review of §8.1,
+the open decisions and the rules proposal (`rules-promotion.md`). Drafted 2026-11-16. CLAUDE.md is
+changed only through the agent-roles process.
 
 ## 1. Goal and scope
 
@@ -200,6 +201,11 @@ holds `&mut self` and the consumer is `!Sync`; `share_consumer_handle.rs`):
    twice or never. The Critic gets an explicit checklist (§6.1), and the integration Delivery and
    Callback suites are the backstop.
 5. **Post-4.4.0 fixes.** None exist on the `4.4` branch today. P11 re-checks for share fixes landed later (a 4.4.1).
+   **P11 (2026-11-23):** the `4.4` branch still has none in the client (one test-only DLQ commit); trunk has
+   three that apply, not ported: KAFKA-21558 (leadership-change resilience; acknowledgements whose
+   callback never runs), the renew-acknowledgement check accumulated across nodes, and KAFKA-19804
+   (initial heartbeat interval, shared with the consumer). See `post-4.4.0-java.md`; the user decides
+   whether to port them before the PR (§7 D11).
 
 ## 6. Rule changes proposed before starting (need approval)
 
