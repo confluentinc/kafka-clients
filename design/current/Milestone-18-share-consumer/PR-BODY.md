@@ -105,17 +105,18 @@ Each phase ran an Actor/Critic loop until the Critic had no open comments.
 
 ## Tests
 
-Local gate on the branch head (macOS, Docker VM 7.75 GiB), 2026-11-23:
+Local gate on the merged head `1a10b8688` (macOS, Docker VM 7.75 GiB), 2026-11-23:
 
 | Suite | Result |
 |---|---|
 | `make -C rust verify`: format-check, check-generated, lint | pass |
-| Library unit tests (`--all-features`) | 6,571 passed, 3 ignored (about 670 test functions added by this milestone) |
-| `integration` binary, apache/kafka 4.2.0 (default) | 559 passed, including all 130 share integration tests (the ones gated to 4.3+ / 4.4 skip themselves); 2 producer transaction tests failed in the gate run while the Docker VM's OOM killer killed a broker JVM, and passed on a rerun alone |
-| `integration`, apache/kafka 4.4.0 (`make -C rust test-integration-broker-4.4`) | 134 passed: the share suites (every 4.3+ / 4.4-gated test runs here) plus the gated bounce and quota tests. The OOM killer killed one 4.4.0 broker JVM during the run; no test failed |
-| `admin`, `consumer`, `producer` test targets, doctests | 5, 35, 8 and 25 passed |
+| Library unit tests (`--all-features`) | 6,579 passed, 3 ignored (about 670 test functions added by this milestone) |
+| `integration` binary, apache/kafka 4.2.0 (default) | 589 of 590 passed, including all 130 share integration tests (the ones gated to 4.3+ / 4.4 skip themselves). The one failure, `producer_transactions_test::test_transactional_records_are_visible_only_after_commit__rust`, is the known load flake; it passed on a rerun alone |
+| `integration`, apache/kafka 4.4.0 (`make -C rust test-integration-broker-4.4`), before the master merge | 134 passed: the share suites (every 4.3+ / 4.4-gated test runs here) plus the gated bounce and quota tests. The OOM killer killed one 4.4.0 broker JVM during the run; no test failed |
+| `admin`, `consumer`, `producer`, `performance`, `integrity` test targets, doctests | 5, 35, 8, 21, 21 and 25 passed |
+| `chaos` | 182 of 183 passed. `workload::tests::rebalance_listener_records_each_callback_and_commits_on_revoke` (from #304) fails identically on `origin/master`: it expects the `MockConsumer` handle's `commit_sync` to fail, but that handle commits in memory. Not touched by this PR |
 | `xtask` and `generator` | 569 passed |
-| `test-integration-perf` | 15 passed |
+| `test-integration-perf` | 21 passed |
 
 Coverage: the 95 Java main files of the 4.4.0 closure each map to a Rust file or a skip reason, every
 Java unit test of the closure is translated or skipped with a reason, and 113 of the 115 Java share
