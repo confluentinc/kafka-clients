@@ -15,7 +15,7 @@
 'use strict';
 
 // check-default-helpers (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Class family, Q28: "Each interface the user implements that has a
+// Class family: "Each interface the user implements that has a
 // `default` method gets a helper class, such as
 // `ConsumerRebalanceListenerDefaults`, holding Java's default bodies
 // translated from the Java source"; "The helper classes are in

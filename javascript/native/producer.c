@@ -241,7 +241,7 @@ static void slot_give_back(Producer* p, int32_t i) {
 // ---- a mock's records and errors --------------------------------------------
 
 // A record a MockProducer keeps (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Implementation over the FFI, Q62): its key and value cross as
+// Conventions, Implementation over the FFI): its key and value cross as
 // the `void *` addresses of `key_tag` and `value_tag`, which the FFI's mock
 // keeps without reading, and `history()` finds the record again from the key
 // it hands back. The reference holds the app's ProducerRecord, and so its key
@@ -278,7 +278,7 @@ static MockRecord* mock_record_of(const void* key) {
 // An error JS gave a mock (setSendException, errorNext, ...): the core
 // carries it as a LocalCallbackError whose opaque is this struct, and
 // error.c hands the very same JS value back (javascript/CLAUDE.md, JavaScript
-// Binding Conventions, Errors, Q38). Two owners: the core's error, which
+// Binding Conventions, Errors). Two owners: the core's error, which
 // releases it from any thread once its last copy is dropped
 // (injected_error_release), and the producer struct, which deletes the
 // reference on the JS thread once the core's copies are gone (the sweep of
@@ -910,7 +910,7 @@ static int send_queued_args(napi_env env, SendCtx* ctx, napi_value* argv) {
 // (javascript/CLAUDE.md, rule 6): the JS side runs the user callback and then
 // completes the KafkaFuture; then the result is reported, once.
 //
-// What runs inside the drain here (D8): the user's Java-style Callback, the
+// What runs inside the drain here: the user's Java-style Callback, the
 // one piece of user code called synchronously, and the settling of the
 // record's Promises (KafkaFuture.get()'s), whose reactions run as microtasks
 // once the drain has returned to JS, never inside it.
@@ -936,7 +936,7 @@ static int send_queued_args(napi_env env, SendCtx* ctx, napi_value* argv) {
 // while it runs. Those delivered during a turn (a send() whose pump runs the
 // core's queue) wait for send_run_queued's loop, which runs them next.
 //
-// `callback_id` (D13) stays in C: it is an int64_t the core may number past
+// `callback_id` stays in C: it is an int64_t the core may number past
 // 2^53, which a JS number cannot hold exactly, so it is never handed to JS. It
 // is used only here, in the one __set_callback_result report, or kept on the
 // context for an awaited or queued callback's.

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // The default bodies of Java's Serializer interface (javascript/CLAUDE.md,
-// JavaScript Binding Conventions, Class family, Q28): what the producer runs
+// JavaScript Binding Conventions, Class family): what the producer runs
 // for a member the user's serializer leaves out.
 
 import type { Serializer } from '../common/serialization/serializer';

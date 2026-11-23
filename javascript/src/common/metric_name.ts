@@ -15,11 +15,11 @@
 // Java's MetricName: Java's methods (it is not a data class, the JS
 // conventions' list not naming it) over private fields. The tags, Java's
 // Map<String, String>, are taken as a Map or a plain object, as a map keyed
-// by strings is (javascript/CLAUDE.md, JavaScript Binding Conventions, Types, Q25).
+// by strings is (javascript/CLAUDE.md, JavaScript Binding Conventions, Types).
 // A Map is kept as given and tags() returns it, as Java's constructor stores
 // the map and tags() returns that field; a plain object is read into a new
 // Map. `equals` and
-// `hashCode` are Java's bodies (Q29), the description left out as Java's.
+// `hashCode` are Java's bodies, the description left out as Java's.
 
 import { JavaForms } from '../internal/args';
 import { objectHashCode, sameClass, stringHashCode } from '../internal/java_object';

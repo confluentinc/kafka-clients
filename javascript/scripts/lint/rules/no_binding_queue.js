@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N8 check-no-binding-queue (javascript/CLAUDE.md boundary rule 7: no
+// check-no-binding-queue (javascript/CLAUDE.md boundary rule 7: no
 // binding-side send queue, buffer, cap or lock). A heuristic (PLAN.md §8
 // decision 13):
 //   - no lock outside native/callback_queue.c: no `pthread_mutex` / `cond` /

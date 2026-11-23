@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N1 check-out-err (scripts/lint/rules/out_err.js).
+// check-out-err (scripts/lint/rules/out_err.js).
 
 const assert = require('node:assert/strict');
 

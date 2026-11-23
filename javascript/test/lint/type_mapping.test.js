@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J7 check-type-mapping (scripts/lint/rules/type_mapping.js).
+// check-type-mapping (scripts/lint/rules/type_mapping.js).
 
 const assert = require('node:assert/strict');
 

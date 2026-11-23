@@ -15,9 +15,9 @@
 'use strict';
 
 // check-encode-callers (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Types, Q24: "`stringSerializer()` calls it for keys and values, the
+// Types: "`stringSerializer()` calls it for keys and values, the
 // headers code for header keys, and the config code once per client";
-// Class family, Q27: a string key or value given without a serializer
+// Class family: a string key or value given without a serializer
 // throws `TypeError`): `encodeLikeJava` of src/internal/encode.ts is used
 // only by the modules of `CALLERS` (`encode-caller`), each reference found
 // through the type checker, so an import under another name counts.

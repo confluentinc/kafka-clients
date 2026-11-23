@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J6 check-overload-shape (scripts/lint/rules/overload_shape.js).
+// check-overload-shape (scripts/lint/rules/overload_shape.js).
 
 const assert = require('node:assert/strict');
 

@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J2 check-java-members (javascript/CLAUDE.md "Java shape, JS idiom"): every
+// check-java-members (javascript/CLAUDE.md "Java shape, JS idiom"): every
 // public member of an exported class translates a member of its Java class
 // (or of a Java supertype): a method by its name, a property as Java's getter
 // (`x()`, `getX()`; an `isX` / `hasX` property keeps its name) or field, a
@@ -25,7 +25,7 @@
 // invented names (lint-mapping.json's `invented`) is exempt, one in its
 // `javaTargets` maps to the `<fqn>#<member>` listed. An error class keeps the
 // fields javascript/CLAUDE.md "Errors" lists, its Java singletons and the
-// methods translating its payload (Q39), and no other member; a function type
+// methods translating its payload, and no other member; a function type
 // (`Callback`) has none to map.
 
 const { atNode } = require('../location');
@@ -142,7 +142,7 @@ module.exports = {
         const jm = java && java.cls && m.isStatic && m.kind === 'property' ? javaMember(index, java.cls, m) : null;
         const singleton = jm !== null && jm.kind === 'field' && jm.owner === java.cls && jm.field.static && jm.field.final;
         // The payload (javascript/CLAUDE.md, JavaScript Binding Conventions,
-        // Errors, Q39): a method translating a Java method of the class's
+        // Errors): a method translating a Java method of the class's
         // chain of its own static-ness (a payload getter, a static factory,
         // a toString() override).
         const method = java && java.cls && m.kind === 'method' ? javaMember(index, java.cls, m) : null;

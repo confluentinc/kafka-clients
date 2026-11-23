@@ -85,7 +85,7 @@ function isSerializer(value: unknown): value is Serializer<unknown> {
  * (`null` or `undefined`): its value is a synchronous function
  * `({ configs, isKey }) => serializer`, called once with the whole
  * configuration, in place of Java's class and its `configure(configs, isKey)`
- * (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization, Q53). The
+ * (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization). The
  * configuration it gets records each of its keys the function reads, into
  * `read`, so that the producer leaves those the core doesn't know out of the
  * configuration it sends to the core, as Java's `originals()` marks them

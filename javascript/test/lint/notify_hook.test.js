@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N3 check-notify-hook (scripts/lint/rules/notify_hook.js).
+// check-notify-hook (scripts/lint/rules/notify_hook.js).
 
 const assert = require('node:assert/strict');
 

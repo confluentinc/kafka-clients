@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J4 check-public-audience (scripts/lint/rules/public_audience.js).
+// check-public-audience (scripts/lint/rules/public_audience.js).
 
 const assert = require('node:assert/strict');
 
@@ -31,7 +31,7 @@ test('Public classes and their public members pass; an error class is exempt', (
   const classes = CLASSES.map((c) => (c.fqn.endsWith('FooException') ? { ...c, public_audience: false } : c));
   const r = lint(fixture({}, classes), [RULE]);
   assert.equal(r.status, 0, r.text);
-  // Rec, Mode, ProducerConfig, Callback, Header, Future; and the 25 members the J2 rule maps (setMode included).
+  // Rec, Mode, ProducerConfig, Callback, Header, Future; and the 25 members check-java-members maps (setMode included).
   assert.ok(r.out.includes('✅ check-public-audience: 33 item(s) checked'), r.text);
 });
 

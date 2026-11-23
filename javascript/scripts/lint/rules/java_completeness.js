@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J3 check-java-completeness (root CLAUDE.md DoD #2: every method of the
+// check-java-completeness (root CLAUDE.md DoD #2: every method of the
 // translated class is implemented): every public, non-deprecated Java
 // constructor, method, `public static final` constant and public mutable
 // field (as its setter, `set<Field>`, plan §5 item 2) of a class an
@@ -30,7 +30,7 @@
 //   - any class: not a method that takes a `ConfigDef` (the key-name
 //     classes' `addClientSslSupport`, `addClientSaslSupport`);
 //   - an error class: its payload (javascript/CLAUDE.md, JavaScript Binding
-//     Conventions, Errors, Q39): every public method the class declares (the
+//     Conventions, Errors): every public method the class declares (the
 //     payload getters, a static factory, a `toString()` override) but Java's
 //     `fillInStackTrace()`, a JVM stack-trace override with no JavaScript
 //     counterpart, and every public constructor that takes a payload, as a
@@ -49,7 +49,7 @@
 //   - a placeholder type (`export type Measurable = unknown`, PLACEHOLDERS):
 //     nothing, the Java class not being translated.
 // `equals` and `hashCode` are asked as any member is: they stay methods
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q29).
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
 // An exported interface or object type mapped to a Java class (`Header`) is
 // asked as a class is.
 

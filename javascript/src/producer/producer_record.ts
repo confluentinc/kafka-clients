@@ -15,7 +15,7 @@
 // Java's ProducerRecord<K, V>: the key and the value are what the producer's
 // serializers take. A producer without a serializer takes a Buffer, a
 // Uint8Array or null, checked at send: a string needs stringSerializer()
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q24, Q27).
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
 // The headers are a Headers (common/header), sealed by send().
 
 import { JavaForms } from '../internal/args';
@@ -61,7 +61,7 @@ function isBytes(value: unknown): value is Uint8Array {
 // they are. The run-time type TypeScript cannot enforce on a
 // ProducerRecord<K, V> (javascript/CLAUDE.md); a string can't reach the FFI
 // as bytes, so it points to stringSerializer() (javascript/CLAUDE.md, JavaScript
-// Binding Conventions, Class family, Q24, Q27).
+// Binding Conventions, Class family).
 function rawBytes(value: unknown, what: 'key' | 'value'): Uint8Array | null {
   if (value === null) return null;
   if (isBytes(value)) return value;

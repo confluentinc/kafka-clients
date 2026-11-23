@@ -14,7 +14,7 @@
 
 'use strict';
 
-// H2 check-exception-word (scripts/lint/rules/exception_word.js).
+// check-exception-word (scripts/lint/rules/exception_word.js).
 
 const assert = require('node:assert/strict');
 

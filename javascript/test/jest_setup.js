@@ -31,7 +31,7 @@
 // An unhandled rejection or an uncaught exception fails the test running when
 // it arrives, at once, and one that arrives between tests fails the next
 // `afterEach`, or the file's `afterAll` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Tests, Q67: no unhandled rejection). Node runs the tests with
+// Conventions, Tests: no unhandled rejection). Node runs the tests with
 // --unhandled-rejections=strict (test/jest_runner.mjs), so a rejection is
 // raised as an uncaught exception even when something listens for
 // `unhandledRejection`. A test that expects one opts out while it listens

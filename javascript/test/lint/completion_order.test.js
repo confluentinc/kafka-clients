@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N5 check-completion-order (scripts/lint/rules/completion_order.js).
+// check-completion-order (scripts/lint/rules/completion_order.js).
 
 const assert = require('node:assert/strict');
 

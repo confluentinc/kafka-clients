@@ -34,12 +34,12 @@
  * `MockProducer.setMockMetrics` is left out too: the FFI takes a native
  * `KafkaMetric`, which the binding cannot build.
  *
- * Left out because it takes an untranslated type (Q30):
+ * Left out because it takes an untranslated type:
  * `MockProducer(Cluster, boolean, Partitioner, Serializer, Serializer)`, so a
  * mock's cluster is always Java's `Cluster.empty()`.
  *
  * Serializers: whether a serializer's methods must all be async is not
- * decided yet (Q50).
+ * decided yet.
  *
  * @packageDocumentation
  */

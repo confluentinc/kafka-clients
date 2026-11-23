@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N6 check-ownership (scripts/lint/rules/ownership.js).
+// check-ownership (scripts/lint/rules/ownership.js).
 
 const assert = require('node:assert/strict');
 

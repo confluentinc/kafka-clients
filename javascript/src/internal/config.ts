@@ -34,7 +34,7 @@
 //   (src/internal/serde.ts) that is no producer key, Java's or the core's (a
 //   `schema.registry.url`), so the core does not list it as unused, as Java's
 //   `originals()` marks it used (javascript/CLAUDE.md, JavaScript Binding
-//   Conventions, Serialization, Q53). A producer key the function read still
+//   Conventions, Serialization). A producer key the function read still
 //   reaches the core, since Java only marks it (javascript/CLAUDE.md, the
 //   serde config keys, a conventions conflict). The consumer's serde keys
 //   (`key.deserializer`, ...) pass, and the core lists them as unused.

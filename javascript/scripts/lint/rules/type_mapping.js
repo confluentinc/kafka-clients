@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J7 check-type-mapping (javascript/CLAUDE.md, JavaScript Binding Conventions,
+// check-type-mapping (javascript/CLAUDE.md, JavaScript Binding Conventions,
 // Types, and javascript/CLAUDE.md "Java shape, JS idiom": Java `null` is
 // `null`, a `long` is a `bigint`, `send` returns a `KafkaFuture`, a blocking
 // method returns a Promise): every parameter,
@@ -23,10 +23,11 @@
 // index; the TypeScript type as the checker resolves it). `null` and
 // `undefined` are stripped first (a Java reference can be null). A return is
 // a Promise of the mapped type only on a waiting member: one whose native
-// path A1 resolves to a `_cb` twin, or one of `PURE_JS_WAITING`; a Promise
-// elsewhere is a `type-mismatch`. A parameter translating a Java `Duration x`
-// is named `x`, Java's name (`duration-name`), an options object's option is
-// checked against the union of the Java types its forms give it.
+// path check-waiting-call-promise resolves to a `_cb` twin, or one of
+// `PURE_JS_WAITING`; a Promise elsewhere is a `type-mismatch`. A parameter
+// translating a Java `Duration x` is named `x`, Java's name
+// (`duration-name`), an options object's option is checked against the
+// union of the Java types its forms give it.
 //
 // | Java                                         | TypeScript                              |
 // |----------------------------------------------|-----------------------------------------|
@@ -72,7 +73,8 @@ const { waitingMembers } = require('./waiting_call_promise');
 
 /**
  * The Java members that block in Java and wait in JavaScript without a native
- * call, so their Promise return is accepted as A1's waiting calls' is.
+ * call, so their Promise return is accepted, as the Promise return of
+ * check-waiting-call-promise's waiting calls is.
  */
 const PURE_JS_WAITING = new Map([
   [
@@ -256,7 +258,7 @@ module.exports = {
       if (PLACEHOLDERS.has(j.name) || NOT_PUBLIC_TYPES.has(j.name)) return (t.flags & (ts.TypeFlags.Unknown | ts.TypeFlags.Any)) !== 0;
       if (j.name === '?') return true;
       // Java's Optional<T> is `T | null` (javascript/CLAUDE.md, JavaScript Binding
-      // Conventions, Types, Q26): null is stripped, T compared.
+      // Conventions, Types): null is stripped, T compared.
       if (j.name === 'Optional') return j.args.length === 0 ? true : matches(j.args[0], t);
       if (j.name === 'OptionalInt') return (t.flags & ts.TypeFlags.NumberLike) !== 0;
       if (j.name === 'Future' || j.name === 'KafkaFuture') {
@@ -447,9 +449,9 @@ module.exports = {
           options.getCallSignatures().length === 0 &&
           !(options.symbol && options.symbol.flags & ts.SymbolFlags.Class);
         if (isOptions) {
-          // An options object (J6 checks its names): each option against the
-          // union of the Java types the forms naming it give; a name closed
-          // with `never` is no option of this signature.
+          // An options object (check-overload-shape checks its names): each
+          // option against the union of the Java types the forms naming it
+          // give; a name closed with `never` is no option of this signature.
           for (const prop of checker.getPropertiesOfType(options)) {
             const type = checker.getTypeOfSymbolAtLocation(prop, p0);
             if (checker.getNonNullableType(type).flags & ts.TypeFlags.Never) continue;

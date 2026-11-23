@@ -35,6 +35,7 @@ const WORKER = new URL('./worker-runner.js', import.meta.resolve('jest-light-run
 /** @typedef {import('@jest/types').Config.ProjectConfig} ProjectConfig */
 /** @typedef {(message: unknown) => void} Listener */
 
+/** The Jest runner that runs each test file in a fresh child process, through jest-light-runner's worker. */
 export default class IsolatedLightRunner {
   /** @type {GlobalConfig} */
   #globalConfig;

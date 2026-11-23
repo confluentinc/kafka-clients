@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J5 check-no-deprecated-translation (scripts/lint/rules/no_deprecated_translation.js).
+// check-no-deprecated-translation (scripts/lint/rules/no_deprecated_translation.js).
 
 const assert = require('node:assert/strict');
 

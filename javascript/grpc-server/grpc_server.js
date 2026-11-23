@@ -165,6 +165,7 @@ function keepLongDeadlines() {
   };
 }
 
+/** The ProducerService of the multilanguage protocol, over the client's producers. */
 class ProducerService {
   #producers = new Map();
   #nextId = 1;

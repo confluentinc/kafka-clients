@@ -15,7 +15,7 @@
 'use strict';
 
 // check-mock-native (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Implementation over the FFI, Q62: "The mocks wrap the FFI's mocks, as .NET
+// Implementation over the FFI: "The mocks wrap the FFI's mocks, as .NET
 // does, and aren't translations of Java's"; "Only KafkaProducer,
 // KafkaConsumer, the admin client and the three mocks call the addon"): each
 // exported class named `Mock...` holds a native handle: its constructor, or

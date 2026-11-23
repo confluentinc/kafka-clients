@@ -16,12 +16,12 @@
 
 // Java's MockProducerTest, its non-transactional tests, over the FFI's mock
 // (javascript/CLAUDE.md, JavaScript Binding Conventions, Implementation over the
-// FFI, Q62), then the binding's own: the call shapes, the error setters and
+// FFI), then the binding's own: the call shapes, the error setters and
 // the records the mock keeps.
 //
 // Not translated:
 // - testPartitioner: it builds the mock with a Cluster, Java's form the
-//   binding leaves out (Scope, Q30), so the mock's cluster is always empty.
+//   binding leaves out (Scope), so the mock's cluster is always empty.
 // - The transaction tests (shouldInitTransactions, shouldBeginTransactions,
 //   shouldCommitEmptyTransaction, the should...IfProducerGotFenced and
 //   should...IfTransactionsAreEnabled tests, the offsets tests,
@@ -1403,7 +1403,7 @@ for (const { call, outcome } of MOCK_AFTER_CLOSE) {
 // first's completion, which only the hold of a waiting call covers. Each
 // round's mock stays reachable until its calls settled (`kept`): one
 // collected with a call pending is the JS conventions' Future improvements
-// entry (Q49), not this test's subject.
+// entry, not this test's subject.
 test('two close() calls at once on an open mock both settle, in each of 25 rounds', () => {
   const r = runNode(`
     const { MockProducer } = require('@confluentinc/kafka-javascript/producer');

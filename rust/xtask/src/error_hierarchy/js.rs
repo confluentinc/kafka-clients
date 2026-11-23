@@ -2159,7 +2159,7 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
         let enums: Vec<String> = info.java.enums.iter().map(|e| render_nested_enum(info, e)).collect();
         text.push_str(&format!(
             "\n// Java's nested types, static members of the class (javascript/CLAUDE.md, JavaScript Binding\n\
-             // Conventions, Names, Q11).\n\
+             // Conventions, Names).\n\
              // eslint-disable-next-line @typescript-eslint/no-namespace -- Java's nested enums, reached through the class name as in Java\n\
              export namespace {name} {{\n{}\n}}\n",
             enums.join("\n\n")
@@ -2220,7 +2220,7 @@ fn c_payload_source(classes: &BTreeMap<String, ClassInfo>, ids: &BTreeMap<String
          // `cargo xtask check-generated` checks it is up to date.\n\
          //\n\
          // The payload of an error the core reports (javascript/CLAUDE.md, JavaScript Binding\n\
-         // Conventions, Errors, Q39): the FFI's view of its class\n\
+         // Conventions, Errors): the FFI's view of its class\n\
          // (kafka_common_Error_<class>, NULL for another class), then the view's\n\
          // accessors, each field set on a plain object by native/error.c's payload_*\n\
          // helper, keyed by its Java field name. NULL when the class has none.\n\

@@ -2880,8 +2880,9 @@ async function withBrokerPaused(body) {
   120000,
 );
 
-// Q21/Q61: no closed flag; close() and [Symbol.asyncDispose] at once each
-// go to the core, which tears down once.
+// No closed flag (JS conventions, Implementation over the FFI): close()
+// and [Symbol.asyncDispose] at once each go to the core, which tears down
+// once.
 (SKIP_CONTAINER ? test.skip : test)(
   'close(), close() and [Symbol.asyncDispose]() at once, with sends, a flush() and a partitionsFor() in flight, all settle once',
   async () => {

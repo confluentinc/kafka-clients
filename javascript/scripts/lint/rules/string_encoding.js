@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N9 check-string-encoding (javascript/CLAUDE.md, JavaScript Binding Conventions,
+// check-string-encoding (javascript/CLAUDE.md, JavaScript Binding Conventions,
 // Types, strings; javascript/CLAUDE.md boundary rule 8): one function,
 // `encodeLikeJava(s)` in src/internal/encode.ts, is the only place where the
 // binding turns a string into bytes, as Java's `String.getBytes(UTF_8)` does

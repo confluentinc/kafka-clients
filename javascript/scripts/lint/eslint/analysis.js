@@ -87,6 +87,7 @@ function moduleFile(check) {
   return null;
 }
 
+/** The analysis of one client directory: each check's outcome, computed once, and where its findings go. */
 class Project {
   constructor(root, options = {}) {
     this.root = root;

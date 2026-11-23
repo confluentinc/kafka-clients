@@ -14,7 +14,7 @@
 
 'use strict';
 
-// A2 check-native-registry (scripts/lint/rules/native_registry.js).
+// check-native-registry (scripts/lint/rules/native_registry.js).
 
 const assert = require('node:assert/strict');
 

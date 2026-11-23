@@ -15,7 +15,7 @@
 'use strict';
 
 // The HTML reference builds (`make docs`, typedoc.config.cjs; JS
-// conventions, Documentation, Q64): TypeDoc over src/, with a warning failing
+// conventions, Documentation): TypeDoc over src/, with a warning failing
 // the build, into a scratch directory. A module per import path, each
 // package's `@packageDocumentation` on its page, and no `@internal` member.
 
