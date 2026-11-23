@@ -70,8 +70,6 @@ export class ClientQuotaAlteration {
   readonly #ops: Array<ClientQuotaAlteration.Op | null> | null;
 
   /**
-   * An alteration of an entity's quotas.
-   *
    * @param options - the entity whose config will be modified, and the
    *   alteration to perform
    * @throws `TypeError` for a value of the wrong type

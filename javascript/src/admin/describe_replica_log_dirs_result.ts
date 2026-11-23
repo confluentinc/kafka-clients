@@ -34,12 +34,15 @@ const FUTURE_LAG_FORMS = READER('getFutureReplicaOffsetLag');
 
 /**
  * The result of `Admin.describeReplicaLogDirs(replicas)`.
- *
- * Instances come from the admin client's `describeReplicaLogDirs()`.
  */
 export class DescribeReplicaLogDirsResult {
   readonly #futures: TopicPartitionReplicaMap<KafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>;
 
+  /**
+   * Instances come from the admin client's `describeReplicaLogDirs()`.
+   *
+   * @param futures - the futures, by replica
+   */
   private constructor(futures: TopicPartitionReplicaMap<KafkaFuture<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>) {
     this.#futures = futures;
   }
@@ -93,8 +96,6 @@ export class DescribeReplicaLogDirsResult {
 export namespace DescribeReplicaLogDirsResult {
   /**
    * The log directories of a replica on a broker.
-   *
-   * Instances come from the futures of `DescribeReplicaLogDirsResult.values()`.
    */
   export class ReplicaLogDirInfo {
     readonly #currentReplicaLogDir: string | null;
@@ -102,6 +103,16 @@ export namespace DescribeReplicaLogDirsResult {
     readonly #futureReplicaLogDir: string | null;
     readonly #futureReplicaOffsetLag: bigint;
 
+    /**
+     * Instances come from the futures of
+     * `DescribeReplicaLogDirsResult.values()`.
+     *
+     * @param currentReplicaLogDir - the current log directory, or null
+     * @param currentReplicaOffsetLag - the current replica's offset lag
+     * @param futureReplicaLogDir - the future log directory, or null
+     * @param futureReplicaOffsetLag - the future replica's offset lag, -1 for
+     *   none
+     */
     private constructor(
       currentReplicaLogDir: string | null,
       currentReplicaOffsetLag: bigint,

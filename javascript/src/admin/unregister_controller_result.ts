@@ -24,12 +24,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `Admin.unregisterController(controllerId)` call.
- *
- * Instances come from the admin client's `unregisterController()`.
  */
 export class UnregisterControllerResult {
   readonly #future: KafkaFuture<void>;
 
+  /**
+   * Instances come from the admin client's `unregisterController()`.
+   *
+   * @param future - the future of the unregistration
+   */
   private constructor(future: KafkaFuture<void>) {
     this.#future = future;
   }

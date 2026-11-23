@@ -58,7 +58,9 @@ export class ClientQuotaFilterComponent {
   readonly #match: Match;
 
   /**
-   * Java's private constructor.
+   * Java's private constructor. Instances come from
+   * `ClientQuotaFilterComponent.ofEntity`, `ofDefaultEntity` and
+   * `ofEntityType`.
    *
    * @param entityType - the entity type the filter component applies to
    * @param match - an exact name, the default name, or any specified name
@@ -157,8 +159,8 @@ export class ClientQuotaFilterComponent {
    *   exactly; `null` when it matches the default name or any specified name
    * @throws `TypeError` when it is given an argument: it only reads
    *
-   * @remarks Java's `Optional` is present, empty or null; the Types rule
-   * reads empty and null as `null`.
+   * @remarks Java's empty and null `Optional` both read as `null`, by the
+   * Types rule.
    */
   match(): string | null {
     if (arguments.length !== 0) MATCH_FORMS.match(undefined, arguments.length);

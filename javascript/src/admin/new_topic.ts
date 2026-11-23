@@ -229,8 +229,8 @@ export class NewTopic {
   /**
    * Set the configuration to use on the new topic.
    *
-   * @param configs - The configuration map, a `Map` or a plain object of its
-   *   keys, on its own
+   * @param configs - The configuration map, a `Map` or plain object, on its
+   *   own
    * @returns This NewTopic object.
    * @throws `TypeError` when the map is not keyed by strings of string values
    */

@@ -31,8 +31,6 @@ const ALL_TOPIC_IDS_FORMS = new JavaForms('allTopicIds', [[]], { reader: true })
 
 /**
  * The result of the `KafkaAdminClient.describeTopics(topics)` call.
- *
- * Instances come from the admin client's `describeTopics()`.
  */
 export class DescribeTopicsResult {
   readonly #topicIdFutures: UuidMap<KafkaFuture<TopicDescription>> | null;
@@ -40,6 +38,8 @@ export class DescribeTopicsResult {
 
   /**
    * Java's protected constructor: exactly one of the two maps.
+   *
+   * Instances come from the admin client's `describeTopics()`.
    *
    * @param topicIdFutures - the futures by topic id, or null
    * @param nameFutures - the futures by topic name, or null

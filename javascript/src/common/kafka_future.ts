@@ -405,10 +405,9 @@ export abstract class KafkaFuture<T> {
    * @throws `TypeError` when `function` is `null`, `undefined` or not a
    *   function
    *
-   * @remarks *(deviation)* On an admin RPC's future, one registered right
-   * after a `MockAdminClient` call runs on a later turn of the event loop,
-   * once the core's task answers, not inside the call as Java's mock runs it
-   * (see `isDone()`).
+   * @remarks *(deviation)* A function registered right after a
+   * `MockAdminClient` call runs on a later turn, not inside the call (see
+   * `isDone()`).
    */
   abstract thenApply<R>(options: {
     /** The function, called as `function(value)`. */
@@ -451,10 +450,9 @@ export abstract class KafkaFuture<T> {
    * @throws `TypeError` when `action` is `null`, `undefined` or not a
    *   function
    *
-   * @remarks *(deviation)* On an admin RPC's future, one registered right
-   * after a `MockAdminClient` call runs on a later turn of the event loop,
-   * once the core's task answers, not inside the call as Java's mock runs it
-   * (see `isDone()`).
+   * @remarks *(deviation)* An action registered right after a
+   * `MockAdminClient` call runs on a later turn, not inside the call (see
+   * `isDone()`).
    */
   abstract whenComplete(options: {
     /** The action to perform, called as `action(value, error)`. */
@@ -571,9 +569,7 @@ export abstract class KafkaFuture<T> {
    *   `{valueIfAbsent}` (a bare plain object included)
    * @throws `TypeError` when `valueIfAbsent` is `undefined`
    *
-   * @remarks *(deviation)* Right after a `MockAdminClient` call, an admin
-   * RPC's future shows its outcome only on a later turn of the event loop
-   * (see `isDone()`).
+   * @remarks *(deviation)* After a `MockAdminClient` call, see `isDone()`.
    */
   abstract getNow(options: {
     /**
@@ -611,9 +607,7 @@ export abstract class KafkaFuture<T> {
    * @returns whether this future failed or was cancelled
    * @throws `TypeError` when it is given an argument: it only reads
    *
-   * @remarks *(deviation)* Right after a `MockAdminClient` call, an admin
-   * RPC's future shows its outcome only on a later turn of the event loop
-   * (see `isDone()`).
+   * @remarks *(deviation)* See `isDone()`.
    */
   abstract isCompletedExceptionally(): boolean;
 
@@ -624,15 +618,7 @@ export abstract class KafkaFuture<T> {
    * @returns whether this future is done
    * @throws `TypeError` when it is given an argument: it only reads
    *
-   * @remarks *(deviation)* An admin RPC's future learns its outcome on a
-   * later turn of the event loop: right after a `MockAdminClient` call, which
-   * Java's mock completes before returning, `isDone()`,
-   * `isCompletedExceptionally()` and `getNow()` don't show it yet, and a
-   * `thenApply` or `whenComplete` registered then runs later, not inside the
-   * call. `await get()` is unaffected. Why: the core's `get_cb` answers even a
-   * completed future from a task it spawns, and the binding calls no blocking
-   * C function. Goes when: the core queues that answer before `get_cb`
-   * returns.
+   * @remarks *(deviation)* For `MockAdminClient`, see that class.
    */
   abstract isDone(): boolean;
 

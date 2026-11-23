@@ -50,8 +50,7 @@ export abstract class AbstractOptions {
    *
    * @returns the timeout, or null
    *
-   * @remarks A negative timeout is sent as 0, which Java's deadline makes of
-   * it.
+   * @remarks A negative timeout is sent as 0.
    */
   timeoutMs(): number | null;
   /**
@@ -63,8 +62,7 @@ export abstract class AbstractOptions {
    * @throws `RangeError` for `NaN`, an infinity, or a value outside 32 bits
    * @throws `TypeError` when it is neither null nor a whole number
    *
-   * @remarks A negative timeout is sent as 0, which Java's deadline makes of
-   * it.
+   * @remarks A negative timeout is sent as 0.
    */
   timeoutMs(timeoutMs: number | null): this;
   /**
@@ -76,8 +74,7 @@ export abstract class AbstractOptions {
    * @throws `RangeError` for `NaN`, an infinity, or a value outside 32 bits
    * @throws `TypeError` when it is neither null nor a whole number
    *
-   * @remarks A negative timeout is sent as 0, which Java's deadline makes of
-   * it.
+   * @remarks A negative timeout is sent as 0.
    */
   timeoutMs(options: {
     /** The timeout in milliseconds, or null for the default api timeout. */

@@ -292,7 +292,7 @@ export class Uuid {
   /**
    * Convert a list of Uuid to an array of Uuid.
    *
-   * @param list - The input list (any iterable), or `{ list }`
+   * @param list - The input list (any iterable)
    * @returns The output array (null for a null list)
    */
   static toArray(list: Iterable<Uuid> | null): Uuid[] | null;

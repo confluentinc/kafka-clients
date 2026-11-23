@@ -37,6 +37,12 @@
  * `listClientMetricsResources` with its classes (use `listGroups` and
  * `listConfigResources`).
  *
+ * `AdminClientConfig` holds Java's constants only, as its `ConfigDef`
+ * machinery is not translated: `AdminClientConfig(Map)`, `configNames()`,
+ * `configDef()` and `main(String[])` are left out, and constructing it throws
+ * `TypeError`. Its constants include those Java's class inherits from
+ * `AbstractConfig`, such as `CONFIG_PROVIDERS_CONFIG`.
+ *
  * Invented *(js-only)*: `MemberToRemoveSet`, Java's `Set<MemberToRemove>`:
  * JavaScript has no value equality for set members.
  *
@@ -249,6 +255,10 @@
  * member by its `Object.toString()`; a Result built through the constructor
  * uses Java's text. Why: the core builds the client's Result. Goes when: the
  * core's message is Java's.
+ *
+ * *(deviation, as in Python)* `Admin.create` takes its configuration as
+ * `configs`, bare or as `{ configs }`, where Java names it `props` and `conf`.
+ * Why: one name for every client's configuration. Permanent.
  *
  * @packageDocumentation
  */

@@ -110,16 +110,16 @@ export class ScramMechanism {
   }
 
   /**
-   * The instance corresponding to the given type indicator.
+   * The mechanism of the given type.
    *
-   * @param type - the type indicator, a Java `byte`, on its own or as `{ type }`
+   * @param type - the type indicator
    * @returns the instance corresponding to the given type indicator, otherwise `UNKNOWN`
    * @throws `TypeError` when the type is not an integer
    * @throws `RangeError` when it is outside Java's `byte`
    */
   static fromType(type: number): ScramMechanism;
   /**
-   * The same as `fromType(type)`, the parameter given by name.
+   * The same as `fromType(type)`.
    *
    * @param options - the type indicator, a Java `byte`
    * @returns the instance corresponding to the given type indicator, otherwise `UNKNOWN`

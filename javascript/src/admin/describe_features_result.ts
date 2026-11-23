@@ -25,14 +25,14 @@ const FEATURE_METADATA_FORMS = new JavaForms('featureMetadata', [[]], { reader: 
 
 /**
  * The result of the `Admin.describeFeatures({ options })` call.
- *
- * Instances come from the admin client's `describeFeatures()`.
  */
 export class DescribeFeaturesResult {
   readonly #future: KafkaFuture<FeatureMetadata>;
 
   /**
    * Java's protected constructor.
+   *
+   * Instances come from the admin client's `describeFeatures()`.
    *
    * @param future - the future of the feature metadata
    */

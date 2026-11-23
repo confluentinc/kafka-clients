@@ -25,12 +25,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `Admin.deleteConsumerGroups(groupIds)` call.
- *
- * Instances come from the admin client's `deleteConsumerGroups()`.
  */
 export class DeleteConsumerGroupsResult {
   readonly #futures: Map<string, KafkaFuture<void>>;
 
+  /**
+   * Instances come from the admin client's `deleteConsumerGroups()`.
+   *
+   * @param futures - the futures, by group id
+   */
   private constructor(futures: Map<string, KafkaFuture<void>>) {
     this.#futures = futures;
   }

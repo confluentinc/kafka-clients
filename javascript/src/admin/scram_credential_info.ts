@@ -42,7 +42,7 @@ export class ScramCredentialInfo {
    * A credential's mechanism and iterations.
    *
    * @param options - the required mechanism, and the number of iterations
-   *   used when creating the credential (a Java `int`)
+   *   used when creating the credential
    * @throws `TypeError` when the mechanism is null or not a ScramMechanism,
    *   or the iterations not an integer
    * @throws `RangeError` when the iterations are outside Java's `int`
@@ -65,7 +65,7 @@ export class ScramCredentialInfo {
   /**
    * The mechanism.
    *
-   * @returns the mechanism
+   * @returns it
    * @throws `TypeError` when it is given an argument: it only reads
    */
   mechanism(): ScramMechanism {
