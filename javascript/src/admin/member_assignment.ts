@@ -38,7 +38,7 @@ export class MemberAssignment {
   /**
    * Creates an instance with the specified parameters.
    *
-   * @param topicPartitions - List of topic partitions, on its own or as `{ topicPartitions }` (null: none)
+   * @param topicPartitions - List of topic partitions, on its own (null: none)
    * @throws `TypeError` when it is not an iterable of TopicPartition, or holds null
    */
   constructor(topicPartitions: Iterable<TopicPartition> | null);

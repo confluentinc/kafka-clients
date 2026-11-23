@@ -29,14 +29,19 @@ const ERRORS_FORMS = new JavaForms('errors', [[]], { reader: true });
 
 /**
  * The result of the `Admin.listGroups()` call.
- *
- * Instances come from the admin client's `listGroups()`.
  */
 export class ListGroupsResult {
   readonly #all: KafkaFuture<GroupListing[]>;
   readonly #valid: KafkaFuture<GroupListing[]>;
   readonly #errors: KafkaFuture<unknown[]>;
 
+  /**
+   * Instances come from the admin client's `listGroups()`.
+   *
+   * @param all - the future of `all()`
+   * @param valid - the future of `valid()`
+   * @param errors - the future of `errors()`
+   */
   private constructor(all: KafkaFuture<GroupListing[]>, valid: KafkaFuture<GroupListing[]>, errors: KafkaFuture<unknown[]>) {
     this.#all = all;
     this.#valid = valid;

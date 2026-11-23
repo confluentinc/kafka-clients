@@ -36,6 +36,9 @@ const TOPIC_NAMES_FORMS = new JavaForms('topicNames', [[]], { reader: true });
 // The token the factories hand the constructors (Java's are private).
 const MAKE: unique symbol = Symbol('TopicCollection');
 
+// What constructing it other than through the factories throws.
+const NOT_DIRECTLY = 'TopicCollection cannot be constructed directly; use TopicCollection.ofTopicIds or TopicCollection.ofTopicNames';
+
 /**
  * The elements of an iterable Java takes as a `Collection`, copied, as
  * Java's `new ArrayList<>(topics)`.
@@ -61,8 +64,7 @@ function elements<T>(value: unknown, check: (v: unknown) => boolean, what: strin
  * A class used to represent a collection of topics. This collection may
  * define topics by name or ID.
  *
- * @remarks An abstract class, as Java's is: build one with
- * `TopicCollection.ofTopicIds` or `TopicCollection.ofTopicNames`.
+ * @remarks Abstract, as Java's: use `ofTopicIds` or `ofTopicNames`.
  */
 export abstract class TopicCollection {
   /**
@@ -72,16 +74,16 @@ export abstract class TopicCollection {
   readonly #brand = true;
 
   /**
-   * Called by the subclasses only.
+   * Called by the subclasses only. Instances come from
+   * `TopicCollection.ofTopicIds` and `TopicCollection.ofTopicNames`.
    *
    * @param token - the factories' token
-   * @throws `TypeError` when called for `TopicCollection` itself, or not by
-   *   the factories: Java's constructor is private
+   * @throws `TypeError` when called for `TopicCollection` itself, which is
+   *   abstract, or not by the factories: Java's constructor is private
    */
   protected constructor(token: unknown) {
-    if (token !== MAKE) {
-      throw new TypeError('TopicCollection cannot be constructed directly; use TopicCollection.ofTopicIds or TopicCollection.ofTopicNames');
-    }
+    if (new.target === TopicCollection) throw new TypeError(NOT_DIRECTLY);
+    if (token !== MAKE) throw new TypeError(NOT_DIRECTLY);
   }
 
   /**
@@ -137,6 +139,11 @@ export namespace TopicCollection {
   export class TopicIdCollection extends TopicCollection {
     readonly #topicIds: readonly Uuid[];
 
+    /**
+     * Instances come from `TopicCollection.ofTopicIds`.
+     *
+     * @param topicIds - the topic IDs, copied
+     */
     private constructor(topicIds: readonly Uuid[]) {
       super(MAKE);
       this.#topicIds = Object.freeze([...topicIds]);
@@ -183,6 +190,11 @@ export namespace TopicCollection {
   export class TopicNameCollection extends TopicCollection {
     readonly #topicNames: readonly string[];
 
+    /**
+     * Instances come from `TopicCollection.ofTopicNames`.
+     *
+     * @param topicNames - the topic names, copied
+     */
     private constructor(topicNames: readonly string[]) {
       super(MAKE);
       this.#topicNames = Object.freeze([...topicNames]);

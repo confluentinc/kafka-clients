@@ -29,8 +29,8 @@ const USER_FORMS = new JavaForms('user', [[]], { reader: true });
  *
  * See KIP-554: Add Broker-side SCRAM Config API.
  *
- * @remarks An abstract class, as Java's is: build a
- * `UserScramCredentialUpsertion` or a `UserScramCredentialDeletion`.
+ * @remarks Abstract: use `UserScramCredentialUpsertion` or
+ * `UserScramCredentialDeletion`.
  */
 export abstract class UserScramCredentialAlteration {
   readonly #user: string;

@@ -140,7 +140,7 @@ export class UserScramCredentialUpsertion extends UserScramCredentialAlteration 
   /**
    * The mechanism and iterations.
    *
-   * @returns the credential info
+   * @returns them
    * @throws `TypeError` when it is given an argument: it only reads
    */
   credentialInfo(): ScramCredentialInfo {
@@ -151,7 +151,7 @@ export class UserScramCredentialUpsertion extends UserScramCredentialAlteration 
   /**
    * The salt.
    *
-   * @returns the salt
+   * @returns it
    * @throws `TypeError` when it is given an argument: it only reads
    */
   salt(): Buffer {
@@ -162,7 +162,7 @@ export class UserScramCredentialUpsertion extends UserScramCredentialAlteration 
   /**
    * The password.
    *
-   * @returns the password
+   * @returns it
    * @throws `TypeError` when it is given an argument: it only reads
    */
   password(): Buffer {

@@ -65,6 +65,9 @@ export class ClientQuotaFilter {
   /**
    * A filter to be applied to matching client quotas.
    *
+   * Instances come from `ClientQuotaFilter.contains`, `containsOnly` and
+   * `all`.
+   *
    * @param components - the components to filter on
    * @param strict - whether the filter only includes specified components
    */

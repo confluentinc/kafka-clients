@@ -1499,7 +1499,11 @@ adds:
 - **The data classes** are the seven `*Description` classes (entry 39), in
   `DATA_CLASSES`; a collection they hold is read-only
   (`internalSetReadOnly` on `TopicPartitionMap` and `TopicPartitionSet`,
-  `src/internal/read_only_map.ts`).
+  `src/internal/read_only_map.ts`). A getter Java computes from a field is a
+  field computed once: `ClassicGroupDescription.isSimpleConsumerGroup` reads
+  a null protocol as `false`, where Java's getter throws
+  `NullPointerException` *(deviation. Why: a data class's field is set when
+  the object is built, and a field cannot throw)*.
 - **Strings.** The SCRAM upsertion's password goes through `encodeLikeJava`,
   as Java's `getBytes(UTF_8)`, and so does its random salt. The other admin
   strings (ACL resource names, principals, hosts, user names, group and
@@ -1527,7 +1531,14 @@ adds:
   for `check-out-err`); `check-public-audience` keeps `MockAdminClient`, a
   Java test fixture, public; `check-java-completeness` reads Java's
   `MockAdminClient` and its `Builder` from the Java index and counts
-  `Admin.create` on the runtime object; `check-type-mapping` holds the rows
+  `Admin.create` on the runtime object; `check-java-supertypes` reads
+  `KafkaAdminClient` and `MockAdminClient` as implementing `Admin` through
+  Java's `AdminClient`, which is not translated; `check-native-wrappers`
+  lists the `Builder`, over the FFI's mock builder, in `nativeCallers`;
+  `check-overload-shape`, `check-type-mapping` and `check-doc-size` read
+  `Admin.create`'s `props` and `conf` as `configs`, the runtime object
+  declaring its `{ configs }` and bare signatures;
+  `check-type-mapping` holds the rows
   of the value-keyed maps and sets; `check-waiting-call-promise` follows a
   Result's `all()` to the futures it composes; `check-exception-word` keeps
   Java's `DeleteAclsResult.FilterResult#exception()`; and
@@ -1943,7 +1954,8 @@ The rules, each named in its finding:
   translates a public, live Java class by name (or is listed), in its file
   (a TypeScript `enum` is `check-java-kind`'s),
   every public member a Java member (the members of an interface's runtime
-  object, `Admin.create`, its static methods), and every public Java member is
+  object, `Admin.create`, its static methods, read from the object type the
+  const is declared with when it has one), and every public Java member is
   translated (`check-public-audience` takes Java's internal `RecordHeader`
   as public, the class the JS conventions have an app build a header with,
   Serialization, the rule's `PUBLIC_BY_RULE`) (an enum's `java.lang.Enum` members and `toJSON()` included, a
@@ -2032,8 +2044,10 @@ The rules, each named in its finding:
   const by its initializer (an arrow function, an object of methods such as
   an interface's statics), and the module's top-level code with any use in
   it that none of those reaches (a function nothing calls or names), keyed
-  by the module; the record's future, `KafkaFutureImpl`, over its native
-  future (Futures and waiting), today. A use is `native.<fn>`,
+  by the module; `KafkaFutureImpl`, a future over a native handle, a
+  record's or an admin RPC's (Futures and waiting), and `MockAdminClient`'s
+  `Builder`, over the FFI's mock builder (Implementation over the FFI: the
+  mocks wrap the FFI's mocks), today. A use is `native.<fn>`,
   `native['<fn>']` or `const { <fn> } = native`, and counts when the code
   reaches it directly or through the `src/internal/` functions and its
   module's unexported functions it calls or hands on as a callback
@@ -2058,16 +2072,23 @@ The rules, each named in its finding:
   signature per Java form, the signatures of its null combinations (a `null`
   key or value, above) and the bare value of a one-parameter form; a nested
   class's sets too (`mappedItems`), and a member two classes inherit from
-  one Java class (`java.lang.Enum#toString`) translated once per class.
+  one Java class (`java.lang.Enum#toString`) translated once per class. The
+  rule's tables hold the set the JS conventions make one form, a serde's
+  two `serialize` methods (Serialization), and the parameters they rename,
+  `Admin.create`'s `props` and `conf` as `configs` (Class family's `configs`
+  form, which also takes the bare map, Signatures and Configuration;
+  *(deviation, as in Python)*), which the rule then checks as one `configs`
+  form, its `{ configs }` signature and its bare one.
 - `check-type-mapping`: each member's type is the one the Types table gives
   (a `byte[]` taken as a `Uint8Array`, returned as a `Buffer`; a `long`
-  returned as a `bigint`, taken as a `bigint` or a whole `number`; where Java
-  takes `Headers`, `Iterable<Header>` or `Header[]`, an element is a `Header`
-  or a `readonly [string, Uint8Array | null]` pair, the pair included; a bare
-  `Header`, as `Headers.add(header)` takes it, is a `RecordHeader`, the rule's
-  `BARE_CLASSES`, "TypeScript first"), a nested
-  class's members' too, a nested class named by its own name
-  (`DeserializationExceptionOrigin`); a Java type the rule's table lacks is
+  returned as a `bigint`, taken as a `bigint` or a whole `number`; a
+  client's `Map` or `Properties` configuration as its `...Configs` type,
+  bare or as `{ configs }`; where Java takes `Headers`, `Iterable<Header>`
+  or `Header[]`, an element is a `Header` or a `readonly [string, Uint8Array
+  | null]` pair, the pair included; a bare `Header`, as `Headers.add(header)`
+  takes it, is a `RecordHeader`, the rule's `BARE_CLASSES`, "TypeScript
+  first"), a nested class's members' too, a nested class named by its own
+  name (`DeserializationExceptionOrigin`); a Java type the rule's table lacks is
   `unmapped`.
 - `check-waiting-call-promise`: a method returns a Promise if and only if its
   native path reaches a `_cb` twin.

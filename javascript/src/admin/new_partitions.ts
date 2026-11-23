@@ -31,13 +31,19 @@ const ASSIGNMENTS_FORMS = new JavaForms('assignments', [[]], { reader: true });
 /**
  * Describes new partitions for a particular topic in a call to
  * `Admin.createPartitions`.
- *
- * Instances come from `NewPartitions.increaseTo`.
  */
 export class NewPartitions {
   readonly #totalCount: number;
   readonly #newAssignments: readonly (readonly number[])[] | null;
 
+  /**
+   * Instances come from `NewPartitions.increaseTo`.
+   *
+   * @param totalCount - the total number of partitions after the operation
+   *   succeeds
+   * @param newAssignments - the replica assignments of the new partitions, or
+   *   null
+   */
   private constructor(totalCount: number, newAssignments: readonly (readonly number[])[] | null) {
     this.#totalCount = totalCount;
     this.#newAssignments = newAssignments;

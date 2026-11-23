@@ -25,12 +25,15 @@ const DELEGATION_TOKENS_FORMS = new JavaForms('delegationTokens', [[]], { reader
 
 /**
  * The result of the `Admin.describeDelegationToken()` call.
- *
- * Instances come from the admin client's `describeDelegationToken()`.
  */
 export class DescribeDelegationTokenResult {
   readonly #future: KafkaFuture<DelegationToken[]>;
 
+  /**
+   * Instances come from the admin client's `describeDelegationToken()`.
+   *
+   * @param future - the future
+   */
   private constructor(future: KafkaFuture<DelegationToken[]>) {
     this.#future = future;
   }

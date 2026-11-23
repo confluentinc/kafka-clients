@@ -520,7 +520,7 @@ module.exports = {
         continue;
       }
       if (jm.kind === 'field') continue;
-      const forms = liveForms(jm.overloads);
+      const forms = liveForms(jm.overloads, `${jm.owner.fqn}#${jm.name}`);
       const names = formOptionNames(forms);
       // The bare values' names: the one parameter of each one-parameter form
       // (several names told apart by type, src/internal/args.ts `bareTypes`).
