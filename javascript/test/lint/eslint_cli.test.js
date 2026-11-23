@@ -180,7 +180,7 @@ test("the formatter of make lint-rules prints a project finding once, with its f
   const { root } = layout();
   fs.rmSync(path.join(root, 'java-index.json'));
   // A finding of a rule that needs no Java index: an underscore member.
-  fs.writeFileSync(path.join(root, 'src', 'producer', 'stray.ts'), 'export class Stray {\n  _x = 1;\n}\n');
+  fs.writeFileSync(path.join(root, 'src', 'producer', 'stray.ts'), '/** A stray class. */\nexport class Stray {\n  _x = 1;\n}\n');
   const r = spawnSync(process.execPath, [BIN, '.', '--format', path.join(ROOT, 'scripts', 'lint', 'eslint', 'formatter.js')], {
     cwd: root,
     encoding: 'utf8',

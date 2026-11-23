@@ -657,6 +657,7 @@ module.exports = {
   memberKey,
   memberTags,
   publicMembers,
+  memberName,
   isInternal,
   signaturesOf,
   formParameters,
