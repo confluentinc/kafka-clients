@@ -27,6 +27,8 @@
 //! The inputs are Javadocs as [`crate::java::clean_javadoc`] leaves them, or
 //! whole `/** .. */` blocks for [`plain_text`].
 
+use std::collections::BTreeSet;
+
 use crate::java::{self, JavaIndex};
 
 /// A Javadoc split into its main description and its block tags.
@@ -122,6 +124,116 @@ pub fn inherit_doc(own: &str, inherited: &str) -> String {
         out.push_str(&format!("\n@{} {} {}", tag.name, tag.arg, tag.text));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Javadocs that point elsewhere (documentation.md §4)
+// ---------------------------------------------------------------------------
+
+/// The references of a Javadoc that only points elsewhere: no text but `@see`
+/// tags (`@see KafkaConsumer#commitSync()`), or a body that is only "See" and
+/// `{@link}`s (`See {@link KafkaProducer#close()}`), with no tags but `@see`
+/// and `@since`. Empty for any other Javadoc.
+pub fn pointer_refs(doc: &str) -> Vec<String> {
+    let parsed = parse(doc);
+    if !parsed.tags.iter().all(|t| t.name == "see" || t.name == "since") {
+        return Vec::new();
+    }
+    let mut refs: Vec<String> = Vec::new();
+    let mut rest = String::new();
+    let mut body = parsed.body.as_str();
+    while let Some(start) = body.find("{@link") {
+        rest.push_str(&body[..start]);
+        let Some(len) = body[start..].find('}') else {
+            return Vec::new();
+        };
+        let inner = &body[start + 1..start + len];
+        let target = inner.split_whitespace().nth(1).unwrap_or_default();
+        refs.push(target.to_string());
+        body = &body[start + len + 1..];
+    }
+    rest.push_str(body);
+    if rest
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| !w.is_empty() && !w.eq_ignore_ascii_case("see"))
+    {
+        return Vec::new();
+    }
+    refs.extend(parsed.tags.iter().filter(|t| t.name == "see").map(|t| {
+        // `@see Foo#bar() label`: the reference is the first word, the
+        // parameter list possibly spaced.
+        let text = t.text.as_str();
+        match text.find(')') {
+            Some(end) if text[..end].contains('(') => text[..=end].to_string(),
+            _ => text.split_whitespace().next().unwrap_or_default().to_string(),
+        }
+    }));
+    refs
+}
+
+/// The raw Javadocs of `marker` ([`JavaIndex::marker_javadocs`]), a Javadoc
+/// that only points elsewhere ([`pointer_refs`]) replaced by the Javadocs it
+/// points to, followed in turn; a marker already in `seen` gives none.
+pub fn followed_javadocs(index: &JavaIndex, marker: &str, seen: &mut BTreeSet<String>) -> Vec<String> {
+    if !seen.insert(marker.to_string()) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for doc in index.marker_javadocs(marker).unwrap_or_default() {
+        out.extend(followed_doc(index, marker, doc, seen));
+    }
+    out
+}
+
+/// `doc`, the Javadoc of what `marker` names, or, when it only points
+/// elsewhere ([`pointer_refs`]), the Javadocs it points to
+/// ([`followed_javadocs`]); `doc` itself when none of them is found.
+pub fn followed_doc(index: &JavaIndex, marker: &str, doc: String, seen: &mut BTreeSet<String>) -> Vec<String> {
+    let followed: Vec<String> = pointer_refs(&doc)
+        .iter()
+        .filter_map(|r| see_marker(index, marker, r))
+        .flat_map(|target| followed_javadocs(index, &target, seen))
+        .collect();
+    if followed.is_empty() {
+        vec![doc]
+    } else {
+        followed
+    }
+}
+
+/// The marker a reference in the Javadoc of `from` names, when it names a
+/// known class or one of its members: `KafkaConsumer`,
+/// `KafkaConsumer#commitSync(Duration)`, `#commitSync()` (a member of
+/// `from`'s own class). The class is found by simple name, `from`'s
+/// package first; main-tree classes only.
+pub fn see_marker(index: &JavaIndex, from: &str, reference: &str) -> Option<String> {
+    let reference = reference.split_whitespace().collect::<String>();
+    let (class_name, member) = reference.split_once('#').unwrap_or((&reference, ""));
+    let from_class = index.resolve(from)?;
+    let class = if class_name.is_empty() {
+        from_class
+    } else {
+        let simple = class_name.rsplit('.').next().unwrap_or(class_name);
+        let mut candidates: Vec<&java::JavaClass> = index
+            .classes
+            .iter()
+            .filter(|c| !c.is_test && c.path.last().is_some_and(|n| n == simple))
+            .collect();
+        candidates.sort_by_key(|c| c.package != from_class.package);
+        candidates.first().copied()?
+    };
+    if member.is_empty() {
+        return Some(class.marker());
+    }
+    let name = member.split('(').next().unwrap_or(member);
+    // A signature naming an overload is kept; one that names none (a
+    // fully-qualified parameter type) falls back to every overload.
+    let member = if member.contains('(') && class.overloads.iter().any(|o| o.signature() == member) {
+        member
+    } else {
+        name
+    };
+    Some(format!("{}#{member}", class.marker()))
 }
 
 // ---------------------------------------------------------------------------

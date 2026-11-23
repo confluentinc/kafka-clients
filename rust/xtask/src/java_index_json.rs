@@ -27,13 +27,16 @@
 //! `javascript/scripts/lint/java_index.js`, fills in what is left out):
 //!
 //! ```text
-//! { "schema": 2, "audience_ref": "4.4.0-rc3", "deprecation_refs": ["4.3.1", "4.4.0-rc3"],
+//! { "schema": 3, "audience_ref": "4.4.0-rc3", "deprecation_refs": ["4.3.1", "4.4.0-rc3"],
 //!   "classes": [
 //!     { "package", "path", "kind"?, "visibility"?, "abstract"?, "deprecated"?,
 //!       "public_audience"?, "unsupported_package"?, "supertypes"?, "supertype_fqns"?,
+//!       "javadoc"?,
 //!       "overloads"?: [ { "name", "params", "param_names"?, "param_types"?, "return_type"?,
-//!                         "visibility"?, "static"?, "default"?, "deprecated"?, "fixed_message"? } ],
-//!       "fields"?: [ { "name", "type", "visibility"?, "static"?, "final"?, "deprecated"?, "value"? } ],
+//!                         "visibility"?, "static"?, "default"?, "abstract"?, "deprecated"?,
+//!                         "fixed_message"?, "javadoc"? } ],
+//!       "fields"?: [ { "name", "type", "visibility"?, "static"?, "final"?, "deprecated"?, "value"?,
+//!                      "javadoc"? } ],
 //!       "enum_constants"? } ] }
 //! ```
 //!
@@ -44,7 +47,21 @@
 //! is reported as not public). `params` holds the erased simple type
 //! names the form keys use (`BiConsumer`), `param_types` the types as written
 //! (`BiConsumer<? super T, ? super Throwable>`). The class's fully qualified
-//! name is `org.apache.kafka.<package>.<path joined by $>`.
+//! name is `org.apache.kafka.<package>.<path joined by $>`. An overload's
+//! `abstract` is the `abstract` keyword (an interface's methods have none).
+//!
+//! `javadoc` holds the size of each Javadoc a public or protected class,
+//! overload, field or enum constant is measured against, as `check-api-docs`
+//! measures a Rust doc (`.claude/rules/documentation.md` §5, [`javadoc_sizes`]):
+//! its own, the overridden member's for an undocumented override (with
+//! `{@inheritDoc}` filled in), or, for one that only points elsewhere, the
+//! Javadocs it points to (§4). Each is `{ "body", "params"?, "return"?,
+//! "throws"? }`, the words of the translated Javadoc (§3) by part: `params`
+//! each `@param` as `[name as written, words]`, `return` the `@return`'s words
+//! (left out when Java has none), `throws` each `@throws` as `[class's simple
+//! name, words]`, and `body` every other word (the description, `@see`), so
+//! the parts add up to the Javadoc's words. A Javadoc of no words (only
+//! `@since`) is left out, as `check-api-docs` leaves it out.
 //!
 //! Besides what the scanner reads, three things are read from the source of a
 //! top-level class, for the client's unit tests:
@@ -67,10 +84,11 @@ use std::fs;
 use std::path::Path;
 
 use crate::java::{self, Deprecation, JavaClass, JavaIndex, JavaKind, Visibility};
+use crate::javadoc::{self, word_count, Translator};
 use crate::lint_custom::{parse_public_list, PUBLIC_AUDIENCE_LIST};
 
 /// The schema version, raised on any incompatible change to the layout.
-const SCHEMA: usize = 2;
+const SCHEMA: usize = 3;
 
 /// The index, relative to `rust/`.
 pub(crate) const JAVASCRIPT_INDEX: &str = "../javascript/java-index.json";
@@ -280,6 +298,8 @@ fn class_json(
     } else {
         Vec::new()
     };
+    let translator = Translator { index: Some(index), panics: false, markdown: false };
+    let measured = |visibility: Visibility| is_api(class.visibility) && is_api(visibility);
     let overloads: Vec<String> = class
         .overloads
         .iter()
@@ -306,11 +326,17 @@ fn class_json(
             }
             flag(&mut e, "static", o.is_static);
             flag(&mut e, "default", o.is_default);
+            flag(&mut e, "abstract", o.is_abstract);
             flag(&mut e, "deprecated", class.deprecation(Some(&signature)) == Deprecation::Yes);
             if o.name == simple && o.return_type.is_none() {
                 if let Some((_, text)) = messages.iter().find(|(params, _)| *params == o.params) {
                     e.push(("fixed_message", string(text)));
                 }
+            }
+            if measured(o.visibility) {
+                let marker = format!("{}#{signature}", class.marker());
+                let docs = javadoc::followed_javadocs(index, &marker, &mut BTreeSet::new());
+                push_sizes(&mut e, &translator, docs);
             }
             object(&e)
         })
@@ -333,6 +359,14 @@ fn class_json(
             flag(&mut e, "deprecated", *deprecated || class.deprecated);
             if let Some(value) = literals.get(name) {
                 e.push(("value", string(value)));
+            }
+            // The field's own Javadoc only: a method of the same name (its
+            // getter) has its own entry.
+            if let Some(doc) = class.field_docs.get(name).filter(|_| measured(vis)) {
+                let marker = format!("{}#{name}", class.marker());
+                let mut seen = BTreeSet::from([marker.clone()]);
+                let docs = javadoc::followed_doc(index, &marker, doc.clone(), &mut seen);
+                push_sizes(&mut e, &translator, docs);
             }
             object(&e)
         })
@@ -363,6 +397,10 @@ fn class_json(
             ),
         ));
     }
+    if is_api(class.visibility) {
+        let docs = javadoc::followed_javadocs(index, &class.marker(), &mut BTreeSet::new());
+        push_sizes(&mut e, &translator, docs);
+    }
     if !overloads.is_empty() {
         e.push(("overloads", format!("[{}]", overloads.join(","))));
     }
@@ -380,6 +418,86 @@ fn flag(entries: &mut Vec<(&str, String)>, key: &'static str, value: bool) {
     if value {
         entries.push((key, boolean(true)));
     }
+}
+
+/// Whether a class or member of visibility `v` is part of an API a client
+/// translates, so its Javadoc sizes are recorded: public or protected.
+fn is_api(v: Visibility) -> bool {
+    matches!(v, Visibility::Public | Visibility::Protected)
+}
+
+/// The size of one Javadoc (documentation.md §5): the words of its
+/// translation by part.
+#[derive(Debug, PartialEq, Eq)]
+pub struct JavadocSize {
+    /// Every word but the tags' below: the description and `@see`.
+    pub body: usize,
+    /// Each `@param`: its name as written, and the words of its entry.
+    pub params: Vec<(String, usize)>,
+    /// The `@return`'s words, `None` when Java has none.
+    pub returns: Option<usize>,
+    /// Each `@throws` / `@exception`: its class's simple name, and the words
+    /// of its entry.
+    pub throws: Vec<(String, usize)>,
+}
+
+/// The sizes of raw Javadocs `docs`, as `check-api-docs` measures them: each
+/// translated (documentation.md §3) and counted by [`word_count`], an entry
+/// of a tag as the translation renders it (`` - `name` - text ``); one of no
+/// words, and a repeat of one already measured, left out.
+pub fn javadoc_sizes(translator: &Translator, docs: Vec<String>) -> Vec<JavadocSize> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for doc in docs {
+        let t = translator.translate(&doc);
+        let words = word_count(&t.rustdoc);
+        if words == 0 || seen.contains(&t.rustdoc) {
+            continue;
+        }
+        let tags = javadoc::parse(&doc).tags;
+        // The translation keeps the tags in order, one entry each.
+        let params: Vec<(String, usize)> = tags
+            .iter()
+            .filter(|tag| tag.name == "param")
+            .zip(&t.params)
+            .map(|(tag, (name, text))| (tag.arg.clone(), word_count(&format!("`{name}` - {text}"))))
+            .collect();
+        let throws: Vec<(String, usize)> = tags
+            .iter()
+            .filter(|tag| tag.name == "throws" || tag.name == "exception")
+            .zip(&t.throws)
+            .map(|(_, throw)| (throw.java.clone(), word_count(&format!("`{}` {}", throw.rust, throw.text))))
+            .collect();
+        let returns = t.returns.as_deref().map(word_count);
+        let tagged = params.iter().chain(&throws).map(|(_, n)| n).sum::<usize>() + returns.unwrap_or(0);
+        out.push(JavadocSize { body: words.saturating_sub(tagged), params, returns, throws });
+        seen.push(t.rustdoc);
+    }
+    out
+}
+
+/// Adds the `javadoc` key of raw Javadocs `docs` ([`javadoc_sizes`]) to
+/// `entries`, unless none has a word.
+fn push_sizes(entries: &mut Vec<(&str, String)>, translator: &Translator, docs: Vec<String>) {
+    let sizes = javadoc_sizes(translator, docs);
+    if sizes.is_empty() {
+        return;
+    }
+    let pairs = |list: &[(String, usize)]| array(list.iter().map(|(name, n)| format!("[{},{n}]", string(name))));
+    let objects = sizes.iter().map(|s| {
+        let mut e = vec![("body", s.body.to_string())];
+        if !s.params.is_empty() {
+            e.push(("params", pairs(&s.params)));
+        }
+        if let Some(n) = s.returns {
+            e.push(("return", n.to_string()));
+        }
+        if !s.throws.is_empty() {
+            e.push(("throws", pairs(&s.throws)));
+        }
+        object(&e)
+    });
+    entries.push(("javadoc", array(objects)));
 }
 
 /// The `public static final String NAME = "literal";` constants of `source`,
@@ -921,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_schema_2_compact_one_class_per_line() {
+    fn writes_schema_3_compact_one_class_per_line() {
         let mut index = index(FIXTURE);
         index.merge_deprecation_list("org.apache.kafka.clients.producer.Rec#TOPIC_CONFIG\n");
         let public: BTreeSet<String> = ["org.apache.kafka.clients.producer.Rec".to_string()].into();
@@ -931,25 +1049,31 @@ mod tests {
         let lines: Vec<&str> = json.lines().map(|l| l.trim_end_matches(',')).collect();
         assert_eq!(
             lines[0],
-            r#"{"schema":2,"audience_ref":"4.4.0-rc3","deprecation_refs":["4.3.1","4.4.0-rc3"],"classes":["#
+            r#"{"schema":3,"audience_ref":"4.4.0-rc3","deprecation_refs":["4.3.1","4.4.0-rc3"],"classes":["#
         );
         // One class per line, sorted by nested path; the test class is left out.
         assert_eq!(lines.len(), 5, "{json}");
         assert_eq!(lines[4], "]}");
         let rec = lines[1];
         let has = |line: &str, part: &str| assert!(line.contains(part), "{part}\nnot in\n{line}");
-        // A key at its default is left out: kind class, visibility public, false flags; no Javadoc.
+        // A key at its default is left out: kind class, visibility public, false flags. The
+        // class's Javadoc, `A "record".`, has two words.
         assert!(
             rec.starts_with(concat!(
                 r#"{"package":"clients.producer","path":["Rec"],"public_audience":true,"unsupported_package":true,"#,
-                r#""supertypes":["Comparable"],"supertype_fqns":[null],"overloads":["#
+                r#""supertypes":["Comparable"],"supertype_fqns":[null],"javadoc":[{"body":2}],"overloads":["#
             )),
             "{rec}"
         );
-        assert!(!rec.contains("javadoc"), "{rec}");
+        // The words of each tag's entry as the translation renders it (`` `timeout` - how
+        // long ``, `` `LocalIllegalStateError` if closed ``), the rest in the body.
         has(
             rec,
-            r#"{"name":"send","params":["Duration"],"param_names":["timeout"],"return_type":"Future<RecordMetadata>"}"#,
+            concat!(
+                r#"{"name":"send","params":["Duration"],"param_names":["timeout"],"return_type":"Future<RecordMetadata>","#,
+                r#""javadoc":[{"body":2,"params":[["timeout",3],["<T>",3]],"return":2,"#,
+                r#""throws":[["IllegalStateException",3],["KafkaException",2]]}]}"#
+            ),
         );
         has(
             rec,
@@ -965,7 +1089,10 @@ mod tests {
         // The listed field is deprecated, and its literal is read from the source.
         has(
             rec,
-            r#"{"name":"TOPIC_CONFIG","type":"String","static":true,"final":true,"deprecated":true,"value":"topic"}"#,
+            concat!(
+                r#"{"name":"TOPIC_CONFIG","type":"String","static":true,"final":true,"deprecated":true,"value":"topic","#,
+                r#""javadoc":[{"body":4}]}"#
+            ),
         );
         // A private member is only named: no parameter names, types as written or return type.
         has(
@@ -984,6 +1111,51 @@ mod tests {
         assert!(lines[3].ends_with(r#""enum_constants":["ON","OFF"]}"#), "{}", lines[3]);
         // Deterministic.
         assert_eq!(json, to_json(&index, &public, &unsupported, &sources));
+    }
+
+    #[test]
+    fn records_abstract_methods_and_the_javadocs_members_are_measured_against() {
+        let index = index(
+            r#"
+            package org.apache.kafka.clients.producer;
+            public abstract class Fut<T> {
+                /**
+                 * Gets it.
+                 *
+                 * @return the value
+                 */
+                public abstract T get();
+                /** See {@link #get()} */
+                public T join() { return null; }
+                /** @since 3.0 */
+                public void quiet() { }
+                /** Hidden. */
+                void hidden() { }
+            }
+            public class Impl extends Fut<String> {
+                public String get() { return null; }
+            }
+            public interface Api {
+                void run();
+            }
+            "#,
+        );
+        let json = to_json(&index, &BTreeSet::new(), &BTreeSet::new(), &|_| None);
+        let has = |part: &str| assert!(json.contains(part), "{part}\nnot in\n{json}");
+        // The `abstract` keyword; an interface's method has none.
+        has(
+            r#"{"name":"get","params":[],"param_names":[],"return_type":"T","abstract":true,"javadoc":[{"body":2,"return":2}]}"#,
+        );
+        has(r#"{"name":"run","params":[],"param_names":[],"return_type":"void"}"#);
+        // A Javadoc that only points elsewhere is the one it points to; an
+        // undocumented override takes the overridden member's.
+        has(r#"{"name":"join","params":[],"param_names":[],"return_type":"T","javadoc":[{"body":2,"return":2}]}"#);
+        has(
+            r#""path":["Impl"],"supertypes":["Fut"],"supertype_fqns":["org.apache.kafka.clients.producer.Fut"],"overloads":[{"name":"get","params":[],"param_names":[],"return_type":"String","javadoc":[{"body":2,"return":2}]}"#,
+        );
+        // A Javadoc of no words, and a member no client translates, have none.
+        has(r#"{"name":"quiet","params":[],"param_names":[],"return_type":"void"}"#);
+        has(r#"{"name":"hidden","params":[],"param_names":[],"return_type":"void","visibility":"package-private"}"#);
     }
 
     #[test]
