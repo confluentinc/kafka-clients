@@ -316,9 +316,10 @@ Notes on specific metrics:
 * **The metrics JSONL is not rotated, and the operator must size the disk for
   it.** Roughly 2.5 KB per 10 s window ≈ **22 MB/day/soak ≈ 315 MB over 14
   days**, so ≈**1.3 GB for the four variants** on one box. The log *is* bounded
-  (50 MB + one `.prev.bz2`); the metrics file is deliberately not, because it is
-  the analysis artifact and losing the early windows would defeat drift
-  detection.
+  (50 MB live, plus rotated copies compressed with bzip2 and deleted after
+  `SOAK_LOG_KEEP_DAYS`, 30 by default); the metrics file is deliberately not,
+  because it is the analysis artifact and losing the early windows would defeat
+  drift detection.
 * **`disconnect` / `coordinator_move` are best-effort classifications** of the
   errors `poll()` / `commit()` raise, by protocol error code
   (`NotCoordinator`/`CoordinatorNotAvailable`/`CoordinatorLoadInProgress` vs
@@ -587,15 +588,15 @@ reference and `unity` only backs the C unit tests; neither is a prerequisite of
 `cargo build --features ffi`.
 
 **`run.sh`** supervises one child: restarts it if it exits, rotates the log
-above 50 MB (bzip2, keeping one `.prev.bz2`), and stops it cleanly on
-SIGINT/SIGTERM.
+above 50 MB without stopping it (bzip2, keeping 30 days of rotated logs), and
+stops it cleanly on SIGINT/SIGTERM.
 
 ### Exit codes and the restart policy
 
 The child's exit code is a contract, because the worst failure mode for an
 unattended soak is a *permanently* broken child restarted every few seconds: the
-process table looks healthy, and each restart bzip2s a 2 KB fragment over the
-single `.prev.bz2` and deletes the log, destroying the evidence of why it died.
+process table looks healthy while nothing is being tested, and the reason it
+died is buried under the output of every restart since.
 
 | code | meaning | supervisor |
 |---|---|---|
@@ -623,9 +624,17 @@ On top of that:
   that bypasses `main()`'s handlers) rather than message loss. The pre-flight
   closes the common startup case, not the general one. Read the `SUMMARY` line:
   a genuine loss report always has one, with `missed=` non-zero.
-* **Rotation only happens when the log is actually at the limit**, or when the
-  supervisor itself stopped the child *for* rotation. A crash never rotates, so
-  the evidence survives.
+* **Rotation never stops the child, and only happens when the log is actually
+  at the limit.** `run.sh` copies the log to `<log>.<UTC time>`, then, in one
+  step, appends whatever the child wrote during the copy and truncates the log,
+  while the child keeps writing. Only a line landing in the instant between the
+  last read and the truncate can be lost. This relies on the child's output
+  being opened with `>>` (`O_APPEND`): with `>`, the child would carry on at its
+  old offset and leave a file of NULs as large as the old log. The copy is
+  compressed with bzip2 in the background at `nice 19`, and rotated logs older
+  than `SOAK_LOG_KEEP_DAYS` (30) are deleted. If the copy fails (a full disk,
+  say), the log is left alone and rotation is retried every 60 s. A crash never
+  rotates, so its output stays in the live log, where an operator looks first.
 * **Consecutive rapid failures are bounded.** A child that lives less than
   `SOAK_RAPID_FAILURE_SECONDS` (60) counts as a rapid failure; the restart delay
   doubles from `SOAK_RESTART_DELAY` (5 s) up to `SOAK_RESTART_DELAY_MAX` (300 s),
@@ -647,7 +656,8 @@ Two deliberate fixes versus the Python version:
 
 Consequently the child writes straight to a plain log file rather than
 streaming through `tee /dev/tty | bzip2`; compression happens at rotation, and
-the live view is `tail -f` on the log. The metrics JSONL is opened in **append**
+the live view is `tail -f` on the log, which keeps following it across
+rotations because the file is truncated in place rather than replaced. The metrics JSONL is opened in **append**
 mode, so a restart adds to the series instead of truncating it.
 
 ## Tests

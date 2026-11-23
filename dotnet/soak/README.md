@@ -128,7 +128,7 @@ Two sinks, and the first is always written:
 
 1. **JSONL**, one object per ~10 s window, **appended** to
    `soak-metrics-<variant>-<testid>.jsonl` and flushed on every write (so a
-   `kill -9`, or the supervisor rotating a log, cannot lose collected samples).
+   `kill -9`, or a restart by the supervisor, cannot lose collected samples).
    Appended rather than truncated because `run.sh` restarts the client and each
    restart must extend the series. **This file is the durable local record a
    two-week run is analysed from.**
@@ -373,9 +373,12 @@ The supervisor additionally: tracks the **real child PID** (never
 `SOAK_MAX_RAPID_FAILURES` restarts that each lived under
 `SOAK_RAPID_FAILURE_SECONDS`, leaving everything on disk with a `.FAILED`
 marker; doubles its restart delay only while failures keep being rapid; and
-rotates the log **only** when it has actually reached `SOAK_LOG_LIMIT_BYTES` —
-a crash-restart must never rotate, or it would bzip2 a few-KB crash fragment
-over the single `.prev.bz2` and delete the evidence of why the child died.
+rotates the log **without stopping the client**, **only** when it has actually
+reached `SOAK_LOG_LIMIT_BYTES`. Rotation copies the log aside, truncates it in
+place while the client keeps appending, compresses the copy in the background,
+and deletes rotated logs after `SOAK_LOG_KEEP_DAYS` (30). A crash-restart never
+rotates, so the crash's own output stays in the live log, where an operator
+looks first.
 
 ---
 
@@ -457,7 +460,8 @@ rather than the omission being silent:
 
 * They test **bash**. `create-ec2.sh` is copied essentially verbatim, and
   `run.sh`'s supervisor logic — PID tracking, the `EXIT_FATAL` never-restart
-  rule, the rotation gate, the backoff doubling — is ported **unchanged**, so it
+  rule, in-place rotation and its gate, the backoff doubling — is ported
+  **unchanged**, so it
   is already covered by the reviewed Python suite against the same script text.
 * .NET's test tree has **no precedent** for driving bash from xunit; inventing
   that harness is a phase of its own.

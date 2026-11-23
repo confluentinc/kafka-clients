@@ -31,6 +31,10 @@
 # The child therefore writes straight to a plain log file instead of streaming
 # through `tee /dev/tty | bzip2`; compression happens at rotation. Live output
 # is `tail -f "$LOGFILE"` from the tmux pane.
+#
+# Rotation never stops the child: the log is copied aside and truncated in
+# place while the child keeps writing to it (see rotate_log). The copies are
+# compressed in the background and deleted after SOAK_LOG_KEEP_DAYS.
 
 set -uo pipefail
 
@@ -66,7 +70,12 @@ Environment:
   SOAK_EXTRA_ARGS
                 Extra soakclient.py arguments, appended verbatim.
   SOAK_LOG_LIMIT_BYTES
-                Rotate above this size. Default: 52428800 (50 MB).
+                Rotate the log above this size. Rotation does not stop the
+                client: the log is copied to <log>.<UTC time>, emptied in
+                place, and the copy compressed in the background.
+                Default: 52428800 (50 MB).
+  SOAK_LOG_KEEP_DAYS
+                Delete rotated logs older than this many days. Default: 30.
   SOAK_BROKERS  Overrides bootstrap.servers from the config file.
   SOAK_PYTHON   Python interpreter. Default: python3 (from the active venv).
   SOAK_RESTART_DELAY
@@ -170,11 +179,12 @@ SOAK_EXTRA_ARGS="${SOAK_EXTRA_ARGS:-}"
 
 TOPIC="${SOAK_TOPIC:-rustsoak-$TESTID-$SOAK_VARIANT}"
 LOG_DIR="${SOAK_LOG_DIR:-$(pwd)}"
-LOGFILE="$LOG_DIR/${TESTID}-${SOAK_VARIANT}.log"
-PREVLOG="$LOG_DIR/${TESTID}-${SOAK_VARIANT}.log.prev.bz2"
+LOG_NAME="${TESTID}-${SOAK_VARIANT}.log"
+LOGFILE="$LOG_DIR/$LOG_NAME"
 METRICS_FILE="$LOG_DIR/soak-metrics-${SOAK_VARIANT}-${TESTID}.jsonl"
 FAILED_MARKER="$LOG_DIR/${TESTID}-${SOAK_VARIANT}.FAILED"
 LIMIT="${SOAK_LOG_LIMIT_BYTES:-$((50 * 1024 * 1024))}"
+KEEP_DAYS="${SOAK_LOG_KEEP_DAYS:-30}"
 PYTHON="${SOAK_PYTHON:-python3}"
 # How often the supervisor checks whether the child is alive and how big the log
 # is. Also the upper bound on how long a SIGINT waits to be handled. One second
@@ -189,6 +199,22 @@ MAX_RAPID_FAILURES="${SOAK_MAX_RAPID_FAILURES:-5}"
 # soakclient.py's exit-code contract. Only this one means "a restart cannot
 # possibly help", so it is the only one that stops the supervisor dead.
 EXIT_FATAL=2
+# After a failed rotation (a full disk, say), wait this long before retrying,
+# rather than attempting a full copy of the log on every poll.
+ROTATE_RETRY_SECONDS=60
+
+if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: SOAK_LOG_KEEP_DAYS must be a whole number of days," \
+         "not '$KEEP_DAYS'" >&2
+    exit "$EXIT_FATAL"
+fi
+# rotate_log finishes its copy and truncates the log in one perl process. perl
+# is part of every Debian/Ubuntu base system and of macOS, so this only trips
+# on an unusually minimal image.
+if ! command -v perl >/dev/null 2>&1; then
+    echo "ERROR: run.sh needs perl to rotate the log, and none is on PATH" >&2
+    exit "$EXIT_FATAL"
+fi
 
 mkdir -p "$LOG_DIR"
 
@@ -267,6 +293,8 @@ log_size() {
     fi
 }
 
+# Called only from on_signal, the INT/TERM trap, which shellcheck does not follow.
+# shellcheck disable=SC2329
 stop_child() {
     # Terminate the tracked PID only. Never `ps | grep soakclient.py`: four
     # soaks share one box and that matches siblings.
@@ -286,17 +314,99 @@ stop_child() {
     kill -KILL "$CHILD" 2>/dev/null
 }
 
+# Appends the log, from byte offset $3 to its end, onto the rotated part, then
+# truncates the log straight after the last read. Only a write landing in the
+# microseconds between the two can be lost. Exits non-zero without truncating
+# on any error.
+# shellcheck disable=SC2016  # perl's variables, not the shell's
+CATCH_UP_AND_TRUNCATE='
+    my ($log, $part, $offset) = @ARGV;
+    open(my $in, "+<", $log) or die "$log: $!\n";
+    open(my $out, ">>", $part) or die "$part: $!\n";
+    binmode $in;
+    binmode $out;
+    $out->autoflush(1);
+    seek($in, $offset, 0) or die "$log: seek: $!\n";
+    while (1) {
+        my $n = read($in, my $buf, 1 << 20);
+        defined $n or die "$log: read: $!\n";
+        last if $n == 0;
+        print {$out} $buf or die "$part: write: $!\n";
+    }
+    truncate($in, 0) or die "$log: truncate: $!\n";
+'
+
+# Rotate the log without stopping the child. The child's stdout/stderr were
+# opened with `>>` (O_APPEND), and that is load-bearing: once the log is
+# truncated, the child's next write lands at the new end of the file. Opened
+# with `>`, it would go on writing at its old offset and leave a sparse file
+# full of NULs as large as the old log.
+#
+# The log goes to "$LOGFILE.<UTC time>", compressed in the background to
+# "$LOGFILE.<UTC time>.bz2". The names sort in rotation order.
 rotate_log() {
-    log "Rotating log: $LOGFILE -> $PREVLOG"
-    rm -f "$PREVLOG"
-    bzip2 -c "$LOGFILE" > "$PREVLOG" && rm -f "$LOGFILE"
+    local part copied
+    part="$LOGFILE.$(date -u +%Y%m%dT%H%M%SZ)"
+    # Two rotations within one second (only with a tiny limit) would share a
+    # name.
+    while [[ -e "$part" || -e "$part.bz2" ]]; do
+        sleep 1
+        part="$LOGFILE.$(date -u +%Y%m%dT%H%M%SZ)"
+    done
+
+    # 1. Bulk copy while the child keeps writing. The log is truncated only
+    #    once all of it has been copied, so a full disk costs a rotation, never
+    #    output.
+    if ! cp -- "$LOGFILE" "$part"; then
+        rm -f -- "$part"
+        log "Log rotation failed: could not copy $LOGFILE. It was left as it" \
+            "is; retrying in ${ROTATE_RETRY_SECONDS}s"
+        return 1
+    fi
+    # 2. Append what the child wrote during the copy, and truncate.
+    copied=$(wc -c < "$part" | tr -d ' ')
+    if ! perl -MIO::Handle -e "$CATCH_UP_AND_TRUNCATE" \
+            "$LOGFILE" "$part" "$copied"; then
+        rm -f -- "$part"
+        log "Log rotation failed while finishing the copy of $LOGFILE. It was" \
+            "left as it is; retrying in ${ROTATE_RETRY_SECONDS}s"
+        return 1
+    fi
+    log "Log rotated at $(wc -c < "$part" | tr -d ' ') bytes to" \
+        "$part.bz2${CHILD:+; the soak client (pid $CHILD) kept running}" \
+        | tee -a "$LOGFILE"
+
+    # 3. Compress, then prune, in the background at the lowest priority, so
+    #    neither delays the supervisor or competes with the soak client.
+    ( nice -n 19 bzip2 -- "$part"; prune_log_parts ) &
+}
+
+# Delete rotated logs, and a .prev.bz2 left by the old stop-and-restart
+# rotation, once they are older than SOAK_LOG_KEEP_DAYS. Only this soak's own
+# files match: their names start with its TESTID and variant.
+prune_log_parts() {
+    find "$LOG_DIR" -maxdepth 1 -type f \
+        \( -name "$LOG_NAME.[0-9]*" -o -name "$LOG_NAME.prev.bz2" \) \
+        -mmin +$(( KEEP_DAYS * 24 * 60 )) -delete
+}
+
+# Compress rotated logs that a previous run.sh was stopped before compressing.
+# Without -f, bzip2 skips one whose .bz2 already exists: that may still be
+# being written by the previous run's compression.
+compress_leftover_parts() {
+    local part
+    for part in "$LOGFILE".[0-9]*Z; do
+        [[ -f "$part" ]] || continue
+        log "Compressing a rotated log that was left uncompressed: $part"
+        ( nice -n 19 bzip2 -- "$part" ) &
+    done
 }
 
 # Rotate only when the log is actually at the limit. A crash-restart must never
-# rotate: it would bzip2 a few-KB fragment over the single .prev.bz2 and delete
-# the log, destroying the evidence of why the child died — the one thing an
-# operator needs. This gate is the difference between a diagnosable failure and
-# a soak that has quietly been dead for a week.
+# rotate: the crash's own few KB of output belong in the log, the first place an
+# operator looks for why the child died, not in a compressed part beside it.
+# This gate is the difference between a diagnosable failure and a soak that has
+# quietly been dead for a week.
 maybe_rotate_log() {
     if (( $(log_size) >= LIMIT )); then
         rotate_log
@@ -343,7 +453,7 @@ trap cleanup EXIT
 
 log "Starting soak client: variant=$SOAK_VARIANT topic=$TOPIC rate=$SOAK_RATE"
 log "  payload=${SOAK_PAYLOAD_SIZE}B hi=$HI_MODE"
-log "  log=$LOGFILE metrics=$METRICS_FILE limit=${LIMIT}B"
+log "  log=$LOGFILE metrics=$METRICS_FILE limit=${LIMIT}B keep=${KEEP_DAYS}d"
 
 # A stale marker from a previous run would be misleading.
 rm -f "$FAILED_MARKER"
@@ -382,12 +492,17 @@ that the venv is activated and that build.sh completed. Nothing was started."
     exit "$EXIT_FATAL"
 fi
 
+# What a previous run may have left: rotated logs past their retention, and
+# rotated logs it did not get to compress.
+prune_log_parts
+compress_leftover_parts
+
 ret=0
 delay="$RESTART_DELAY"
 rapid_failures=0
+next_rotation=0
 
 while [[ "$run" == true ]]; do
-    stopped_for_rotation=false
     started_at=$(date +%s)
 
     if [[ -n "$JEMALLOC_PRELOAD" ]]; then
@@ -404,11 +519,9 @@ while [[ "$run" == true ]]; do
         if ! kill -0 "$CHILD" 2>/dev/null; then
             break
         fi
-        if (( $(log_size) >= LIMIT )); then
-            log "Log reached ${LIMIT} bytes"
-            stopped_for_rotation=true
-            stop_child
-            break
+        # Rotation leaves the child running (see rotate_log).
+        if (( $(log_size) >= LIMIT )) && (( $(date +%s) >= next_rotation )); then
+            rotate_log || next_rotation=$(( $(date +%s) + ROTATE_RETRY_SECONDS ))
         fi
     done
 
@@ -421,6 +534,13 @@ while [[ "$run" == true ]]; do
     # A signal for us: stop without rotating or touching anything.
     [[ "$run" == true ]] || break
 
+    # SIGKILL gives the child no chance to log anything, and run.sh sends it
+    # only while stopping (handled above), so point at the usual sender.
+    if (( ret == 128 + 9 )); then
+        log "  It was killed by SIGKILL, which run.sh did not send. On Linux" \
+            "that is usually the kernel's OOM killer: journalctl -k | grep -i oom"
+    fi
+
     if (( ret == EXIT_FATAL )); then
         give_up "child exited $ret (fatal: rejected config, missing bindings or \
 failed authentication). Fix the cause and start the soak again; restarting it \
@@ -428,36 +548,27 @@ unchanged would only repeat this."
         break
     fi
 
-    if [[ "$stopped_for_rotation" == true ]]; then
-        # We asked it to stop, so this is not a failure: rotate and reset the
-        # backoff.
-        rotate_log
-        rapid_failures=0
-        delay="$RESTART_DELAY"
-    else
-        if (( lifetime < RAPID_FAILURE_SECONDS )); then
-            # A crash/rapid-restart must never rotate (see maybe_rotate_log's
-            # comment): if the log was already near LIMIT, the crash's own
-            # output can push it over, and rotating here would bzip2 a few-KB
-            # crash fragment over the single .prev.bz2 and delete the log --
-            # destroying the one thing an operator needs to diagnose it.
-            rapid_failures=$(( rapid_failures + 1 ))
-            log "Rapid failure ${rapid_failures}/${MAX_RAPID_FAILURES}" \
-                "(lived ${lifetime}s < ${RAPID_FAILURE_SECONDS}s)"
-            if (( rapid_failures >= MAX_RAPID_FAILURES )); then
-                give_up "$rapid_failures consecutive restarts each lasting under \
+    if (( lifetime < RAPID_FAILURE_SECONDS )); then
+        # A crash/rapid-restart must never rotate (see maybe_rotate_log's
+        # comment): if the log was already near LIMIT, the crash's own output
+        # can push it over, and rotating here would move that output out of
+        # the log an operator reads first.
+        rapid_failures=$(( rapid_failures + 1 ))
+        log "Rapid failure ${rapid_failures}/${MAX_RAPID_FAILURES}" \
+            "(lived ${lifetime}s < ${RAPID_FAILURE_SECONDS}s)"
+        if (( rapid_failures >= MAX_RAPID_FAILURES )); then
+            give_up "$rapid_failures consecutive restarts each lasting under \
 ${RAPID_FAILURE_SECONDS}s (last exit status $ret). This is a crash loop, not a \
 soak; the cause is in the log above."
-                break
-            fi
-        else
-            # It ran for a while, so whatever happened was not a startup
-            # failure: treat it as an isolated one, rotate if the log has
-            # reached the limit, and restart promptly.
-            maybe_rotate_log
-            rapid_failures=0
-            delay="$RESTART_DELAY"
+            break
         fi
+    else
+        # It ran for a while, so whatever happened was not a startup failure:
+        # treat it as an isolated one, rotate if the log has reached the limit,
+        # and restart promptly.
+        maybe_rotate_log
+        rapid_failures=0
+        delay="$RESTART_DELAY"
     fi
 
     log "Restarting in ${delay}s"
