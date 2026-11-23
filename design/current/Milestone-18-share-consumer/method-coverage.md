@@ -149,7 +149,7 @@ fields). `getErrorResponse(int, Throwable)` takes the crate's `&Errors` (or
 | `INITIAL_EPOCH`, `FINAL_EPOCH` (constants) | `ShareRequestMetadata::INITIAL_EPOCH`, `::FINAL_EPOCH` |
 | `ShareRequestMetadata(Uuid, int)` | `ShareRequestMetadata::new` |
 | `isNewSession()` | `ShareRequestMetadata::is_new_session` |
-| `nextEpoch(int)` (static) | `ShareRequestMetadata::do_next_epoch` (NAMING: CLAUDE.md §2 would give `next_epoch_with_prev_epoch`; the rustdoc says "the `do_` prefix the crate uses for such a collision", but the crate's other `do_*` fns are Java's own `doSend` etc., so there is no such precedent. Compare `FetchMetadata::next_epoch(prev_epoch)`, which has no instance overload) |
+| `nextEpoch(int)` (static) | `ShareRequestMetadata::do_next_epoch` (CLAUDE.md §2: a static non-factory method that shares its name with an instance method becomes `do_<name>`) |
 | `initialEpoch(Uuid)` (static) | `ShareRequestMetadata::initial_epoch` |
 | `nextEpoch()` | `ShareRequestMetadata::next_epoch` |
 | `nextCloseExistingAttemptNew()` | `ShareRequestMetadata::next_close_existing_attempt_new` |
@@ -256,7 +256,7 @@ fields). `getErrorResponse(int, Throwable)` takes the crate's `&Errors` (or
 | `ShareGroupHeartbeatResponse` | 7 | 7 | 0 |
 | `ShareGroupDescribeRequest` (+ `Builder`) | 8 | 8 | 0 |
 | `ShareGroupDescribeResponse` | 6 | 6 | 0 |
-| `ShareRequestMetadata` | 11 + 2 constants | 11 + 2 | 0 (`do_next_epoch` name to settle) |
+| `ShareRequestMetadata` | 11 + 2 constants | 11 + 2 | 0 |
 | `DescribeShareGroupOffsetsRequest` (+ `Builder`) | 10 | 10 | 0 |
 | `DescribeShareGroupOffsetsResponse` | 9 | 9 | 0 |
 | `AlterShareGroupOffsetsRequest` (+ `Builder`) | 11 | 11 (two overload pairs collapsed) | 0 |
