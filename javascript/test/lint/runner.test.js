@@ -61,6 +61,9 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-no-todo',
     'check-exception-word',
     'check-java-line',
+    'check-source-line',
+    'check-no-tracking-ids',
+    'check-summaries',
     'check-out-err',
     'check-cb-twin-only',
     'check-notify-hook',
@@ -83,6 +86,10 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-exception-word',
     'check-internal-members',
     'check-java-line',
+    'check-source-line',
+    'check-no-tracking-ids',
+    'check-summaries',
+    'check-implementation-docs',
     'check-java-name',
     'check-java-members',
     'check-java-completeness',
@@ -98,7 +105,7 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     'check-directives',
     'check-config',
   ]);
-  // The three rules split by file type: each half reads its own files.
+  // The six rules split by file type: each half reads its own files.
   /**
    * @param {import('./_project').Check[]} list
    * @param {string} name
@@ -109,11 +116,16 @@ test('every rule has a name, kinds, needs, a hint and a check; each tool runs it
     return rule.PART;
   };
   assert.deepEqual(
-    ['check-no-todo', 'check-exception-word', 'check-java-line'].map((n) => [half(ESLINT_CHECKS, n), half(RULES, n)]),
+    ['check-no-todo', 'check-exception-word', 'check-java-line', 'check-source-line', 'check-no-tracking-ids', 'check-summaries'].map(
+      (n) => [half(ESLINT_CHECKS, n), half(RULES, n)],
+    ),
     [
       ['code', 'other'],
       ['ts', 'c'],
-      ['ts', 'c'],
+      ['ts', 'other'],
+      ['ts', 'other'],
+      ['ts', 'other'],
+      ['ts', 'other'],
     ],
   );
   // Only the rules that read TypeScript are ESLint's; the runner keeps the addon's (and no TypeScript-only rule).
