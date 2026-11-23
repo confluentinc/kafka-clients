@@ -18,9 +18,10 @@ pending.
 
 Totals:
 
-- **23 comments carry a rule tag, and the Actor fixed all 23.** None was disputed or withdrawn,
+- **20 comments carry a rule tag, and the Actor fixed all 20.** None was disputed or withdrawn,
   and none was recorded as a false positive.
-- **Tagging was uneven.** Critics 201, 291 and 310 tagged nothing, so each count below is a lower
+- **Tagging was uneven.** Critics 201, 220, 240, 291 and 310 tagged nothing (Critic 220's only rule mention is the
+  resolution line pointing at R4 item 8, written after its Issue 1), so each count below is a lower
   bound. Comments that applied a rule without its tag are listed separately.
 - **Over-application:** none in the live reviews. The only rule-driven pressure came in the
   backtest, and it led to the rewording in `5259c6e5f`. The scopes held: Critic 260 Issue 7 and
@@ -37,13 +38,13 @@ Totals:
 
 | Rule | Tagged (true / false positives) | Recommendation | Target |
 |---|---|---|---|
-| R1 Assertion fidelity | 8 / 0 | Promote | DoD item 3 |
+| R1 Assertion fidelity | 7 / 0 | Promote | DoD item 3 |
 | R2 Deferral ledger | 1 / 0 | Promote | DoD item 8 |
 | R3 Production-path construction | 1 / 0 | Promote (thin evidence) | new DoD item 13 |
-| R4 Callback → async checklist | 5 / 0 (the milestone's only High) | Promote, split | CLAUDE.md §11.6 bullet + new §11.8 |
+| R4 Callback → async checklist | 4 / 0 (the milestone's only High) | Promote, split | CLAUDE.md §11.6 bullet + new §11.8 |
 | R5 Java semantics table | 0 tagged; 3 untagged / 0 | Promote | CLAUDE.md §1.4 |
 | R6 `close()` is explicit | 1 / 0 | Promote reworded, merged | CLAUDE.md §11.4 |
-| R7 Rules are checked against Java | 9 / 0 | Promote | agent-roles.md item 5 |
+| R7 Rules are checked against Java | 7 / 0 | Promote | agent-roles.md item 5 |
 | R8 Rust-only types get a test plan | 1 / 0 | Promote reworded | DoD item 7 |
 
 ### R1 — Assertion fidelity
@@ -54,9 +55,8 @@ a request-count or a timing check, unless a deviation note at the test says why.
 `5259c6e5f`: a Java test that cannot compile in Rust (`testDoubleBuild`) is skipped with a
 one-line reason, and no compile-fail test is needed.
 
-**Tagged comments (8, all fixed):**
+**Tagged comments (7, all fixed):**
 
-- 220 Issue 4 [R1, R7]: a test note claimed `bootstrap.servers` was required.
 - 245 Issue 4: a test checked an empty set, which holds without the call, where Java has
   `verify(..assignFromSubscribedAwaitingCallback)`.
 - 246 Issue 5: `never().markPendingRevocation` was dropped in three tests.
@@ -69,6 +69,7 @@ one-line reason, and no compile-fail test is needed.
 
 **Untagged applications:**
 
+- 220 Issue 4: a test note claimed `bootstrap.servers` was required.
 - 310 Issue 1: a callback assertion was checked before `close`.
 - 310 Issue 2: `let _ =` on a fallback abort.
 - 310 Issue 7: Java retries a describe error that Rust panicked on.
@@ -85,7 +86,7 @@ Append after the last sub-bullet of `.claude/rules/definition-of-done.md` item 3
 
 ```
    - Every Java assertion has a Rust counterpart, diffed test by test. A translation does not swap Java's inputs (record magic, list order, error class), widen what a fixture accepts, compare by pointer where Java compares by value, replace a `verify(..)` of a call with a state check that also holds without the call, or drop an `assertFalse(future.isDone())`, a request count or a timing check, unless a deviation note at the test says why. A Java timing assertion may be adapted to the Rust test clock (a range or a paused clock) with a note; it is never ported as a wall-clock sleep. A Java test that cannot compile in Rust (it relies on a runtime type error the Rust signature rules out) is skipped with a one-line reason; no compile-fail test is needed.
-   - Two places where an assertion hides: an assertion inside a Java callback also covers the callbacks `close` runs, so a Rust test that records the outcome checks it after `close`; and a Java fallback call inside `catch` is unguarded, so its Rust translation propagates the fallback's error instead of discarding it with `let _ =`.
+   - Two places where an assertion can hide. Where the Java callback runs on the calling thread and `close` rethrows its errors (the share consumer's acknowledgement callback, the consumer's rebalance listener), an assertion inside it also covers the callbacks `close` runs, so a Rust test that records the outcome checks it after `close`; this does not hold for a callback Java runs on another thread (a producer `Callback` on the Sender thread). And where Java's fallback call inside `catch` is unguarded, its Rust translation propagates the fallback's error instead of discarding it with `let _ =`; where Java guards it (`Utils.closeQuietly`, `Utils.swallow`, a nested `try`), `let _ =` is the faithful translation.
 ```
 
 ### R2 — Deferral ledger
@@ -165,9 +166,8 @@ Insert after `.claude/rules/definition-of-done.md` item 12:
 - `84ce72128` added item 8, from 220 Issue 1.
 - `34f0ddde8` made item 8 assert the next call, from Critic 251.
 
-**Tagged comments (5, all fixed):**
+**Tagged comments (4, all fixed):**
 
-- 220 Issue 1: `entered_callback` was not reset when the future was dropped.
 - **251 Issue 1 (High):** a dropped `fetch_records` turned the record being decoded into a gap,
   which the broker archives.
 - 251 Issue 2: a dropped `take_renewals` lost the renewals.
@@ -177,6 +177,8 @@ Insert after `.claude/rules/definition-of-done.md` item 12:
 
 **Untagged applications:**
 
+- 220 Issue 1: `entered_callback` was not reset when the future was dropped (it led to item 8,
+  `84ce72128`).
 - 251 Issue 3: a stale `delivered_batch` after a drop.
 - 280 Issues 7–10: a retried `close` resent the acknowledge-on-close, lost its first error, or
   ignored its own timeout.
@@ -184,8 +186,9 @@ Insert after `.claude/rules/definition-of-done.md` item 12:
 - 260 verdict (c) used item 7 to reject a per-request spawn.
 - The lock-order audits in 251, 260, 270 and 280 found no ABBA.
 
-By severity this is the most productive rule: it found the milestone's only High and five
-Mediums, with no false positives. Not folded in yet: the backtest's R4.4 near-miss, where an error
+By severity this is the most productive rule: the comments it covers, tagged and untagged,
+hold the milestone's only High (251 Issue 1) and three Mediums (251 Issue 2, 280 Issues 1 and 7);
+the rest are Low. No false positives. Not folded in yet: the backtest's R4.4 near-miss, where an error
 inside a chain skips a sibling step (the #279 bug). The text below adds it to item 4.
 
 **Recommendation: promote, split by kind.** Item 8 and the close-resume lessons from 280 become a
@@ -194,7 +197,7 @@ Tokio-pitfall bullet in CLAUDE.md §11.6. Items 1–7 become a new CLAUDE.md §1
 Append under CLAUDE.md §11.6, after the `MutexGuard` bullet:
 
 ```
-       - Any future can be dropped at any `.await` (a caller's `tokio::time::timeout` or `select!`). A Java `finally`, or any state reset or "done" flag after a call that becomes an `.await`, needs a drop guard or is set only after the step completes, so that the next call resumes the interrupted work instead of skipping or repeating it. Test it by dropping the future mid-await **and asserting what the next call returns** (and what it sends or acknowledges), not only what the guard restored. A `close()` dropped part-way leaves the object closable: it is marked closed only after Java's last step, keeps its progress and first error for the retry, bounds the retry by the retry's own timeout, and never resends a step Java runs once.
+       - Any future can be dropped at any `.await` (a caller's `tokio::time::timeout` or `select!`). A Java `finally`, or any state reset or "done" flag after a call that becomes an `.await`, needs a drop guard or is set only after the step completes, so that the next call resumes the interrupted work instead of skipping or repeating it. Test it by dropping the future mid-await **and asserting what the next call returns** (and what it sends or acknowledges), not only what the guard restored. A `close()` dropped part-way leaves the object closable: it is marked closed only after Java's last step, keeps its progress and first error for the retry, bounds the retry by the retry's own timeout, and never resends a step Java runs once. This `close()` part binds new code and any `close` a change touches; existing code is not swept (`AsyncKafkaConsumer::close` runs every step again on a retry, PLAN §8.1 row 19, a consumer follow-up).
 ```
 
 Insert after CLAUDE.md §11.7:
@@ -289,10 +292,8 @@ Three kinds of claim need the method body read. If Java contradicts a rule, the 
   from Critic 201 Issues 1, 3 and 4.
 - `5259c6e5f` extended the rule to deviation notes in code and tests (backtest S5-1).
 
-**Tagged comments (9, all fixed):**
+**Tagged comments (7, all fixed):**
 
-- 220 Issue 2: a doc said a callback panic is not caught, and it is.
-- 220 Issue 4.
 - 245 Issue 2: a method-coverage row put the cache trim in the wrong place.
 - 245 Issue 5: a false `assert_fence_is_no_op` note.
 - 251 Issue 5: a compressed-stream note misstated Java.
@@ -304,6 +305,7 @@ Three kinds of claim need the method body read. If Java contradicts a rule, the 
 **Untagged applications:**
 
 - 201 Issues 1, 3, 4, 6, 9 and 10: unchecked claims about Java in the plan and the rules.
+- 220 Issue 2: a doc said a callback panic is not caught, and it is; 220 Issue 4.
 - 270: false phase-order comments, fixed in `c0ddf76bb`.
 - 300 Issue 7: the proposed `Renew` entry overstated when `poll` returns the error.
 - 310 Issue 3.
