@@ -17,6 +17,9 @@
 //! Translated from `org.apache.kafka.clients.consumer`. The `clients` Java
 //! package segment is intentionally dropped per CLAUDE.md §2.
 
+mod acknowledge_options;
+mod acknowledge_type;
+pub mod acknowledgement_commit_callback;
 pub mod close_options;
 mod consumer_commit_failed_error;
 mod consumer_config;
@@ -30,17 +33,26 @@ mod consumer_record;
 mod consumer_records;
 mod consumer_retriable_commit_failed_error;
 mod dyn_consumer;
+mod dyn_share_consumer;
 mod group_protocol;
 mod interceptor;
 mod kafka_consumer;
+mod kafka_share_consumer;
 mod mock_consumer;
+mod mock_share_consumer;
 mod offset_and_metadata;
 mod offset_and_timestamp;
 pub mod offset_commit_callback;
+mod share_consumer;
+mod share_consumer_config;
+mod share_consumer_handle;
 mod subscription_pattern;
 
 pub(crate) mod internals;
 
+pub use acknowledge_options::{AcknowledgeOptions, AcknowledgeOptionsBuilder};
+pub use acknowledge_type::AcknowledgeType;
+pub use acknowledgement_commit_callback::AcknowledgementCommitCallback;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
@@ -49,14 +61,20 @@ pub use consumer_rebalance_listener::ConsumerRebalanceListener;
 pub use consumer_record::{ConsumerRecord, ConsumerRecordOptions, ConsumerRecordOptionsBuilder};
 pub use consumer_records::ConsumerRecords;
 pub use dyn_consumer::DynConsumer;
+pub use dyn_share_consumer::DynShareConsumer;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
 pub use internals::ConsumerHandle;
 pub use kafka_consumer::KafkaConsumer;
+pub use kafka_share_consumer::KafkaShareConsumer;
 pub use mock_consumer::MockConsumer;
+pub use mock_share_consumer::MockShareConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
 pub use offset_commit_callback::OffsetCommitCallback;
+pub use share_consumer::ShareConsumer;
+pub(crate) use share_consumer_config::ShareConsumerConfig;
+pub use share_consumer_handle::ShareConsumerHandle;
 pub use subscription_pattern::SubscriptionPattern;
 
 use std::collections::{HashMap, HashSet};

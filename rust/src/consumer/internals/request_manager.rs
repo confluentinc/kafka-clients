@@ -83,6 +83,27 @@ pub(crate) trait RequestManager: Send + 'static {
     /// Java: `default void signalClose()`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManager#signalClose")]
     fn signal_close(&mut self) {}
+
+    /// Runs the response handling of the requests whose responses (or
+    /// failures) arrived in the last network poll. Default no-op.
+    ///
+    /// Rust-only (DoD §7). Java's managers register `whenComplete` callbacks
+    /// on their `UnsentRequest`s, and `NetworkClientDelegate#poll` runs them
+    /// inside the network poll, before `ConsumerNetworkThread#runOnce` reaps
+    /// the expired events. A manager that keeps its response receivers
+    /// instead of spawning a forwarder per request runs those callback bodies
+    /// here: the background task calls this through
+    /// [`super::RequestManagers::handle_completed_requests`] right after
+    /// every network poll, in `run_once` and in the close loop of `cleanup`.
+    /// `ShareConsumeRequestManager` is the one manager that overrides it.
+    fn handle_completed_requests(&mut self) {}
+
+    /// The implementing type's name, for the tests that pin the order of
+    /// [`super::RequestManagers::entries`]. Rust-only, test-only.
+    #[cfg(test)]
+    fn type_name_for_test(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
 }
 
 #[cfg(test)]
@@ -113,6 +134,15 @@ mod tests {
     fn default_maximum_time_to_wait_is_i64_max() {
         let mgr = DefaultsOnly;
         assert_eq!(mgr.maximum_time_to_wait(0), i64::MAX);
+    }
+
+    #[test]
+    fn default_handle_completed_requests_is_noop() {
+        let mut mgr = DefaultsOnly;
+        mgr.handle_completed_requests();
+        // A manager that does not override the hook has nothing to handle:
+        // its next poll still returns no request.
+        assert!(mgr.poll(0).unsent_requests.is_empty());
     }
 
     #[test]

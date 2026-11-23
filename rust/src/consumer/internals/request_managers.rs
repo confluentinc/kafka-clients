@@ -19,14 +19,17 @@
 //!
 //! # Scope
 //!
-//! All seven in-scope manager slots are wired up (`coordinator`,
+//! The seven consumer manager slots are wired up (`coordinator`,
 //! `commit`, `consumer_heartbeat`, `consumer_membership`, `offsets`,
-//! `topic_metadata`, `fetch`). Streams- and share-consumer slots are
+//! `topic_metadata`, `fetch`), and the three share-consumer (KIP-932) slots
+//! (`share_heartbeat`, `share_membership`, `share_consume`), which Java's
+//! share constructor fills together with `coordinator`. Streams slots are
 //! out of milestone scope per `consumer-threading.md` §20.
 //!
-//! The Java `RequestManagers::supplier(...)` static factory is still
-//! out of scope here — the bg-task wiring in Phase 10/11 constructs
-//! each manager directly.
+//! The consumer's `RequestManagers::supplier(...)` static factory is not
+//! translated: `AsyncKafkaConsumer::new` constructs each manager directly.
+//! The share consumer's is
+//! [`RequestManagers::supplier_with_share_acknowledgement_event_handler`].
 //!
 //! # Why a flag, not `IdempotentCloser`
 //!
@@ -37,16 +40,32 @@
 
 #![cfg_attr(not(test), expect(dead_code))]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::Notify;
 
 use super::CommitRequestManager;
 use super::ConsumerHeartbeatRequestManager;
 use super::ConsumerMembershipManager;
 use super::CoordinatorRequestManager;
 use super::FetchRequestManager;
+use super::MemberStateListener;
 use super::OffsetsRequestManager;
 use super::RequestManager;
+use super::ShareConsumeRequestManager;
+use super::ShareConsumerMetadata;
+use super::ShareFetchBuffer;
+use super::ShareFetchConfig;
+use super::ShareFetchMetricsManager;
+use super::ShareHeartbeatRequestManager;
+use super::ShareMembershipManager;
+use super::SubscriptionState;
 use super::TopicMetadataRequestManager;
+use super::events::{BackgroundEventHandler, ShareAcknowledgementEventHandler};
+use crate::common::Error;
+use crate::common::metrics::Metrics;
+use crate::common::utils::Time;
+use crate::consumer::ConsumerConfig;
 
 /// Container holding all consumer request managers. The bg task
 /// iterates over its [`Self::entries`] to poll each manager in
@@ -112,6 +131,28 @@ pub(crate) struct RequestManagers {
     /// directly with the network-client delegate it holds (see
     /// [`crate::consumer::internals::NodeStatus`]).
     pub(crate) fetch: Option<FetchRequestManager>,
+    /// Share-group heartbeat manager — `Some` for a share consumer. Java:
+    /// `Optional<ShareHeartbeatRequestManager> shareHeartbeatRequestManager`.
+    pub(crate) share_heartbeat: Option<ShareHeartbeatRequestManager>,
+    /// Share-group membership manager — `Some` for a share consumer. Java:
+    /// `Optional<ShareMembershipManager> shareMembershipManager`. Held as
+    /// `Arc` because [`ShareHeartbeatRequestManager`] holds the same
+    /// instance; unlike `consumer_membership` it is in [`Self::entries`],
+    /// polled through `impl RequestManager for Arc<ShareMembershipManager>`.
+    pub(crate) share_membership: Option<Arc<ShareMembershipManager>>,
+    /// Share consume request manager — `Some` for a share consumer. Java:
+    /// `Optional<ShareConsumeRequestManager> shareConsumeRequestManager`.
+    /// Behind `Arc<Mutex<_>>` because the share membership manager notifies
+    /// it as a `MemberStateListener` (`impl MemberStateListener for
+    /// Mutex<ShareConsumeRequestManager>`); it is in [`Self::entries`],
+    /// polled through `impl RequestManager for
+    /// Arc<Mutex<ShareConsumeRequestManager>>`.
+    ///
+    /// Lock order: the `RequestManagers` lock, then this one; the membership
+    /// manager's state lock, then this one (it notifies listeners holding
+    /// it). This lock is never held while calling into the membership
+    /// manager, nor across an `.await`.
+    pub(crate) share_consume: Option<Arc<Mutex<ShareConsumeRequestManager>>>,
     /// Auxiliary slot for dyn-dispatched managers — used by tests to
     /// inject spy/fake managers without expanding the concrete-field
     /// list. The production constructor `new(...)` leaves this empty;
@@ -153,9 +194,130 @@ impl RequestManagers {
             consumer_membership,
             offsets,
             fetch,
+            share_heartbeat: None,
+            share_membership: None,
+            share_consume: None,
             dyn_managers: Vec::new(),
             closed: false,
         }
+    }
+
+    /// Constructs the `RequestManagers` of a share consumer: the coordinator
+    /// and the three share managers. The consumer-only slots are `None`
+    /// (Java's `Optional.empty()`, or `null` for the offsets, topic-metadata
+    /// and fetch managers).
+    ///
+    /// Java's `entries()` order is coordinator → share heartbeat → share
+    /// membership → share consume; see [`Self::entries`].
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#RequestManagers")]
+    pub(crate) fn with_share_consume_request_manager(
+        share_consume_request_manager: Arc<Mutex<ShareConsumeRequestManager>>,
+        coordinator: Option<Arc<CoordinatorRequestManager>>,
+        share_heartbeat: Option<ShareHeartbeatRequestManager>,
+        share_membership: Option<Arc<ShareMembershipManager>>,
+    ) -> Self {
+        Self {
+            coordinator,
+            topic_metadata: None,
+            commit: None,
+            consumer_heartbeat: None,
+            consumer_membership: None,
+            offsets: None,
+            fetch: None,
+            share_heartbeat,
+            share_membership,
+            share_consume: Some(share_consume_request_manager),
+            dyn_managers: Vec::new(),
+            closed: false,
+        }
+    }
+
+    /// Creates the `RequestManagers` of a share consumer (`ShareConsumerImpl`):
+    /// the coordinator, share membership, share heartbeat and share consume
+    /// request managers, with the share consume request manager registered
+    /// as a state listener of the share membership manager.
+    ///
+    /// # Errors
+    ///
+    /// The error of `ShareFetchConfig::with_consumer_config` when
+    /// `isolation.level` or `share.acquire.mode` names no known value.
+    ///
+    /// # Translation notes
+    ///
+    /// - Java returns a `Supplier` that the network thread calls; Rust builds
+    ///   the managers here, as `AsyncKafkaConsumer::new` builds the
+    ///   consumer's.
+    /// - `group_id` and `rack_id` are the two `GroupRebalanceConfig` fields
+    ///   Java reads (ledger G8: Rust has no `GroupRebalanceConfig`).
+    /// - Java's `LogContext` and `ClientTelemetryReporter` parameters are
+    ///   dropped (the `log` crate; KIP-714 telemetry is not translated,
+    ///   ledger G16), and so is the member-id label update on the reporter.
+    /// - `completion_notify` is Rust-only: the background task's network-poll
+    ///   wakeup, installed on the coordinator and heartbeat managers so their
+    ///   spawned response forwarders wake the poll, as `AsyncKafkaConsumer`
+    ///   installs it on the consumer's.
+    #[expect(clippy::too_many_arguments, reason = "the Java supplier's parameters")]
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#supplier")]
+    pub(crate) fn supplier_with_share_acknowledgement_event_handler(
+        time: Arc<dyn Time>,
+        share_acknowledgement_event_handler: Arc<ShareAcknowledgementEventHandler>,
+        background_event_handler: Arc<BackgroundEventHandler>,
+        metadata: Arc<ShareConsumerMetadata>,
+        subscriptions: Arc<Mutex<SubscriptionState>>,
+        fetch_buffer: Arc<ShareFetchBuffer>,
+        config: &ConsumerConfig,
+        group_id: &str,
+        rack_id: Option<&str>,
+        share_fetch_metrics_manager: Arc<ShareFetchMetricsManager>,
+        metrics: &Arc<Metrics>,
+        completion_notify: &Arc<Notify>,
+    ) -> Result<Self, Error> {
+        let retry_backoff_ms = config.retry_backoff_ms();
+        let retry_backoff_max_ms = config.retry_backoff_max_ms();
+        let share_fetch_config = ShareFetchConfig::with_consumer_config(config)?;
+
+        let coordinator = Arc::new(CoordinatorRequestManager::new(retry_backoff_ms, retry_backoff_max_ms, group_id));
+        coordinator.set_completion_notify(Arc::clone(completion_notify));
+        let share_membership_manager = Arc::new(ShareMembershipManager::new(
+            group_id,
+            rack_id.map(str::to_string),
+            Arc::clone(&subscriptions),
+            metadata.metadata_arc(),
+            Arc::clone(&time),
+            metrics,
+        ));
+
+        let mut share_heartbeat_request_manager = ShareHeartbeatRequestManager::new(
+            time.milliseconds(),
+            config,
+            Arc::clone(&coordinator),
+            Arc::clone(&subscriptions),
+            Arc::clone(&share_membership_manager),
+            background_event_handler,
+            metrics,
+        );
+        share_heartbeat_request_manager.set_completion_notify(Arc::clone(completion_notify));
+        let share_consume_request_manager = Arc::new(Mutex::new(ShareConsumeRequestManager::new(
+            time,
+            group_id,
+            metadata,
+            subscriptions,
+            share_fetch_config,
+            fetch_buffer,
+            share_acknowledgement_event_handler,
+            share_fetch_metrics_manager,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+        )));
+        share_membership_manager
+            .register_state_listener(Arc::clone(&share_consume_request_manager) as Arc<dyn MemberStateListener>);
+
+        Ok(Self::with_share_consume_request_manager(
+            share_consume_request_manager,
+            Some(coordinator),
+            Some(share_heartbeat_request_manager),
+            Some(share_membership_manager),
+        ))
     }
 
     /// Constructs a `RequestManagers` populated only with dyn-dispatched
@@ -174,6 +336,9 @@ impl RequestManagers {
             consumer_membership: None,
             offsets: None,
             fetch: None,
+            share_heartbeat: None,
+            share_membership: None,
+            share_consume: None,
             dyn_managers,
             closed: false,
         }
@@ -202,12 +367,18 @@ impl RequestManagers {
     /// `Arc<CommitRequestManager>`, and `Arc<ConsumerMembershipManager>`
     /// respectively so the heartbeat manager and the membership manager
     /// can share the same instance with the slot in this container
-    /// (Java does the same via heap references). Producing a
-    /// `&mut dyn RequestManager` from a shared `Arc<...>` would
-    /// require refactoring `RequestManager::poll` to take `&self`
-    /// (semantic mismatch with Java). Instead the bg task polls them
-    /// separately via [`Self::coordinator_handle`],
+    /// (Java does the same via heap references). Instead the bg task
+    /// polls them separately via [`Self::coordinator_handle`],
     /// [`Self::commit_handle`], and `ConsumerMembershipManager::reconcile`.
+    /// An `Arc`-shared manager can be an entry (the share managers are,
+    /// through `impl RequestManager for Arc<ShareMembershipManager>` and
+    /// `for Arc<Mutex<ShareConsumeRequestManager>>`); the consumer's are
+    /// not, which is why its membership reconcile runs after the offsets
+    /// and fetch polls (Milestone 18 PLAN §8).
+    ///
+    /// For a share consumer the order is `(coordinator skipped) → share
+    /// heartbeat → share membership → share consume`, Java's share
+    /// constructor order.
     ///
     /// `fetch` is skipped too, and polled last by the bg task, because its
     /// `poll` / `poll_on_close` take the network-client delegate the bg task
@@ -227,6 +398,14 @@ impl RequestManagers {
     /// [nomicon-borrow-splitting]: https://doc.rust-lang.org/nomicon/borrow-splitting.html
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#entries")]
     pub(crate) fn entries(&mut self) -> Vec<&mut dyn RequestManager> {
+        let mut list: Vec<&mut dyn RequestManager> = Vec::new();
+        self.for_each_entry(|rm| list.push(rm));
+        list
+    }
+
+    /// Visits the managers of [`Self::entries`], in the same order, without
+    /// collecting them into a `Vec`.
+    fn for_each_entry<'a>(&'a mut self, mut visit: impl FnMut(&'a mut dyn RequestManager)) {
         // Destructure so each `Option` is borrowed independently —
         // borrow-splitting per <https://doc.rust-lang.org/nomicon/borrow-splitting.html>.
         let Self {
@@ -237,28 +416,55 @@ impl RequestManagers {
             consumer_membership: _,
             offsets,
             fetch: _,
+            share_heartbeat,
+            share_membership,
+            share_consume,
             dyn_managers,
             closed: _,
         } = self;
-        let mut list: Vec<&mut dyn RequestManager> = Vec::new();
         // Order matches Java (the `RequestManagers` constructor) minus the
         // three Arc-shared slots and the fetch slot: (coordinator skipped)
         // → (commit skipped) → heartbeat → (membership skipped) → offsets
         // → topic_metadata → (fetch, polled by the bg task with the
         // delegate).
+        //
+        // A share consumer has none of those but the coordinator, and Java's
+        // share constructor lists (coordinator skipped) → share heartbeat →
+        // share membership → share consume, so the share membership manager
+        // reconciles a new assignment before the share consume manager polls
+        // in the same iteration. Both kinds are never present together.
         if let Some(h) = consumer_heartbeat.as_mut() {
-            list.push(h as &mut dyn RequestManager);
+            visit(h);
+        }
+        if let Some(h) = share_heartbeat.as_mut() {
+            visit(h);
+        }
+        if let Some(m) = share_membership.as_mut() {
+            visit(m);
+        }
+        if let Some(c) = share_consume.as_mut() {
+            visit(c);
         }
         if let Some(o) = offsets.as_mut() {
-            list.push(o as &mut dyn RequestManager);
+            visit(o);
         }
         if let Some(t) = topic_metadata.as_mut() {
-            list.push(t as &mut dyn RequestManager);
+            visit(t);
         }
         for m in dyn_managers.iter_mut() {
-            list.push(m.as_mut());
+            visit(m.as_mut());
         }
-        list
+    }
+
+    /// Runs [`RequestManager::handle_completed_requests`] on every manager of
+    /// [`Self::entries`], in that order. The background task calls it right
+    /// after each network poll, where Java's `NetworkClientDelegate#poll`
+    /// runs the requests' `whenComplete` callbacks.
+    ///
+    /// Rust-only (DoD §7): it routes the hook so that `run_once` needs no
+    /// change when another manager adopts it. The walk allocates nothing.
+    pub(crate) fn handle_completed_requests(&mut self) {
+        self.for_each_entry(|rm| rm.handle_completed_requests());
     }
 
     /// Returns a clone of the `Arc<CoordinatorRequestManager>` handle,
@@ -309,8 +515,11 @@ impl RequestManagers {
     /// implements `Closeable`. Among the consumer's managers that is only the
     /// fetch manager (`FetchRequestManager extends AbstractFetch implements
     /// Closeable`), so this closes it: `AbstractFetch.close()` closes the
-    /// fetch buffer and the decompression buffer supplier. The Rust close is
-    /// infallible, so `closeQuietly`'s log-and-continue has nothing to catch.
+    /// fetch buffer and the decompression buffer supplier. Among the share
+    /// consumer's it is only `ShareConsumeRequestManager implements
+    /// Closeable`, which closes its share fetch buffer and its metrics. The
+    /// Rust closes are infallible, so `closeQuietly`'s log-and-continue has
+    /// nothing to catch.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.RequestManagers#close")]
     pub(crate) fn close(&mut self) {
         if self.closed {
@@ -321,6 +530,9 @@ impl RequestManagers {
         self.closed = true;
         if let Some(fetch) = self.fetch.as_mut() {
             fetch.abstract_fetch_mut().close();
+        }
+        if let Some(share_consume) = self.share_consume.as_ref() {
+            share_consume.lock().unwrap_or_else(std::sync::PoisonError::into_inner).close();
         }
         log::debug!("RequestManagers has been closed");
     }
@@ -360,7 +572,7 @@ mod tests {
     use crate::consumer::internals::FetchBuffer;
     use crate::consumer::internals::FetchConfig;
     use crate::consumer::internals::FetchRequestManager;
-    use crate::consumer::internals::SubscriptionState;
+    use crate::consumer::internals::HeartbeatRequestManagerHooks;
 
     fn coord_manager() -> Arc<CoordinatorRequestManager> {
         Arc::new(CoordinatorRequestManager::new(100, 1_000, "group-1"))
@@ -530,6 +742,142 @@ mod tests {
             fetch_buffer.is_empty(),
             "Java's AbstractFetch.close closes the fetch buffer, which drops its buffered data"
         );
+    }
+
+    /// The share consumer's `RequestManagers`, built through the share
+    /// supplier as `ShareConsumerImpl` builds them.
+    fn share_request_managers(metrics: &Arc<Metrics>) -> RequestManagers {
+        let config = crate::consumer::ConsumerConfig {
+            bootstrap_servers: vec!["localhost:9092".to_string()],
+            group_id: Some("shareGroup".to_string()),
+            ..crate::consumer::ConsumerConfig::defaults()
+        };
+        let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = Arc::new(ShareConsumerMetadata::with_config(
+            &config,
+            Arc::clone(&subscriptions),
+            ClusterResourceListeners::new(),
+        ));
+        let (background_event_tx, _background_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = crate::consumer::internals::ShareFetchMetricsRegistry::with_metric_grp_prefix(
+            crate::consumer::internals::ConsumerUtils::CONSUMER_SHARE_METRIC_GROUP_PREFIX,
+        );
+        RequestManagers::supplier_with_share_acknowledgement_event_handler(
+            Arc::new(crate::common::utils::MockTime::new()),
+            Arc::new(ShareAcknowledgementEventHandler::new()),
+            Arc::new(BackgroundEventHandler::new(background_event_tx)),
+            metadata,
+            subscriptions,
+            Arc::new(ShareFetchBuffer::new()),
+            &config,
+            "shareGroup",
+            None,
+            Arc::new(ShareFetchMetricsManager::new(Arc::clone(metrics), &registry)),
+            metrics,
+            &Arc::new(Notify::new()),
+        )
+        .expect("the default config is valid")
+    }
+
+    /// Rust counterpart of `RequestManagersTest#testConsumerGroupRequestManagersAndListenersWired`
+    /// for the share supplier (Java has no share case): the coordinator and
+    /// the three share managers are present, the consumer-only managers are
+    /// not, and the share consume request manager is the membership manager's
+    /// only state listener (Java's
+    /// `shareMembershipManager.registerStateListener(shareConsumeRequestManager)`).
+    #[test]
+    fn share_group_request_managers_and_listeners_wired() {
+        let metrics = Arc::new(Metrics::new());
+        let mut rm = share_request_managers(&metrics);
+        assert!(rm.coordinator.is_some());
+        assert!(rm.share_heartbeat.is_some());
+        assert!(rm.share_consume.is_some());
+        let membership = Arc::clone(rm.share_membership.as_ref().expect("share membership manager"));
+        assert!(rm.commit.is_none());
+        assert!(rm.consumer_heartbeat.is_none());
+        assert!(rm.consumer_membership.is_none());
+        assert!(rm.offsets.is_none());
+        assert!(rm.topic_metadata.is_none());
+        assert!(rm.fetch.is_none());
+
+        // The heartbeat manager reaches the same membership manager.
+        let heartbeat_membership = Arc::clone(rm.share_heartbeat.as_ref().expect("heartbeat").membership_manager());
+        assert!(Arc::ptr_eq(&membership, &heartbeat_membership));
+
+        let listeners = membership.abstract_mm.inner.lock().unwrap().state_updates_listeners.clone();
+        assert_eq!(1, listeners.len());
+        let share_consume = rm.share_consume.as_ref().expect("share consume request manager");
+        assert!(std::ptr::addr_eq(Arc::as_ptr(&listeners[0]), Arc::as_ptr(share_consume)));
+
+        // Java's share `entries()`: coordinator, share heartbeat, share
+        // membership, share consume; the coordinator is polled separately.
+        assert_eq!(3, rm.entries().len());
+        assert_eq!(
+            0,
+            rm.membership_boundary(),
+            "the share managers are all after the consumer boundary"
+        );
+    }
+
+    /// Java's share `entries()` order, which the share background task polls
+    /// in: share heartbeat, share membership, share consume (the coordinator
+    /// is polled separately). The membership manager's poll applies an
+    /// assignment the share consume manager fetches in the same iteration
+    /// (PLAN §8.1 row 10), so moving the heartbeat or the membership manager
+    /// after it must fail here (Critic 270).
+    #[test]
+    fn share_entries_are_heartbeat_then_membership_then_consume() {
+        let metrics = Arc::new(Metrics::new());
+        let mut rm = share_request_managers(&metrics);
+        let names: Vec<&str> = rm
+            .entries()
+            .iter()
+            // `ShareHeartbeatRequestManager`, `Arc<ShareMembershipManager>`,
+            // `Arc<Mutex<ShareConsumeRequestManager>>`: the last path segment.
+            .map(|m| {
+                m.type_name_for_test()
+                    .trim_end_matches('>')
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(
+            vec![
+                "ShareHeartbeatRequestManager",
+                "ShareMembershipManager",
+                "ShareConsumeRequestManager"
+            ],
+            names
+        );
+    }
+
+    /// Java's `RequestManagers#close` closes every `Closeable` entry; for a
+    /// share consumer that is `ShareConsumeRequestManager#close`, which
+    /// removes the share fetch metrics. A second close does nothing.
+    #[test]
+    fn close_closes_the_share_consume_manager() {
+        let metrics = Arc::new(Metrics::new());
+        let mut rm = share_request_managers(&metrics);
+        let share_fetch_metrics = |metrics: &Metrics| {
+            metrics
+                .metrics()
+                .snapshot()
+                .keys()
+                .filter(|name| name.group() == "consumer-share-fetch-manager-metrics")
+                .count()
+        };
+        assert!(share_fetch_metrics(&metrics) > 0);
+
+        rm.close();
+        assert!(rm.is_closed());
+        assert_eq!(
+            0,
+            share_fetch_metrics(&metrics),
+            "ShareConsumeRequestManager#close removes its metrics"
+        );
+        rm.close();
+        assert!(rm.is_closed());
     }
 
     /// Verifies that `entries()` returns managers in the same order on

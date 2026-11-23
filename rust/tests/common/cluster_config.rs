@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 
 use super::kafka_cluster::SASL_USERNAME;
+use super::test_jars::TestJar;
 
 /// Describes cluster requirements for a group of tests.
 ///
@@ -62,6 +63,16 @@ pub struct ClusterConfig {
     /// starts a private cluster and removes its containers when the context is
     /// dropped, including on panic.
     pub dedicated: bool,
+    /// Extra server properties of single broker nodes, by node id — Java's
+    /// `@ClusterConfigProperty(id = N, key = ..., value = ...)`. Set after
+    /// [`Self::server_properties`], so a node's value wins; same
+    /// environment-variable form.
+    pub broker_properties: BTreeMap<i32, BTreeMap<String, String>>,
+    /// Kafka test jars copied into every node's `/opt/kafka/libs`, for a
+    /// cluster configured with a class of Kafka's test sources (see
+    /// [`super::test_jars`]); controllers get them too, since every node
+    /// validates the class-valued configs. Empty for every other cluster.
+    pub broker_libs: Vec<TestJar>,
 }
 
 /// The type of cluster requested — Java `org.apache.kafka.common.test.api.Type`.
@@ -119,6 +130,8 @@ impl Default for ClusterConfig {
             cluster_type: Type::CoKraft,
             controllers: 1,
             dedicated: false,
+            broker_properties: BTreeMap::new(),
+            broker_libs: Vec::new(),
         }
     }
 }

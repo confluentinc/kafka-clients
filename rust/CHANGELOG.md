@@ -4,6 +4,70 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 
 ## [Unreleased]
 
+### Consumer
+
+- New: the share consumer (KIP-932) public API, translated from Java 4.4.0:
+  the `ShareConsumer` trait with its dyn-compatible `DynShareConsumer`,
+  `KafkaShareConsumer` (built from a string configuration map and two
+  deserializers), `MockShareConsumer`, `ShareConsumerHandle` (`wakeup` from
+  another task while `poll` holds the consumer) and `AcknowledgeOptions` /
+  `AcknowledgeOptionsBuilder` for acknowledging by topic, partition and
+  offset, with the value types `AcknowledgeType` and
+  `AcknowledgementCommitCallback` (and `acknowledgement_commit_callback::new`
+  for a closure). The KIP-714 telemetry methods are not included, as for
+  `Consumer`. Rust only: there is no C FFI or binding for it yet. Behaviour
+  that differs from Java is listed under *Translation notes* in the rustdoc;
+  the notable one is that a record acknowledged with `AcknowledgeType::Renew`
+  is delivered again as a new `ConsumerRecord`, deserialized again.
+- Fix: partition revocation now follows Java 4.4.0's
+  `AbstractMembershipManager#revokePartitions`, which the consumer had not
+  translated. No API or signature changes. What changes:
+  - An INFO log ("Revoking previously assigned partitions [...]") precedes
+    each revocation, and another ("The pause flag in partitions [...] will be
+    removed due to revocation.") names paused partitions whose pause flag the
+    revocation drops.
+  - On `unsubscribe` (or subscribing to an empty topic list) while still in
+    the group (member epoch > 0), the partitions being released are marked
+    pending revocation before `onPartitionsRevoked` runs: fetching for them
+    stops and in-flight fetch responses for them are discarded. Positions are
+    unchanged, so committing inside the callback still works. `close` is not
+    affected: it runs the listener directly, as in Java.
+  - As a consequence, during that `onPartitionsRevoked`, `position()` on a
+    released partition that has no position yet no longer fetches one: it
+    waits until `default.api.timeout.ms` and returns a timeout error, as in
+    Java.
+  - A failed `onPartitionsRevoked` logs Java's ERROR line
+    ("onPartitionsRevoked callback invocation failed for partitions [...]"),
+    during a rebalance and during `unsubscribe`.
+  - Two further steps are translated for Java parity but change no outcome
+    today: revoking only the partitions still assigned when the revocation
+    runs, and skipping `onPartitionsRevoked` for a member in the fatal state.
+    On every reachable path the rebalance has already stopped before either
+    could make a difference.
+- Change: after a rebalance the consumer holds its assigned partitions in
+  Java's order, sorted by topic name, then partition (Java's
+  `TopicIdPartitionSet#topicPartitions()`, kept through
+  `SubscriptionState#assignFromSubscribed`). This order decides the order fetch
+  requests list partitions in. It used to be random, changing from one
+  assignment to the next. A manual `assign()` is unchanged. No API or
+  signature changes.
+
+### Admin client
+
+- New: the share-group methods of Java 4.4.0's `Admin`:
+  `describe_share_groups`, `list_share_group_offsets`,
+  `alter_share_group_offsets`, `delete_share_group_offsets` and
+  `delete_share_groups`, each with its `_with_options` form, and their public
+  types (`ShareGroupDescription`, `ShareMemberDescription`,
+  `ShareMemberAssignment`, `SharePartitionOffsetInfo`,
+  `ListShareGroupOffsetsSpec`, five `*Options` and five `*Result` types).
+  `MockAdminClient` returns `LocalUnsupportedOperationError` ("Not implemented
+  yet") for all five, as Java's mock throws `UnsupportedOperationException`.
+  Rust only: there is no C FFI or binding for them yet.
+- **Breaking** for code that implements `Admin` itself: the five
+  `_with_options` methods are required trait methods, as they are abstract in
+  Java's `Admin`.
+
 ### C FFI
 
 - A NULL mandatory argument (a handle, a string, a list, a map, an element, a

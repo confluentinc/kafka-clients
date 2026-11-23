@@ -90,14 +90,7 @@ impl AbstractConfig {
         )
     )]
     pub(crate) fn new(definition: &'static ConfigDef, originals: ConfigMap, do_log: bool) -> Result<Self, Error> {
-        Self::with_hooks(
-            definition,
-            originals,
-            do_log,
-            "AbstractConfig",
-            |parsed| parsed,
-            |_| Ok(ConfigMap::new()),
-        )
+        Self::with_hooks(definition, originals, do_log, "AbstractConfig", Ok, |_| Ok(ConfigMap::new()))
     }
 
     /// Java's `AbstractConfig(definition, originals, configProviderProps,
@@ -106,7 +99,8 @@ impl AbstractConfig {
     ///
     /// - `pre_process` is Java's `preProcessParsedConfig`: called directly
     ///   after user configs got parsed (and thus default values is not set),
-    ///   it returns the map that becomes the originals.
+    ///   it returns the map that becomes the originals, or the error Java's
+    ///   override throws.
     /// - `post_process` is Java's `postProcessParsedConfig`: called directly
     ///   after user configs got parsed (and thus default values got set), with
     ///   the configuration as parsed so far, it returns a map of updates that
@@ -119,15 +113,16 @@ impl AbstractConfig {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] if a value is missing, cannot be parsed or fails its
-    /// validator, before or after the updates, or the error `post_process`
+    /// The error `pre_process` returns; [`Error::Config`] if a value is
+    /// missing, cannot be parsed or fails its validator, before or after the
+    /// updates; or the error `post_process`
     /// returns.
     pub(crate) fn with_hooks(
         definition: &'static ConfigDef,
         originals: ConfigMap,
         do_log: bool,
         class_name: &str,
-        pre_process: impl FnOnce(ConfigMap) -> ConfigMap,
+        pre_process: impl FnOnce(ConfigMap) -> Result<ConfigMap, Error>,
         post_process: impl FnOnce(&AbstractConfig) -> Result<ConfigMap, Error>,
     ) -> Result<Self, Error> {
         Self::with_hooks_and_log_warnings(definition, originals, do_log, true, class_name, pre_process, post_process)
@@ -150,10 +145,10 @@ impl AbstractConfig {
         do_log: bool,
         log_warnings: bool,
         class_name: &str,
-        pre_process: impl FnOnce(ConfigMap) -> ConfigMap,
+        pre_process: impl FnOnce(ConfigMap) -> Result<ConfigMap, Error>,
         post_process: impl FnOnce(&AbstractConfig) -> Result<ConfigMap, Error>,
     ) -> Result<Self, Error> {
-        let originals = pre_process(originals);
+        let originals = pre_process(originals)?;
         let values = definition.parse_with_log_warnings(&originals, log_warnings)?;
         let mut config = Self { used: Mutex::new(HashSet::new()), originals, values };
         let config_updates = post_process(&config)?;
@@ -647,7 +642,7 @@ mod tests {
             "TestConfig",
             |mut parsed| {
                 parsed.insert("preprocess".to_string(), Some("success".into()));
-                parsed
+                Ok(parsed)
             },
             |_| Ok(ConfigMap::new()),
         )
@@ -661,6 +656,24 @@ mod tests {
             config.get(PREPROCESSOR_CONFIG).unwrap(),
             Some(&ParsedValue::String("success".into()))
         );
+    }
+
+    /// Not in `AbstractConfigTest`: an error from Java's
+    /// `preProcessParsedConfig` (as `ShareConsumerConfig`'s throws) is
+    /// returned before the originals are parsed or post-processed; the value
+    /// here would fail to parse as a list.
+    #[test]
+    fn test_preprocess_error_is_returned_before_parsing() {
+        let err = AbstractConfig::with_hooks(
+            &TEST_CONFIG_DEF,
+            map(&[(METRIC_REPORTER_CLASSES_CONFIG, ParsedValue::Int(1))]),
+            false,
+            "TestConfig",
+            |_| Err(Error::config_message("rejected by preProcessParsedConfig")),
+            |_| panic!("post_process must not run"),
+        )
+        .unwrap_err();
+        assert_eq!("rejected by preProcessParsedConfig", config_error_message::<()>(Err(err)));
     }
 
     #[test]
@@ -799,29 +812,18 @@ mod tests {
     /// the hook's reads mark keys used.
     #[test]
     fn test_post_process_parsed_config() {
-        let config = AbstractConfig::with_hooks(
-            &POST_DEF,
-            map(&[("a", "5".into())]),
-            false,
-            "TestConfig",
-            |parsed| parsed,
-            |config| {
+        let config =
+            AbstractConfig::with_hooks(&POST_DEF, map(&[("a", "5".into())]), false, "TestConfig", Ok, |config| {
                 let a = config.get_int("a")?.unwrap_or_default();
                 Ok(ConfigMap::from([("b".to_string(), Some(ParsedValue::Int(a * 2)))]))
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(config.get_int("b").unwrap(), Some(10));
         assert!(config.unused().is_empty());
 
-        let err = AbstractConfig::with_hooks(
-            &POST_DEF,
-            ConfigMap::new(),
-            false,
-            "TestConfig",
-            |parsed| parsed,
-            |_| Ok(ConfigMap::from([("b".to_string(), Some(ParsedValue::Int(-1)))])),
-        )
+        let err = AbstractConfig::with_hooks(&POST_DEF, ConfigMap::new(), false, "TestConfig", Ok, |_| {
+            Ok(ConfigMap::from([("b".to_string(), Some(ParsedValue::Int(-1)))]))
+        })
         .unwrap_err();
         assert_eq!(
             config_error_message::<()>(Err(err)),

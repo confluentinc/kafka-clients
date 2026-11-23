@@ -20,11 +20,15 @@
 mod abstract_fetch;
 mod abstract_heartbeat_request_manager;
 pub(crate) mod abstract_membership_manager;
+mod acknowledgement_batch;
+mod acknowledgement_commit_callback_handler;
+mod acknowledgements;
 mod async_kafka_consumer;
 pub(crate) mod auto_offset_reset_strategy;
 #[cfg(test)]
 mod auto_offset_reset_strategy_test;
-pub(crate) mod commit_request_manager;
+pub(crate) mod batch_cursor;
+mod commit_request_manager;
 mod completed_fetch;
 mod consumer_heartbeat_request_manager;
 mod consumer_interceptors;
@@ -35,6 +39,8 @@ mod consumer_protocol;
 pub(crate) use consumer_protocol::ConsumerProtocol;
 mod consumer_rebalance_listener_invoker;
 mod consumer_rebalance_listener_method_name;
+mod consumer_share_fetch_error;
+mod consumer_share_in_flight_batch_error;
 mod consumer_utils;
 mod coordinator_request_manager;
 mod deserializers;
@@ -53,6 +59,7 @@ mod member_state;
 mod member_state_listener;
 pub(crate) mod metrics;
 pub(crate) mod network_client_delegate;
+mod node_acknowledgements;
 mod offset_and_timestamp_internal;
 mod offset_commit_callback_invoker;
 pub(crate) mod offset_fetcher_utils;
@@ -62,6 +69,28 @@ mod positions_validator;
 mod request_manager;
 mod request_managers;
 mod request_state;
+pub(crate) mod share_acknowledgement_mode;
+pub(crate) mod share_acquire_mode;
+mod share_completed_fetch;
+mod share_consume_request_manager;
+mod share_consumer_impl;
+mod share_consumer_metadata;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "in Java only the visible-for-testing constructor uses it")
+)]
+mod share_consumer_metrics;
+mod share_fetch;
+mod share_fetch_buffer;
+mod share_fetch_collector;
+mod share_fetch_config;
+mod share_fetch_metrics_aggregator;
+mod share_fetch_metrics_manager;
+mod share_fetch_metrics_registry;
+mod share_heartbeat_request_manager;
+pub(crate) mod share_in_flight_batch;
+mod share_membership_manager;
+mod share_session_handler;
 pub(crate) mod subscription_state;
 mod timed_request_state;
 pub(crate) mod topic_metadata_request_manager;
@@ -69,9 +98,12 @@ mod wakeup_trigger;
 
 pub(crate) use abstract_fetch::AbstractFetch;
 pub(crate) use abstract_heartbeat_request_manager::{
-    AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatFailureAction,
+    AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatRequestManagerHooks,
 };
-pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment};
+pub(crate) use abstract_membership_manager::{AbstractMembershipManager, LocalAssignment, MembershipManagerHooks};
+pub(crate) use acknowledgement_batch::AcknowledgementBatch;
+pub(crate) use acknowledgement_commit_callback_handler::AcknowledgementCommitCallbackHandler;
+pub(crate) use acknowledgements::Acknowledgements;
 pub(crate) use async_kafka_consumer::AsyncKafkaConsumer;
 // `ConsumerHandle` is public (tagged `rust-only`): `crate::consumer` re-exports it.
 pub use async_kafka_consumer::ConsumerHandle;
@@ -86,6 +118,8 @@ pub(crate) use consumer_metadata::ConsumerMetadata;
 pub(crate) use consumer_network_thread::ConsumerNetworkThread;
 pub(crate) use consumer_rebalance_listener_invoker::ConsumerRebalanceListenerInvoker;
 pub(crate) use consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+pub(crate) use consumer_share_fetch_error::ConsumerShareFetchError;
+pub(crate) use consumer_share_in_flight_batch_error::ConsumerShareInFlightBatchError;
 pub(crate) use consumer_utils::ConsumerUtils;
 pub(crate) use coordinator_request_manager::CoordinatorRequestManager;
 pub(crate) use deserializers::Deserializers;
@@ -104,6 +138,7 @@ pub(crate) use heartbeat_request_state::HeartbeatRequestState;
 pub(crate) use member_state::MemberState;
 pub(crate) use member_state_listener::MemberStateListener;
 pub(crate) use network_client_delegate::{NetworkClientDelegate, PollResult, UnsentRequest};
+pub(crate) use node_acknowledgements::NodeAcknowledgements;
 pub(crate) use offset_and_timestamp_internal::OffsetAndTimestampInternal;
 pub(crate) use offset_commit_callback_invoker::{
     AutoCommitInterceptorHook, OffsetCommitCallbackInvoker, OffsetCommitCallbackQueue,
@@ -115,6 +150,28 @@ pub(crate) use positions_validator::PositionsValidator;
 pub(crate) use request_manager::RequestManager;
 pub(crate) use request_managers::RequestManagers;
 pub(crate) use request_state::RequestState;
+pub(crate) use share_acknowledgement_mode::ShareAcknowledgementMode;
+pub(crate) use share_acquire_mode::ShareAcquireMode;
+pub(crate) use share_completed_fetch::ShareCompletedFetch;
+pub(crate) use share_consume_request_manager::ShareConsumeRequestManager;
+pub(crate) use share_consumer_impl::ShareConsumerImpl;
+pub(crate) use share_consumer_metadata::ShareConsumerMetadata;
+#[cfg_attr(
+    not(test),
+    expect(unused_imports, reason = "in Java only the visible-for-testing constructor uses it")
+)]
+pub(crate) use share_consumer_metrics::ShareConsumerMetrics;
+pub(crate) use share_fetch::ShareFetch;
+pub(crate) use share_fetch_buffer::ShareFetchBuffer;
+pub(crate) use share_fetch_collector::ShareFetchCollector;
+pub(crate) use share_fetch_config::ShareFetchConfig;
+pub(crate) use share_fetch_metrics_aggregator::ShareFetchMetricsAggregator;
+pub(crate) use share_fetch_metrics_manager::ShareFetchMetricsManager;
+pub(crate) use share_fetch_metrics_registry::ShareFetchMetricsRegistry;
+pub(crate) use share_heartbeat_request_manager::ShareHeartbeatRequestManager;
+pub(crate) use share_in_flight_batch::ShareInFlightBatch;
+pub(crate) use share_membership_manager::ShareMembershipManager;
+pub(crate) use share_session_handler::ShareSessionHandler;
 pub(crate) use subscription_state::{FetchPosition, LogTruncation, SubscriptionState};
 pub(crate) use timed_request_state::TimedRequestState;
 pub(crate) use topic_metadata_request_manager::TopicMetadataRequestManager;

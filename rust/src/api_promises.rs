@@ -64,6 +64,7 @@ use crate::common::security::*;
 use crate::common::serialization::*;
 use crate::common::topic_collection::*;
 use crate::common::*;
+use crate::consumer::acknowledgement_commit_callback::*;
 use crate::consumer::close_options::*;
 use crate::consumer::consumer_partition_assignor::*;
 use crate::consumer::offset_commit_callback::*;
@@ -582,6 +583,50 @@ fn admin_types_are_send_and_sync() {
         is_send!(ListPartitionReassignmentsResult) && is_sync!(ListPartitionReassignmentsResult),
         "ListPartitionReassignmentsResult"
     );
+    assert!(
+        is_send!(AlterShareGroupOffsetsOptions) && is_sync!(AlterShareGroupOffsetsOptions),
+        "AlterShareGroupOffsetsOptions"
+    );
+    assert!(
+        is_send!(AlterShareGroupOffsetsResult) && is_sync!(AlterShareGroupOffsetsResult),
+        "AlterShareGroupOffsetsResult"
+    );
+    assert!(
+        is_send!(DeleteShareGroupOffsetsOptions) && is_sync!(DeleteShareGroupOffsetsOptions),
+        "DeleteShareGroupOffsetsOptions"
+    );
+    assert!(
+        is_send!(DeleteShareGroupOffsetsResult) && is_sync!(DeleteShareGroupOffsetsResult),
+        "DeleteShareGroupOffsetsResult"
+    );
+    assert!(
+        is_send!(DeleteShareGroupsOptions) && is_sync!(DeleteShareGroupsOptions),
+        "DeleteShareGroupsOptions"
+    );
+    assert!(
+        is_send!(DeleteShareGroupsResult) && is_sync!(DeleteShareGroupsResult),
+        "DeleteShareGroupsResult"
+    );
+    assert!(
+        is_send!(DescribeShareGroupsOptions) && is_sync!(DescribeShareGroupsOptions),
+        "DescribeShareGroupsOptions"
+    );
+    assert!(
+        is_send!(DescribeShareGroupsResult) && is_sync!(DescribeShareGroupsResult),
+        "DescribeShareGroupsResult"
+    );
+    assert!(
+        is_send!(ListShareGroupOffsetsOptions) && is_sync!(ListShareGroupOffsetsOptions),
+        "ListShareGroupOffsetsOptions"
+    );
+    assert!(
+        is_send!(ListShareGroupOffsetsResult) && is_sync!(ListShareGroupOffsetsResult),
+        "ListShareGroupOffsetsResult"
+    );
+    assert!(
+        is_send!(ListShareGroupOffsetsSpec) && is_sync!(ListShareGroupOffsetsSpec),
+        "ListShareGroupOffsetsSpec"
+    );
     assert!(is_send!(ListTopicsOptions) && is_sync!(ListTopicsOptions), "ListTopicsOptions");
     assert!(is_send!(ListTopicsResult) && is_sync!(ListTopicsResult), "ListTopicsResult");
     assert!(
@@ -636,6 +681,22 @@ fn admin_types_are_send_and_sync() {
     assert!(
         is_send!(ScramCredentialInfo) && is_sync!(ScramCredentialInfo),
         "ScramCredentialInfo"
+    );
+    assert!(
+        is_send!(ShareGroupDescription) && is_sync!(ShareGroupDescription),
+        "ShareGroupDescription"
+    );
+    assert!(
+        is_send!(ShareMemberAssignment) && is_sync!(ShareMemberAssignment),
+        "ShareMemberAssignment"
+    );
+    assert!(
+        is_send!(ShareMemberDescription) && is_sync!(ShareMemberDescription),
+        "ShareMemberDescription"
+    );
+    assert!(
+        is_send!(SharePartitionOffsetInfo) && is_sync!(SharePartitionOffsetInfo),
+        "SharePartitionOffsetInfo"
     );
     assert!(is_send!(ScramMechanism) && is_sync!(ScramMechanism), "ScramMechanism");
     assert!(
@@ -742,6 +803,15 @@ fn producer_types_are_send_and_sync() {
 
 #[test]
 fn consumer_types_are_send_and_sync() {
+    assert!(
+        is_send!(AcknowledgeOptions) && is_sync!(AcknowledgeOptions),
+        "AcknowledgeOptions"
+    );
+    assert!(
+        is_send!(AcknowledgeOptionsBuilder) && is_sync!(AcknowledgeOptionsBuilder),
+        "AcknowledgeOptionsBuilder"
+    );
+    assert!(is_send!(AcknowledgeType) && is_sync!(AcknowledgeType), "AcknowledgeType");
     assert!(is_send!(Assignment) && is_sync!(Assignment), "Assignment");
     assert!(is_send!(CloseOptions) && is_sync!(CloseOptions), "CloseOptions");
     assert!(
@@ -790,6 +860,10 @@ fn consumer_types_are_send_and_sync() {
     assert!(is_send!(GroupProtocol) && is_sync!(GroupProtocol), "GroupProtocol");
     assert!(is_send!(OffsetAndMetadata) && is_sync!(OffsetAndMetadata), "OffsetAndMetadata");
     assert!(
+        is_send!(ShareConsumerHandle) && is_sync!(ShareConsumerHandle),
+        "ShareConsumerHandle"
+    );
+    assert!(
         is_send!(OffsetAndTimestamp) && is_sync!(OffsetAndTimestamp),
         "OffsetAndTimestamp"
     );
@@ -818,4 +892,17 @@ fn consumers_are_send_but_not_sync() {
     assert!(is_send!(KafkaConsumer<String, Vec<u8>>) && !is_sync!(KafkaConsumer<String, Vec<u8>>));
     assert!(is_send!(MockConsumer<String, Vec<u8>>) && !is_sync!(MockConsumer<String, Vec<u8>>));
     assert!(is_send!(Box<dyn DynConsumer<String, Vec<u8>>>) && !is_sync!(Box<dyn DynConsumer<String, Vec<u8>>>));
+}
+
+/// The share consumers are `Send + !Sync` for the same reason
+/// (`share-consumer.md` §1): Java's `ShareConsumerImpl#acquire` rejects a
+/// second thread at runtime. `ShareConsumerHandle` is their `Sync` view for
+/// `wakeup`, probed above.
+#[test]
+fn share_consumers_are_send_but_not_sync() {
+    assert!(is_send!(KafkaShareConsumer<String, Vec<u8>>) && !is_sync!(KafkaShareConsumer<String, Vec<u8>>));
+    assert!(is_send!(MockShareConsumer<String, Vec<u8>>) && !is_sync!(MockShareConsumer<String, Vec<u8>>));
+    assert!(
+        is_send!(Box<dyn DynShareConsumer<String, Vec<u8>>>) && !is_sync!(Box<dyn DynShareConsumer<String, Vec<u8>>>)
+    );
 }

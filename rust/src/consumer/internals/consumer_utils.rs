@@ -32,14 +32,16 @@
 //!  - `refresh_committed_offsets` — seeds positions from committed offsets.
 //!  - `maybe_wrap_as_kafka_error` / `maybe_wrap_as_kafka_error_with_msg` —
 //!    Java's `KafkaException` cast-or-wrap.
+//!  - `create_share_fetch_metrics_manager` — the share consumer's fetch
+//!    metrics manager (Milestone 18 P3b, ledger gap G4).
+//!  - `create_metrics` — the metrics registry, used by the share consumer
+//!    (Milestone 18 P7); `AsyncKafkaConsumer` builds the same registry inline.
 //!
 //! # Out of scope (skipped per PLAN.md deferral #7)
 //!
 //! - `createConsumerNetworkClient` — uses `ConsumerNetworkClient` which is
 //!   classic-protocol-only per `consumer-threading.md` §20.
-//! - `createMetrics`, `createFetchMetricsManager`,
-//!   `createShareFetchMetricsManager` — the metrics framework is deferred
-//!   across Milestone-8 (see Phase 11 PLAN.md "AsyncConsumerMetrics" note).
+//! - `createFetchMetricsManager` — `AsyncKafkaConsumer` builds it inline.
 //! - `configuredConsumerInterceptors` — relies on Java's reflection-based
 //!   class-name-to-instance machinery. Phase 2 made the decision to take
 //!   interceptors as already-constructed `Vec<Box<dyn ConsumerInterceptor>>`
@@ -55,13 +57,16 @@ use std::time::Duration;
 
 use log::info;
 
+use crate::common::metrics::{MetricConfig, Metrics, RecordingLevel};
 use crate::common::protocol::Errors;
+use crate::common::utils::Time;
 use crate::common::{Error, IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::internals::AutoOffsetResetStrategy;
 use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
+use crate::consumer::internals::{ShareFetchMetricsManager, ShareFetchMetricsRegistry};
 
 /// Consumer-internal shared constants and helpers.
 ///
@@ -115,6 +120,46 @@ impl ConsumerUtils {
 
     /// Java: `CONSUMER_CLIENT_ID_METRIC_TAG` (package-private).
     pub(crate) const CONSUMER_CLIENT_ID_METRIC_TAG: &str = "client-id";
+
+    /// Builds a consumer's metrics registry: `metrics.num.samples`,
+    /// `metrics.sample.window.ms` and `metrics.recording.level`, with the
+    /// `client-id` tag on every metric.
+    ///
+    /// Translates Java's static `createMetrics(ConsumerConfig, Time,
+    /// List<MetricsReporter>)`. The reporter list and the JMX
+    /// `MetricsContext` are not translated (the consumer's registry has
+    /// neither), and an unknown recording level, which `ConsumerConfig`
+    /// rejects, falls back to `INFO`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerUtils#createMetrics")]
+    pub(crate) fn create_metrics(config: &ConsumerConfig, time: Arc<dyn Time>) -> Arc<Metrics> {
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert(Self::CONSUMER_CLIENT_ID_METRIC_TAG.to_string(), config.client_id().to_string());
+        let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
+        let metric_config = MetricConfig::new()
+            .set_samples(config.metrics_num_samples)
+            .set_time_window_ms(config.metrics_sample_window_ms)
+            .set_record_level(recording_level)
+            .set_tags(tags);
+        Arc::new(Metrics::with_default_config_time(Arc::new(metric_config), time))
+    }
+
+    /// Builds the share consumer's fetch metrics manager, its metric names
+    /// tagged with `client-id` in the `consumer-share-fetch-manager-metrics`
+    /// group.
+    ///
+    /// Translates Java's static `createShareFetchMetricsManager(Metrics)`.
+    /// `client-id` is a default tag of the consumer's `Metrics`, so the
+    /// registry's template tag set lists only it, as Java's singleton set does.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerUtils#createShareFetchMetricsManager")]
+    pub(crate) fn create_share_fetch_metrics_manager(metrics: Arc<Metrics>) -> ShareFetchMetricsManager {
+        let mut metrics_tags = indexmap::IndexSet::new();
+        metrics_tags.insert(Self::CONSUMER_CLIENT_ID_METRIC_TAG.to_string());
+        let metrics_registry = ShareFetchMetricsRegistry::with_tags_metric_grp_prefix(
+            metrics_tags,
+            Self::CONSUMER_SHARE_METRIC_GROUP_PREFIX,
+        );
+        ShareFetchMetricsManager::new(metrics, &metrics_registry)
+    }
 
     /// Converts a `Duration` timeout to whole milliseconds, saturating at
     /// `i64::MAX`.
@@ -370,6 +415,38 @@ mod tests {
             ConsumerUtils::THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED,
             "internal.throw.on.fetch.stable.offset.unsupported"
         );
+    }
+
+    /// G4: `createShareFetchMetricsManager` registers its metrics in the
+    /// `consumer-share-fetch-manager-metrics` group, tagged with the consumer's
+    /// `client-id` default tag, and records through them.
+    #[test]
+    fn create_share_fetch_metrics_manager_uses_the_share_group_and_client_id_tag() {
+        use crate::common::metrics::{MetricConfig, Metrics};
+        use crate::common::{Metric, MetricValue};
+        use std::collections::BTreeMap;
+
+        let tags = BTreeMap::from([(ConsumerUtils::CONSUMER_CLIENT_ID_METRIC_TAG.to_string(), "c1".to_string())]);
+        let metrics = Arc::new(Metrics::with_default_config(Arc::new(MetricConfig::new().set_tags(tags))));
+        let manager = ConsumerUtils::create_share_fetch_metrics_manager(Arc::clone(&metrics));
+        manager.record_bytes_fetched(5);
+
+        let name = metrics
+            .metric_instance_with_key_value(
+                &ShareFetchMetricsRegistry::with_tags_metric_grp_prefix(
+                    indexmap::IndexSet::from([ConsumerUtils::CONSUMER_CLIENT_ID_METRIC_TAG.to_string()]),
+                    ConsumerUtils::CONSUMER_SHARE_METRIC_GROUP_PREFIX,
+                )
+                .bytes_fetched_total,
+                &[],
+            )
+            .unwrap();
+        assert_eq!("bytes-consumed-total", name.name());
+        assert_eq!("consumer-share-fetch-manager-metrics", name.group());
+        assert_eq!(Some(&"c1".to_string()), name.tags().get("client-id"));
+        assert_eq!(MetricValue::Double(5.0), metrics.metric(&name).unwrap().metric_value());
+        manager.close();
+        assert!(metrics.metric(&name).is_none());
     }
 
     /// Audit finding C1-03: `Duration::MAX` saturates to `i64::MAX` ms

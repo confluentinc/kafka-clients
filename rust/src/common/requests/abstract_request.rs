@@ -87,6 +87,7 @@ use crate::WriteTxnMarkersRequestData;
 use super::AlterClientQuotasRequest;
 use super::AlterPartitionReassignmentsRequest;
 use super::AlterReplicaLogDirsRequest;
+use super::AlterShareGroupOffsetsRequest;
 use super::AlterUserScramCredentialsRequest;
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
@@ -99,6 +100,7 @@ use super::CreateTopicsRequest;
 use super::DeleteAclsRequest;
 use super::DeleteGroupsRequest;
 use super::DeleteRecordsRequest;
+use super::DeleteShareGroupOffsetsRequest;
 use super::DeleteTopicsRequest;
 use super::DescribeAclsRequest;
 use super::DescribeClientQuotasRequest;
@@ -108,6 +110,7 @@ use super::DescribeDelegationTokenRequest;
 use super::DescribeGroupsRequest;
 use super::DescribeLogDirsRequest;
 use super::DescribeProducersRequest;
+use super::DescribeShareGroupOffsetsRequest;
 use super::DescribeTopicPartitionsRequest;
 use super::DescribeTransactionsRequest;
 use super::DescribeUserScramCredentialsRequest;
@@ -136,6 +139,10 @@ use super::RequestHeader;
 use super::SaslAuthenticateRequest;
 use super::SaslHandshakeRequest;
 use super::SendBuilder;
+use super::ShareAcknowledgeRequest;
+use super::ShareFetchRequest;
+use super::ShareGroupDescribeRequest;
+use super::ShareGroupHeartbeatRequest;
 use super::TxnOffsetCommitRequest;
 use super::UnregisterControllerRequest;
 use super::UpdateFeaturesRequest;
@@ -293,6 +300,20 @@ pub enum AbstractRequest {
     WriteTxnMarkers(WriteTxnMarkersRequest),
     /// A ListTransactions request.
     ListTransactions(ListTransactionsRequest),
+    /// A DeleteShareGroupOffsets request (KIP-932).
+    DeleteShareGroupOffsets(DeleteShareGroupOffsetsRequest),
+    /// A AlterShareGroupOffsets request (KIP-932).
+    AlterShareGroupOffsets(AlterShareGroupOffsetsRequest),
+    /// A DescribeShareGroupOffsets request (KIP-932).
+    DescribeShareGroupOffsets(DescribeShareGroupOffsetsRequest),
+    /// A ShareAcknowledge request (KIP-932).
+    ShareAcknowledge(ShareAcknowledgeRequest),
+    /// A ShareFetch request (KIP-932).
+    ShareFetch(ShareFetchRequest),
+    /// A ShareGroupDescribe request (KIP-932).
+    ShareGroupDescribe(ShareGroupDescribeRequest),
+    /// A ShareGroupHeartbeat request (KIP-932).
+    ShareGroupHeartbeat(ShareGroupHeartbeatRequest),
 }
 
 impl AbstractRequest {
@@ -353,6 +374,13 @@ impl AbstractRequest {
             Self::DescribeTransactions(r) => r.version(),
             Self::WriteTxnMarkers(r) => r.version(),
             Self::ListTransactions(r) => r.version(),
+            Self::DeleteShareGroupOffsets(r) => r.version(),
+            Self::AlterShareGroupOffsets(r) => r.version(),
+            Self::DescribeShareGroupOffsets(r) => r.version(),
+            Self::ShareAcknowledge(r) => r.version(),
+            Self::ShareFetch(r) => r.version(),
+            Self::ShareGroupDescribe(r) => r.version(),
+            Self::ShareGroupHeartbeat(r) => r.version(),
         }
     }
 
@@ -413,6 +441,13 @@ impl AbstractRequest {
             Self::DescribeTransactions(r) => r.api_key(),
             Self::WriteTxnMarkers(r) => r.api_key(),
             Self::ListTransactions(r) => r.api_key(),
+            Self::DeleteShareGroupOffsets(r) => r.api_key(),
+            Self::AlterShareGroupOffsets(r) => r.api_key(),
+            Self::DescribeShareGroupOffsets(r) => r.api_key(),
+            Self::ShareAcknowledge(r) => r.api_key(),
+            Self::ShareFetch(r) => r.api_key(),
+            Self::ShareGroupDescribe(r) => r.api_key(),
+            Self::ShareGroupHeartbeat(r) => r.api_key(),
         }
     }
 
@@ -482,6 +517,13 @@ impl AbstractRequest {
             Self::DescribeTransactions(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::WriteTxnMarkers(r) => SendBuilder::build_request_send(header, r.data_mut()),
             Self::ListTransactions(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DeleteShareGroupOffsets(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::AlterShareGroupOffsets(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::DescribeShareGroupOffsets(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ShareAcknowledge(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ShareFetch(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ShareGroupDescribe(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::ShareGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -678,6 +720,27 @@ impl AbstractRequest {
             Self::ListTransactions(r) => {
                 super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
+            Self::DeleteShareGroupOffsets(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AlterShareGroupOffsets(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::DescribeShareGroupOffsets(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ShareAcknowledge(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ShareFetch(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ShareGroupDescribe(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::ShareGroupHeartbeat(r) => {
+                super::RequestUtils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
         }
     }
 
@@ -745,6 +808,13 @@ impl AbstractRequest {
             Self::DescribeTransactions(r) => Self::serialize_body(r.data_mut(), version),
             Self::WriteTxnMarkers(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListTransactions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DeleteShareGroupOffsets(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AlterShareGroupOffsets(r) => Self::serialize_body(r.data_mut(), version),
+            Self::DescribeShareGroupOffsets(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareAcknowledge(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareGroupDescribe(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ShareGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
@@ -827,6 +897,17 @@ impl AbstractRequest {
             Self::DescribeTransactions(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::WriteTxnMarkers(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ListTransactions(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::DeleteShareGroupOffsets(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::AlterShareGroupOffsets(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            // Java's `getErrorResponse(int, Throwable)` copies the throwable's message,
+            // so the wrapper takes the error `Errors.exception()` builds for the code.
+            Self::DescribeShareGroupOffsets(r) => {
+                Some(r.get_error_response(throttle_time_ms, &crate::common::Error::new(*error)))
+            },
+            Self::ShareAcknowledge(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ShareFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ShareGroupDescribe(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ShareGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -1099,6 +1180,27 @@ impl AbstractRequest {
                 let data = ListTransactionsRequestData::read(readable, api_version)?;
                 Ok(Self::ListTransactions(ListTransactionsRequest::new(data, api_version)))
             },
+            ApiKeys::DELETE_SHARE_GROUP_OFFSETS => Ok(Self::DeleteShareGroupOffsets(
+                DeleteShareGroupOffsetsRequest::parse(readable, api_version)?,
+            )),
+            ApiKeys::ALTER_SHARE_GROUP_OFFSETS => Ok(Self::AlterShareGroupOffsets(
+                AlterShareGroupOffsetsRequest::parse(readable, api_version)?,
+            )),
+            ApiKeys::DESCRIBE_SHARE_GROUP_OFFSETS => Ok(Self::DescribeShareGroupOffsets(
+                DescribeShareGroupOffsetsRequest::parse(readable, api_version)?,
+            )),
+            ApiKeys::SHARE_ACKNOWLEDGE => {
+                Ok(Self::ShareAcknowledge(ShareAcknowledgeRequest::parse(readable, api_version)?))
+            },
+            ApiKeys::SHARE_FETCH => Ok(Self::ShareFetch(ShareFetchRequest::parse(readable, api_version)?)),
+            ApiKeys::SHARE_GROUP_DESCRIBE => Ok(Self::ShareGroupDescribe(ShareGroupDescribeRequest::parse(
+                readable,
+                api_version,
+            )?)),
+            ApiKeys::SHARE_GROUP_HEARTBEAT => Ok(Self::ShareGroupHeartbeat(ShareGroupHeartbeatRequest::parse(
+                readable,
+                api_version,
+            )?)),
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!(
@@ -1166,6 +1268,13 @@ impl std::fmt::Display for AbstractRequest {
             Self::DescribeTransactions(r) => write!(f, "{r}"),
             Self::WriteTxnMarkers(r) => write!(f, "{r}"),
             Self::ListTransactions(r) => write!(f, "{r}"),
+            Self::DeleteShareGroupOffsets(r) => write!(f, "{r}"),
+            Self::AlterShareGroupOffsets(r) => write!(f, "{r}"),
+            Self::DescribeShareGroupOffsets(r) => write!(f, "{r}"),
+            Self::ShareAcknowledge(r) => write!(f, "{r}"),
+            Self::ShareFetch(r) => write!(f, "{r}"),
+            Self::ShareGroupDescribe(r) => write!(f, "{r}"),
+            Self::ShareGroupHeartbeat(r) => write!(f, "{r}"),
         }
     }
 }

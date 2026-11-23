@@ -1934,12 +1934,12 @@ impl AsyncConsumerHandleState {
 ///
 /// A type-erased, thread-safe lifecycle hook (`signal_close` / `wakeup`).
 /// Erased so the close handle does not carry the consumer's `K`/`V` types.
-type LifecycleFn = Box<dyn Fn() + Send + Sync>;
+pub(crate) type LifecycleFn = Box<dyn Fn() + Send + Sync>;
 
 /// The type-erased close hook: Java's `ConsumerNetworkThread.close(Duration)`
 /// state change (`ConsumerNetworkThread#closeInternal`), which
 /// carries the close timeout the bg task's `cleanup()` is bounded by.
-type SignalCloseFn = Box<dyn Fn(Duration) + Send + Sync>;
+pub(crate) type SignalCloseFn = Box<dyn Fn(Duration) + Send + Sync>;
 
 /// Builds the two lifecycle closures a [`NetworkThreadCloseHandle`] needs:
 /// `signal_close_fn` (publish the close timeout, clear the running flag, then
@@ -1979,7 +1979,7 @@ type SignalCloseFn = Box<dyn Fn(Duration) + Send + Sync>;
 /// wiring. The fixture previously stubbed these closures, which is exactly why
 /// the dead-nudge bug survived: the stub set a flag, so it could not reproduce
 /// the trigger's `disabled` short-circuit.
-fn build_close_handle_fns(
+pub(crate) fn build_close_handle_fns(
     running: Arc<std::sync::atomic::AtomicBool>,
     close_timeout_ms: Arc<AtomicI64>,
     notify: Arc<tokio::sync::Notify>,
@@ -2470,7 +2470,7 @@ fn try_take_completion<T>(receiver: &mut tokio::sync::oneshot::Receiver<Result<T
 /// wakeup was checked before the event was submitted (Java's
 /// `setActiveTask` before `addAndGet`): a wakeup seen afterwards found the
 /// event's future pending, so it wins.
-async fn await_event_completion<T: Send + 'static>(
+pub(crate) async fn await_event_completion<T: Send + 'static>(
     wakeup_trigger: &WakeupTrigger,
     time: &dyn Time,
     mut receiver: tokio::sync::oneshot::Receiver<Result<T, Error>>,
@@ -3365,7 +3365,7 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
 /// `new` is synchronous and [`Deserializers::close`] is async, so the close
 /// runs through [`Utils::close_quietly_from_sync`], which the producer's
 /// constructor shares for its serializers.
-struct CloseDeserializersOnError<K: 'static, V: 'static> {
+pub(crate) struct CloseDeserializersOnError<K: 'static, V: 'static> {
     deserializers: Option<Arc<Deserializers<K, V>>>,
 }
 
@@ -3374,13 +3374,13 @@ where
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    fn new(deserializers: Arc<Deserializers<K, V>>) -> Self {
+    pub(crate) fn new(deserializers: Arc<Deserializers<K, V>>) -> Self {
         Self { deserializers: Some(deserializers) }
     }
 
     /// Construction succeeded: hands the deserializers on, so nothing closes
     /// them here.
-    fn disarm(mut self) -> Arc<Deserializers<K, V>> {
+    pub(crate) fn disarm(mut self) -> Arc<Deserializers<K, V>> {
         self.deserializers.take().expect("the guard is disarmed once")
     }
 }
@@ -4220,7 +4220,7 @@ where
             Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let app_event_processor = ApplicationEventProcessor::new(
             Arc::clone(&request_managers),
-            Arc::clone(&metadata),
+            metadata.metadata_arc(),
             Arc::clone(&subscriptions),
             Arc::clone(&application_event_reaper),
             Arc::clone(&time),
@@ -5355,8 +5355,8 @@ where
                     // 2. If a listener is registered, run `on_partitions_assigned`.
                     // 3. Reply on the ack (the `PartitionsAssignedEvent.future()`)
                     //    so the bg reconciliation resumes.
-                    let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
-
+                    // Java's `ApplyAssignmentEvent` carries the `SortedSet` the
+                    // `PartitionsAssignedEvent` holds; the `Vec` keeps that order.
                     // Step 1 — applyNewAssignment: enqueue + await the
                     // ApplyAssignmentEvent. Java `addAndGet(applyEvent)`.
                     let apply_result = {
@@ -5368,7 +5368,7 @@ where
                             .add_and_get::<()>(
                                 ApplicationEvent::ApplyAssignment {
                                     handle: apply_handle,
-                                    assigned_partitions: assigned_set,
+                                    assigned_partitions,
                                     added_partitions: added_partitions.clone(),
                                 },
                                 apply_rx,
