@@ -974,10 +974,13 @@ each goes when the reason it gives goes:
   `IAsyncOffsetCommitCallback` reports a null callback before a null key, which comes after its group
   check, while `AsyncMockConsumer` reports the null key first, as Java's `MockConsumer#commitAsync`
   reads the map before the callback (Java has no asynchronous callback).
-- **A zero timeout.** A real `BeginningOffsets` or `EndOffsets` with a null element and a zero timeout
-  (or, without a timeout, `default.api.timeout.ms` at 0) returns an empty map without a native call, as
-  Java does. A timeout under 1 ms counts as zero, for any partition, where Java's `beginningOffsets`
-  tests `Duration.isZero()`. Goes when the C ABI takes a timeout finer than a millisecond.
+- **A zero timeout.** A real `BeginningOffsets` or `EndOffsets` with a null element throws
+  `ArgumentNullException` "partitions must not contain null" whatever the timeout, as Python's binding
+  fails for a `None` element; the binding does not read `default.api.timeout.ms` (ledger 639). Java
+  returns an empty map there when the timeout, or without one `default.api.timeout.ms`, is zero. Goes
+  when the C ABI carries a null partition. A timeout under 1 ms counts as zero, for any partition, where
+  Java's `beginningOffsets` tests `Duration.isZero()`. Goes when the C ABI takes a timeout finer than a
+  millisecond.
 - **Sorting a null `Uuid`.** `CompareTo(null)` throws, so `List.Sort()`, `Array.Sort` and
   `BinarySearch`, with or without `Comparer<Uuid>.Default`, throw `InvalidOperationException` around its
   `ArgumentNullException`, as Java's sort throws. `OrderBy`, `SortedSet<Uuid>` and a comparer that calls
