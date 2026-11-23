@@ -178,8 +178,10 @@ After:
 > released by the GC only; each `ConsumerRecord` references it with its native record pointer. Topic, partition,
 > key and value are read at poll, the deserializers run there (Java's `poll()` contract); every other getter is
 > one P/Invoke per call, uncached, followed by `GC.KeepAlive` of the handle. `Headers` reads the native headers
-> on first use, under a lock, and then holds writable owned copies. No code disposes a batch a record wraps; a
-> kept record keeps its whole batch, and the pressure is the key and value bytes plus a per-record constant.
+> on first use, under a lock, into a writable list of `Header`s that view the batch: a key is decoded and a value
+> copied on its first `Key()` / `Value()`, and `ValueMemory()` is a view until `Value()` copies. No code disposes a
+> batch a record wraps; a kept record, `Headers`, `Header`, or header memory taken before `Value()` keeps its
+> whole batch, and the pressure is the key and value bytes plus a per-record constant.
 > Raw bytes through a span deserializer or `ByteArrayDeserializer` are still copied into owned arrays.
 
 The "Deferred alternative — keep-alive (zero-copy)" paragraph: its first sentence becomes "**Zero-copy key and
@@ -190,13 +192,14 @@ need." is removed.
 
 Before: `public Headers Headers();    // the record's own, writable copies (not routed through a deserializer this phase)`
 
-After: `public Headers Headers();    // the record's own; read from the batch on first use, then writable owned copies`
+After: `public Headers Headers();    // the record's own and writable; read from the batch on first use, its values views of the batch until Value() copies one`
 
 ### W3 — `CLAUDE.md` type table, the `Headers` / `Header` row
 
 Before: "… never on the mocks; a fetched record's are its own and writable"
 
-After: "… never on the mocks; a fetched record's are its own, read from the batch on first use, and writable"
+After: "… never on the mocks; a fetched record's are its own, read from the batch on first use, their values views
+of the batch until `Value()` copies one, and writable"
 
 ### W4 — `CLAUDE.md` type table, the `byte[]` key/value row; and the "Key/value type" row
 
@@ -286,12 +289,12 @@ the batch.
     they force no copy.
 - `NewError` materializes owned copies (string keys, `byte[]` values) for `RecordDeserializationException`, so an
   exception the caller keeps does not keep the batch.
-- `ProducerSendMarshal` reads each header value through `ValueMemory()`, pinned for the call, instead of `Value()`,
-  so forwarding a fetched header to a producer makes no managed copy. The one copy is made by the C FFI function
-  `kafka_common_header_Headers_add_with_key_value`, which builds `RecordHeader::new(key, value.to_vec())` (the key
-  into a `String`, the value into a `Vec<u8>`), because the C API has no borrowed header-value form (ledger 301); the
-  Rust producer makes no extra copy, writing the header into the batch buffer as wire encoding, as it does key and
-  value.
+- `ProducerSendMarshal` reads each header value through the internal `ValueSpan`, fixed for the call, instead of
+  `Value()`, so forwarding a fetched header to a producer makes no managed copy. The one copy is made by the C FFI
+  function `kafka_common_header_Headers_add_with_key_value`, which builds `RecordHeader::new(key, value.to_vec())`
+  (the key into a `String`, the value into a `Vec<u8>`), because the C API has no borrowed header-value form
+  (ledger 301); the Rust producer makes no extra copy, writing the header into the batch buffer as wire encoding, as
+  it does key and value.
 - `CopyHeaders` is removed; copy-out builds the record's `Headers` with its native source.
 
 S4–S6 as above. S5 adds tests for: a fetched header's `ValueMemory()` backed by a `BytesMemoryManager` over the
@@ -303,5 +306,5 @@ released; and a producer sending a fetched header.
 
 Ledger rows (Proposed): 587 is revised to the zero-copy form above; 596, `Header.ValueMemory()` (the deviation
 above); 597, a fetched `Header` reads its key and value through the C views on first use, `Key()` and `Value()`
-cached as Java's `RecordHeader`, `ValueMemory()` never copied. Rule drafts W2 and W3 say "read from the batch on
-first use, its values views of the batch until `Value()` copies one".
+cached as Java's `RecordHeader`, `ValueMemory()` never copied. Rule drafts W1, W2 and W3 say a fetched record's
+headers are read from the batch on first use, their values views of the batch until `Value()` copies one.
