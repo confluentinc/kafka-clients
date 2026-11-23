@@ -23,7 +23,14 @@ export MULTILANG_IMAGE_TAG
 
 .PHONY: build build-all devel-build build-grpc-images clean-grpc-images submodules init init-hooks \
 	test test-integration-perf verify verify-commit verify-commit-checks bump-version \
-	select-tests pre-push-test-selection clean-test-selection clean
+	select-tests pre-push-test-selection clean-test-selection clean \
+	build-javascript test-javascript test-javascript-unit lint-javascript verify-javascript \
+	test-javascript-macos-docker verify-javascript-macos-docker \
+	build-grpc-images-javascript test-integration-javascript \
+	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
+	build-grpc-native-javascript test-integration-javascript-native \
+	chaos-javascript chaos-javascript-native \
+	pack-javascript package-check-javascript
 
 build: init-hooks build-all
 
@@ -93,11 +100,13 @@ init-hooks:
 	@chmod +x .githooks/pre-commit .githooks/pre-push
 
 # The Rust tests with every feature compiled (the native-Rust ones; the gRPC
-# arms run with their binding), then the C and Python tests.
+# arms run with their binding), then the C and Python tests, and the Node.js
+# client's tests that need no broker (test-javascript-unit).
 test: submodules
 	$(MAKE) -C rust test-all-features
 	$(MAKE) -C c test
 	$(MAKE) -C python test
+	$(MAKE) test-javascript-unit
 
 # The Rust, Python and .NET performance suites, one after the other: they
 # assert latency budgets, so each needs the machine to itself. The .NET arm is
@@ -107,13 +116,15 @@ test-integration-perf:
 	$(MAKE) -C python test-performance
 	$(MAKE) -C dotnet test-integration-perf-dotnet
 
-# The whole gate: the release builds, the Rust checks, the tests, and the
-# Python binding's checks (mypy --strict and the static checks). It runs no
-# .NET target: `make -C dotnet verify` is the .NET gate.
+# The whole gate: the release builds, the Rust checks, the tests, the Python
+# binding's checks (mypy --strict and the static checks) and the Node.js
+# client's rule linter (lint-javascript). It runs no .NET target: `make -C
+# dotnet verify` is the .NET gate.
 verify: build
 	$(MAKE) -C rust format-check check-generated lint
 	$(MAKE) test
 	$(MAKE) -C python check
+	$(MAKE) lint-javascript
 
 # The pre-commit hook's verification. It first selects the tests the changes
 # since the last commit can affect into its own .test-selection-commit.json
@@ -133,11 +144,139 @@ verify-commit-checks: submodules
 	$(MAKE) -C rust format-check check-generated lint test-integration
 	$(MAKE) -C c test
 
-# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]`
-# bumps the versions of the Rust crate, the Python wheels and the .NET package:
-# see rust/Makefile. VERSION, PYTHON_VERSION and DOTNET_VERSION reach the
-# sub-make through its environment (make passes command-line variables down);
-# this recipe never pastes them in.
+# ── The Node.js client ───────────────────────────────────────────────────
+#
+# The Node.js client (javascript/). `verify` runs its build, its rule linter,
+# its format check, its type checks (of the sources and of the tests) and its
+# unit tests (test-javascript-unit, through `test`, and lint-javascript), so it
+# needs Node.js 22.14 or newer and `npm ci` in
+# javascript/ first (typescript and eslint are devDependencies); its
+# broker-backed and gRPC arms run in CI's own jobs (verify-javascript and
+# verify-javascript-macos-docker, in .semaphore/semaphore.yml). Its build is the
+# addon and the TypeScript library. javascript/Makefile expects the Rust library
+# already built, so these targets build it first.
+build-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript build
+
+# Just the JavaScript gRPC image (producer only). Like the C image it needs only
+# the Rust release artifacts: javascript/Dockerfile.grpc builds the addon itself
+# against the copied libconfluent_kafka.so. Not part of `build-grpc-images`,
+# as the JavaScript client is not yet part of `build` either.
+build-grpc-images-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript grpc-image
+
+# The Node.js client's static, unit and typing tests, its broker-backed test
+# against a scratch broker it starts with docker (or KAFKA_BOOTSTRAP_SERVERS
+# when set), then the container gRPC multilanguage arm (Linux only; see
+# test-integration-javascript), as python/'s and c/'s `test` end with theirs. The
+# build needs the devDependencies (`npm ci` in javascript/): typescript compiles
+# the library (javascript/src/**/*.ts -> javascript/dist/).
+test-javascript: build-javascript
+	$(MAKE) -C javascript test
+
+# The Node.js client's tests that need no broker, the part of `test` (and so
+# of `verify`): the static tests (header conformance, the package layout, the
+# release scripts), the unit tests, the memory probes (test-memory), and the
+# type checks, `tsc --strict` over the sources (the build), over the type
+# tests (test-typing, against the compiled declarations) and over every test
+# file (typecheck-tests), with the interface check of the declarations and the
+# exports map against the committed API report (check-api). The type check of
+# the tests reads the compiled declarations, so it runs here, in the one
+# sub-make that builds dist/, never beside it: under `make -j` a second build
+# would delete dist/ while these tests read it.
+test-javascript-unit: build-javascript
+	$(MAKE) -C javascript test-static test-unit test-memory test-typing check-api typecheck-tests
+
+# macOS variant of test-javascript: the unit and memory tests only, as
+# python/'s `verify-macos` runs pytest test/unit only. On macOS the gRPC
+# multilanguage arm runs natively instead (see verify-javascript-macos-docker).
+test-javascript-macos-docker: build-javascript
+	$(MAKE) -C javascript test-unit test-memory
+
+# The Node.js client's rule linter (ESLint, javascript/eslint.config.cjs, and
+# the runner, javascript/scripts/lint_rules.js) and its own tests; ESLint is a
+# devDependency, so `npm ci` in javascript/ first, as for the build. It reads
+# the bindings header the Rust build writes and the committed Java index
+# (javascript/java-index.json, `cargo xtask java-index`), not the kafka submodule.
+# It never builds or reads javascript/dist/, so it may run beside the tests;
+# the type check of the tests, which needs dist/, is in test-javascript-unit.
+lint-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript lint-rules test-lint format-check
+
+verify-javascript: test-javascript lint-javascript
+
+# macOS verify-javascript: the unit tests, then the gRPC multilanguage arm with
+# the gRPC server as a native host process, as python/'s `verify-macos` does.
+verify-javascript-macos-docker: test-javascript-macos-docker
+	$(MAKE) test-integration-javascript-native
+
+# The producer-only `__grpc_js` arm. Self-skips off Linux, like the Python and C
+# arms (the image copies the host-built Linux libconfluent_kafka.so); use
+# `test-integration-javascript-native` there. Part of `verify-javascript`
+# (through javascript/'s `test`), not of `verify`.
+test-integration-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript test-integration-grpc
+
+# The same arm over the SSL / SASL_SSL CONTAINER listeners (CTLSONLY :9100 /
+# CSASLTLS :9101), which INTEGRATION_TEST_PROTOCOL selects
+# (rust/tests/common/test_context.rs), as python/'s and c/'s
+# `test-integration-ssl` and `test-integration-sasl-ssl` do. They inherit the
+# non-Linux skip. They also run the Node.js client's own broker-backed tests
+# over SSL and mTLS, and over SASL_PLAINTEXT and SASL_SSL with the
+# StandardAuthorizer (javascript/'s test-integration-ssl and
+# test-integration-sasl, each against a broker of its own).
+test-integration-javascript-ssl:
+	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-integration-javascript
+	$(MAKE) -C javascript test-integration-ssl
+test-integration-javascript-sasl-ssl:
+	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-integration-javascript
+	$(MAKE) -C javascript test-integration-sasl
+
+# The `__grpc_js` arm with the gRPC server as a host process instead of a
+# container (MULTILANG_BACKEND_MODE=native; see rust/tests/common/backend_pool.rs):
+# only the broker runs in Docker. Used on macOS, where a container runs Linux
+# and could only test the Linux build of the binding. The server needs nothing
+# built for it: it runs from javascript/, with the gRPC packages `npm ci`
+# installs in javascript/node_modules.
+build-grpc-native-javascript: build-javascript
+	$(MAKE) -C javascript grpc-native
+
+test-integration-javascript-native: build-grpc-native-javascript
+	$(MAKE) -C rust test-integration-grpc-js-native
+
+# The chaos runs of the Node.js producer (rust/Makefile `chaos-javascript`):
+# the container backend, and the same runs with the server as a host process.
+# Long and destructive to their own cluster, so not part of `verify`;
+# .semaphore/chaos-javascript.yml runs the first as a scheduled task.
+chaos-javascript: build-grpc-images-javascript
+	$(MAKE) -C rust chaos-javascript
+
+chaos-javascript-native: build-grpc-native-javascript
+	MULTILANG_BACKEND_MODE=native $(MAKE) -C rust chaos-javascript
+
+# The npm packages of the Node.js client, with this machine's addon only:
+# pack-javascript packs them into javascript/build/pack, and
+# package-check-javascript packs them, then installs them into a fresh project
+# and runs the smoke program there. See javascript/Makefile; the release
+# packages are built by release.yml's "Release (JavaScript):" blocks.
+pack-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript pack
+
+package-check-javascript:
+	$(MAKE) -C rust build-all-features
+	$(MAKE) -C javascript pack-check
+
+# `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]
+# [JAVASCRIPT_VERSION=...]` bumps the versions of the Rust crate, the Python
+# wheels, the .NET package and the Node.js package: see rust/Makefile. VERSION,
+# PYTHON_VERSION, DOTNET_VERSION and JAVASCRIPT_VERSION reach the sub-make
+# through its environment (make passes command-line variables down); this
+# recipe never pastes them in.
 bump-version:
 	$(MAKE) -C rust bump-version
 
