@@ -19,7 +19,7 @@
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');
-const { CLASSES, LIB, javaIndex, mapping, method, INVENTED } = require('./_java_fixture');
+const { CLASSES, LIB, javaClass, javaIndex, mapping, method, INVENTED } = require('./_java_fixture');
 
 const RULE = 'check-java-members';
 
@@ -137,4 +137,37 @@ test('no exported class with a Java class fails: 0 items checked', () => {
   );
   assert.equal(r.status, 1);
   assert.ok(r.err.includes('❌ check-java-members: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
+});
+
+test("an interface's runtime object maps its members to the Java interface's static methods", () => {
+  const classes = [
+    ...CLASSES,
+    javaClass('clients.producer.Station', { kind: 'interface', overloads: [method('go'), method('create', [], { static: true })] }),
+  ];
+  const station = (/** @type {string} */ statics) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex(classes),
+      ...LIB,
+      'src/producer/station.ts': `export interface Station {\n  go(): void;\n}\nexport const Station = {\n${statics}};\n`,
+    });
+  const create = '  create(): Station { return { go(): void {} }; },\n';
+  assert.equal(lint(station(create), [RULE]).status, 0);
+  const r = lint(station(`${create}  inventedHelper(): void {},\n  go(): void {},\n`), [RULE]);
+  assert.deepEqual(findings(r), [
+    'Station.inventedHelper: no Java member of clients.producer.Station',
+    'Station.go: is static, but clients.producer.Station#go is an instance member',
+  ]);
+  // A member on the list of invented names passes.
+  const listed = lint(
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex(classes),
+      ...LIB,
+      'src/producer/station.ts': `export interface Station {\n  go(): void;\n}\nexport const Station = {\n${create}  inventedHelper(): void {},\n};\n`,
+      'lint-mapping.json': mapping({ invented: { ...INVENTED, 'Station.inventedHelper': 'a reason' } }),
+    }),
+    [RULE],
+  );
+  assert.equal(listed.status, 0, listed.text);
 });

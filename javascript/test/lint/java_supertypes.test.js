@@ -123,14 +123,14 @@ test('each finding kind, with its exact text', () => {
   const errors = 'javascript/CLAUDE.md, JavaScript Binding Conventions, Errors';
   assert.deepEqual(findings(r), [
     `src/common/errors/bar_error.ts:BarError: does not extend IllegalStateError, the root's class of Java's IllegalStateException, a direct supertype of Java's common.errors.BarException (${errors})`,
-    "src/common/errors/bar_error.ts:BarError: extends Error, which translates no direct supertype of Java's common.errors.BarException (IllegalStateException)",
+    "src/common/errors/bar_error.ts:BarError: extends Error, which translates no supertype of Java's common.errors.BarException (IllegalStateException)",
     'src/common/errors/foo_error.ts:FooError: implements KafkaError, the class translating common.KafkaException: extends it',
     `src/common/header/headers.ts:Headers: has no [Symbol.iterator], for Java's Iterable (${table}: Iterable<T> becomes [Symbol.iterator]())`,
     `src/common/kafka_error.ts:KafkaError: does not extend Error, for Java's RuntimeException (${errors}: KafkaError extends Error heads the error tree)`,
     `src/common/serialization/serializer.ts:Serializer: has no close, for Java's Closeable (${table}: Closeable becomes close(): Promise<void> plus [Symbol.asyncDispose])`,
-    "src/common/topic_partition.ts:TopicPartition: implements Iterable, which translates no direct supertype of Java's common.TopicPartition (Serializable)",
+    "src/common/topic_partition.ts:TopicPartition: implements Iterable, which translates no supertype of Java's common.TopicPartition (Serializable)",
     `src/common/uid.ts:Uid: has no compareTo, for Java's Comparable (${table}: Comparable<T> keeps compareTo())`,
-    "src/producer/cfg.ts:Cfg: extends Base, which translates no direct supertype of Java's clients.producer.Cfg (AbstractConfig)",
+    "src/producer/cfg.ts:Cfg: extends Base, which translates no supertype of Java's clients.producer.Cfg (AbstractConfig)",
     "src/producer/kafka_producer.ts:KafkaProducer: does not implement Producer, which translates clients.producer.Producer, a direct supertype of Java's clients.producer.KafkaProducer",
     `src/producer/producer.ts:Producer: has a close() that does not return a Promise, for Java's Closeable (${table}: Closeable becomes close(): Promise<void> plus [Symbol.asyncDispose])`,
     `src/producer/producer.ts:Producer: has no [Symbol.asyncDispose], for Java's Closeable (${table}: Closeable becomes close(): Promise<void> plus [Symbol.asyncDispose])`,
@@ -153,5 +153,28 @@ test('a supertype the index leaves unresolved is looked up in the classes enclos
   assert.equal(lint(fixture(nested('export class Square implements Shape {}\n')), [RULE]).status, 0);
   assert.deepEqual(findings(lint(fixture(nested('export class Square {}\nvoid (null as unknown as Shape);\n')), [RULE])), [
     "src/producer/square.ts:Square: does not implement Shape, which translates clients.producer.Outer$Shape, a direct supertype of Java's clients.producer.Outer$Square",
+  ]);
+});
+
+test('a Java supertype the client does not translate stands for its own supertypes, recursively', () => {
+  // Java's KafkaAdminClient extends AdminClient, an abstract class the client
+  // does not translate, which implements Admin.
+  const admin = (/** @type {string} */ client) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([
+        ...JSON.parse(INDEX).classes,
+        javaClass('clients.producer.Outer'),
+        javaClass('clients.admin.Admin', { kind: 'interface' }),
+        javaClass('clients.admin.AdminClient', { abstract: true, supertypes: ['Admin'], supertype_fqns: [`${P}clients.admin.Admin`] }),
+        javaClass('clients.admin.KafkaAdminClient', { supertypes: ['AdminClient'], supertype_fqns: [`${P}clients.admin.AdminClient`] }),
+      ]),
+      ...LIB,
+      'src/admin/admin.ts': 'export interface Admin {}\n',
+      'src/admin/kafka_admin_client.ts': `import type { Admin } from './admin';\n${client}`,
+    });
+  assert.equal(lint(admin('export class KafkaAdminClient implements Admin {}\n'), [RULE]).status, 0);
+  assert.deepEqual(findings(lint(admin('export class KafkaAdminClient {}\nvoid (null as unknown as Admin);\n'), [RULE])), [
+    "src/admin/kafka_admin_client.ts:KafkaAdminClient: does not implement Admin, which translates clients.admin.Admin, a supertype of Java's clients.admin.KafkaAdminClient, through clients.admin.AdminClient, which the client does not translate",
   ]);
 });

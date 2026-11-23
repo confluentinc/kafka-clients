@@ -82,6 +82,21 @@ const INDEX = javaIndex([
       method('onCompletion', ['RecordMetadata'], { param_names: ['metadata'], javadoc: [{ body: 6, params: [['metadata', 4]] }] }),
     ],
   }),
+  // A class documenting its type parameter, `@param <T>`.
+  javaClass('clients.producer.Box', { javadoc: [{ body: 3, params: [['<T>', 3]] }] }),
+  // Rec's nested types: a one-method interface and a class.
+  javaClass('clients.producer.Rec$Part', {
+    kind: 'interface',
+    javadoc: [{ body: 4 }],
+    overloads: [method('apply', ['String'], { param_names: ['a'] })],
+  }),
+  javaClass('clients.producer.Rec$Builder', { javadoc: [{ body: 3 }], overloads: [method('build', [], { javadoc: [{ body: 2 }] })] }),
+  // An interface with a static method, on its runtime object.
+  javaClass('clients.producer.Maker', {
+    kind: 'interface',
+    javadoc: [{ body: 3 }],
+    overloads: [method('create', ['String'], { static: true, param_names: ['name'], javadoc: [{ body: 5, params: [['name', 3]] }] })],
+  }),
 ]);
 
 /** A TSDoc comment of `lines`, indented by `indent`. */
@@ -166,7 +181,7 @@ test('a doc past 150% of its Javadoc is a finding, with its exact text', () => {
   ]);
 });
 
-test('only what has a Java counterpart counts: tags Java lacks, @defaultValue and @typeParam do not; @remarks, @see and @example do', () => {
+test('only what has a Java counterpart counts: tags Java lacks, @defaultValue and a @typeParam Java lacks do not; @remarks, @see and @example do', () => {
   const extraTags = [
     'Creates it.',
     '',
@@ -242,4 +257,55 @@ test('a member mapped by javaTargets is measured against its target; an invented
   assert.deepEqual(findings(tagged), [
     "Rec.toJSON: 14 words, more than 150% of the Javadoc's 2 (at most 3) of clients.producer.Rec#topic()",
   ]);
+});
+
+test('a @typeParam counts when Java documents the type parameter, a @throws when it names a Java throw anywhere', () => {
+  const box = (/** @type {string} */ typeParam) =>
+    doc('', ['A box of values.', '', `@typeParam T - ${typeParam}`]) + 'export class Box<T> {\n  readonly #value: T | null = null;\n}\n';
+  assert.equal(lint(fixture({ 'src/producer/box.ts': box('the values') }), [RULE]).status, 0);
+  assert.deepEqual(findings(lint(fixture({ 'src/producer/box.ts': box("the type of the values it holds, as Java's") }), [RULE])), [
+    "src/producer/box.ts:Box: 15 words, more than 150% of the Javadoc's 6 (at most 9) of clients.producer.Box",
+  ]);
+  // close(Duration) throws IllegalArgumentException: an entry naming its error after another counts too.
+  const r = lint(
+    fixture({
+      'src/producer/rec.ts': rec().replace(
+        '@throws `IllegalArgumentError` when negative',
+        '@throws `RangeError` for a timeout that is NaN or infinite, and `IllegalArgumentError` when negative',
+      ),
+    }),
+    [RULE],
+  );
+  assert.deepEqual(findings(r), [
+    "Rec.close/2: 25 words, more than 150% of the Javadoc's 13 (at most 19) of clients.producer.Rec#close(Duration)",
+  ]);
+});
+
+test("nested types are measured against Java's nested classes, and an interface's runtime object's members against its statics", () => {
+  const nested =
+    'export declare namespace Rec {\n' +
+    doc('  ', ['A part of a record, with many words more than its Javadoc.']) +
+    '  export type Part = (a: string) => void;\n' +
+    doc('  ', ['A builder.']) +
+    '  export class Builder {\n' +
+    doc('    ', ['Builds the record, with many more words.']) +
+    '    build(): void;\n  }\n}\n';
+  assert.deepEqual(findings(lint(fixture({ 'src/producer/rec.ts': rec() + nested }), [RULE])), [
+    "src/producer/rec.ts:Rec.Part: 12 words, more than 150% of the Javadoc's 4 (at most 6) of clients.producer.Rec$Part",
+    "Rec.Builder.build: 7 words, more than 150% of the Javadoc's 2 (at most 3) of clients.producer.Rec$Builder#build()",
+  ]);
+  const maker = (/** @type {string} */ text) =>
+    doc('', ['A maker.']) +
+    'export interface Maker {}\n' +
+    doc('', ['Its statics.']) +
+    'export const Maker = {\n' +
+    doc('  ', [text, '', '@param options - the name']) +
+    '  create(options: { name: string }): Maker { void options; return {}; },\n};\n';
+  assert.equal(lint(fixture({ 'src/producer/maker.ts': maker('Creates a maker of the name.') }), [RULE]).status, 0);
+  assert.deepEqual(
+    findings(
+      lint(fixture({ 'src/producer/maker.ts': maker('Creates a maker of the given name, with many words more than Java has.') }), [RULE]),
+    ),
+    ["Maker.create: 17 words, more than 150% of the Javadoc's 8 (at most 12) of clients.producer.Maker#create(String)"],
+  );
 });

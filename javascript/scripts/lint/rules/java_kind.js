@@ -18,7 +18,10 @@
 // Class family): each export translating a Java type takes the TypeScript
 // form of its Java kind:
 //   - a Java interface is an `interface`, beside which a runtime `const` of
-//     the same name may hold its statics (`Admin.create`);
+//     the same name holds its statics (`Admin.create`) when it has public
+//     static methods, and only then (the const's members are
+//     check-java-members' and check-doc-size's, scripts/lint/java_ts.js
+//     `staticsMembers`);
 //   - a Java class, record or enum is a class ("An enum is a class with
 //     frozen instances"), abstract exactly when Java's is; a Java abstract
 //     class's constructor throws `TypeError` when `new.target` is the class
@@ -73,6 +76,11 @@ const RULE = {
   class: 'a Java class is a TypeScript class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family)',
   enum: 'an enum is a class with frozen instances (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family)',
 };
+
+/** Why a constant beside an interface whose Java type has no static method is a finding. */
+const STATICS =
+  "a constant of an interface's name is the runtime object holding the Java interface's public static methods, and it has none " +
+  '(javascript/CLAUDE.md, JavaScript Binding Conventions, Names and Class family: `Admin.create`)';
 
 /** The TypeScript forms of a symbol's declarations (a merged namespace, which holds nested types, left out). */
 function formsOf(ts, declarations) {
@@ -157,7 +165,7 @@ module.exports = {
   kinds: ['ts-enum', 'kind-form', 'abstract-mismatch', 'abstract-new-target', 'abstract-method'],
   needs: ['program', 'java'],
   hint:
-    'Translate a Java interface as an interface (a const of its name may hold its statics), a class, record or ' +
+    "Translate a Java interface as an interface (a const of its name holds its statics, when Java's has some), a class, record or " +
     "enum as a class, abstract exactly when Java's is, with a constructor that throws TypeError for new.target " +
     "itself and Java's abstract methods abstract, and no TypeScript enum (javascript/CLAUDE.md, JavaScript " +
     'Binding Conventions, Class family).',
@@ -190,15 +198,19 @@ module.exports = {
       const forms = formsOf(ts, (symbol && symbol.declarations) || [item.node]);
       const { form, reason } = expectedForm(cls);
       const javaKind = cls.kind === 'class' && cls.abstract ? 'abstract class' : cls.kind;
-      const allowed = form === 'interface' ? ['interface', 'const'] : [form];
+      // The runtime object beside an interface holds Java's statics, so only
+      // an interface with some has one.
+      const statics = cls.overloads.some((o) => o.static && o.visibility === 'public' && !o.deprecated);
+      const allowed = form === 'interface' && statics ? ['interface', 'const'] : [form];
       const wrong = [...forms].filter((f) => !allowed.includes(f));
       if (!forms.has(form) || wrong.length > 0) {
         const shown = [...forms].map((f) => FORM_TEXT[f]).join(' and ');
+        const why = form === 'interface' && forms.has(form) && wrong.length === 1 && wrong[0] === 'const' ? STATICS : reason;
         findings.push({
           kind: 'kind-form',
           subject,
           at,
-          message: `translates the Java ${javaKind} ${shortName(cls)} as ${shown}: ${reason}`,
+          message: `translates the Java ${javaKind} ${shortName(cls)} as ${shown}: ${why}`,
         });
         continue;
       }
