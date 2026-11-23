@@ -78,7 +78,7 @@ one-line reason, and no compile-fail test is needed.
 R1 produced the most findings in the backtest too (S1-2/3/4, S5-1/2). Its timing clause worked as
 intended in 280 verdict 6(b): range assertions, not wall-clock sleeps.
 
-**Recommendation: promote** to DoD item 3. It is the most-used rule, with no false positives.
+**Recommendation: promote** to DoD item 3. It is tied with R7 as the most-cited rule (7 tagged comments each), with no false positives.
 The text adds the two traps Critic 310 found and the "state check instead of a call check" case
 from 245 Issue 4.
 
@@ -86,7 +86,7 @@ Append after the last sub-bullet of `.claude/rules/definition-of-done.md` item 3
 
 ```
    - Every Java assertion has a Rust counterpart, diffed test by test. A translation does not swap Java's inputs (record magic, list order, error class), widen what a fixture accepts, compare by pointer where Java compares by value, replace a `verify(..)` of a call with a state check that also holds without the call, or drop an `assertFalse(future.isDone())`, a request count or a timing check, unless a deviation note at the test says why. A Java timing assertion may be adapted to the Rust test clock (a range or a paused clock) with a note; it is never ported as a wall-clock sleep. A Java test that cannot compile in Rust (it relies on a runtime type error the Rust signature rules out) is skipped with a one-line reason; no compile-fail test is needed.
-   - Two places where an assertion can hide. Where the Java callback runs on the calling thread and `close` rethrows its errors (the share consumer's acknowledgement callback, the consumer's rebalance listener), an assertion inside it also covers the callbacks `close` runs, so a Rust test that records the outcome checks it after `close`; this does not hold for a callback Java runs on another thread (a producer `Callback` on the Sender thread). And where Java's fallback call inside `catch` is unguarded, its Rust translation propagates the fallback's error instead of discarding it with `let _ =`; where Java guards it (`Utils.closeQuietly`, `Utils.swallow`, a nested `try`), `let _ =` is the faithful translation.
+   - Two places where an assertion can hide. Where the Java callback runs on the calling thread and `close` rethrows its errors (the share consumer's acknowledgement callback, the consumer's rebalance listener), an assertion inside it also covers the callbacks `close` runs, so a Rust test that records the outcome checks it after `close`; this does not hold for a callback Java runs on another thread (a producer `Callback` on the Sender thread). And where Java's fallback call inside `catch` is unguarded, its Rust translation propagates the fallback's error instead of discarding it with `let _ =`; where Java guards it and drops the error (a nested `try` whose `catch` ignores it, `Utils.closeQuietly` / `Utils.swallow` without a `firstException`), `let _ =` is faithful, logging where Java logs (those overloads log at WARN); the `firstException` overloads keep the error for `close` to rethrow, so the translation keeps it too.
 ```
 
 ### R2 — Deferral ledger
@@ -197,7 +197,7 @@ Tokio-pitfall bullet in CLAUDE.md §11.6. Items 1–7 become a new CLAUDE.md §1
 Append under CLAUDE.md §11.6, after the `MutexGuard` bullet:
 
 ```
-       - Any future can be dropped at any `.await` (a caller's `tokio::time::timeout` or `select!`). A Java `finally`, or any state reset or "done" flag after a call that becomes an `.await`, needs a drop guard or is set only after the step completes, so that the next call resumes the interrupted work instead of skipping or repeating it. Test it by dropping the future mid-await **and asserting what the next call returns** (and what it sends or acknowledges), not only what the guard restored. A `close()` dropped part-way leaves the object closable: it is marked closed only after Java's last step, keeps its progress and first error for the retry, bounds the retry by the retry's own timeout, and never resends a step Java runs once. This `close()` part binds new code and any `close` a change touches; existing code is not swept (`AsyncKafkaConsumer::close` runs every step again on a retry, PLAN §8.1 row 19, a consumer follow-up).
+       - Any future can be dropped at any `.await` (a caller's `tokio::time::timeout` or `select!`). A Java `finally`, or any state reset or "done" flag after a call that becomes an `.await`, needs a drop guard or is set only after the step completes, so that the next call resumes the interrupted work instead of skipping or repeating it. Test it by dropping the future mid-await **and asserting what the next call returns** (and what it sends or acknowledges), not only what the guard restored. A `close()` dropped part-way leaves the object closable: it is marked closed only after Java's last step, keeps its progress and first error for the retry, bounds the retry by the retry's own timeout, and never resends a step Java runs once. This `close()` part binds new code and any `close` a change touches; existing code is not swept (`AsyncKafkaConsumer::close` runs every step again on a retry, PLAN §8.1 row 19; a consumer follow-up in PLAN §8).
 ```
 
 Insert after CLAUDE.md §11.7:
