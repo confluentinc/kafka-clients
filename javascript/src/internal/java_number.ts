@@ -39,6 +39,22 @@ export function checkInt(value: unknown, what: string): number {
 }
 
 /**
+ * A Java `short` argument named `what`.
+ *
+ * @param value - the value given
+ * @param what - the argument's name, for the error
+ * @returns the number
+ *
+ * @throws `TypeError` when it is not a whole number
+ * @throws `RangeError` when it is beyond Java's `short`
+ */
+export function checkShort(value: unknown, what: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError(`${what} must be an integer`);
+  if (value < -32768 || value > 32767) throw new RangeError(`${what} must be from -32768 to 32767`);
+  return value;
+}
+
+/**
  * A Java `long` argument named `what`, as a bigint.
  *
  * @param value - the value given

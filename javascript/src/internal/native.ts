@@ -152,6 +152,48 @@ interface SpiedRecord {
   headers: [string, Buffer | null][];
 }
 
+/** A native admin client handle (native/admin.c), opaque to JavaScript. */
+type AdminHandle = object;
+
+/** The box over an admin RPC's native result (native/admin.c), opaque to JavaScript. */
+type AdminResultBox = object;
+
+/** A native MockAdminClient.Builder handle (native/admin.c), opaque to JavaScript. */
+type MockAdminBuilderHandle = object;
+
+/** A node's fields as the addon takes them (native/admin.c, admin_node_from_js). */
+interface NodeFields {
+  id: number;
+  host: string | null;
+  port: number;
+  rack: string | null;
+  isFenced: boolean;
+}
+
+/** The counts of native/admin.c, for the lifetime tests. */
+interface AdminStats {
+  adminsMade: number;
+  adminsFreed: number;
+  resultsMade: number;
+  resultsFreed: number;
+  futuresMade: number;
+  futuresFreed: number;
+  waitsStarted: number;
+  waitsCompleted: number;
+}
+
+/**
+ * The setters an admin options object ran, in the order they last ran, as
+ * `[setter, value]` pairs, or null for Java's null options (the FFI reports
+ * it).
+ */
+type AdminOptionsSetters = Array<[string, unknown]> | null;
+
+// An ACL binding or filter as the addon passes it: [resourceTypeCode, name,
+// patternTypeCode, principal, host, operationCode, permissionTypeCode], each
+// enum as Java's byte code; a filter's name, principal and host may be null.
+type AclFields = [number, string | null, number, string | null, string | null, number, number];
+
 /** The functions the addon registers (native/addon.c). */
 interface Native {
   probe(): boolean;
@@ -276,6 +318,225 @@ interface Native {
   headerValue(header: HeaderHandle): Buffer | null;
   // The counts of native/headers.c. Test-only.
   headerStats(): HeaderStats;
+  // Admin.create(configs): the configuration's [key, value] pairs,
+  // encodeLikeJava's bytes of each.
+  adminCreate(entries: Array<[Uint8Array, Uint8Array]>): AdminHandle;
+  // Admin.close() for a timeoutMs of null, else close(Duration), through the
+  // `_cb` twins; closedNow: this close closed the client.
+  adminClose(handle: AdminHandle, timeoutMs: number | bigint | null, onComplete: (closedNow: boolean) => void): void;
+  // The future accessor `name` of a result hands out (its key null, or a
+  // string), as its slot in the client's table.
+  adminResultFuture(handle: AdminHandle, box: AdminResultBox, name: string, key: unknown): number;
+  // The futures of a map accessor, as [key, slot] pairs, each key as the
+  // addon reads it.
+  adminResultFutures(handle: AdminHandle, box: AdminResultBox, name: string): Array<[unknown, number]> | null;
+  // The untimed wait on a future, through get_cb, once: `done` gets its
+  // value, converted to plain values, or its error.
+  adminFutureWait(handle: AdminHandle, slot: number, done: (value: unknown, error: Error | null) => void): void;
+  // A timed wait through get_with_timeout_cb: timedOut when the wait timed
+  // out, the error the core's TimeoutError; the outcome comes from the
+  // untimed wait.
+  adminFutureGet(handle: AdminHandle, slot: number, timeoutMs: number, done: (error: Error | null, timedOut: boolean) => void): void;
+  // The RPCs: each returns its result's box at once; a null options is
+  // Java's null, which the FFI reports.
+  adminDescribeCluster(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  adminListTopics(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.createTopics: each NewTopic as its fields (NewTopic.internalToNative).
+  adminCreateTopics(handle: AdminHandle, newTopics: unknown[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.deleteTopics and describeTopics: form 0 for names (Java's
+  // Collection<String> form), 1 for a TopicNameCollection, 2 for a
+  // TopicIdCollection, the ids as [mostSigBits, leastSigBits].
+  adminDeleteTopics(handle: AdminHandle, form: number, items: unknown[], options: AdminOptionsSetters): AdminResultBox;
+  adminDescribeTopics(handle: AdminHandle, form: number, items: unknown[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.createPartitions: [topic, NewPartitions fields] pairs.
+  adminCreatePartitions(handle: AdminHandle, newPartitions: Array<[string, unknown]>, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.deleteRecords: [[topic, partition], beforeOffset] pairs.
+  adminDeleteRecords(
+    handle: AdminHandle,
+    recordsToDelete: Array<[[string | null, number], bigint]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.describeConfigs: each resource as [typeId, name] (Java's byte id).
+  adminDescribeConfigs(handle: AdminHandle, resources: Array<[number, string]>, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.incrementalAlterConfigs: [[typeId, name], [[opId, name, value]]] pairs.
+  adminIncrementalAlterConfigs(
+    handle: AdminHandle,
+    configs: Array<[[number, string], Array<[number, string, string | null]>]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.listConfigResources: the types as Java's byte ids (none: every type).
+  adminListConfigResources(handle: AdminHandle, typeIds: number[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeLogDirs: the broker ids.
+  adminDescribeLogDirs(handle: AdminHandle, brokers: number[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.alterReplicaLogDirs: [[topic, partition, brokerId], logDir] pairs.
+  adminAlterReplicaLogDirs(
+    handle: AdminHandle,
+    replicaAssignment: Array<[[string, number, number], string | null]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.describeReplicaLogDirs: each replica as [topic, partition, brokerId].
+  adminDescribeReplicaLogDirs(handle: AdminHandle, replicas: Array<[string, number, number]>, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.electLeaders: the election type's ordinal, the partitions as
+  // [topic, partition] pairs or null for every partition.
+  adminElectLeaders(
+    handle: AdminHandle,
+    electionType: number,
+    partitions: Array<[string, number]> | null,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.alterPartitionReassignments: [[topic, partition], targetReplicas or
+  // null] pairs, null cancelling.
+  adminAlterPartitionReassignments(
+    handle: AdminHandle,
+    reassignments: Array<[[string, number], number[] | null]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.listPartitionReassignments: the partitions, or null for every one.
+  adminListPartitionReassignments(
+    handle: AdminHandle,
+    partitions: Array<[string, number]> | null,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.listOffsets: [[topic, partition], spec, timestamp] rows (the spec in
+  // the C enum's order), the options from Java's READ_COMMITTED constructor
+  // when readCommitted.
+  adminListOffsets(
+    handle: AdminHandle,
+    topicPartitionOffsets: Array<[[string, number], number, bigint]>,
+    readCommitted: boolean,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.listGroups: the futures `all`, `valid` and `errors`.
+  adminListGroups(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeConsumerGroups, describeClassicGroups and deleteConsumerGroups:
+  // the group ids.
+  adminDescribeConsumerGroups(handle: AdminHandle, groupIds: string[], options: AdminOptionsSetters): AdminResultBox;
+  adminDescribeClassicGroups(handle: AdminHandle, groupIds: string[], options: AdminOptionsSetters): AdminResultBox;
+  adminDeleteConsumerGroups(handle: AdminHandle, groupIds: string[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.listConsumerGroupOffsets: the group id (Java's (groupId) form) or,
+  // for a null one, the specs as [groupId, [topic, partition] pairs or null].
+  adminListConsumerGroupOffsets(
+    handle: AdminHandle,
+    groupId: string | null,
+    groupSpecs: Array<[string, Array<[string, number]> | null]> | null,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.alterConsumerGroupOffsets: [[topic, partition], offset, leaderEpoch
+  // (-1: none), metadata] rows.
+  adminAlterConsumerGroupOffsets(
+    handle: AdminHandle,
+    groupId: string,
+    offsets: Array<[[string, number], bigint, number, string]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.deleteConsumerGroupOffsets: [topic, partition] pairs.
+  adminDeleteConsumerGroupOffsets(
+    handle: AdminHandle,
+    groupId: string,
+    partitions: Array<[string, number]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.removeMembersFromConsumerGroup: the members' group instance ids, or
+  // null in removeAll mode.
+  adminRemoveMembersFromConsumerGroup(
+    handle: AdminHandle,
+    groupId: string,
+    members: string[] | null,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.createAcls: each binding as [resourceTypeCode, name,
+  // patternTypeCode, principal, host, operationCode, permissionTypeCode].
+  adminCreateAcls(handle: AdminHandle, acls: AclFields[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeAcls: the filter as its seven fields, a name, principal or
+  // host null for any.
+  adminDescribeAcls(handle: AdminHandle, filter: AclFields, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.deleteAcls: each filter as its seven fields.
+  adminDeleteAcls(handle: AdminHandle, filters: AclFields[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeClientQuotas: the filter as [strict, [[entityType,
+  // matchKind (0 exact, 1 default, 2 any), name | null], ...]].
+  adminDescribeClientQuotas(
+    handle: AdminHandle,
+    filter: [boolean, Array<[string, number, string | null]>],
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.alterClientQuotas: each alteration as [entityEntries, ops], an
+  // entity's entries [[entityType, name | null], ...], an op [key, value |
+  // null].
+  adminAlterClientQuotas(
+    handle: AdminHandle,
+    entries: Array<[Array<[string, string | null]>, Array<[string, number | null]>]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.describeUserScramCredentials: the users, or null for every user.
+  adminDescribeUserScramCredentials(handle: AdminHandle, users: string[] | null, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.alterUserScramCredentials: an upsertion as [0, user,
+  // mechanismType, iterations, password, salt], a deletion as [1, user,
+  // mechanismType].
+  adminAlterUserScramCredentials(
+    handle: AdminHandle,
+    alterations: Array<[0, string, number, number, Uint8Array, Uint8Array] | [1, string, number]>,
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.createDelegationToken.
+  adminCreateDelegationToken(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.renewDelegationToken: the HMAC, copied during the call.
+  adminRenewDelegationToken(handle: AdminHandle, hmac: Uint8Array, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.expireDelegationToken: the HMAC, copied during the call.
+  adminExpireDelegationToken(handle: AdminHandle, hmac: Uint8Array, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeDelegationToken.
+  adminDescribeDelegationToken(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeProducers: the partitions as [topic, partition].
+  adminDescribeProducers(handle: AdminHandle, partitions: Array<[string, number]>, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeTransactions: the transactional ids.
+  adminDescribeTransactions(handle: AdminHandle, transactionalIds: string[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.abortTransaction: the spec as [[topic, partition], producerId,
+  // producerEpoch, coordinatorEpoch].
+  adminAbortTransaction(
+    handle: AdminHandle,
+    spec: [[string, number], bigint, number, number],
+    options: AdminOptionsSetters,
+  ): AdminResultBox;
+  // Admin.forceTerminateTransaction: the transactional id.
+  adminForceTerminateTransaction(handle: AdminHandle, transactionalId: string, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.listTransactions.
+  adminListTransactions(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.fenceProducers: the transactional ids.
+  adminFenceProducers(handle: AdminHandle, transactionalIds: string[], options: AdminOptionsSetters): AdminResultBox;
+  // Admin.describeFeatures.
+  adminDescribeFeatures(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.updateFeatures: [feature, [maxVersionLevel, upgradeTypeCode]]
+  // pairs; an empty map or a blank feature name throws the core's error.
+  adminUpdateFeatures(handle: AdminHandle, featureUpdates: Array<[string, [number, number]]>, options: AdminOptionsSetters): AdminResultBox;
+  // Admin.unregisterController: the controller id.
+  adminUnregisterController(handle: AdminHandle, controllerId: number, options: AdminOptionsSetters): AdminResultBox;
+  // Java's MockAdminClient() (no argument) or MockAdminClient(brokers,
+  // controller).
+  mockAdminCreate(...args: [] | [brokers: NodeFields[] | null, controller: NodeFields | null]): AdminHandle;
+  // Java's MockAdminClient.controller(Node) and timeoutNextRequest(int).
+  mockAdminController(handle: AdminHandle, node: NodeFields | null): void;
+  mockAdminTimeoutNextRequest(handle: AdminHandle, numberOfRequests: number): void;
+  // Java's MockAdminClient.addTopic(internal, name, partitions, configs),
+  // markTopicForDeletion(name) and setFetchesRemainingUntilVisible(topicName, n).
+  mockAdminAddTopic(
+    handle: AdminHandle,
+    internal: boolean,
+    name: string | null,
+    partitions: unknown[],
+    configs: Array<[string, string | null]> | null,
+  ): void;
+  mockAdminMarkTopicForDeletion(handle: AdminHandle, name: string | null): void;
+  mockAdminSetFetchesRemainingUntilVisible(handle: AdminHandle, topicName: string | null, fetchesRemainingUntilVisible: number): void;
+  // Java's MockAdminClient.updateEndOffsets (end) or updateBeginningOffsets:
+  // [[topic, partition], offset] pairs.
+  mockAdminUpdateOffsets(handle: AdminHandle, end: boolean, newOffsets: Array<[[string, number], bigint]>): void;
+  // Java's MockAdminClient.updateConsumerGroupOffsets: [[topic, partition], offset] pairs.
+  mockAdminUpdateConsumerGroupOffsets(handle: AdminHandle, newOffsets: Array<[[string, number], bigint]>): void;
+  // Java's new MockAdminClient.Builder(), its setters, run at once, and build().
+  mockAdminBuilderNew(): MockAdminBuilderHandle;
+  mockAdminBuilderSet(builder: MockAdminBuilderHandle, setter: string, value: unknown): void;
+  mockAdminBuilderBuild(builder: MockAdminBuilderHandle): AdminHandle;
+  // The counts of native/admin.c. Test-only.
+  adminStats(): AdminStats;
   // The counts of native/producer.c. Test-only.
   producerStats(): ProducerStats;
   // The counts of native/error.c. Test-only.
