@@ -45,6 +45,8 @@ const ESLINT_CHECKS = [
   part(summaries, 'ts'),
   require('./rules/implementation_docs'),
   require('./rules/java_name'),
+  require('./rules/java_kind'),
+  require('./rules/java_supertypes'),
   require('./rules/java_members'),
   require('./rules/java_completeness'),
   require('./rules/public_audience'),
@@ -56,6 +58,8 @@ const ESLINT_CHECKS = [
   require('./rules/type_mapping'),
   require('./rules/waiting_call_promise'),
   require('./rules/native_registry'),
+  require('./rules/native_wrappers'),
+  require('./rules/doc_size'),
   require('./rules/directives'),
   require('./rules/eslint_config'),
 ];
@@ -81,7 +85,6 @@ const RUNNER_CHECKS = [
   require('./rules/no_repeated_precondition'),
   require('./rules/tsfn_lifetime'),
   require('./rules/default_helpers'),
-  require('./rules/mock_native'),
   require('./rules/encode_callers'),
   require('./rules/commonjs_pin'),
 ];

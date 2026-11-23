@@ -205,9 +205,11 @@ module.exports = {
     'parameters, with one TypeScript overload signature per Java form (javascript/CLAUDE.md, JavaScript Binding ' +
     'Conventions, Signatures).',
   LEFT_OUT,
+  MERGED_FORMS,
   liveForms,
   optionName,
   formOptionNames,
+  formKey,
   signaturesOf,
   check(ctx) {
     const { ts, checker } = ctx.program();

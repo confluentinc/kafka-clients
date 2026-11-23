@@ -105,9 +105,10 @@ function bodyOf(ts, d) {
 /**
  * `root` and every src/ function, method or constructor it calls, as the
  * type checker resolves the calls (a module helper, another class's method,
- * `x['_m']()`, `this.#m()`, `new X()`), transitively, each once.
+ * `x['_m']()`, `this.#m()`, `new X()`), transitively, each once; with
+ * `follow`, only the bodies it accepts.
  */
-function reachedBodies(ctx, root) {
+function reachedBodies(ctx, root, follow = null) {
   const { ts, checker } = ctx.program();
   // An overload signature has no body: its implementation is what runs.
   if (root.body === undefined && root.parent && root.parent.members) {
@@ -133,7 +134,7 @@ function reachedBodies(ctx, root) {
           const decls = ts.isClassDeclaration(d) ? d.members.filter((m) => ts.isConstructorDeclaration(m)) : [d];
           for (const x of decls) {
             const body = bodyOf(ts, x);
-            if (body && !seen.has(body) && body.getSourceFile().fileName.startsWith(srcDir)) {
+            if (body && !seen.has(body) && body.getSourceFile().fileName.startsWith(srcDir) && (follow === null || follow(body))) {
               seen.add(body);
               out.push(body);
             }
@@ -147,4 +148,4 @@ function reachedBodies(ctx, root) {
   return out;
 }
 
-module.exports = { nativeSymbol, nativeUses, reachedBodies };
+module.exports = { nativeSymbol, nativeUses, reachedBodies, bodyOf };

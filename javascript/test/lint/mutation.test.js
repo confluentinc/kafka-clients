@@ -1186,7 +1186,7 @@ MUTATIONS.push(
     },
   },
   {
-    rule: 'check-mock-native',
+    rule: 'check-native-wrappers',
     what: 'a MockProducer whose constructor builds no FFI mock, holding no native handle',
     apply: (root) => {
       edit(
@@ -1203,6 +1203,44 @@ MUTATIONS.push(
         'function nativeMock(): object {\n  return native.mockProducerCreate(false);\n}\nvoid nativeMock;\n\n/** The native producer handle',
       );
     },
+  },
+  {
+    rule: 'check-native-wrappers',
+    what: 'KafkaFuture, which the JS conventions do not name, calling the addon itself',
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        '  static internalCreate<T>(record: boolean): KafkaFuture<T> {\n',
+        '  static internalCreate<T>(record: boolean): KafkaFuture<T> {\n    native.previewNoticeDue();\n',
+      ),
+  },
+  {
+    rule: 'check-java-kind',
+    what: "KafkaFuture's constructor no longer refusing KafkaFuture itself",
+    apply: (root) =>
+      edit(root, 'src/common/kafka_future.ts', '    if (new.target === KafkaFuture) {', '    if (new.target === undefined) {'),
+  },
+  {
+    rule: 'check-java-kind',
+    what: 'a TypeScript enum export',
+    apply: (root) => add(root, 'src/producer/acks.ts', "/** The acks. */\nexport enum Acks {\n  ALL = 'all',\n}\n"),
+  },
+  {
+    rule: 'check-java-supertypes',
+    what: 'Node extending a base its Java class does not',
+    apply: (root) => edit(root, 'src/common/node.ts', 'export class Node {', 'export class Node extends Object {'),
+  },
+  {
+    rule: 'check-doc-size',
+    what: "isDone's TSDoc past 150% of its Javadoc",
+    apply: (root) =>
+      edit(
+        root,
+        'src/common/kafka_future.ts',
+        '   * via cancellation.\n',
+        "   * via cancellation. It reads the future's state, which the client sets on the\n   * JavaScript thread when the record's delivery completes.\n",
+      ),
   },
   {
     rule: 'check-encode-callers',
