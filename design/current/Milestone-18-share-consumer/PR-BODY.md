@@ -138,7 +138,9 @@ its share session never complete, so their callback never runs.
 4. **`Admin` and semver at 1.x**: the five required `_with_options` share methods break external `impl Admin`. That is faithful to Java and to the trait's existing shape. CLAUDE.md §3 asks that what is minor in Java stay minor in Rust; giving them default bodies would avoid the break, as a policy for every future `Admin` method.
 5. **Consumer follow-ups** (PLAN §8): owned by "consumer follow-up, out of M18" with no named milestone. (KAFKA-21455, found in the post-4.4.0 check, waits for the version bump with D11.)
 6. **Harness memory**: the Docker VM's OOM killer (`global_oom`) killed one broker JVM in the 4.2.0 gate run, where it failed two producer transaction tests that passed on a rerun, and one in the 4.4.0 run, with no failure. The peak was 26 containers / 6.9 GiB of the VM's 7.75 GiB. The decision on the harness was deferred.
-7. **Master**: `origin/master` is 5 commits ahead and merges without conflicts (`git merge-tree`). 12 files changed on both sides, among them `rust/README.md` and the test harness (`tests/common`, `consumer_test.rs`, `Makefile`, `.semaphore/semaphore.yml`). Merge it with a merge commit before opening the PR and run the gate again.
+7. **Master**: merged with a merge commit (`1a10b8688`: #304, #310, #342, #348, #351). No textual
+   conflicts; one semantic one, #310 changed `MemoryRecords::write_end_transactional_marker` to take a
+   `BytesMut`, fixed in the share test helper inside the merge commit.
 8. **Archive**: move `design/current/Milestone-18-share-consumer/` to `design/history/` once §8.1 is reviewed, as Milestone 15 did.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
