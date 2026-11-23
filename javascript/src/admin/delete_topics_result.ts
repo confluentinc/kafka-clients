@@ -29,8 +29,6 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `Admin.deleteTopics(topics)` call.
- *
- * Instances come from the admin client's `deleteTopics()`.
  */
 export class DeleteTopicsResult {
   readonly #topicIdFutures: UuidMap<KafkaFuture<void>> | null;
@@ -38,6 +36,8 @@ export class DeleteTopicsResult {
 
   /**
    * Java's protected constructor: exactly one of the two maps.
+   *
+   * Instances come from the admin client's `deleteTopics()`.
    *
    * @param topicIdFutures - the futures by topic id, or null
    * @param nameFutures - the futures by topic name, or null

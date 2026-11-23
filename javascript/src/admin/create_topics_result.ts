@@ -69,8 +69,6 @@ function topicOf(forms: JavaForms, args: unknown, count: number): string {
 
 /**
  * The result of `Admin.createTopics(newTopics)`.
- *
- * Instances come from the admin client's `createTopics()`.
  */
 export class CreateTopicsResult {
   // The sources of values() and all(): Java's futures of
@@ -83,6 +81,8 @@ export class CreateTopicsResult {
   /**
    * Java's protected constructor, for a subclass: one future of the topic's
    * metadata and configuration per topic.
+   *
+   * Instances come from the admin client's `createTopics()`.
    *
    * @param futures - the futures, by topic name
    * @throws `TypeError` when they are not a Map
@@ -176,10 +176,10 @@ export class CreateTopicsResult {
    * @returns the future
    * @throws `TypeError` for a null topic
    *
-   * @remarks *(deviation)* On the client's Result, a topic not in the
-   * request fails its future with `IllegalArgumentError`, where Java throws
-   * `NullPointerException`. Why: the C FFI answers so. Goes when: the FFI
-   * answers as Java's accessor does.
+   * @remarks *(deviation)* A topic not in the request fails the client's
+   * future with `IllegalArgumentError`, where Java throws
+   * `NullPointerException`. Why: the FFI answers so. Goes when: it answers as
+   * Java.
    */
   config(topic: string): KafkaFuture<Config | null>;
   /**
@@ -189,10 +189,10 @@ export class CreateTopicsResult {
    * @returns the future
    * @throws `TypeError` for a null topic
    *
-   * @remarks *(deviation)* On the client's Result, a topic not in the
-   * request fails its future with `IllegalArgumentError`, where Java throws
-   * `NullPointerException`. Why: the C FFI answers so. Goes when: the FFI
-   * answers as Java's accessor does.
+   * @remarks *(deviation)* A topic not in the request fails the client's
+   * future with `IllegalArgumentError`, where Java throws
+   * `NullPointerException`. Why: the FFI answers so. Goes when: it answers as
+   * Java.
    */
   config(options: {
     /** The topic. */

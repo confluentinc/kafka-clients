@@ -27,12 +27,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `Admin.createAcls(acls)` call.
- *
- * Instances come from the admin client's `createAcls()`.
  */
 export class CreateAclsResult {
   readonly #futures: AclBindingMap<KafkaFuture<void>>;
 
+  /**
+   * Instances come from the admin client's `createAcls()`.
+   *
+   * @param futures - the futures, by binding
+   */
   private constructor(futures: AclBindingMap<KafkaFuture<void>>) {
     this.#futures = futures;
   }

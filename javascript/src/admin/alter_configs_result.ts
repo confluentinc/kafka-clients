@@ -27,12 +27,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `Admin.incrementalAlterConfigs(configs, options)` call.
- *
- * Instances come from the admin client's `incrementalAlterConfigs()`.
  */
 export class AlterConfigsResult {
   readonly #futures: ConfigResourceMap<KafkaFuture<void>>;
 
+  /**
+   * Instances come from the admin client's `incrementalAlterConfigs()`.
+   *
+   * @param futures - the futures, by resource
+   */
   private constructor(futures: ConfigResourceMap<KafkaFuture<void>>) {
     this.#futures = futures;
   }

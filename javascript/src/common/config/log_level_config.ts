@@ -19,37 +19,37 @@
 import { readOnlySet } from '../../internal/read_only_set';
 
 /**
- * The constants of Java's `org.apache.kafka.common.config.LogLevelConfig`:
- * every `public static final` field, evaluated from the Java source, is a
- * static property of the same name; a deprecated one is left out. A `List`
- * constant is a frozen array and a `Set` constant a read-only set whose `add`,
- * `delete` and `clear` throw `UnsupportedOperationError`, both in Java's order.
- *
- * Java: `org.apache.kafka.common.config.LogLevelConfig`.
+ * This class holds definitions for log level configurations related to Kafka's
+ * application logging. See KIP-412 for additional information
  */
 export class LogLevelConfig {
   /**
-   * Java's `LogLevelConfig.FATAL_LOG_LEVEL`.
+   * The `FATAL` level designates a very severe error that will lead the Kafka
+   * broker to abort.
    */
   static readonly FATAL_LOG_LEVEL: string = 'FATAL';
   /**
-   * Java's `LogLevelConfig.ERROR_LOG_LEVEL`.
+   * The `ERROR` level designates error events that might still allow the broker
+   * to continue running.
    */
   static readonly ERROR_LOG_LEVEL: string = 'ERROR';
   /**
-   * Java's `LogLevelConfig.WARN_LOG_LEVEL`.
+   * The `WARN` level designates potentially harmful situations.
    */
   static readonly WARN_LOG_LEVEL: string = 'WARN';
   /**
-   * Java's `LogLevelConfig.INFO_LOG_LEVEL`.
+   * The `INFO` level designates informational messages that highlight normal
+   * Kafka events at a coarse-grained level
    */
   static readonly INFO_LOG_LEVEL: string = 'INFO';
   /**
-   * Java's `LogLevelConfig.DEBUG_LOG_LEVEL`.
+   * The `DEBUG` level designates fine-grained informational events that are
+   * most useful to debug Kafka
    */
   static readonly DEBUG_LOG_LEVEL: string = 'DEBUG';
   /**
-   * Java's `LogLevelConfig.TRACE_LOG_LEVEL`.
+   * The `TRACE` level designates finer-grained informational events than the
+   * `DEBUG` level.
    */
   static readonly TRACE_LOG_LEVEL: string = 'TRACE';
   /**

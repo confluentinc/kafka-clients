@@ -26,12 +26,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of the `Admin.listConfigResources()` call.
- *
- * Instances come from the admin client's `listConfigResources()`.
  */
 export class ListConfigResourcesResult {
   readonly #future: KafkaFuture<ConfigResource[]>;
 
+  /**
+   * Instances come from the admin client's `listConfigResources()`.
+   *
+   * @param future - the future of the resources
+   */
   private constructor(future: KafkaFuture<ConfigResource[]>) {
     this.#future = future;
   }

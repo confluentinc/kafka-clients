@@ -47,14 +47,20 @@ function mapToString(map: ReadonlyMap<string, unknown>): string {
 /**
  * Encapsulates details about finalized as well as supported features. This
  * is useful when trying to retrieve the finalized and supported features.
- *
- * Instances come from the admin client's `describeFeatures()`.
  */
 export class FeatureMetadata {
   readonly #finalizedFeatures: ReadonlyMap<string, FinalizedVersionRange>;
   readonly #finalizedFeaturesEpoch: bigint | null;
   readonly #supportedFeatures: ReadonlyMap<string, SupportedVersionRange>;
 
+  /**
+   * Instances come from the futures of
+   * `DescribeFeaturesResult.featureMetadata()`.
+   *
+   * @param finalizedFeatures - the finalized feature versions, by name
+   * @param finalizedFeaturesEpoch - the epoch, or null when absent
+   * @param supportedFeatures - the supported feature versions, by name
+   */
   private constructor(
     finalizedFeatures: ReadonlyMap<string, FinalizedVersionRange>,
     finalizedFeaturesEpoch: bigint | null,

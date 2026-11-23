@@ -65,7 +65,7 @@ export class ListConsumerGroupOffsetsOptions extends AbstractOptions {
    */
   requireStable(): boolean;
   /**
-   * Sets whether the broker returns stable offsets only.
+   * Sets an optional requireStable flag.
    *
    * @param requireStable - whether the broker returns stable offsets only, on its own
    * @returns This ListConsumerGroupOffsetsOptions object.

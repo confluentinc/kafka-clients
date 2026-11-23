@@ -655,14 +655,20 @@ export namespace ConfigEntry {
 
   /**
    * Class representing a configuration synonym of a `ConfigEntry`.
-   *
-   * Instances come from the admin client's `ConfigEntry`s.
    */
   export class ConfigSynonym {
     readonly #name: string | null;
     readonly #value: string | null;
     readonly #source: ConfigSource | null;
 
+    /**
+     * Instances come from `ConfigEntry.synonyms()`.
+     *
+     * @param name - Configuration name (this may be different from the name of
+     *   the associated `ConfigEntry`)
+     * @param value - Configuration value
+     * @param source - `ConfigSource` of this configuration
+     */
     private constructor(name: string | null, value: string | null, source: ConfigSource | null) {
       this.#name = name;
       this.#value = value;

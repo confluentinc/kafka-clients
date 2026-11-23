@@ -168,16 +168,18 @@ export type CloseArgs = {
  *
  * This class is thread-safe.
  *
- * @remarks The admin client is thread safe in Java; here every call is made
- * from the JS thread, and a future's outcome, with its `thenApply` and
- * `whenComplete` functions, arrives there too, from the event loop. An admin
- * client keeps Node running from its creation until `close()` closes it:
- * close every one (`close()`, or `await using`). Clients in worker threads
- * are not supported in the preview.
+ * @remarks Threads: see `Admin`. It keeps Node running until `close()`
+ * *(deviation. Why: Node exits mid-`await` when nothing holds it)*: close
+ * every one.
  */
 export class KafkaAdminClient implements Admin {
   readonly #handle: AdminHandle;
 
+  /**
+   * Instances come from `Admin.create`.
+   *
+   * @param handle - the native client
+   */
   private constructor(handle: AdminHandle) {
     this.#handle = handle;
   }
@@ -197,16 +199,14 @@ export class KafkaAdminClient implements Admin {
     return client;
   }
 
+  close(): Promise<void>;
   /**
-   * @remarks Without a timeout it waits with no time limit, Java's
-   * `Long.MAX_VALUE` milliseconds. A negative timeout is read as zero
-   * *(deviation: Java's `KafkaAdminClient.close` throws
+   * @remarks A negative timeout, given here or bare (`close(timeout)`), is
+   * read as zero *(deviation: Java's `KafkaAdminClient.close` throws
    * `IllegalArgumentException("The timeout cannot be negative.")`. Why: the
    * binding repeats no precondition. Goes when: the FFI returns Java's
-   * error)*. A call after `close()` goes to the core: an RPC returns its
-   * Result, whose futures fail with the core's error.
+   * error)*.
    */
-  close(): Promise<void>;
   close(options: CloseArgs): Promise<void>;
   close(timeout: Duration): Promise<void>;
   close(options?: unknown): Promise<void> {

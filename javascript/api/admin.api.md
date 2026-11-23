@@ -464,7 +464,8 @@ export interface Admin {
 export const Admin: {
     create(options: {
         configs: AdminClientConfigs;
-    } | AdminClientConfigs): Admin;
+    }): Admin;
+    create(configs: AdminClientConfigs): Admin;
 };
 
 // @public

@@ -33,6 +33,14 @@ test('testTopicCollection', () => {
 
 // ---- the binding's own ----------------------------------------------------------
 
+test('TopicCollection is abstract: plain JavaScript cannot construct it', () => {
+  // @ts-expect-error an abstract class: tsc refuses new, and the run time throws TypeError
+  assert.throws(() => new TopicCollection(), {
+    name: 'TypeError',
+    message: 'TopicCollection cannot be constructed directly; use TopicCollection.ofTopicIds or TopicCollection.ofTopicNames',
+  });
+});
+
 test('the factories copy the collection, and refuse a bare string and null', () => {
   const names = ['foo'];
   const collection = TopicCollection.ofTopicNames({ topics: new Set(names) });

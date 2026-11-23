@@ -31,12 +31,15 @@ const HASH_CODE_FORMS = READER('hashCode');
 
 /**
  * Describe records to delete in a call to `Admin.deleteRecords`.
- *
- * Instances come from `RecordsToDelete.beforeOffset`.
  */
 export class RecordsToDelete {
   readonly #offset: bigint;
 
+  /**
+   * Instances come from `RecordsToDelete.beforeOffset`.
+   *
+   * @param offset - the offset before which all records will be deleted
+   */
   private constructor(offset: bigint) {
     this.#offset = offset;
   }

@@ -182,11 +182,16 @@ export namespace OffsetSpec {
 
   /**
    * The spec of the earliest offset whose timestamp is at least the given
-   * one. Instances come from `OffsetSpec.forTimestamp(timestamp)`.
+   * one.
    */
   export class TimestampSpec extends OffsetSpec {
     readonly #timestamp: bigint;
 
+    /**
+     * Instances come from `OffsetSpec.forTimestamp(timestamp)`.
+     *
+     * @param timestamp - the timestamp, in milliseconds
+     */
     private constructor(timestamp: bigint) {
       super();
       this.#timestamp = timestamp;
