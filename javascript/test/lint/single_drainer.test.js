@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N4 check-single-drainer (scripts/lint/rules/single_drainer.js).
+// check-single-drainer (scripts/lint/rules/single_drainer.js).
 
 const assert = require('node:assert/strict');
 

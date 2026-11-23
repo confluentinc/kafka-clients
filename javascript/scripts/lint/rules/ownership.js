@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N6 check-ownership (javascript/CLAUDE.md boundary rule 9: ownership follows
+// check-ownership (javascript/CLAUDE.md boundary rule 9: ownership follows
 // the signature). Owned and borrowed are read from the bindings header:
 //   - native/ receives a handle type OWNED when it gets it as the return value
 //     of a header function returning a non-const `kafka_..._t *` (an

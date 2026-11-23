@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.producer.Partitioner is not translated
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Scope, Q30): a placeholder type
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Scope): a placeholder type
 // for MockProducer's constructor, which takes it and cannot be dropped.
 
 /**

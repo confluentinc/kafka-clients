@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N3 check-notify-hook (javascript/CLAUDE.md boundary rule 2: the notify hook
+// check-notify-hook (javascript/CLAUDE.md boundary rule 2: the notify hook
 // only signals): every function native/ installs as a client's notify hook (the
 // second argument of a `__set_callbacks_notify_err` call) is, statement for
 // statement,

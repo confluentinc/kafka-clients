@@ -18,7 +18,7 @@
  * `MetricValueProvider`, `MetricConfig` and `Measurable` it takes or returns.
  * `QuotaViolationError` is generated from the Java sources.
  *
- * Left out (Q30): the setter `KafkaMetric.config(MetricConfig)`, whose only
+ * Left out: the setter `KafkaMetric.config(MetricConfig)`, whose only
  * extra parameter over the getter is `config`, and which Java says is for
  * the server only.
  *

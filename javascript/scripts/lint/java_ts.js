@@ -61,7 +61,7 @@ const ERROR_ALLOWANCE = {
 /**
  * The client config classes, translated for their constants only
  * (javascript/CLAUDE.md "Generated files"; javascript/CLAUDE.md, JavaScript Binding
- * Conventions, Scope, Q55, as the Python client's Scope: their `ConfigDef`
+ * Conventions, Scope, as the Python client's Scope: their `ConfigDef`
  * machinery is not translated). The key-name classes (`SslConfigs`,
  * `SaslConfigs`, `SecurityConfig`) are translated in full, but a method that
  * takes a `ConfigDef`.

@@ -102,7 +102,7 @@ static napi_value error_object(napi_env env, const kafka_common_Error_t* e, int 
     error_discard(FFI_SET(source, kafka_common_Error_source_err(e, &ffi_err)));
 
     // An error JS gave a mock comes back as the very same value
-    // (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors, Q38).
+    // (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors).
     if (code == kafka_common_Error_LOCAL_CALLBACK) {
         const kafka_common_LocalCallbackError_t* local = NULL;
         void* opaque = NULL;
@@ -122,7 +122,7 @@ static napi_value error_object(napi_env env, const kafka_common_Error_t* e, int 
         || napi_get_boolean(env, api != 0, &v) != napi_ok || set_named(env, obj, "apiError", v)) {
         return NULL;
     }
-    // The payload the FFI's view of the class gives (Q39): its fields, keyed
+    // The payload the FFI's view of the class gives: its fields, keyed
     // by Java field name, which src/internal/throwable.ts reads.
     napi_value payload = error_payload_to_js(env, code, e);
     if (payload != NULL && set_named(env, obj, "payload", payload)) return NULL;

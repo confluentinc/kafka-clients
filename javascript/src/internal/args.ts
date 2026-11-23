@@ -109,7 +109,7 @@ export interface JavaFormsOptions {
   readonly reader?: boolean;
   /**
    * An error class's constructor (javascript/CLAUDE.md, JavaScript Binding
-   * Conventions, Errors, Q39): the form error lists the forms as JavaScript
+   * Conventions, Errors): the form error lists the forms as JavaScript
    * calls them, by number of parameters, ties in Java's order: `()`, a
    * one-parameter form's value on its own, `(message)`, and a longer form's
    * options object, `({ message, cause })`; more than one argument is

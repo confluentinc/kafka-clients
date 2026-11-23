@@ -14,7 +14,7 @@
 
 'use strict';
 
-// H3 check-internal-members (scripts/lint/rules/internal_members.js).
+// check-internal-members (scripts/lint/rules/internal_members.js).
 
 const assert = require('node:assert/strict');
 

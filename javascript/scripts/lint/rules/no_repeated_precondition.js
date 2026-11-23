@@ -15,9 +15,9 @@
 'use strict';
 
 // check-no-repeated-precondition (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Errors, Q35: "The binding repeats none of Java's
+// Conventions, Errors: "The binding repeats none of Java's
 // preconditions. The FFI checks the mandatory parameters and the core checks
-// the rest"; Implementation over the FFI, Q58, Q60: the binding's own checks
+// the rest"; Implementation over the FFI: the binding's own checks
 // are a listed few): no string literal of src/ or native/ holds the message
 // of a precondition the FFI or the core checks (`repeated-precondition`), so
 // the binding cannot raise it itself. The binding's own listed checks (the

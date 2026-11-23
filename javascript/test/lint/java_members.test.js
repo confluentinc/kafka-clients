@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J2 check-java-members (scripts/lint/rules/java_members.js).
+// check-java-members (scripts/lint/rules/java_members.js).
 
 const assert = require('node:assert/strict');
 

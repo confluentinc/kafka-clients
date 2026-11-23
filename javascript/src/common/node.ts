@@ -17,7 +17,7 @@
 // the constructor (`node.id`, `node.host`, `node.isEmpty`), and Java's three
 // public constructors are one constructor taking one object of their named
 // parameters. The object is frozen when it is created. `equals` and
-// `hashCode` are Java's bodies (Q29).
+// `hashCode` are Java's bodies.
 //
 // Not translated: Java's protected constructor Node(id, host, port, rack,
 // isFenced, idString), which only a subclass calls.

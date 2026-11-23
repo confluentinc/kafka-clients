@@ -149,6 +149,7 @@ test('only own enumerable keys are names, and value() reads only those', () => {
 
 test('a one-parameter form takes the bare value: anything but a plain object', () => {
   const SEND = new JavaForms('send', [['record'], ['record', 'callback']]);
+  /** A class of the caller's own, given bare. */
   class Record {}
   const record = new Record();
   assert.equal(SEND.match(record, 1), 0);

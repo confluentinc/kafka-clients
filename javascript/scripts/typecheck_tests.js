@@ -15,7 +15,7 @@
 'use strict';
 
 // The type check of the tests (`make typecheck-tests`; JS conventions,
-// Tests, Q67, and Build, packaging and release, Q74): `tsc --strict` over
+// Tests, and Build, packaging and release): `tsc --strict` over
 // every test file, those under test/ and the verifiable clients' under
 // verifiable_clients/test/ (TEST_DIRS), with test/tsconfig.json, the
 // JavaScript tests through `checkJs`. It fails on any finding in a test file,

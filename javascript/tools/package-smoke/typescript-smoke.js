@@ -16,7 +16,7 @@
 
 // A TypeScript consumer of @confluentinc/kafka-javascript as a user installs
 // it (javascript/CLAUDE.md, JavaScript Binding Conventions, Layout and modules and
-// Stability, Q13, Q70, Q74): in the project that installed the tarballs
+// Stability): in the project that installed the tarballs
 // (.semaphore/test-npm.sh), `tsc --strict --noEmit` over a small consumer,
 // with `skipLibCheck: false`, so the published declarations are checked as
 // well as typed against:

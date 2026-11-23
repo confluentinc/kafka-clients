@@ -17,7 +17,7 @@
 // `cargo xtask check-generated` checks it is up to date.
 //
 // The payload of an error the core reports (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Errors, Q39): the FFI's view of its class
+// Conventions, Errors): the FFI's view of its class
 // (kafka_common_Error_<class>, NULL for another class), then the view's
 // accessors, each field set on a plain object by native/error.c's payload_*
 // helper, keyed by its Java field name. NULL when the class has none.

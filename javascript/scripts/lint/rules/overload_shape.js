@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J6 check-overload-shape (javascript/CLAUDE.md "Java shape, JS idiom": one
+// check-overload-shape (javascript/CLAUDE.md "Java shape, JS idiom": one
 // Java overload set is one function taking one object of named parameters,
 // a one-parameter form also takes the value on its own, and src/internal/args.ts
 // checks a call against the Java forms). Read over the function's TypeScript
@@ -69,7 +69,7 @@ const MERGED_FORMS = new Map([
   ],
 ]);
 /**
- * The Java forms the JS conventions leave out (Scope, Q30: a form whose
+ * The Java forms the JS conventions leave out (Scope: a form whose
  * only extra parameter has a type that isn't translated), by
  * `<class fqn>#<formKey>`, with the reason: such a form is not asked for.
  */
@@ -151,7 +151,7 @@ function hostKind(type) {
   if (base === 'boolean' || base === 'Boolean') return 'boolean';
   if (base === 'String') return 'string';
   if (base === 'Map' || base === 'Properties') return 'configs';
-  // A type variable keeps its own kind, as in the Python conventions J6
+  // A type variable keeps its own kind, as in the Python conventions this rule
   // follows (`ProducerRecord[K, V]` keeps `key` and `value` apart), although
   // `K` and `V` are both `Data` in JavaScript.
   if (base === 'K' || base === 'V') return base;
@@ -312,7 +312,7 @@ module.exports = {
       }
       // A property typed `null` is taken: the signature of a null key or value,
       // which binds `never` (javascript/CLAUDE.md, JavaScript Binding Conventions,
-      // Class family, Q26), names its form's parameters as the form's own does.
+      // Class family), names its form's parameters as the form's own does.
       const neverProp = (prop, sig) => {
         const type = checker.getTypeOfSymbolAtLocation(prop, sig.parameters[0]);
         if ((type.flags & ts.TypeFlags.Null) !== 0) return false;

@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N2 check-cb-twin-only (javascript/CLAUDE.md boundary rule 4: waiting calls
+// check-cb-twin-only (javascript/CLAUDE.md boundary rule 4: waiting calls
 // use the `_cb` twin): for every header function `f` with an `f_cb` twin,
 // native/ calls `f_cb`, never `f` or its `_err` twin, which would block the
 // event loop and run callbacks on the caller's thread. This generalises

@@ -14,7 +14,7 @@
 
 'use strict';
 
-// H1 check-no-todo (javascript/CLAUDE.md "Files and process": every file,
+// check-no-todo (javascript/CLAUDE.md "Files and process": every file,
 // root CLAUDE.md §7): no unfinished-work marker in any file of the client
 // (every file under javascript/: the sources, tests, scripts, tools, the gRPC
 // harness, the build files, the docs), in code, comments or strings alike.

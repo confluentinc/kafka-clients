@@ -15,7 +15,7 @@
 'use strict';
 
 // The docs lint of scripts/lint/eslint/config.js (javascript/CLAUDE.md, JavaScript
-// Binding Conventions, Documentation, Q64): eslint-plugin-jsdoc's
+// Binding Conventions, Documentation): eslint-plugin-jsdoc's
 // require-param, require-returns and require-hyphen-before-param-description
 // read every doc comment on src/, the body-less declarations included
 // (overload signatures, abstract methods, interface methods), where the

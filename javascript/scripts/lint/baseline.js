@@ -44,6 +44,7 @@ const STALE_KEY = 'stale entry: no finding matches it any more; delete the line'
 const STALE_PREFIX = 'stale entry: no finding starts with it any more; delete the line';
 const DUPLICATE = 'listed twice; delete one';
 
+/** A baseline: the finding keys and prefixes it waives, and its duplicate lines. */
 class Baseline {
   /** The baseline of `text`, read from `file` (the name findings report). */
   static parse(file, text) {

@@ -15,10 +15,10 @@
 // Java's OffsetAndMetadata, a data class (javascript/CLAUDE.md, JavaScript Binding
 // Conventions, Class family): `offset`, `metadata` and `leaderEpoch` are
 // readonly fields, and the object is frozen when it is created. `offset` is a
-// `long`, so a bigint (Types, Q23); `leaderEpoch` is Java's
+// `long`, so a bigint (Types); `leaderEpoch` is Java's
 // `Optional<Integer>` getter, `number | null`, so a negative epoch reads as
 // null, as Java's getter returns `Optional.empty()` for it. `equals`,
-// `hashCode` and `toString` are Java's bodies (Q29).
+// `hashCode` and `toString` are Java's bodies.
 
 import { JavaForms } from '../internal/args';
 import { illegalArgument } from '../internal/errors';

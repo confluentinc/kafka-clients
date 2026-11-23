@@ -15,7 +15,7 @@
 // Java's TopicPartition, a data class (javascript/CLAUDE.md, JavaScript Binding
 // Conventions, Class family): `tp.topic` and `tp.partition` are readonly
 // fields, and the object is frozen when it is created, so a key cannot change
-// after it goes into a map. `equals` and `hashCode` are Java's bodies (Q29).
+// after it goes into a map. `equals` and `hashCode` are Java's bodies.
 
 import { JavaForms } from '../internal/args';
 import { objectHashCode, objectsEquals, sameClass } from '../internal/java_object';

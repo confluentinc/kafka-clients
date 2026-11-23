@@ -14,7 +14,7 @@
 
 'use strict';
 
-// A1 check-waiting-call-promise (scripts/lint/rules/waiting_call_promise.js).
+// check-waiting-call-promise (scripts/lint/rules/waiting_call_promise.js).
 
 const assert = require('node:assert/strict');
 

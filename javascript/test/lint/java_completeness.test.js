@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J3 check-java-completeness (scripts/lint/rules/java_completeness.js).
+// check-java-completeness (scripts/lint/rules/java_completeness.js).
 
 const assert = require('node:assert/strict');
 
