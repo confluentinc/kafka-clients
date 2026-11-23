@@ -12,16 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The public classes of Java's
-// org.apache.kafka.common.config this client has. The config classes'
-// constants and ConfigError are generated from the Java sources.
+/**
+ * The public classes of Java's `org.apache.kafka.common.config` this client
+ * has: the key-name classes (`SslConfigs`, `SaslConfigs`, `SecurityConfig`,
+ * `TopicConfig`, `LogLevelConfig`), whose constants are generated from the
+ * Java sources, `SslClientAuth`, `ConfigError`, and `ConfigResource`, which
+ * the admin client's config calls take.
+ *
+ * Invented *(js-only)*: `ConfigResourceMap`, Java's
+ * `Map<ConfigResource, V>`: JavaScript has no value equality for map keys.
+ *
+ * Not translated: the `ConfigDef` machinery (`AbstractConfig`, `ConfigDef`
+ * and the classes it uses), as a configuration is a plain object the core
+ * checks, and the `addClientSaslSupport` and `addClientSslSupport` methods,
+ * which take a `ConfigDef`.
+ *
+ * @packageDocumentation
+ */
 
+export { ConfigResource } from './config_resource';
+export { ConfigResourceMap } from './config_resource_map';
 export { SslClientAuth } from './ssl_client_auth';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { ConfigError } from './config_error';
+export { LogLevelConfig } from './log_level_config';
 export { SaslConfigs } from './sasl_configs';
 export { SecurityConfig } from './security_config';
 export { SslConfigs } from './ssl_configs';
+export { TopicConfig } from './topic_config';
 // END GENERATED EXPORTS
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import

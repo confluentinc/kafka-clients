@@ -8,6 +8,103 @@
 export const __esModule: true;
 
 // @public
+export class ClassicGroupState {
+    static readonly COMPLETING_REBALANCE: ClassicGroupState;
+    static readonly DEAD: ClassicGroupState;
+    static readonly EMPTY: ClassicGroupState;
+    name(): string;
+    ordinal(): number;
+    static parse(name: string): ClassicGroupState;
+    static parse(options: {
+        name: string;
+    }): ClassicGroupState;
+    static readonly PREPARING_REBALANCE: ClassicGroupState;
+    static readonly STABLE: ClassicGroupState;
+    toJSON(key?: string): string;
+    toString(): string;
+    static readonly UNKNOWN: ClassicGroupState;
+    static valueOf(name: string): ClassicGroupState;
+    static valueOf(options: {
+        name: string;
+    }): ClassicGroupState;
+    static values(): ClassicGroupState[];
+}
+
+// @public
+export class ElectionType {
+    name(): string;
+    ordinal(): number;
+    static readonly PREFERRED: ElectionType;
+    toJSON(key?: string): string;
+    toString(): string;
+    static readonly UNCLEAN: ElectionType;
+    readonly value: number;
+    static valueOf(name: string): ElectionType;
+    static valueOf(options: {
+        name: string;
+        value?: never;
+    }): ElectionType;
+    static valueOf(value: number): ElectionType;
+    static valueOf(options: {
+        value: number;
+        name?: never;
+    }): ElectionType;
+    static values(): ElectionType[];
+}
+
+// @public
+export class GroupState {
+    static readonly ASSIGNING: GroupState;
+    static readonly COMPLETING_REBALANCE: GroupState;
+    static readonly DEAD: GroupState;
+    static readonly EMPTY: GroupState;
+    static groupStatesForType(type: GroupType): Set<GroupState>;
+    static groupStatesForType(options: {
+        type: GroupType;
+    }): Set<GroupState>;
+    name(): string;
+    static readonly NOT_READY: GroupState;
+    ordinal(): number;
+    static parse(name: string): GroupState;
+    static parse(options: {
+        name: string;
+    }): GroupState;
+    static readonly PREPARING_REBALANCE: GroupState;
+    static readonly RECONCILING: GroupState;
+    static readonly STABLE: GroupState;
+    toJSON(key?: string): string;
+    toString(): string;
+    static readonly UNKNOWN: GroupState;
+    static valueOf(name: string): GroupState;
+    static valueOf(options: {
+        name: string;
+    }): GroupState;
+    static values(): GroupState[];
+}
+
+// @public
+export class GroupType {
+    static readonly CLASSIC: GroupType;
+    static readonly CONSUMER: GroupType;
+    name(): string;
+    ordinal(): number;
+    static parse(name: string | null): GroupType;
+    static parse(options: {
+        name: string | null;
+    }): GroupType;
+    static readonly SHARE: GroupType;
+    static readonly STREAMS: GroupType;
+    toJSON(key?: string): string;
+    toString(): string;
+    static readonly UNKNOWN: GroupType;
+    static valueOf(name: string): GroupType;
+    static valueOf(options: {
+        name: string;
+    }): GroupType;
+    static values(): GroupType[];
+}
+
+// @public
 export class InvalidRecordError extends InvalidConfigurationError {
     constructor(options: {
         message: string | null;
@@ -19,6 +116,26 @@ export class InvalidRecordError extends InvalidConfigurationError {
         cause: unknown;
         name?: never;
     });
+}
+
+// @public
+export class IsolationLevel {
+    static forId(id: number): IsolationLevel;
+    static forId(options: {
+        id: number;
+    }): IsolationLevel;
+    id(): number;
+    name(): string;
+    ordinal(): number;
+    static readonly READ_COMMITTED: IsolationLevel;
+    static readonly READ_UNCOMMITTED: IsolationLevel;
+    toJSON(key?: string): string;
+    toString(): string;
+    static valueOf(name: string): IsolationLevel;
+    static valueOf(options: {
+        name: string;
+    }): IsolationLevel;
+    static values(): IsolationLevel[];
 }
 
 // @public
@@ -220,6 +337,37 @@ export class PartitionInfo {
 }
 
 // @public
+export abstract class TopicCollection {
+    protected constructor(token: unknown);
+    // (undocumented)
+    static ofTopicIds(topics: Iterable<Uuid>): TopicCollection.TopicIdCollection;
+    // (undocumented)
+    static ofTopicIds(options: {
+        topics: Iterable<Uuid>;
+    }): TopicCollection.TopicIdCollection;
+    // (undocumented)
+    static ofTopicNames(topics: Iterable<string>): TopicCollection.TopicNameCollection;
+    // (undocumented)
+    static ofTopicNames(options: {
+        topics: Iterable<string>;
+    }): TopicCollection.TopicNameCollection;
+}
+
+// @public (undocumented)
+export namespace TopicCollection {
+    export class TopicIdCollection extends TopicCollection {
+        toJSON(): Record<string, unknown>;
+        // (undocumented)
+        topicIds(): Uuid[];
+    }
+    export class TopicNameCollection extends TopicCollection {
+        toJSON(): Record<string, unknown>;
+        // (undocumented)
+        topicNames(): string[];
+    }
+}
+
+// @public
 export class TopicPartition {
     constructor(options: {
         topic: string | null;
@@ -236,6 +384,36 @@ export class TopicPartition {
         partition: number;
     };
     readonly topic: string | null;
+    toString(): string;
+}
+
+// @public
+export class TopicPartitionInfo {
+    constructor(options: {
+        partition: number;
+        leader: Node | null;
+        replicas: Iterable<Node>;
+        isr: Iterable<Node>;
+        elr: Iterable<Node>;
+        lastKnownElr: Iterable<Node>;
+    });
+    constructor(options: {
+        partition: number;
+        leader: Node | null;
+        replicas: Iterable<Node>;
+        isr: Iterable<Node>;
+        elr?: never;
+        lastKnownElr?: never;
+    });
+    elr(): Node[] | null;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    isr(): Node[];
+    lastKnownElr(): Node[] | null;
+    leader(): Node | null;
+    partition(): number;
+    replicas(): Node[];
+    toJSON(): Record<string, unknown>;
     toString(): string;
 }
 
@@ -271,6 +449,57 @@ export class TopicPartitionMap<V> implements Iterable<[TopicPartition, V]> {
 }
 
 // @public
+export class TopicPartitionReplica {
+    constructor(options: {
+        topic: string;
+        partition: number;
+        brokerId: number;
+    });
+    brokerId(): number;
+    equals(obj: unknown): boolean;
+    hashCode(): number;
+    partition(): number;
+    toJSON(): {
+        topic: string;
+        partition: number;
+        brokerId: number;
+    };
+    topic(): string;
+    toString(): string;
+}
+
+// @public
+export class TopicPartitionReplicaMap<V> implements Iterable<[TopicPartitionReplica, V]> {
+    [Symbol.iterator](): IterableIterator<[TopicPartitionReplica, V]>;
+    constructor();
+    constructor(options: {
+        entries: Iterable<readonly [TopicPartitionReplica | null, V]>;
+    });
+    constructor(entries: Iterable<readonly [TopicPartitionReplica | null, V]>);
+    clear(): void;
+    delete(options: {
+        key: TopicPartitionReplica | null;
+    }): boolean;
+    delete(key: TopicPartitionReplica | null): boolean;
+    entries(): IterableIterator<[TopicPartitionReplica, V]>;
+    forEach(callback: (value: V, key: TopicPartitionReplica, map: TopicPartitionReplicaMap<V>) => void): void;
+    get(options: {
+        key: TopicPartitionReplica | null;
+    }): V | null;
+    get(key: TopicPartitionReplica | null): V | null;
+    has(options: {
+        key: TopicPartitionReplica | null;
+    }): boolean;
+    has(key: TopicPartitionReplica | null): boolean;
+    keys(): IterableIterator<TopicPartitionReplica>;
+    set(key: TopicPartitionReplica | null, value: V): this;
+    size(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    values(): IterableIterator<V>;
+}
+
+// @public
 export class TopicPartitionSet implements Iterable<TopicPartition> {
     [Symbol.iterator](): IterableIterator<TopicPartition>;
     constructor();
@@ -296,6 +525,72 @@ export class TopicPartitionSet implements Iterable<TopicPartition> {
     toJSON(): Array<TopicPartition | null>;
     toString(): string;
     values(): IterableIterator<TopicPartition>;
+}
+
+// @public
+export class Uuid {
+    constructor(options: {
+        mostSigBits: bigint | number;
+        leastSigBits: bigint | number;
+    });
+    compareTo(other: Uuid): number;
+    compareTo(options: {
+        other: Uuid;
+    }): number;
+    equals(obj: unknown): boolean;
+    static fromString(str: string): Uuid;
+    static fromString(options: {
+        str: string;
+    }): Uuid;
+    getLeastSignificantBits(): bigint;
+    getMostSignificantBits(): bigint;
+    hashCode(): number;
+    static readonly METADATA_TOPIC_ID: Uuid;
+    static readonly ONE_UUID: Uuid;
+    static randomUuid(): Uuid;
+    static readonly RESERVED: ReadonlySet<Uuid>;
+    static toArray(list: Iterable<Uuid> | null): Uuid[] | null;
+    static toArray(options: {
+        list: Iterable<Uuid> | null;
+    }): Uuid[] | null;
+    toJSON(): string;
+    static toList(array: ReadonlyArray<Uuid> | null): Uuid[] | null;
+    static toList(options: {
+        array: ReadonlyArray<Uuid> | null;
+    }): Uuid[] | null;
+    toString(): string;
+    static readonly ZERO_UUID: Uuid;
+}
+
+// @public
+export class UuidMap<V> implements Iterable<[Uuid, V]> {
+    [Symbol.iterator](): IterableIterator<[Uuid, V]>;
+    constructor();
+    constructor(options: {
+        entries: Iterable<readonly [Uuid | null, V]>;
+    });
+    constructor(entries: Iterable<readonly [Uuid | null, V]>);
+    clear(): void;
+    delete(options: {
+        key: Uuid | null;
+    }): boolean;
+    delete(key: Uuid | null): boolean;
+    entries(): IterableIterator<[Uuid, V]>;
+    forEach(callback: (value: V, key: Uuid, map: UuidMap<V>) => void): void;
+    get(options: {
+        key: Uuid | null;
+    }): V | null;
+    get(key: Uuid | null): V | null;
+    has(options: {
+        key: Uuid | null;
+    }): boolean;
+    has(key: Uuid | null): boolean;
+    keys(): IterableIterator<Uuid>;
+    set(key: Uuid | null, value: V): this;
+    size(): number;
+    toJSON(): Record<string, unknown>;
+    toString(): string;
+    values(): IterableIterator<V>;
 }
 
 ```

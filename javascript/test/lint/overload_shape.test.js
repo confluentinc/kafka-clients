@@ -187,6 +187,43 @@ test("one signature per Java form: each names exactly its form's parameters", ()
   ]);
 });
 
+test('one-parameter forms of two names each take their bare value; forms of the same names, typed apart, are one key', () => {
+  const { javaClass } = require('./_java_fixture');
+  const index = javaIndex([
+    javaClass('clients.producer.Rec', {
+      overloads: [
+        method('find', ['Collection<String>'], { param_names: ['names'] }),
+        method('find', ['Collection<String>', 'Mode'], { param_names: ['names', 'mode'] }),
+        method('find', ['Mode'], { param_names: ['ids'] }),
+        method('find', ['Mode', 'Mode'], { param_names: ['ids', 'mode'] }),
+        method('drop', ['Collection<String>'], { param_names: ['topics'] }),
+        method('drop', ['Mode'], { param_names: ['topics'] }),
+      ],
+    }),
+  ]);
+  const root = (/** @type {string} */ body) =>
+    project({ 'tsconfig.json': TSCONFIG, 'java-index.json': index, 'src/producer/rec.ts': `export class Rec {\n${body}}\n` });
+  const r = lint(
+    root(
+      [
+        '  find(names: Iterable<string>): void;',
+        '  find(options: { names: Iterable<string>; mode?: never; ids?: never }): void;',
+        '  find(options: { names: Iterable<string>; mode: number; ids?: never }): void;',
+        '  find(ids: number): void;',
+        '  find(options: { ids: number; mode?: never; names?: never }): void;',
+        '  find(options: { ids: number; mode: number; names?: never }): void;',
+        '  find(options: unknown): void { void options; }',
+        '  drop(topics: Iterable<string> | number): void;',
+        '  drop(options: { topics: Iterable<string> | number }): void;',
+        '  drop(options: unknown): void { void options; }',
+        '',
+      ].join('\n'),
+    ),
+    [RULE],
+  );
+  assert.deepEqual(shapeFindings(r), [], r.text);
+});
+
 test('a Java form the options object does not name is its own finding, keyed by the form', () => {
   const { javaClass } = require('./_java_fixture');
   const index = javaIndex([
@@ -412,6 +449,60 @@ test("Java's long is a kind of its own, bigint: a long and an int at one positio
   assert.deepEqual(formOptionNames([form(['long'], ['offset']), form(['Long'], ['position'])]), [['offset'], ['offset']]);
   // An int and a double are both numbers: one option.
   assert.deepEqual(formOptionNames([form(['int'], ['n']), form(['double'], ['x'])]), [['n'], ['n']]);
+});
+
+test("a class's method takes the parameter names of the interface that declares it; an enum's implicit valueOf(String) names its parameter `name`", () => {
+  const { javaClass } = require('./_java_fixture');
+  // Base declares send(String record); Rec overrides it as send(String r)
+  // and adds send(String r, int p1). Mode has Java's valueOf(byte value)
+  // beside its implicit valueOf(String).
+  const classes = CLASSES.map((c) => {
+    if (c.fqn.endsWith('.Rec'))
+      return {
+        ...c,
+        overloads: c.overloads.concat([
+          method('send', ['String'], { param_names: ['r'] }),
+          method('send', ['String', 'int'], { param_names: ['r', 'p1'] }),
+        ]),
+      };
+    if (c.fqn.endsWith('.Base')) return { ...c, overloads: c.overloads.concat([method('send', ['String'], { param_names: ['record'] })]) };
+    if (c.fqn.endsWith('.Mode'))
+      return {
+        ...c,
+        overloads: c.overloads
+          .filter((o) => o.name !== 'valueOf')
+          .concat([
+            method('valueOf', ['String'], { static: true, param_names: [] }),
+            method('valueOf', ['byte'], { static: true, param_names: ['value'] }),
+          ]),
+      };
+    return c;
+  });
+  void javaClass;
+  const SEND = (/** @type {string} */ name) =>
+    `  send(${name}: string): void;\n  send(options: { ${name}: string; p1?: never }): void;\n  send(options: { ${name}: string; p1: number }): void;\n  send(options: unknown): void { void options; }\n`;
+  const VALUE_OF =
+    '  static valueOf(name: string): Mode;\n  static valueOf(options: { name: string; value?: never }): Mode;\n' +
+    '  static valueOf(value: number): Mode;\n  static valueOf(options: { value: number; name?: never }): Mode;\n' +
+    '  static valueOf(n: unknown): Mode { void n; return Mode.ON; }\n';
+  const root = (/** @type {string} */ name) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex(classes),
+      ...LIB,
+      'src/producer/rec.ts': REC_PER_FORM.replace('  flush(): void {}\n', `  flush(): void {}\n${SEND(name)}`),
+      'src/producer/mode.ts': LIB['src/producer/mode.ts'].replace(
+        '  static valueOf(n: string): Mode { void n; return Mode.ON; }\n',
+        VALUE_OF,
+      ),
+    });
+  let r = lint(root('record'), [RULE]);
+  assert.deepEqual(shapeFindings(r), [], r.text);
+  // The class's own name is not the interface's.
+  r = lint(root('r'), [RULE]);
+  assert.deepEqual(shapeFindings(r), [
+    'Rec.send: translates 2 Java forms of clients.producer.Rec#send (send(String record); send(String r, int p1)) but takes (r: string), not one options object',
+  ]);
 });
 
 test('cannot run without the Java index', () => {

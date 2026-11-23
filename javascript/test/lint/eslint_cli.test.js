@@ -45,6 +45,8 @@ function layout() {
     copy(ROOT, root, rel);
   fs.mkdirSync(path.join(root, 'test', 'unit'), { recursive: true });
   copy(ROOT, root, 'test/unit/internal/native.test.js');
+  fs.mkdirSync(path.join(root, 'test', 'unit', 'admin'), { recursive: true });
+  copy(ROOT, root, 'test/unit/admin/kafka_admin_client.test.js');
   copy(ROOT, root, 'java-index.json');
   // The type declarations the typed configuration reads (@types/node); ignored by the linter itself.
   fs.symlinkSync(path.join(ROOT, 'node_modules'), path.join(root, 'node_modules'), 'dir');

@@ -24,7 +24,8 @@
 //!   - the config classes' constants ([`crate::config_consts::js`]);
 //!   - the producer's configuration keys ([`crate::config_types::js`]): the
 //!     `ProducerConfigs` type, `src/producer/producer_configs.ts`, and the
-//!     key list `src/internal/producer_config_keys.ts`.
+//!     key list `src/internal/producer_config_keys.ts`, and the admin
+//!     client's `AdminClientConfigs` type, `src/admin/admin_client_configs.ts`.
 //!
 //! Every generated file carries [`GENERATED_MARKER`]. A folder holding only
 //! generated modules gets a generated `index.ts`; a folder that also holds
@@ -76,7 +77,15 @@ pub(crate) fn header(from: &str) -> String {
 /// The src/ folders whose `index.ts` is hand-written (they also hold
 /// hand-written modules); the generator owns only the marked block there.
 /// `""` is `src/` itself.
-const MIXED_DIRS: &[&str] = &["", "common", "common/config", "common/metrics", "consumer", "producer"];
+const MIXED_DIRS: &[&str] = &[
+    "",
+    "admin",
+    "common",
+    "common/config",
+    "common/metrics",
+    "consumer",
+    "producer",
+];
 
 /// The src/ folders whose `index.ts` is hand-written and which hold no
 /// generated module: their parents' blocks do not export them.

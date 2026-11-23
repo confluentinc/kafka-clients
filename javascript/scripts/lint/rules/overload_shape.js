@@ -175,7 +175,11 @@ function formOptionNames(forms) {
     out.push(
       f.params.map((t, i) => {
         const earlier = out.findIndex((names, k) => names[i] !== undefined && hostKind(forms[k].params[i]) === hostKind(t));
-        return earlier >= 0 ? out[earlier][i] : optionName(t, f.param_names[i]);
+        // An enum's implicit `valueOf(String name)` has no source, so the
+        // index gives its parameter no name: the JLS names it `name`
+        // (`ElectionType.valueOf(byte value)` beside it).
+        const javaName = f.param_names[i] || (f.name === 'valueOf' && f.static && t === 'String' ? 'name' : '');
+        return earlier >= 0 ? out[earlier][i] : optionName(t, javaName);
       }),
     );
   }
@@ -217,7 +221,9 @@ module.exports = {
     for (const { item, java, m, jm } of mappedMembers(ctx)) {
       if (jm === null || constantsOnly(java.cls)) continue;
       checked += 1;
-      const key = `${jm.owner.fqn}#${jm.name}#${m.isStatic}`;
+      // Per translating class: two classes may each translate a member they
+      // inherit from one Java class (java.lang.Enum#toString).
+      const key = `${java.cls.fqn}>${jm.owner.fqn}#${jm.name}#${m.isStatic}`;
       const subject = `${item.name}.${m.name}`;
       const at = atNode(ctx, m.node);
       if (translations.has(key)) {
@@ -249,9 +255,9 @@ module.exports = {
       // The one-parameter forms' names: a signature taking that one parameter,
       // by that name, is the bare value (`send(record)`, `close(timeout)`).
       const bareNames = new Set(forms.map((f, k) => (f.params.length === 1 ? allNames[k][0] : null)).filter((n) => n !== null));
-      // One-parameter forms of several names would be told apart by type,
-      // which src/internal/args.ts does not do: none takes a bare value.
-      if (bareNames.size > 1) bareNames.clear();
+      // One-parameter forms of several names are told apart by the value's
+      // type (src/internal/args.ts, `bareTypes`: `describeTopics(topicNames)`
+      // and `describeTopics(topics)`), each taking its bare value.
       const isOptionsParam = (p) => {
         const t = checker.getNonNullableType(checker.getTypeAtLocation(p));
         return (
@@ -355,7 +361,12 @@ module.exports = {
               required.push(prop.name);
             }
           }
-          const k = allNames.findIndex((n) => n.length === required.length && n.every((x) => required.includes(x)));
+          // Forms of the same names (`deleteTopics(Collection<String>, ..)`,
+          // `deleteTopics(TopicCollection, ..)`): each signature stands for
+          // the first of them no other signature stood for.
+          const fits = (n) => n.length === required.length && n.every((x) => required.includes(x));
+          const free = allNames.findIndex((n, i) => fits(n) && !covered.has(i));
+          const k = free >= 0 ? free : allNames.findIndex(fits);
           // The other forms' names closed with `never`, so that a value
           // holding one (a variable, which no excess-property check reads)
           // matches no signature it does not belong to.
@@ -379,6 +390,10 @@ module.exports = {
             covered.add(k);
           }
         }
+        // Forms of the same names are one (`deleteTopics(Collection<String>)`
+        // and `deleteTopics(TopicCollection)`: one key typed as both).
+        const sameNames = (a, b) => allNames[a].length === allNames[b].length && allNames[a].every((x) => allNames[b].includes(x));
+        for (const k of [...covered]) for (const i of forms.keys()) if (sameNames(k, i)) covered.add(i);
         for (const [k, f] of forms.entries()) if (!covered.has(k) && !coveredBy(k)) findings.push(missingForm(f));
         continue;
       }

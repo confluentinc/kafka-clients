@@ -15,8 +15,9 @@
 'use strict';
 
 // Proto <-> JavaScript translation helpers for grpc_server.js, the JavaScript
-// twin of python/grpc_translate.py (producer half only: the JavaScript binding
-// has no consumer or admin client yet).
+// twin of python/grpc_translate.py: the producer's and the errors shared by
+// every service (the JavaScript binding has no consumer yet). The admin
+// client's are in grpc_admin_translate.js, which builds on these.
 //
 // Messages are the plain objects @grpc/proto-loader hands out with the options
 // grpc_server.js loads the protos with (keepCase, longs: String,
@@ -333,6 +334,7 @@ module.exports = {
   makeLoggingDeliveryCallback,
   protoToProducerRecord,
   metricToProto,
+  nodeToProto,
   partitionInfoToProto,
   recordMetadataToProto,
   serverError,
