@@ -638,8 +638,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The earliest available offset for each partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null and the
-    /// <c>default.api.timeout.ms</c> setting is not zero (with zero the result is empty, as for any partition).
+    /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null.
     /// </exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or, on a <see cref="MockConsumer{TKey, TValue}"/>, an element is null (Java's mock
@@ -660,8 +659,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The earliest available offset for each partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null and
-    /// <paramref name="timeout"/> is not zero (with a zero timeout the result is empty, as for any partition).
+    /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null, even with a
+    /// zero <paramref name="timeout"/>.
     /// </exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">
@@ -685,8 +684,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The latest offset for each partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null and the
-    /// <c>default.api.timeout.ms</c> setting is not zero (with zero the result is empty, as for any partition).
+    /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null.
     /// </exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or, on a <see cref="MockConsumer{TKey, TValue}"/>, an element is null (Java's mock
@@ -707,8 +705,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <returns>The latest offset for each partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null and
-    /// <paramref name="timeout"/> is not zero (with a zero timeout the result is empty, as for any partition).
+    /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null, even with a
+    /// zero <paramref name="timeout"/>.
     /// </exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">
