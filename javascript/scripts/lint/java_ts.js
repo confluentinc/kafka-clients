@@ -198,8 +198,9 @@ const MAPPING_FILE = 'lint-mapping.json';
 
 /**
  * The mapping lists of `ctx`'s client, read once from `lint-mapping.json`
- * (both empty when the file is missing): `{invented, javaTargets}`, each a
- * `Map` from a key to its text, the order of the file kept.
+ * (all empty when the file is missing): `{invented, javaTargets,
+ * nativeCallers}`, each a `Map` from a key to its text, the order of the file
+ * kept.
  *   - `invented`: the names JavaScript invents (javascript/CLAUDE.md, JavaScript
  *     Binding Conventions, Scope and "Layout and modules": every addition
  *     Java lacks is *(js-only)* and on the list of invented names, which is
@@ -207,7 +208,10 @@ const MAPPING_FILE = 'lint-mapping.json';
  *     lint reads, each with the reason it has no Java counterpart. An
  *     invented options type is named `...Args` (check-invented-names).
  *   - `javaTargets`: the Java class, or member, of an item the convention
- *     does not find, `<fqn>` or `<fqn>#<member>`.
+ *     does not find, `<fqn>` or `<fqn>#<member>`;
+ *   - `nativeCallers`: the classes (exported or not) and exported functions
+ *     outside the wrappers the JS conventions name that call the addon, each
+ *     with the reason the rules give (check-native-wrappers).
  * An export is keyed `src/<module>.ts:<Name>`, a member `<Class>.<member>`,
  * one named by a well-known symbol `<Class>.[Symbol.asyncDispose]`.
  */
@@ -217,13 +221,14 @@ function mappingLists(ctx) {
     try {
       text = ctx.read(MAPPING_FILE);
     } catch (e) {
-      if (e.code === 'ENOENT') return { invented: new Map(), javaTargets: new Map() };
+      if (e.code === 'ENOENT') return { invented: new Map(), javaTargets: new Map(), nativeCallers: new Map() };
       throw e;
     }
     const json = JSON.parse(text);
     return {
       invented: new Map(Object.entries(json.invented || {})),
       javaTargets: new Map(Object.entries(json.javaTargets || {})),
+      nativeCallers: new Map(Object.entries(json.nativeCallers || {})),
     };
   });
 }
@@ -550,7 +555,12 @@ function exportedItems(ctx) {
         const declaredHere = declarations.some((d) => d.getSourceFile() === sf);
         const known = bySymbol.get(target);
         if (known && (known.declaredHere || !declaredHere)) continue;
-        const node = declarations.find((d) => !ts.isFunctionDeclaration(d) || d.body) || declarations[0];
+        // A type's own declaration first: an interface beside a constant of its
+        // name holding its statics (`Admin` and `Admin.create`) is the interface.
+        const node =
+          declarations.find((d) => ts.isClassDeclaration(d) || ts.isInterfaceDeclaration(d) || ts.isTypeAliasDeclaration(d)) ||
+          declarations.find((d) => !ts.isFunctionDeclaration(d) || d.body) ||
+          declarations[0];
         const kind = declarationKind(ts, node);
         const tags = mappingOf(ctx, `${rel}:${exported.name}`, node);
         bySymbol.set(target, { rel, dir, sf, name: exported.name, node, kind, tags, declaredHere });

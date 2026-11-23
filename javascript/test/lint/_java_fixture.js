@@ -74,6 +74,7 @@ const PREFIX = 'org.apache.kafka.';
  * @property {boolean} abstract
  * @property {boolean} functional_interface
  * @property {string[]} supertypes
+ * @property {(string | null)[]} [supertype_fqns]
  * @property {boolean} public_audience
  * @property {boolean} unsupported_package
  * @property {boolean} deprecated

@@ -1703,8 +1703,10 @@ mapping lists are in `lint-mapping.json`: `invented`, the list of invented
 names for the exported items and public members (JS conventions, Layout and
 modules), a member named by a well-known symbol keyed
 `<Class>.[Symbol.<name>]` (`KafkaProducer.[Symbol.asyncDispose]`,
-`Headers.[Symbol.iterator]`), each with its reason, and `javaTargets`, the Java class or member of
-an item the naming convention does not find; the other invented names are
+`Headers.[Symbol.iterator]`), each with its reason, `javaTargets`, the Java class or member of
+an item the naming convention does not find, and `nativeCallers`, the classes
+and exported functions outside the wrappers the JS conventions name that call
+the addon, each with the reason the rules give (`check-native-wrappers`); the other invented names are
 `NODE_DEBUG=confluent_kafka` and the platform package names (the
 never-closed warning and its code are gone: "Threads and liveness").
 
@@ -1757,10 +1759,77 @@ The rules, each named in its finding:
   `_`-prefixed, but `_ffiId` on an error class, which `KafkaError` declares.
 - `check-java-name`, `check-java-members`, `check-java-completeness`,
   `check-public-audience`, `check-no-deprecated-translation`: every export
-  translates a public, live Java class by name (or is listed), in its file,
+  translates a public, live Java class by name (or is listed), in its file
+  (a TypeScript `enum` is `check-java-kind`'s),
   every public member a Java member, and every public Java member is
   translated (an enum's `java.lang.Enum` members and `toJSON()` included, a
   public mutable field as its setter `set<Field>`, plan §5 item 2).
+- `check-java-kind`: each export translating a Java type (the mapping of
+  `check-java-name`, `javaTargets` included) takes the form of its Java kind
+  (JS conventions, Class family, Q12, Q16, Q28): a Java interface is a
+  TypeScript `interface`, beside which a `const` of its name may hold its
+  statics (`Admin.create`); a class, record or enum is a class, abstract
+  exactly when Java's is, a Java abstract class's constructor throwing
+  `TypeError` when `new.target` is the class itself (`KafkaFuture`'s) and its
+  translations of Java's abstract methods `abstract` (the Java index's
+  `abstract`); no export is a TypeScript `enum`. The rule's table holds the
+  forms the JS conventions give otherwise: `Header` and `Headers` are classes
+  (Serialization), `Callback` a function type ("a callback is a function"),
+  and a type not translated the placeholder `type X = unknown` (Scope). Not
+  checked: an export whose Java class the index does not hold (the root's
+  built-in errors), a nested type, and an abstract Java method with a
+  concrete overload.
+- `check-java-supertypes`: each exported class or interface translating a
+  Java type has as its direct supertypes (a class's `extends` and
+  `implements`, an interface's `extends`) the translations of its Java type's
+  direct supertypes, and no other, an invented base included (JS conventions,
+  Class family and Errors, Q29, Q32): a translated type by its export, a
+  class in `extends` and an interface in `implements`; a JDK type by the JS
+  conventions' JDK table, `Closeable` and `AutoCloseable` as `close()`
+  returning a Promise plus `[Symbol.asyncDispose]` (a serde's as its optional
+  `close()`, Serialization), `Iterable` as `[Symbol.iterator]()` (TypeScript's
+  `Iterable<T>` allowed in `implements`), `Comparable` as `compareTo()`,
+  `Future`, `Serializable`, `Principal` and `Object` as nothing,
+  `RuntimeException`, `Exception` and `Throwable` as `Error`, a Java built-in
+  error as the root's class and `NullPointerException` as `TypeError` (Types),
+  a JDK type missing from the table being a finding; a Java supertype the
+  client does not translate (`AbstractConfig`, an internal one) as nothing.
+  Not checked: type arguments, an export whose form `check-java-kind`
+  refuses, and the root's built-in errors, whose Java classes the index does
+  not hold.
+- `check-doc-size`: a TSDoc has at most 150% of its Javadoc's words (JS
+  conventions, Documentation, Q64), counted as `.claude/rules/documentation.md`
+  §5 counts a Rust doc's: the Java words are the Java index's (`cargo xtask
+  java-index` counts each Javadoc with `check-api-docs`' translator and
+  counter, one that only points elsewhere replaced by the one it points to,
+  `{@inheritDoc}` filled in); the TSDoc counts its description, `@remarks`,
+  `@see` and `@example`, a `@param` Java has (the options object's when Java
+  has any), `@returns` when Java has `@return` and a `@throws` naming the
+  error of a Java `@throws`, never `@defaultValue`, `@typeParam`,
+  `@deprecated` or a modifier tag. It reads the TSDoc of each export, public
+  member and overload signature mapping to a Java member with a Javadoc: a
+  signature against the Java form the overload-shape mapping finds for it,
+  else (an error class's constructors always) against every form of the set,
+  passing when it fits one; a setter against its field's Javadoc; a function
+  type translating a one-method interface (`Callback`) against the
+  interface's Javadoc and its method's together. A generated file passes
+  through its generator. Not checked: a member with no Java counterpart (an
+  invented one, an `...Args` key, an options object's keys) or no Javadoc.
+- `check-native-wrappers`: only the classes the JS conventions name call the
+  addon (Implementation over the FFI, Q31, Q57, Q62): each exported class of
+  that set (`KafkaProducer`, `KafkaConsumer`, the admin client, every
+  `Mock...`, `Headers`, and `Header`, the JS conventions' `RecordHeader`)
+  holds a native handle, its constructor or a field initializer reaching a
+  `native.<fn>` use, as the mocks wrap the FFI's mocks: `MockProducer` today;
+  any other class of `src/` outside `src/internal/`, exported or not, and any
+  exported function, that reaches one is listed in `lint-mapping.json`'s
+  `nativeCallers` with the reason the rules give, and every entry is needed:
+  the record's future, `KafkaFutureImpl`, over its native future (Futures and
+  waiting), today. A use counts when the code reaches it directly or through
+  the `src/internal/` functions and its module's unexported functions it
+  calls (`scripts/lint/native_uses.js`); a call into another such class, or
+  another exported function, is that one's. Not checked: what a use does
+  (that it creates the FFI's object, that every method goes through it).
 - `check-invented-names`: every entry of `lint-mapping.json` is needed and
   resolves, and an invented options type is named `...Args`.
 - `check-module-exports`: each package has one import path; an index
@@ -1842,11 +1911,6 @@ The rules, each named in its finding:
   method of each default method's name. A `...Defaults` class nothing asks
   for is a finding too. `Callback` has no default method, so no helper
   exists yet.
-- `check-mock-native`: each exported `Mock...` class holds a native handle,
-  its constructor (through the `src/` functions it calls, as
-  `check-waiting-call-promise` follows a method) or a field initializer
-  reaching a `native.<fn>` use, as the mocks wrap the FFI's mocks (JS
-  conventions, Implementation over the FFI, Q62): `MockProducer` today.
 - `check-encode-callers`: only the string serializer (`src/common/serialization/`),
   the headers code (`src/common/header/`) and the config code
   (`src/internal/config.ts`) use `encodeLikeJava` (JS conventions, Types,
