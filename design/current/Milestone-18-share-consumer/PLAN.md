@@ -408,6 +408,14 @@ added to CLAUDE.md or the DoD:
   ~6 GiB of containers, §8 "Bugs found by P10"). Verified locally (134 passed); the GitHub/Semaphore run itself was
   not observable from the agent.
 
+- **D11 — The share fixes Java landed after 4.4.0.** **Open (P11, 2026-11-23).** Three trunk commits apply to the
+  Rust translation and are not ported (`post-4.4.0-java.md` §1): F1 KAFKA-21558 (leadership-change resilience; among
+  others, acknowledgements piggy-backed for a node that lost its share session never complete, so their callback
+  never runs), F2 (renew-acknowledgement check accumulated across nodes) and F3 KAFKA-19804 (initial heartbeat
+  interval, shared with the consumer, so a consumer behaviour change too). None is on the `4.4` branch yet. Options:
+  port them in this PR as a phase beyond the 4.4.0 contract (as Milestone 17 took KAFKA-20864 ahead of 4.4), or
+  leave them to a follow-up once a 4.4.x or 4.5 release carries them.
+
 ### 7.2 Which decision gates which phase
 
 | Decision | Needed before | Why |
