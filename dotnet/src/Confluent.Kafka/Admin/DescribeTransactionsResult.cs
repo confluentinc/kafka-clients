@@ -57,7 +57,7 @@ public sealed class DescribeTransactionsResult
     public KafkaFuture<TransactionDescription?> Description(string transactionalId)
     {
         // Java's map holds no null key, so a null id was not requested either.
-        return transactionalId is not null && _futures.TryGetValue(transactionalId, out KafkaFuture<TransactionDescription?> future)
+        return transactionalId is not null && _futures.TryGetValue(transactionalId, out KafkaFuture<TransactionDescription?>? future)
             ? future
             : throw new IllegalArgumentException(
                 "TransactionalId `" + JavaText.ValueOf(transactionalId) + "` was not included in the request");
@@ -87,7 +87,7 @@ public sealed class DescribeTransactionsResult
                 new Dictionary<string, TransactionDescription?>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, KafkaFuture<TransactionDescription?>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null));
+                descriptions.Add(entry.Key, ((IKafkaFutureImpl<TransactionDescription?>)entry.Value).GetNowUnwrapped(null));
             }
 
             return descriptions;
@@ -95,13 +95,13 @@ public sealed class DescribeTransactionsResult
     }
 
     internal static DescribeTransactionsResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<TransactionDescription?>> Descriptions, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<TransactionDescription?>> Descriptions, SafeAdminResultHandle Result) native)
     {
         Dictionary<string, KafkaFuture<TransactionDescription?>> futures =
             new Dictionary<string, KafkaFuture<TransactionDescription?>>(native.Descriptions.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, KafkaFutureImpl<TransactionDescription?>> entry in native.Descriptions)
+        foreach (KeyValuePair<string, IKafkaFutureImpl<TransactionDescription?>> entry in native.Descriptions)
         {
-            futures.Add(entry.Key, new KafkaFuture<TransactionDescription?>(entry.Value));
+            futures.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
         }
 
         return new DescribeTransactionsResult(futures, native.Result);

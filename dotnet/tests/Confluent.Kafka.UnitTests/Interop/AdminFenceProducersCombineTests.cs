@@ -32,7 +32,7 @@ public sealed class AdminFenceProducersCombineTests
     {
         KafkaFutureImpl<long> producerId = new KafkaFutureImpl<long>();
         KafkaFutureImpl<short> epoch = new KafkaFutureImpl<short>();
-        KafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch);
+        IKafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch, AdminFlavour.Sync);
 
         if (producerIdFirst)
         {
@@ -56,7 +56,7 @@ public sealed class AdminFenceProducersCombineTests
 
         Assert.True(combined.IsSettled);
         Assert.Null(combined.Failure);
-        ProducerIdAndEpoch pair = combined.GetNow(default);
+        ProducerIdAndEpoch pair = combined.GetNowUnwrapped(default);
         Assert.Equal(9_001L, pair.ProducerId);
         Assert.Equal((short)17, pair.Epoch);
     }
@@ -66,7 +66,7 @@ public sealed class AdminFenceProducersCombineTests
     {
         KafkaFutureImpl<long> producerId = new KafkaFutureImpl<long>();
         KafkaFutureImpl<short> epoch = new KafkaFutureImpl<short>();
-        KafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch);
+        IKafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch, AdminFlavour.Sync);
         KafkaException failure = new Common.Errors.InvalidProducerEpochException("the producer id failed");
 
         producerId.CompleteWithError(failure);
@@ -82,7 +82,7 @@ public sealed class AdminFenceProducersCombineTests
     {
         KafkaFutureImpl<long> producerId = new KafkaFutureImpl<long>();
         KafkaFutureImpl<short> epoch = new KafkaFutureImpl<short>();
-        KafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch);
+        IKafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch, AdminFlavour.Sync);
         KafkaException epochFailure = new Common.Errors.InvalidTxnStateException("the epoch failed");
         KafkaException producerIdFailure = new Common.Errors.InvalidProducerEpochException("the producer id failed");
 
@@ -98,7 +98,7 @@ public sealed class AdminFenceProducersCombineTests
     {
         KafkaFutureImpl<long> producerId = new KafkaFutureImpl<long>();
         KafkaFutureImpl<short> epoch = new KafkaFutureImpl<short>();
-        KafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch);
+        IKafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch, AdminFlavour.Sync);
         KafkaException failure = new Common.Errors.InvalidTxnStateException("the epoch failed");
 
         epoch.CompleteWithError(failure);
@@ -115,10 +115,27 @@ public sealed class AdminFenceProducersCombineTests
         producerId.Complete(5L);
         epoch.Complete(2);
 
-        KafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch);
+        IKafkaFutureImpl<ProducerIdAndEpoch> combined = NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch, AdminFlavour.Sync);
 
         Assert.True(combined.IsSettled);
-        Assert.Equal(5L, combined.GetNow(default).ProducerId);
-        Assert.Equal((short)2, combined.GetNow(default).Epoch);
+        Assert.Equal(5L, combined.GetNowUnwrapped(default).ProducerId);
+        Assert.Equal((short)2, combined.GetNowUnwrapped(default).Epoch);
+    }
+
+    [Fact]
+    public void TheCombinedFuture_HasTheFlavorItIsGiven()
+    {
+        AsyncKafkaFutureImpl<long> producerId = new AsyncKafkaFutureImpl<long>();
+        AsyncKafkaFutureImpl<short> epoch = new AsyncKafkaFutureImpl<short>();
+
+        Assert.IsType<KafkaFutureImpl<ProducerIdAndEpoch>>(
+            NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch, AdminFlavour.Sync));
+        IKafkaFutureImpl<ProducerIdAndEpoch> combined =
+            NativeAdminClient.CombineProducerIdAndEpoch(producerId, epoch, AdminFlavour.Async);
+        Assert.IsType<AsyncKafkaFutureImpl<ProducerIdAndEpoch>>(combined);
+
+        producerId.Complete(5L);
+        epoch.Complete(2);
+        Assert.Equal(5L, combined.GetNowUnwrapped(default).ProducerId);
     }
 }

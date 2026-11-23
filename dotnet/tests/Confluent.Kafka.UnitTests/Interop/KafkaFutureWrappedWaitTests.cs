@@ -32,7 +32,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// The waits the public futures make, as Java's <c>KafkaFuture.get</c> and <c>getNow</c> answer: a failure inside an
 /// <see cref="ExecutionException"/> whose message is the failure's <c>toString()</c>, a cancellation as it is, a
 /// timeout as <c>java.util.concurrent.TimeoutException</c> (with <c>FutureRecordMetadata</c>'s message for a send's
-/// future); and the binding's own waits, which keep the failure itself.
+/// future); and the binding's own waits, which keep the failure itself. The sync waits run on the sync engine and the
+/// async ones on the async engine.
 /// </summary>
 public sealed class KafkaFutureWrappedWaitTests
 {
@@ -42,59 +43,69 @@ public sealed class KafkaFutureWrappedWaitTests
     public async Task AFailure_IsWrappedByEveryJavaWait_AndKeptByTheBindingsOwnWaits()
     {
         var future = new KafkaFutureImpl<int>();
+        var awaitable = new AsyncKafkaFutureImpl<int>();
         var failure = new InvalidTopicException("Invalid topic: a b");
         Assert.True(future.CompleteWithError(failure));
+        Assert.True(awaitable.CompleteWithError(failure));
 
-        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => future.GetWrapped()));
-        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => future.GetWrapped(TimeSpan.Zero)));
-        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => future.GetWrapped(s_deadline)));
-        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => future.GetWrapped(CancellationToken.None)));
-        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => future.GetNowWrapped(-1)));
-        KafkaFutureImpl erased = future;
-        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => erased.WaitWrapped()));
-        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => erased.GetNowWrapped()));
+        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => future.Get()));
+        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => future.Get(TimeSpan.Zero)));
+        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => future.Get(s_deadline)));
+        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => future.Get(CancellationToken.None)));
+        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => future.GetNow(-1)));
+        KafkaFuture plain = future;
+        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => plain.Get()));
+        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => plain.GetNow()));
 
-        Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidTopicException>(() => future.GetWrappedAsync()));
-        Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidTopicException>(() => future.GetWrappedAsync(s_deadline)));
+        Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidTopicException>(() => awaitable.Get()));
+        Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidTopicException>(() => awaitable.Get(s_deadline)));
         Assert.Same(
-            failure, await FutureAssert.ThrowsAsync<InvalidTopicException>(() => future.GetWrappedAsync(CancellationToken.None)));
-        Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidTopicException>(() => erased.WaitWrappedAsync()));
+            failure, await FutureAssert.ThrowsAsync<InvalidTopicException>(() => awaitable.Get(CancellationToken.None)));
+        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => awaitable.GetNow(-1)));
+        AsyncKafkaFuture awaitablePlain = awaitable;
+        Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidTopicException>(() => awaitablePlain.Get()));
+        Assert.Same(failure, FutureAssert.Throws<InvalidTopicException>(() => awaitablePlain.GetNow()));
 
-        ExecutionException wrapper = Assert.Throws<ExecutionException>(() => future.GetWrapped());
+        ExecutionException wrapper = Assert.Throws<ExecutionException>(() => future.Get());
         Assert.Equal("Confluent.Kafka.Common.Errors.InvalidTopicException: Invalid topic: a b", wrapper.Message);
-        Assert.NotSame(wrapper, Assert.Throws<ExecutionException>(() => future.GetWrapped()));
+        Assert.NotSame(wrapper, Assert.Throws<ExecutionException>(() => future.Get()));
 
-        Assert.Same(failure, Assert.Throws<InvalidTopicException>(() => future.Get()));
-        Assert.Same(failure, Assert.Throws<InvalidTopicException>(() => future.GetNow(-1)));
-        Assert.Same(failure, await Assert.ThrowsAsync<InvalidTopicException>(() => future.GetAsync()));
+        Assert.Same(failure, Assert.Throws<InvalidTopicException>(() => future.GetUnwrapped()));
+        Assert.Same(failure, Assert.Throws<InvalidTopicException>(() => future.GetNowUnwrapped(-1)));
+        Assert.Same(failure, Assert.Throws<InvalidTopicException>(() => awaitable.GetUnwrapped()));
+        Assert.Same(failure, Assert.Throws<InvalidTopicException>(() => awaitable.GetNowUnwrapped(-1)));
+        Assert.Same(failure, await Assert.ThrowsAsync<InvalidTopicException>(() => awaitable.ToCompletionStage()));
     }
 
     [Fact]
     public async Task TheJavaTask_IsTheSameOnEveryCall_AndNotTheRawTask_WhileTheFailureIsPending()
     {
-        var future = new KafkaFutureImpl<int>();
-        Task<int> javaTask = future.GetWrappedAsync();
-        Assert.Same(javaTask, future.GetWrappedAsync());
-        Assert.NotSame(future.GetAsync(), javaTask);
+        var future = new AsyncKafkaFutureImpl<int>();
+        Task<int> javaTask = future.Get();
+        Assert.Same(javaTask, future.Get());
+        Assert.NotSame(future.ToCompletionStage(), javaTask);
 
         var failure = new InvalidOperationException("late failure");
         Assert.True(future.CompleteWithError(failure));
         Assert.Same(failure, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => javaTask));
-        Assert.Same(javaTask, future.GetWrappedAsync());
-        Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(() => future.GetAsync()));
+        Assert.Same(javaTask, future.Get());
+        Assert.Same(failure, await Assert.ThrowsAsync<InvalidOperationException>(() => future.ToCompletionStage()));
     }
 
     [Fact]
     public async Task AFailureWithNoMessage_IsNamedByItsClassInTheMessage()
     {
         var future = new KafkaFutureImpl<int>();
+        var awaitable = new AsyncKafkaFutureImpl<int>();
         var failure = new TopicExistsException((string?)null);
         Assert.True(future.CompleteWithError(failure));
+        Assert.True(awaitable.CompleteWithError(failure));
 
-        ExecutionException wrapper = Assert.Throws<ExecutionException>(() => future.GetWrapped());
+        ExecutionException wrapper = Assert.Throws<ExecutionException>(() => future.Get());
         Assert.Same(failure, wrapper.InnerException);
         Assert.Equal("Confluent.Kafka.Common.Errors.TopicExistsException", wrapper.Message);
-        ExecutionException awaited = await Assert.ThrowsAsync<ExecutionException>(() => future.GetWrappedAsync());
+        ExecutionException awaited = await Assert.ThrowsAsync<ExecutionException>(() => awaitable.Get());
+        Assert.Same(failure, awaited.InnerException);
         Assert.Equal(wrapper.Message, awaited.Message);
     }
 
@@ -102,12 +113,15 @@ public sealed class KafkaFutureWrappedWaitTests
     public async Task ACancelledFuture_ThrowsTheCancellationAsItIs()
     {
         var future = new KafkaFutureImpl<int>();
+        var awaitable = new AsyncKafkaFutureImpl<int>();
         Assert.True(future.Cancel(true));
+        Assert.True(awaitable.Cancel(true));
 
-        Assert.ThrowsAny<OperationCanceledException>(() => future.GetWrapped());
-        Assert.ThrowsAny<OperationCanceledException>(() => future.GetWrapped(TimeSpan.Zero));
-        Assert.ThrowsAny<OperationCanceledException>(() => future.GetNowWrapped(-1));
-        Task<int> javaTask = future.GetWrappedAsync();
+        Assert.ThrowsAny<OperationCanceledException>(() => future.Get());
+        Assert.ThrowsAny<OperationCanceledException>(() => future.Get(TimeSpan.Zero));
+        Assert.ThrowsAny<OperationCanceledException>(() => future.GetNow(-1));
+        Assert.ThrowsAny<OperationCanceledException>(() => awaitable.GetNow(-1));
+        Task<int> javaTask = awaitable.Get();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => javaTask);
         Assert.True(javaTask.IsCanceled);
     }
@@ -116,13 +130,17 @@ public sealed class KafkaFutureWrappedWaitTests
     public async Task ACancellationGivenAsTheError_CancelsAnOrdinaryFuture_AndIsThrownAsItIs()
     {
         var future = new KafkaFutureImpl<int>();
+        var awaitable = new AsyncKafkaFutureImpl<int>();
         var cancellation = new OperationCanceledException("given as the error");
         Assert.True(future.CompleteWithError(cancellation));
+        Assert.True(awaitable.CompleteWithError(cancellation));
 
-        Assert.True(future.IsCancelled);
-        Assert.Same(cancellation, Assert.Throws<OperationCanceledException>(() => future.GetWrapped()));
-        Assert.Same(cancellation, Assert.Throws<OperationCanceledException>(() => future.GetNowWrapped(-1)));
-        Task<int> javaTask = future.GetWrappedAsync();
+        Assert.True(future.IsCancelled());
+        Assert.Same(cancellation, Assert.Throws<OperationCanceledException>(() => future.Get()));
+        Assert.Same(cancellation, Assert.Throws<OperationCanceledException>(() => future.GetNow(-1)));
+        Assert.True(awaitable.IsCancelled());
+        Assert.Same(cancellation, Assert.Throws<OperationCanceledException>(() => awaitable.GetNow(-1)));
+        Task<int> javaTask = awaitable.Get();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => javaTask);
         Assert.True(javaTask.IsCanceled);
     }
@@ -130,21 +148,25 @@ public sealed class KafkaFutureWrappedWaitTests
     [Fact]
     public async Task ACancellationGivenAsTheError_FailsASendsFuture_AndIsWrappedLikeAnyOtherFailure()
     {
-        KafkaFutureImpl<RecordMetadata> pending = KafkaFutureImpl<RecordMetadata>.ForSend();
-        Task<RecordMetadata> takenWhilePending = pending.GetWrappedAsync();
+        AsyncKafkaFutureImpl<RecordMetadata> pending = AsyncKafkaFutureImpl<RecordMetadata>.ForSend();
+        Task<RecordMetadata> takenWhilePending = pending.Get();
+        KafkaFutureImpl<RecordMetadata> blocking = KafkaFutureImpl<RecordMetadata>.ForSend();
         var cancellation = new OperationCanceledException("given as the error");
         Assert.True(pending.CompleteWithError(cancellation));
+        Assert.True(blocking.CompleteWithError(cancellation));
 
-        Assert.False(pending.IsCancelled);
+        Assert.False(pending.IsCancelled());
         Assert.Same(
             cancellation, await FutureAssert.ThrowsAsync<OperationCanceledException>(() => takenWhilePending));
         Assert.True(takenWhilePending.IsFaulted);
-        Assert.Same(cancellation, FutureAssert.Throws<OperationCanceledException>(() => pending.GetWrapped()));
-        Assert.Same(cancellation, FutureAssert.Throws<OperationCanceledException>(() => pending.GetNowWrapped(null!)));
+        Assert.Same(cancellation, FutureAssert.Throws<OperationCanceledException>(() => pending.GetNow(null!)));
+        Assert.False(blocking.IsCancelled());
+        Assert.Same(cancellation, FutureAssert.Throws<OperationCanceledException>(() => blocking.Get()));
+        Assert.Same(cancellation, FutureAssert.Throws<OperationCanceledException>(() => blocking.GetNow(null!)));
 
-        KafkaFutureImpl<RecordMetadata> done = KafkaFutureImpl<RecordMetadata>.ForSend();
+        AsyncKafkaFutureImpl<RecordMetadata> done = AsyncKafkaFutureImpl<RecordMetadata>.ForSend();
         Assert.True(done.CompleteWithError(cancellation));
-        Task<RecordMetadata> takenAfter = done.GetWrappedAsync();
+        Task<RecordMetadata> takenAfter = done.Get();
         Assert.True(takenAfter.IsFaulted);
         Assert.Same(cancellation, await FutureAssert.ThrowsAsync<OperationCanceledException>(() => takenAfter));
     }
@@ -197,31 +219,43 @@ public sealed class KafkaFutureWrappedWaitTests
     public async Task ADependant_IsWrappedOnItsJavaWaits_WhileTheActionSeesTheFailureItself()
     {
         var source = new KafkaFutureImpl<int>();
+        var awaitableSource = new AsyncKafkaFutureImpl<int>();
         var thrown = new InvalidOperationException("the function threw");
-        KafkaFutureImpl<int> applied = source.ThenApply<int>(_ => throw thrown);
+        KafkaFutureImpl<int> applied = source.ThenApplyFunc<int>(_ => throw thrown);
+        AsyncKafkaFutureImpl<int> awaitableApplied = awaitableSource.ThenApplyFunc<int>(_ => throw thrown);
         Exception? seen = null;
-        KafkaFutureImpl<int> completed = applied.WhenComplete((_, error) => seen = error);
+        Exception? awaitableSeen = null;
+        KafkaFutureImpl<int> completed = applied.WhenCompleteAction((_, error) => seen = error);
+        AsyncKafkaFutureImpl<int> awaitableCompleted =
+            awaitableApplied.WhenCompleteAction((_, error) => awaitableSeen = error);
 
         Assert.True(source.Complete(1));
+        Assert.True(awaitableSource.Complete(1));
 
-        Assert.Same(thrown, FutureAssert.Throws<InvalidOperationException>(() => applied.GetWrapped(s_deadline)));
-        Assert.Same(thrown, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => completed.GetWrappedAsync()));
+        Assert.Same(thrown, FutureAssert.Throws<InvalidOperationException>(() => applied.Get(s_deadline)));
+        Assert.Same(thrown, FutureAssert.Throws<InvalidOperationException>(() => completed.Get(s_deadline)));
+        Assert.Same(thrown, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => awaitableApplied.Get()));
+        Assert.Same(thrown, await FutureAssert.ThrowsAsync<InvalidOperationException>(() => awaitableCompleted.Get()));
         Assert.Same(thrown, seen);
+        Assert.Same(thrown, awaitableSeen);
     }
 
     [Fact]
     public async Task AnOrdinaryFuture_TimesOutWithNoMessage()
     {
         var future = new KafkaFutureImpl<int>();
+        var awaitable = new AsyncKafkaFutureImpl<int>();
 
-        FutureTimeoutException timedOut = Assert.Throws<FutureTimeoutException>(() => future.GetWrapped(TimeSpan.Zero));
+        FutureTimeoutException timedOut = Assert.Throws<FutureTimeoutException>(() => future.Get(TimeSpan.Zero));
         Assert.Equal(string.Empty, timedOut.Message);
         Assert.IsAssignableFrom<System.TimeoutException>(timedOut);
         Assert.Equal(
             string.Empty,
-            (await Assert.ThrowsAsync<FutureTimeoutException>(() => future.GetWrappedAsync(TimeSpan.FromMilliseconds(5)))).Message);
+            (await Assert.ThrowsAsync<FutureTimeoutException>(() => awaitable.Get(TimeSpan.FromMilliseconds(5)))).Message);
         Assert.Equal(
-            string.Empty, Assert.Throws<FutureTimeoutException>(() => future.Get(TimeSpan.FromMilliseconds(5))).Message);
+            string.Empty, Assert.Throws<FutureTimeoutException>(() => future.GetUnwrapped(TimeSpan.FromMilliseconds(5))).Message);
+        Assert.Equal(
+            string.Empty, Assert.Throws<FutureTimeoutException>(() => awaitable.GetUnwrapped(TimeSpan.FromMilliseconds(5))).Message);
     }
 
     [Theory]
@@ -232,12 +266,14 @@ public sealed class KafkaFutureWrappedWaitTests
     public async Task ASendsFuture_TimesOutWithFutureRecordMetadatasMessage(long ticks, string milliseconds)
     {
         KafkaFutureImpl<RecordMetadata> future = KafkaFutureImpl<RecordMetadata>.ForSend();
+        AsyncKafkaFutureImpl<RecordMetadata> awaitable = AsyncKafkaFutureImpl<RecordMetadata>.ForSend();
         TimeSpan timeout = TimeSpan.FromTicks(ticks);
         string expected = "Timeout after waiting for " + milliseconds + " ms.";
 
-        Assert.Equal(expected, Assert.Throws<FutureTimeoutException>(() => future.GetWrapped(timeout)).Message);
-        Assert.Equal(expected, (await Assert.ThrowsAsync<FutureTimeoutException>(() => future.GetWrappedAsync(timeout))).Message);
-        Assert.False(future.IsDone);
+        Assert.Equal(expected, Assert.Throws<FutureTimeoutException>(() => future.Get(timeout)).Message);
+        Assert.Equal(expected, (await Assert.ThrowsAsync<FutureTimeoutException>(() => awaitable.Get(timeout))).Message);
+        Assert.False(future.IsDone());
+        Assert.False(awaitable.IsDone());
     }
 
     [Theory]
@@ -256,7 +292,7 @@ public sealed class KafkaFutureWrappedWaitTests
             Assert.Equal(
                 "Timeout after waiting for 0 ms.",
                 Assert.Throws<FutureTimeoutException>(
-                    () => new KafkaFuture<RecordMetadata>(KafkaFutureImpl<RecordMetadata>.ForSend()).Get(TimeSpan.Zero)).Message);
+                    () => KafkaFutureImpl<RecordMetadata>.ForSend().Get(TimeSpan.Zero)).Message);
         }
         else
         {

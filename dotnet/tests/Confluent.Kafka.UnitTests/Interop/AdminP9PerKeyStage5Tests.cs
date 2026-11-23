@@ -51,7 +51,7 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task CreateAcls_EveryBindingFaultsUnderItsOwnOwnedKey()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AclBinding[] bindings = { Binding("cp6-alpha"), Binding("cp6-beta"), Binding("cp6-gamma") };
@@ -70,7 +70,7 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task AlterClientQuotas_EveryEntityFaultsUnderItsOwnOwnedKey()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ClientQuotaEntity alpha = Entity("cp6-quota-alpha");
@@ -93,7 +93,7 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task DeleteTopicsByIds_EachIdFaultsUnderItsOwnParsedKey()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         Uuid first = new Uuid(11L, 22L);
@@ -118,7 +118,7 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task AlterReplicaLogDirs_EachReplicaFaultsUnderItsOwnThreeScalarKey()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
@@ -151,7 +151,7 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task AlterPartitionReassignments_OnePartitionSucceeds_WhileAnotherFaults()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
@@ -179,7 +179,7 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task DeleteConsumerGroups_EachStringKeyFaultsIndependently()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDeleteConsumerGroupsResult groups =
@@ -197,7 +197,7 @@ public sealed class AdminP9PerKeyStage5Tests
     [Fact]
     public async Task AlterUserScramCredentials_ThreeRowsOverTwoUsers_SettleTwoKeys()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterUserScramCredentialsResult result = AsyncAlterUserScramCredentialsResult.OfClient(admin.AlterUserScramCredentials(

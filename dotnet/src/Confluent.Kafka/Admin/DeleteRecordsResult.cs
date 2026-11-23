@@ -28,7 +28,7 @@ namespace Confluent.Kafka.Admin;
 public sealed class DeleteRecordsResult
 {
     private readonly IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>> _futures;
-    private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
     /// <summary>Creates a result over the given futures, keyed by topic partition.</summary>
@@ -60,7 +60,7 @@ public sealed class DeleteRecordsResult
 
     private DeleteRecordsResult(
         IReadOnlyDictionary<TopicPartition, KafkaFuture<DeletedRecords>> lowWatermarks,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _futures = lowWatermarks;
@@ -84,20 +84,23 @@ public sealed class DeleteRecordsResult
     /// them from <see cref="LowWatermarks()"/>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// A future the Result was constructed with is <see langword="null"/>.
+    /// </exception>
     public KafkaFuture All() =>
         _nativeFutures is not null
-            ? new KafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures))
+            ? FutureState.AllOf(new KafkaFutureImpl<object?>(), _nativeFutures)
             : SyncAdminFutures.AllOf(_futures.Values);
 
     internal static DeleteRecordsResult OfClient(
-        (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<DeletedRecords>> LowWatermarks, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<DeletedRecords>> LowWatermarks, SafeAdminResultHandle Result) native)
     {
         Dictionary<TopicPartition, KafkaFuture<DeletedRecords>> lowWatermarks =
             new Dictionary<TopicPartition, KafkaFuture<DeletedRecords>>(native.LowWatermarks.Count);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.LowWatermarks.Count);
-        foreach (KeyValuePair<TopicPartition, KafkaFutureImpl<DeletedRecords>> entry in native.LowWatermarks)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.LowWatermarks.Count);
+        foreach (KeyValuePair<TopicPartition, IKafkaFutureImpl<DeletedRecords>> entry in native.LowWatermarks)
         {
-            lowWatermarks.Add(entry.Key, new KafkaFuture<DeletedRecords>(entry.Value));
+            lowWatermarks.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

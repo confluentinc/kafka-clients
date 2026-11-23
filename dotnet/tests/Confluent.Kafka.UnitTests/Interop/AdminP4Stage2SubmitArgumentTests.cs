@@ -188,12 +188,12 @@ public sealed class AdminP4Stage2SubmitArgumentTests
 
         TopicPartition nullSpec = new TopicPartition("p4s2-args", 1);
         var listed = admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [nullSpec] = null! }, new ListOffsetsOptions());
-        Assert.Equal(-1L, listed.Futures[nullSpec].Get(TimeSpan.FromSeconds(30)).Offset());
+        Assert.Equal(-1L, listed.Futures[nullSpec].GetUnwrapped(TimeSpan.FromSeconds(30)).Offset());
     }
 
     private static long Offset(NativeAdminClient admin, TopicPartition partition, OffsetSpec spec) =>
         admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = spec }, new ListOffsetsOptions())
-            .Futures[partition].Get(TimeSpan.FromSeconds(30)).Offset();
+            .Futures[partition].GetUnwrapped(TimeSpan.FromSeconds(30)).Offset();
 
     private static OffsetSpec? Spec(string kind) => kind switch
     {

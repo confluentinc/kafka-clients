@@ -30,44 +30,24 @@ using KafkaTimeoutException = Confluent.Kafka.Common.Errors.TimeoutException;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Tests the public <see cref="KafkaFuture{T}"/> over a <see cref="KafkaFutureImpl{T}"/>: the default-value guard,
-/// the same-instance contract of <c>Get()</c>, identity equality, <c>IsDone()</c>, the conversion to
-/// <see cref="KafkaFuture"/>, and the member set.
+/// Tests the public <see cref="KafkaFuture{T}"/>, which a <see cref="KafkaFutureImpl{T}"/> is: a <c>default</c> one is
+/// <see langword="null"/>, the same-instance contract of <c>Get()</c>, identity equality, <c>IsDone()</c>, the typed
+/// future as its own <see cref="KafkaFuture"/>, and the member set.
 /// </summary>
 public sealed class PublicKafkaFutureTests
 {
-    private const string DefaultValueMessage = "This KafkaFuture is a default value and is bound to no operation.";
-
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     [Fact]
-    public void Default_Get_ThrowsInvalidOperationException_WithItsMessage()
+    public void Default_IsNull()
     {
-        KafkaFuture<RecordMetadata> viaDefault = default(KafkaFuture<RecordMetadata>);
-        KafkaFuture<RecordMetadata> viaNew = new KafkaFuture<RecordMetadata>();
+        KafkaFuture<RecordMetadata>? declared = default;
 
-        for (int call = 0; call < 2; call++)
-        {
-            AssertDefaultThrows(() => viaDefault.Get());
-            AssertDefaultThrows(() => viaNew.Get());
-        }
-
-        AssertDefaultThrows(() => default(KafkaFuture<long>).Get());
-    }
-
-    [Fact]
-    public void Default_IsDone_ThrowsInvalidOperationException_WithTheSameMessage()
-    {
-        KafkaFuture<RecordMetadata> viaDefault = default(KafkaFuture<RecordMetadata>);
-        KafkaFuture<RecordMetadata> viaNew = new KafkaFuture<RecordMetadata>();
-
-        for (int call = 0; call < 2; call++)
-        {
-            AssertDefaultThrows(() => viaDefault.IsDone());
-            AssertDefaultThrows(() => viaNew.IsDone());
-        }
-
-        AssertDefaultThrows(() => default(KafkaFuture<long>).IsDone());
+        Assert.Null(declared);
+        Assert.Null(default(KafkaFuture<RecordMetadata>));
+        Assert.Null(default(KafkaFuture<long>));
+        KafkaFuture<int>?[] slots = new KafkaFuture<int>?[1];
+        Assert.Null(slots[0]);
     }
 
     [Theory]
@@ -76,7 +56,7 @@ public sealed class PublicKafkaFutureTests
     public void IsDone_IsFalseUntilCompleted_ThenTrue_OnSuccessAndOnFailure(string outcome)
     {
         KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>();
-        KafkaFuture<RecordMetadata> future = new KafkaFuture<RecordMetadata>(completion);
+        KafkaFuture<RecordMetadata> future = completion;
         KafkaFuture<RecordMetadata> copy = future;
 
         Assert.False(future.IsDone());
@@ -118,7 +98,7 @@ public sealed class PublicKafkaFutureTests
         RecordMetadata metadata = NewMetadata();
         KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>();
         Assert.True(completion.Complete(metadata));
-        KafkaFuture<RecordMetadata> future = new KafkaFuture<RecordMetadata>(completion);
+        KafkaFuture<RecordMetadata> future = completion;
 
         KafkaFuture<RecordMetadata> copy = future;
 
@@ -164,7 +144,7 @@ public sealed class PublicKafkaFutureTests
         KafkaException cause = new Common.Errors.TimeoutException(Message);
         KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>();
         Assert.True(completion.CompleteWithError(cause));
-        KafkaFuture<RecordMetadata> future = new KafkaFuture<RecordMetadata>(completion);
+        KafkaFuture<RecordMetadata> future = completion;
 
         for (int call = 0; call < 2; call++)
         {
@@ -181,8 +161,8 @@ public sealed class PublicKafkaFutureTests
     public void Equality_IsReferenceIdentityOfTheCompletion()
     {
         KafkaFutureImpl<RecordMetadata> completion = Completed(NewMetadata());
-        KafkaFuture<RecordMetadata> a = new KafkaFuture<RecordMetadata>(completion);
-        KafkaFuture<RecordMetadata> sameCompletion = new KafkaFuture<RecordMetadata>(completion);
+        KafkaFuture<RecordMetadata> a = completion;
+        KafkaFuture<RecordMetadata> sameCompletion = completion;
         Assert.True(a.Equals(sameCompletion));
         Assert.True(a == sameCompletion);
         Assert.False(a != sameCompletion);
@@ -191,61 +171,63 @@ public sealed class PublicKafkaFutureTests
         RecordMetadata shared = NewMetadata();
         KafkaFutureImpl<RecordMetadata> firstCompletion = Completed(shared);
         KafkaFutureImpl<RecordMetadata> secondCompletion = Completed(shared);
-        KafkaFuture<RecordMetadata> x = new KafkaFuture<RecordMetadata>(firstCompletion);
-        KafkaFuture<RecordMetadata> y = new KafkaFuture<RecordMetadata>(secondCompletion);
+        KafkaFuture<RecordMetadata> x = firstCompletion;
+        KafkaFuture<RecordMetadata> y = secondCompletion;
         Assert.Same(x.Get(), y.Get());
         Assert.False(x.Equals(y));
         Assert.False(x == y);
         Assert.True(x != y);
 
         KafkaFutureImpl<RecordMetadata> pending = new KafkaFutureImpl<RecordMetadata>();
-        KafkaFuture<RecordMetadata> before = new KafkaFuture<RecordMetadata>(pending);
+        KafkaFuture<RecordMetadata> before = pending;
         int hashBefore = before.GetHashCode();
         Assert.True(pending.Complete(shared));
-        KafkaFuture<RecordMetadata> after = new KafkaFuture<RecordMetadata>(pending);
+        KafkaFuture<RecordMetadata> after = pending;
         Assert.True(before == after);
         Assert.Equal(hashBefore, after.GetHashCode());
 
-        KafkaFuture<RecordMetadata> d1 = default(KafkaFuture<RecordMetadata>);
-        KafkaFuture<RecordMetadata> d2 = new KafkaFuture<RecordMetadata>();
-        Assert.True(d1.Equals(d2));
-        Assert.True(d1 == d2);
-        Assert.False(d1 != d2);
-        Assert.Equal(d1.GetHashCode(), d2.GetHashCode());
-        Assert.False(d1.Equals(a));
-        Assert.False(a.Equals(d1));
-        Assert.True(d1 != a);
-        Assert.True(a != d1);
-        Assert.False(d1 == a);
+        KafkaFuture<RecordMetadata>? n1 = null;
+        KafkaFuture<RecordMetadata>? n2 = default;
+        Assert.True(n1 == n2);
+        Assert.False(n1 != n2);
+        Assert.True(Equals(n1, n2));
+        Assert.False(a.Equals(n1));
+        Assert.True(n1 != a);
+        Assert.True(a != n1);
+        Assert.False(n1 == a);
+        Assert.False(a == n1);
 
         object boxedEqual = sameCompletion;
         object boxedDifferent = y;
         object rawCompletion = completion;
         Assert.True(a.Equals(boxedEqual));
         Assert.False(x.Equals(boxedDifferent));
-        Assert.False(a.Equals(rawCompletion));
+        Assert.Same(rawCompletion, a);
+        Assert.True(a.Equals(rawCompletion));
         Assert.False(a.Equals("not a future"));
         Assert.False(a.Equals(null));
     }
 
     [Fact]
-    public void Default_EveryMemberButEqualityAndToString_ThrowsInvalidOperationException()
+    public void Null_EqualityOperators_AreNullSafe_TypedAndPlain()
     {
-        KafkaFuture<RecordMetadata> future = default(KafkaFuture<RecordMetadata>);
-        using CancellationTokenSource cancellation = new CancellationTokenSource();
+        KafkaFuture<RecordMetadata>? none = null;
+        KafkaFuture? plainNone = none;
+        KafkaFuture<RecordMetadata> live = new KafkaFutureImpl<RecordMetadata>();
+        KafkaFuture plainLive = live;
 
-        AssertDefaultThrows(() => future.Get(TimeSpan.Zero));
-        AssertDefaultThrows(() => future.Get(cancellation.Token));
-        AssertDefaultThrows(() => future.GetNow(NewMetadata()));
-        AssertDefaultThrows(() => future.IsCancelled());
-        AssertDefaultThrows(() => future.IsCompletedExceptionally());
-        AssertDefaultThrows(() => future.Cancel(true));
-        AssertDefaultThrows(() => future.ThenApply(metadata => metadata.Offset()));
-        AssertDefaultThrows(() => future.WhenComplete((metadata, error) => { }));
-
-        Assert.Equal(typeof(KafkaFuture<RecordMetadata>).ToString(), future.ToString());
-        KafkaFuture erased = future;
-        Assert.True(erased == default(KafkaFuture));
+        Assert.True(none == null);
+        Assert.False(none != null);
+        Assert.True(plainNone == null);
+        Assert.True(plainNone == none);
+        Assert.False(live == null);
+        Assert.True(live != null);
+        Assert.False(plainLive == null);
+        Assert.False(plainLive == none);
+        Assert.False(none == plainLive);
+        Assert.False(live.Equals(none));
+        Assert.False(plainLive.Equals(plainNone));
+        Assert.False(live.Equals((object?)null));
     }
 
     [Fact]
@@ -253,14 +235,29 @@ public sealed class PublicKafkaFutureTests
     {
         KafkaFuture<RecordMetadata>[] futures =
         {
-            default(KafkaFuture<RecordMetadata>),
-            new KafkaFuture<RecordMetadata>(new KafkaFutureImpl<RecordMetadata>()),
+            new KafkaFutureImpl<RecordMetadata>(),
+            KafkaFuture.CompletedFuture(NewMetadata()),
         };
         foreach (KafkaFuture<RecordMetadata> future in futures)
         {
             Assert.Equal("function", Assert.Throws<ArgumentNullException>(() => future.ThenApply<long>(null!)).ParamName);
             Assert.Equal("action", Assert.Throws<ArgumentNullException>(() => future.WhenComplete(null!)).ParamName);
         }
+    }
+
+    [Fact]
+    public void ThenApplyWhenCompleteAndTheStatics_ReturnTheSyncEngine_TypedAndPlain()
+    {
+        KafkaFuture<int> typed = new KafkaFutureImpl<int>();
+        KafkaFuture plain = typed;
+
+        Assert.IsType<KafkaFutureImpl<int>>(typed.ThenApply(value => value + 1));
+        Assert.IsType<KafkaFutureImpl<int>>(typed.WhenComplete((value, error) => { }));
+        Assert.IsType<KafkaFutureImpl<string>>(plain.ThenApply(() => "applied"));
+        Assert.IsType<KafkaFutureImpl<int>>(plain.WhenComplete(error => { }));
+        Assert.IsType<KafkaFutureImpl<int>>(KafkaFuture.CompletedFuture(1));
+        Assert.IsType<KafkaFutureImpl<object?>>(KafkaFuture.AllOf(typed));
+        Assert.IsType<KafkaFutureImpl<object?>>(KafkaFuture.AllOf<int>(typed));
     }
 
     [Theory]
@@ -271,7 +268,7 @@ public sealed class PublicKafkaFutureTests
         RecordMetadata metadata = NewMetadata();
         KafkaException failure = new Common.Errors.TimeoutException("The operation failed.");
         KafkaFutureImpl<RecordMetadata> completion = new KafkaFutureImpl<RecordMetadata>();
-        KafkaFuture<RecordMetadata> future = new KafkaFuture<RecordMetadata>(completion);
+        KafkaFuture<RecordMetadata> future = completion;
         using CancellationTokenSource cancellation = new CancellationTokenSource();
 
         Assert.True(outcome == "succeeded" ? completion.Complete(metadata) : completion.CompleteWithError(failure));
@@ -326,13 +323,13 @@ public sealed class PublicKafkaFutureTests
     }
 
     [Fact]
-    public void Conversion_ToKafkaFuture_IsTheSameFuture()
+    public void ATypedFuture_IsItsOwnPlainFuture_TheSameObject()
     {
         KafkaFutureImpl<RecordMetadata> impl = new KafkaFutureImpl<RecordMetadata>();
-        KafkaFuture<RecordMetadata> typed = new KafkaFuture<RecordMetadata>(impl);
+        KafkaFuture<RecordMetadata> typed = impl;
         KafkaFuture erased = typed;
-        Assert.True(erased == typed.Erase());
-        Assert.True(erased == new KafkaFuture(impl));
+        Assert.Same(typed, erased);
+        Assert.True(erased == impl);
         Assert.Equal(typed.GetHashCode(), erased.GetHashCode());
         Assert.False(erased.IsDone());
         Assert.True(impl.Complete(NewMetadata()));
@@ -340,7 +337,7 @@ public sealed class PublicKafkaFutureTests
         erased.GetNow();
 
         KafkaFutureImpl<RecordMetadata> failing = new KafkaFutureImpl<RecordMetadata>();
-        KafkaFuture erasedFailure = new KafkaFuture<RecordMetadata>(failing);
+        KafkaFuture erasedFailure = failing;
         KafkaException cause = new Common.Errors.TimeoutException("The operation failed.");
         Assert.True(failing.CompleteWithError(cause));
         Assert.Same(cause, FutureAssert.Throws<KafkaTimeoutException>(() => erasedFailure.GetNow()));
@@ -348,36 +345,31 @@ public sealed class PublicKafkaFutureTests
     }
 
     [Fact]
-    public void Equality_BetweenATypedFutureAndTheValueItConvertsTo_IsSymmetric()
+    public void Equality_BetweenATypedFutureAndItsPlainView_IsSymmetric()
     {
-        KafkaFuture<RecordMetadata> overImpl = new KafkaFuture<RecordMetadata>(new KafkaFutureImpl<RecordMetadata>());
-        KafkaFuture<RecordMetadata> otherImpl = new KafkaFuture<RecordMetadata>(new KafkaFutureImpl<RecordMetadata>());
-        KafkaFuture<RecordMetadata> none = default;
+        KafkaFuture<RecordMetadata> overImpl = new KafkaFutureImpl<RecordMetadata>();
+        KafkaFuture<RecordMetadata> otherImpl = new KafkaFutureImpl<RecordMetadata>();
 
         AssertTypedAndErasedEquality(overImpl, overImpl, equal: true);
-        AssertTypedAndErasedEquality(none, none, equal: true);
-        AssertTypedAndErasedEquality(none, default(KafkaFuture), equal: true);
-
         AssertTypedAndErasedEquality(overImpl, otherImpl, equal: false);
-        AssertTypedAndErasedEquality(overImpl, none, equal: false);
-        AssertTypedAndErasedEquality(none, otherImpl, equal: false);
+        AssertTypedAndErasedEquality(otherImpl, overImpl, equal: false);
 
-        KafkaFuture<int> otherType = new KafkaFuture<int>(new KafkaFutureImpl<int>());
+        KafkaFuture<int> otherType = new KafkaFutureImpl<int>();
         Assert.False(((object)overImpl).Equals(otherType));
         Assert.False(((object)(KafkaFuture)overImpl).Equals(otherType));
         Assert.False(((object)otherType).Equals((KafkaFuture)overImpl));
     }
 
     [Fact]
-    public void Equality_EveryDefaultFuture_EqualsEveryOther_TypedOrUntyped_Transitively_WithHashCodeZero()
+    public void Equality_EveryNullFuture_EqualsEveryOther_TypedOrPlain()
     {
-        object[] defaults = { default(KafkaFuture<int>), default(KafkaFuture), default(KafkaFuture<string>) };
-        foreach (object left in defaults)
+        KafkaFuture?[] nulls = { default(KafkaFuture<int>), default(KafkaFuture), default(KafkaFuture<string>) };
+        foreach (KafkaFuture? left in nulls)
         {
-            Assert.Equal(0, left.GetHashCode());
-            foreach (object right in defaults)
+            foreach (KafkaFuture? right in nulls)
             {
-                Assert.True(left.Equals(right), left.GetType() + " should equal " + right.GetType());
+                Assert.True(left == right);
+                Assert.True(Equals(left, right));
             }
         }
     }
@@ -385,17 +377,17 @@ public sealed class PublicKafkaFutureTests
     [Fact]
     public void Equality_ALiveFuture_IsUnequalToAFutureOfAnotherType_AndEqualToItsOwnErasedForm()
     {
-        KafkaFuture<string> otherType = new KafkaFuture<string>(new KafkaFutureImpl<string>());
+        KafkaFuture<string> otherType = new KafkaFutureImpl<string>();
         KafkaFuture<int>[] live =
         {
-            new KafkaFuture<int>(new KafkaFutureImpl<int>()),
-            new KafkaFuture<int>(new KafkaFutureImpl<int>(mayCancel: false)),
+            new KafkaFutureImpl<int>(),
+            new KafkaFutureImpl<int>(mayCancel: false),
         };
         foreach (KafkaFuture<int> future in live)
         {
-            AssertUnequalBothWays(future, default(KafkaFuture<string>));
+            Assert.False(future.Equals((object?)default(KafkaFuture<string>)));
             AssertUnequalBothWays(future, otherType);
-            AssertUnequalBothWays(future, default(KafkaFuture));
+            Assert.False(future.Equals(default(KafkaFuture)));
             object erased = (KafkaFuture)future;
             Assert.True(((object)future).Equals(erased));
             Assert.True(erased.Equals(future));
@@ -409,7 +401,7 @@ public sealed class PublicKafkaFutureTests
     public void IsDone_OverADoneValueSource_RunsNothing_UntilASettlingReadRunsEachListenerOnce(string read)
     {
         var source = new FakeFutureValueSource<int>();
-        KafkaFuture<int> future = new KafkaFuture<int>(new KafkaFutureImpl<int>(source: source));
+        KafkaFuture<int> future = new KafkaFutureImpl<int>(source: source);
         var ran = new ConcurrentQueue<(string Listener, int Thread)>();
         KafkaFuture<int> applied = future.ThenApply(value =>
         {
@@ -457,7 +449,7 @@ public sealed class PublicKafkaFutureTests
     public void IsDone_OverAPendingValueSource_IsFalse_AndRunsNothing()
     {
         var source = new FakeFutureValueSource<int>();
-        KafkaFuture<int> future = new KafkaFuture<int>(new KafkaFutureImpl<int>(source: source));
+        KafkaFuture<int> future = new KafkaFutureImpl<int>(source: source);
         int ran = 0;
         future.WhenComplete((value, error) => Interlocked.Increment(ref ran));
 
@@ -472,7 +464,7 @@ public sealed class PublicKafkaFutureTests
     [Fact]
     public void Cancel_OverAnImpl_AnswersTrueAgainOnceCancelled_AsJavaDoes()
     {
-        KafkaFuture<int> future = new KafkaFuture<int>(new KafkaFutureImpl<int>());
+        KafkaFuture<int> future = new KafkaFutureImpl<int>();
 
         Assert.True(future.Cancel(true));
         Assert.True(future.Cancel(false));
@@ -482,23 +474,29 @@ public sealed class PublicKafkaFutureTests
     }
 
     [Fact]
-    public void Shape_IsAPublicReadonlyStruct_WithJavasKafkaFutureMembers()
+    public void Shape_IsAPublicAbstractClass_DerivingFromKafkaFuture_WithJavasKafkaFutureMembers()
     {
         Type open = typeof(KafkaFuture<>);
         Type type = typeof(KafkaFuture<RecordMetadata>);
 
-        Assert.True(type.IsValueType);
+        Assert.True(open.IsClass);
+        Assert.True(open.IsAbstract);
+        Assert.False(open.IsSealed);
         Assert.True(open.IsPublic);
-
-        Assert.Contains(
-            open.CustomAttributes,
-            attribute => attribute.AttributeType.FullName == "System.Runtime.CompilerServices.IsReadOnlyAttribute");
+        Assert.Equal(typeof(KafkaFuture), type.BaseType);
+        Assert.True(typeof(KafkaFuture).IsAssignableFrom(typeof(KafkaFutureImpl<RecordMetadata>)));
 
         Type typeParameter = Assert.Single(open.GetGenericArguments());
         Assert.Equal(GenericParameterAttributes.None, typeParameter.GenericParameterAttributes);
         Assert.Empty(typeParameter.GetGenericParameterConstraints());
 
-        Assert.Equal(new[] { typeof(IEquatable<KafkaFuture<RecordMetadata>>) }, type.GetInterfaces());
+        Assert.Equal(
+            new[]
+            {
+                "System.IEquatable`1[Confluent.Kafka.Common.KafkaFuture]",
+                "System.IEquatable`1[Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata]]",
+            },
+            type.GetInterfaces().Select(face => face.ToString()).OrderBy(name => name, StringComparer.Ordinal));
 
         Assert.Equal(
             new[]
@@ -511,16 +509,22 @@ public sealed class PublicKafkaFutureTests
                 "Confluent.Kafka.Producer.RecordMetadata Get(System.Threading.CancellationToken)",
                 "Confluent.Kafka.Producer.RecordMetadata Get(System.TimeSpan)",
                 "Confluent.Kafka.Producer.RecordMetadata GetNow(Confluent.Kafka.Producer.RecordMetadata)",
-                "System.Boolean Cancel(System.Boolean)",
                 "System.Boolean Equals(Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
                 "System.Boolean Equals(System.Object)",
-                "System.Boolean IsCancelled()",
-                "System.Boolean IsCompletedExceptionally()",
-                "System.Boolean IsDone()",
                 "System.Int32 GetHashCode()",
-                "System.String ToString()",
             },
             Signatures(type, BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
+        Assert.All(
+            type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+                .Where(method => method.Name is not ("Equals" or "GetHashCode")),
+            method => Assert.True(method.IsAbstract, method.Name + " should be abstract"));
+
+        foreach (string inherited in new[] { "Cancel", "IsCancelled", "IsCompletedExceptionally", "IsDone", "ToString" })
+        {
+            MethodInfo method = type.GetMethods(BindingFlags.Public | BindingFlags.Instance).Single(m => m.Name == inherited);
+            Assert.Equal(typeof(KafkaFuture), method.DeclaringType);
+            Assert.True(method.IsAbstract, inherited + " should be abstract");
+        }
 
         const BindingFlags AnyInstance = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
         Assert.Null(type.GetMethod("ToCompletionStage", AnyInstance));
@@ -529,12 +533,10 @@ public sealed class PublicKafkaFutureTests
         Assert.DoesNotContain(
             type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static),
             method => typeof(Task).IsAssignableFrom(method.ReturnType));
-        Assert.Equal(type, type.GetMethod("ToString", Type.EmptyTypes)!.DeclaringType);
 
         Assert.Equal(
             new[]
             {
-                "Confluent.Kafka.Common.KafkaFuture op_Implicit(Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
                 "System.Boolean op_Equality(Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata], "
                     + "Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
                 "System.Boolean op_Inequality(Confluent.Kafka.Common.KafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata], "
@@ -542,34 +544,13 @@ public sealed class PublicKafkaFutureTests
             },
             Signatures(type, BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
 
-        Assert.Empty(type.GetConstructors(BindingFlags.Public | BindingFlags.Instance));
-        ConstructorInfo[] constructors = type.GetConstructors(BindingFlags.NonPublic | BindingFlags.Instance);
-        Assert.All(constructors, constructor => Assert.True(constructor.IsAssembly));
-        Assert.Equal(
-            new[] { typeof(KafkaFutureImpl<RecordMetadata>).ToString() },
-            constructors
-                .Select(constructor => Assert.Single(constructor.GetParameters()).ParameterType.ToString())
-                .OrderBy(name => name, StringComparer.Ordinal)
-                .ToArray());
+        ConstructorInfo constructor = Assert.Single(type.GetConstructors(AnyInstance));
+        Assert.True(constructor.IsFamilyAndAssembly);
+        Assert.Empty(constructor.GetParameters());
 
-        Assert.Empty(type.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
+        Assert.Empty(type.GetFields(AnyInstance | BindingFlags.Static | BindingFlags.DeclaredOnly));
         Assert.Empty(type.GetProperties(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static));
-        FieldInfo[] fields = type.GetFields(BindingFlags.NonPublic | BindingFlags.Instance);
-        Assert.All(fields, field =>
-        {
-            Assert.True(field.IsPrivate);
-            Assert.True(field.IsInitOnly);
-        });
-        Assert.Equal(
-            new[] { typeof(KafkaFutureImpl<RecordMetadata>) + " _impl" },
-            fields.Select(field => field.FieldType + " " + field.Name).OrderBy(name => name, StringComparer.Ordinal).ToArray());
         Assert.Empty(type.GetNestedTypes(BindingFlags.Public));
-    }
-
-    private static void AssertDefaultThrows(Func<object?> get)
-    {
-        InvalidOperationException thrown = Assert.Throws<InvalidOperationException>(get);
-        Assert.Equal(DefaultValueMessage, thrown.Message);
     }
 
     private static object? OnNewThread(Func<object?> body, out int threadId)

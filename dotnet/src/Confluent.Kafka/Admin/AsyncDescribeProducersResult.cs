@@ -56,7 +56,7 @@ public sealed class AsyncDescribeProducersResult
     /// </exception>
     public AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState> PartitionResult(TopicPartition partition) =>
         partition is not null
-        && _futures.TryGetValue(partition, out AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState> future)
+        && _futures.TryGetValue(partition, out AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>? future)
             ? future
             : throw new IllegalArgumentException(
                 string.Format(
@@ -87,7 +87,7 @@ public sealed class AsyncDescribeProducersResult
                     new Dictionary<TopicPartition, DescribeProducersResult.PartitionProducerState>(futures.Count);
                 foreach (KeyValuePair<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>> entry in futures)
                 {
-                    states.Add(entry.Key, entry.Value.Impl.GetNow(null!));
+                    states.Add(entry.Key, AsyncAdminFutures.Engine(entry.Value).GetNowUnwrapped(null!));
                 }
 
                 return states;
@@ -95,13 +95,13 @@ public sealed class AsyncDescribeProducersResult
     }
 
     internal static AsyncDescribeProducersResult OfClient(
-        (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> Partitions, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> Partitions, SafeAdminResultHandle Result) native)
     {
         Dictionary<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>> futures =
             new Dictionary<TopicPartition, AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>>(native.Partitions.Count);
-        foreach (KeyValuePair<TopicPartition, KafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> entry in native.Partitions)
+        foreach (KeyValuePair<TopicPartition, IKafkaFutureImpl<DescribeProducersResult.PartitionProducerState>> entry in native.Partitions)
         {
-            futures.Add(entry.Key, new AsyncKafkaFuture<DescribeProducersResult.PartitionProducerState>(entry.Value));
+            futures.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
         }
 
         return new AsyncDescribeProducersResult(futures, native.Result);

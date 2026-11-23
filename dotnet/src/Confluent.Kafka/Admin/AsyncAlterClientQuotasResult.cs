@@ -33,7 +33,7 @@ namespace Confluent.Kafka.Admin;
 public sealed class AsyncAlterClientQuotasResult
 {
     private readonly IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture> _values;
-    private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
     /// <summary>Creates a result over the given futures, keyed by quota entity.</summary>
@@ -57,7 +57,7 @@ public sealed class AsyncAlterClientQuotasResult
 
     private AsyncAlterClientQuotasResult(
         IReadOnlyDictionary<ClientQuotaEntity, AsyncKafkaFuture> values,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -78,19 +78,22 @@ public sealed class AsyncAlterClientQuotasResult
     /// failure to complete if any entity failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// A future the Result was constructed with is <see langword="null"/>.
+    /// </exception>
     public AsyncKafkaFuture All() =>
         _nativeFutures is not null
-            ? new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures))
+            ? AsyncAdminFutures.Of(FutureState.AllOf(new AsyncKafkaFutureImpl<object?>(), _nativeFutures))
             : AsyncAdminFutures.AllOf(_values.Values);
 
     internal static AsyncAlterClientQuotasResult OfClient(
-        (IReadOnlyDictionary<ClientQuotaEntity, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<ClientQuotaEntity, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<ClientQuotaEntity, AsyncKafkaFuture> values = new Dictionary<ClientQuotaEntity, AsyncKafkaFuture>(native.Values.Count);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
-        foreach (KeyValuePair<ClientQuotaEntity, KafkaFutureImpl<object?>> entry in native.Values)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<ClientQuotaEntity, IKafkaFutureImpl<object?>> entry in native.Values)
         {
-            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            values.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

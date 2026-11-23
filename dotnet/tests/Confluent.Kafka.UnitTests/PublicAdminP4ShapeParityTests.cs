@@ -110,9 +110,9 @@ public sealed class PublicAdminP4ShapeParityTests
         Assert.Equal(typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, Exception>>), partitions.ReturnType);
         Assert.Equal(typeof(KafkaFuture), all.ReturnType);
 
-        // Nullability positions: 0 = the KafkaFuture (a struct, so oblivious), 1 = the dictionary, 2 = its
+        // Nullability positions: 0 = the KafkaFuture, 1 = the dictionary, 2 = its
         // TopicPartition key, 3 = the map's value.
-        Assert.Equal(NullableAnnotation.Oblivious, NullableAnnotation.Flag(partitions.ReturnParameter, 0));
+        Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(partitions.ReturnParameter, 0));
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(partitions.ReturnParameter, 1));
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(partitions.ReturnParameter, 2));
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(partitions.ReturnParameter, 3));

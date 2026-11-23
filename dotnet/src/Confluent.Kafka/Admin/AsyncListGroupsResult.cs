@@ -27,15 +27,15 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class AsyncListGroupsResult
 {
-    private readonly KafkaFutureImpl<IReadOnlyCollection<GroupListing>> _all;
-    private readonly KafkaFutureImpl<IReadOnlyCollection<GroupListing>> _valid;
-    private readonly KafkaFutureImpl<IReadOnlyCollection<Exception>> _errors;
+    private readonly IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> _all;
+    private readonly IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> _valid;
+    private readonly IKafkaFutureImpl<IReadOnlyCollection<Exception>> _errors;
     private readonly SafeAdminResultHandle _native;
 
     private AsyncListGroupsResult(
-        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
-        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
-        KafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
+        IKafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
         SafeAdminResultHandle native)
     {
         _all = all;
@@ -47,21 +47,21 @@ public sealed class AsyncListGroupsResult
     internal SafeAdminResultHandle Native => _native;
 
     internal static AsyncListGroupsResult OfClient(
-        (KafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
-            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
-            KafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
+        (IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
+            IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
+            IKafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
             SafeAdminResultHandle Result) native) =>
         new AsyncListGroupsResult(native.All, native.Valid, native.Errors, native.Result);
 
     /// <inheritdoc cref="ListGroupsResult.All"/>
     public AsyncKafkaFuture<IReadOnlyCollection<GroupListing>> All() =>
-        new AsyncKafkaFuture<IReadOnlyCollection<GroupListing>>(_all);
+        AsyncAdminFutures.Of(_all);
 
     /// <inheritdoc cref="ListGroupsResult.Valid"/>
     public AsyncKafkaFuture<IReadOnlyCollection<GroupListing>> Valid() =>
-        new AsyncKafkaFuture<IReadOnlyCollection<GroupListing>>(_valid);
+        AsyncAdminFutures.Of(_valid);
 
     /// <inheritdoc cref="ListGroupsResult.Errors"/>
     public AsyncKafkaFuture<IReadOnlyCollection<Exception>> Errors() =>
-        new AsyncKafkaFuture<IReadOnlyCollection<Exception>>(_errors);
+        AsyncAdminFutures.Of(_errors);
 }

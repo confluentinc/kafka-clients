@@ -34,29 +34,33 @@ internal sealed class CreateTopicsRefinements
 
     private static readonly Func<IntPtr, int> s_readInt32 = static value => Marshal.ReadInt32(value);
 
-    internal CreateTopicsRefinements(SafeAdminResultHandle result, IReadOnlyDictionary<string, KafkaFutureImpl<object?>> values)
+    internal CreateTopicsRefinements(
+        SafeAdminResultHandle result, IReadOnlyDictionary<string, IKafkaFutureImpl<object?>> values, AdminFlavour flavour)
     {
         Result = result;
         Values = values;
+        Flavour = flavour;
     }
 
     internal SafeAdminResultHandle Result { get; }
 
-    internal IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values { get; }
+    internal IReadOnlyDictionary<string, IKafkaFutureImpl<object?>> Values { get; }
 
-    internal KafkaFutureImpl<Config> Config(string topic) =>
+    internal AdminFlavour Flavour { get; }
+
+    internal IKafkaFutureImpl<Config> Config(string topic) =>
         Refine(topic, NativeMethods.CreateTopicsResultConfig, s_copyOutConfig);
 
-    internal KafkaFutureImpl<Uuid> TopicId(string topic) =>
+    internal IKafkaFutureImpl<Uuid> TopicId(string topic) =>
         Refine(topic, NativeMethods.CreateTopicsResultTopicId, s_copyOutUuid);
 
-    internal KafkaFutureImpl<int> NumPartitions(string topic) =>
+    internal IKafkaFutureImpl<int> NumPartitions(string topic) =>
         Refine(topic, NativeMethods.CreateTopicsResultNumPartitions, s_readInt32);
 
-    internal KafkaFutureImpl<int> ReplicationFactor(string topic) =>
+    internal IKafkaFutureImpl<int> ReplicationFactor(string topic) =>
         Refine(topic, NativeMethods.CreateTopicsResultReplicationFactor, s_readInt32);
 
-    private KafkaFutureImpl<T> Refine<T>(
+    private IKafkaFutureImpl<T> Refine<T>(
         string topic, NativeAdminClient.KeyedResultFuture accessor, Func<IntPtr, T> convert)
     {
         if (topic is null)
@@ -71,16 +75,16 @@ internal sealed class CreateTopicsRefinements
             future = NativeAdminClient.CallAccessor(Result, accessor, name.Pointer);
         }
 
-        KafkaFutureImpl<T> source = NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Owned(future), convert);
-        if (!Values.TryGetValue(topic, out KafkaFutureImpl<object?>? key))
+        IKafkaFutureImpl<T> source = NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Owned(future), convert, Flavour);
+        if (!Values.TryGetValue(topic, out IKafkaFutureImpl<object?>? key))
         {
             return source;
         }
 
-        KafkaFutureImpl<T> linked = source.ThenApply(static value => value);
-        key.AddListener(settled =>
+        IKafkaFutureImpl<T> linked = source.ThenApplyFunc(static value => value);
+        key.AddListener(_ =>
         {
-            if (settled.IsCancelled && settled.Failure is { } cancellation)
+            if (key.IsCancelled() && key.Failure is { } cancellation)
             {
                 linked.Propagate(cancellation);
             }

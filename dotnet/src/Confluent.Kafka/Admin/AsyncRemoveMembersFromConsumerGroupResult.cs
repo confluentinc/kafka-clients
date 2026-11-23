@@ -49,7 +49,7 @@ public sealed class AsyncRemoveMembersFromConsumerGroupResult
     /// A new future over the whole request. When every member was to be removed, a member's failure is a
     /// <see cref="KafkaException"/> naming the member, its <see cref="Exception.InnerException"/> the member's own error.
     /// </returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(NativeAdminClient.RemoveMembersFromConsumerGroupAll(_native));
+    public AsyncKafkaFuture All() => AsyncAdminFutures.Of(NativeAdminClient.RemoveMembersFromConsumerGroupAll(_native, AdminFlavour.Async));
 
     /// <summary>
     /// The outcome of removing one member — Java's <c>memberResult(MemberToRemove)</c>.
@@ -67,7 +67,7 @@ public sealed class AsyncRemoveMembersFromConsumerGroupResult
     public AsyncKafkaFuture MemberResult(MemberToRemove member)
     {
         NativeAdminClient.RequireRequestedMember(member, _removeAll);
-        return new AsyncKafkaFuture(NativeAdminClient.RemoveMembersFromConsumerGroupMemberResult(_native, member));
+        return AsyncAdminFutures.Of(NativeAdminClient.RemoveMembersFromConsumerGroupMemberResult(_native, member, AdminFlavour.Async));
     }
 
     internal static AsyncRemoveMembersFromConsumerGroupResult OfClient(SafeAdminResultHandle native, RemoveMembersFromConsumerGroupOptions options) =>

@@ -32,7 +32,7 @@ public sealed class DescribeReplicaLogDirsResult
 {
     private readonly IReadOnlyDictionary<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>> _values;
     private readonly IEqualityComparer<TopicPartitionReplica> _comparer;
-    private readonly IReadOnlyDictionary<TopicPartitionReplica, KafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>? _nativeValues;
+    private readonly IReadOnlyDictionary<TopicPartitionReplica, IKafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>>? _nativeValues;
     private readonly SafeAdminResultHandle? _native;
 
     internal DescribeReplicaLogDirsResult(
@@ -44,14 +44,14 @@ public sealed class DescribeReplicaLogDirsResult
     }
 
     private DescribeReplicaLogDirsResult(
-        IReadOnlyDictionary<TopicPartitionReplica, KafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> nativeValues, SafeAdminResultHandle native)
+        IReadOnlyDictionary<TopicPartitionReplica, IKafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> nativeValues, SafeAdminResultHandle native)
     {
         IEqualityComparer<TopicPartitionReplica> comparer = EqualityComparer<TopicPartitionReplica>.Default;
         Dictionary<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>> values =
             new Dictionary<TopicPartitionReplica, KafkaFuture<ReplicaLogDirInfo>>(nativeValues.Count, comparer);
-        foreach (KeyValuePair<TopicPartitionReplica, KafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> entry in nativeValues)
+        foreach (KeyValuePair<TopicPartitionReplica, IKafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> entry in nativeValues)
         {
-            values.Add(entry.Key, new KafkaFuture<ReplicaLogDirInfo>(entry.Value));
+            values.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
         }
 
         _values = values;
@@ -75,11 +75,11 @@ public sealed class DescribeReplicaLogDirsResult
     /// <returns>A future yielding the whole map, or failing with the first failure to complete.</returns>
     public KafkaFuture<IReadOnlyDictionary<TopicPartitionReplica, ReplicaLogDirInfo>> All() =>
         _nativeValues is not null
-            ? new KafkaFuture<IReadOnlyDictionary<TopicPartitionReplica, ReplicaLogDirInfo>>(KafkaFutureImpl.GatherAll(_nativeValues, _comparer))
+            ? SyncAdminFutures.Of(FutureState.GatherAll(new KafkaFutureImpl<object?>(), _nativeValues, _comparer))
             : SyncAdminFutures.GatherAll(_values, _comparer);
 
     internal static DescribeReplicaLogDirsResult OfClient(
-        (IReadOnlyDictionary<TopicPartitionReplica, KafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> Values, SafeAdminResultHandle Result) native) =>
+        (IReadOnlyDictionary<TopicPartitionReplica, IKafkaFutureImpl<DescribeReplicaLogDirsResult.ReplicaLogDirInfo>> Values, SafeAdminResultHandle Result) native) =>
         new DescribeReplicaLogDirsResult(native.Values, native.Result);
 
     /// <summary>
