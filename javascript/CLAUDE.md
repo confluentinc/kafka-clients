@@ -1621,12 +1621,11 @@ binding:
   publish job refuses a version below 4). There is no manual publish script.
   `javascript/` is mirrored read-only to `confluent-kafka-javascript` and
   released from `<major>.<minor>.x` branches.
-- CI runs the binding on Node 22 (every suite), on Node 24 (the static,
-  unit and typing tests, and the broker-backed tests against the scratch
-  broker `test-integration` starts, `await using` being native there) and on
-  Node 26 (the static, unit and typing tests, which need no broker), as the
-  JS conventions ask (CI on Node 22, 24 and 26, Q73). The gRPC arms run on
-  Node 22.
+- CI runs the binding on Node 22 (every suite), and on Node 24 and Node 26
+  (the static, unit and typing tests, and the broker-backed tests against the
+  scratch broker `test-integration` starts), as the JS conventions ask (CI
+  on Node 22, 24 and 26, Q73). The gRPC arms and the SSL and SASL_SSL tests
+  run on Node 22.
 
 ### Generated files
 
