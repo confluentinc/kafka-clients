@@ -61,8 +61,8 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
     /// represent the offsets that the consumer will start reading from on the next poll. The map is copied.
     /// </param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="records"/> or a list in it, or <paramref name="nextOffsets"/> or an offset in it, is
-    /// <see langword="null"/>.
+    /// <paramref name="records"/> or a partition or a list in it, or <paramref name="nextOffsets"/> or a partition or
+    /// an offset in it, is <see langword="null"/>.
     /// </exception>
     public ConsumerRecords(
         IReadOnlyDictionary<TopicPartition, IReadOnlyList<ConsumerRecord<TKey, TValue>>> records,
@@ -96,10 +96,11 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
     /// <param name="partition">The partition to get records for.</param>
     /// <returns>
     /// The partition's records, in their order, as a read-only list; an empty list when this set holds
-    /// none for it.
+    /// none for it, as for a <see langword="null"/> partition.
     /// </returns>
     public IReadOnlyList<ConsumerRecord<TKey, TValue>> Records(TopicPartition partition) =>
-        _byPartition.TryGetValue(partition, out ReadOnlyCollection<ConsumerRecord<TKey, TValue>>? records)
+        partition is not null
+            && _byPartition.TryGetValue(partition, out ReadOnlyCollection<ConsumerRecord<TKey, TValue>>? records)
             ? records
             : s_noRecords;
 
@@ -182,6 +183,11 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
             new List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>>(records.Count);
         foreach (KeyValuePair<TopicPartition, IReadOnlyList<ConsumerRecord<TKey, TValue>>> entry in records)
         {
+            if (entry.Key is null)
+            {
+                throw new ArgumentNullException(nameof(records), "records must not contain null");
+            }
+
             if (entry.Value is null)
             {
                 throw new ArgumentNullException(nameof(records), "The records must not contain a null list.");
@@ -223,6 +229,11 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
             new Dictionary<TopicPartition, OffsetAndMetadata>(nextOffsets.Count);
         foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in nextOffsets)
         {
+            if (entry.Key is null)
+            {
+                throw new ArgumentNullException(nameof(nextOffsets), "nextOffsets must not contain null");
+            }
+
             if (entry.Value is null)
             {
                 throw new ArgumentNullException(nameof(nextOffsets), "The next offsets must not contain a null value.");

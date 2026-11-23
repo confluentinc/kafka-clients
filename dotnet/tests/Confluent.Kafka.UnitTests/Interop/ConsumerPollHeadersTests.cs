@@ -53,7 +53,7 @@ public sealed class ConsumerPollHeadersTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { (Topic, Partition) });
-        consumer.Seek(Topic, Partition, offset: 0);
+        consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         consumer.AddRecord(Topic, Partition, offset: 0, key: null, value: null);
 
         ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback(s_pollTimeout, new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()), new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()));
@@ -69,7 +69,7 @@ public sealed class ConsumerPollHeadersTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { (Topic, Partition) });
-        consumer.Seek(Topic, Partition, offset: 0);
+        consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         using IDisposable valueBlock = AddRecordWithHeaders(
             consumer,
             Topic,

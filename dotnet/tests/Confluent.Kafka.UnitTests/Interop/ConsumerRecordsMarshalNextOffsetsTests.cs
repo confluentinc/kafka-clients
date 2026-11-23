@@ -445,7 +445,7 @@ public sealed class ConsumerRecordsMarshalNextOffsetsTests
             return Encoding.UTF8.GetString(data.ToArray());
         }
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data)
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlyMemory<byte> data)
         {
             Given.Add(data);
             return Encoding.UTF8.GetString(data.ToArray());

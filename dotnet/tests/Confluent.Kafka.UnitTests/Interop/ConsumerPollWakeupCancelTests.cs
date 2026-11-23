@@ -47,7 +47,7 @@ public sealed class ConsumerPollWakeupCancelTests
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         consumer.Assign(new[] { (Topic, Partition) });
-        consumer.Seek(Topic, Partition, offset: 0);
+        consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         return Task.FromResult(consumer);
     }
 

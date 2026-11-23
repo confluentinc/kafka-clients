@@ -15,6 +15,7 @@
 using System.Globalization;
 
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Internal;
 
@@ -64,7 +65,7 @@ public sealed class ConsumerRecord<TKey, TValue>
     private readonly TimestampType _timestampType;
     private readonly TKey? _key;
     private readonly TValue? _value;
-    private readonly Headers _headers;
+    private readonly IHeaders _headers;
     private readonly int? _leaderEpoch;
     private readonly int _serializedKeySize;
     private readonly int _serializedValueSize;
@@ -91,7 +92,7 @@ public sealed class ConsumerRecord<TKey, TValue>
             NULL_SIZE,
             key,
             value,
-            new Headers(),
+            new RecordHeaders(),
             null)
     {
     }
@@ -123,7 +124,7 @@ public sealed class ConsumerRecord<TKey, TValue>
         int serializedValueSize,
         TKey? key,
         TValue? value,
-        Headers headers,
+        IHeaders headers,
         int? leaderEpoch)
         : this(
             topic,
@@ -171,7 +172,7 @@ public sealed class ConsumerRecord<TKey, TValue>
         int serializedValueSize,
         TKey? key,
         TValue? value,
-        Headers headers,
+        IHeaders headers,
         int? leaderEpoch,
         short? deliveryCount)
     {
@@ -229,7 +230,7 @@ public sealed class ConsumerRecord<TKey, TValue>
 
     /// <summary>The record headers; empty when the record has none.</summary>
     /// <returns>The record headers; empty when the record has none.</returns>
-    public Headers Headers() => _headers;
+    public IHeaders Headers() => _headers;
 
     /// <summary>
     /// The record's leader epoch, or <see langword="null"/> when the record format has none (Java's

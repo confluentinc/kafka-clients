@@ -302,7 +302,7 @@ public sealed class PublicConsumerSeekLagTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        IllegalStateException ex = Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(default, 0L); });
+        IllegalStateException ex = Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(new TopicPartition(null!, 0), 0L); });
         Assert.Equal("No current assignment for partition null-0", ex.Message);
     }
 

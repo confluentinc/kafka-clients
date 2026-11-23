@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.Globalization;
 
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 
 namespace Confluent.Kafka.Producer;
@@ -39,7 +40,7 @@ public sealed class ProducerRecord<TKey, TValue>
     private readonly long? _timestamp;
     private readonly TKey? _key;
     private readonly TValue? _value;
-    private readonly Headers _headers;
+    private readonly RecordHeaders _headers;
 
     /// <summary>
     /// Creates a record with a specified timestamp to be sent to a specified topic and partition.
@@ -74,7 +75,7 @@ public sealed class ProducerRecord<TKey, TValue>
         long? timestamp,
         TKey? key,
         TValue? value,
-        IEnumerable<Header>? headers)
+        IEnumerable<IHeader>? headers)
     {
         _topic = topic ?? throw new IllegalArgumentException("Topic cannot be null.");
 
@@ -100,7 +101,7 @@ public sealed class ProducerRecord<TKey, TValue>
         _timestamp = timestamp;
         _key = key;
         _value = value;
-        _headers = new Headers(headers);
+        _headers = new RecordHeaders(headers);
     }
 
     /// <summary>
@@ -142,7 +143,7 @@ public sealed class ProducerRecord<TKey, TValue>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="topic"/> is null, or <paramref name="partition"/> is specified and negative.
     /// </exception>
-    public ProducerRecord(string topic, int? partition, TKey? key, TValue? value, IEnumerable<Header>? headers)
+    public ProducerRecord(string topic, int? partition, TKey? key, TValue? value, IEnumerable<IHeader>? headers)
         : this(topic, partition, null, key, value, headers)
     {
     }
@@ -215,7 +216,9 @@ public sealed class ProducerRecord<TKey, TValue>
     /// </summary>
     /// <returns>The record's own headers, a writable copy of the constructor's <c>headers</c>, empty when there
     /// were none.</returns>
-    public Headers Headers() => _headers;
+    public IHeaders Headers() => _headers;
+
+    internal RecordHeaders OwnHeaders => _headers;
 
     /// <summary>
     /// Whether <paramref name="obj"/> is a record with an equal topic, partition, headers, key, value and timestamp. A

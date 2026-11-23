@@ -56,7 +56,8 @@ public sealed class KafkaAdminClient : IAdmin
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions options) =>
-        DeleteTopicsResult.OfClient(_native.DeleteTopics(topics, AdminEarlyReturns.DeleteTopics(topics, options)));
+        DeleteTopicsResult.OfClient(
+            _native.DeleteTopics(_native.CheckTopicIds(topics), AdminEarlyReturns.DeleteTopics(topics, options)));
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(IReadOnlyCollection<string> topics) =>
@@ -76,7 +77,7 @@ public sealed class KafkaAdminClient : IAdmin
     /// <inheritdoc/>
     public DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions options) =>
         DescribeTopicsResult.OfClient(
-            _native.DescribeTopics(topics, AdminEarlyReturns.DescribeTopics(topics, options)));
+            _native.DescribeTopics(_native.CheckTopicIds(topics), AdminEarlyReturns.DescribeTopics(topics, options)));
 
     /// <inheritdoc/>
     public DescribeTopicsResult DescribeTopics(IReadOnlyCollection<string> topicNames) =>

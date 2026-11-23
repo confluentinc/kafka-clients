@@ -52,15 +52,28 @@ public sealed class PublicAdminP8Tests
     }
 
     [Fact]
-    public void AbortTransaction_RejectsADefaultTopicPartition()
+    public void AbortTransaction_RejectsANullTopic()
     {
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentNullException error = Assert.Throws<ArgumentNullException>(
-            () => admin.AbortTransaction(new AbortTransactionSpec(default, 1L, 1, 1)));
+            () => admin.AbortTransaction(new AbortTransactionSpec(new TopicPartition(null!, 0), 1L, 1, 1)));
 
         Assert.Equal("spec", error.ParamName);
+    }
+
+    [Fact]
+    public void AbortTransaction_RejectsANullTopicPartition()
+    {
+        MockAdminClient admin = MockAdminClient.Create().Build();
+        using IDisposable adminDisposal = TestTimeout.Disposal(admin);
+
+        ArgumentNullException error = Assert.Throws<ArgumentNullException>(
+            () => admin.AbortTransaction(new AbortTransactionSpec(null!, 1L, 1, 1)));
+
+        Assert.Equal("spec", error.ParamName);
+        Assert.Equal(new ArgumentNullException("spec", "spec must not have a null TopicPartition").Message, error.Message);
     }
 
     [Fact]
@@ -403,7 +416,7 @@ public sealed class PublicAdminP8Tests
         Assert.Throws<ArgumentNullException>(() => admin.DescribeProducers(null!));
 
         ArgumentNullException element = Assert.Throws<ArgumentNullException>(
-            () => admin.DescribeProducers(new[] { new TopicPartition("alpha", 0), default }));
+            () => admin.DescribeProducers(new[] { new TopicPartition("alpha", 0), new TopicPartition(null!, 0) }));
         Assert.Equal("partitions", element.ParamName);
     }
 

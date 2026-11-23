@@ -112,7 +112,8 @@ public sealed class MockAdminClient : IAdmin
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions options) =>
-        DeleteTopicsResult.OfClient(_native.DeleteTopics(topics, options ?? new DeleteTopicsOptions()));
+        DeleteTopicsResult.OfClient(
+            _native.DeleteTopics(_native.CheckTopicIds(topics), options ?? new DeleteTopicsOptions()));
 
     /// <inheritdoc/>
     public DeleteTopicsResult DeleteTopics(IReadOnlyCollection<string> topics) =>
@@ -131,7 +132,8 @@ public sealed class MockAdminClient : IAdmin
 
     /// <inheritdoc/>
     public DescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions options) =>
-        DescribeTopicsResult.OfClient(_native.DescribeTopics(topics, options ?? new DescribeTopicsOptions()));
+        DescribeTopicsResult.OfClient(
+            _native.DescribeTopics(_native.CheckTopicIds(topics), options ?? new DescribeTopicsOptions()));
 
     /// <inheritdoc/>
     public DescribeTopicsResult DescribeTopics(IReadOnlyCollection<string> topicNames) =>
@@ -691,7 +693,7 @@ public sealed class MockAdminClient : IAdmin
     /// </summary>
     /// <param name="newOffsets">The beginning offset per topic partition.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="newOffsets"/> is null, or a key has a null topic.
+    /// <paramref name="newOffsets"/> is null, or has a null key or a key with a null topic.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// A key has a topic containing a NUL character (see the <see cref="IAdmin"/> remarks).
@@ -707,7 +709,7 @@ public sealed class MockAdminClient : IAdmin
     /// </summary>
     /// <param name="newOffsets">The end offset per topic partition.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="newOffsets"/> is null, or a key has a null topic.
+    /// <paramref name="newOffsets"/> is null, or has a null key or a key with a null topic.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// A key has a topic containing a NUL character (see the <see cref="IAdmin"/> remarks).
@@ -726,7 +728,7 @@ public sealed class MockAdminClient : IAdmin
     /// parameter; the real client has no such restriction.
     /// </remarks>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="newOffsets"/> is null, or a key has a null topic.
+    /// <paramref name="newOffsets"/> is null, or has a null key or a key with a null topic.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// A key has a topic containing a NUL character (see the <see cref="IAdmin"/> remarks).

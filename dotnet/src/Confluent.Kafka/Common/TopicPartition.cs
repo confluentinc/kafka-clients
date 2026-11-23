@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Globalization;
 
 namespace Confluent.Kafka.Common;
 
@@ -21,10 +22,11 @@ namespace Confluent.Kafka.Common;
 /// The constructor, like Java's, stores a <see langword="null"/> topic and a negative partition as given, though
 /// <see cref="Topic()"/> is annotated non-nullable.
 /// </remarks>
-public readonly struct TopicPartition : IEquatable<TopicPartition>
+public sealed class TopicPartition : IEquatable<TopicPartition>
 {
     private readonly string _topic;
     private readonly int _partition;
+    private int _hash;
 
     /// <summary>Initializes a pair, storing both arguments as given.</summary>
     public TopicPartition(string topic, int partition)
@@ -42,18 +44,22 @@ public readonly struct TopicPartition : IEquatable<TopicPartition>
     public int Partition() => _partition;
 
     /// <summary>
-    /// Determines whether two <see cref="TopicPartition"/> values are equal.
+    /// Determines whether two <see cref="TopicPartition"/> values are equal; two <see langword="null"/> references
+    /// are equal.
     /// </summary>
-    public static bool operator ==(TopicPartition left, TopicPartition right) => left.Equals(right);
+    public static bool operator ==(TopicPartition? left, TopicPartition? right) =>
+        ReferenceEquals(left, right) || (left is not null && left.Equals(right));
 
     /// <summary>
     /// Determines whether two <see cref="TopicPartition"/> values are not equal.
     /// </summary>
-    public static bool operator !=(TopicPartition left, TopicPartition right) => !left.Equals(right);
+    public static bool operator !=(TopicPartition? left, TopicPartition? right) => !(left == right);
 
     /// <inheritdoc/>
-    public bool Equals(TopicPartition other) =>
-        Partition() == other.Partition() && string.Equals(Topic(), other.Topic(), StringComparison.Ordinal);
+    public bool Equals(TopicPartition? other) =>
+        other is not null
+        && (ReferenceEquals(this, other)
+            || (_partition == other._partition && string.Equals(_topic, other._topic, StringComparison.Ordinal)));
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) => obj is TopicPartition other && Equals(other);
@@ -61,11 +67,21 @@ public readonly struct TopicPartition : IEquatable<TopicPartition>
     /// <inheritdoc/>
     public override int GetHashCode()
     {
-        int topicHash = Topic() is null ? 0 : StringComparer.Ordinal.GetHashCode(Topic());
-        return unchecked((topicHash * 397) ^ Partition());
+        // Cached as Java's: recomputed while it is 0, so a racing first call only repeats the computation.
+        if (_hash != 0)
+        {
+            return _hash;
+        }
+
+        int topicHash = _topic is null ? 0 : StringComparer.Ordinal.GetHashCode(_topic);
+        int result = unchecked((topicHash * 397) ^ _partition);
+        _hash = result;
+        return result;
     }
 
     /// <inheritdoc/>
-    public override string ToString() =>
-        (Topic() ?? "null") + "-" + Partition().ToString(System.Globalization.CultureInfo.InvariantCulture);
+    public override string ToString() => Format(_topic, _partition);
+
+    internal static string Format(string? topic, int partition) =>
+        (topic ?? "null") + "-" + partition.ToString(CultureInfo.InvariantCulture);
 }

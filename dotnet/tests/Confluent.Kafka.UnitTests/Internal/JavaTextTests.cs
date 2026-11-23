@@ -23,6 +23,7 @@ using System.Numerics;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Internal;
 
 using Xunit;
@@ -269,7 +270,7 @@ public sealed class JavaTextTests
     [Fact]
     public void ValueOf_Headers_IsTheirOwnToString()
     {
-        Headers headers = new Headers().Add("a", new byte[] { 1 });
+        IHeaders headers = new RecordHeaders().Add("a", new byte[] { 1 });
 
         Assert.Equal("RecordHeaders(headers = [RecordHeader(key = a, value = [1])], isReadOnly = false)", JavaText.ValueOf(headers));
         Assert.Equal("RecordHeaders(headers = [RecordHeader(key = a, value = [1])], isReadOnly = false)", JavaText.CoreText(headers, null));
