@@ -163,3 +163,25 @@ test('the gRPC harness is in scope', () => {
     ),
   ]);
 });
+
+test('the verifiable clients are in scope, and so are a JSON, a gyp, a Java and a linker map file', () => {
+  const root = project({
+    'verifiable_clients/v.js': j('// as Sender', '.java:12 does\n'),
+    'test/tsconfig.json': j('{\n  // Sender', '.java:30\n  "include": ["Sender', '.java:31"]\n}\n'),
+    'native/binding.gyp': j('# Sender', ".java:1, a comment\n{ 'x': 'a#Sender", ".java:2' } # Sender", '.java:3\n'),
+    'tools/t/T.java': j('/** Sender', '.java:4 */\nclass T {}\n'),
+    'native/a.map': j('/* Sender', '.java:5 */\n{ global: x; };\n'),
+    'verifiable_clients/README.md': j('Sender', '.java:6 is in a document, not a comment\n'),
+  });
+  const r = lint(root, [RULE]);
+  assert.equal(r.status, 1);
+  const rest = ': name the Java member instead (`org.apache.kafka.…Class#member`)';
+  assert.deepEqual(findings(r), [
+    j('verifiable_clients/v.js: 1 Java file:line reference(s) in comments, the first `Sender', '.java:12` at line 1', rest),
+    j('native/a.map: 1 Java file:line reference(s) in comments, the first `Sender', '.java:5` at line 1', rest),
+    // A `#` inside a string starts no comment.
+    j('native/binding.gyp: 2 Java file:line reference(s) in comments, the first `Sender', '.java:1` at line 1', rest),
+    j('test/tsconfig.json: 1 Java file:line reference(s) in comments, the first `Sender', '.java:30` at line 2', rest),
+    j('tools/t/T.java: 1 Java file:line reference(s) in comments, the first `Sender', '.java:4` at line 1', rest),
+  ]);
+});

@@ -152,3 +152,35 @@ test('a void or Promise<void> declaration needs no @returns, an options object o
     '18 jsdoc/require-hyphen-before-param-description: There must be a hyphen before @param description.',
   ]);
 });
+
+test('a doc comment of one @remarks alone asks for no tag; one with a summary, another tag or a second block does', () => {
+  const source = [
+    'export abstract class A {', // 1
+    '  /** @remarks What this class does differently. */', // 2
+    '  send(record: string): number;', // 3
+    '  /** Sends. @remarks Differently. */', // 4
+    '  send(a: number): number;', // 5
+    '  /**', // 6
+    '   * @param b - the b', // 7
+    '   * @remarks Differently.', // 8
+    '   */', // 9
+    '  send(b: boolean): number;', // 10
+    '  /**', // 11
+    '   * @remarks A remark', // 12
+    '   * over two lines.', // 13
+    '   */', // 14
+    '  send(c: bigint): number;', // 15
+    '  send(x: unknown): number {', // 16
+    '    return typeof x === "string" ? 1 : 0;', // 17
+    '  }', // 18
+    '  /** @remarks Differently. */', // 19
+    '  abstract flush(timeout: number): Promise<number>;', // 20
+    '}', // 21
+  ].join('\n');
+  // Whether a remark alone sits only on a member implementing an interface member is check-implementation-docs'.
+  assert.deepEqual(findings(source), [
+    '4 jsdoc/require-param: Missing JSDoc @param "a" declaration.',
+    '4 jsdoc/require-returns: Missing JSDoc @returns declaration.',
+    '6 jsdoc/require-returns: Missing JSDoc @returns declaration.',
+  ]);
+});

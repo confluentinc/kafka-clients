@@ -228,11 +228,11 @@ function javaLineRefs(text) {
 }
 
 /**
- * The references of a file's comments, `comments` being `{line, text}` (a
- * block comment's text spanning several lines): `[line, reference]`, the
- * comment lines grouped into runs of consecutive lines.
+ * The comment lines of `comments` (`{line, text}`, a block comment's text
+ * spanning several lines) grouped into runs of consecutive lines, each line
+ * `[number, text]`.
  */
-function javaLineRefsOfComments(comments) {
+function commentRuns(comments) {
   const runs = [];
   for (const { line, text } of comments) {
     text.split('\n').forEach((physical, offset) => {
@@ -242,11 +242,30 @@ function javaLineRefsOfComments(comments) {
       else runs.push([[number, physical]]);
     });
   }
+  return runs;
+}
+
+/**
+ * The references of a file's comments, `comments` being `{line, text}` (a
+ * block comment's text spanning several lines): `[line, reference]`, the
+ * comment lines grouped into runs of consecutive lines.
+ */
+function javaLineRefsOfComments(comments) {
   const out = [];
-  for (const run of runs) {
+  for (const run of commentRuns(comments)) {
     for (const [index, reference] of javaLineRefsRun(run.map(([, t]) => t))) out.push([run[index][0], reference]);
   }
   return out;
 }
 
-module.exports = { javaLineRefsRun, javaLineRefs, javaLineRefsOfComments, commentBody };
+module.exports = {
+  javaLineRefsRun,
+  javaLineRefs,
+  javaLineRefsOfComments,
+  commentBody,
+  commentRuns,
+  countWhile,
+  wordStarts,
+  skipLineWord,
+  lineNumber,
+};
