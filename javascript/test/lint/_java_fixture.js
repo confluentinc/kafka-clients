@@ -14,11 +14,23 @@
 
 'use strict';
 
-// A hand-written Java index (java-index.json, schema 2, as `cargo xtask
+// A hand-written Java index (java-index.json, schema 3, as `cargo xtask
 // java-index` writes it, but every key given) for the Java rules' fixture
 // projects.
 
 const PREFIX = 'org.apache.kafka.';
+
+/**
+ * The size of one Javadoc (`cargo xtask java-index`'s `javadoc`): its words by
+ * part, `params` and `throws` as `[name, words]`, `return` null when Java has
+ * no `@return`.
+ *
+ * @typedef {object} JavadocSize
+ * @property {number} body
+ * @property {[string, number][]} [params]
+ * @property {number | null} [return]
+ * @property {[string, number][]} [throws]
+ */
 
 /**
  * An overload of the index.
@@ -32,8 +44,9 @@ const PREFIX = 'org.apache.kafka.';
  * @property {string} visibility
  * @property {boolean} static
  * @property {boolean} default
+ * @property {boolean} abstract
  * @property {boolean} deprecated
- * @property {string | null} javadoc
+ * @property {JavadocSize[]} javadoc
  */
 
 /**
@@ -46,7 +59,7 @@ const PREFIX = 'org.apache.kafka.';
  * @property {boolean} static
  * @property {boolean} final
  * @property {boolean} deprecated
- * @property {string | null} javadoc
+ * @property {JavadocSize[]} javadoc
  */
 
 /**
@@ -64,7 +77,7 @@ const PREFIX = 'org.apache.kafka.';
  * @property {boolean} public_audience
  * @property {boolean} unsupported_package
  * @property {boolean} deprecated
- * @property {string | null} javadoc
+ * @property {JavadocSize[]} javadoc
  * @property {JavaMethod[]} overloads
  * @property {JavaField[]} fields
  * @property {string[]} enum_constants
@@ -91,8 +104,9 @@ function method(name, params = [], extra = {}) {
     visibility: 'public',
     static: false,
     default: false,
+    abstract: false,
     deprecated: false,
-    javadoc: null,
+    javadoc: [],
     ...extra,
   };
 }
@@ -112,7 +126,7 @@ function field(name, extra = {}) {
     static: true,
     final: true,
     deprecated: false,
-    javadoc: null,
+    javadoc: [],
     ...extra,
   };
 }
@@ -138,7 +152,7 @@ function javaClass(name, extra = {}) {
     public_audience: true,
     unsupported_package: false,
     deprecated: false,
-    javadoc: null,
+    javadoc: [],
     overloads: [],
     fields: [],
     enum_constants: [],
@@ -153,7 +167,7 @@ function javaClass(name, extra = {}) {
  * @returns {string}
  */
 function javaIndex(classes) {
-  return JSON.stringify({ schema: 2, audience_ref: '4.4.0-rc3', deprecation_refs: ['4.3.1', '4.4.0-rc3'], classes });
+  return JSON.stringify({ schema: 3, audience_ref: '4.4.0-rc3', deprecation_refs: ['4.3.1', '4.4.0-rc3'], classes });
 }
 
 /**

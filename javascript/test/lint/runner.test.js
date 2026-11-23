@@ -213,12 +213,12 @@ test('the inputs a later rule needs: a missing Java index or header is a reason,
 });
 
 test('a present Java index and header load once', () => {
-  const root = project({ 'java-index.json': '{"schema":2,"classes":[{"package":"x","path":["X"]}]}', 'h.h': 'void kafka_x(void);\n' });
+  const root = project({ 'java-index.json': '{"schema":3,"classes":[{"package":"x","path":["X"]}]}', 'h.h': 'void kafka_x(void);\n' });
   const ctx = new Context({ root, headerPath: path.join(root, 'h.h') });
   assert.equal(ctx.missing('java'), null);
   assert.equal(ctx.missing('header'), null);
   assert.equal(ctx.javaIndex(), ctx.javaIndex());
-  assert.equal(ctx.javaIndex().schema, 2);
+  assert.equal(ctx.javaIndex().schema, 3);
   // The loader puts back what the file leaves out at its default.
   assert.deepEqual(ctx.javaIndex().classes[0], {
     package: 'x',
@@ -231,6 +231,7 @@ test('a present Java index and header load once', () => {
     unsupported_package: false,
     supertypes: [],
     supertype_fqns: [],
+    javadoc: [],
     overloads: [],
     fields: [],
     enum_constants: [],
@@ -239,7 +240,7 @@ test('a present Java index and header load once', () => {
   assert.equal(ctx.header(), 'void kafka_x(void);\n');
   const bad = project({ 'java-index.json': '{' });
   assert.match(new Context({ root: bad }).missing('java'), /^cannot read the Java index java-index\.json: /);
-  const empty = project({ 'java-index.json': '{"schema":2,"classes":[]}' });
+  const empty = project({ 'java-index.json': '{"schema":3,"classes":[]}' });
   assert.equal(new Context({ root: empty }).missing('java'), 'the Java index java-index.json lists no class');
 });
 

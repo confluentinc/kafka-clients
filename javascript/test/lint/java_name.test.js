@@ -183,7 +183,7 @@ test('cannot run without the Java index, or with one of another schema', () => {
   r = lint(project({ 'tsconfig.json': TSCONFIG, 'src/a.ts': '', 'java-index.json': '{"schema":1,"classes":[]}' }), [RULE]);
   assert.equal(
     r.err[1],
-    '❌ check-java-name: cannot run, the Java index java-index.json is not schema 2 (rerun `cargo xtask java-index` from rust/)',
+    '❌ check-java-name: cannot run, the Java index java-index.json is not schema 3 (rerun `cargo xtask java-index` from rust/)',
   );
 });
 
