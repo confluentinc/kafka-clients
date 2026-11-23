@@ -14,7 +14,7 @@
 // Java's org.apache.kafka.clients.admin.DeleteConsumerGroupsResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). `deletedGroups()` returns Java's map as a
+// Conventions, Class family). `deletedGroups()` returns Java's map as a
 // `Map`; `all()` is Java's `allOf` over its futures.
 
 import { JavaForms } from '../internal/args';

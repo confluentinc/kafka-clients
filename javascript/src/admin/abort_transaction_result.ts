@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.AbortTransactionResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). Java holds one future per partition, the
+// Conventions, Class family). Java holds one future per partition, the
 // spec's one: `all()` is Java's `allOf` over them.
 
 import { JavaForms } from '../internal/args';

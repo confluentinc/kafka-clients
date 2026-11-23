@@ -140,14 +140,6 @@ export class GroupState {
     /** The name of the constant to return. */
     name: string;
   }): GroupState;
-  /**
-   * Looks the constant up by its name.
-   *
-   * @param name - the name, on its own or as `{ name }`
-   * @returns the constant
-   * @throws `IllegalArgumentError` when no constant has that name
-   * @throws `TypeError` when the name is null or not a string
-   */
   static valueOf(name: unknown): GroupState {
     VALUE_OF_FORMS.match(name, arguments.length);
     const value = VALUE_OF_FORMS.value(name, 'name');
@@ -176,12 +168,6 @@ export class GroupState {
     /** The name to parse. */
     name: string;
   }): GroupState;
-  /**
-   * Parses the name.
-   *
-   * @param name - the name, on its own or as `{ name }`
-   * @returns the constant
-   */
   static parse(name: unknown): GroupState {
     PARSE_FORMS.match(name, arguments.length);
     const value = PARSE_FORMS.value(name, 'name');
@@ -210,12 +196,6 @@ export class GroupState {
     /** The group type. */
     type: GroupType;
   }): Set<GroupState>;
-  /**
-   * The states of a group type, as Java's `Set.of` lists them.
-   *
-   * @param type - the group type
-   * @returns the states
-   */
   static groupStatesForType(type: unknown): Set<GroupState> {
     GROUP_STATES_FOR_TYPE_FORMS.match(type, arguments.length);
     const value = GROUP_STATES_FOR_TYPE_FORMS.value(type, 'type');

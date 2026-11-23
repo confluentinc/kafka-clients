@@ -217,7 +217,7 @@ module.exports = {
         }
       }
       // An interface's statics are on the runtime object of its name
-      // (javascript/CLAUDE.md, JavaScript Binding Conventions, Names, Q10: `Admin.create`).
+      // (javascript/CLAUDE.md, JavaScript Binding Conventions, Names: `Admin.create`).
       if (item.kind === 'interface') {
         for (const st of item.node.getSourceFile().statements) {
           if (!ts.isVariableStatement(st)) continue;

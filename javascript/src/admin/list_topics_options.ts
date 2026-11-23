@@ -13,9 +13,9 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.ListTopicsOptions, an option class
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19). Java's
-// setter listInternal and reader shouldListInternal keep their two names
-// (Q17): `listInternal()` with no argument throws TypeError.
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family). Java's
+// setter listInternal and reader shouldListInternal keep their two names:
+// `listInternal()` with no argument throws TypeError.
 
 import { JavaForms } from '../internal/args';
 import { objectHashCode, sameClass } from '../internal/java_object';
@@ -41,7 +41,7 @@ export class ListTopicsOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -83,13 +83,6 @@ export class ListTopicsOptions extends AbstractOptions {
     /** Whether we should list internal topics. */
     listInternal: boolean;
   }): this;
-  /**
-   * Sets whether internal topics are listed.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing or not a boolean
-   */
   listInternal(options: unknown): this {
     this.#listInternal = checkBoolean(LIST_INTERNAL.value(options, arguments.length), 'listInternal');
     this.internalRecord('listInternal', this.#listInternal);

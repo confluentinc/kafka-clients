@@ -15,7 +15,7 @@
 'use strict';
 
 // DescribeConfigsOptions, an option class (javascript/CLAUDE.md, JavaScript
-// Binding Conventions, Class family, Q17, Q19): the keyed constructor, Java's
+// Binding Conventions, Class family): the keyed constructor, Java's
 // starting values and the getter / setter pairs. Java has no test of it.
 
 const assert = require('node:assert/strict');

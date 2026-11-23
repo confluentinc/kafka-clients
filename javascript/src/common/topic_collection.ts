@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.common.TopicCollection: an abstract class whose
 // constructor is private, with its two nested subclasses, TopicIdCollection
 // and TopicNameCollection, classes of the namespace merged with it
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names, Q11). Their constructors
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names). Their constructors
 // are private too: the static factories build them.
 
 import { kind } from '../internal/args';
@@ -99,11 +99,6 @@ export abstract class TopicCollection {
     /** The topic IDs, any iterable of Uuid. */
     topics: Iterable<Uuid>;
   }): TopicCollection.TopicIdCollection;
-  /**
-   * @param topics - the topic IDs
-   * @returns a collection of topics defined by topic ID
-   * @throws `TypeError` when they are null or not an iterable of Uuid
-   */
   static ofTopicIds(topics: unknown): TopicCollection.TopicIdCollection {
     OF_TOPIC_IDS_FORMS.match(topics, arguments.length);
     const ids = elements<Uuid>(OF_TOPIC_IDS_FORMS.value(topics, 'topics'), (v) => v instanceof Uuid, 'Uuid');
@@ -125,11 +120,6 @@ export abstract class TopicCollection {
     /** The topic names, any iterable of strings. */
     topics: Iterable<string>;
   }): TopicCollection.TopicNameCollection;
-  /**
-   * @param topics - the topic names
-   * @returns a collection of topics defined by topic name
-   * @throws `TypeError` when they are null, a string, or not an iterable of strings
-   */
   static ofTopicNames(topics: unknown): TopicCollection.TopicNameCollection {
     OF_TOPIC_NAMES_FORMS.match(topics, arguments.length);
     const names = elements<string>(OF_TOPIC_NAMES_FORMS.value(topics, 'topics'), (v) => typeof v === 'string', 'strings');

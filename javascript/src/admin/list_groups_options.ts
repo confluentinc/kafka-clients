@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 // Java's org.apache.kafka.clients.admin.ListGroupsOptions, an option class
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19): a keyed
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family): a keyed
 // constructor, one key per setter field, named after the field, not the
 // setter (`groupStates` calls `inGroupStates`, `types` calls `withTypes`,
 // `protocolTypes` calls `withProtocolTypes`), as Python's. The setters store
@@ -83,7 +83,7 @@ export class ListGroupsOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -177,13 +177,6 @@ export class ListGroupsOptions extends AbstractOptions {
     /** The states (null or empty: all). */
     groupStates: Iterable<GroupState> | null;
   }): this;
-  /**
-   * Sets the states.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing, not an iterable of GroupState, or holds null
-   */
   inGroupStates(options: unknown): this {
     const value = IN_GROUP_STATES.value(options, arguments.length);
     this.#groupStates = copyOf<GroupState>(value, 'groupStates', [(v) => v instanceof GroupState, 'GroupState']);
@@ -214,13 +207,6 @@ export class ListGroupsOptions extends AbstractOptions {
     /** The protocol types (null or empty: all). */
     protocolTypes: Iterable<string> | null;
   }): this;
-  /**
-   * Sets the protocol types.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing, a string, not an iterable of strings, or holds null
-   */
   withProtocolTypes(options: unknown): this {
     const value = WITH_PROTOCOL_TYPES.value(options, arguments.length);
     this.#protocolTypes = copyOf<string>(value, 'protocolTypes', [(v) => typeof v === 'string', 'strings']);
@@ -248,13 +234,6 @@ export class ListGroupsOptions extends AbstractOptions {
     /** The group types (null or empty: all). */
     types: Iterable<GroupType> | null;
   }): this;
-  /**
-   * Sets the types.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing, not an iterable of GroupType, or holds null
-   */
   withTypes(options: unknown): this {
     const value = WITH_TYPES.value(options, arguments.length);
     this.#types = copyOf<GroupType>(value, 'types', [(v) => v instanceof GroupType, 'GroupType']);

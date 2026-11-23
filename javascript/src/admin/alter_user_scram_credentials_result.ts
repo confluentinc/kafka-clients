@@ -53,13 +53,6 @@ export class AlterUserScramCredentialsResult {
     /** The required map from user names to futures representing the results of the alteration(s) for each user. */
     futures: ReadonlyMap<string, KafkaFuture<void>> | Readonly<Record<string, KafkaFuture<void>>>;
   });
-  /**
-   * Builds the result.
-   *
-   * @param options - the futures
-   * @throws `TypeError` when they are null, or not a map of strings to
-   *   KafkaFutures
-   */
   constructor(options: unknown) {
     FORMS.match(options, arguments.length);
     const futures = FORMS.value(options, 'futures');

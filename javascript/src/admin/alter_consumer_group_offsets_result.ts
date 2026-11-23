@@ -17,7 +17,7 @@
 // constructor here over the core's own `partitionResult(partition)` and
 // `all()` futures, which carry Java's outcomes and messages, the client
 // building it through `internalOfClient` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16), as Python's.
+// Conventions, Class family), as Python's.
 
 import { JavaForms, kind } from '../internal/args';
 import type { KafkaFuture } from '../common/kafka_future';
@@ -81,12 +81,6 @@ export class AlterConsumerGroupOffsetsResult {
     /** The partition. */
     partition: TopicPartition;
   }): KafkaFuture<void>;
-  /**
-   * The future of one partition.
-   *
-   * @param options - the partition
-   * @returns the future
-   */
   partitionResult(options: unknown): KafkaFuture<void> {
     PARTITION_RESULT_FORMS.match(options, arguments.length);
     const partition = PARTITION_RESULT_FORMS.value(options, 'partition');

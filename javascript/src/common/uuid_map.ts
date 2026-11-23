@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // UuidMap (js-only): Java's Map<Uuid, V>, which JavaScript cannot key by value
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q25; the
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family; the
 // admin client's value-keyed maps). It is built as TopicPartitionMap is: it
 // wraps a Map keyed by the base64 text of the fields Uuid.equals compares, the
 // two halves (Uuid.internalKey, its toString()), and keeps each original

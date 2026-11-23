@@ -139,6 +139,7 @@ function log(message) {
   process.stderr.write(`js server: ${message}\n`);
 }
 
+/** The AdminService of the multilanguage protocol, over the client's admin clients. */
 class AdminService {
   #admins = new Map();
   #nextId = 1;
