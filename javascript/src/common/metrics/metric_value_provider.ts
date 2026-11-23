@@ -19,11 +19,6 @@
 /**
  * Super-interface for `Measurable` or `Gauge` that provides metric values.
  *
- * @remarks *(deviation)* A placeholder: Java's `MetricValueProvider` is not
- * translated, so `KafkaMetric` reads one by its Java methods: `value(config,
- * now)`, or a `Measurable`'s `measure(config, now)`. Why: a placeholder
- * typed `unknown` checks nothing, but `KafkaMetric`'s constructor, which
- * takes it, cannot be dropped. Goes when: `MetricValueProvider` is
- * translated.
+ * @remarks *(deviation)* A placeholder, not translated.
  */
 export type MetricValueProvider = unknown;

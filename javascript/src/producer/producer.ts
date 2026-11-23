@@ -289,20 +289,16 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    * @returns the producer's metrics, by name
    * @throws `TypeError` when it is given an argument
    *
-   * @remarks Java's `Map<MetricName, ? extends Metric>` is a
-   * `MetricNameMap<Metric>`, whose keys compare as `MetricName.equals` does.
-   * Each value is a `KafkaMetric`. *(deviation: Java's map is a live view,
-   * whose metrics read their value when asked. Why: the values are read
-   * through the C ABI when `metrics()` runs, as the Python binding reads
-   * them; call `metrics()` again for newer values. Goes when: the JavaScript
-   * metrics wrap the core's.)*
+   * @remarks A `MetricNameMap` of `KafkaMetric`s. *(deviation)* A snapshot,
+   * not Java's live view: call `metrics()` again for newer values. Why: it is
+   * read through the C ABI.
    */
   metrics(): MetricNameMap<Metric>;
 
   /**
    * Close this producer. This method blocks until all previously sent
-   * requests complete: Java's `close()`, which waits as
-   * `close(Duration.ofMillis(Long.MAX_VALUE))` does, with no time limit.
+   * requests complete. This method is equivalent to
+   * `close({ timeout: Infinity })`.
    *
    * **If `close()` is called from a `Callback`, a warning message will be
    * logged and `close({ timeout: 0 })` will be called instead.** We do this
@@ -317,23 +313,10 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    *   indicate the client is no longer usable
    * @throws `TypeError` rejects with it when it is given `undefined`
    *
-   * @remarks The records waited for are those whose `send()` had resolved
-   * before `close()` was called, and their callbacks' Promises: a callback
-   * Promise that never settles holds the close. Calling it again closes as
-   * the core does, harmlessly. Every failure rejects the returned Promise:
-   * `close()` never throws.
-   *
-   * Close every producer: a producer keeps Node running until it is closed,
-   * and no garbage collection closes one, so a script that never calls
-   * `close()` never exits on its own. Once closed, the producer holds Node
-   * only while a call made on it waits for its answer, and its native client
-   * is released when the producer is garbage collected. `await using` closes
-   * a producer at the end of its scope (`[Symbol.asyncDispose]`). Called from
-   * a send callback, the override above holds only before the callback's
-   * first `await`, and only in a callback the core runs in its drain: after
-   * that `await`, or in a callback that waited for its turn behind an earlier
-   * callback's Promise, `close()` waits for that callback to settle, so a
-   * callback that awaits it never settles.
+   * @remarks It waits for the records whose `send()` had resolved, and their
+   * callbacks' Promises; it never throws. Close every producer: one keeps Node
+   * running until closed. After its first `await`, `close()` in a callback
+   * waits for it.
    */
   close(): Promise<void>;
   /**
@@ -364,9 +347,8 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    *   trying to close the client; this error should be treated as fatal and
    *   indicate the client is no longer usable
    *
-   * @remarks A negative `timeout` is rejected by the client, with Java's
-   * error, and changes nothing. A callback Promise that never settles holds
-   * the close past its timeout. Called from a callback the core runs in its
+   * @remarks A callback Promise that never settles holds the close past its
+   * timeout. Called from a callback the core runs in its
    * drain, before its first `await`, it is `close({ timeout: 0 })` and waits
    * for no callback's Promise; after that `await`, or from a callback that
    * waited for its turn behind an earlier callback's Promise, it waits for the

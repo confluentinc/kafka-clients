@@ -249,24 +249,9 @@ function checkFunction(value: unknown, name: string, shape: string): (...args: n
  * `thenApply` fails with an `ExecutionError` from `get()`, whereas the
  * `Promise` fails with the failure itself.
  *
- * @remarks The future `KafkaProducer.send` resolves to is Java's
- *   `FutureRecordMetadata`: it is never cancelled, so its `cancel()` returns
- *   false, and a timed `get()` that times out rejects with the client's
- *   message, "Timed out waiting for KafkaFuture after <ms> ms", a negative
- *   timeout printed as 0 ms *(deviation: Java's is "Timeout after waiting
- *   for <ms> ms.", with the value given. Why: the message is the Rust core's
- *   `KafkaFutureImpl::get_with_timeout`, which every future shares and the
- *   C FFI passes on. Goes when: the core gives Java's message)*. Every other future (`completedFuture`, `allOf`, the
- *   dependants of `thenApply` and `whenComplete`) is Java's
- *   `KafkaFutureImpl` and can be
- *   cancelled. Java's `get()` blocks; here it returns a Promise. A failed
- *   future rejects only the Promises its `get()` and `toCompletionStage()`
- *   returned: a failed future nobody waits on raises no unhandled rejection,
- *   and neither do its dependants, while a Promise `get()` returned and the
- *   caller dropped does, as any rejected Promise does. The function of
- *   `thenApply` and the action of `whenComplete` are called positionally,
- *   `function(value)` and `action(value, error)`, as Java calls
- *   `apply(a)` and `accept(a, b)`.
+ * @remarks A record's future is never cancelled, and its timed `get()`
+ *   rejects with the core's message *(deviation: Java's differs)*. A failed
+ *   future nobody awaits raises no unhandled rejection.
  *
  * @typeParam T - the result type
  */
@@ -293,15 +278,10 @@ export abstract class KafkaFuture<T> {
   /**
    * Returns a new KafkaFuture that is already completed with the given value.
    *
-   * @param options - the value
-   *
-   * @remarks A value that is not a plain object may also be given on its own,
-   * `completedFuture(value)`. A plain object is always the options object, so
-   * it is passed by name, `completedFuture({ value: obj })`, as generic code
-   * should always do. In TypeScript the bare value is a primitive, `null`, an
-   * array, a function, a `Map`, `Set`, `Date`, `ArrayBuffer`, `DataView` or
-   * typed array (`Buffer` included); an instance of another class goes by name
-   * there, while plain JavaScript also takes it on its own.
+   * @param options - the value; one that is not a plain object may also be
+   *   given on its own, `completedFuture(value)`, and a plain object is always
+   *   the options object, so it is passed by name, `completedFuture({ value:
+   *   obj })`, as generic code should always do
    * @returns the completed future
    * @throws `IllegalArgumentError` when the given parameters are not `{value}`
    *   (a bare plain object included)
@@ -313,13 +293,13 @@ export abstract class KafkaFuture<T> {
   }): KafkaFuture<U>;
 
   /**
-   * Returns a new KafkaFuture that is already completed with the given value:
-   * the value on its own, the same as `completedFuture({value})`: anything
-   * but a plain object; in TypeScript a primitive, `null`, an array, a
-   * function, a `Map`, `Set`, `Date`, `ArrayBuffer`, `DataView` or typed
-   * array (any other object by name).
+   * Returns a new KafkaFuture that is already completed with the given value,
+   * passed bare.
    *
-   * @param value - The value
+   * @param value - The value, the same as `completedFuture({value})`: anything
+   *   but a plain object; in TypeScript a primitive, `null`, an array, a
+   *   function, a `Map`, `Set`, `Date`, `ArrayBuffer`, `DataView` or typed array
+   *   (`Buffer` included), any other object by name
    * @param check - None: a value TypeScript cannot take bare (a plain object,
    *   a generic value) asks for one more argument, which no call can give
    * @returns the completed future
@@ -499,8 +479,6 @@ export abstract class KafkaFuture<T> {
    * Waits if necessary for this future to complete, and then returns its
    * result.
    *
-   * Every failure rejects the returned Promise: `get()` never throws.
-   *
    * @returns resolving to the result value, rejecting with an
    *   `ExecutionError` whose `cause` is the failure
    * @throws `ExecutionError` rejects with it when this future completed with
@@ -512,11 +490,9 @@ export abstract class KafkaFuture<T> {
 
   /**
    * Waits if necessary for at most the given time for this future to
-   * complete, and then returns its result, if available (Java's
-   * `get(long, TimeUnit)`).
+   * complete, and then returns its result, if available.
    *
-   * Every failure rejects the returned Promise, an argument check's
-   * included: `get()` never throws.
+   * It never throws: an argument error rejects too.
    *
    * @param options - the timeout
    * @returns resolving to the result value, rejecting with an
@@ -578,12 +554,13 @@ export abstract class KafkaFuture<T> {
 
   /**
    * Returns the result value (or throws any encountered error) if completed,
-   * else returns the given valueIfAbsent: the value on its own, the same as
-   * `getNow({valueIfAbsent})`: anything but a plain object; in TypeScript a
-   * primitive, `null`, an array, a function, a `Map`, `Set`, `Date`,
-   * `ArrayBuffer`, `DataView` or typed array (any other object by name).
+   * else returns the given valueIfAbsent, passed bare.
    *
-   * @param valueIfAbsent - The value returned while this future is not done
+   * @param valueIfAbsent - The value returned while this future is not done,
+   *   the same as `getNow({valueIfAbsent})`: anything but a plain object; in
+   *   TypeScript a primitive, `null`, an array, a function, a `Map`, `Set`,
+   *   `Date`, `ArrayBuffer`, `DataView` or typed array (any other object by
+   *   name)
    * @returns the result value, or `valueIfAbsent` while not done
    */
   abstract getNow(valueIfAbsent: Bare<T | null>): T | null;

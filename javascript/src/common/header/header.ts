@@ -193,9 +193,7 @@ export class Header {
    * @returns the header's value; may be null.
    * @throws `TypeError` when it is given an argument
    *
-   * @remarks *(js-only)* The value is a `Buffer` over the native header's
-   * bytes, the same `Buffer` on every call, which keeps the header alive;
-   * where the runtime refuses external buffers, a copy.
+   * @remarks *(js-only)* A `Buffer` over the native bytes.
    */
   value(): Buffer | null {
     VALUE_FORMS.match(undefined, arguments.length);

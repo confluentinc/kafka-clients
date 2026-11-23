@@ -53,8 +53,8 @@ export class ThrottlingQuotaExceededError extends RetriableError {
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. With it, `throttleTimeMs()` returns
-   * `0`. Given the message on its own, the same as `{ message }`.
+   * Java's `(String message)` constructor, given the message alone. With it,
+   * `throttleTimeMs()` returns `0`.
    *
    * @param message - the message; `null` reads as `''`
    */

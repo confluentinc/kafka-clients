@@ -158,7 +158,7 @@ export class ProducerRecord<out K = never, out V = never> {
   /** The value */
   readonly value: V | null;
 
-  /** The headers: the record's own, which `send()` makes read-only */
+  /** The headers */
   readonly headers: Headers;
 
   /**
@@ -262,20 +262,13 @@ export class ProducerRecord<out K = never, out V = never> {
    *   timestamp a bigint beyond Java's `Long`, or a number beyond 2^53 - 1,
    *   the integers a JS number holds exactly
    *
-   * @remarks The parameters given are one of Java's constructors, each a
-   * signature of its own: `{topic, partition, timestamp, key, value,
-   * headers}`, `{topic, partition, timestamp, key, value}`, `{topic,
-   * partition, key, value, headers}`, `{topic, partition, key, value}`,
-   * `{topic, key, value}` or `{topic, value}`; one a constructor leaves out is
-   * what it passes (`null`, no headers). `null` is Java's `null`; a key set to
-   * `undefined` is refused (leave the key out). The record is frozen: a field
-   * cannot be reassigned, so `send()` reads what this constructor checked.
-   * Its `headers` stay writable until the record is sent. The key and the
-   * value are what the producer's serializers take, checked by `send()` when
-   * there is none. An omitted or `null` key or value binds `never`, through
-   * a signature per null combination beside each Java constructor's, as
-   * Python's binding adds one stub per combination, so a producer takes the
-   * `ProducerRecord<K, V>` of its serializers.
+   * @remarks A field one leaves out is what it passes (`null`, no headers).
+   * `null` is Java's `null`; a key set to `undefined` is refused (leave the key
+   * out). The record is frozen, so `send()` reads what this constructor
+   * checked; its `headers` stay writable until it is sent. An omitted or
+   * `null` key or value binds `never`, through a signature per null
+   * combination, so a producer takes the `ProducerRecord<K, V>` of its
+   * serializers.
    */
   constructor(options: {
     /** The topic the record will be appended to. */

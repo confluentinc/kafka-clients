@@ -716,15 +716,20 @@ waives a wrong shape of the forms that are translated.
 17. **Config-constant docs are generated from Java's own documentation**
     (`rust/xtask/src/config_consts/js.rs`), translated as a Javadoc is (a list one item per
     line, a link as `[text](url)`), in this order:
-    1. a configuration key's constant takes the documentation argument of the `define` call
-       of `ProducerConfig`'s `ConfigDef` for that key, its SSL and SASL support included
-       (`CommonClientConfigs.BOOTSTRAP_SERVERS_DOC` for `bootstrap.servers`);
-    2. else the `<NAME>_DOC` sibling in its Java class (or, for `X_CONFIG`, `X_DOC`), of any
+    1. a constant Java documents takes its own Javadoc (`<code>batch.size</code>` for
+       `BATCH_SIZE_CONFIG`);
+    2. else a configuration key's constant takes the documentation argument of the `define`
+       call of `ProducerConfig`'s `ConfigDef` for that key, its SSL and SASL support included
+       (`SslConfigs.SSL_PROTOCOL_DOC` for `ssl.protocol`);
+    3. else the `<NAME>_DOC` sibling in its Java class (or, for `X_CONFIG`, `X_DOC`), of any
        visibility;
-    3. else a generated line naming it ("The `acks` configuration key.", "The documentation
+    4. else a generated line naming it ("The `acks` configuration key.", "The documentation
        of `ProducerConfig.X_CONFIG`.", or "Java's `C.NAME`.").
 
     No prose is invented. With the 4.4 sources no key falls to the key line.
+    Amended 2026-11-24 by the owner: a constant Java documents takes its own Javadoc, so its
+    doc stays within the 150% of the Documentation rule, as Rust's constants do; the
+    ConfigDef chain is kept for one Java leaves undocumented.
 18. **On a method returning a Promise, `` @throws `XError` `` documents a rejection**, its
     text saying it rejects: D2 accepts it as Java's `@throws`. `KafkaProducer`'s `send`,
     `flush` and `close` carry Java's `@throws` so, from Java's text ("rejects with it if

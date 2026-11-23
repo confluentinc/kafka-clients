@@ -51,21 +51,13 @@ export class CommitFailedError extends KafkaError {
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. Given the message on its own, the
-   * same as `{ message }`.
+   * Java's `(String message)` constructor, given the message alone.
    *
    * @param message - the message; `null` reads as `''`
    */
   constructor(message: string | null);
   /**
-   * Java's no-argument constructor. The message is Java's own: "Commit cannot
-   * be completed since the group has already rebalanced and assigned the
-   * partitions to another member. This means that the time between subsequent
-   * calls to poll() was longer than the configured max.poll.interval.ms, which
-   * typically implies that the poll loop is spending too much time message
-   * processing. You can address this either by increasing max.poll.interval.ms
-   * or by reducing the maximum size of batches returned in poll() with
-   * max.poll.records.".
+   * Java's no-argument constructor. The message is Java's own.
    */
   constructor();
   constructor(...args: unknown[]) {

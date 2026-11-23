@@ -17,13 +17,7 @@
 // `cargo xtask check-generated` checks it is up to date.
 
 /**
- * The constants of Java's `org.apache.kafka.common.config.SecurityConfig`:
- * every `public static final` field, evaluated from the Java source, is a
- * static property of the same name; a deprecated one is left out. A `List`
- * constant is a frozen array and a `Set` constant a read-only set whose `add`,
- * `delete` and `clear` throw `UnsupportedOperationError`, both in Java's order.
- *
- * Java: `org.apache.kafka.common.config.SecurityConfig`.
+ * Contains the common security config for SSL and SASL
  */
 export class SecurityConfig {
   /**

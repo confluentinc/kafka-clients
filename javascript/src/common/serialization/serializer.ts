@@ -60,9 +60,7 @@ export interface Serializer<in T> {
    *
    * This method must be idempotent as it may be called multiple times.
    *
-   * @remarks It is optional: a serializer without it is closed by doing
-   * nothing, Java's default. The producer calls it when it closes; what it
-   * throws is reported through `process.emitWarning`, never thrown.
+   * @remarks Optional; what it throws goes to `process.emitWarning`.
    */
   close?(): void;
 }

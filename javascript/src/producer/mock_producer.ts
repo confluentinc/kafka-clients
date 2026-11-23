@@ -154,67 +154,9 @@ function completeRecord(
  * the completion of the call and supply an optional error for the producer to
  * throw.
  *
- * @remarks The mock is the client core's, reached as `KafkaProducer` is:
- * `send()`, `flush()`, `partitionsFor()` and `close()` return Promises, and
- * the delivery callbacks run on the JS thread, one at a time in completion
- * order, as `KafkaProducer`'s do, inside the mock call that completes the
- * record (`send()` with `autoComplete`, `completeNext()`, `errorNext()`,
- * `flush()`), before it returns, and what a callback throws comes out of
- * that call, as in Java. A callback that waits for its turn behind an
- * earlier callback's Promise runs once that settled, after `completeNext()`
- * or `errorNext()` returned: what it throws is then kept, as a rejection is
- * *(deviation, as Python's `AsyncMockProducer`: Java's runs it inside the
- * call. Why: a callback starts only once the one before it settled)*.
- * `history()` returns the app's own
- * records; the mock holds each until `clear()` or its native client is
- * released. Like a producer, a mock keeps Node running until `close()`
- * closes it, so close every mock, and a call made on a closed mock keeps Node
- * running until that call settles. The mock's cluster is always empty: Java's
- * constructor taking a `Cluster` is left out (Cluster is not translated), so
- * the partitioner is never called and every record goes to partition 0, as
- * in Java. A callback's throw leaves the record's future completed
- * *(deviation: Java's leaves it incomplete. Why: the core's mock completes
- * it. Goes when: the core's mock leaves it incomplete)*, and `flush()`
- * completes every waiting record, running each callback, before it rejects
- * with the first throw *(deviation: Java's `flush()` stops at the first
- * callback that throws, the later records staying waiting. Why: the core's
- * mock completes all of them in one call. Goes when: the core's mock stops at
- * the first throw)*. A callback's Promise that rejects is the callback's
- * error, as a throw is, and is never logged: `send()` with `autoComplete`
- * waits for it and rejects with it, and `flush()` rejects with it. After
- * `completeNext()` or `errorNext()` it is kept, oldest first, and the next
- * `send()`, `flush()` or `close()` rejects with the oldest, once
- * *(deviation, as Python's `AsyncMockProducer`: Java's mock throws it from
- * the completing call. Why: those calls return before the Promise
- * settles)*. Only the record's own `send()` gets its callback's error: a
- * `send()` made inside a callback, or one whose drain runs callbacks a
- * pending `flush()` completed, leaves those errors to their own calls.
- * With `autoComplete`, a `send()` made from a callback's synchronous part
- * runs its own callback in its turn, once that callback and the Promise it
- * returns settled, and settles after it, rejecting with its error, so a
- * callback that awaits it never settles *(deviation: Java's runs it inside
- * the nested `send()`. Why: the callback queue does not nest, and the
- * callbacks run one at a time. Goes when: a drain started inside a drain
- * runs the callbacks, where the addon's `cbq_drain` and the FFI's
- * `CallbackQueue::execute` return at once)*. A `completeNext()` or
- * `errorNext()` made there returns before the next record's callback runs,
- * which runs in its turn, its throw coming out of the outer completing call,
- * or kept when no such call runs it *(deviation: Java's nested call throws
- * it. Why: the callback queue does not nest, and those calls cannot wait.
- * Goes when: the same)*.
- * `flush()` and `close()` wait for the callbacks of the records they cover,
- * those waiting for their turn included, and for every callback Promise
- * already started, before they settle; the record's future completes once
- * the Promise settled, as for a throw. A `close()` made from one of the
- * mock's callbacks before its first `await` does not wait for the callbacks,
- * its own among them, as Python's `AsyncMockProducer`, but only from a
- * callback the core runs in its drain: one that waited for its turn behind
- * an earlier callback's Promise is as after its first `await`. After that
- * `await`, `close()` waits for that callback, and a `flush()` made from a
- * callback does too, unless an error is set with `setFlushException`, which
- * it rejects with at once, as Java's; so a callback that awaits either
- * otherwise never settles (`KafkaProducer` refuses a `flush()` made before
- * the first `await`, from a callback the core runs in its drain).
+ * @remarks *(deviation)* Over the core's mock: callbacks run one at a time,
+ * `flush()` completes every record, and a throwing callback's future
+ * completes. Close every mock.
  */
 export class MockProducer<K, V> implements Producer<K, V> {
   #handle: ProducerHandle;
@@ -279,11 +221,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @throws `TypeError` when `autoComplete` is not a boolean, or a serializer
    *   is neither null nor an object with a `serialize` method
    *
-   * @remarks Java's form with a `Cluster` is left out, so the cluster is
-   * always empty, as `Cluster.empty()`, and the partitioner is never
-   * called, as in Java with an empty cluster. A serializer runs on every
-   * send, each with its own fresh empty headers, and what it returns is not
-   * kept, as in Java; a null one is not run.
+   * @remarks The cluster is always empty, so the partitioner is never called.
+   * A serializer runs on every send, with fresh empty headers.
    */
   constructor(options: {
     /**
@@ -320,29 +259,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * @remarks The mock adds the record to the list of sent records,
-   * `history()`, as Java's mock does, and rejects with `IllegalStateError`
-   * "MockProducer is already closed." when it is closed, and with a
-   * `KafkaError` when it is fenced. The error set with `setSendException`
-   * rejects the send as it is, the very same value. The serializers run
-   * first, key then value, and what one throws rejects the send as it is, an
-   * `ApiError` or a `TypeError` included, as Java's mock serializes with no
-   * `try` *(deviation: Java's mock checks that it is closed, fenced or has a
-   * send error before it serializes. Why: the serializers run in JavaScript
-   * before the call reaches the core's mock)*. A null `record` rejects with
-   * `TypeError` even on a closed mock *(deviation: Java's mock checks that
-   * it is closed first. Why: the binding keeps no closed state, and the
-   * record is checked in JavaScript before the call reaches the core's mock,
-   * which holds it, as for `KafkaProducer.send`)*. With `autoComplete`, the
-   * callback runs inside the call, before the returned Promise resolves, and
-   * a Promise it returns is awaited, its rejection rejecting the send; made
-   * from a callback's synchronous part, or while an earlier callback's
-   * Promise is pending, the send runs its callback in its turn, once the
-   * callbacks before it settled, and only then settles, so a callback that
-   * awaits a send it made never settles. The record's headers stay writable,
-   * as Java's mock leaves them. An error a callback's Promise rejected with
-   * after `completeNext()` or `errorNext()`, or a callback that waited for
-   * its turn threw, rejects the next send, once, before it sends anything.
+   * @remarks *(deviation)* The serializers and the null check run before the
+   * closed check.
    */
   send(options: {
     /** The record to send. */
@@ -754,19 +672,12 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * @remarks The mock closes at once, as Java's mock does: its `close()` is
-   * `close(Duration.ofMillis(0))`, and a timeout given, a negative one
-   * included, is not waited for. The error set with `setCloseException`
-   * rejects it as it is, and the mock stays open. Once closed, the mock
-   * holds Node only while a call made on it waits for its answer. It settles
-   * once the callbacks waiting for their turn ran and every callback Promise
-   * already started has, then rejects with the oldest error kept that no
-   * call raised yet. Made from one of the mock's callbacks before its first
-   * `await`, it does not wait for the callbacks, its own among them, as
-   * Python's `AsyncMockProducer`, but only from a callback the core runs in
-   * its drain: one that waited for its turn behind an earlier callback's
-   * Promise is as after that `await`, where it waits for the callback, so a
-   * callback that awaits it never settles, as on `KafkaProducer`.
+   * @remarks The mock closes at once, as Java's mock does, a timeout given
+   * not waited for. The error set with `setCloseException` rejects it, and the
+   * mock stays open. It settles once the waiting callbacks ran, then rejects
+   * with the oldest error kept. From a callback, before its first `await`, it
+   * waits for no callback; after it, for that callback, so a callback that
+   * awaits it never settles.
    */
   close(): Promise<void>;
   close(options: CloseArgs): Promise<void>;
@@ -841,10 +752,7 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @throws `IllegalArgumentError` when it is given an argument
    * @throws `TypeError` when it is given `undefined`
    *
-   * @remarks The sends still waiting are dropped too, as in Java: their
-   * futures never complete. A completed record's callback still waiting for
-   * its turn runs in its turn, as Java's ran inside the call that completed
-   * the record.
+   * @remarks Waiting sends are dropped.
    */
   clear(): void;
   clear(options?: unknown): void {
@@ -866,17 +774,7 @@ export class MockProducer<K, V> implements Producer<K, V> {
    *   propagate, unless the call is made from a callback's synchronous part
    *   or the callback waits for its turn
    *
-   * @remarks The record's callback runs inside the call, and its future is
-   * done when it returns. A Promise the callback returns is not awaited: its
-   * rejection is kept for the next `send()`, `flush()` or `close()`. While an
-   * earlier callback's Promise is pending, the record's callback waits for
-   * its turn: it runs once that settled, after this call returned, and its
-   * throw is kept the same way *(deviation, as Python's `AsyncMockProducer`:
-   * Java's runs it inside the call. Why: the callbacks run one at a time)*.
-   * Made from a callback's synchronous part, it returns before the record's
-   * callback runs, which runs in its turn, its throw coming out of the outer
-   * completing call, or kept when no such call runs it *(deviation: Java's
-   * runs it inside the call. Why: the callback queue does not nest)*.
+   * @remarks *(deviation)* A waiting callback runs later.
    */
   completeNext(): boolean;
   completeNext(options?: unknown): boolean {
@@ -896,12 +794,8 @@ export class MockProducer<K, V> implements Producer<K, V> {
    *   propagate, unless the call is made from a callback's synchronous part
    *   or the callback waits for its turn
    *
-   * @remarks The record's callback gets the very same error, and its future's
-   * `get()` rejects with an `ExecutionError` whose `cause` it is. A null `e`
-   * completes the call successfully, as Java's `completeNext()` is
-   * `errorNext(null)`. Made from a callback's synchronous part, or while an
-   * earlier callback's Promise is pending, it returns before the record's
-   * callback runs, as `completeNext()` does *(deviation)*.
+   * @remarks *(deviation)* A waiting callback runs later, as for
+   * `completeNext()`.
    */
   errorNext(options: {
     /** The error to complete the call with. */
@@ -922,8 +816,7 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * Error to throw when `send` is called: Java's public field
-   * `sendException`.
+   * Error to throw when `send` is called.
    *
    * @param options - the error, or null for none
    * @throws `IllegalArgumentError` when the given parameters are not
@@ -931,19 +824,16 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @throws `TypeError` when `sendException` is neither an `Error` nor null,
    *   or `undefined`
    *
-   * @remarks Java's public mutable field is this setter *(deviation, as in
-   * Python. Why: the client keeps its state in private fields, and the core's
-   * mock has a setter only)*. `send` rejects with the very same value.
+   * @remarks *(deviation)* A setter.
    */
   setSendException(options: {
     /** Error to throw when `send` is called, or null. */
     sendException: Error | null;
   }): void;
   /**
-   * Error to throw when `send` is called: the error on its own, the same as
-   * `setSendException({sendException})`.
+   * Error to throw when `send` is called.
    *
-   * @param sendException - The error, or null for none
+   * @param sendException - The error on its own, or null for none
    */
   setSendException(sendException: Error | null): void;
   setSendException(options: unknown): void {
@@ -952,8 +842,7 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * Error to throw when `flush` is called: Java's public field
-   * `flushException`.
+   * Error to throw when `flush` is called.
    *
    * @param options - the error, or null for none
    * @throws `IllegalArgumentError` when the given parameters are not
@@ -961,17 +850,16 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @throws `TypeError` when `flushException` is neither an `Error` nor null,
    *   or `undefined`
    *
-   * @remarks Java's public mutable field is this setter *(deviation, as in
-   * Python)*. `flush` rejects with the very same value.
+   * @remarks *(deviation)* A setter.
    */
   setFlushException(options: {
     /** Error to throw when `flush` is called, or null. */
     flushException: Error | null;
   }): void;
   /**
-   * Error to throw when `flush` is called: the error on its own.
+   * Error to throw when `flush` is called.
    *
-   * @param flushException - The error, or null for none
+   * @param flushException - The error on its own, or null for none
    */
   setFlushException(flushException: Error | null): void;
   setFlushException(options: unknown): void {
@@ -980,8 +868,7 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * Error to throw when `partitionsFor` is called: Java's public field
-   * `partitionsForException`.
+   * Error to throw when `partitionsFor` is called.
    *
    * @param options - the error, or null for none
    * @throws `IllegalArgumentError` when the given parameters are not
@@ -989,17 +876,16 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @throws `TypeError` when `partitionsForException` is neither an `Error`
    *   nor null, or `undefined`
    *
-   * @remarks Java's public mutable field is this setter *(deviation, as in
-   * Python)*. `partitionsFor` rejects with the very same value.
+   * @remarks *(deviation)* A setter.
    */
   setPartitionsForException(options: {
     /** Error to throw when `partitionsFor` is called, or null. */
     partitionsForException: Error | null;
   }): void;
   /**
-   * Error to throw when `partitionsFor` is called: the error on its own.
+   * Error to throw when `partitionsFor` is called.
    *
-   * @param partitionsForException - The error, or null for none
+   * @param partitionsForException - The error on its own, or null for none
    */
   setPartitionsForException(partitionsForException: Error | null): void;
   setPartitionsForException(options: unknown): void {
@@ -1012,27 +898,25 @@ export class MockProducer<K, V> implements Producer<K, V> {
   }
 
   /**
-   * Error to throw when `close` is called: Java's public field
-   * `closeException`.
+   * Error to throw when `close` is called.
    *
-   * @param options - the error, or null for none
+   * @param options - the error, or null for none; `close` rejects with it, and
+   *   the mock stays open
    * @throws `IllegalArgumentError` when the given parameters are not
    *   `{closeException}`
    * @throws `TypeError` when `closeException` is neither an `Error` nor null,
    *   or `undefined`
    *
-   * @remarks Java's public mutable field is this setter *(deviation, as in
-   * Python)*. `close` rejects with the very same value, and the mock stays
-   * open.
+   * @remarks *(deviation)* A setter.
    */
   setCloseException(options: {
     /** Error to throw when `close` is called, or null. */
     closeException: Error | null;
   }): void;
   /**
-   * Error to throw when `close` is called: the error on its own.
+   * Error to throw when `close` is called.
    *
-   * @param closeException - The error, or null for none
+   * @param closeException - The error on its own, or null for none
    */
   setCloseException(closeException: Error | null): void;
   setCloseException(options: unknown): void {

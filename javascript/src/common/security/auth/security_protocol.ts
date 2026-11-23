@@ -178,11 +178,10 @@ export class SecurityProtocol {
   }
 
   /**
-   * The protocol named `name` in any case, as Java's
-   * `valueOf(name.toUpperCase(Locale.ROOT))`. The name is given on its own,
-   * `forName('ssl')`, or named, `forName({ name: 'ssl' })`.
+   * Case insensitive lookup by protocol name.
    *
-   * @param name - the protocol's name, in any case
+   * @param name - the protocol's name, in any case, given on its own
+   *   (`forName('ssl')`) or named (`forName({ name: 'ssl' })`)
    * @returns the protocol
    * @throws `IllegalArgumentError` when no protocol has that name, or the
    *   given parameters are not `{name}`
@@ -190,9 +189,9 @@ export class SecurityProtocol {
    */
   static forName(name: string): SecurityProtocol;
   /**
-   * The protocol named `name` in any case, the same as `forName(name)`.
+   * Case insensitive lookup by protocol name.
    *
-   * @param options - the protocol's name
+   * @param options - the protocol's name, the same as `forName(name)`
    * @returns the protocol
    * @throws `IllegalArgumentError` when no protocol has that name
    */

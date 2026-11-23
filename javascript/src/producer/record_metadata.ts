@@ -47,9 +47,6 @@ interface RecordMetadataFields {
 
 /**
  * The metadata for a record that has been acknowledged by the server.
- *
- * Built by the client; a delivery callback for a failed record receives one
- * whose fields are -1.
  */
 export class RecordMetadata {
   /** The topic the record was appended to */
@@ -95,14 +92,13 @@ export class RecordMetadata {
   readonly #brand = true;
 
   /**
-   * Creates the metadata of a record, Java's `RecordMetadata(topicPartition,
-   * baseOffset, batchIndex, timestamp, serializedKeySize,
-   * serializedValueSize)`: the offset is `baseOffset + batchIndex`, or -1
-   * when the base offset is -1 (the offset is unknown).
+   * Creates a new instance with the provided parameters.
    *
    * @param options - the topic partition, the base offset, the index of the
    *   record in its batch, the timestamp and the serialized key and value
-   *   sizes
+   *   sizes: the offset is `baseOffset + batchIndex`, or -1 when the base
+   *   offset is -1 (the offset is unknown); a `long` takes a bigint, or a whole
+   *   number up to 2^53 - 1
    * @throws `IllegalArgumentError` when the given parameters are not
    *   `{topicPartition, baseOffset, batchIndex, timestamp,
    *   serializedKeySize, serializedValueSize}`
@@ -111,10 +107,7 @@ export class RecordMetadata {
    * @throws `RangeError` when an `int` is beyond Java's `int`, a bigint
    *   beyond Java's `long`, or a number beyond 2^53 - 1
    *
-   * @remarks A `long` takes a bigint, or a whole number up to 2^53 - 1. The
-   * object is frozen. *(deviation: Java's constructor takes a null
-   * `topicPartition`, and its `topic()` then throws. Why: the fields of a
-   * data class are set when it is built.)*
+   * @remarks *(deviation)* `topicPartition` is required.
    */
   constructor(options: {
     /** The topic and partition the record was sent to. */

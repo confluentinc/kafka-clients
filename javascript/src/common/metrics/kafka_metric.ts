@@ -141,10 +141,8 @@ export class KafkaMetric implements Metric {
   }
 
   /**
-   * @remarks The value is the metric's `MetricValueProvider`'s, read as
-   * `value(MetricConfig, long)` reads it. It throws `TypeError` when it is
-   * given an argument, or the time is null (Java's `time.milliseconds()` on
-   * a null).
+   * @remarks Read through the value provider's `value(config, now)`; a null
+   * time throws `TypeError`, as Java's does.
    */
   metricValue(): unknown {
     METRIC_VALUE_FORMS.match(undefined, arguments.length);

@@ -34,11 +34,6 @@ const ORDINAL_FORMS = new JavaForms('ordinal', [[]], { reader: true });
 /**
  * Describes whether the server should require or request client
  * authentication.
- *
- * The constants are `REQUIRED`, `REQUESTED` and `NONE`; `VALUES` is Java's
- * `List.of(values())`, a frozen array in Java's order.
- *
- * Java: `org.apache.kafka.common.config.SslClientAuth`.
  */
 export class SslClientAuth {
   #name: string;

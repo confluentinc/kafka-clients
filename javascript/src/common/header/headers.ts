@@ -157,14 +157,8 @@ function wrapAll(handles: object[]): Header[] {
  *
  * The order of headers is preserved in the order they were added.
  *
- * @remarks Java's `Headers` is an interface whose one class, `RecordHeaders`,
- *   is internal; this class is both, with `RecordHeaders`' constructors and
- *   `toString()`. The headers of a record become read-only when the record is
- *   sent: `add` and `remove` then throw `IllegalStateError` "RecordHeaders
- *   has been closed.". *(js-only)* The headers are the core's native
- *   `RecordHeaders`. A `Header` read from headers that can still change is a
- *   copy, which stays as it is when they change, as Java's does; one read
- *   from read-only headers is a view, with no copy, which keeps them alive.
+ * @remarks *(js-only)* Java's `RecordHeaders` too, over the core's; read-only
+ *   once sent.
  */
 export class Headers implements Iterable<Header> {
   // The native RecordHeaders (native/headers.c), whose finalizer drops it;
@@ -371,11 +365,9 @@ export class Headers implements Iterable<Header> {
    * @throws `TypeError` when the key is not a string, holds a NUL ("a header
    *   key must be a string without null bytes") or is `undefined`
    *
-   * @remarks *(deviation)* On read-only headers a null key is
-   * `IllegalArgumentError`, where Java's `remove` checks the read-only state
-   * first. Why: the FFI checks a null argument first, and the binding repeats
-   * no precondition of Java's. Goes when: the FFI checks the read-only state
-   * first.
+   * @remarks *(deviation)* On read-only headers a null key throws
+   * `IllegalArgumentError` first. Why: the FFI checks nulls first. Goes when:
+   * the FFI checks the read-only state first.
    */
   remove(options: {
     /** The key to remove all headers for; must not be null. */
@@ -409,11 +401,8 @@ export class Headers implements Iterable<Header> {
    * @throws `TypeError` when the key is not a string, holds a NUL ("a header
    *   key must be a string without null bytes") or is `undefined`
    *
-   * @remarks *(js-only)* While the headers can still change (before their
-   * record is sent), the header is the binding's own copy of the key and
-   * value, which stays as it is when the headers change, as Java's does.
-   * Once they are read-only, it is a view of the header inside them, with no
-   * copy, which keeps them alive.
+   * @remarks *(js-only)* A copy while the headers can change, a view, which
+   * keeps them alive, once read-only.
    */
   lastHeader(options: {
     /** The key to get the last header for; must not be null. */
@@ -447,13 +436,9 @@ export class Headers implements Iterable<Header> {
    *   when iterated, holds a NUL ("a header key must be a string without null
    *   bytes")
    *
-   * @remarks *(js-only)* Each header is a copy while the headers can still
-   * change, and a view once they are read-only, as `lastHeader` says.
-   * *(deviation)* Each iterator reads the headers when it is made, so a change
-   * during an iteration is not seen and throws nothing, where Java's throws
-   * `ConcurrentModificationException`. Why: the FFI hands the headers out as a
-   * list, and Java's `ArrayList` iterators fail fast only on a best-effort
-   * basis.
+   * @remarks *(js-only)* Copies or views, as `lastHeader`'s. *(deviation)*
+   * Each iterator reads the headers when made, so a change during an iteration
+   * throws nothing. Why: the FFI hands the headers out as a list.
    */
   headers(options: {
     /** The key to return the headers for; must not be null. */
@@ -488,8 +473,7 @@ export class Headers implements Iterable<Header> {
    *   Headers, if NO headers are present an empty array is returned.
    * @throws `TypeError` when it is given an argument: it only reads
    *
-   * @remarks *(js-only)* Each header is a copy while the headers can still
-   * change, and a view once they are read-only, as `lastHeader` says.
+   * @remarks *(js-only)* Copies or views, as `lastHeader`'s.
    */
   toArray(): Header[] {
     // Java's toArray() takes nothing: an argument is refused, never dropped.
