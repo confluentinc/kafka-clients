@@ -155,8 +155,8 @@ core's header values being owned `Vec<u8>`); per-field retention (one kept recor
 | 588 | Design, `NewError` | Exception headers | `RecordDeserializationException` holds materialized headers, so it never keeps the batch | Proposed |
 | 589 | Design, `ConsumerRecords` | `NextOffsets` | read on first call and cached; not copied per poll | Proposed |
 | 590 | Rule drafts | Rule text W1–W7 | drafts below; applied only on the owner's explicit OK | Open |
-| 596 | Revision (2026-11-22) | `Header.ValueMemory()` | new public `ReadOnlyMemory<byte>? ValueMemory()`: `null` for a null value; for a fetched header a memory over the batch (`SafeConsumerRecordsHandle.HandOut`), never copied, readable after the next poll and after the consumer is disposed; for a built header its own array. *(Deviation: Java's `Header` has only `value()`. Why: a `byte[]` cannot view the batch)* | Proposed |
-| 597 | Revision (2026-11-22) | Fetched `Header` | reads its key and value through the C views on first use: `Key()` decoded once with UTF-8 (a NUL byte kept, invalid bytes as U+FFFD) and cached, `Value()` copied once and the same array returned on every call, as Java's `RecordHeader`; `ValueMemory()` never copies; a producer send of a fetched header makes no managed copy (the one copy is `kafka_common_header_Headers_add_with_key_value`'s, key into a `String` and value into a `Vec<u8>`, as the C API has no borrowed header-value form, ledger 301; the Rust producer only writes the header into the batch buffer); `RecordDeserializationException` holds owned copies | Proposed |
+| 596 | Revision (2026-11-22) | `Header.ValueMemory()` | new public `ReadOnlyMemory<byte>? ValueMemory()`: `null` for a null value; for a fetched header a memory over the batch (`SafeConsumerRecordsHandle.HandOut`), never copied, readable after the next poll and after the consumer is disposed, until `Value()` has cached its array, and that array from then on (as Java's `RecordHeader` keeps only the array after `value()`); for a built header its own array. *(Deviation: Java's `Header` has only `value()`. Why: a `byte[]` cannot view the batch)* | Proposed |
+| 597 | Revision (2026-11-22) | Fetched `Header` | reads its key and value through the C views on first use: `Key()` decoded once with UTF-8 (a NUL byte kept, invalid bytes as U+FFFD) and cached, `Value()` copied once and the same array returned on every call, as Java's `RecordHeader`; `ValueMemory()` never copies: a view of the batch until `Value()`, the array `Value()` returns after it; a producer send of a fetched header makes no managed copy (the one copy is `kafka_common_header_Headers_add_with_key_value`'s, key into a `String` and value into a `Vec<u8>`, as the C API has no borrowed header-value form, ledger 301; the Rust producer only writes the header into the batch buffer); `RecordDeserializationException` holds owned copies | Proposed |
 
 ## Draft rule text (not applied)
 
@@ -282,9 +282,11 @@ the batch.
   - New public `ReadOnlyMemory<byte>? ValueMemory()`: `null` for a null value, as `ISerializer<T>`'s
     `ReadOnlyMemory<byte>?` marks null; for a fetched header a memory over the batch through
     `SafeConsumerRecordsHandle.HandOut` (a `BytesMemoryManager`, which keeps the batch alive while reachable and
-    while pinned), with no copy; for a header built with a `byte[]`, that array as memory. *(Deviation: Java's
-    `Header` has only `value()`. Why: a `byte[]` cannot view the batch, and the consumer's key and value already
-    have a zero-copy memory form.)*
+    while pinned), with no copy, until `Value()` has cached its array, and from then on that array, so a write into
+    it shows through both, as Java's `RecordHeader` keeps only the array once `value()` has copied it (a memory taken
+    before stays a view; the internal `ValueSpan` follows the same rule); for a header built with a `byte[]`, that
+    array as memory. *(Deviation: Java's `Header` has only `value()`. Why: a `byte[]` cannot view the batch, and the
+    consumer's key and value already have a zero-copy memory form.)*
   - `Equals`, `GetHashCode` and `ToString` keep their output and compare or print the value through its span, so
     they force no copy.
 - `NewError` materializes owned copies (string keys, `byte[]` values) for `RecordDeserializationException`, so an
@@ -299,12 +301,14 @@ the batch.
 
 S4–S6 as above. S5 adds tests for: a fetched header's `ValueMemory()` backed by a `BytesMemoryManager` over the
 batch (`MemoryMarshal.TryGetMemoryManager`), usable after the next `Poll` and after the consumer is disposed;
-`Value()` returning the same array on every call; a key with a NUL byte and a key with invalid UTF-8 (U+FFFD); a
-null value (`Value()` and `ValueMemory()` null) and an empty one; concurrent first use of `Key()`, `Value()` and the
-list; an untouched `Headers` making no native call; `RecordDeserializationException.Headers()` after the batch is
-released; and a producer sending a fetched header.
+`Value()` returning the same array on every call, and `ValueMemory()` returning that array once `Value()` was
+called; a key with a NUL byte and a key with invalid UTF-8 (U+FFFD); a null value (`Value()` and `ValueMemory()`
+null) and an empty one; concurrent first use of `Key()`, `Value()` and the list; an untouched `Headers` making no
+native call; `RecordDeserializationException.Headers()` after the batch is released; and a producer sending a
+fetched header.
 
 Ledger rows (Proposed): 587 is revised to the zero-copy form above; 596, `Header.ValueMemory()` (the deviation
 above); 597, a fetched `Header` reads its key and value through the C views on first use, `Key()` and `Value()`
-cached as Java's `RecordHeader`, `ValueMemory()` never copied. Rule drafts W1, W2 and W3 say a fetched record's
-headers are read from the batch on first use, their values views of the batch until `Value()` copies one.
+cached as Java's `RecordHeader`, `ValueMemory()` never copied (a view until `Value()`, its array after). Rule
+drafts W1, W2 and W3 say a fetched record's headers are read from the batch on first use, their values views of the
+batch until `Value()` copies one.
