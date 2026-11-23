@@ -59,6 +59,6 @@ public sealed class ListConfigResourcesResult
     public KafkaFuture<IReadOnlyCollection<ConfigResource>> All() => _future.ThenApply(static resources => resources);
 
     internal static ListConfigResourcesResult OfClient(
-        (KafkaFutureImpl<IReadOnlyCollection<ConfigResource>> All, SafeAdminResultHandle Result) native) =>
-        new ListConfigResourcesResult(new KafkaFuture<IReadOnlyCollection<ConfigResource>>(native.All), native.Result);
+        (IKafkaFutureImpl<IReadOnlyCollection<ConfigResource>> All, SafeAdminResultHandle Result) native) =>
+        new ListConfigResourcesResult(SyncAdminFutures.Of(native.All), native.Result);
 }

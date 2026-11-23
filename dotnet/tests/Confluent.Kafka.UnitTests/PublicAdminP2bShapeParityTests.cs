@@ -96,8 +96,8 @@ public sealed class PublicAdminP2bShapeParityTests
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<TopicListing>>), listings.ReturnType);
         Assert.Equal(typeof(KafkaFuture<IReadOnlyCollection<string>>), names.ReturnType);
 
-        // Non-null: Java's future and its two thenApply projections never carry null. The future is a struct, so position 0
-        // carries no annotation and the value's own sits at position 1.
+        // Non-null: Java's future and its two thenApply projections never carry null. Position 0 is the future's own
+        // annotation, and the value's sits at position 1.
         Assert.Equal(1, NullableAnnotation.Flag(namesToListings.ReturnParameter, 1));
         Assert.Equal(1, NullableAnnotation.Flag(listings.ReturnParameter, 1));
         Assert.Equal(1, NullableAnnotation.Flag(names.ReturnParameter, 1));

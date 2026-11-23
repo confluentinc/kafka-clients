@@ -39,17 +39,17 @@ public sealed class DescribeClientQuotasResult
 
     /// <summary>Creates a result over the given future of every matching entity's quotas.</summary>
     /// <param name="entities">The future of the entity-to-quota map.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="entities"/> is <see langword="default"/>, a future with no source.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="entities"/> is <see langword="null"/>.</exception>
     public DescribeClientQuotasResult(
         KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities)
     {
-        _future = entities != default ? entities : throw new ArgumentNullException(nameof(entities));
+        _future = entities ?? throw new ArgumentNullException(nameof(entities));
     }
 
     private DescribeClientQuotasResult(
-        KafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities, SafeAdminResultHandle native)
+        IKafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> entities, SafeAdminResultHandle native)
     {
-        _future = new KafkaFuture<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>>(entities);
+        _future = SyncAdminFutures.Of(entities);
         _native = native;
     }
 
@@ -69,7 +69,7 @@ public sealed class DescribeClientQuotasResult
         _future;
 
     internal static DescribeClientQuotasResult OfClient(
-        (KafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> Entities,
+        (IKafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> Entities,
         SafeAdminResultHandle Result) native) =>
         new DescribeClientQuotasResult(native.Entities, native.Result);
 }

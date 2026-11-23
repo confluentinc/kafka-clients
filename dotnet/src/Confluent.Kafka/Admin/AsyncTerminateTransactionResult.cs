@@ -25,10 +25,10 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="TerminateTransactionResult"/>
 public sealed class AsyncTerminateTransactionResult
 {
-    private readonly KafkaFutureImpl<object?> _future;
+    private readonly IKafkaFutureImpl<object?> _future;
     private readonly SafeAdminResultHandle _native;
 
-    private AsyncTerminateTransactionResult(KafkaFutureImpl<object?> future, SafeAdminResultHandle native)
+    private AsyncTerminateTransactionResult(IKafkaFutureImpl<object?> future, SafeAdminResultHandle native)
     {
         _future = future;
         _native = native;
@@ -37,9 +37,9 @@ public sealed class AsyncTerminateTransactionResult
     internal SafeAdminResultHandle Native => _native;
 
     /// <inheritdoc cref="TerminateTransactionResult.Result"/>
-    public AsyncKafkaFuture Result() => new AsyncKafkaFuture(_future);
+    public AsyncKafkaFuture Result() => AsyncAdminFutures.Of(_future);
 
     internal static AsyncTerminateTransactionResult OfClient(
-        (KafkaFutureImpl<object?> Future, SafeAdminResultHandle Result) native) =>
+        (IKafkaFutureImpl<object?> Future, SafeAdminResultHandle Result) native) =>
         new AsyncTerminateTransactionResult(native.Future, native.Result);
 }

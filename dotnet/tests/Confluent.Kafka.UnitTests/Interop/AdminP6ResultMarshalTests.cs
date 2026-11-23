@@ -247,7 +247,7 @@ public sealed class AdminP6ResultMarshalTests
     [Fact]
     public async Task DescribeClientQuotas_OnTheCoreMock_FailsTheOneFuture()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeClientQuotasResult result =

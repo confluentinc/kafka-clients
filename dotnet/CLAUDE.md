@@ -37,8 +37,8 @@ producer.Send(record)  ──►  ValueTask<AsyncKafkaFuture<RecordMetadata>>   
         │  P/Invoke: kafka_producer_Producer_send_with_callback_cb(view, record, callback, cb, opaque)
         │  the handover cb unpins; the first stage completes in Send when the producer takes or refuses
         │    the record at once, else in the cb on the CompletionThread. Later on_completion runs the user
-        │    callback, then the record's KafkaFutureImpl completes, on the CompletionThread (ffi §A1, §A6,
-        │    §A7). The consumer and admin use the same queue.
+        │    callback, then the record's future (its AsyncKafkaFutureImpl) completes, on the CompletionThread
+        │    (ffi §A1, §A6, §A7). The consumer and admin use the same queue.
         ▼
    C ABI  kafka_producer_Producer_send_with_callback_cb / _Producer__execute_callbacks   (flat pointers, out_err)
         ▼
@@ -199,7 +199,8 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
   (above). If a user can name it, it lives here.
 - `Internal/` — **internal** managed scaffolding
   (`Confluent.Kafka.Internal`): the completion bridge (`CompletionThread`, one drain
-  thread per client that has one, ffi §0.3; `KafkaFutureImpl` and `Completion`; the
+  thread per client that has one, ffi §0.3; the future engines `KafkaFutureImpl` (sync) and
+  `AsyncKafkaFutureImpl` (async), which share `FutureState<T>`; `Completion`; the
   `_cb` → `TaskCompletionSource` adapters, ffi §A7/§B7), the client configuration's type check and
   text (§4 **Config**).
 - `Internal/Interop/` — the **P/Invoke boundary**
@@ -285,7 +286,7 @@ public interface IAsyncCallback {          // Java `Callback`, async form (M19/P
 public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable {   // Java `Producer<K,V>`
     // method names mirror Java — no `Async` suffix; the interface carries the async distinction
     // outer = the handover (Java's send blocking; completes at the core's handover cb, never parks a thread); inner = the Future —
-    // AsyncKafkaFuture<RecordMetadata>, a readonly struct whose Get() is the delivery Task (M11/P3.6)
+    // AsyncKafkaFuture<RecordMetadata>, an abstract class whose Get() is the delivery Task (M11/P3.6, M25/P3)
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
     // Java's SECOND send signature — send(record, Callback) STILL returns the Future, so the callback
     // is an ADDITIONAL parameter, not an alternative (M11/P8 D-6 shape: declared identically on both
@@ -311,8 +312,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable { 
     Task AbortTransaction(CancellationToken cancellationToken = default);
 }
 
-public readonly struct AsyncKafkaFuture<T> {   // Java java.util.concurrent.Future<T> (producer send) — M11/P3.6
-    public Task<T> Get();   // + Java's other KafkaFuture members (§4 Futures); default(...) → InvalidOperationException
+public abstract class AsyncKafkaFuture<T> : AsyncKafkaFuture {   // Java java.util.concurrent.Future<T> (producer send) — M11/P3.6, M25/P3
+    public new abstract Task<T> Get();   // + Java's other KafkaFuture members (§4 Futures); default(...) is null
 }
 
 // The sync `IProducer<TKey,TValue>` (sync mirror) is **shipped** (M11/P4), generic-only (M11/P5):
@@ -700,8 +701,8 @@ The **admin client** shipped in M15 as `IAdmin` (`KafkaAdminClient` /
 sync `IAdmin` (`KafkaAdminClient` / `MockAdminClient`; Results hold `KafkaFuture` /
 `KafkaFuture<T>`) and async `IAsyncAdmin` (`AsyncKafkaAdminClient` / `AsyncMockAdminClient`;
 `Async*Result` types hold `AsyncKafkaFuture` / `AsyncKafkaFuture<T>`). Since M19/P1 that core is
-on the uniform C FFI: each future is a `KafkaFutureImpl` over an eager `get_cb`
-(`ffi-marshalling.md` §C1). `MockAdminClient` and `AsyncMockAdminClient` have Java's two
+on the uniform C FFI: each future is its flavour's engine (`KafkaFutureImpl` or `AsyncKafkaFutureImpl`)
+over an eager `get_cb` (`ffi-marshalling.md` §C1). `MockAdminClient` and `AsyncMockAdminClient` have Java's two
 constructors, `()` and `(brokers, controller)`, and Java's nested `Builder`, over
 `kafka_admin_MockAdminClient_Builder_*` (ledger 106). Their `Close` does nothing, as Java's mock
 (decision 21).
@@ -823,7 +824,7 @@ its C# realization, and where the enforcing rule lives.
 
 | Java | C# idiom | Rule / detail |
 |---|---|---|
-| `Future<RecordMetadata>` | `Task<RecordMetadata>`; on `IAsyncProducer.Send` wrapped as `AsyncKafkaFuture<RecordMetadata>` (a struct over `KafkaFutureImpl` with Java's `KafkaFuture` members, whose `Get()` returns a `Task`; a deliberate deviation so the two stages are distinguishable — M11/P3.6); on `IProducer.Send` it is `KafkaFuture<RecordMetadata>` (a struct over `KafkaFutureImpl` with Java's `KafkaFuture` members, whose blocking `Get()` is Java's `get()`; the name pairs with `AsyncKafkaFuture` — Java's `org.apache.kafka.common.KafkaFuture` is the Admin type, mapped to `Task<T>` — M11/P4.2). Since M15/P14 Java's Admin `KafkaFuture<T>` maps to `KafkaFuture<T>` in the sync admin Results and to `AsyncKafkaFuture<T>` in the async ones, with non-generic `KafkaFuture` / `AsyncKafkaFuture` for Java's `KafkaFuture<Void>`. This supersedes the 'mapped to `Task<T>`' note (M11/P4.2 D10). Which one a method returns: §4 Sync vs async, the M15/P14 a/b rule. | a `KafkaFutureImpl` (decision 4a) completed on the client's drain thread — producer ffi §A7, consumer ffi §B7; admin: one per native future, completed by its eager `get_cb` delivery on the admin drain thread, ffi §C1 (decisions 5, 8) |
+| `Future<RecordMetadata>` | `Task<RecordMetadata>`; on `IAsyncProducer.Send` wrapped as `AsyncKafkaFuture<RecordMetadata>` (an abstract class, whose engine `AsyncKafkaFutureImpl` is the future, with Java's `KafkaFuture` members, whose `Get()` returns a `Task`; a deliberate deviation so the two stages are distinguishable — M11/P3.6); on `IProducer.Send` it is `KafkaFuture<RecordMetadata>` (an abstract class, whose engine `KafkaFutureImpl` is the future, with Java's `KafkaFuture` members, whose blocking `Get()` is Java's `get()`; the name pairs with `AsyncKafkaFuture` — Java's `org.apache.kafka.common.KafkaFuture` is the Admin type, mapped to `Task<T>` — M11/P4.2). Since M15/P14 Java's Admin `KafkaFuture<T>` maps to `KafkaFuture<T>` in the sync admin Results and to `AsyncKafkaFuture<T>` in the async ones, with non-generic `KafkaFuture` / `AsyncKafkaFuture` for Java's `KafkaFuture<Void>`. This supersedes the 'mapped to `Task<T>`' note (M11/P4.2 D10). Which one a method returns: §4 Sync vs async, the M15/P14 a/b rule. Both are abstract classes since M25/P3 (§4 Futures). | the flavour's engine, `KafkaFutureImpl` or `AsyncKafkaFutureImpl` (decision 4a; M25/P3), completed on the client's drain thread — producer ffi §A7, consumer ffi §B7; admin: one per native future, completed by its eager `get_cb` delivery on the admin drain thread, ffi §C1 (decisions 5, 8) |
 | `send` — **blocks** *and* returns `Future<RecordMetadata>` | `ValueTask<AsyncKafkaFuture<RecordMetadata>>` on `IAsyncProducer`; the outer stage is the block (it completes at the core's handover `cb`; no thread parked), the inner `AsyncKafkaFuture` is the `Future` (`await future.Get()` = Java's `future.get()`); on `IProducer` it is `KafkaFuture<RecordMetadata>` — `Send` is the block (the blocking `send_with_callback`, ≤ `max.block.ms`), `future.Get()` is the `Future` (M11/P4.2) | M11/P3.5, M11/P3.6, M11/P4.2, ffi §A1 |
 | **blocks** in Java, **or** returns `Future<T>`, **or** takes a completion callback — any one is enough (producer `send`/`flush`/`close`/`partitionsFor`; consumer `poll`/`commitSync`/`position`/`subscribe`/`assign`/`pause`/`resume`/`unsubscribe`) | `Task`/`Task<T>` on the **async** interface (`IAsyncProducer`/`IAsyncConsumer`) + `CancellationToken`; method name **mirrors Java** (no `Async` suffix) | the three async triggers — §4 **Sync vs async**; best-effort cancel ffi §A7/§B7. `seek` and `currentLag` block in Java too: a `Task` on `IAsyncConsumer` over `seek_*_cb` / `current_lag_cb`, a blocking member on `IConsumer` (decision 22, ledger 103) |
 | `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close, then join the client's drain thread, wait for the in-flight uses, and destroy on the closing thread — §4 **Close/Dispose**; ffi §A7, §B2 |
@@ -1182,7 +1183,7 @@ not transfer). **If you cannot check, assume it blocks.** (Since M19/P1 `seek` a
 | Java signal | C# |
 |---|---|
 | **Blocks** — `addAndGet` · `processBackgroundEvents` · `getResult` · `result.await` · `waitOnMetadata` | `Task`/`Task<T>` on the async interface, `CancellationToken`; name mirrors Java (no `Async` suffix) |
-| **Returns `Future<T>`** — even if it barely blocks (`send`) | `Task<T>` on the async interface; name mirrors Java (no `Async` suffix). Exception: the producer's `send` yields `AsyncKafkaFuture<RecordMetadata>` (a struct over the `Task<T>`) from its admission `ValueTask` — M11/P3.6, §3 idiom map. The sync `IProducer.Send` returns `KafkaFuture<RecordMetadata>` (a blocking `Get()`) — M11/P4.2. Admin (M15/P14): every RPC returns its Result at once, as in Java; the Result holds one `KafkaFuture<T>` per key on `IAdmin` and one `AsyncKafkaFuture<T>` per key on `IAsyncAdmin`. Only `Close` waits. |
+| **Returns `Future<T>`** — even if it barely blocks (`send`) | `Task<T>` on the async interface; name mirrors Java (no `Async` suffix). Exception: the producer's `send` yields `AsyncKafkaFuture<RecordMetadata>` (whose `Get()` returns a `Task<T>`) from its admission `ValueTask` — M11/P3.6, §3 idiom map. The sync `IProducer.Send` returns `KafkaFuture<RecordMetadata>` (a blocking `Get()`) — M11/P4.2. Admin (M15/P14): every RPC returns its Result at once, as in Java; the Result holds one `KafkaFuture<T>` per key on `IAdmin` and one `AsyncKafkaFuture<T>` per key on `IAsyncAdmin`. Only `Close` waits. |
 | **Takes a completion callback** — even if non-blocking (`send(record, Callback)`, `commitAsync(OffsetCommitCallback)`) | `Task`/`Task<T>` on the async interface. The `Task` **replaces** the callback **only when the two carry the same information, at the same point, with the same arity**; where they do not, the callback-taking overload is kept **in addition** to the `Task`. **The test — does the callback deliver payload, ordering, or a signature the `Task` cannot?** If yes, keep both and record the reasoning in the phase PLAN (a concise comment at the site only where it is needed, §4 Comments). Two carve-outs are in force: **(1) `commitAsync(OffsetCommitCallback)`** — the callback delivers the **offsets the commit applied to**, which a `Task` returning `void` cannot express, and `commitAsync` is one half of a Java sync/async **pair** whose other half (`commitSync`) already owns the `Task` mapping (`Commit`, M5/P6) → see the §4 **commit-callback divergence** (M9/P7). **(2) `send(record, Callback)`** — Java's **second** `send` overload *still returns the `Future`* (`Producer.java:86`), so the callback is an **additional** parameter, not an alternative; dropping it removes one of Java's two `send` signatures outright. It also fires at a point no `Task` continuation can occupy: **before** the future's waiters are released (`ProducerBatch.java:303-323`), and with a **-1 placeholder metadata** rather than the fault the `Task` carries (`Callback.java:28-33`) → see the §4 **delivery-callback divergence** (M14/P1). Note this row governs **one-shot** completions only; a **multi-shot registration** (a rebalance listener) is never expressible as a `Task` and is out of its scope entirely. |
 | Non-blocking **getter** | sync **method**, Java's name (ledger 365) |
 | Non-blocking **action**, no completion signal | sync plain **method** |
@@ -1208,22 +1209,30 @@ error (an `ErrorNext(new OperationCanceledException())` included). `WhenComplete
 functions' dependants, the delivery and commit callbacks and `ToCompletionStage()` see the failure
 itself, never the wrapper.
 
-*(Decision 32 = yes, Agreed 2026-10-17.)* `KafkaFuture<T>`, `KafkaFuture`, `AsyncKafkaFuture<T>` and
-`AsyncKafkaFuture` are `readonly struct`s that carry Java's `KafkaFuture` members, in Java's order:
+*(Decision 32 = yes, Agreed 2026-10-17; classes since M25/P3, ledger 626–637.)* `KafkaFuture<T>`,
+`KafkaFuture`, `AsyncKafkaFuture<T>` and `AsyncKafkaFuture` are `public abstract class`es, as Java's
+`KafkaFuture<T>` is, that carry Java's `KafkaFuture` members, in Java's order:
 the statics `CompletedFuture` and `AllOf`, `ThenApply`, `WhenComplete`, `Cancel`, `Get()`,
 `Get(TimeSpan)`, `GetNow`, `IsCancelled()`, `IsCompletedExceptionally()`, `IsDone()`, and `ToString` in
 Java's `KafkaFutureImpl` format, every one a method (ledger 365). `BaseFunction` and `BiConsumer` are delegates nested in
-`KafkaFuture`. Deviations, each recorded:
+`KafkaFuture`. Each future is one object: its flavour's internal sealed engine, `KafkaFutureImpl<T>` or
+`AsyncKafkaFutureImpl<T>`, which holds its fields and logic in a `FutureState<T>` (ledger 626, 629). The
+constructors are `private protected`, so users cannot derive from the futures (ledger 628). There is no default
+value: `default(KafkaFuture<T>)` is `null`. Equality is identity (ledger 633). A `null` future given to `AllOf`
+or to a Result's `All()` throws `ArgumentNullException` "futures must not contain null" (ledger 634). The
+engine synchronizes on the future object itself, so a user's `lock (future)` can delay its completion and every
+later one of the same client, and a `Get()` inside it can wait forever: do not lock on a future (ledger 631).
+Deviations, each recorded:
 - `Get(CancellationToken)` is added (no Java twin). It ends only that wait, never the future.
 - The non-generic futures are Java's `KafkaFuture<Void>`: their `ThenApply` takes a `Func<R>` and
   their `WhenComplete` an `Action<Exception?>`, because .NET has no `Void`. `KafkaFuture<T>`
-  converts implicitly to `KafkaFuture` (the same future), so `AllOf` takes mixed types, and
-  `AllOf<T>(params KafkaFuture<T>[])` takes an array of one type. The async structs match.
-- `ToCompletionStage()` exists on the async structs only. It returns the future's own `Task`, the
+  derives from `KafkaFuture` (the same future, ledger 627), so `AllOf` takes mixed types, and
+  `AllOf<T>(params KafkaFuture<T>[])` takes an array of one type (ledger 632). The async classes match.
+- `ToCompletionStage()` exists on the async classes only. It returns the future's own `Task`, the
   same on every call, which faults with the failure itself; `Get()` returns a different `Task`,
-  which faults with the `ExecutionException`. The sync structs hand out no `Task`. *(Q13 = (a),
+  which faults with the `ExecutionException`. The sync classes hand out no `Task`. *(Q13 = (a),
   ledger 45.)*
-- The async `Get` forms return a `Task`; no struct has a `GetAwaiter`.
+- The async `Get` forms return a `Task`; no future has a `GetAwaiter`.
 - A timeout throws Java's `TimeoutException` (`Confluent.Kafka.TimeoutException`, a
   `System.TimeoutException`): with no message, as `CompletableFuture.get`, and for a send's
   future with `FutureRecordMetadata`'s "Timeout after waiting for <ms> ms.", the milliseconds
@@ -1699,7 +1708,7 @@ Index:
   (call-scoped pin; the async send pins until the handover) · §A5 Error model
   (the class of the error's id + preconditions) ·
   §A6 Callback marshalling (the `_cb` completions and the per-record `Callback_t`) ·
-  §A7 Async completion (`KafkaFutureImpl`, `Completion`, the in-callback rules)
+  §A7 Async completion (the future engines, `Completion`, the in-callback rules)
 
 **Part B · Consumer** (end to end)
 - §B1 Thread model · §B2 Handle ownership (owned container + borrowed view) ·

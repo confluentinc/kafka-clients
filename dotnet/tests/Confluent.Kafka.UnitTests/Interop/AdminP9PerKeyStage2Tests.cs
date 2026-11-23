@@ -44,7 +44,7 @@ public sealed class AdminP9PerKeyStage2Tests
     [Fact]
     public async Task DescribeTopicsByName_PerKeyOutcomes_AreIndependent()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
@@ -67,7 +67,7 @@ public sealed class AdminP9PerKeyStage2Tests
     [Fact]
     public async Task DescribeTopicsById_ResolvesTheRequestedUuid()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncCreateTopicsResult created =
@@ -86,7 +86,7 @@ public sealed class AdminP9PerKeyStage2Tests
     [Fact]
     public async Task DescribeConfigs_ResolvesTheCompositeResourceKey()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
@@ -112,7 +112,7 @@ public sealed class AdminP9PerKeyStage2Tests
     [Fact]
     public async Task DescribeLogDirs_ResolvesTheInt32BrokerKey()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(2);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(2, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         await TestTimeout.Run(
@@ -152,7 +152,7 @@ public sealed class AdminP9PerKeyStage2Tests
     [InlineData(Rpc.FenceProducers)]
     public async Task EveryKeyFaultsIndependently_WithJavasOwnMessage(Rpc rpc)
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         string[] keys = new[] { "cp3-key-a", "cp3-key-b", "cp3-key-c" };

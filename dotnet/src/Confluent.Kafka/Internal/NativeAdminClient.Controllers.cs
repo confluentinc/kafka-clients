@@ -35,7 +35,7 @@ internal sealed partial class NativeAdminClient
 
     private static readonly ResultFuture s_unregisterControllerAll = NativeMethods.UnregisterControllerResultAll;
 
-    internal (KafkaFutureImpl<object?> All, SafeAdminResultHandle Result) UnregisterController(
+    internal (IKafkaFutureImpl<object?> All, SafeAdminResultHandle Result) UnregisterController(
         int controllerId, UnregisterControllerOptions? options)
     {
         EnterUse();

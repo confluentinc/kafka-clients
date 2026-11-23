@@ -38,10 +38,10 @@ public sealed class AdminListTransactionsBrokerListingsTests
     {
         using ByBrokerIdValue value = new ByBrokerIdValue();
         SafeKafkaFutureHandle outer = SafeKafkaFutureHandle.Owned(value.Outer);
-        NativeFutureSource<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> source =
-            NativeAdminClient.BrokerListings.Create(outer);
+        NativeFutureSource<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> source =
+            NativeAdminClient.BrokerListings.Create(outer, AdminFlavour.Sync);
 
-        IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> early = source.Future.GetNow(null!);
+        IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> early = source.Future.GetNowUnwrapped(null!);
 
         Assert.NotNull(early);
         Assert.Equal(new[] { 1, 2 }, early.Keys.OrderBy(broker => broker));
@@ -50,7 +50,7 @@ public sealed class AdminListTransactionsBrokerListingsTests
 
         source.Issue();
 
-        Assert.Same(early, source.Future.GetNow(null!));
+        Assert.Same(early, source.Future.GetNowUnwrapped(null!));
         ByBrokerIdValue.AssertSettled(early);
         Assert.True(outer.IsClosed, "a per-broker future built and never delivered still holds the outer future");
     }
@@ -60,13 +60,13 @@ public sealed class AdminListTransactionsBrokerListingsTests
     {
         using ByBrokerIdValue value = new ByBrokerIdValue();
         SafeKafkaFutureHandle outer = SafeKafkaFutureHandle.Owned(value.Outer);
-        NativeFutureSource<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> source =
-            NativeAdminClient.BrokerListings.Create(outer);
+        NativeFutureSource<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> source =
+            NativeAdminClient.BrokerListings.Create(outer, AdminFlavour.Sync);
 
         source.Issue();
 
         Assert.True(source.Future.IsSettled);
-        IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> brokers = source.Future.GetNow(null!);
+        IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> brokers = source.Future.GetNowUnwrapped(null!);
         Assert.Equal(new[] { 1, 2 }, brokers.Keys.OrderBy(broker => broker));
         ByBrokerIdValue.AssertSettled(brokers);
         Assert.True(outer.IsClosed, "a per-broker future built and never delivered still holds the outer future");
@@ -106,12 +106,12 @@ public sealed class AdminListTransactionsBrokerListingsTests
         internal IntPtr Outer { get; }
 
         internal static void AssertSettled(
-            IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> brokers)
+            IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> brokers)
         {
-            foreach (KeyValuePair<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> broker in brokers)
+            foreach (KeyValuePair<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> broker in brokers)
             {
                 Assert.True(broker.Value.IsSettled, $"broker {broker.Key} was not settled by the delivery");
-                Assert.Equal(Expected(broker.Key), Assert.Single(broker.Value.GetNow(null!)));
+                Assert.Equal(Expected(broker.Key), Assert.Single(broker.Value.GetNowUnwrapped(null!)));
             }
         }
 
