@@ -2105,7 +2105,19 @@ fn render(g: &BTreeMap<String, ClassInfo>, own: &Forms, info: &ClassInfo) -> Res
             ctor.push("  protected constructor(...args: unknown[]) {".into());
         } else {
             for s in &sigs {
-                ctor.push(tsdoc(&s.doc, "  "));
+                // An abstract base refuses to be built itself, as Python's
+                // raises `TypeError` (a throw Java does not declare, which
+                // costs no words, check-doc-size).
+                let doc = if info.is_abstract {
+                    let gap = if s.doc.contains("\n@") { "\n" } else { "\n\n" };
+                    format!(
+                        "{}{gap}@throws `TypeError` when `new.target` is `{name}` itself, a catch-only base",
+                        s.doc
+                    )
+                } else {
+                    s.doc.clone()
+                };
+                ctor.push(tsdoc(&doc, "  "));
                 ctor.push(format!("  constructor({});", s.params));
             }
             ctor.push("  constructor(...args: unknown[]) {".into());
@@ -2451,6 +2463,14 @@ mod tests {
         assert!(retriable
             .content
             .contains("if (new.target === RetriableError && !isCreate(args)) {"));
+        // Each constructor signature says so, as Python's docstring does.
+        assert_eq!(
+            retriable
+                .content
+                .matches("   * @throws `TypeError` when `new.target` is `RetriableError` itself, a\n   *   catch-only base\n")
+                .count(),
+            6
+        );
         assert!(!retriable.content.contains("_ffiId"));
         assert!(retriable.content.contains("\nsetForms(RetriableError, ["));
         let api = find("ApiError");

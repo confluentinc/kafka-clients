@@ -39,12 +39,16 @@ export abstract class InvalidOffsetError extends KafkaError {
    * Java's `(String message)` constructor.
    *
    * @param options - the message
+   * @throws `TypeError` when `new.target` is `InvalidOffsetError` itself, a
+   *   catch-only base
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
    * Java's `(String message)` constructor, given the message alone.
    *
    * @param message - the message; `null` reads as `''`
+   * @throws `TypeError` when `new.target` is `InvalidOffsetError` itself, a
+   *   catch-only base
    */
   constructor(message: string | null);
   constructor(...args: unknown[]) {
