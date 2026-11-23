@@ -319,7 +319,7 @@ public sealed class ZeroCopyRetentionBrokerTests
             throw new InvalidOperationException("the consumer called the form without headers");
 
         public async ValueTask<ReadOnlyMemory<byte>?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            string topic, IHeaders headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             await Task.Yield();
             return data;

@@ -53,7 +53,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
+    /// A serializer declares a public <c>Serialize(string, IHeaders, T)</c> but does not implement
     /// <see cref="ISerializerWithHeaders{T}"/>: the producer would never call that method.
     /// </exception>
     public MockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer)
@@ -77,7 +77,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
+    /// A serializer declares a public <c>Serialize(string, IHeaders, T)</c> but does not implement
     /// <see cref="ISerializerWithHeaders{T}"/>: the producer would never call that method.
     /// </exception>
     public MockProducer(

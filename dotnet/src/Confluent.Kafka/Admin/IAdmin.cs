@@ -121,7 +121,11 @@ public interface IAdmin : IDisposable
     /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="topics"/> is null, or is a name collection containing a null element.
+    /// <paramref name="topics"/> contains a null element: a null name or a null id.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="topics"/> is null ("The TopicCollection: null provided did not match any supported classes for
+    /// deleteTopics.").
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="options"/> is null. Not thrown when <paramref name="topics"/> holds no non-empty name, or no
@@ -201,7 +205,11 @@ public interface IAdmin : IDisposable
     /// <see cref="TopicDescription"/> or its own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="topics"/> is null, or is a name collection containing a null element.
+    /// <paramref name="topics"/> contains a null element: a null name or a null id.
+    /// </exception>
+    /// <exception cref="IllegalArgumentException">
+    /// <paramref name="topics"/> is null ("The TopicCollection: null provided did not match any supported classes for
+    /// describeTopics.").
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="options"/> is null. Not thrown when <paramref name="topics"/> is a collection of names with no
@@ -354,7 +362,8 @@ public interface IAdmin : IDisposable
     /// <see cref="DeleteRecordsResult"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="recordsToDelete"/> is null, or contains a topic partition with a null topic or a null entry.
+    /// <paramref name="recordsToDelete"/> is null, or contains a null partition, a topic partition with a null topic or
+    /// a null entry.
     /// </exception>
     /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -668,8 +677,8 @@ public interface IAdmin : IDisposable
     /// itself fails only when the election could not be run at all.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="options"/> is null, or <paramref name="partitions"/> contains a topic partition with a null
-    /// topic.
+    /// <paramref name="options"/> is null, or <paramref name="partitions"/> contains a null partition or a topic
+    /// partition with a null topic.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="electionType"/> is not one of <see cref="ElectionType.PREFERRED"/>
@@ -725,7 +734,7 @@ public interface IAdmin : IDisposable
     /// future; a partially failed batch is not a failed call.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="reassignments"/> is null, or contains a topic partition with a null topic.
+    /// <paramref name="reassignments"/> is null, or contains a null partition or a topic partition with a null topic.
     /// </exception>
     /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -766,7 +775,7 @@ public interface IAdmin : IDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="groupId"/> or <paramref name="offsets"/> is null, or <paramref name="offsets"/> contains a topic
-    /// partition with a null topic or a null <see cref="OffsetAndMetadata"/> value.
+    /// partition with a null topic, a null partition or a null <see cref="OffsetAndMetadata"/> value.
     /// </exception>
     /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -810,7 +819,7 @@ public interface IAdmin : IDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="groupId"/> or <paramref name="partitions"/> is null, or <paramref name="partitions"/> contains a
-    /// topic partition with a null topic.
+    /// null partition or a topic partition with a null topic.
     /// </exception>
     /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -857,9 +866,9 @@ public interface IAdmin : IDisposable
     /// ongoing reassignment is absent from the map; that is not an error.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="options"/> is null, or <paramref name="partitions"/> contains a topic partition with a null
-    /// topic. Not thrown when <paramref name="partitions"/> holds a partition with an empty topic or a negative
-    /// partition number, since nothing is sent then.
+    /// <paramref name="options"/> is null, or <paramref name="partitions"/> contains a null partition or a topic
+    /// partition with a null topic. Not thrown when <paramref name="partitions"/> holds a partition with an empty topic
+    /// or a negative partition number, since nothing is sent then.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="partitions"/> contains a topic partition with a topic containing a NUL character (see the
@@ -934,7 +943,8 @@ public interface IAdmin : IDisposable
     /// partition that fails fails only <em>its own</em> future.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="topicPartitionOffsets"/> is null, or contains a topic partition with a null topic.
+    /// <paramref name="topicPartitionOffsets"/> is null, or contains a null partition or a topic partition with a null
+    /// topic.
     /// </exception>
     /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -1149,7 +1159,8 @@ public interface IAdmin : IDisposable
     /// own failure.
     /// </returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="groupSpecs"/> is null, or contains a null group id, a null spec or a null selected topic.
+    /// <paramref name="groupSpecs"/> is null, or contains a null group id, a null spec, a null selected partition or a
+    /// null selected topic.
     /// </exception>
     /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -1808,8 +1819,8 @@ public interface IAdmin : IDisposable
     /// </param>
     /// <returns>One future per partition. See <see cref="DescribeProducersResult"/>.</returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="partitions"/> is null, or contains a topic partition with a null topic, which the ABI would skip
-    /// silently.
+    /// <paramref name="partitions"/> is null, or contains a null partition or a topic partition with a null topic,
+    /// which the ABI would skip silently.
     /// </exception>
     /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">
@@ -1876,8 +1887,8 @@ public interface IAdmin : IDisposable
     /// <param name="options">The options for the request. A null is rejected.</param>
     /// <returns>The single future Java publishes. See <see cref="AbortTransactionResult"/>.</returns>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="spec"/> is null, or carries a topic partition whose topic is null (constructible, as in Java, or
-    /// a <c>default(TopicPartition)</c>), which cannot cross the C ABI.
+    /// <paramref name="spec"/> is null, or carries a null partition or a partition whose topic is null, which cannot
+    /// cross the C ABI.
     /// </exception>
     /// <exception cref="ArgumentNullException"><paramref name="options"/> is null.</exception>
     /// <exception cref="ArgumentException">

@@ -33,11 +33,11 @@ internal static class SerdeGuard
     internal static void Check<T>(ISerializer<T> serializer, string client, bool disposes)
     {
         if (serializer is not ISerializerWithHeaders<T>
-            && DefaultMethodGuard.Declares(serializer, "Serialize", typeof(string), typeof(Headers), typeof(T)))
+            && DefaultMethodGuard.Declares(serializer, "Serialize", typeof(string), typeof(IHeaders), typeof(T)))
         {
             string type = DefaultMethodGuard.TypeText(typeof(T));
             throw DefaultMethodGuard.NeverCalled(
-                serializer, "Serialize(string, Headers, " + type + ")", "ISerializerWithHeaders<" + type + ">", client);
+                serializer, "Serialize(string, IHeaders, " + type + ")", "ISerializerWithHeaders<" + type + ">", client);
         }
 
         CheckClose(serializer, client, disposes);
@@ -46,20 +46,20 @@ internal static class SerdeGuard
     internal static void Check<T>(IDeserializer<T> deserializer, string client, bool disposes)
     {
         if (deserializer is not IDeserializerWithHeaders<T>
-            && DefaultMethodGuard.Declares(deserializer, "Deserialize", typeof(string), typeof(Headers), typeof(ReadOnlySpan<byte>)))
+            && DefaultMethodGuard.Declares(deserializer, "Deserialize", typeof(string), typeof(IHeaders), typeof(ReadOnlySpan<byte>)))
         {
             string type = DefaultMethodGuard.TypeText(typeof(T));
             throw DefaultMethodGuard.NeverCalled(
-                deserializer, "Deserialize(string, Headers, ReadOnlySpan<byte>)", "IDeserializerWithHeaders<" + type + ">", client);
+                deserializer, "Deserialize(string, IHeaders, ReadOnlySpan<byte>)", "IDeserializerWithHeaders<" + type + ">", client);
         }
 
         if (deserializer is not IDeserializerWithReadOnlyMemory<T>
-            && DefaultMethodGuard.Declares(deserializer, "Deserialize", typeof(string), typeof(Headers), typeof(ReadOnlyMemory<byte>)))
+            && DefaultMethodGuard.Declares(deserializer, "Deserialize", typeof(string), typeof(IHeaders), typeof(ReadOnlyMemory<byte>)))
         {
             string type = DefaultMethodGuard.TypeText(typeof(T));
             throw DefaultMethodGuard.NeverCalled(
                 deserializer,
-                "Deserialize(string, Headers, ReadOnlyMemory<byte>)",
+                "Deserialize(string, IHeaders, ReadOnlyMemory<byte>)",
                 "IDeserializerWithReadOnlyMemory<" + type + ">",
                 client);
         }
@@ -71,12 +71,12 @@ internal static class SerdeGuard
     {
         if (serializer is not IAsyncSerializerWithHeaders<T>
             && DefaultMethodGuard.Declares(
-                serializer, "Serialize", typeof(string), typeof(Headers), typeof(T), typeof(CancellationToken)))
+                serializer, "Serialize", typeof(string), typeof(IHeaders), typeof(T), typeof(CancellationToken)))
         {
             string type = DefaultMethodGuard.TypeText(typeof(T));
             throw DefaultMethodGuard.NeverCalled(
                 serializer,
-                "Serialize(string, Headers, " + type + ", CancellationToken)",
+                "Serialize(string, IHeaders, " + type + ", CancellationToken)",
                 "IAsyncSerializerWithHeaders<" + type + ">",
                 client);
         }
@@ -91,13 +91,13 @@ internal static class SerdeGuard
                 deserializer,
                 "Deserialize",
                 typeof(string),
-                typeof(Headers),
+                typeof(IHeaders),
                 typeof(ReadOnlyMemory<byte>),
                 typeof(CancellationToken)))
         {
             throw DefaultMethodGuard.NeverCalled(
                 deserializer,
-                "Deserialize(string, Headers, ReadOnlyMemory<byte>, CancellationToken)",
+                "Deserialize(string, IHeaders, ReadOnlyMemory<byte>, CancellationToken)",
                 "IAsyncDeserializerWithHeaders<" + DefaultMethodGuard.TypeText(typeof(T)) + ">",
                 client);
         }

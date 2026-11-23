@@ -112,6 +112,16 @@ public sealed class PublicRecordMetadataTests
         Assert.Equal("topicPartition must not be null", e.Message);
     }
 
+    [Fact]
+    public void NullTopicInTheTopicPartition_IsReturnedAsGiven_AndPrintsAsJavaDoes()
+    {
+        RecordMetadata metadata = new RecordMetadata(new TopicPartition(null!, 3), 15L, 3, 2340234L, 3, 5);
+
+        Assert.Null(metadata.Topic());
+        Assert.Equal(3, metadata.Partition());
+        Assert.Equal("null-3@18", metadata.ToString());
+    }
+
     [Theory]
     [InlineData("t", 0, 5L, 123L, -1, 100)]
     [InlineData("orders", 7, -1L, -1L, 3, 0)]
@@ -121,7 +131,7 @@ public sealed class PublicRecordMetadataTests
     {
         TopicPartition tp = new TopicPartition(topic, partition);
 
-        RecordMetadata made = new RecordMetadata(tp, offset, timestamp, keySize, valueSize);
+        RecordMetadata made = new RecordMetadata(topic, partition, offset, timestamp, keySize, valueSize);
         RecordMetadata built = new RecordMetadata(tp, offset, 0, timestamp, keySize, valueSize);
 
         Assert.Equal(built.Topic(), made.Topic());

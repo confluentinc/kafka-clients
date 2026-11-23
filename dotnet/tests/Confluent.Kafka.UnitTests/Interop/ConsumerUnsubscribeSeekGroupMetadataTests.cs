@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 
@@ -99,7 +100,7 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
 
         // Java's MockConsumer.seek checks no offset; the core mock refuses the unassigned partition.
         IllegalStateException ex = Assert.Throws<IllegalStateException>(
-            () => consumer.Seek("proof-topic", 0, offset: -1));
+            () => consumer.Seek(new TopicPartition("proof-topic", 0), offset: -1));
 
         Assert.Equal("No current assignment for partition proof-topic-0", ex.Message);
     }
@@ -110,7 +111,7 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         await TestTimeout.DisposeAsync(consumer);
 
-        Assert.Throws<IllegalStateException>(() => consumer.Seek("proof-topic", 0, offset: -5));
+        Assert.Throws<IllegalStateException>(() => consumer.Seek(new TopicPartition("proof-topic", 0), offset: -5));
     }
 
     [Fact]
@@ -120,7 +121,7 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = Assert.Throws<IllegalStateException>(
-            () => consumer.Seek("proof-topic", partition: -1, offset: 0));
+            () => consumer.Seek(new TopicPartition("proof-topic", -1), offset: 0));
         Assert.Equal("No current assignment for partition proof-topic--1", ex.Message);
     }
 

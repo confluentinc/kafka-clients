@@ -955,7 +955,7 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        TopicPartition nullTopic = default;
+        TopicPartition nullTopic = new TopicPartition(null!, 0);
 
         AssertThrowAlike(() => sync.AlterPartitionReassignments(null!), () => async.AlterPartitionReassignments(null!));
         AssertThrowAlike(() => sync.ListOffsets(null!), () => async.ListOffsets(null!));
@@ -1314,7 +1314,7 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable syncDisposal = TestTimeout.Disposal(sync);
         AsyncMockAdminClient async = AsyncMockAdminClient.Create().Build();
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
-        TopicPartition nullTopic = default;
+        TopicPartition nullTopic = new TopicPartition(null!, 0);
         TopicPartition partition = new TopicPartition("diff-ae", 0);
         string?[] nullGroup = { "diff-ae-group", null };
         RemoveMembersFromConsumerGroupOptions everyone = new RemoveMembersFromConsumerGroupOptions();
@@ -2059,9 +2059,9 @@ public sealed class PublicAdminP14DifferentialTests
         using IDisposable asyncDisposal = TestTimeout.Disposal(async);
         string[] nullId = { "diff-pg", null! };
         string[] nulId = { "diff\0pg" };
-        TopicPartition[] nullTopic = { new TopicPartition("diff-pg", 0), default };
+        TopicPartition[] nullTopic = { new TopicPartition("diff-pg", 0), new TopicPartition(null!, 0) };
         TopicPartition[] nulTopic = { new TopicPartition("diff\0pg", 0) };
-        AbortTransactionSpec nullTopicSpec = new AbortTransactionSpec(default, 1L, 1, 1);
+        AbortTransactionSpec nullTopicSpec = new AbortTransactionSpec(new TopicPartition(null!, 0), 1L, 1, 1);
         AbortTransactionSpec nulTopicSpec = new AbortTransactionSpec(new TopicPartition("diff\0pg", 0), 1L, 1, 1);
         ListTransactionsOptions nulPattern = new ListTransactionsOptions().FilterOnTransactionalIdPattern("diff\0pg");
 

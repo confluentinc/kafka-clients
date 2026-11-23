@@ -87,11 +87,12 @@ public sealed class PublicAdminP4ShapeParityTests
                 nameof(IAdmin.AlterPartitionReassignments),
                 new[] { typeof(IReadOnlyDictionary<TopicPartition, NewPartitionReassignment>) })!.ReturnType);
 
-        // The reassignment value is nullable: null is Java's Optional.empty(), "revert this partition". Position 1 of the
-        // flattened parameter type: position 0 is the dictionary, and TopicPartition, a value type, takes no position.
+        // The reassignment value is nullable: null is Java's Optional.empty(), "revert this partition". Position 2 of the
+        // flattened parameter type: position 0 is the dictionary, 1 its TopicPartition key.
         Assert.Equal(
             NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(reassign.GetParameters()[0], 0));
-        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(reassign.GetParameters()[0], 1));
+        Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(reassign.GetParameters()[0], 1));
+        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(reassign.GetParameters()[0], 2));
 
         Assert.Empty(
             typeof(IAdmin).GetMethods()
@@ -109,10 +110,12 @@ public sealed class PublicAdminP4ShapeParityTests
         Assert.Equal(typeof(KafkaFuture<IReadOnlyDictionary<TopicPartition, Exception>>), partitions.ReturnType);
         Assert.Equal(typeof(KafkaFuture), all.ReturnType);
 
-        // Nullability positions: 0 = the KafkaFuture (a struct, so oblivious), 1 = the dictionary, 2 = the map's value.
+        // Nullability positions: 0 = the KafkaFuture (a struct, so oblivious), 1 = the dictionary, 2 = its
+        // TopicPartition key, 3 = the map's value.
         Assert.Equal(NullableAnnotation.Oblivious, NullableAnnotation.Flag(partitions.ReturnParameter, 0));
         Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(partitions.ReturnParameter, 1));
-        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(partitions.ReturnParameter, 2));
+        Assert.Equal(NullableAnnotation.NotAnnotated, NullableAnnotation.Flag(partitions.ReturnParameter, 2));
+        Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(partitions.ReturnParameter, 3));
 
         Assert.Equal(
             new[] { nameof(ElectLeadersResult.All), nameof(ElectLeadersResult.Partitions) },

@@ -18,6 +18,7 @@ using System.Globalization;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Consumer;
 
@@ -164,7 +165,7 @@ public sealed class ConsumerRecordsTests
         int emptyPartitionIndex = 2;
         TopicPartition topicPartition = new TopicPartition(topic, 0);
         ConsumerRecord<int?, string> newRecord = new ConsumerRecord<int?, string>(
-            topic, 0, 0, 0L, TimestampType.CREATE_TIME, 0, 0, 0, "0", new Headers(), null);
+            topic, 0, 0, 0L, TimestampType.CREATE_TIME, 0, 0, 0, "0", new RecordHeaders(), null);
         ConsumerRecords<int?, string> records =
             BuildTopicTestRecords(recordSize, partitionSize, emptyPartitionIndex, new[] { topic });
         ConsumerRecords<int?, string> emptyRecords = ConsumerRecords<int?, string>.Empty();
@@ -248,6 +249,47 @@ public sealed class ConsumerRecordsTests
         ArgumentNullException e = Assert.Throws<ArgumentNullException>(
             () => new ConsumerRecords<int?, string>(Records(s_tp, OneRecord()), nextOffsets));
         Assert.Equal("nextOffsets", e.ParamName);
+    }
+
+    // Java's constructor stores the records map as given, which a C# dictionary cannot do with a null key.
+    [Fact]
+    public void ANullPartitionInRecords_ThrowsArgumentNullException_AtConstruction()
+    {
+        EntryMap<TopicPartition, IReadOnlyList<ConsumerRecord<int?, string>>> records =
+            new EntryMap<TopicPartition, IReadOnlyList<ConsumerRecord<int?, string>>>(
+                new KeyValuePair<TopicPartition, IReadOnlyList<ConsumerRecord<int?, string>>>(s_tp, OneRecord()),
+                new KeyValuePair<TopicPartition, IReadOnlyList<ConsumerRecord<int?, string>>>(null!, OneRecord()));
+
+        ArgumentNullException e = Assert.Throws<ArgumentNullException>(
+            () => new ConsumerRecords<int?, string>(records, new Dictionary<TopicPartition, OffsetAndMetadata>()));
+        Assert.Equal("records", e.ParamName);
+        Assert.Equal(new ArgumentNullException("records", "records must not contain null").Message, e.Message);
+    }
+
+    // Java's Map.copyOf throws NullPointerException for a null key.
+    [Fact]
+    public void ANullPartitionInNextOffsets_ThrowsArgumentNullException_AtConstruction()
+    {
+        EntryMap<TopicPartition, OffsetAndMetadata> nextOffsets = new EntryMap<TopicPartition, OffsetAndMetadata>(
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(s_tp, new OffsetAndMetadata(1L)),
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(null!, new OffsetAndMetadata(2L)));
+
+        ArgumentNullException e = Assert.Throws<ArgumentNullException>(
+            () => new ConsumerRecords<int?, string>(Records(s_tp, OneRecord()), nextOffsets));
+        Assert.Equal("nextOffsets", e.ParamName);
+        Assert.Equal(new ArgumentNullException("nextOffsets", "nextOffsets must not contain null").Message, e.Message);
+    }
+
+    // Java's records(TopicPartition) finds nothing for a null partition and returns an empty list.
+    [Fact]
+    public void RecordsOfANullPartition_IsEmpty()
+    {
+        ConsumerRecords<int?, string> records = new ConsumerRecords<int?, string>(
+            Records(s_tp, OneRecord()), new Dictionary<TopicPartition, OffsetAndMetadata>());
+
+        Assert.Empty(records.Records((TopicPartition)null!));
+        Assert.Empty(ConsumerRecords<int?, string>.EMPTY.Records((TopicPartition)null!));
+        Assert.Single(records.Records(s_tp));
     }
 
     [Fact]
@@ -368,7 +410,7 @@ public sealed class ConsumerRecordsTests
                     {
                         records.Add(new ConsumerRecord<int?, string>(
                             topic, i, j, 0L, TimestampType.CREATE_TIME, 0, 0, j,
-                            j.ToString(CultureInfo.InvariantCulture), new Headers(), null));
+                            j.ToString(CultureInfo.InvariantCulture), new RecordHeaders(), null));
                     }
                 }
 

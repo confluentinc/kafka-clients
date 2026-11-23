@@ -174,6 +174,11 @@ internal sealed partial class NativeAdminClient : IDisposable
         HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
         foreach (TopicPartition partition in partitions)
         {
+            if (partition is null)
+            {
+                throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
+            }
+
             if (partition.Topic() is null)
             {
                 throw new ArgumentNullException(
@@ -620,6 +625,11 @@ internal sealed partial class NativeAdminClient : IDisposable
         int index = 0;
         foreach (KeyValuePair<TopicPartition, long> entry in newOffsets)
         {
+            if (entry.Key is null)
+            {
+                throw new ArgumentNullException(nameof(newOffsets), "newOffsets must not contain null");
+            }
+
             if (entry.Key.Topic() is null)
             {
                 throw new ArgumentNullException(

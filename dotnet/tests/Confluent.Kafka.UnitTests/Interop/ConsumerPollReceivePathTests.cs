@@ -44,7 +44,7 @@ public sealed class ConsumerPollReceivePathTests
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         consumer.Assign(new[] { (topic, partition) });
-        consumer.Seek(topic, partition, offset: 0);
+        consumer.Seek(new TopicPartition(topic, partition), offset: 0);
         return Task.FromResult(consumer);
     }
 
