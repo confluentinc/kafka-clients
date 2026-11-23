@@ -19,13 +19,13 @@
 // java-index` (rust/xtask/src/java_index_json.rs, which documents the schema),
 // so nothing in javascript/ reads the kafka submodule. The file leaves out a
 // key at its default; this loader puts every key back, so a reader sees each
-// class, overload and field whole.
+// class, overload and field whole, and adds up each Javadoc's words.
 
 const fs = require('node:fs');
 const path = require('node:path');
 
 /** The schema this loader reads. */
-const SCHEMA = 2;
+const SCHEMA = 3;
 
 /** The committed index, beside this client's package.json. */
 const INDEX_PATH = path.join(__dirname, '..', '..', 'java-index.json');
@@ -43,12 +43,23 @@ const CLASS_DEFAULTS = {
   unsupported_package: false,
   supertypes: [],
   supertype_fqns: [],
+  javadoc: [],
   overloads: [],
   fields: [],
   enum_constants: [],
 };
-const OVERLOAD_DEFAULTS = { return_type: null, visibility: 'public', static: false, default: false, deprecated: false };
-const FIELD_DEFAULTS = { type: null, visibility: 'public', static: false, final: false, deprecated: false };
+const OVERLOAD_DEFAULTS = {
+  return_type: null,
+  visibility: 'public',
+  static: false,
+  default: false,
+  abstract: false,
+  deprecated: false,
+  javadoc: [],
+};
+const FIELD_DEFAULTS = { type: null, visibility: 'public', static: false, final: false, deprecated: false, javadoc: [] };
+/** A Javadoc's size (`javadoc`): `return` null when Java has no `@return`. */
+const JAVADOC_DEFAULTS = { params: [], return: null, throws: [] };
 
 /** `o` with each key of `defaults` it lacks set to a copy of its default. */
 function fill(o, defaults) {
@@ -59,20 +70,37 @@ function fill(o, defaults) {
 }
 
 /**
+ * The Javadoc sizes `sizes` with their keys put back, each with `words`, the
+ * sum of its parts: the words the 150% limit is computed from.
+ */
+function expandSizes(sizes) {
+  for (const s of sizes) {
+    fill(s, JAVADOC_DEFAULTS);
+    s.words = s.body + s.params.reduce((n, [, w]) => n + w, 0) + (s.return || 0) + s.throws.reduce((n, [, w]) => n + w, 0);
+  }
+}
+
+/**
  * Index `index` (the parsed file) with every key put back: each class's
  * `fqn` (`org.apache.kafka.<package>.<path joined by $>`), each overload's
- * `param_names` (blank for a private one) and `param_types` (its `params`).
+ * `param_names` (blank for a private one) and `param_types` (its `params`),
+ * and each Javadoc size's `words`.
  */
 function expand(index) {
   for (const c of index.classes || []) {
     fill(c, CLASS_DEFAULTS);
     if (c.fqn === undefined) c.fqn = `org.apache.kafka.${c.package}.${c.path.join('$')}`;
+    expandSizes(c.javadoc);
     for (const o of c.overloads) {
       fill(o, OVERLOAD_DEFAULTS);
       if (o.param_names === undefined) o.param_names = o.params.map(() => '');
       if (o.param_types === undefined) o.param_types = o.params;
+      expandSizes(o.javadoc);
     }
-    for (const f of c.fields) fill(f, FIELD_DEFAULTS);
+    for (const f of c.fields) {
+      fill(f, FIELD_DEFAULTS);
+      expandSizes(f.javadoc);
+    }
   }
   return index;
 }

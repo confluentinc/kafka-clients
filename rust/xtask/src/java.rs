@@ -194,6 +194,9 @@ pub struct Overload {
     pub is_static: bool,
     /// Whether it is a `default` method of an interface.
     pub is_default: bool,
+    /// Whether it is declared `abstract` (an interface's methods, abstract
+    /// without the keyword, are not).
+    pub is_abstract: bool,
     /// The names of its parameters, in order.
     pub param_names: Vec<String>,
     /// Its parameter types as written, annotations and `final` dropped,
@@ -1279,6 +1282,7 @@ impl Scanned {
                     visibility,
                     is_static,
                     is_default: false,
+                    is_abstract: false,
                     param_names: Vec::new(),
                     param_types: Vec::new(),
                     returns_class: false,
@@ -1525,6 +1529,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                             visibility: visibility.take().unwrap_or(implicit),
                             is_static: std::mem::take(&mut is_static),
                             is_default: std::mem::take(&mut is_default),
+                            is_abstract: std::mem::take(&mut is_abstract),
                             param_names,
                             param_types,
                             returns_class,
