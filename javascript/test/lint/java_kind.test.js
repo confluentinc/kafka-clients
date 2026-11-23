@@ -131,3 +131,17 @@ test('an interface beside its constant passes, the constant declared first too',
     '/** A station. */\nexport interface Station {\n  go(): void;\n}\n';
   assert.equal(lint(fixture({ 'src/producer/station.ts': both }), [RULE]).status, 0);
 });
+
+test("a constant beside an interface whose Java type has no static method is a finding: it holds Java's statics", () => {
+  const r = lint(
+    fixture({
+      'src/producer/base.ts':
+        '/** A base. */\nexport interface Base {\n  flush(): void;\n}\n' +
+        '/** Invented. */\nexport const Base = { inventedHelper(): void {} };\n',
+    }),
+    [RULE],
+  );
+  assert.deepEqual(findings(r), [
+    "src/producer/base.ts:Base: translates the Java interface clients.producer.Base as an interface and a constant: a constant of an interface's name is the runtime object holding the Java interface's public static methods, and it has none (javascript/CLAUDE.md, JavaScript Binding Conventions, Names and Class family: `Admin.create`)",
+  ]);
+});

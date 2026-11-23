@@ -381,7 +381,9 @@ function signaturesOf(ts, node) {
  * `completedFuture(value, ...check: BareCheck<U>)`), which no call gives.
  */
 function formParameters(ts, sig) {
-  const ps = [...(sig.parameters || [])];
+  // A function-valued property of an interface's runtime object: its function's.
+  const fn = !sig.parameters && sig.initializer && sig.initializer.parameters ? sig.initializer : sig;
+  const ps = [...(fn.parameters || [])];
   const last = ps[ps.length - 1];
   // Only the type-level check: a rest parameter typed `BareCheck<...>`, whatever
   // its name; any other trailing rest parameter, a Java parameter named `check`
@@ -501,9 +503,54 @@ function shapeMembers(ts, node) {
   return out;
 }
 
-/** The public members of exported item `item`: a class's, or an interface's or object type's. */
+/**
+ * The runtime object beside exported interface `item` that holds its statics
+ * (javascript/CLAUDE.md, JavaScript Binding Conventions, Names: `Admin.create`
+ * is on a runtime object named after the interface): the object literal of
+ * the const of its name in its module, or null.
+ */
+function staticsObject(ts, item) {
+  if (!ts.isInterfaceDeclaration(item.node)) return null;
+  for (const st of item.node.getSourceFile().statements) {
+    if (!ts.isVariableStatement(st)) continue;
+    for (const d of st.declarationList.declarations) {
+      if (ts.isIdentifier(d.name) && d.name.text === item.name && d.initializer && ts.isObjectLiteralExpression(d.initializer)) {
+        return d.initializer;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The members of the runtime object beside exported interface `item`
+ * (`staticsObject`), in the shape `publicMembers` gives a class's, each
+ * static: a method (a method or a function-valued property), an accessor or
+ * a property. A spread has none.
+ */
+function staticsMembers(ts, item) {
+  const object = staticsObject(ts, item);
+  if (object === null) return [];
+  const out = [];
+  for (const p of object.properties) {
+    const name = p.name ? memberName(ts, p.name) : null;
+    if (name === null || name.startsWith('_')) continue;
+    const fn = ts.isPropertyAssignment(p) && (ts.isArrowFunction(p.initializer) || ts.isFunctionExpression(p.initializer));
+    if (ts.isMethodDeclaration(p) || fn) out.push({ name, kind: 'method', isStatic: true, isReadonly: false, node: p });
+    else if (ts.isGetAccessorDeclaration(p)) out.push({ name, kind: 'get', isStatic: true, isReadonly: true, node: p });
+    else if (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) {
+      out.push({ name, kind: 'property', isStatic: true, isReadonly: false, node: p });
+    }
+  }
+  return out;
+}
+
+/**
+ * The public members of exported item `item`: a class's, or an interface's
+ * or object type's, an interface's runtime object's included (its statics).
+ */
 function itemMembers(ts, item) {
-  return item.kind === 'class' ? publicMembers(ts, item.node) : shapeMembers(ts, item.node);
+  return item.kind === 'class' ? publicMembers(ts, item.node) : [...shapeMembers(ts, item.node), ...staticsMembers(ts, item)];
 }
 
 /** The kind of export declaration `d`, or null for one the rules do not read. */
@@ -672,6 +719,8 @@ module.exports = {
   signaturesOf,
   formParameters,
   shapeMembers,
+  staticsObject,
+  staticsMembers,
   itemMembers,
   javaMember,
   unGet,

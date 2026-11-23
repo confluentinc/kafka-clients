@@ -22,16 +22,23 @@
 // points elsewhere replaced by the one it points to). The TypeScript words are
 // counted as the Rust lint counts (`wordCount`), and only what has a Java
 // counterpart: the description, `@remarks` (Rust's notes), `@see` and
-// `@example`; a `@param` Java has (the options object's when Java has any);
-// `@returns` when Java has `@return`; a `@throws` naming the error of a Java
-// `@throws`. Checked: the TSDoc of every export, public member and overload
+// `@example`; a `@param` Java has (the options object's when Java has any),
+// and a `@typeParam` Java has as `@param <T>`; `@returns` when Java has
+// `@return`; a `@throws` naming, anywhere in it, the error of a Java
+// `@throws` (Rust's `names_throw`). Checked: the TSDoc of every export, nested
+// type (a class, interface or type alias of the namespace merged with an
+// export, against Java's nested class of its name, recursively), public
+// member (an interface's runtime object's as its statics) and overload
 // signature mapping to a Java member with a Javadoc (scripts/lint/java_ts.js,
-// `javaTargets` included), a signature against the Java form the overload-shape
-// mapping finds for it, else against every form of the set, passing when it
-// fits one; a function type translating a one-method interface (`Callback`)
-// against the interface's Javadoc and its method's together. Not checked: a
-// member with no Java counterpart (an invented one, an `...Args` key, the keys
-// of an options object), and what has no Javadoc.
+// `javaTargets` included), a signature against the Java form the
+// overload-shape mapping finds for it, else against every form of the set,
+// passing when it fits one; a function type translating a one-method
+// interface (`Callback`, `KafkaFuture.BaseFunction`) against the interface's
+// Javadoc and its method's together. Not checked: a member with no Java
+// counterpart (an invented one, an `...Args` key, the keys of an options
+// object), a nested type no Java nested class translates, the members of an
+// interface's runtime object that is not an object literal, and what has no
+// Javadoc.
 
 const { atNode } = require('../location');
 const {
@@ -150,11 +157,15 @@ function errorNames(cls) {
   return names;
 }
 
-/** The error a `@throws` text names first: its leading code span, link or word. */
-function thrownName(text) {
-  const m = /^\s*(?:\{@link\w*\s+([\w.$]+)[^}]*\}|`([\w.$]+)`|([\w.$]+))/.exec(text);
-  if (m === null) return null;
-  return (m[1] || m[2] || m[3]).split('.').pop();
+/** Whether `text` holds `word` as a whole identifier (the Rust lint's `has_word`). */
+function hasWord(text, word) {
+  const ident = /[\p{L}\p{N}_]/u;
+  for (let at = text.indexOf(word); at >= 0; at = text.indexOf(word, at + 1)) {
+    const before = at > 0 ? text[at - 1] : '';
+    const after = text[at + word.length] || '';
+    if (!ident.test(before) && !ident.test(after)) return true;
+  }
+  return false;
 }
 
 /**
@@ -163,20 +174,24 @@ function thrownName(text) {
  */
 function countedWords(doc, java, options) {
   const javaParams = new Set(java.params.map(([n]) => n));
-  const javaThrows = new Set(java.throws.flatMap(([c]) => errorNames(c)));
+  // Whether Java documents a parameter, a type parameter (`<T>`) aside.
+  const valueParams = [...javaParams].some((p) => !p.startsWith('<'));
+  const javaThrows = [...new Set(java.throws.flatMap(([c]) => errorNames(c)))];
   let n = wordCount(doc.description);
   for (const b of doc.blocks) {
     if (COUNTED_TAGS.has(b.tag)) n += wordCount(b.text);
-    else if (b.tag === 'param') {
+    else if (b.tag === 'param' || b.tag === 'typeParam') {
       const m = /^\s*([\w$.]+)\s*(?:-\s*)?([^]*)$/.exec(b.text);
       if (m === null) continue;
       const name = m[1].split('.')[0];
-      // The entry as the Rust translation renders it, `` `name` - text ``.
-      if (javaParams.has(name) || (options.has(name) && javaParams.size > 0)) n += 1 + wordCount(m[2]);
+      // The entry as the Rust translation renders it, `` `name` - text ``: a
+      // type parameter's when Java has its `@param <T>`.
+      const documented = b.tag === 'typeParam' ? javaParams.has(`<${name}>`) : javaParams.has(name) || (options.has(name) && valueParams);
+      if (documented) n += 1 + wordCount(m[2]);
     } else if (b.tag === 'returns' || b.tag === 'return') {
       if (java.return !== null) n += wordCount(b.text);
     } else if (b.tag === 'throws') {
-      if (javaThrows.has(thrownName(b.text))) n += wordCount(b.text);
+      if (javaThrows.some((name) => hasWord(b.text, name))) n += wordCount(b.text);
     }
   }
   return n;
@@ -282,16 +297,16 @@ module.exports = {
         message: `${best.words} words, more than 150% of the Javadoc's ${best.java} (at most ${Math.floor((best.java * 3) / 2)}) of ${javaRef}`,
       });
     };
-    for (const { item, java, isError } of mappedItems(ctx)) {
-      if (item.tags.jsOnly || java === null || !java.cls) continue;
-      const cls = java.cls;
+    /** Measures item `item` (an export or a nested type) translating Java class `cls`, its members, and its nested types. */
+    const measureItem = (item, cls, isError) => {
       let classSizes = cls.javadoc;
-      if (functionType(cls)) {
+      const isFunction = ts.isTypeAliasDeclaration(item.node) && ts.isFunctionTypeNode(item.node.type);
+      if (functionType(cls) || isFunction) {
         // The function is the interface's one method too.
         const methods = cls.overloads.filter((o) => !o.static && !o.default && o.name !== cls.path[cls.path.length - 1]);
         if (methods.length === 1) classSizes = joined(classSizes, methods[0].javadoc);
       }
-      measure(`${item.rel}:${item.name}`, item.node, docText(ts, item.node), classSizes, shortName(cls));
+      measure(item.subject || `${item.rel}:${item.name}`, item.node, docText(ts, item.node), classSizes, shortName(cls));
       const members = isError ? publicMembers(ts, item.node) : itemMembers(ts, item);
       for (const m of members) {
         const tags = memberTags(ctx, item, m);
@@ -314,6 +329,25 @@ module.exports = {
           measure(subject, sig, docText(ts, sig), sizesOfMember(jm, forms), at, optionsParams(ts, checker, sig));
         });
       }
+      // The nested types: each type of the namespace merged with the item
+      // that Java's nested class of its name translates.
+      const symbol = item.node.name ? checker.getSymbolAtLocation(item.node.name) : undefined;
+      for (const ns of ((symbol && symbol.declarations) || []).filter((d) => ts.isModuleDeclaration(d))) {
+        if (!ns.body || !ts.isModuleBlock(ns.body)) continue;
+        for (const st of ns.body.statements) {
+          const isType = ts.isClassDeclaration(st) || ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st);
+          if (!isType || !st.name || !(ts.getCombinedModifierFlags(st) & ts.ModifierFlags.Export)) continue;
+          const nestedCls = index.byFqn.get(`${cls.fqn}$${st.name.text}`);
+          if (!nestedCls) continue;
+          const name = `${item.name}.${st.name.text}`;
+          const kind = ts.isClassDeclaration(st) ? 'class' : ts.isInterfaceDeclaration(st) ? 'interface' : 'type';
+          measureItem({ rel: item.rel, name, subject: `${item.rel}:${name}`, node: st, kind }, nestedCls, false);
+        }
+      }
+    };
+    for (const { item, java, isError } of mappedItems(ctx)) {
+      if (item.tags.jsOnly || java === null || !java.cls) continue;
+      measureItem(item, java.cls, isError);
     }
     // An exported function javaTargets maps to a Java member: each signature
     // against that member's Javadocs.
