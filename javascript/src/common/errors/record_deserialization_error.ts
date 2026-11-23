@@ -206,7 +206,7 @@ export class RecordDeserializationError extends SerializationError {
 }
 
 // Java's nested types, static members of the class (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Names, Q11).
+// Conventions, Names).
 // eslint-disable-next-line @typescript-eslint/no-namespace -- Java's nested enums, reached through the class name as in Java
 export namespace RecordDeserializationError {
   /**

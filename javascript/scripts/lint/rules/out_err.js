@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N1 check-out-err (root CLAUDE.md §4: `out_err` is never NULL and points at
+// check-out-err (root CLAUDE.md §4: `out_err` is never NULL and points at
 // NULL on entry; nothing is silently dropped). An error slot is passed to
 //   - every header function whose last parameter is
 //     `kafka_common_Error_t **out_err`;

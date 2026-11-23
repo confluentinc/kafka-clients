@@ -15,10 +15,10 @@
 // Java's StringSerializer, as the built-in factory stringSerializer()
 // (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization): a serializer that
 // writes a string as Java's String.getBytes(encoding) does, through
-// encodeLikeJava (src/internal/encode.ts), each lone surrogate as `?` (Types,
-// Q24). The factory takes an optional { configs, isKey }, Java's
+// encodeLikeJava (src/internal/encode.ts), each lone surrogate as `?`
+// (Types). The factory takes an optional { configs, isKey }, Java's
 // configure(configs, isKey), so that it also goes in a serde config key
-// without `()` (Q53).
+// without `()`.
 
 import { JavaForms, kind } from '../../internal/args';
 import { nameBuiltIn } from '../../internal/serde';

@@ -15,7 +15,7 @@
 'use strict';
 
 // The README's examples of the producer package run (JS conventions,
-// Documentation, Q64: the docs carry the contract): each one a user can run as
+// Documentation: the docs carry the contract): each one a user can run as
 // written, against MockProducer or an address where no broker listens, a
 // fragment with the names the text around it defines.
 // test/integration/doc_examples.test.js runs them against a broker. This file

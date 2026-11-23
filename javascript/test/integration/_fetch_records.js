@@ -76,6 +76,7 @@ function fetchRequest(correlationId, topic, partition, offset) {
   return Buffer.concat([int32(msg.length), msg]);
 }
 
+/** A reader of a Fetch response, field by field, big-endian. */
 class Reader {
   /** @param {Buffer} buf */
   constructor(buf) {

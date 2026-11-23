@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J1 check-java-name (javascript/CLAUDE.md "Files and layout", root CLAUDE.md
+// check-java-name (javascript/CLAUDE.md "Files and layout", root CLAUDE.md
 // §2): every class, interface and type a public module of src/ exports
 // translates a Java class of its folder's package, by name, or is listed
 // (lint-mapping.json's `invented` and `javaTargets`); its file is the Java class's

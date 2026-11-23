@@ -33,6 +33,7 @@ const { IllegalStateError } = require('@confluentinc/kafka-javascript');
 /** @typedef {(result: { metadata: Metadata, exception: unknown }) => void} Callback */
 /** @typedef {{ record: Record, callback: Callback | null }} Completion */
 
+/** A stand-in for Java's MockProducer, whose pending completions the tests reach. */
 class MockProducer {
   /** @param {{ autoComplete?: boolean }} [options] */
   constructor({ autoComplete = true } = {}) {

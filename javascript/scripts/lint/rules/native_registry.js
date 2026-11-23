@@ -14,7 +14,7 @@
 
 'use strict';
 
-// A2 check-native-registry (javascript/CLAUDE.md "Files and layout"):
+// check-native-registry (javascript/CLAUDE.md "Files and layout"):
 //   - every function native/addon.c registers (its napi_property_descriptor
 //     table) is used from src/ through the handle src/internal/native.ts exports
 //     (under any name: by its type), and every function src/ uses is

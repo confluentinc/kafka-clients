@@ -344,7 +344,7 @@ async function produce(): Promise<void> {
   const mapNow = map.getNow(new Map<string, number>());
   expectTypeOf(mapNow).toEqualTypeOf<Map<string, number> | null>();
   void [set, date, bytes, raw, fnValue, bufferNow, mapNow];
-  // An instance of the caller's own class goes by name in TypeScript (plain JavaScript also takes it bare).
+  /** A class of the caller's own: its instance goes by name in TypeScript (plain JavaScript also takes it bare). */
   class Box {
     constructor(readonly n: number) {}
   }
@@ -422,7 +422,7 @@ async function produce(): Promise<void> {
   void asMetric;
   // @ts-expect-error metrics() takes no argument
   kafkaProducer.metrics(1);
-  // TopicPartitionMap and TopicPartitionSet (js-only, Q25): keyed by value.
+  // TopicPartitionMap and TopicPartitionSet (js-only): keyed by value.
   const offsets = new TopicPartitionMap<bigint>([[new TopicPartition({ topic: 't', partition: 0 }), 5n]]);
   expectTypeOf(offsets.get(new TopicPartition({ topic: 't', partition: 0 }))).toEqualTypeOf<bigint | null>();
   expectTypeOf(offsets.set(new TopicPartition({ topic: 't', partition: 1 }), 6n)).toEqualTypeOf<TopicPartitionMap<bigint>>();
@@ -504,7 +504,7 @@ new QuotaViolationError('m');
 // metric() is a KafkaMetric, an error the core reports included: its name comes from the core.
 declare const quota: QuotaViolationError;
 expectTypeOf(quota.metric()).toEqualTypeOf<KafkaMetric>();
-// The payload constructors (Q39): Java's other parameters by name, beside message and cause.
+// The payload constructors: Java's other parameters by name, beside message and cause.
 const unauthorized = new TopicAuthorizationError({ unauthorizedTopics: ['a', 'b'] });
 expectTypeOf(unauthorized.unauthorizedTopics()).toEqualTypeOf<Set<string>>();
 void new TopicAuthorizationError({ message: 'm', unauthorizedTopics: new Set(['a']) });
@@ -576,6 +576,7 @@ new ConfigError(sasl);
 new TopicAuthorizationError(caught);
 // A class with a (cause) form takes the Error as its cause.
 void new KafkaError(caught);
+/** A caller's subclass of an abstract error base. */
 class MyRetriable extends RetriableError {}
 void new MyRetriable('m');
 // @ts-expect-error Java's RetriableError is abstract: caught and subclassed, never constructed
@@ -810,6 +811,7 @@ expectTypeOf(KafkaProducer.PRODUCER_METRIC_GROUP_NAME).toEqualTypeOf<string>();
 
 // Serializers: the producer's type arguments are inferred from them, and an
 // omitted (or null) serializer binds Uint8Array.
+/** A value of the caller's own type, which a serializer of its own writes. */
 interface Order {
   id: number;
 }
@@ -825,7 +827,7 @@ void viaFactory;
 // the producer is typed as bytes.
 expectTypeOf(new KafkaProducer(viaFactory)).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
 // The config keys bind the type their functions return, as arguments do
-// (Q27): the README's "the same through the configuration".
+// (JS conventions, Class family): the README's "the same through the configuration".
 expectTypeOf(new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer })).toEqualTypeOf<
   KafkaProducer<string, string>
 >();
@@ -882,7 +884,7 @@ void serializers;
 
 // MockProducer: Java's Producer, over the FFI's mock. Its type arguments are
 // inferred from its serializers; a mock built without them is the one place
-// a type argument is written (Q27).
+// a type argument is written.
 async function mocks(): Promise<void> {
   const typed = new MockProducer({
     autoComplete: true,

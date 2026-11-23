@@ -16,7 +16,7 @@
 
 // TopicPartitionMap and TopicPartitionSet, the js-only collections keyed by
 // TopicPartition (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family
-// and Types, Q25). Java has no test of its own for them: they stand for Java's
+// and Types). Java has no test of its own for them: they stand for Java's
 // HashMap<TopicPartition, V> and HashSet<TopicPartition>, whose keys compare
 // with TopicPartition.equals.
 

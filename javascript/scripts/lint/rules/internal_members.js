@@ -17,7 +17,7 @@
 const { atNode } = require('../location');
 const { isInternal, errorRegistry } = require('../java_ts');
 
-// H3 check-internal-members (javascript/CLAUDE.md "Files and layout"): a
+// check-internal-members (javascript/CLAUDE.md "Files and layout"): a
 // member of a public class that only the library calls is a public member
 // marked `@internal` in its TSDoc and named `internal...`
 // (`ProducerRecord.internalToNative`, `RecordMetadata.internalCreate`), which

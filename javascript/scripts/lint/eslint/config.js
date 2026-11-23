@@ -21,7 +21,7 @@
 // recommended type-checked rules on src/, typed through tsconfig.json, and
 // the docs lint on src/: eslint-plugin-jsdoc's `require-param` and
 // `require-returns` (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Documentation, Q64, and Build, packaging and release, Q74).
+// Documentation, and Build, packaging and release).
 
 const jsdoc = require('eslint-plugin-jsdoc');
 const tseslint = require('typescript-eslint');
@@ -95,7 +95,7 @@ function config(root, { typed = true } = {}) {
     {
       // A doc comment names each parameter with `@param` and what the function
       // returns with `@returns`. An options object is one parameter, described
-      // as a whole (Documentation, Q64): its destructured keys are documented
+      // as a whole (Documentation): its destructured keys are documented
       // on its options type, so `checkDestructured` is off. Only an existing
       // doc comment is checked: which members need one is not this lint's.
       files: ['src/**/*.ts'],

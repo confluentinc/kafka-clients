@@ -18,7 +18,7 @@
 // `replicas()`, `inSyncReplicas()` and `offlineReplicas()`, over private
 // fields. A Java `Node[]` taken is any iterable of `Node`, and one returned is
 // a new array each call (plan §5, item 1; the JS conventions' Types table). `equals`
-// and `hashCode` are Java's bodies (Q29).
+// and `hashCode` are Java's bodies.
 
 import { JavaForms, kind } from '../internal/args';
 import { objectHashCode, objectsEquals, sameClass } from '../internal/java_object';

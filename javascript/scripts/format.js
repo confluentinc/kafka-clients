@@ -15,7 +15,7 @@
 'use strict';
 
 // The formatter (javascript/CLAUDE.md, JavaScript Binding Conventions, Build,
-// packaging and release, Q74): Prettier, with prettier.config.cjs, over the
+// packaging and release): Prettier, with prettier.config.cjs, over the
 // client's TypeScript and JavaScript. `make format-check` (part of
 // `lint-javascript`, so of the root `verify`) fails on a file Prettier would
 // change; `make format` rewrites them.

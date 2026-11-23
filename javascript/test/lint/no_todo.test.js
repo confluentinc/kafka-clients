@@ -14,7 +14,7 @@
 
 'use strict';
 
-// H1 check-no-todo (scripts/lint/rules/no_todo.js).
+// check-no-todo (scripts/lint/rules/no_todo.js).
 
 const assert = require('node:assert/strict');
 

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Headers and Header over the FFI's RecordHeaders and RecordHeader
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization, Q31; option 1 of
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization; option 1 of
 // javascript/design/current/producer/DECISIONS.md, entry 21). Each JS
 // Headers / Header holds a handle object, a plain object napi_wrap'ed over a
 // box and type-tagged, whose finalizer drops the object's reference on the

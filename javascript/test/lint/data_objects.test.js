@@ -14,7 +14,7 @@
 
 'use strict';
 
-// J8 check-data-objects (scripts/lint/rules/data_objects.js).
+// check-data-objects (scripts/lint/rules/data_objects.js).
 
 const assert = require('node:assert/strict');
 

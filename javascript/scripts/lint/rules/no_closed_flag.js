@@ -15,7 +15,7 @@
 'use strict';
 
 // check-no-closed-flag (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Implementation over the FFI, Q61: "The binding keeps no closed flag. A call
+// Implementation over the FFI: "The binding keeps no closed flag. A call
 // after close() goes to the FFI, and the error is the core's, with Java's
 // message"; javascript/CLAUDE.md boundary rule 1):
 //   - no class of src/, a client's, a mock's or any other, has a field

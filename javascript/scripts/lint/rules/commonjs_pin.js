@@ -15,7 +15,7 @@
 'use strict';
 
 // check-commonjs-pin (javascript/CLAUDE.md, JavaScript Binding Conventions, Layout
-// and modules, Q13: "The package is CommonJS only, as 1.x is. `tsc` emits
+// and modules: "The package is CommonJS only, as 1.x is. `tsc` emits
 // CommonJS with `module: nodenext`, `package.json` has no `"type":
 // "module"`, and each `exports` entry has the `types` and `default`
 // conditions"):

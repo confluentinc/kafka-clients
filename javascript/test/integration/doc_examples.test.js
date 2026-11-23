@@ -14,8 +14,8 @@
 
 'use strict';
 
-// The README's examples against a broker (JS conventions, Documentation,
-// Q64: the docs carry the contract): the Example, the Headers and Errors
+// The README's examples against a broker (JS conventions, Documentation:
+// the docs carry the contract): the Example, the Headers and Errors
 // blocks, and examples/producer.js, which "`send` in two steps" describes,
 // each run as a user runs it, and what they wrote read back.
 // test/unit/producer/index.test.js runs the blocks without a broker.

@@ -506,8 +506,8 @@ test('a string key or value points to stringSerializer(); null stays null', () =
     ['h', bytes('é')],
     ['n', null],
   ]);
-  // A string can't reach the FFI as bytes without a serializer (root Q24, Q27);
-  // the headers stay writable.
+  // A string can't reach the FFI as bytes without a serializer (JS
+  // conventions, Types and Class family); the headers stay writable.
   const s = new ProducerRecord({ topic: 't', key: 'clé', value: null });
   assert.throws(() => sending(s).internalToNative(), {
     name: 'TypeError',
@@ -540,7 +540,7 @@ test("send seals the headers once the fields are checked, as Java's doSend calls
 
 // The record is frozen: plain JavaScript cannot reassign a field after the
 // constructor checked it, so send() checks nothing again (JS conventions,
-// Q35: the binding repeats no precondition).
+// Errors: the binding repeats no precondition).
 test('the record is frozen: a field cannot be reassigned, so send reads what the constructor checked', () => {
   const r = new ProducerRecord({
     topic: 't',

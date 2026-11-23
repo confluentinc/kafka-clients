@@ -83,6 +83,7 @@ export interface ErrorPayload {
   readonly fields?: Readonly<Record<string, readonly [kind: Kind, coreDefault: unknown]>>;
 }
 
+/** An error class as the registry holds it: its name, its forms, its payload and its form check. */
 interface Registered {
   readonly name: string;
   readonly forms: readonly ErrorForm[];
@@ -223,7 +224,7 @@ function matcherOf(r: Registered): JavaForms {
   // A bare value is a message when it is a string or null, a cause when it
   // is an Error (or null, when the class has no message on its own); a
   // payload parameter is given by name only, `{ unauthorizedTopics }`
-  // (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors, Q39).
+  // (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors).
   const bareTypes: Record<string, (value: unknown) => boolean> = {};
   if (singles.has('message')) bareTypes.message = isMessage;
   if (singles.has('cause')) bareTypes.cause = singles.has('message') ? isError : isErrorOrNull;
@@ -237,7 +238,7 @@ function matcherOf(r: Registered): JavaForms {
       // The forms as JavaScript calls them, so the ES2022
       // `new Error(message, { cause })` throws `KafkaError() takes one of (),
       // (message), (cause), ({ message, cause }); got 2 arguments`
-      // (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors, Q39).
+      // (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors).
       callShapes: true,
     },
   );

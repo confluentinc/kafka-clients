@@ -15,7 +15,7 @@
 'use strict';
 
 // The code of the user docs type-checks (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Documentation, Q64: the docs carry the contract). Every `js`
+// Conventions, Documentation: the docs carry the contract). Every `js`
 // and `ts` block of README.md and MIGRATION.md is written to a file of its
 // own, its body inside an async function (its `import` declarations, which
 // cannot go there, before it), and tsc checks them all under --strict, the

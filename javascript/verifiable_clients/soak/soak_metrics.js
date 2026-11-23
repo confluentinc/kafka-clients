@@ -51,6 +51,7 @@ function str(value) {
   return String(value);
 }
 
+/** The values of one metric over a window: their total, count and maximum. */
 class Bucket {
   constructor() {
     this.total = 0;

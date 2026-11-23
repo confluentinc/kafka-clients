@@ -18,7 +18,7 @@
 // Hours of steady state: runs soakclient.js for a given time (6 to 24 hours
 // for a real run, by hand or on a schedule) and judges its resources, as the
 // steady state of a long-lived producer must hold them (javascript/CLAUDE.md,
-// JavaScript Binding Conventions, Tests, Q68: soak where JavaScript has a hot
+// JavaScript Binding Conventions, Tests: soak where JavaScript has a hot
 // path). Every --sample-seconds the soak client writes a metrics window
 // (its RSS, JavaScript heap and external memory, the memory of Buffers), and
 // this program reads the client process's open file descriptors and threads

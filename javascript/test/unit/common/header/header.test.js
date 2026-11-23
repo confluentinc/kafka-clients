@@ -121,7 +121,7 @@ test("equals and hashCode are RecordHeader's", () => {
   assert.ok(!h1.equals(new Header({ key: 'k', value: null })));
   assert.ok(!h1.equals(new Header({ key: 'j', value: Buffer.from([1, 255, 127, 128]) })));
   assert.ok(!h1.equals(new Header({ key: 'k', value: Buffer.from([1, 255, 127]) })));
-  // getClass() != o.getClass(): a subclass's header is another class.
+  /** A subclass of Header: getClass() != o.getClass(), so its header is another class's. */
   class Sub extends Header {}
   assert.ok(!h1.equals(new Sub({ key: 'k', value: Buffer.from([1, 255, 127, 128]) })));
   for (const o of [null, 'k', { key: 'k' }]) assert.equal(h1.equals({ o }), false);

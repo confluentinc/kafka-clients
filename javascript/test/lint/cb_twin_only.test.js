@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N2 check-cb-twin-only (scripts/lint/rules/cb_twin_only.js).
+// check-cb-twin-only (scripts/lint/rules/cb_twin_only.js).
 
 const assert = require('node:assert/strict');
 

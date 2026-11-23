@@ -14,7 +14,7 @@
 
 'use strict';
 
-// N4 check-single-drainer (javascript/CLAUDE.md boundary rules 3 and 10: one
+// check-single-drainer (javascript/CLAUDE.md boundary rules 3 and 10: one
 // drainer per client, never a destroy inside a drain, a destroy only from the
 // handle object's finalizer, and only for a closed client):
 //   - a client's `__execute_callbacks_err` is called only from the queue's

@@ -14,7 +14,7 @@
 
 'use strict';
 
-// H2 check-exception-word (root CLAUDE.md §2, §4): no identifier of src/ or
+// check-exception-word (root CLAUDE.md §2, §4): no identifier of src/ or
 // native/ contains the word "exception", in any case. Comments and string
 // literals may name the Java classes, so only identifiers are read: the
 // TypeScript sources through the TypeScript parser, the C sources through

@@ -16,8 +16,8 @@
 
 // The installed package without its platform package, as an install with
 // --omit=optional, or a lockfile made on another OS, leaves it
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Build, packaging and release,
-// Q73: "A missing platform package fails at load with an error that names the
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Build, packaging and release:
+// "A missing platform package fails at load with an error that names the
 // package and the usual causes"). In the project that installed the tarballs
 // (.semaphore/test-npm.sh), the platform package's folder is moved aside, a
 // fresh Node.js requires the client there, and its error must name the

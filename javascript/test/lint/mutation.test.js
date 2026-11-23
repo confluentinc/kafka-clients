@@ -197,7 +197,7 @@ function add(root, rel, text) {
 
 MUTATIONS.push(
   {
-    // A Java getter turned into a method: J2 finds no Java `getOffset`, and J3 misses `offset`.
+    // A Java getter turned into a method: check-java-members finds no Java `getOffset`, and check-java-completeness misses `offset`.
     rules: ['check-java-members', 'check-java-completeness'],
     what: 'the offset getter renamed to a getOffset method',
     apply: (root) =>
@@ -299,10 +299,11 @@ MUTATIONS.push(
       ),
   },
   {
-    rule: 'check-java-completeness',
-    what: 'a translated method dropped',
     // On the Producer interface: dropped from KafkaProducer, the interface's
-    // flush would also wait on nothing (check-type-mapping).
+    // flush would also wait on nothing (check-type-mapping). MockProducer's
+    // remark on its flush is then on a member that implements nothing.
+    rules: ['check-implementation-docs', 'check-java-completeness'],
+    what: 'a translated method dropped',
     apply: (root) => edit(root, 'src/producer/producer.ts', '  flush(): Promise<void>;\n', ''),
   },
   {
@@ -311,7 +312,7 @@ MUTATIONS.push(
     apply: (root) => add(root, 'src/producer/record_meta.ts', '/** Metadata. */\nexport class RecordMeta {}\n'),
   },
   {
-    // J2 reports the static-ness, and J3 no longer counts the static forId as translated.
+    // check-java-members reports the static-ness, and check-java-completeness no longer counts the static forId as translated.
     rules: ['check-java-members', 'check-java-completeness'],
     what: 'a static method made an instance method',
     // Every signature of it: the two overloads and the implementation.
@@ -374,7 +375,7 @@ MUTATIONS.push(
       ),
   },
   {
-    // J7 reads every signature, not only the first.
+    // check-type-mapping reads every signature, not only the first.
     rule: 'check-type-mapping',
     what: "a wrong option type in a later ProducerRecord constructor's signature",
     apply: (root) =>

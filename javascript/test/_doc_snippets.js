@@ -136,6 +136,7 @@ async function runBlock(block, options = {}) {
     /** @type {new (...args: unknown[]) => import('@confluentinc/kafka-javascript/producer').KafkaProducer<unknown, unknown>} */ (
       /** @type {unknown} */ (producers.KafkaProducer)
     );
+  /** The producer a block constructs, recorded so the run can close it. */
   class KafkaProducer extends Base {
     /** @param {unknown[]} args the constructor's */
     constructor(...args) {
