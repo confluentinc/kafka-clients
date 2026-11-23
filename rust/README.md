@@ -248,15 +248,16 @@ returned, so no `acknowledge_*` call is needed.
 
 ## Known limitations
 
-The 1.0 release does not include the following Java client features:
+The crate does not include the following Java client features:
 
 - **Consumer groups:** only the KIP-848 group protocol
   (`group.protocol=consumer`). The classic protocol (`group.protocol=classic`)
   and client-side partition assignors are not supported, and
   `KafkaConsumer::new` returns `LocalUnsupportedOperationError` for them.
-- **Share groups:** the share consumer (see [Share consumer
-  (KIP-932)](#share-consumer-kip-932)) is Rust only: it has no C FFI and no
-  Python, C or .NET binding yet.
+- **Share groups:** the 1.0 release has no share consumer. The share
+  consumer added since (see [Share consumer (KIP-932)](#share-consumer-kip-932),
+  not yet released) is Rust only: it has no C FFI and no Python, C or .NET
+  binding yet.
 - **SASL:** only `PLAIN`, over `SASL_PLAINTEXT` and `SASL_SSL`. SCRAM, GSSAPI
   (Kerberos) and OAUTHBEARER are not supported, and any other `sasl.mechanism`
   fails the configuration.
