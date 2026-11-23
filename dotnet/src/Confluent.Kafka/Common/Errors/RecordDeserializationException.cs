@@ -32,7 +32,7 @@ public class RecordDeserializationException : SerializationException
     private readonly long _timestamp;
     private readonly byte[]? _keyBuffer;
     private readonly byte[]? _valueBuffer;
-    private readonly Headers? _headers;
+    private readonly IHeaders? _headers;
 
     /// <summary>
     /// Initializes an exception for the record at <paramref name="offset"/> of <paramref name="partition"/>, with
@@ -46,7 +46,7 @@ public class RecordDeserializationException : SerializationException
         TimestampType timestampType,
         byte[]? keyBuffer,
         byte[]? valueBuffer,
-        Headers? headers,
+        IHeaders? headers,
         string? message,
         Exception? innerException)
         : base(message, innerException)
@@ -105,7 +105,7 @@ public class RecordDeserializationException : SerializationException
     /// <remarks>
     /// A consumer gives copies of the headers the deserializer saw, which keep no polled batch in memory.
     /// </remarks>
-    public Headers? Headers() => _headers;
+    public IHeaders? Headers() => _headers;
 
     internal override int FfiId => -27;
 }

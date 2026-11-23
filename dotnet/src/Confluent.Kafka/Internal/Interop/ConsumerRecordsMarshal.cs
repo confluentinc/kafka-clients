@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
@@ -207,7 +208,7 @@ internal static class ConsumerRecordsMarshal
 
                         // Made here only for a deserializer that takes headers; otherwise the record makes them when
                         // asked.
-                        Headers? headers = key.TakesHeaders || value.TakesHeaders ? new Headers(batch, record) : null;
+                        RecordHeaders? headers = key.TakesHeaders || value.TakesHeaders ? new RecordHeaders(batch, record) : null;
 
                         TKey? deserializedKey = default;
                         TValue? deserializedValue = default;
@@ -454,7 +455,7 @@ internal static class ConsumerRecordsMarshal
     // The headers of a polled record, as headers whose key and value are read from the batch on first use, or null
     // when it has none. The core's headers handle of the record and its elements' views are valid as long as the
     // batch; the caller holds the batch's lock, since RecordHeaders__as_Headers must not run concurrently on one handle.
-    internal static List<Header>? ReadHeaders(SafeConsumerRecordsHandle batch, IntPtr record)
+    internal static List<IHeader>? ReadHeaders(SafeConsumerRecordsHandle batch, IntPtr record)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr recordHeaders = NativeMethods.ConsumerRecordHeaders(record, ref outErr);
@@ -483,12 +484,12 @@ internal static class ConsumerRecordsMarshal
                 return null;
             }
 
-            List<Header> headers = new List<Header>(count);
+            List<IHeader> headers = new List<IHeader>(count);
             for (int i = 0; i < count; i++)
             {
                 IntPtr header = NativeMethods.RecordHeaderAsHeader(Get(array, i), ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
-                headers.Add(new Header(batch, header));
+                headers.Add(new RecordHeader(batch, header));
             }
 
             return headers;
@@ -528,7 +529,7 @@ internal static class ConsumerRecordsMarshal
         IDeserializerWithReadOnlyMemory<T>? withMemory,
         SafeConsumerRecordsHandle batch,
         string topic,
-        Headers? headers,
+        RecordHeaders? headers,
         IntPtr bytes)
     {
         KafkaBytes* view = (KafkaBytes*)bytes;
@@ -549,7 +550,7 @@ internal static class ConsumerRecordsMarshal
         AsyncDeserializerCall<T> call,
         SafeConsumerRecordsHandle batch,
         string topic,
-        Headers? headers,
+        RecordHeaders? headers,
         IntPtr bytes,
         CancellationToken cancellationToken)
     {
@@ -576,7 +577,7 @@ internal static class ConsumerRecordsMarshal
         AsyncDeserializerCall<T> call,
         BytesMemoryManager lent,
         string topic,
-        Headers? headers,
+        RecordHeaders? headers,
         CancellationToken cancellationToken)
     {
         try
@@ -599,11 +600,11 @@ internal static class ConsumerRecordsMarshal
         IntPtr record,
         IntPtr key,
         IntPtr value,
-        Headers? headers,
+        RecordHeaders? headers,
         Exception cause)
     {
         long offset = ConsumerRecordMarshal.Offset(record);
-        Headers owned = (headers ?? new Headers(batch, record)).ToOwned();
+        RecordHeaders owned = (headers ?? new RecordHeaders(batch, record)).ToOwned();
         return new RecordDeserializationException(
             origin,
             partition,
@@ -663,9 +664,9 @@ internal static class ConsumerRecordsMarshal
             batch.AddRecord((long)Length(key) + Length(value));
 
             // Made here only for a deserializer that takes headers; otherwise the record makes them when asked.
-            Headers? headers = keyWithHeaders is not null || keyWithMemory is not null
+            RecordHeaders? headers = keyWithHeaders is not null || keyWithMemory is not null
                 || valueWithHeaders is not null || valueWithMemory is not null
-                ? new Headers(batch, record)
+                ? new RecordHeaders(batch, record)
                 : null;
 
             TKey? deserializedKey = default;

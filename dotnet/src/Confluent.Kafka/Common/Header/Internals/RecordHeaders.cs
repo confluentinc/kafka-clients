@@ -19,20 +19,22 @@ using System.Text;
 
 using Confluent.Kafka.Internal.Interop;
 
-namespace Confluent.Kafka.Common.Header;
+namespace Confluent.Kafka.Common.Header.Internals;
 
 /// <summary>
-/// A record's headers, in the order they were added, a key possibly repeated: Java's <c>Headers</c>, with the
-/// constructors, equality, hash, string form and read-only state of Java's <c>RecordHeaders</c>. A consumed record's
-/// headers are its own and writable, and empty, not null, when it has none: they read the record's headers from the
-/// polled batch on first use, as headers whose keys and values are views of the batch until read.
+/// A record's headers, with Java's equality, hash, string form and read-only state, over the elements' own equality,
+/// hash and string form. A <see langword="null"/> header, or a <see langword="null"/> key given to <c>Add</c>, throws
+/// <see cref="ArgumentNullException"/>, and a <see langword="null"/> key to look up or remove
+/// <see cref="IllegalArgumentException"/>. A consumed record's headers are its own and writable, and empty, not null,
+/// when it has none: they read the record's headers from the polled batch on first use, as headers whose keys and
+/// values are views of the batch until read.
 /// </summary>
-public sealed class Headers : IEnumerable<Header>
+internal sealed class RecordHeaders : IHeaders
 {
     // Two fields, so the object stays at the size of a list reference and a flag, as a send without headers
     // allocates one per record.
     //
-    // _state is the List<Header>, allocated on the first Add or when built from non-empty input, so a record without
+    // _state is the List<IHeader>, allocated on the first Add or when built from non-empty input, so a record without
     // headers costs one object; or, for a polled record's headers not read yet, the polled batch. The first use of any
     // member reads them into the list under the batch's lock: the core's RecordHeaders__as_Headers must not run
     // concurrently on one record's headers.
@@ -44,34 +46,32 @@ public sealed class Headers : IEnumerable<Header>
 
     private static readonly IntPtr s_readOnlyMark = new IntPtr(-1);
 
-    /// <summary>Initializes empty headers, Java's <c>RecordHeaders()</c>.</summary>
-    public Headers()
+    /// <summary>Initializes empty headers.</summary>
+    public RecordHeaders()
     {
     }
 
     /// <summary>
-    /// Initializes headers with a copy of <paramref name="headers"/>, Java's <c>RecordHeaders(Header[])</c>: a
-    /// <see langword="null"/> array gives empty headers, and a <see langword="null"/> element throws
-    /// <see cref="ArgumentNullException"/>.
+    /// Initializes headers with a copy of <paramref name="headers"/>: a <see langword="null"/> array gives empty
+    /// headers, and a <see langword="null"/> element throws <see cref="ArgumentNullException"/>.
     /// </summary>
-    public Headers(Header[]? headers)
-        : this((IEnumerable<Header>?)headers)
+    public RecordHeaders(IHeader[]? headers)
+        : this((IEnumerable<IHeader>?)headers)
     {
     }
 
     /// <summary>
-    /// Initializes headers with a copy of <paramref name="headers"/>, Java's
-    /// <c>RecordHeaders(Iterable&lt;Header&gt;)</c>: a <see langword="null"/> sequence gives empty headers, and a
-    /// <see langword="null"/> element throws <see cref="ArgumentNullException"/>. A copy of a <see cref="Headers"/>
-    /// is writable.
+    /// Initializes headers with a copy of <paramref name="headers"/>: a <see langword="null"/> sequence gives empty
+    /// headers, and a <see langword="null"/> element throws <see cref="ArgumentNullException"/>. A copy of a
+    /// <see cref="RecordHeaders"/> is writable.
     /// </summary>
-    public Headers(IEnumerable<Header>? headers)
+    public RecordHeaders(IEnumerable<IHeader>? headers)
     {
-        if (headers is Headers other)
+        if (headers is RecordHeaders other)
         {
             if (other.Materialized() is { Count: > 0 } source)
             {
-                _state = new List<Header>(source);
+                _state = new List<IHeader>(source);
             }
 
             return;
@@ -82,50 +82,42 @@ public sealed class Headers : IEnumerable<Header>
             return;
         }
 
-        List<Header>? list = null;
-        if (headers is ICollection<Header> collection)
+        List<IHeader>? list = null;
+        if (headers is ICollection<IHeader> collection)
         {
             if (collection.Count == 0)
             {
                 return;
             }
 
-            list = new List<Header>(collection.Count);
+            list = new List<IHeader>(collection.Count);
         }
 
-        foreach (Header header in headers)
+        foreach (IHeader header in headers)
         {
             if (header is null)
             {
                 throw new ArgumentNullException(nameof(headers), "Header cannot be null.");
             }
 
-            (list ??= new List<Header>()).Add(header);
+            (list ??= new List<IHeader>()).Add(header);
         }
 
         _state = list;
     }
 
     // The headers of `record` in the polled `batch`, read on first use.
-    internal Headers(SafeConsumerRecordsHandle batch, IntPtr record)
+    internal RecordHeaders(SafeConsumerRecordsHandle batch, IntPtr record)
     {
         _record = record;
         _state = batch;
     }
 
-    internal bool IsReadOnly => _record == s_readOnlyMark;
-
     // The send reads the list by index, so it allocates no enumerator.
-    internal List<Header>? Entries => Materialized();
+    internal List<IHeader>? Entries => Materialized();
 
-    /// <summary>
-    /// Adds a header to the end, returning these headers, so calls can be chained.
-    /// </summary>
-    /// <param name="header">The header to add.</param>
-    /// <returns>These headers.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="header"/> is <see langword="null"/>.</exception>
-    /// <exception cref="IllegalStateException">The headers are read-only.</exception>
-    public Headers Add(Header header)
+    /// <inheritdoc/>
+    public IHeaders Add(IHeader header)
     {
         if (header is null)
         {
@@ -133,10 +125,10 @@ public sealed class Headers : IEnumerable<Header>
         }
 
         CanWrite();
-        List<Header>? list = Materialized();
+        List<IHeader>? list = Materialized();
         if (list is null)
         {
-            list = new List<Header>();
+            list = new List<IHeader>();
             _state = list;
         }
 
@@ -144,29 +136,15 @@ public sealed class Headers : IEnumerable<Header>
         return this;
     }
 
-    /// <summary>
-    /// Creates a header from <paramref name="key"/> and <paramref name="value"/> and adds it to the end, returning
-    /// these headers, so calls can be chained.
-    /// </summary>
-    /// <param name="key">The header key.</param>
-    /// <param name="value">The header value, which may be <see langword="null"/>.</param>
-    /// <returns>These headers.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="key"/> is <see langword="null"/>.</exception>
-    /// <exception cref="IllegalStateException">The headers are read-only.</exception>
-    public Headers Add(string key, byte[]? value) => Add(new Header(key, value));
+    /// <inheritdoc/>
+    public IHeaders Add(string key, byte[]? value) => Add(new RecordHeader(key, value));
 
-    /// <summary>
-    /// Removes every header with the given key, returning these headers, so calls can be chained.
-    /// </summary>
-    /// <param name="key">The key to remove.</param>
-    /// <returns>These headers.</returns>
-    /// <exception cref="IllegalStateException">The headers are read-only.</exception>
-    /// <exception cref="IllegalArgumentException"><paramref name="key"/> is <see langword="null"/>.</exception>
-    public Headers Remove(string key)
+    /// <inheritdoc/>
+    public IHeaders Remove(string key)
     {
         CanWrite();
         CheckKey(key);
-        List<Header>? headers = Materialized();
+        List<IHeader>? headers = Materialized();
         if (headers is null)
         {
             return this;
@@ -186,7 +164,7 @@ public sealed class Headers : IEnumerable<Header>
         int kept = first;
         for (int i = first + 1; i < headers.Count; i++)
         {
-            Header header = headers[i];
+            IHeader header = headers[i];
             if (!string.Equals(header.Key(), key, StringComparison.Ordinal))
             {
                 headers[kept++] = header;
@@ -197,14 +175,11 @@ public sealed class Headers : IEnumerable<Header>
         return this;
     }
 
-    /// <summary>Returns the last header with the given key, or <see langword="null"/> when there is none.</summary>
-    /// <param name="key">The key to look up.</param>
-    /// <returns>The last header with that key, or <see langword="null"/>.</returns>
-    /// <exception cref="IllegalArgumentException"><paramref name="key"/> is <see langword="null"/>.</exception>
-    public Header? LastHeader(string key)
+    /// <inheritdoc/>
+    public IHeader? LastHeader(string key)
     {
         CheckKey(key);
-        List<Header>? headers = Materialized();
+        List<IHeader>? headers = Materialized();
         if (headers is null)
         {
             return null;
@@ -221,26 +196,33 @@ public sealed class Headers : IEnumerable<Header>
         return null;
     }
 
-    /// <summary>
-    /// Returns every header with the given key, in the order they were added, Java's <c>headers(String)</c>. Each
-    /// enumeration reads the current headers.
-    /// </summary>
-    /// <param name="key">The key to look up.</param>
-    /// <returns>The headers with that key.</returns>
-    /// <exception cref="IllegalArgumentException"><paramref name="key"/> is <see langword="null"/>.</exception>
-    public IEnumerable<Header> GetHeaders(string key)
+    /// <inheritdoc/>
+    public IEnumerable<IHeader> Headers(string key)
     {
         CheckKey(key);
         return FilterByKey(key);
     }
 
-    /// <summary>Returns every header, in the order they were added.</summary>
-    /// <returns>The headers; an empty array when there are none.</returns>
-    public Header[] ToArray() => Materialized() is { Count: > 0 } headers ? headers.ToArray() : Array.Empty<Header>();
+    /// <summary>
+    /// Makes the headers read-only: every later <c>Add</c> or <c>Remove</c> throws <see cref="IllegalStateException"/>.
+    /// </summary>
+    public void SetReadOnly()
+    {
+        // Read first: the mark overwrites the native record pointer the read needs.
+        Materialized();
+        _record = s_readOnlyMark;
+    }
+
+    /// <summary>Returns whether the headers are read-only.</summary>
+    /// <returns><see langword="true"/> once <see cref="SetReadOnly()"/> has run.</returns>
+    public bool IsReadOnly() => _record == s_readOnlyMark;
 
     /// <inheritdoc/>
-    public IEnumerator<Header> GetEnumerator() =>
-        Materialized() is { } headers ? headers.GetEnumerator() : ((IEnumerable<Header>)Array.Empty<Header>()).GetEnumerator();
+    public IHeader[] ToArray() => Materialized() is { Count: > 0 } headers ? headers.ToArray() : Array.Empty<IHeader>();
+
+    /// <inheritdoc/>
+    public IEnumerator<IHeader> GetEnumerator() =>
+        Materialized() is { } headers ? headers.GetEnumerator() : ((IEnumerable<IHeader>)Array.Empty<IHeader>()).GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
@@ -252,13 +234,13 @@ public sealed class Headers : IEnumerable<Header>
             return true;
         }
 
-        if (obj is not Headers other)
+        if (obj is not RecordHeaders other)
         {
             return false;
         }
 
-        List<Header>? headers = Materialized();
-        List<Header>? otherHeaders = other.Materialized();
+        List<IHeader>? headers = Materialized();
+        List<IHeader>? otherHeaders = other.Materialized();
         int count = headers?.Count ?? 0;
         if (count != (otherHeaders?.Count ?? 0))
         {
@@ -282,7 +264,7 @@ public sealed class Headers : IEnumerable<Header>
         int result = 1;
         if (Materialized() is { } headers)
         {
-            foreach (Header header in headers)
+            foreach (IHeader header in headers)
             {
                 result = unchecked((31 * result) + header.GetHashCode());
             }
@@ -304,30 +286,25 @@ public sealed class Headers : IEnumerable<Header>
                     builder.Append(", ");
                 }
 
-                builder.Append(headers[i].ToString());
+                builder.Append(headers[i].ToString() ?? "null");
             }
         }
 
-        return builder.Append("], isReadOnly = ").Append(IsReadOnly ? "true" : "false").Append(')').ToString();
+        return builder.Append("], isReadOnly = ").Append(IsReadOnly() ? "true" : "false").Append(')').ToString();
     }
 
-    internal void SetReadOnly()
+    // Copies, which reference no batch, of these headers: each RecordHeader read from a batch is copied, every other
+    // header kept.
+    internal RecordHeaders ToOwned()
     {
-        Materialized();
-        _record = s_readOnlyMark;
-    }
-
-    // Owned copies, which reference no batch, of these headers.
-    internal Headers ToOwned()
-    {
-        List<Header>? headers = Materialized();
-        Headers copy = new Headers();
+        List<IHeader>? headers = Materialized();
+        RecordHeaders copy = new RecordHeaders();
         if (headers is { Count: > 0 })
         {
-            List<Header> owned = new List<Header>(headers.Count);
-            foreach (Header header in headers)
+            List<IHeader> owned = new List<IHeader>(headers.Count);
+            foreach (IHeader header in headers)
             {
-                owned.Add(header.ToOwned());
+                owned.Add(header is RecordHeader recordHeader ? recordHeader.ToOwned() : header);
             }
 
             copy._state = owned;
@@ -337,7 +314,7 @@ public sealed class Headers : IEnumerable<Header>
     }
 
     // The list, read from the batch first when these are a polled record's headers not read yet.
-    private List<Header>? Materialized()
+    private List<IHeader>? Materialized()
     {
         object? state = _state;
         if (state is SafeConsumerRecordsHandle batch)
@@ -346,7 +323,7 @@ public sealed class Headers : IEnumerable<Header>
             state = _state;
         }
 
-        return (List<Header>?)state;
+        return (List<IHeader>?)state;
     }
 
     private void Materialize(SafeConsumerRecordsHandle batch)
@@ -358,7 +335,7 @@ public sealed class Headers : IEnumerable<Header>
                 return;
             }
 
-            List<Header>? headers = ConsumerRecordsMarshal.ReadHeaders(batch, _record);
+            List<IHeader>? headers = ConsumerRecordsMarshal.ReadHeaders(batch, _record);
             _record = IntPtr.Zero;
             _state = headers;
         }
@@ -374,21 +351,21 @@ public sealed class Headers : IEnumerable<Header>
 
     private void CanWrite()
     {
-        if (IsReadOnly)
+        if (IsReadOnly())
         {
             throw new IllegalStateException("RecordHeaders has been closed.");
         }
     }
 
-    private IEnumerable<Header> FilterByKey(string key)
+    private IEnumerable<IHeader> FilterByKey(string key)
     {
-        List<Header>? headers = Materialized();
+        List<IHeader>? headers = Materialized();
         if (headers is null)
         {
             yield break;
         }
 
-        foreach (Header header in headers)
+        foreach (IHeader header in headers)
         {
             if (string.Equals(header.Key(), key, StringComparison.Ordinal))
             {

@@ -22,6 +22,7 @@ using System.Runtime.InteropServices;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
@@ -34,11 +35,11 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The headers of a polled record over its native batch. Held alone, a <see cref="Header"/>, unread
-/// <see cref="Headers"/> or a <see cref="Header.ValueMemory"/> result keeps the batch across the consumer's disposal
-/// and forced collections, reads the fetched data, and lets the batch go once dropped. Every member of
-/// <see cref="Headers"/>, as the first access of headers not read yet, behaves as on headers built from the same
-/// data, as Java's <c>RecordHeaders</c> does.
+/// The headers of a polled record over its native batch. Held alone, an <see cref="IHeader"/>, unread
+/// <see cref="IHeaders"/> or a <see cref="HeaderExtensions.ValueMemory(IHeader)"/> result keeps the batch across the
+/// consumer's disposal and forced collections, reads the fetched data, and lets the batch go once dropped. Every
+/// member of <see cref="IHeaders"/>, as the first access of headers not read yet, behaves as on headers built from
+/// the same data, as Java's <c>RecordHeaders</c> does.
 /// </summary>
 public sealed class PolledHeadersTests
 {
@@ -61,7 +62,7 @@ public sealed class PolledHeadersTests
     [InlineData(1, "b")]
     public void AHeaderHeldAlone_KeepsItsBatch_AfterTheConsumerIsDisposed_UntilItIsUnreachable(int index, string key)
     {
-        StrongBox<Header?> held = new StrongBox<Header?>();
+        StrongBox<IHeader?> held = new StrongBox<IHeader?>();
         WeakReference batch;
         MockConsumer<byte[], byte[]> consumer = Ready(out IDisposable blocks);
         using (blocks)
@@ -86,7 +87,7 @@ public sealed class PolledHeadersTests
     [Fact]
     public void UnreadHeadersHeldAlone_KeepTheirBatch_AfterTheConsumerIsDisposed_UntilTheyAreUnreachable()
     {
-        StrongBox<Headers?> held = new StrongBox<Headers?>();
+        StrongBox<IHeaders?> held = new StrongBox<IHeaders?>();
         WeakReference batch;
         MockConsumer<byte[], byte[]> consumer = Ready(out IDisposable blocks);
         using (blocks)
@@ -151,7 +152,7 @@ public sealed class PolledHeadersTests
     [InlineData("Add(Header)")]
     [InlineData("Add(string, byte[])")]
     [InlineData("Remove")]
-    [InlineData("GetHeaders")]
+    [InlineData("Headers(string)")]
     [InlineData("LastHeader")]
     [InlineData("Equals")]
     [InlineData("EqualsAsTheArgument")]
@@ -168,14 +169,14 @@ public sealed class PolledHeadersTests
         using (blocks)
         using (TestTimeout.Disposal(consumer))
         {
-            Headers polled = Assert.Single(consumer.Poll(s_pollTimeout)).Headers();
+            RecordHeaders polled = (RecordHeaders)Assert.Single(consumer.Poll(s_pollTimeout)).Headers();
             Assert.IsType<SafeConsumerRecordsHandle>(Field(polled, "_state"));
-            Headers built = Built();
+            RecordHeaders built = Built();
 
             switch (member)
             {
                 case "Add(Header)":
-                    Header added = new Header("d", new byte[] { 4 });
+                    IHeader added = new RecordHeader("d", new byte[] { 4 });
                     Assert.Same(polled, polled.Add(added));
                     built.Add(added);
                     Assert.Equal(built.ToArray(), polled.ToArray());
@@ -193,12 +194,12 @@ public sealed class PolledHeadersTests
                     Assert.Equal(built.ToArray(), polled.ToArray());
                     Assert.Equal(new[] { "b", "c" }, polled.Select(header => header.Key()));
                     break;
-                case "GetHeaders":
-                    Assert.Equal(built.GetHeaders("a"), polled.GetHeaders("a"));
+                case "Headers(string)":
+                    Assert.Equal(built.Headers("a"), polled.Headers("a"));
                     Assert.Equal(
                         new[] { s_a, Array.Empty<byte>() },
-                        Built().GetHeaders("a").Select(header => header.Value()));
-                    Assert.Equal(new[] { s_a, Array.Empty<byte>() }, polled.GetHeaders("a").Select(h => h.Value()));
+                        Built().Headers("a").Select(header => header.Value()));
+                    Assert.Equal(new[] { s_a, Array.Empty<byte>() }, polled.Headers("a").Select(h => h.Value()));
                     break;
                 case "LastHeader":
                     Assert.Equal(built.LastHeader("a"), polled.LastHeader("a"));
@@ -211,12 +212,12 @@ public sealed class PolledHeadersTests
                     Assert.True(built.Equals(polled));
                     break;
                 case "EqualsEmpty":
-                    Assert.False(polled.Equals(new Headers()));
-                    Assert.False(new Headers().Equals(polled));
+                    Assert.False(polled.Equals(new RecordHeaders()));
+                    Assert.False(new RecordHeaders().Equals(polled));
                     break;
                 case "GetHashCode":
                     Assert.Equal(built.GetHashCode(), polled.GetHashCode());
-                    Assert.NotEqual(new Headers().GetHashCode(), polled.GetHashCode());
+                    Assert.NotEqual(new RecordHeaders().GetHashCode(), polled.GetHashCode());
                     break;
                 case "ToString":
                     Assert.Equal(Rendering, polled.ToString());
@@ -226,7 +227,7 @@ public sealed class PolledHeadersTests
                     Assert.Equal(built.ToArray(), polled.ToArray());
                     break;
                 case "CopyConstructor":
-                    Headers copy = new Headers(polled);
+                    RecordHeaders copy = new RecordHeaders(polled);
                     Assert.Equal(built, copy);
                     // Java's RecordHeaders(Iterable) copies the list, not its headers.
                     Assert.Equal(polled.ToArray().Length, copy.ToArray().Length);
@@ -242,12 +243,12 @@ public sealed class PolledHeadersTests
                     ProducerRecord<byte[], byte[]> record =
                         new ProducerRecord<byte[], byte[]>("t", (int?)null, (byte[]?)null, (byte[]?)null, polled);
                     Assert.Equal(built, record.Headers());
-                    Assert.False(polled.IsReadOnly);
+                    Assert.False(polled.IsReadOnly());
                     Assert.Equal(built, polled);
                     break;
                 case "SetReadOnly":
                     polled.SetReadOnly();
-                    Assert.True(polled.IsReadOnly);
+                    Assert.True(polled.IsReadOnly());
                     Assert.Equal(built.ToArray(), polled.ToArray());
                     IllegalStateException e = Assert.Throws<IllegalStateException>(() => polled.Add("d", null));
                     Assert.Equal("RecordHeaders has been closed.", e.Message);
@@ -262,18 +263,18 @@ public sealed class PolledHeadersTests
     // The reads after the collection are not inlined either, so no temporary of theirs (a header array, a memory)
     // stays reported live in the test's frame and roots the batch after the held object is dropped.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void AssertHeader(StrongBox<Header?> held, string key, byte[]? value)
+    private static void AssertHeader(StrongBox<IHeader?> held, string key, byte[]? value)
     {
-        Header header = held.Value!;
+        IHeader header = held.Value!;
         Assert.Equal(key, header.Key());
         Assert.Equal(value, header.ValueMemory()?.ToArray());
         Assert.Equal(value, header.Value());
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void AssertHeaders(StrongBox<Headers?> held)
+    private static void AssertHeaders(StrongBox<IHeaders?> held)
     {
-        Headers headers = held.Value!;
+        IHeaders headers = held.Value!;
         Assert.IsType<SafeConsumerRecordsHandle>(Field(headers, "_state"));
         Assert.Equal(Built().ToArray(), headers.ToArray());
         Assert.Equal(Rendering, headers.ToString());
@@ -286,7 +287,7 @@ public sealed class PolledHeadersTests
     // Not inlined, so the records, the record and its headers are unreachable once it returns: only the held header
     // roots the batch.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference PollHeader(MockConsumer<byte[], byte[]> consumer, int index, StrongBox<Header?> held)
+    private static WeakReference PollHeader(MockConsumer<byte[], byte[]> consumer, int index, StrongBox<IHeader?> held)
     {
         held.Value = Assert.Single(consumer.Poll(s_pollTimeout)).Headers().ToArray()[index];
         Assert.Null(Field(held.Value, "_key"));
@@ -294,7 +295,7 @@ public sealed class PolledHeadersTests
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference PollHeaders(MockConsumer<byte[], byte[]> consumer, StrongBox<Headers?> held)
+    private static WeakReference PollHeaders(MockConsumer<byte[], byte[]> consumer, StrongBox<IHeaders?> held)
     {
         held.Value = Assert.Single(consumer.Poll(s_pollTimeout)).Headers();
         return Weak(Field(held.Value, "_state"));
@@ -338,8 +339,8 @@ public sealed class PolledHeadersTests
         return consumer;
     }
 
-    private static Headers Built() =>
-        new Headers().Add("a", new byte[] { 1, 2, 3 }).Add("b", null).Add("a", Array.Empty<byte>()).Add("c", new byte[] { 9 });
+    private static RecordHeaders Built() =>
+        (RecordHeaders)new RecordHeaders().Add("a", new byte[] { 1, 2, 3 }).Add("b", null).Add("a", Array.Empty<byte>()).Add("c", new byte[] { 9 });
 
     private static object? Field(object target, string name) =>
         target.GetType().GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(target);

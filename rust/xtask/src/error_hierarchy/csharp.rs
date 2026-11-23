@@ -247,7 +247,7 @@ fn cs_type(java: &str, usings: &mut BTreeSet<&'static str>) -> anyhow::Result<Cs
         "long" => ("long", false, false, &[]),
         "double" => ("double", false, false, &[]),
         "boolean" => ("bool", false, false, &[]),
-        "TopicPartition" => ("TopicPartition", false, false, &[NS_COMMON]),
+        "TopicPartition" => ("TopicPartition", true, false, &[NS_COMMON]),
         "Set<String>" => ("IReadOnlyCollection<string>", true, false, &[NS_SCG]),
         "Set<TopicPartition>" | "Collection<TopicPartition>" => {
             ("IReadOnlyCollection<TopicPartition>", true, false, &[NS_SCG, NS_COMMON])
@@ -268,9 +268,9 @@ fn cs_type(java: &str, usings: &mut BTreeSet<&'static str>) -> anyhow::Result<Cs
 }
 
 /// Whether a C# type is a value type, so a copy of a collection of it has no null element to
-/// check.
+/// check; a copy of a collection of a reference type checks for one, as Java's `Set.copyOf` does.
 fn is_value_type(cs: &str) -> bool {
-    matches!(cs, "int" | "long" | "double" | "bool" | "TopicPartition")
+    matches!(cs, "int" | "long" | "double" | "bool")
 }
 
 fn cs_literal(s: &str) -> String {
@@ -523,13 +523,21 @@ fn cs_expr(
                     let elem = t
                         .element()
                         .ok_or_else(|| anyhow::anyhow!("error hierarchy (C#): a set for `{}`", t.text))?;
-                    if !is_value_type(elem) {
-                        anyhow::bail!("error hierarchy (C#): `Set.copyOf` of `{elem}` would need a null-element check");
-                    }
                     let x = cs_expr(x, scope, None, usings)?;
                     usings.insert(NS_SYSTEM);
                     usings.insert(NS_SCG);
-                    format!("new HashSet<{elem}>({x} ?? throw new ArgumentNullException(nameof({x})))")
+                    let copy = format!("new HashSet<{elem}>({x} ?? throw new ArgumentNullException(nameof({x})))");
+                    if is_value_type(elem) {
+                        copy
+                    } else {
+                        // Java's `Set.copyOf` throws on a null element, and Python's generated
+                        // `checked_set(x, "x", elements=True)` raises: the copy, which reads the input
+                        // once, is checked for the one null a `HashSet` can hold.
+                        format!(
+                            "{copy} is var copied && !copied.Contains(null!) ? copied : throw new \
+                             ArgumentNullException(nameof({x}), \"{x} must not contain null\")"
+                        )
+                    }
                 },
                 (["Collections", "unmodifiableSet" | "unmodifiableMap"], [x @ Expr::Name(_)]) => {
                     let x = cs_expr(x, scope, None, usings)?;
@@ -1572,8 +1580,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::super::{build_graph, ClassInfo, Graph};
-    use super::{cs_namespace, getter_returns, render_class};
-    use crate::java_parse::{Ctor, Param, Visibility};
+    use super::{cs_expr, cs_namespace, cs_type, getter_returns, render_class, CsParam, Scope};
+    use crate::java_parse::{Ctor, Expr, Param, Visibility};
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1763,5 +1771,60 @@ mod tests {
             let err = render_class(&g, &c[&fqn], &repo_root()).unwrap_err().to_string();
             assert!(err.contains(&format!("would hide `{cs}`")), "{err}");
         }
+    }
+
+    /// `Set.copyOf(x)` as C#, `x` being a parameter of the Java type `java_ty`.
+    fn set_copy_of(java_ty: &str) -> String {
+        let mut usings = std::collections::BTreeSet::new();
+        let ty = cs_type(java_ty, &mut usings).unwrap();
+        let params = [CsParam {
+            java_name: "x".into(),
+            java_ty: java_ty.into(),
+            name: "x".into(),
+            ty: ty.clone(),
+            nullable: false,
+        }];
+        let e = Expr::Call(vec!["Set".into(), "copyOf".into()], vec![Expr::Name(vec!["x".into()])]);
+        cs_expr(&e, &Scope { params: &params }, Some(&ty), &mut usings).unwrap()
+    }
+
+    #[test]
+    fn a_set_copy_of_a_reference_element_checks_for_a_null_element() {
+        assert_eq!(
+            set_copy_of("Set<TopicPartition>"),
+            "new HashSet<TopicPartition>(x ?? throw new ArgumentNullException(nameof(x))) is var copied && \
+             !copied.Contains(null!) ? copied : throw new ArgumentNullException(nameof(x), \"x must not contain null\")"
+        );
+    }
+
+    #[test]
+    fn a_set_copy_of_a_value_type_element_is_a_plain_copy() {
+        let mut usings = std::collections::BTreeSet::new();
+        let ty = super::CsTy {
+            text: "IReadOnlyCollection<long>".into(),
+            reference: true,
+            always_nullable: false,
+        };
+        let params = [CsParam {
+            java_name: "x".into(),
+            java_ty: "Set<Long>".into(),
+            name: "x".into(),
+            ty: ty.clone(),
+            nullable: false,
+        }];
+        let e = Expr::Call(vec!["Set".into(), "copyOf".into()], vec![Expr::Name(vec!["x".into()])]);
+        assert_eq!(
+            cs_expr(&e, &Scope { params: &params }, Some(&ty), &mut usings).unwrap(),
+            "new HashSet<long>(x ?? throw new ArgumentNullException(nameof(x)))"
+        );
+    }
+
+    #[test]
+    fn a_topic_partition_is_a_reference_type() {
+        let mut usings = std::collections::BTreeSet::new();
+        let ty = cs_type("TopicPartition", &mut usings).unwrap();
+        assert!(ty.reference);
+        assert_eq!(ty.decl(true), "TopicPartition?");
+        assert_eq!(ty.decl(false), "TopicPartition");
     }
 }

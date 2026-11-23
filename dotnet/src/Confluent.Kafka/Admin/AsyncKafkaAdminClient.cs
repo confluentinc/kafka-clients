@@ -59,7 +59,8 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
 
     /// <inheritdoc/>
     public AsyncDeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions options) =>
-        AsyncDeleteTopicsResult.OfClient(_native.DeleteTopics(topics, AdminEarlyReturns.DeleteTopics(topics, options)));
+        AsyncDeleteTopicsResult.OfClient(
+            _native.DeleteTopics(_native.CheckTopicIds(topics), AdminEarlyReturns.DeleteTopics(topics, options)));
 
     /// <inheritdoc/>
     public AsyncDeleteTopicsResult DeleteTopics(IReadOnlyCollection<string> topics) =>
@@ -79,7 +80,7 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
     /// <inheritdoc/>
     public AsyncDescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions options) =>
         AsyncDescribeTopicsResult.OfClient(
-            _native.DescribeTopics(topics, AdminEarlyReturns.DescribeTopics(topics, options)));
+            _native.DescribeTopics(_native.CheckTopicIds(topics), AdminEarlyReturns.DescribeTopics(topics, options)));
 
     /// <inheritdoc/>
     public AsyncDescribeTopicsResult DescribeTopics(IReadOnlyCollection<string> topicNames) =>

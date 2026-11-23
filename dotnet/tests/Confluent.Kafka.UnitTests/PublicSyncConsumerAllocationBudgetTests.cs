@@ -42,7 +42,7 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
     private const int ValueSize = 64;
 
     // Under twice the per-record cost, measured at 248 B on net8.0 and net10.0 (key, value, the ConsumerRecord holding
-    // its batch and its native record, and its list slot; its Headers is created on first use only), so a new
+    // its batch and its native record, and its list slot; its headers object is created on first use only), so a new
     // per-record copy of that size fails the budget. The topic has its own budget test.
     private const long PerRecordBudgetBytes = 448;
 

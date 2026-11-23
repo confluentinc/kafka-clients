@@ -30,13 +30,13 @@ namespace Confluent.Kafka.Consumer;
 /// </summary>
 /// <remarks>
 /// It needs no disposal, and it never changes. Its records are views of the poll's native batch, not copies: the
-/// records, their <see cref="Confluent.Kafka.Common.Header.Headers"/>, each
-/// <see cref="Confluent.Kafka.Common.Header.Header"/>, a header memory taken before <c>Value()</c>, and a key or value
+/// records, their <see cref="Confluent.Kafka.Common.Header.IHeaders"/>, each
+/// <see cref="Confluent.Kafka.Common.Header.IHeader"/>, a header memory taken before <c>Value()</c>, and a key or value
 /// that a deserializer returned as a memory over the batch's own bytes, each keep the whole batch in memory while it
 /// is reachable, after later polls and after the consumer is disposed, as
 /// <see cref="ConsumerRecord{TKey, TValue}"/> describes. To keep something longer without the batch, keep a copy: the
-/// arrays <c>Value()</c> returns, <c>new Header(header.Key(), header.Value())</c>, or a key or value deserialized to
-/// an owned type. A poll with neither records nor next offsets returns <see cref="EMPTY"/>, not
+/// arrays <c>Value()</c> returns, a header added with <c>headers.Add(header.Key(), header.Value())</c>, or a key or
+/// value deserialized to an owned type. A poll with neither records nor next offsets returns <see cref="EMPTY"/>, not
 /// <see langword="null"/>.
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
@@ -70,8 +70,8 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
     /// represent the offsets that the consumer will start reading from on the next poll. The map is copied.
     /// </param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="records"/> or a list in it, or <paramref name="nextOffsets"/> or an offset in it, is
-    /// <see langword="null"/>.
+    /// <paramref name="records"/> or a partition or a list in it, or <paramref name="nextOffsets"/> or a partition or
+    /// an offset in it, is <see langword="null"/>.
     /// </exception>
     public ConsumerRecords(
         IReadOnlyDictionary<TopicPartition, IReadOnlyList<ConsumerRecord<TKey, TValue>>> records,
@@ -107,10 +107,11 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
     /// <param name="partition">The partition to get records for.</param>
     /// <returns>
     /// The partition's records, in their order, as a read-only list; an empty list when this set holds
-    /// none for it.
+    /// none for it, as for a <see langword="null"/> partition.
     /// </returns>
     public IReadOnlyList<ConsumerRecord<TKey, TValue>> Records(TopicPartition partition) =>
-        _byPartition.TryGetValue(partition, out ReadOnlyCollection<ConsumerRecord<TKey, TValue>>? records)
+        partition is not null
+            && _byPartition.TryGetValue(partition, out ReadOnlyCollection<ConsumerRecord<TKey, TValue>>? records)
             ? records
             : s_noRecords;
 
@@ -224,6 +225,11 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
             new List<KeyValuePair<TopicPartition, ReadOnlyCollection<ConsumerRecord<TKey, TValue>>>>(records.Count);
         foreach (KeyValuePair<TopicPartition, IReadOnlyList<ConsumerRecord<TKey, TValue>>> entry in records)
         {
+            if (entry.Key is null)
+            {
+                throw new ArgumentNullException(nameof(records), "records must not contain null");
+            }
+
             if (entry.Value is null)
             {
                 throw new ArgumentNullException(nameof(records), "The records must not contain a null list.");
@@ -265,6 +271,11 @@ public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<Consumer
             new Dictionary<TopicPartition, OffsetAndMetadata>(nextOffsets.Count);
         foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in nextOffsets)
         {
+            if (entry.Key is null)
+            {
+                throw new ArgumentNullException(nameof(nextOffsets), "nextOffsets must not contain null");
+            }
+
             if (entry.Value is null)
             {
                 throw new ArgumentNullException(nameof(nextOffsets), "The next offsets must not contain a null value.");

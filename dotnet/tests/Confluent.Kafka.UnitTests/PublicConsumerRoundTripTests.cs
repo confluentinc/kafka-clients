@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
@@ -153,7 +154,7 @@ public sealed class PublicConsumerRoundTripTests
     [Fact]
     public async Task Poll_HeaderValueIsByteArray()
     {
-        // The mock's AddRecord takes no headers, so only an empty Headers is reachable.
+        // The mock's AddRecord takes no headers, so only an empty RecordHeaders is reachable.
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
@@ -163,10 +164,10 @@ public sealed class PublicConsumerRoundTripTests
         ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.NotNull(record.Headers());
         Assert.Empty(record.Headers());
-        Header header = new Header("hk", Encoding.UTF8.GetBytes("hv"));
+        RecordHeader header = new RecordHeader("hk", Encoding.UTF8.GetBytes("hv"));
         Assert.Equal("hk", header.Key());
         Assert.Equal(Encoding.UTF8.GetBytes("hv"), header.Value());
-        Assert.Null(new Header("null-valued", null).Value());
+        Assert.Null(new RecordHeader("null-valued", null).Value());
     }
 
     [Fact]

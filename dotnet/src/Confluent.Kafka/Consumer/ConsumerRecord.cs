@@ -17,6 +17,7 @@ using System.Globalization;
 using System.Threading;
 
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
@@ -30,9 +31,9 @@ namespace Confluent.Kafka.Consumer;
 /// <remarks>
 /// <para>
 /// A polled record's key and value are the deserializers' output, and its topic is an owned copy. Its headers are read
-/// from the poll's native batch on their first use (see <see cref="Confluent.Kafka.Common.Header.Header"/>), and its
-/// other fields on each call, so the record keeps the batch in memory while it is reachable, after later polls and
-/// after the consumer is disposed, and the garbage collector frees it.
+/// from the poll's native batch on their first use, and its other fields on each call, so the record keeps the batch in
+/// memory while it is reachable, after later polls and after the consumer is disposed, and the garbage collector frees
+/// it.
 /// </para>
 /// <para>
 /// A deserializer that may keep its memory,
@@ -71,7 +72,7 @@ public sealed class ConsumerRecord<TKey, TValue>
     private readonly TValue? _value;
     // A polled record's headers are made on the first call of Headers() unless a deserializer took them during the
     // poll; a constructed record's are set by its constructor.
-    private Headers? _headers;
+    private IHeaders? _headers;
     private readonly int? _leaderEpoch;
     private readonly int _serializedKeySize;
     private readonly int _serializedValueSize;
@@ -102,7 +103,7 @@ public sealed class ConsumerRecord<TKey, TValue>
             NULL_SIZE,
             key,
             value,
-            new Headers(),
+            new RecordHeaders(),
             null)
     {
     }
@@ -134,7 +135,7 @@ public sealed class ConsumerRecord<TKey, TValue>
         int serializedValueSize,
         TKey? key,
         TValue? value,
-        Headers headers,
+        IHeaders headers,
         int? leaderEpoch)
         : this(
             topic,
@@ -182,7 +183,7 @@ public sealed class ConsumerRecord<TKey, TValue>
         int serializedValueSize,
         TKey? key,
         TValue? value,
-        Headers headers,
+        IHeaders headers,
         int? leaderEpoch,
         short? deliveryCount)
     {
@@ -208,7 +209,7 @@ public sealed class ConsumerRecord<TKey, TValue>
         int partition,
         TKey? key,
         TValue? value,
-        Headers? headers)
+        RecordHeaders? headers)
     {
         _batch = batch;
         _record = record;
@@ -289,7 +290,7 @@ public sealed class ConsumerRecord<TKey, TValue>
 
     /// <summary>The record headers; empty when the record has none.</summary>
     /// <returns>The record headers; empty when the record has none.</returns>
-    public Headers Headers() => _headers ?? CreateHeaders();
+    public IHeaders Headers() => _headers ?? CreateHeaders();
 
     /// <summary>
     /// The record's leader epoch, or <see langword="null"/> when the record format has none (Java's
@@ -384,9 +385,9 @@ public sealed class ConsumerRecord<TKey, TValue>
         + ", value = " + JavaText.ValueOf(_value) + ")";
 
     // One instance per record, whichever thread asks first.
-    private Headers CreateHeaders()
+    private IHeaders CreateHeaders()
     {
-        Headers headers = new Headers(_batch!, _record);
+        IHeaders headers = new RecordHeaders(_batch!, _record);
         return Interlocked.CompareExchange(ref _headers, headers, null) ?? headers;
     }
 }

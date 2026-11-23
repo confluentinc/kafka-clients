@@ -21,7 +21,9 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
@@ -35,7 +37,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// <summary>
 /// A polled record's headers over the core's views of the batch: they are read on first use, once, under the
 /// batch's lock; a header's key is decoded and cached on first use and its value copied once and cached, while
-/// <see cref="Header.ValueMemory"/> is a view of the batch that outlives the next poll and the consumer.
+/// <see cref="HeaderExtensions.ValueMemory(IHeader)"/> is a view of the batch that outlives the next poll and the
+/// consumer.
 /// </summary>
 public sealed class ConsumerRecordWrappedHeadersTests
 {
@@ -51,12 +54,12 @@ public sealed class ConsumerRecordWrappedHeadersTests
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        Header header;
+        IHeader header;
         ReadOnlyMemory<byte>? memory;
         try
         {
             consumer.Assign(new[] { (Topic, Partition) });
-            consumer.Seek(Topic, Partition, offset: 0);
+            consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
             using IDisposable blocks = ConsumerPollHeadersTests.AddRecordWithHeaders(
                 consumer, Topic, Partition, offset: 0, key: null, value: null, ("h", s_value));
 
@@ -89,12 +92,12 @@ public sealed class ConsumerRecordWrappedHeadersTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { (Topic, Partition) });
-        consumer.Seek(Topic, Partition, offset: 0);
+        consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         using IDisposable blocks = ConsumerPollHeadersTests.AddRecordWithHeaders(
             consumer, Topic, Partition, offset: 0, key: null, value: null, ("h", s_value));
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(await Poll(consumer));
-        Header header = Assert.Single(record.Headers());
+        IHeader header = Assert.Single(record.Headers());
 
         byte[]? first = header.Value();
         Assert.Equal(s_value, first);
@@ -110,13 +113,13 @@ public sealed class ConsumerRecordWrappedHeadersTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { (Topic, Partition) });
-        consumer.Seek(Topic, Partition, offset: 0);
+        consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         using IDisposable blocks = ConsumerPollHeadersTests.AddRecordWithHeaders(
             consumer, Topic, Partition, offset: 0, key: null, value: null,
             ("null-value", null), ("empty-value", Array.Empty<byte>()));
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(await Poll(consumer));
-        Header[] headers = record.Headers().ToArray();
+        IHeader[] headers = record.Headers().ToArray();
 
         Assert.Equal("null-value", headers[0].Key());
         Assert.Null(headers[0].ValueMemory());
@@ -135,14 +138,14 @@ public sealed class ConsumerRecordWrappedHeadersTests
     public void BuiltHeader_ValueMemory_IsItsArray_OrNullForANullValue()
     {
         byte[] value = { 1, 2, 3 };
-        Header header = new Header("k", value);
+        IHeader header = new RecordHeader("k", value);
 
         ReadOnlyMemory<byte>? memory = header.ValueMemory();
 
         Assert.NotNull(memory);
         Assert.True(MemoryMarshal.TryGetArray(memory.Value, out ArraySegment<byte> segment));
         Assert.Same(value, segment.Array);
-        Assert.Null(new Header("k", null).ValueMemory());
+        Assert.Null(new RecordHeader("k", null).ValueMemory());
     }
 
     [Fact]
@@ -151,18 +154,18 @@ public sealed class ConsumerRecordWrappedHeadersTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { (Topic, Partition) });
-        consumer.Seek(Topic, Partition, offset: 0);
+        consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         using IDisposable blocks = ConsumerPollHeadersTests.AddRecordWithHeaders(
             consumer, Topic, Partition, offset: 0, key: null, value: null, ("h", s_value));
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(await Poll(consumer));
 
         Assert.Null(Field(record, "_headers"));
-        Headers headers = record.Headers();
+        IHeaders headers = record.Headers();
         Assert.IsType<SafeConsumerRecordsHandle>(Field(headers, "_state"));
 
-        Header header = Assert.Single(headers);
-        Assert.IsType<List<Header>>(Field(headers, "_state"));
+        IHeader header = Assert.Single(headers);
+        Assert.IsType<List<IHeader>>(Field(headers, "_state"));
         Assert.Null(Field(header, "_key"));
         Assert.Null(Field(header, "_value"));
         Assert.Equal("h", header.Key());
@@ -177,7 +180,7 @@ public sealed class ConsumerRecordWrappedHeadersTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { (Topic, Partition) });
-        consumer.Seek(Topic, Partition, offset: 0);
+        consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         List<IDisposable> blocks = new List<IDisposable>();
         try
         {
@@ -192,15 +195,15 @@ public sealed class ConsumerRecordWrappedHeadersTests
             Assert.Equal(Records, records.Count());
             foreach (ConsumerRecord<byte[], byte[]> record in records)
             {
-                (Headers Headers, Header[] Entries, string Key, byte[]? Value)[] seen =
-                    new (Headers, Header[], string, byte[]?)[Threads];
+                (IHeaders Headers, IHeader[] Entries, string Key, byte[]? Value)[] seen =
+                    new (IHeaders, IHeader[], string, byte[]?)[Threads];
                 using Barrier barrier = new Barrier(Threads);
                 Task[] tasks = Enumerable.Range(0, Threads).Select(i => Task.Factory.StartNew(
                     () =>
                     {
                         barrier.SignalAndWait();
-                        Headers headers = record.Headers();
-                        Header[] entries = headers.ToArray();
+                        IHeaders headers = record.Headers();
+                        IHeader[] entries = headers.ToArray();
                         seen[i] = (headers, entries, entries[1].Key(), entries[1].Value());
                     },
                     CancellationToken.None,
@@ -208,7 +211,7 @@ public sealed class ConsumerRecordWrappedHeadersTests
                     TaskScheduler.Default)).ToArray();
                 await Task.WhenAll(tasks);
 
-                foreach ((Headers Headers, Header[] Entries, string Key, byte[]? Value) one in seen)
+                foreach ((IHeaders Headers, IHeader[] Entries, string Key, byte[]? Value) one in seen)
                 {
                     Assert.Same(seen[0].Headers, one.Headers);
                     Assert.Equal(2, one.Entries.Length);
@@ -238,13 +241,13 @@ public sealed class ConsumerRecordWrappedHeadersTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { (Topic, Partition) });
-        consumer.Seek(Topic, Partition, offset: 0);
+        consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         using IDisposable blocks = ConsumerPollHeadersTests.AddRecordWithHeaders(
             consumer, Topic, Partition, offset: 0, key: null, value: null,
             ("h", s_value), ("empty-value", Array.Empty<byte>()));
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(await Poll(consumer));
-        Header header = record.Headers().ToArray()[0];
+        IHeader header = record.Headers().ToArray()[0];
 
         ReadOnlyMemory<byte> before = header.ValueMemory()!.Value;
         Assert.True(MemoryMarshal.TryGetMemoryManager(before, out BytesMemoryManager? _));
@@ -264,10 +267,10 @@ public sealed class ConsumerRecordWrappedHeadersTests
         Assert.Equal(written, header.ValueMemory()!.Value.ToArray());
         Assert.Equal(written, SpanOf(header));
         Assert.Equal(s_value, before.ToArray());
-        Assert.True(header.Equals(new Header("h", written)));
-        Assert.False(header.Equals(new Header("h", s_value)));
+        Assert.True(header.Equals(new RecordHeader("h", written)));
+        Assert.False(header.Equals(new RecordHeader("h", s_value)));
 
-        Header empty = record.Headers().ToArray()[1];
+        IHeader empty = record.Headers().ToArray()[1];
         byte[] emptyValue = empty.Value()!;
         Assert.True(MemoryMarshal.TryGetArray(empty.ValueMemory()!.Value, out ArraySegment<byte> emptySegment));
         Assert.Same(emptyValue, emptySegment.Array);
@@ -281,7 +284,7 @@ public sealed class ConsumerRecordWrappedHeadersTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { (Topic, Partition) });
-        consumer.Seek(Topic, Partition, offset: 0);
+        consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         List<IDisposable> blocks = new List<IDisposable>();
         try
         {
@@ -295,7 +298,7 @@ public sealed class ConsumerRecordWrappedHeadersTests
             Assert.Equal(Records, records.Count());
             foreach (ConsumerRecord<byte[], byte[]> record in records)
             {
-                Header header = Assert.Single(record.Headers());
+                IHeader header = Assert.Single(record.Headers());
                 byte[]?[] values = new byte[]?[Threads];
                 ReadOnlyMemory<byte>?[] memories = new ReadOnlyMemory<byte>?[Threads];
                 using Barrier barrier = new Barrier(Threads);
@@ -364,7 +367,7 @@ public sealed class ConsumerRecordWrappedHeadersTests
             byte[] withNul = { (byte)'a', 0x00, (byte)'b' };
             fixed (byte* nul = withNul)
             {
-                key = Header.DecodeKey(new KafkaBytes((IntPtr)nul, withNul.Length));
+                key = RecordHeader.DecodeKey(new KafkaBytes((IntPtr)nul, withNul.Length));
             }
         }
 
@@ -372,7 +375,7 @@ public sealed class ConsumerRecordWrappedHeadersTests
             new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         ProducerRecord<byte[], byte[]> record = new ProducerRecord<byte[], byte[]>(
-            "t", (int?)null, (byte[]?)null, (byte[]?)null, new[] { new Header(key, s_value) });
+            "t", (int?)null, (byte[]?)null, (byte[]?)null, new[] { new RecordHeader(key, s_value) });
 
         ArgumentException e = Assert.Throws<ArgumentException>(() => producer.Send(record));
 
@@ -395,13 +398,13 @@ public sealed class ConsumerRecordWrappedHeadersTests
         fixed (byte* bad = invalid)
         fixed (byte* text = nonAscii)
         {
-            Assert.Equal("a\0b", Header.DecodeKey(new KafkaBytes((IntPtr)nul, withNul.Length)));
-            Assert.Equal("x��", Header.DecodeKey(new KafkaBytes((IntPtr)bad, invalid.Length)));
-            Assert.Equal("clé-🔑", Header.DecodeKey(new KafkaBytes((IntPtr)text, nonAscii.Length)));
-            Assert.Equal(string.Empty, Header.DecodeKey(new KafkaBytes((IntPtr)text, 0)));
+            Assert.Equal("a\0b", RecordHeader.DecodeKey(new KafkaBytes((IntPtr)nul, withNul.Length)));
+            Assert.Equal("x��", RecordHeader.DecodeKey(new KafkaBytes((IntPtr)bad, invalid.Length)));
+            Assert.Equal("clé-🔑", RecordHeader.DecodeKey(new KafkaBytes((IntPtr)text, nonAscii.Length)));
+            Assert.Equal(string.Empty, RecordHeader.DecodeKey(new KafkaBytes((IntPtr)text, 0)));
         }
 
-        Assert.Equal(string.Empty, Header.DecodeKey(default));
+        Assert.Equal(string.Empty, RecordHeader.DecodeKey(default));
     }
 
     private static Task<ConsumerRecords<byte[], byte[]>> Poll(NativeConsumer consumer) =>
@@ -411,8 +414,8 @@ public sealed class ConsumerRecordWrappedHeadersTests
             new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()));
 
     // The bytes the internal ValueSpan gives, which the producer send reads.
-    private static byte[]? SpanOf(Header header) =>
-        header.ValueSpan(out ReadOnlySpan<byte> value) ? value.ToArray() : null;
+    private static byte[]? SpanOf(IHeader header) =>
+        ((RecordHeader)header).ValueSpan(out ReadOnlySpan<byte> value) ? value.ToArray() : null;
 
     private static object? Field(object target, string name) =>
         target.GetType().GetField(name, BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(target);

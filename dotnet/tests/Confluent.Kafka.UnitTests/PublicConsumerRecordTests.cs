@@ -18,6 +18,7 @@ using System.Reflection;
 using System.Text;
 
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Consumer;
 using Xunit;
@@ -52,7 +53,7 @@ public sealed class PublicConsumerRecordTests
         Assert.Equal(ConsumerRecord<string, string>.NULL_SIZE, record.SerializedValueSize());
         Assert.Null(record.LeaderEpoch());
         Assert.Null(record.DeliveryCount());
-        Assert.True(new Headers().Equals(record.Headers()));
+        Assert.True(new RecordHeaders().Equals(record.Headers()));
     }
 
     [Fact]
@@ -68,8 +69,8 @@ public sealed class PublicConsumerRecordTests
         int serializedKeySize = 100;
         int serializedValueSize = 1142;
 
-        Headers headers = new Headers();
-        headers.Add(new Header("header key", Encoding.UTF8.GetBytes("header value")));
+        RecordHeaders headers = new RecordHeaders();
+        headers.Add(new RecordHeader("header key", Encoding.UTF8.GetBytes("header value")));
         ConsumerRecord<string, string> record = new ConsumerRecord<string, string>(
             topic, partition, offset, timestamp, timestampType, serializedKeySize, serializedValueSize, key, value,
             headers, null);
@@ -108,7 +109,7 @@ public sealed class PublicConsumerRecordTests
     [Fact]
     public void Ctor_KeepsTheGivenHeadersObject()
     {
-        Headers headers = new Headers();
+        RecordHeaders headers = new RecordHeaders();
 
         ConsumerRecord<string, string> eleven = new ConsumerRecord<string, string>(
             "t", 0, 0L, 0L, TimestampType.CREATE_TIME, 1, 1, "k", "v", headers, null);
@@ -128,12 +129,12 @@ public sealed class PublicConsumerRecordTests
 
         IllegalArgumentException eleven = Assert.Throws<IllegalArgumentException>(
             () => new ConsumerRecord<string, string>(
-                null!, 0, 0L, 0L, TimestampType.CREATE_TIME, 1, 1, "k", "v", new Headers(), null));
+                null!, 0, 0L, 0L, TimestampType.CREATE_TIME, 1, 1, "k", "v", new RecordHeaders(), null));
         Assert.Equal("Topic cannot be null", eleven.Message);
 
         IllegalArgumentException twelve = Assert.Throws<IllegalArgumentException>(
             () => new ConsumerRecord<string, string>(
-                null!, 0, 0L, 0L, TimestampType.CREATE_TIME, 1, 1, "k", "v", new Headers(), null, null));
+                null!, 0, 0L, 0L, TimestampType.CREATE_TIME, 1, 1, "k", "v", new RecordHeaders(), null, null));
         Assert.Equal("Topic cannot be null", twelve.Message);
     }
 
@@ -164,7 +165,7 @@ public sealed class PublicConsumerRecordTests
     public void DeliveryCount_IsTheGivenCount()
     {
         ConsumerRecord<string, string> record = new ConsumerRecord<string, string>(
-            "orders", 3, 42L, 1700L, TimestampType.CREATE_TIME, 1, 1, "k", "v", new Headers(), 7, (short)5);
+            "orders", 3, 42L, 1700L, TimestampType.CREATE_TIME, 1, 1, "k", "v", new RecordHeaders(), 7, (short)5);
 
         Assert.Equal((short)5, record.DeliveryCount());
         Assert.Equal(7, record.LeaderEpoch());
@@ -174,7 +175,7 @@ public sealed class PublicConsumerRecordTests
     public void ToString_PrintsTheGivenDeliveryCount()
     {
         ConsumerRecord<string, string> record = new ConsumerRecord<string, string>(
-            "orders", 3, 42L, 1700L, TimestampType.CREATE_TIME, 1, 1, "k", "v", new Headers(), 7, (short)5);
+            "orders", 3, 42L, 1700L, TimestampType.CREATE_TIME, 1, 1, "k", "v", new RecordHeaders(), 7, (short)5);
 
         Assert.Equal(
             "ConsumerRecord(topic = orders, partition = 3, leaderEpoch = 7, offset = 42, "
@@ -198,7 +199,7 @@ public sealed class PublicConsumerRecordTests
         (Type Type, string Name) serializedValueSize = (typeof(int), "serializedValueSize");
         (Type Type, string Name) key = (arguments[0], "key");
         (Type Type, string Name) value = (arguments[1], "value");
-        (Type Type, string Name) headers = (typeof(Headers), "headers");
+        (Type Type, string Name) headers = (typeof(IHeaders), "headers");
         (Type Type, string Name) leaderEpoch = (typeof(int?), "leaderEpoch");
         (Type Type, string Name) deliveryCount = (typeof(short?), "deliveryCount");
         List<(Type Type, string Name)[]> expected = new List<(Type Type, string Name)[]>

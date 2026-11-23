@@ -243,7 +243,7 @@ internal static class FutureFailure
 
     // The core's placeholder for a record failed before it is appended: the record's partition, or -1.
     private static RecordMetadata Placeholder(string topic, int? partition) =>
-        new RecordMetadata(new TopicPartition(topic, partition ?? -1), -1L, -1L, -1, -1);
+        new RecordMetadata(topic, partition ?? -1, -1L, -1L, -1, -1);
 
     private static KafkaFutureImpl<RecordMetadata> Failed(ApiException error)
     {

@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 
 namespace Confluent.Kafka.Internal.Interop;
 
@@ -32,6 +33,8 @@ internal static unsafe class ProducerSendMarshal
     private const int MaxStackStringBytes = 1024;
 
     private const string RecordParameter = "record";
+
+    private const string NullHeaderKeyMessage = "Invalid null header key found in headers";
 
     internal static IntPtr Send(
         SafeProducerHandle producer,
@@ -125,12 +128,13 @@ internal static unsafe class ProducerSendMarshal
     }
 
     // Java sends a NUL in a topic or a header key whole, with no error; the C ABI would cut the string at the NUL, so
-    // the string is rejected before anything is pinned. An unpaired surrogate crosses as '?', as Java writes it.
+    // the topic and each header key's first read are rejected before anything is pinned, and HeaderKey checks every
+    // later read, after the async send's pin. An unpaired surrogate crosses as '?', as Java writes it.
     // Python's mocks, pure Python, accept such a record; the mocks here build it through the C ABI and reject it too.
     private static void RejectAlteredStrings(in SerializedProducerRecord record)
     {
         AdminStrings.Validate(record.Topic, AdminStrings.InvalidTopicMessage, RecordParameter);
-        List<Header>? entries = record.Headers?.Entries;
+        List<IHeader>? entries = record.Headers?.Entries;
         if (entries is null)
         {
             return;
@@ -138,8 +142,22 @@ internal static unsafe class ProducerSendMarshal
 
         for (int i = 0; i < entries.Count; i++)
         {
-            AdminStrings.Validate(entries[i].Key(), AdminStrings.InvalidHeaderKeyMessage, RecordParameter);
+            _ = HeaderKey(entries[i]);
         }
+    }
+
+    // A null key throws Java's IllegalArgumentException, as Java's size estimate does, on the mocks too, since the C
+    // ABI cannot carry it. Every read of a user header's key is checked, as it may answer differently each time.
+    private static string HeaderKey(IHeader header)
+    {
+        string? key = header.Key();
+        if (key is null)
+        {
+            throw new IllegalArgumentException(NullHeaderKeyMessage);
+        }
+
+        AdminStrings.Validate(key, AdminStrings.InvalidHeaderKeyMessage, RecordParameter);
+        return key;
     }
 
     internal static IntPtr BuildRecord(in SerializedProducerRecord record, IntPtr key, IntPtr value, ref IntPtr outErr)
@@ -222,7 +240,7 @@ internal static unsafe class ProducerSendMarshal
             return false;
         }
 
-        List<Header>? entries = record.Headers?.Entries;
+        List<IHeader>? entries = record.Headers?.Entries;
         if (entries is null || entries.Count == 0)
         {
             return true;
@@ -268,18 +286,30 @@ internal static unsafe class ProducerSendMarshal
     // C API has no borrowed header-value form (ledger 301), so both are pinned for the call only; the Rust producer
     // makes no further copy, writing the header into the batch buffer as wire encoding. A fetched header's value
     // crosses as its view of the polled batch, with no managed copy; the header keeps the batch alive until the call
-    // returns. An empty value crosses as a non-null pointer: fixed over an empty span yields NULL,
-    // which the ABI reads as a null value.
-    private static void AddHeader(IntPtr view, Header header, ref IntPtr outErr)
+    // returns. A user's header crosses as the array its Value() returns. An empty value crosses as a non-null
+    // pointer: fixed over an empty span yields NULL, which the ABI reads as a null value.
+    private static void AddHeader(IntPtr view, IHeader header, ref IntPtr outErr)
     {
-        bool hasValue = header.ValueSpan(out ReadOnlySpan<byte> value);
+        string key = HeaderKey(header);
+        ReadOnlySpan<byte> value;
+        bool hasValue;
+        if (header is RecordHeader recordHeader)
+        {
+            hasValue = recordHeader.ValueSpan(out value);
+        }
+        else
+        {
+            byte[]? array = header.Value();
+            hasValue = array is not null;
+            value = array;
+        }
+
         byte empty = 0;
         fixed (byte* valueData = value)
         {
             KafkaBytes valueBytes = !hasValue
                 ? default
                 : new KafkaBytes(value.Length == 0 ? (IntPtr)(&empty) : (IntPtr)valueData, value.Length);
-            string key = header.Key();
             int capacity = Utf8Marshal.QuestionMarkUtf8.GetMaxByteCount(key.Length) + 1;
             if (capacity <= MaxStackStringBytes)
             {

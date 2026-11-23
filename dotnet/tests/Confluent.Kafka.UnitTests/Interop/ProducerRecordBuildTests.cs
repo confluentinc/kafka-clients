@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
@@ -47,7 +48,8 @@ public sealed class ProducerRecordBuildTests
     [Fact]
     public void BuildRecord_WithHeaders_ReadsBackEveryFieldAndEachHeaderInOrder()
     {
-        Headers headers = new Headers()
+        RecordHeaders headers = new RecordHeaders();
+        headers
             .Add("null-value", null)
             .Add("empty-value", Array.Empty<byte>())
             .Add(NonAsciiKey, s_valueWithNul)
@@ -90,7 +92,7 @@ public sealed class ProducerRecordBuildTests
     public void BuildRecord_WithoutHeaders_HasNone_AndJavasNullsForTheUnsetFields(bool emptyHeaders)
     {
         SerializedProducerRecord record = new SerializedProducerRecord(
-            "plain", partition: null, timestamp: null, key: null, value: null, emptyHeaders ? new Headers() : null);
+            "plain", partition: null, timestamp: null, key: null, value: null, emptyHeaders ? new RecordHeaders() : null);
 
         IntPtr native = Build(record, IntPtr.Zero, IntPtr.Zero);
         try
@@ -111,7 +113,8 @@ public sealed class ProducerRecordBuildTests
     [Fact]
     public void BuildRecord_AHeadersRemovedToEmpty_SendsNoHeaders()
     {
-        Headers headers = new Headers().Add("gone", Bytes("x")).Remove("gone");
+        RecordHeaders headers = new RecordHeaders();
+        headers.Add("gone", Bytes("x")).Remove("gone");
         byte[] value = Bytes("v");
         using NativeBytes valueBytes = new NativeBytes(value);
         SerializedProducerRecord record = new SerializedProducerRecord("t", 0, null, null, value, headers);
@@ -133,7 +136,7 @@ public sealed class ProducerRecordBuildTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { ("fetched", 0) });
-        consumer.Seek("fetched", 0, offset: 0);
+        consumer.Seek(new TopicPartition("fetched", 0), offset: 0);
         using IDisposable blocks = ConsumerPollHeadersTests.AddRecordWithHeaders(
             consumer, "fetched", 0, offset: 0, key: null, value: null,
             ("null-value", null), ("empty-value", Array.Empty<byte>()), (NonAsciiKey, s_valueWithNul));
@@ -141,8 +144,8 @@ public sealed class ProducerRecordBuildTests
             TimeSpan.FromMilliseconds(100),
             new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()),
             new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()));
-        Headers headers = Assert.Single(records).Headers();
-        SerializedProducerRecord record = new SerializedProducerRecord("t", 0, null, null, null, headers);
+        IHeaders headers = Assert.Single(records).Headers();
+        SerializedProducerRecord record = new SerializedProducerRecord("t", 0, null, null, null, (RecordHeaders)headers);
 
         IntPtr native = Build(record, IntPtr.Zero, IntPtr.Zero);
         try
@@ -159,9 +162,9 @@ public sealed class ProducerRecordBuildTests
         }
 
         // The send read each value as a view of the batch: none was copied into a managed array.
-        foreach (Header header in headers)
+        foreach (IHeader header in headers)
         {
-            Assert.Null(typeof(Header).GetField("_value", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(header));
+            Assert.Null(typeof(RecordHeader).GetField("_value", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(header));
         }
     }
 
@@ -190,7 +193,7 @@ public sealed class ProducerRecordBuildTests
         return result;
     }
 
-    private static List<(string? Key, byte[]? Value)> HeadersOf(IntPtr native)
+    internal static List<(string? Key, byte[]? Value)> HeadersOf(IntPtr native)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr recordHeaders = RecordNative.Headers(native, ref outErr);

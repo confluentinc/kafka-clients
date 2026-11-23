@@ -18,6 +18,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -111,10 +112,10 @@ public sealed class PublicProducerHeadersAllocationTests
 
     private static ProducerRecord<byte[], byte[]> Record(int headerCount)
     {
-        Header[] headers = new Header[headerCount];
+        RecordHeader[] headers = new RecordHeader[headerCount];
         for (int i = 0; i < headerCount; i++)
         {
-            headers[i] = new Header("header-" + i, i == 0 ? null : Encoding.UTF8.GetBytes("value-" + i));
+            headers[i] = new RecordHeader("header-" + i, i == 0 ? null : Encoding.UTF8.GetBytes("value-" + i));
         }
 
         return new ProducerRecord<byte[], byte[]>(

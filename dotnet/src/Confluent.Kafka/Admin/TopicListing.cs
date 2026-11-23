@@ -63,6 +63,6 @@ public sealed class TopicListing
             CultureInfo.InvariantCulture,
             "(name={0}, topicId={1}, internal={2})",
             Name(),
-            TopicId(),
+            _topicId is null ? "null" : _topicId.ToString(),
             IsInternal() ? "true" : "false");
 }

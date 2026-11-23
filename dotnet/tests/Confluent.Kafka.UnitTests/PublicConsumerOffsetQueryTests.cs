@@ -263,7 +263,7 @@ public sealed class PublicConsumerOffsetQueryTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ArgumentNullException ex = await Assert.ThrowsAsync<ArgumentNullException>(
-            () => consumer.Committed(new[] { default(TopicPartition) }));
+            () => consumer.Committed(new[] { new TopicPartition(null!, 0) }));
         Assert.Equal("partitions", ex.ParamName);
         Assert.Contains("partitions must not contain a TopicPartition with a null topic", ex.Message, StringComparison.Ordinal);
     }
@@ -275,7 +275,7 @@ public sealed class PublicConsumerOffsetQueryTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
-            [default] = 1L,
+            [new TopicPartition(null!, 0)] = 1L,
         };
 
         ArgumentNullException ex = await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.OffsetsForTimes(search));

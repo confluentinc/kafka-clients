@@ -81,7 +81,7 @@ public sealed class AbortTransactionSpec
     {
         unchecked
         {
-            int hash = TopicPartition().GetHashCode();
+            int hash = TopicPartition()?.GetHashCode() ?? 0;
             hash = (hash * 31) + ProducerId().GetHashCode();
             hash = (hash * 31) + ProducerEpoch();
             return (hash * 31) + CoordinatorEpoch();
@@ -94,7 +94,7 @@ public sealed class AbortTransactionSpec
         string.Format(
             CultureInfo.InvariantCulture,
             "AbortTransactionSpec(topicPartition={0}, producerId={1}, producerEpoch={2}, coordinatorEpoch={3})",
-            TopicPartition(),
+            TopicPartition()?.ToString() ?? "null",
             ProducerId(),
             ProducerEpoch(),
             CoordinatorEpoch());

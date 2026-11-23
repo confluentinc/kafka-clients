@@ -150,7 +150,7 @@ public sealed class SerdeHeadersBrokerTests
     private static void AssertTheFailureCarriesTheHeaders(HeaderReadingDeserializer deserializer, RecordDeserializationException e)
     {
         Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.VALUE, e.Origin());
-        Headers seen = Assert.Single(deserializer.Seen);
+        IHeaders seen = Assert.Single(deserializer.Seen);
         // The error holds owned copies, so it never keeps the polled batch alive.
         Assert.NotSame(seen, e.Headers());
         Assert.Equal(seen, e.Headers());
@@ -262,12 +262,12 @@ public sealed class SerdeHeadersBrokerTests
 
         internal HeaderAddingSerializer(string header = SchemaId) => _header = header;
 
-        internal List<Headers> Seen { get; } = new List<Headers>();
+        internal List<IHeaders> Seen { get; } = new List<IHeaders>();
 
         public ReadOnlyMemory<byte>? Serialize(string topic, string? data) =>
             throw new InvalidOperationException("the producer called the form without headers");
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, Headers headers, string? data)
+        public ReadOnlyMemory<byte>? Serialize(string topic, IHeaders headers, string? data)
         {
             Seen.Add(headers);
             headers.Add(_header, Encoding.UTF8.GetBytes("1"));
@@ -279,7 +279,7 @@ public sealed class SerdeHeadersBrokerTests
             throw new InvalidOperationException("the producer called the form without headers");
 
         public async ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken)
+            string topic, IHeaders headers, string? data, CancellationToken cancellationToken)
         {
             await Task.Yield();
             return Serialize(topic, headers, data);
@@ -302,12 +302,12 @@ public sealed class SerdeHeadersBrokerTests
             _fail = fail;
         }
 
-        internal List<Headers> Seen { get; } = new List<Headers>();
+        internal List<IHeaders> Seen { get; } = new List<IHeaders>();
 
         public string? Deserialize(string topic, ReadOnlySpan<byte> data) =>
             throw new InvalidOperationException("the consumer called the form without headers");
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlySpan<byte> data)
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlySpan<byte> data)
         {
             Seen.Add(headers);
             string text = Encoding.UTF8.GetString(data.ToArray());
@@ -325,7 +325,7 @@ public sealed class SerdeHeadersBrokerTests
             throw new InvalidOperationException("the consumer called the form without headers");
 
         public ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+            string topic, IHeaders headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
             new ValueTask<string?>(Deserialize(topic, headers, data.Span));
     }
 }
