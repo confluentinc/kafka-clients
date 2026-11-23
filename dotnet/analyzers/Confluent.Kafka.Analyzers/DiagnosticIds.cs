@@ -91,7 +91,8 @@ public static class DiagnosticIds
 
     /// <summary>
     /// An <c>&lt;Enum&gt;Methods</c> class's <c>s_values</c> or <c>VALUES</c> that does not list every member of the
-    /// enum once, written out, in declaration order.
+    /// enum once, written out, in declaration order, or a switch expression of the class that names a member of the
+    /// enum but gives another member no arm, or a member two arms.
     /// </summary>
     public const string EnumValuesList = "CKRDA0015";
 
