@@ -129,6 +129,42 @@ public sealed class JavaNameAnalyzerTests
                 + "org.apache.kafka.common.header.Header; declare it as the interface IHeader"));
 
     [Fact]
+    public Task AJavaInterface_TranslatedAsAnInterfaceWithoutTheIPrefix_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Header
+            {
+                public interface {|#0:Header|}
+                {
+                    string Key();
+
+                    byte[] Value();
+                }
+            }
+            """,
+            Files(Header),
+            Name(0, "kind T:Confluent.Kafka.Common.Header.Header: translates the Java interface "
+                + "org.apache.kafka.common.header.Header; declare it as the interface IHeader"));
+
+    [Fact]
+    public Task AJavaInterface_TranslatedAsAGenericInterfaceWithoutTheIPrefix_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public interface {|#0:BaseFunction|}<in TA, out TB>
+                {
+                    TB Apply(TA a);
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.BaseFunction\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.BaseFunction\tinstance\tapply(Object a)\n"),
+            Name(0, "kind T:Confluent.Kafka.Common.BaseFunction`2: translates the Java interface "
+                + "org.apache.kafka.common.BaseFunction; declare it as the interface IBaseFunction"));
+
+    [Fact]
     public Task AJavaInterface_TranslatedAsADelegate_IsReported() =>
         Verifier.VerifyWithFilesAsync(
             """
