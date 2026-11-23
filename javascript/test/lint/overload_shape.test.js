@@ -563,3 +563,35 @@ test("a nested class's overload set is checked as an export's: one options objec
     'Outer.Inner.seek: translates 2 Java forms of clients.producer.Outer$Inner#seek (seek(String topic); seek(String topic, int partition)) but takes (topic: string, partition?: number), not one options object',
   ]);
 });
+
+test("Admin.create's props and conf are configs (RENAMED_PARAMS): one configs form, its { configs } signature and its bare one", () => {
+  const { javaClass } = require('./_java_fixture');
+  const classes = [
+    ...CLASSES,
+    javaClass('clients.admin.Admin', {
+      kind: 'interface',
+      overloads: [
+        method('create', ['Properties'], { static: true, return_type: 'Admin', param_names: ['props'] }),
+        method('create', ['Map'], { static: true, return_type: 'Admin', param_names: ['conf'] }),
+      ],
+    }),
+  ];
+  const statics = (/** @type {string} */ signatures) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex(classes),
+      ...LIB,
+      'src/admin/admin.ts':
+        'export type AdminClientConfigs = { readonly [key: string]: unknown };\nexport interface Admin {}\n' +
+        `export const Admin: {\n${signatures}} = {\n  create(options: unknown): Admin { void options; return {}; },\n};\n`,
+    });
+  const options = '  create(options: { configs: AdminClientConfigs }): Admin;\n';
+  const bare = '  create(configs: AdminClientConfigs): Admin;\n';
+  assert.deepEqual(shapeFindings(lint(statics(options + bare), [RULE])), []);
+  assert.deepEqual(shapeFindings(lint(statics(options), [RULE])), [
+    "Admin.create: takes no bare value, though clients.admin.Admin#create's form create(Properties configs) has one parameter: add a signature taking configs on its own",
+  ]);
+  assert.deepEqual(shapeFindings(lint(statics(bare), [RULE])), [
+    'Admin.create: translates 2 Java forms of clients.admin.Admin#create (create(Properties configs); create(Map configs)) but takes (configs: AdminClientConfigs), not one options object',
+  ]);
+});

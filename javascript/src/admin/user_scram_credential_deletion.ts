@@ -32,8 +32,6 @@ export class UserScramCredentialDeletion extends UserScramCredentialAlteration {
   readonly #mechanism: ScramMechanism;
 
   /**
-   * A deletion of one of a user's credentials.
-   *
    * @param options - the mandatory user, and the mandatory mechanism
    * @throws `TypeError` when the user or the mechanism is null or of the
    *   wrong type

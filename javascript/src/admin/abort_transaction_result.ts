@@ -26,12 +26,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 
 /**
  * The result of `Admin.abortTransaction(spec, options)`.
- *
- * Instances come from the admin client's `abortTransaction()`.
  */
 export class AbortTransactionResult {
   readonly #futures: TopicPartitionMap<KafkaFuture<void>>;
 
+  /**
+   * Instances come from the admin client's `abortTransaction()`.
+   *
+   * @param futures - the futures, by partition
+   */
   private constructor(futures: TopicPartitionMap<KafkaFuture<void>>) {
     this.#futures = futures;
   }

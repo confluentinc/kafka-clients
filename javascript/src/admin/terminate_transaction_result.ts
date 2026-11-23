@@ -24,12 +24,15 @@ const RESULT_FORMS = new JavaForms('result', [[]], { reader: true });
 
 /**
  * The result of the `Admin.forceTerminateTransaction(transactionalId)` call.
- *
- * Instances come from the admin client's `forceTerminateTransaction()`.
  */
 export class TerminateTransactionResult {
   readonly #future: KafkaFuture<void>;
 
+  /**
+   * Instances come from the admin client's `forceTerminateTransaction()`.
+   *
+   * @param future - the future of the termination
+   */
   private constructor(future: KafkaFuture<void>) {
     this.#future = future;
   }

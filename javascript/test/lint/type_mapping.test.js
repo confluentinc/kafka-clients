@@ -628,3 +628,31 @@ test("a nested class's members are typed as its Java nested class's, and the nes
   assert.equal(r.status, 0, r.text);
   assert.deepEqual(findings(lint(outer('number'), [RULE])), ['Outer.Inner.name: return: Java String is not TypeScript number']);
 });
+
+test("Admin.create's renamed configs is checked as the configuration, in its { configs } signature and its bare one", () => {
+  const admin = javaClass('clients.admin.Admin', {
+    kind: 'interface',
+    overloads: [
+      method('create', ['Properties'], { static: true, return_type: 'Admin', param_names: ['props'] }),
+      method('create', ['Map'], { static: true, return_type: 'Admin', param_names: ['conf'] }),
+    ],
+  });
+  const root = (/** @type {string} */ option) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...classes, admin]),
+      ...FILES,
+      ...LIB,
+      'src/producer/typed.ts': TYPED_TS,
+      'src/common/kafka_future.ts': FUTURE_TS,
+      'src/admin/admin.ts':
+        'export type AdminClientConfigs = { readonly [key: string]: unknown };\nexport interface Admin {}\n' +
+        `export const Admin: {\n  create(options: { configs: ${option} }): Admin;\n  create(configs: AdminClientConfigs): Admin;\n} = {\n` +
+        '  create(options: unknown): Admin { void options; return {}; },\n};\n',
+    });
+  const r = lint(root('AdminClientConfigs'), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  assert.deepEqual(findings(lint(root('number'), [RULE])), [
+    'Admin.create: option configs: Java Properties | Map has no row in the table (TypeScript number)',
+  ]);
+});

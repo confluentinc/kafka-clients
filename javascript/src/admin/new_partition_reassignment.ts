@@ -34,12 +34,9 @@ export class NewPartitionReassignment {
   readonly #targetReplicas: readonly number[];
 
   /**
-   * A reassignment to the given replicas.
-   *
    * @param targetReplicas - the broker ids of the target replicas, any
    *   iterable, copied
-   * @throws `IllegalArgumentError` "Cannot create a new partition
-   *   reassignment without any replicas" when none are supplied
+   * @throws `IllegalArgumentError` if no replicas are supplied
    * @throws `TypeError` for a null element or a value of the wrong type
    */
   constructor(targetReplicas: Iterable<number>);

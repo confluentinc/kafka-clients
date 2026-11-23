@@ -128,9 +128,7 @@ export class ClassicGroupDescription {
   /**
    * If the group is a simple consumer group or not.
    *
-   * @remarks *(deviation)* Computed once, so a null protocol reads as false
-   * where Java's getter throws `NullPointerException`. Why: a data class's
-   * field.
+   * @remarks *(deviation)* Null `protocol` reads `false`.
    */
   readonly isSimpleConsumerGroup: boolean;
 

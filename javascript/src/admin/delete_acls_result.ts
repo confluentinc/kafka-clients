@@ -34,12 +34,15 @@ const ERROR_FORMS = new JavaForms('exception', [[]], { reader: true });
 
 /**
  * The result of the `Admin.deleteAcls(filters)` call.
- *
- * Instances come from the admin client's `deleteAcls()`.
  */
 export class DeleteAclsResult {
   readonly #futures: AclBindingFilterMap<KafkaFuture<DeleteAclsResult.FilterResults>>;
 
+  /**
+   * Instances come from the admin client's `deleteAcls()`.
+   *
+   * @param futures - the futures, by filter
+   */
   private constructor(futures: AclBindingFilterMap<KafkaFuture<DeleteAclsResult.FilterResults>>) {
     this.#futures = futures;
   }
@@ -111,6 +114,12 @@ export namespace DeleteAclsResult {
     readonly #binding: AclBinding | null;
     readonly #error: ApiError | null;
 
+    /**
+     * Instances come from `DeleteAclsResult.FilterResults.values()`.
+     *
+     * @param binding - the deleted binding, or null
+     * @param error - the error the deletion failed with, or null
+     */
     private constructor(binding: AclBinding | null, error: ApiError | null) {
       this.#binding = binding;
       this.#error = error;
@@ -174,6 +183,11 @@ export namespace DeleteAclsResult {
   export class FilterResults {
     readonly #values: readonly FilterResult[];
 
+    /**
+     * Instances come from the futures of `DeleteAclsResult.values()`.
+     *
+     * @param values - the results, in the response's order
+     */
     private constructor(values: readonly FilterResult[]) {
       this.#values = values;
     }

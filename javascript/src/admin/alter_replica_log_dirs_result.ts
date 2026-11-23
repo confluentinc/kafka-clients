@@ -30,12 +30,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
  *
  * To retrieve the detailed result per specified `TopicPartitionReplica`, use
  * `values()`. To retrieve the overall result only, use `all()`.
- *
- * Instances come from the admin client's `alterReplicaLogDirs()`.
  */
 export class AlterReplicaLogDirsResult {
   readonly #futures: TopicPartitionReplicaMap<KafkaFuture<void>>;
 
+  /**
+   * Instances come from the admin client's `alterReplicaLogDirs()`.
+   *
+   * @param futures - the futures, by replica
+   */
   private constructor(futures: TopicPartitionReplicaMap<KafkaFuture<void>>) {
     this.#futures = futures;
   }

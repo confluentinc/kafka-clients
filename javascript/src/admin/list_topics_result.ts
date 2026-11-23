@@ -28,12 +28,15 @@ const NAMES_FORMS = new JavaForms('names', [[]], { reader: true });
 
 /**
  * The result of the `Admin.listTopics()` call.
- *
- * Instances come from the admin client's `listTopics()`.
  */
 export class ListTopicsResult {
   readonly #future: KafkaFuture<Map<string, TopicListing>>;
 
+  /**
+   * Instances come from the admin client's `listTopics()`.
+   *
+   * @param future - the future of the topics' listings by name
+   */
   private constructor(future: KafkaFuture<Map<string, TopicListing>>) {
     this.#future = future;
   }

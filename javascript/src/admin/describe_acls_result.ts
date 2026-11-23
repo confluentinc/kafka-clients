@@ -26,12 +26,15 @@ const VALUES_FORMS = new JavaForms('values', [[]], { reader: true });
 
 /**
  * The result of the `KafkaAdminClient.describeAcls(filter)` call.
- *
- * Instances come from the admin client's `describeAcls()`.
  */
 export class DescribeAclsResult {
   readonly #future: KafkaFuture<AclBinding[]>;
 
+  /**
+   * Instances come from the admin client's `describeAcls()`.
+   *
+   * @param future - the future of the ACLs
+   */
   private constructor(future: KafkaFuture<AclBinding[]>) {
     this.#future = future;
   }

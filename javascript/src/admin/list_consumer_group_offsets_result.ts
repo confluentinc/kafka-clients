@@ -35,12 +35,15 @@ const ALL_FORMS = new JavaForms('all', [[]], { reader: true });
 /**
  * The result of the `Admin.listConsumerGroupOffsets({ groupSpecs })` and
  * `Admin.listConsumerGroupOffsets(groupId)` calls.
- *
- * Instances come from the admin client's `listConsumerGroupOffsets()`.
  */
 export class ListConsumerGroupOffsetsResult {
   readonly #futures: Map<string, KafkaFuture<TopicPartitionMap<OffsetAndMetadata | null>>>;
 
+  /**
+   * Instances come from the admin client's `listConsumerGroupOffsets()`.
+   *
+   * @param futures - the futures, by group id
+   */
   private constructor(futures: Map<string, KafkaFuture<TopicPartitionMap<OffsetAndMetadata | null>>>) {
     this.#futures = futures;
   }
