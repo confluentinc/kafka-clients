@@ -1814,8 +1814,10 @@ pub(crate) mod tests {
 
     /// Critic 251 Issue 3: a dropped call's batch is never tracked, so once the
     /// records handed out are acknowledged and taken, nothing stays pending.
-    /// The record the dropped call had decoded (offset 0) is lost with its
-    /// batch (ledger deferral row); the pending one (offset 1) is decoded again.
+    /// Through `fetch_records`, which keeps no state, the record the dropped
+    /// call had decoded (offset 0) is lost with its batch; the pending one
+    /// (offset 1) is decoded again. The consumer reads through
+    /// `fetch_records_into` instead, which keeps it (next test).
     #[test]
     fn test_dropped_fetch_records_leaves_no_pending_acknowledgements_behind() {
         let tip = tip();
