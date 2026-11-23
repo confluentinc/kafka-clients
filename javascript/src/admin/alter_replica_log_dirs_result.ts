@@ -15,8 +15,8 @@
 // Java's org.apache.kafka.clients.admin.AlterReplicaLogDirsResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). Java's map keyed by TopicPartitionReplica
-// is a TopicPartitionReplicaMap (Q25).
+// Conventions, Class family). Java's map keyed by TopicPartitionReplica
+// is a TopicPartitionReplicaMap.
 
 import { JavaForms } from '../internal/args';
 import { KafkaFuture } from '../common/kafka_future';

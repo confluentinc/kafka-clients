@@ -16,7 +16,7 @@
 // level is a final field Java's two constructors set, read by
 // `isolationLevel()`. Java builds it with a constructor of its own, so it keeps
 // Java's constructors only, `()` and `(isolationLevel)`, as Python's does
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19).
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
 
 import { JavaForms, kind } from '../internal/args';
 import { IsolationLevel } from '../common/isolation_level';
@@ -37,7 +37,7 @@ export class ListOffsetsOptions extends AbstractOptions {
    * Java's `ListOffsetsOptions()`: `READ_UNCOMMITTED`.
    *
    * @remarks The class takes no keyed constructor of its setters, as Java's
-   * class has a constructor of its own (Q19). Set the timeout with
+   * class has a constructor of its own. Set the timeout with
    * `timeoutMs()`.
    */
   constructor();
@@ -50,7 +50,7 @@ export class ListOffsetsOptions extends AbstractOptions {
    * @throws `TypeError` when the isolation level is not an IsolationLevel
    *
    * @remarks The class takes no keyed constructor of its setters, as Java's
-   * class has a constructor of its own (Q19). Set the timeout with
+   * class has a constructor of its own. Set the timeout with
    * `timeoutMs()`.
    */
   constructor(isolationLevel: IsolationLevel | null);
@@ -63,24 +63,13 @@ export class ListOffsetsOptions extends AbstractOptions {
    * @throws `TypeError` when the isolation level is not an IsolationLevel
    *
    * @remarks The class takes no keyed constructor of its setters, as Java's
-   * class has a constructor of its own (Q19). Set the timeout with
+   * class has a constructor of its own. Set the timeout with
    * `timeoutMs()`.
    */
   constructor(options: {
     /** The isolation level of the offsets to list; null is stored, as Java stores it. */
     isolationLevel: IsolationLevel | null;
   });
-  /**
-   * Java's two constructors.
-   *
-   * @param options - nothing, or the isolation level, on its own or by name
-   * @throws `IllegalArgumentError` for a form Java has not
-   * @throws `TypeError` when the isolation level is not an IsolationLevel
-   *
-   * @remarks The class takes no keyed constructor of its setters, as Java's
-   * class has a constructor of its own (Q19). Set the timeout with
-   * `timeoutMs()`.
-   */
   constructor(options?: unknown) {
     super();
     if (CONSTRUCTOR_FORMS.match(options, arguments.length) === 0) return;

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.CreatePartitionsOptions, an option class
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19). validateOnly is a getter /
-// setter pair of one name (Q17); retryOnQuotaViolation keeps its reader's
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family). validateOnly is a getter /
+// setter pair of one name; retryOnQuotaViolation keeps its reader's
 // own name.
 
 import { JavaForms } from '../internal/args';
@@ -40,7 +40,7 @@ export class CreatePartitionsOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -95,13 +95,6 @@ export class CreatePartitionsOptions extends AbstractOptions {
     /** Whether the request is only validated. */
     validateOnly: boolean;
   }): this;
-  /**
-   * Reads or sets the value.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the value, or this object
-   * @throws `TypeError` when the value is not a boolean
-   */
   validateOnly(options?: unknown): boolean | this {
     if (!VALIDATE_ONLY.sets(options, arguments.length)) return this.#validateOnly;
     this.#validateOnly = checkBoolean(VALIDATE_ONLY.value(options), 'validateOnly');
@@ -128,13 +121,6 @@ export class CreatePartitionsOptions extends AbstractOptions {
     /** Whether a quota violation is retried. */
     retryOnQuotaViolation: boolean;
   }): this;
-  /**
-   * Sets the value.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing or not a boolean
-   */
   retryOnQuotaViolation(options: unknown): this {
     this.#retryOnQuotaViolation = checkBoolean(RETRY_ON_QUOTA_VIOLATION.value(options, arguments.length), 'retryOnQuotaViolation');
     this.internalRecord('retryOnQuotaViolation', this.#retryOnQuotaViolation);

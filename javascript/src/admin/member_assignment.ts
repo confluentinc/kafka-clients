@@ -14,7 +14,7 @@
 // Java's org.apache.kafka.clients.admin.MemberAssignment. Java's
 // `Set<TopicPartition>` is held by value (Java's `Set.copyOf`) and returned as
 // a new TopicPartitionSet (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Types, Q25); `equals`, `hashCode` and `toString` are Java's.
+// Types); `equals`, `hashCode` and `toString` are Java's.
 
 import { JavaForms, kind } from '../internal/args';
 import { sameClass } from '../internal/java_object';

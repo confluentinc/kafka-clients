@@ -14,10 +14,10 @@
 
 // Java's org.apache.kafka.clients.admin.DescribeProducersResult, with its
 // nested PartitionProducerState, a class of the namespace merged with it
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names, Q11). The Result's
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Names). The Result's
 // Java constructor is package-private: a private constructor here, the client
-// building it through `internalCreate` (Class family, Q16). Java's map keyed
-// by TopicPartition is a TopicPartitionMap (Q25); `all()` is Java's `allOf`
+// building it through `internalCreate` (Class family). Java's map keyed
+// by TopicPartition is a TopicPartitionMap; `all()` is Java's `allOf`
 // then `thenApply` over its futures.
 
 import { JavaForms, kind } from '../internal/args';

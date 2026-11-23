@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.FeatureUpdate, a value class that
 // keeps Java's methods, with its nested UpgradeType enum, a class of the
 // namespace merged with it (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Names, Q11). equals, hashCode and toString are Java's. Java's constructor
+// Names). equals, hashCode and toString are Java's. Java's constructor
 // stores a null upgrade type when the level is not zero, and dereferences it
 // only later: the same here.
 
@@ -235,14 +235,6 @@ export namespace FeatureUpdate {
       /** The name of the constant to return. */
       name: string;
     }): UpgradeType;
-    /**
-     * Looks the constant up.
-     *
-     * @param name - the name, on its own or as `{ name }`
-     * @returns the constant with the specified name
-     * @throws `IllegalArgumentError` when no constant has that name
-     * @throws `TypeError` when the name is null or not a string
-     */
     static valueOf(name: unknown): UpgradeType {
       TYPE_VALUE_OF_FORMS.match(name, arguments.length);
       const value = TYPE_VALUE_OF_FORMS.value(name, 'name');
@@ -276,14 +268,6 @@ export namespace FeatureUpdate {
       /** The code, a Java `int`. */
       code: number;
     }): UpgradeType;
-    /**
-     * Looks the upgrade type up.
-     *
-     * @param code - the code, on its own or as `{ code }`
-     * @returns the upgrade type, `UNKNOWN` for an unknown code
-     * @throws `TypeError` when the code is not an integer
-     * @throws `RangeError` when it is outside Java's `int`
-     */
     static fromCode(code: unknown): UpgradeType {
       TYPE_FROM_CODE_FORMS.match(code, arguments.length);
       const value = TYPE_FROM_CODE_FORMS.value(code, 'code');

@@ -45,8 +45,7 @@ test('TopicMetadataAndConfig: the values, or the failure each accessor throws', 
   }
 });
 
-// A subclass reaches Java's protected constructor, as Java's tests in the
-// package do.
+/** A subclass that reaches Java's protected constructor, as Java's tests in the package do. */
 class Subclass extends CreateTopicsResult {
   /** @param {Map<string, Future<CreateTopicsResult.TopicMetadataAndConfig>>} futures */
   constructor(futures) {

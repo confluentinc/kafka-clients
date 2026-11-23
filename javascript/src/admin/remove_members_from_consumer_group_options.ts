@@ -16,7 +16,7 @@
 // `(members)`, which stay its only forms, as Python's; its setters are
 // `timeoutMs`, inherited, and `reason(String)`, which returns nothing, as
 // Java's `void`. Java's `Set<MemberToRemove>` is a MemberToRemoveSet
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Types, Q25; decided by the owner
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Types; decided by the owner
 // on 2026-11-20). The members are not a setter: the client hands them to the
 // addon apart from the setters (`internalMembers`), which builds the native
 // options with Java's `(members)` constructor.
@@ -113,13 +113,6 @@ export class RemoveMembersFromConsumerGroupOptions extends AbstractOptions {
     /** The reason, or null. */
     reason: string | null;
   }): void;
-  /**
-   * Reads or sets the reason.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the reason, or nothing once set
-   * @throws `TypeError` when the value is neither a string nor null
-   */
   reason(options?: unknown): string | null | void {
     if (!REASON.sets(options, arguments.length)) return this.#reason;
     const value = REASON.value(options);

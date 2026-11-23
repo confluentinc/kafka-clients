@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.DescribeFeaturesOptions, an option
-// class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19).
-// Java's getter / setter pair `nodeId` is one method (Q17); its `OptionalInt`
+// class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
+// Java's getter / setter pair `nodeId` is one method; its `OptionalInt`
 // reads as `number | null` (Types).
 
 import { checkInt } from '../internal/java_number';
@@ -37,7 +37,7 @@ export class DescribeFeaturesOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -90,15 +90,6 @@ export class DescribeFeaturesOptions extends AbstractOptions {
     /** The node id. */
     nodeId: number;
   }): this;
-  /**
-   * Reads or sets the node id.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the value, or this object
-   * @throws `TypeError` when the value is not an integer (null included:
-   *   Java's `int` cannot hold null)
-   * @throws `RangeError` when it is beyond Java's `int`
-   */
   nodeId(options?: unknown): number | null | this {
     if (!NODE_ID.sets(options, arguments.length)) return this.#nodeId;
     this.#nodeId = checkInt(NODE_ID.value(options), 'nodeId');

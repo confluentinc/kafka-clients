@@ -163,12 +163,6 @@ export class RemoveMembersFromConsumerGroupResult {
     /** The member. */
     member: MemberToRemove;
   }): KafkaFuture<void>;
-  /**
-   * The future of one member.
-   *
-   * @param options - the member
-   * @returns the future
-   */
   memberResult(options: unknown): KafkaFuture<void> {
     MEMBER_RESULT_FORMS.match(options, arguments.length);
     const member = MEMBER_RESULT_FORMS.value(options, 'member');

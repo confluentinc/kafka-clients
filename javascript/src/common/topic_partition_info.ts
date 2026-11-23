@@ -115,13 +115,6 @@ export class TopicPartitionInfo {
     elr?: never;
     lastKnownElr?: never;
   });
-  /**
-   * Builds the partition's information.
-   *
-   * @param options - the fields of one of Java's two constructors
-   * @throws `IllegalArgumentError` when the given parameters are no Java form
-   * @throws `TypeError` for a value of the wrong type, or a null list
-   */
   constructor(options: unknown) {
     const form = FORMS.match(options, arguments.length);
     this.#partition = checkInt(FORMS.value(options, 'partition'), 'partition');

@@ -242,15 +242,6 @@ export class Uuid {
     /** The base64 encoding */
     str: string;
   }): Uuid;
-  /**
-   * Creates a UUID based on a base64 string encoding used in the toString() method.
-   *
-   * @param str - the base64 encoding, on its own or as `{ str }`
-   * @returns the UUID
-   * @throws `IllegalArgumentError` when the text is longer than 24
-   *   characters, is not base64, or does not decode to 16 bytes
-   * @throws `TypeError` when it is null or not a string
-   */
   static fromString(str: unknown): Uuid {
     FROM_STRING_FORMS.match(str, arguments.length);
     const text = FROM_STRING_FORMS.value(str, 'str');
@@ -289,14 +280,6 @@ export class Uuid {
     /** The UUID to compare with */
     other: Uuid;
   }): number;
-  /**
-   * Compares this UUID with another by their most, then least, significant
-   * bits, as signed longs.
-   *
-   * @param other - the UUID to compare with, on its own or as `{ other }`
-   * @returns -1, 0 or 1
-   * @throws `TypeError` when it is null (Java dereferences it)
-   */
   compareTo(other: unknown): number {
     COMPARE_TO_FORMS.match(other, arguments.length);
     const o = COMPARE_TO_FORMS.value(other, 'other');
@@ -323,12 +306,6 @@ export class Uuid {
     /** The input list, any iterable */
     list: Iterable<Uuid> | null;
   }): Uuid[] | null;
-  /**
-   * Convert a list of Uuid to an array of Uuid.
-   *
-   * @param list - The input list (any iterable), or `{ list }`
-   * @returns The output array (null for a null list)
-   */
   static toArray(list: unknown): Uuid[] | null {
     TO_ARRAY_FORMS.match(list, arguments.length);
     const value = TO_ARRAY_FORMS.value(list, 'list');
@@ -354,12 +331,6 @@ export class Uuid {
     /** The input array */
     array: ReadonlyArray<Uuid> | null;
   }): Uuid[] | null;
-  /**
-   * Convert an array of Uuids to a list of Uuid.
-   *
-   * @param array - The input array, or `{ array }`
-   * @returns The output list (null for a null array)
-   */
   static toList(array: unknown): Uuid[] | null {
     TO_LIST_FORMS.match(array, arguments.length);
     const value = TO_LIST_FORMS.value(array, 'array') as ReadonlyArray<Uuid> | null;

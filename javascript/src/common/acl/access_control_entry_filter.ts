@@ -167,12 +167,6 @@ export class AccessControlEntryFilter {
     /** The entry. */
     other: AccessControlEntry;
   }): boolean;
-  /**
-   * Returns true if this filter matches the given AccessControlEntry.
-   *
-   * @param other - the entry, on its own or as `{ other }`
-   * @returns whether this filter matches it
-   */
   matches(other: unknown): boolean {
     MATCHES_FORMS.match(other, arguments.length);
     const given = MATCHES_FORMS.value(other, 'other');

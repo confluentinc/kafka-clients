@@ -1266,6 +1266,7 @@ test("the quota, SCRAM and token calls' forms and null arguments: TypeError nami
       name: 'TypeError',
       message: 'options must not be null',
     });
+    /** A subclass of UserScramCredentialAlteration that is neither an upsertion nor a deletion. */
     class Other extends UserScramCredentialAlteration {
       constructor() {
         super({ user: 'u' });
@@ -1611,7 +1612,7 @@ test("the feature and controller calls' forms and null arguments: TypeError nami
     // @ts-expect-error Java's null map, its first dereference
     assert.throws(() => client.updateFeatures({ featureUpdates: null }), { name: 'TypeError', message: 'featureUpdates must not be null' });
     // A plain object given alone is the options object (javascript/CLAUDE.md,
-    // JavaScript Binding Conventions, Signatures, Q15): the map goes by name.
+    // JavaScript Binding Conventions, Signatures): the map goes by name.
     // @ts-expect-error a plain object of updates given alone
     assert.throws(() => client.updateFeatures({ 'metadata.version': upgradeTo(2) }), {
       name: 'IllegalArgumentError',

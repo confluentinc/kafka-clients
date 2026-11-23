@@ -95,14 +95,6 @@ export class NewPartitions {
     /** The replica assignments for the new partitions, or null for the controller's. */
     newAssignments: Iterable<Iterable<number>> | null;
   }): NewPartitions;
-  /**
-   * Builds the new partitions.
-   *
-   * @param options - the count, and the assignments
-   * @returns the new partitions
-   * @throws `IllegalArgumentError` when the given parameters are no Java form
-   * @throws `TypeError` or `RangeError` when a count or a broker id is not a Java `int`
-   */
   static increaseTo(options: unknown): NewPartitions {
     INCREASE_TO_FORMS.match(options, arguments.length);
     const totalCount = checkInt(INCREASE_TO_FORMS.value(options, 'totalCount'), 'totalCount');

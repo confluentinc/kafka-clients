@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.DescribeAclsResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). Java's `Collection<AclBinding>` is an
+// Conventions, Class family). Java's `Collection<AclBinding>` is an
 // array, as Java's response builds a list (Types).
 
 import { JavaForms } from '../internal/args';

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.UpdateFeaturesOptions, an option
-// class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19).
-// Java's getter / setter pair `validateOnly` is one method (Q17).
+// class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
+// Java's getter / setter pair `validateOnly` is one method.
 
 import { GetterSetter, applyOptionKeys, checkBoolean } from '../internal/options';
 import { AbstractOptions } from './abstract_options';
@@ -35,7 +35,7 @@ export class UpdateFeaturesOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -83,13 +83,6 @@ export class UpdateFeaturesOptions extends AbstractOptions {
     /** Whether the request is only validated. */
     validateOnly: boolean;
   }): this;
-  /**
-   * Reads or sets the value.
-   *
-   * @param options - the value to set, or nothing to read it
-   * @returns the value, or this object
-   * @throws `TypeError` when the value is not a boolean
-   */
   validateOnly(options?: unknown): boolean | this {
     if (!VALIDATE_ONLY.sets(options, arguments.length)) return this.#validateOnly;
     this.#validateOnly = checkBoolean(VALIDATE_ONLY.value(options), 'validateOnly');

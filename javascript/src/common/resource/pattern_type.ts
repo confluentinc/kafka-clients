@@ -102,14 +102,6 @@ export class PatternType {
     /** The constant's name */
     name: string;
   }): PatternType;
-  /**
-   * The constant named exactly `name`, Java's `valueOf(String)`.
-   *
-   * @param name - the name, on its own or as `{ name }`
-   * @returns the constant with the specified name
-   * @throws `IllegalArgumentError` when no constant has that name
-   * @throws `TypeError` when the name is null or not a string
-   */
   static valueOf(name: unknown): PatternType {
     VALUE_OF_FORMS.match(name, arguments.length);
     const value = VALUE_OF_FORMS.value(name, 'name');
@@ -139,13 +131,6 @@ export class PatternType {
     /** The string to parse. */
     name: string | null;
   }): PatternType;
-  /**
-   * Return the PatternType with the provided name or `UNKNOWN` if one cannot be found.
-   *
-   * @param name - The string to parse, on its own or as `{ name }`.
-   * @returns the PatternType, or UNKNOWN
-   * @throws `TypeError` when it is neither a string nor null
-   */
   static fromString(name: unknown): PatternType {
     FROM_STRING_FORMS.match(name, arguments.length);
     const value = FROM_STRING_FORMS.value(name, 'name');
@@ -176,15 +161,6 @@ export class PatternType {
     /** The code, a Java `byte` */
     code: number;
   }): PatternType;
-  /**
-   * Return the PatternType with the provided code or `PatternType.UNKNOWN` if one
-   * cannot be found.
-   *
-   * @param code - the code, a Java `byte`, on its own or as `{ code }`
-   * @returns the constant
-   * @throws `TypeError` when the code is not an integer
-   * @throws `RangeError` when it is outside Java's `byte`
-   */
   static fromCode(code: unknown): PatternType {
     FROM_CODE_FORMS.match(code, arguments.length);
     const value = FROM_CODE_FORMS.value(code, 'code');
