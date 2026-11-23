@@ -204,8 +204,8 @@ holds `&mut self` and the consumer is `!Sync`; `share_consumer_handle.rs`):
    **P11 (2026-11-23):** the `4.4` branch still has none in the client (one test-only DLQ commit); trunk has
    three that apply, not ported: KAFKA-21558 (leadership-change resilience; acknowledgements whose
    callback never runs), the renew-acknowledgement check accumulated across nodes, and KAFKA-19804
-   (initial heartbeat interval, shared with the consumer). See `post-4.4.0-java.md`; the user decides
-   whether to port them before the PR (§7 D11).
+   (initial heartbeat interval, shared with the consumer). See `post-4.4.0-java.md`;
+   the user decided to stay on 4.4.0: they wait for the next version bump (§7 D11).
 
 ## 6. Rule changes proposed before starting (need approval)
 
@@ -408,13 +408,13 @@ added to CLAUDE.md or the DoD:
   ~6 GiB of containers, §8 "Bugs found by P10"). Verified locally (134 passed); the GitHub/Semaphore run itself was
   not observable from the agent.
 
-- **D11 — The share fixes Java landed after 4.4.0.** **Open (P11, 2026-11-23).** Three trunk commits apply to the
-  Rust translation and are not ported (`post-4.4.0-java.md` §1): F1 KAFKA-21558 (leadership-change resilience; among
+- **D11 — The share fixes Java landed after 4.4.0.** **Decided 2026-11-23 (user): stay on 4.4.0.** Three trunk
+  commits apply to the Rust translation (`post-4.4.0-java.md` §1): F1 KAFKA-21558 (leadership-change resilience; among
   others, acknowledgements piggy-backed for a node that lost its share session never complete, so their callback
   never runs), F2 (renew-acknowledgement check accumulated across nodes) and F3 KAFKA-19804 (initial heartbeat
-  interval, shared with the consumer, so a consumer behaviour change too). None is on the `4.4` branch yet. Options:
-  port them in this PR as a phase beyond the 4.4.0 contract (as Milestone 17 took KAFKA-20864 ahead of 4.4), or
-  leave them to a follow-up once a 4.4.x or 4.5 release carries them.
+  interval, shared with the consumer). None is on the `4.4` branch yet. They are not ported in this milestone; they
+  and the consumer's KAFKA-21455 wait for the next Apache Kafka version bump, where F1 is the correctness fix to take
+  first.
 
 ### 7.2 Which decision gates which phase
 
@@ -499,7 +499,7 @@ summarised here; where the reasoning already lives elsewhere, the row links to i
 | 3 | **Consumer behaviour change: Java's assignment order, end to end.** The reconciliation in `AbstractMembershipManager` sorts the resolved assignment by topic name, then partition, as Java's `TopicIdPartitionSet#topicPartitions()` does. The consumer's `ApplyAssignment` hop carries it as a `Vec`. `assign_from_subscribed` builds an `IndexMap` and `PartitionStates::set` keeps the input order, as Java's `SubscriptionState#assignFromSubscribed` (`LinkedHashMap`) and `PartitionStates#set` do. After a rebalance, both consumers hold their partitions in Java's sorted order instead of a random one; a manual `assign()` is unchanged. | Share `record_limit` mode fetches from the node of the first fetchable partition, so a random order made `testFetchOneNodeAtATimeForRecordLimitMode` fail about half the time (§8 row). The user chose to fix it in shared infra rather than pin the order in the test | `50e83a71f` and its fixups (CHANGELOG `### Consumer`) |
 | 4 | **The record-batch decoder is shared with `CompletedFetch`** (`batch_cursor.rs`), extracted in a behaviour-neutral commit rather than duplicated. | §3 item 4; `infra-audit.md` §4 ("`CompletedFetch` / batch decoder — refactor first (P3a)") | `7deea5d8a` |
 | 5 | **RENEW record retention (D5, option (c), provisional).** A renewed record is decoded and deserialized again on redelivery, where Java hands back the same `ConsumerRecord`. The public doc (`AcknowledgeType::Renew`) carries a `WARNING:`: a **proposed contract change, awaiting acceptance** in `design/current/doc-contract-changes.md` (P8). | §7.1 D5 | `48d86cf59` (decision), `f406c1107`; doc `a34d82e8f` and its fixups |
-| 6 | **The abstract membership and heartbeat managers were reshaped for a second subclass** (`MembershipManagerHooks`, the moved reconcile, leave and fence chains; `RebalanceMetricsManager` as a trait; `TopicIdPartitionSet` not translated, ledger G3 / G5), in behaviour-neutral commits. | PLAN §4 P4 and §5 risk 2; ledger §3 G3, G5 | `3923672ad`..`50c4735f6` (P4a) |
+| 6 | **The abstract membership and heartbeat managers were reshaped for a second subclass** (`MembershipManagerHooks`, the moved reconcile, leave and fence chains; `RebalanceMetricsManager` as a trait; `TopicIdPartitionSet` not translated, ledger G3 / G5), in behaviour-neutral commits. | PLAN §4 P4 and §5 risk 2; ledger §3 G3, G5 | `49c190a7a`..`50c4735f6` (P4a) |
 | 7 | **Consumer behaviour change: `AbstractMembershipManager#revokePartitions` translated** in the shared base, which the share manager also reaches. | §8 first row | `5b7977401` |
 | 8 | **The share consume request manager listens to membership events through `impl MemberStateListener for Mutex<ShareConsumeRequestManager>`**, where `CommitRequestManager` keeps its listener state behind its own inner `Mutex`. | Java's `onMemberEpochUpdated` mutates the manager, which is otherwise driven through `&mut self` (`share-consumer.md` §6: plain fields); P6 holds it as `Arc<Mutex<_>>` and registers that. Ledger deferral row "P6 wiring of `ShareConsumeRequestManager`" | `96df47d45` |
 | 9 | **A generic response hook after every network poll.** `RequestManager::handle_completed_requests` (Rust-only, default no-op) is routed by `RequestManagers::handle_completed_requests` to every manager of `entries()` without allocating; `ConsumerNetworkThread::run_once` calls it right after the network poll (Phase 4.5, inside the lock Phase 5 already takes, before `maximumTimeToWait` and the reaper), and `cleanup` after each close poll. Only the share consume request manager overrides it. | Java runs `whenComplete` inside `NetworkClientDelegate#poll`, so a share `commitSync` future completes in the `runOnce` iteration of its response (row 1). A hook in the loop keeps that timing; making it a trait method routed by `RequestManagers` (Critic 260's ask) means a consumer manager can adopt it later without touching `run_once`. Behaviour-neutral for the consumer (no consumer manager overrides it; no extra lock in `run_once`). Pinned by `run_once_handles_completed_requests_after_the_network_poll_and_before_the_reaper`, `cleanup_handles_completed_requests_after_each_close_poll` and the two `run_once_completes_*` share tests | `f22581ee2`, `1073c7194` |
