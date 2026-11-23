@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.DescribeTransactionsResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). Java keys its futures by the internal
+// Conventions, Class family). Java keys its futures by the internal
 // `CoordinatorKey.byTransactionalId`, which compares by the id alone: here a
 // `Map` keyed by the id. `all()` is Java's `allOf` then `thenApply`.
 

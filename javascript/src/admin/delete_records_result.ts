@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.DeleteRecordsResult, whose Java
 // constructor is public. Java's map keyed by TopicPartition is a
 // TopicPartitionMap (javascript/CLAUDE.md, JavaScript Binding Conventions, Class
-// family, Q25).
+// family).
 
 import { JavaForms, kind } from '../internal/args';
 import { KafkaFuture } from '../common/kafka_future';
@@ -51,12 +51,6 @@ export class DeleteRecordsResult {
     /** The futures, by partition. */
     futures: TopicPartitionMap<KafkaFuture<DeletedRecords>>;
   });
-  /**
-   * Builds the result.
-   *
-   * @param options - the futures
-   * @throws `TypeError` when they are not a TopicPartitionMap
-   */
   constructor(options: unknown) {
     FORMS.match(options, arguments.length);
     const futures = FORMS.value(options, 'futures');

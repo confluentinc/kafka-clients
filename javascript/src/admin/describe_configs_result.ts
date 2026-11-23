@@ -15,8 +15,8 @@
 // Java's org.apache.kafka.clients.admin.DescribeConfigsResult. Its Java
 // constructor is protected: a protected constructor here, and an `@internal`
 // static the client calls (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Class family, Q16). Java's map keyed by ConfigResource is a
-// ConfigResourceMap (Q25).
+// Class family). Java's map keyed by ConfigResource is a
+// ConfigResourceMap.
 
 import { JavaForms } from '../internal/args';
 import { KafkaFuture } from '../common/kafka_future';

@@ -17,7 +17,7 @@
 // TopicPartitionReplica (Java has no test of its own for it: these check
 // Java's equals, hashCode and toString, its null check and the forms) and
 // TopicPartitionReplicaMap, the js-only map keyed by TopicPartitionReplica
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q25;
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family;
 // DECISIONS.md entry 38), which stands for Java's HashMap<TopicPartitionReplica, V>.
 
 const assert = require('node:assert/strict');

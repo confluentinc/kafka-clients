@@ -120,14 +120,6 @@ export class TransactionState {
     /** The name of the constant to return. */
     name: string;
   }): TransactionState;
-  /**
-   * Looks the constant up by its name.
-   *
-   * @param name - the name, on its own or as `{ name }`
-   * @returns the constant
-   * @throws `IllegalArgumentError` when no constant has that name
-   * @throws `TypeError` when the name is null or not a string
-   */
   static valueOf(name: unknown): TransactionState {
     VALUE_OF_FORMS.match(name, arguments.length);
     const value = VALUE_OF_FORMS.value(name, 'name');
@@ -158,13 +150,6 @@ export class TransactionState {
     /** The display name, or null. */
     name: string | null;
   }): TransactionState;
-  /**
-   * Parses the display name, as Java's `NAME_TO_ENUM.getOrDefault(name, UNKNOWN)`.
-   *
-   * @param name - the name, on its own or as `{ name }`
-   * @returns the constant
-   * @throws `TypeError` when the name is neither a string nor null
-   */
   static parse(name: unknown): TransactionState {
     PARSE_FORMS.match(name, arguments.length);
     const value = PARSE_FORMS.value(name, 'name');

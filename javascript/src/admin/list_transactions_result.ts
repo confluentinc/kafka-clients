@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.ListTransactionsResult. Its Java
 // constructor is package-private: a private constructor here, the client
 // building it through `internalCreate` (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Class family, Q16). It holds Java's one future of a map of
+// Conventions, Class family). It holds Java's one future of a map of
 // futures by broker; `byBrokerId()` and `allByBrokerId()` make a new future
 // each call, as Java's do, and `all()` flattens the latter's lists.
 

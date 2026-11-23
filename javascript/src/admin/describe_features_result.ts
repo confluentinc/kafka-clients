@@ -15,7 +15,7 @@
 // Java's org.apache.kafka.clients.admin.DescribeFeaturesResult. Its Java
 // constructor is protected: a protected constructor here, and an `@internal`
 // static the client calls (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Class family, Q16).
+// Class family).
 
 import { JavaForms } from '../internal/args';
 import type { KafkaFuture } from '../common/kafka_future';

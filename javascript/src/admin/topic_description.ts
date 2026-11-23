@@ -121,13 +121,6 @@ export class TopicDescription {
     /** The topic id. */
     topicId: Uuid | null;
   });
-  /**
-   * Builds the description.
-   *
-   * @param options - the fields of one of Java's three constructors
-   * @throws `IllegalArgumentError` when the given parameters are no Java form
-   * @throws `TypeError` for a value of the wrong type, or null partitions
-   */
   constructor(options: unknown) {
     const form = FORMS.match(options, arguments.length);
     const name = FORMS.value(options, 'name');

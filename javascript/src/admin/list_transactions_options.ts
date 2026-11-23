@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Java's org.apache.kafka.clients.admin.ListTransactionsOptions, an option
-// class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family, Q19):
+// class (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family):
 // a keyed constructor, one key per field, named after the field, not the
 // setter (`filteredStates` calls `filterStates`, `filteredProducerIds`
 // `filterProducerIds`, `filteredDuration` `filterOnDuration`,
@@ -117,7 +117,7 @@ export class ListTransactionsOptions extends AbstractOptions {
    * @throws `TypeError` for a value of the wrong type
    *
    * @remarks *(deviation)* Java builds the options through their setters
-   * only. Why: one call builds a configured object (Q19); the setters stay.
+   * only. Why: one call builds a configured object; the setters stay.
    */
   constructor(options?: {
     /**
@@ -184,14 +184,6 @@ export class ListTransactionsOptions extends AbstractOptions {
     /** The set of states to filter by. */
     states: Iterable<TransactionState>;
   }): this;
-  /**
-   * Sets the states.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing, null (Java dereferences
-   *   it), or not an iterable of TransactionState
-   */
   filterStates(options: unknown): this {
     const value = FILTER_STATES.value(options, arguments.length);
     this.#filteredStates = copyOf<TransactionState>(value, 'states', [(v) => v instanceof TransactionState, 'TransactionState']);
@@ -228,15 +220,6 @@ export class ListTransactionsOptions extends AbstractOptions {
     /** The set of producerIds to filter by. */
     producerIdFilters: Iterable<bigint | number>;
   }): this;
-  /**
-   * Sets the producer ids.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing, null (Java dereferences
-   *   it), or not an iterable of whole numbers
-   * @throws `RangeError` for an id beyond Java's `long`
-   */
   filterProducerIds(options: unknown): this {
     const value = FILTER_PRODUCER_IDS.value(options, arguments.length);
     const given = copyOf<unknown>(value, 'producerIdFilters', [(v) => typeof v === 'bigint' || typeof v === 'number', 'bigints']);
@@ -273,14 +256,6 @@ export class ListTransactionsOptions extends AbstractOptions {
     /** The duration in milliseconds to filter by. */
     durationMs: bigint | number;
   }): this;
-  /**
-   * Sets the duration.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing or not a whole number
-   * @throws `RangeError` when it is beyond Java's `long`
-   */
   filterOnDuration(options: unknown): this {
     this.#filteredDuration = checkLong(FILTER_ON_DURATION.value(options, arguments.length), 'durationMs');
     this.internalRecord('filterOnDuration', this.#filteredDuration);
@@ -308,13 +283,6 @@ export class ListTransactionsOptions extends AbstractOptions {
     /** The transactional ID regular expression pattern to filter by, or null. */
     pattern: string | null;
   }): this;
-  /**
-   * Sets the pattern.
-   *
-   * @param options - the value
-   * @returns this object
-   * @throws `TypeError` when the value is missing, or neither a string nor null
-   */
   filterOnTransactionalIdPattern(options: unknown): this {
     const value = FILTER_ON_TRANSACTIONAL_ID_PATTERN.value(options, arguments.length);
     if (value !== null && typeof value !== 'string') throw new TypeError(`pattern must be a string or null, not ${kind(value)}`);

@@ -686,7 +686,7 @@ int admin_option_timeout(napi_env env, napi_value value, int32_t* out) {
         return -1;
     }
     // A negative timeout is sent as 0, which Java's calcDeadlineMs makes of
-    // it (javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures, Q22).
+    // it (javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures).
     *out = t < 0 ? 0 : t;
     return 0;
 }
