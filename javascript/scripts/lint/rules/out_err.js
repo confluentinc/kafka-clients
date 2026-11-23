@@ -126,8 +126,14 @@ module.exports = {
           m.file === c.file &&
           m.start < c.start &&
           m.end > c.end &&
-          // The call is one of its arguments, possibly behind a cast.
-          m.args.some((a) => a.replace(/^(\(\s*[\w\s*]+\)\s*)+/, '').startsWith(`${c.name}(`)),
+          // The call is one of its arguments, possibly behind a cast, and
+          // through a pointer a struct holds (`acc->one(...)`).
+          m.args.some((a) =>
+            a
+              .replace(/^(\(\s*[\w\s*]+\)\s*)+/, '')
+              .replace(/^(?:\w+\s*(?:->|\.)\s*)+/, '')
+              .startsWith(`${c.name}(`),
+          ),
       );
       if (macro) {
         // The macros read `ffi_err` alone (native/util.h): another slot is never read.
