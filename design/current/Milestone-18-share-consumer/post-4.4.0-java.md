@@ -1,8 +1,11 @@
 # Milestone 18 — Java share-consumer changes after 4.4.0 (P11)
 
 Checked 2026-11-23 for PLAN §4 P11 and §5 risk 5. Nothing here is ported: each change is listed
-with whether it applies to the Rust translation and what porting it would take. The user decides
-what to port, and when.
+with whether it applies to the Rust translation and what porting it would take.
+
+**Decision (user, 2026-11-23; PLAN §7 D11): stay on 4.4.0.** Nothing below is ported in Milestone
+18. F1–F3 and KAFKA-21455 wait for the next Apache Kafka version bump; at that bump F1 is the
+correctness fix to take first.
 
 Refs fetched into `kafka/`'s object store; the submodule's checkout stays at `4.4.0`
 (`1156b2752a`):
@@ -32,7 +35,8 @@ Closure searched: `consumer/internals/Share*`, `ShareSession*`, `ShareFetch*`, `
 
 Found alongside, not a share fix: `d9be0ece7d` KAFKA-21455 adds `notifyAssignmentChange(emptySet)`
 to `AbstractMembershipManager#clearAssignmentAndLeaveGroup`; the Rust base lacks it. Only
-`AsyncKafkaConsumer` listens to `onGroupAssignmentUpdated`, so it is a consumer follow-up.
+`AsyncKafkaConsumer` listens to `onGroupAssignmentUpdated`, so it is a consumer follow-up, for the
+same version bump.
 
 ## 2. The 4.4 branch
 
@@ -48,16 +52,28 @@ to `AbstractMembershipManager#clearAssignmentAndLeaveGroup`; the Rust base lacks
   (`bfb092bbc0`, `aec3926e7b`; checked: no share behaviour change); KIP-1388 (`e74cae57d0`); KIP-1332
   preparation (`500b73c097`); the `RebalanceListener` rename (`6bc6d9b851`); public config
   constants (`b9c4fef95d`).
-- **Broker-side**: partition rotation for share fetches (`d193373f24`), share fetch offset
-  metadata (`ea6afaa461`), DLQ helper extraction (`a94c289255`).
+- **Broker-side**: partition rotation for share fetches (`d193373f24`, KAFKA-21344), share fetch
+  offset metadata (`ea6afaa461`), DLQ helper extraction (`a94c289255`). The first two also add an
+  eighth share suite to `clients-integration-tests` (see the next-but-one item).
 - **Cosmetic or test-only, nothing to port**: `9740c8e324` (`@Override`), `72bbbc3bbc` (removes
   code Rust never had), `c40d0c9b30`, `c9da36e270`, `62f0fef0e8`, `5ce7e34250`, `934a0c17af`,
   `53abf0e80d` (test reshuffles).
 - **Test improvements that could be taken later**: `8de9414907` (tighter
   `testSubscriptionAndPollFollowedByTopicDeletion`), `e28414ee4a` (`testComplexShareConsumer`
-  flushes every 100 records).
+  flushes every 100 records), and the new trunk suite `ShareConsumerFairnessTest` (`ea6afaa461`
+  added it, `d193373f24` rewrote it, `c40d0c9b30` touched it; not in 4.4.0). It has 5
+  `@ClusterTest`s (`testPartitionsServedFairlyInImplicitMode`,
+  `testPartitionsServedFairlyWithExplicitAcknowledgements`,
+  `testPartitionsRotateWhenAllPartitionsReturnRecordsWithExplicitAcknowledgement`,
+  `testPartitionsRotateWhenAllPartitionsReturnRecordsWithImplicitAcknowledgement`,
+  `testPartitionWithoutRecordsIsReadFirstWhenRecordsArrive`), client-side tests of a broker fix
+  through the share consumer's implicit and explicit acknowledgement paths. It could join as
+  `share_consumer_fairness_test.rs`, gated on a broker that carries KAFKA-21344 (4.5+).
 - **Already in 4.4.0**: `2f3d864e96`, `d37b17e490` (KAFKA-21106), `4d781f506a`, `db6f147797`,
   `1807f7e846`, and on the shared files `7ff5d7b71c` (KAFKA-20854), `e5e26abb27` (KAFKA-20187).
-- **Shared files, consumer-only or no share effect**: `cf93eefad7` KAFKA-21293 (Rust's
-  `SubscriptionState` has no listener field), `a486c38c53`, `cd69d2ebd0` (Admin javadoc),
+- **Shared files, consumer-only or no share effect**: `cf93eefad7` KAFKA-21293 (it removes
+  the listener reset `listenerContext.set(ListenerContext.NULL_LISTENER)` from
+  `SubscriptionState#unsubscribe`, a reset that came to trunk with KAFKA-20385 / KAFKA-20684, which
+  the 4.4 branch reverted in `79a29b0675`; so neither 4.4.0 nor Rust's `unsubscribe` ever reset
+  `rebalance_listener`), `a486c38c53`, `cd69d2ebd0` (Admin javadoc),
   `05f61b9ff5` (KRaft voters).
