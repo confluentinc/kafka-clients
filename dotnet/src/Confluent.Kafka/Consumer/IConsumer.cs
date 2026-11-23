@@ -53,12 +53,13 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
 {
     /// <summary>
     /// Polls for records (Java <c>poll(Duration)</c>). An empty poll returns an empty
-    /// <see cref="ConsumerRecords{TKey, TValue}"/>, not <see langword="null"/>. The records own copies of their
-    /// bytes, except a key or value that a deserializer returned as a memory over the batch's own bytes, as
-    /// <see cref="ConsumerRecord{TKey, TValue}"/> describes.
+    /// <see cref="ConsumerRecords{TKey, TValue}"/>, not <see langword="null"/>. The records are views of the poll's
+    /// native batch, not copies: a record, its headers, a header, and a memory taken from them keep the whole batch
+    /// in memory while reachable, as <see cref="ConsumerRecords{TKey, TValue}"/> describes, which also says how to
+    /// keep a copy instead.
     /// </summary>
     /// <param name="timeout">The maximum time to wait (must be non-negative).</param>
-    /// <returns>The records polled, as an owned <see cref="ConsumerRecords{TKey, TValue}"/>.</returns>
+    /// <returns>The records polled, which need no disposal.</returns>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a poll failure (or a <see cref="IConsumerCommon.Wakeup"/> interrupted it).</exception>

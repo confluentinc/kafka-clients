@@ -241,8 +241,15 @@ What to know about a memory that was kept:
   or the value. It compares by identity, so compare the bytes with `a.Span.SequenceEqual(b.Span)`.
 - A polled record's headers are read from the batch on their first use. `Header.Key()` decodes the
   key once and `Header.Value()` copies the value once, returning the same array on every call, as
-  Java's `RecordHeader`. `Header.ValueMemory()` is the value as a memory over the batch, with no copy,
-  kept valid as above; it has no Java counterpart. A header built in .NET gives its own array.
+  Java's `RecordHeader`. Until `Value()` is called, `Header.ValueMemory()` is the value as a memory
+  over the batch, with no copy, kept valid as above; after it, `ValueMemory()` is the array `Value()`
+  returns, so a write to that array shows in both. It has no Java counterpart. A header built in .NET
+  gives its own array.
+- A polled record is itself a view of the batch, not a copy, whatever the deserializers: the record,
+  its `ConsumerRecords`, its `Headers`, each `Header` and a `ValueMemory()` taken from one keep the
+  whole batch in memory while they are reachable, past the next `Poll` and the consumer's disposal.
+  To keep something for long without the batch, keep a copy: the arrays `Value()` returns,
+  `new Header(header.Key(), header.Value())`, or a key or value deserialized to an owned type.
 
 A record consumed this way is produced again without a copy by giving the memory to a
 `ReadOnlyMemorySerializer`: the producer reads the consumer's bytes where they are. A polled

@@ -29,10 +29,15 @@ namespace Confluent.Kafka.Consumer;
 /// every topic partition returned by a poll.
 /// </summary>
 /// <remarks>
-/// It needs no disposal, and it never changes. Its records hold owned values, except a key or value that is a
-/// memory over the poll's own bytes, as <see cref="ConsumerRecord{TKey, TValue}"/> describes: the bytes of the whole
-/// batch then stay in memory until no such key or value is reachable. A poll with neither records nor next offsets
-/// returns <see cref="EMPTY"/>, not <see langword="null"/>.
+/// It needs no disposal, and it never changes. Its records are views of the poll's native batch, not copies: the
+/// records, their <see cref="Confluent.Kafka.Common.Header.Headers"/>, each
+/// <see cref="Confluent.Kafka.Common.Header.Header"/>, a header memory taken before <c>Value()</c>, and a key or value
+/// that a deserializer returned as a memory over the batch's own bytes, each keep the whole batch in memory while it
+/// is reachable, after later polls and after the consumer is disposed, as
+/// <see cref="ConsumerRecord{TKey, TValue}"/> describes. To keep something longer without the batch, keep a copy: the
+/// arrays <c>Value()</c> returns, <c>new Header(header.Key(), header.Value())</c>, or a key or value deserialized to
+/// an owned type. A poll with neither records nor next offsets returns <see cref="EMPTY"/>, not
+/// <see langword="null"/>.
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>
 /// <typeparam name="TValue">The deserialized value type.</typeparam>

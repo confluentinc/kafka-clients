@@ -70,7 +70,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <see cref="ConsumerRecords{TKey, TValue}"/>, not <see langword="null"/>. The <see cref="Task"/> faults with
     /// a <see cref="KafkaException"/> on failure, or with a <see cref="RecordDeserializationException"/> as
     /// <see cref="IConsumer{TKey, TValue}.Poll(TimeSpan)"/> throws one. A deserializer that is not a built-in class
-    /// is awaited for each record, the key before the value.
+    /// is awaited for each record, the key before the value. The records are views of the poll's native batch, as
+    /// <see cref="IConsumer{TKey, TValue}.Poll(TimeSpan)"/> describes.
     /// </summary>
     /// <param name="timeout">The maximum time to wait (must be non-negative).</param>
     /// <param name="cancellationToken">
@@ -79,7 +80,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// token; when it fires while a batch is deserialized, the consumer seeks back to the batch's first records, so
     /// the next poll returns them.
     /// </param>
-    /// <returns>The records polled, as an owned <see cref="ConsumerRecords{TKey, TValue}"/>.</returns>
+    /// <returns>The records polled, which need no disposal.</returns>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default);
