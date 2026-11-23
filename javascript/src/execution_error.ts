@@ -50,9 +50,9 @@ export class ExecutionError extends Error {
    */
   constructor(options: { /** The cause (`Error`'s `cause`). */ cause: unknown; name?: never });
   /**
-   * Java's `(Throwable cause)` constructor. The message is the cause's
-   * `String()`, as Java's is `cause.toString()` (`''` for a null cause). Given
-   * the cause on its own, the same as `{ cause }`.
+   * Java's `(Throwable cause)` constructor, given the cause alone. The message
+   * is the cause's `String()`, as Java's is `cause.toString()` (`''` for a null
+   * cause).
    *
    * @param cause - the cause (`Error`'s `cause`)
    */

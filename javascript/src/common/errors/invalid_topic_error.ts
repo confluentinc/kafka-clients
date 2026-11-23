@@ -68,8 +68,8 @@ export class InvalidTopicError extends InvalidConfigurationError {
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. With it, `invalidTopics()` returns
-   * an empty set. Given the message on its own, the same as `{ message }`.
+   * Java's `(String message)` constructor, given the message alone. With it,
+   * `invalidTopics()` returns an empty set.
    *
    * @param message - the message; `null` reads as `''`
    */
@@ -83,10 +83,9 @@ export class InvalidTopicError extends InvalidConfigurationError {
    */
   constructor(options: { /** The cause (`Error`'s `cause`). */ cause: unknown; name?: never });
   /**
-   * Java's `(Throwable cause)` constructor. The message is the cause's
-   * `String()`, as Java's is `cause.toString()` (`''` for a null cause). With
-   * it, `invalidTopics()` returns an empty set. Given the cause on its own, the
-   * same as `{ cause }`.
+   * Java's `(Throwable cause)` constructor, given the cause alone. The message
+   * is the cause's `String()`, as Java's is `cause.toString()` (`''` for a null
+   * cause). With it, `invalidTopics()` returns an empty set.
    *
    * @param cause - the cause (`Error`'s `cause`)
    */

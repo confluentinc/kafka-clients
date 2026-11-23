@@ -38,6 +38,12 @@
  * `MockProducer(Cluster, boolean, Partitioner, Serializer, Serializer)`, so a
  * mock's cluster is always Java's `Cluster.empty()`.
  *
+ * `ProducerConfig` holds Java's constants only, as its `ConfigDef` machinery
+ * is not translated: `ProducerConfig(Properties)`, `ProducerConfig(Map)`,
+ * `configNames()`, `configDef()` and `main(String[])` are left out, and
+ * constructing it throws `TypeError`. Its constants include those Java's class
+ * inherits from `AbstractConfig`, such as `CONFIG_PROVIDERS_CONFIG`.
+ *
  * Serializers: whether a serializer's methods must all be async is not
  * decided yet.
  *

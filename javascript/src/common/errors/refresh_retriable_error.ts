@@ -27,7 +27,7 @@ import { RetriableError } from './retriable_error';
  *
  * Java: `org.apache.kafka.common.errors.RefreshRetriableException`.
  *
- * A catch-only base: constructing it throws `TypeError`.
+ * A catch-only base.
  */
 export abstract class RefreshRetriableError extends RetriableError {
   /**
@@ -49,8 +49,7 @@ export abstract class RefreshRetriableError extends RetriableError {
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. Given the message on its own, the
-   * same as `{ message }`.
+   * Java's `(String message)` constructor, given the message alone.
    *
    * @param message - the message; `null` reads as `''`
    */
@@ -63,9 +62,9 @@ export abstract class RefreshRetriableError extends RetriableError {
    */
   constructor(options: { /** The cause (`Error`'s `cause`). */ cause: unknown; name?: never });
   /**
-   * Java's `(Throwable cause)` constructor. The message is the cause's
-   * `String()`, as Java's is `cause.toString()` (`''` for a null cause). Given
-   * the cause on its own, the same as `{ cause }`.
+   * Java's `(Throwable cause)` constructor, given the cause alone. The message
+   * is the cause's `String()`, as Java's is `cause.toString()` (`''` for a null
+   * cause).
    *
    * @param cause - the cause (`Error`'s `cause`)
    */

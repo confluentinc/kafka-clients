@@ -53,8 +53,8 @@ export class ResourceNotFoundError extends ApiError {
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. With it, `resource()` returns
-   * `null`. Given the message on its own, the same as `{ message }`.
+   * Java's `(String message)` constructor, given the message alone. With it,
+   * `resource()` returns `null`.
    *
    * @param message - the message; `null` reads as `''`
    */

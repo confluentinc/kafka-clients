@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use super::{constants_of, simple, Kind, Reader, Value, DEPRECATED_LIST, SPECS};
+use super::{constants_of, simple, Kind, Reader, Value, DEPRECATED_LIST, JAVA_ROOT, SPECS};
 use crate::javascript_gen::{header, js_str, tsdoc, JsModule};
 
 type Res<T> = anyhow::Result<T>;
@@ -56,14 +56,17 @@ const NOTES: &[(&str, &str, &str)] = &[
 ];
 
 /// The TSDoc text of constant `name` (value `value`) of Java class `owner`
-/// (PLAN.md §8 decision 17), Java's own documentation of it, translated as a
-/// Javadoc is:
-/// 1. for a configuration key, the documentation argument of the `define`
-///    call of `ProducerConfig`'s `ConfigDef` for that key (`docs`), which may
-///    be another class's `_DOC` (`CommonClientConfigs.BOOTSTRAP_SERVERS_DOC`);
-/// 2. else the sibling `<NAME>_DOC` or, for an `X_CONFIG`, `X_DOC` (any
+/// (PLAN.md §8 decision 17, as amended), Java's own documentation of it,
+/// translated as a Javadoc is:
+/// 1. the constant's own Javadoc (`javadoc`), when Java documents it, so the
+///    TSDoc stays within 150% of it, as Rust's constants do (check-doc-size);
+/// 2. else, for a configuration key, the documentation argument of the
+///    `define` call of `ProducerConfig`'s `ConfigDef` for that key (`docs`),
+///    which may be another class's `_DOC`
+///    (`CommonClientConfigs.BOOTSTRAP_SERVERS_DOC`);
+/// 3. else the sibling `<NAME>_DOC` or, for an `X_CONFIG`, `X_DOC` (any
 ///    visibility) of `owner`;
-/// 3. else a line naming it: the key of an `X_CONFIG`, the constant an
+/// 4. else a line naming it: the key of an `X_CONFIG`, the constant an
 ///    `X_DOC` documents, or Java's constant itself.
 fn constant_doc(
     reader: &mut Reader,
@@ -71,10 +74,14 @@ fn constant_doc(
     owner: &str,
     name: &str,
     value: &Value,
+    javadoc: Option<&str>,
 ) -> Res<String> {
     // The docs are read as Markdown (TypeDoc), so they keep Java's links and
     // nested lists.
     let translator = crate::javadoc::Translator { index: None, panics: false, markdown: true };
+    if let Some(own) = javadoc.map(|d| translator.to_rustdoc(d)).filter(|d| !d.trim().is_empty()) {
+        return Ok(own);
+    }
     if let Value::Str(key) = value {
         let is_key_constant = !name.ends_with("_DOC") && !name.starts_with("DEFAULT_");
         if let Some((class, src)) = docs.get(key).filter(|_| is_key_constant) {
@@ -159,6 +166,34 @@ fn js_value(v: &Value, long: bool) -> Res<(String, String)> {
     })
 }
 
+/// Top-level Java class `fqn` as the Java scanner reads it, its Javadoc and
+/// its fields' Javadocs included; `None` when its source declares no such
+/// class.
+fn scanned_class(repo_root: &Path, fqn: &str) -> Res<Option<crate::java::JavaClass>> {
+    let path = repo_root.join(JAVA_ROOT).join(format!("{}.java", fqn.replace('.', "/")));
+    let source = fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let below = fqn
+        .strip_prefix(crate::java::MARKER_PREFIX)
+        .ok_or_else(|| anyhow::anyhow!("config constants: {fqn} is not below org.apache.kafka"))?;
+    let parts: Vec<String> = below.split('.').map(str::to_string).collect();
+    let (name, package) = parts
+        .split_last()
+        .ok_or_else(|| anyhow::anyhow!("config constants: {fqn} has no class"))?;
+    let mut classes = Vec::new();
+    crate::java::push_classes(package, &source, false, &mut classes);
+    Ok(classes.into_iter().find(|c| c.path == [name.clone()]))
+}
+
+/// The Javadoc of top-level Java class `fqn`, translated for TypeDoc; `None`
+/// when it has none.
+fn class_javadoc(repo_root: &Path, fqn: &str) -> Res<Option<String>> {
+    let translator = crate::javadoc::Translator { index: None, panics: false, markdown: true };
+    Ok(scanned_class(repo_root, fqn)?
+        .and_then(|c| c.javadoc)
+        .map(|doc| translator.to_rustdoc(&doc))
+        .filter(|doc| !doc.trim().is_empty()))
+}
+
 /// The generated config-class modules.
 pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
     let deprecated: Vec<String> = fs::read_to_string(repo_root.join(DEPRECATED_LIST))
@@ -170,6 +205,8 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
     let mut reader = Reader::new(repo_root);
     // The documentation of every key a producer's configuration takes.
     let docs = crate::config_types::define_docs(repo_root, PRODUCER_CONFIG)?;
+    // The Javadoc of each constant Java documents, by the class declaring it.
+    let mut field_docs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut out = Vec::new();
     for (java, dir) in JS_SPECS {
         let spec = SPECS
@@ -197,6 +234,10 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
             .map(|m| format!("`{m}`"))
             .collect();
         skipped.dedup();
+        // A class Java documents keeps Java's doc, within 150% of it
+        // (check-doc-size): what it leaves out is listed in its package's
+        // documentation.
+        let javadoc = class_javadoc(repo_root, spec.java)?;
         let mut about = format!(
             "The constants of Java's `{}`: every `public static final` field, evaluated from the Java \
              source, is a static property of the same name; a deprecated one is left out. A `List` \
@@ -225,6 +266,12 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
             ));
         }
         about.push_str(&format!("\n\nJava: `{}`.", spec.java));
+        if let Some(doc) = javadoc {
+            about = doc;
+            if spec.kind == Kind::ConstantsOnly {
+                about.push_str("\n\n@remarks *(deviation)* Constants only: `new` throws `TypeError`.");
+            }
+        }
         let mut text = header(&format!("Java's `{}`", spec.java));
         text.push('\n');
         if consts.iter().any(|(_, v, _)| matches!(v, Value::Set(_))) {
@@ -242,7 +289,12 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
                 .iter()
                 .any(|f| f.name == *n && matches!(f.ty.as_str(), "long" | "Long"));
             let (val, ty) = js_value(v, long)?;
-            let mut doc = constant_doc(&mut reader, &docs, owner, n, v)?;
+            if !field_docs.contains_key(*owner) {
+                let documented = scanned_class(repo_root, owner)?.map(|c| c.field_docs).unwrap_or_default();
+                field_docs.insert(owner.to_string(), documented);
+            }
+            let javadoc = field_docs.get(*owner).and_then(|d| d.get(n)).map(String::as_str);
+            let mut doc = constant_doc(&mut reader, &docs, owner, n, v, javadoc)?;
             if let Some((_, _, t)) = NOTES.iter().find(|(c, k, _)| c == java && k == n) {
                 doc.push_str("\n\n");
                 doc.push_str(t);
@@ -350,24 +402,43 @@ mod tests {
     fn test_constant_docs_come_from_java_doc_strings() {
         let modules = modules(&repo_root()).unwrap();
         let producer = &modules.iter().find(|m| m.name == "ProducerConfig").unwrap().content;
-        // From the private `METADATA_MAX_AGE_DOC` sibling of `METADATA_MAX_AGE_CONFIG`.
-        assert!(producer.contains("  /**\n   * The period of time in milliseconds after which we force a refresh of\n"));
-        // `<code>x</code>` read as Javadoc: a code span.
-        assert!(producer.contains("`linger.ms`"));
+        let sasl = &modules.iter().find(|m| m.name == "SaslConfigs").unwrap().content;
+        let ssl = &modules.iter().find(|m| m.name == "SslConfigs").unwrap().content;
+        // A constant Java documents takes its own Javadoc: `<code>x</code>` is a
+        // code span, a link keeps its target.
+        assert!(
+            producer.contains("  /**\n   * `metadata.max.age.ms`\n   */\n  static readonly METADATA_MAX_AGE_CONFIG")
+        );
         assert!(!producer.contains("   * <code>"));
-        // The ConfigDef's doc of the key, another class's `_DOC` (CommonClientConfigs').
-        assert!(producer
-            .contains("  /**\n   * A list of host/port pairs used to establish the initial connection to the\n"));
-        // Without the ConfigDef's doc and with no sibling in the class: the key.
+        assert!(sasl.contains("[here](http://www.iana.org/assignments/sasl-mechanisms/sasl-mechanisms.xhtml)"));
+        // One Java leaves undocumented: the ConfigDef's doc of its key
+        // (`SslConfigs.SSL_PROTOCOL_DOC`, through the producer's SSL support).
+        assert!(
+            ssl.contains("  /**\n   * The SSL protocol used to generate the SSLContext. The default is 'TLSv1.3',\n")
+        );
         let mut reader = Reader::new(&repo_root());
         let key = Value::Str("bootstrap.servers".into());
-        let line =
-            constant_doc(&mut reader, &BTreeMap::new(), PRODUCER_CONFIG, "BOOTSTRAP_SERVERS_CONFIG", &key).unwrap();
-        assert_eq!(line, "The `bootstrap.servers` configuration key.");
+        let doc = |reader: &mut Reader, javadoc: Option<&str>| {
+            constant_doc(
+                reader,
+                &BTreeMap::new(),
+                PRODUCER_CONFIG,
+                "BOOTSTRAP_SERVERS_CONFIG",
+                &key,
+                javadoc,
+            )
+            .unwrap()
+        };
+        assert_eq!(doc(&mut reader, Some("<code>bootstrap.servers</code>")), "`bootstrap.servers`");
+        // Without its Javadoc, the ConfigDef's doc and a sibling in the class: the key.
+        assert_eq!(doc(&mut reader, None), "The `bootstrap.servers` configuration key.");
+        // A Javadoc of no words (only `@since`) counts as none.
+        assert_eq!(
+            doc(&mut reader, Some("@since 1.0")),
+            "The `bootstrap.servers` configuration key."
+        );
         // A list keeps one item per line, a link its target.
-        assert!(producer.contains("   * - `acks=0` If set to zero"));
-        assert!(producer.contains("   *   1. If no partition is specified"));
-        let sasl = &modules.iter().find(|m| m.name == "SaslConfigs").unwrap().content;
+        assert!(sasl.contains("   * - `org.apache.kafka.common.security.oauthbearer.ClientCredentialsJwtRetriever`\n"));
         assert!(sasl.contains("[here](https://docs.oracle.com/javase/8/docs/technotes/guides/security/jgss/tutorials/LoginConfigFile.html)"));
         assert!(producer.contains(
             "  /**\n   * The documentation of `ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG`.\n   */\n  static readonly ENABLE_IDEMPOTENCE_DOC"
@@ -385,7 +456,6 @@ mod tests {
             }
         }
         // A translation note follows Java's text.
-        let ssl = &modules.iter().find(|m| m.name == "SslConfigs").unwrap().content;
         assert!(ssl.contains("   * Translation note: Java's value."));
     }
 }

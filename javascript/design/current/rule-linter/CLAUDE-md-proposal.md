@@ -257,9 +257,9 @@ Each item gives the decision, the place in `javascript/CLAUDE.md`, and the propo
 
 14. **Generated config-constant docs** (decision 17).
     - Place: "Generated files", after the config classes' constants.
-    - Add: "Each constant's TSDoc is Java's own `_DOC` string of it (the sibling `<NAME>_DOC`,
-      or `X_DOC` for `X_CONFIG`), translated as a Javadoc is; a constant without one gets a line
-      naming it."
+    - Add: "Each constant's TSDoc is its own Javadoc when Java documents it, else Java's
+      documentation of it (its key's `ConfigDef` doc, or the sibling `<NAME>_DOC`, or `X_DOC`
+      for `X_CONFIG`), translated as a Javadoc is; a constant with none gets a line naming it."
 
 15. **ESLint and typescript-eslint** (decision 19).
     - Place: "Files and process".

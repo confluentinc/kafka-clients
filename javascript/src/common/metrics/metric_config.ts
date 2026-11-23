@@ -19,10 +19,6 @@
 /**
  * Configuration values for metrics
  *
- * @remarks *(deviation)* A placeholder: Java's `MetricConfig` is not
- * translated, so a value of this type is only passed on, to the value
- * provider. Why: a placeholder typed `unknown` checks nothing, but
- * `KafkaMetric`'s constructor and `config()`, which take and return it,
- * cannot be dropped. Goes when: `MetricConfig` is translated.
+ * @remarks *(deviation)* Placeholder.
  */
 export type MetricConfig = unknown;

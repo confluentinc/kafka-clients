@@ -326,26 +326,12 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    *   neither null nor an object with a `serialize` method
    *
    * @remarks Java's `Map` and `Properties` constructors are the one
-   * `configs`. A serializer can come through `key.serializer` and
-   * `value.serializer`: each takes a synchronous function `({ configs, isKey
-   * }) => serializer`, such as `stringSerializer`, which the producer calls
-   * once with the whole configuration, in place of Java's class and its
-   * `configure(configs, isKey)` *(deviation: Java takes a class or a class
-   * name. Why: JavaScript can't load a class by name synchronously)*. These
-   * two keys don't reach the core, and neither does a key a function reads
-   * that is no producer key, Java's or the core's, as Java marks it used; a producer key
-   * it reads still does. *(deviation: Java passes the function's
-   * configuration with the computed `client.id`, and checks the
-   * configuration before it builds the serializers; here the function gets
-   * the configuration as given, and runs before the core checks it. Why: the
-   * binding calls the function before the core exists, to know which keys it
-   * reads. Goes when: the FFI exposes the client id and the check before
-   * construction.)* Without serializers a key or value is sent as the bytes the
-   * record holds, and the producer is a `KafkaProducer<Uint8Array,
-   * Uint8Array>`; a config function's serializer binds the type its
-   * function returns, as an argument does. The first
-   * client a process builds emits one `ExperimentalWarning` while the client
-   * is in preview.
+   * `configs`. `key.serializer` and `value.serializer` take a function
+   * `({ configs, isKey }) => serializer`, called once with the configuration
+   * as given, before the core checks it *(deviation: Java takes a class)*;
+   * these keys, and the keys it reads, don't reach the core. Without
+   * serializers a key or value is sent as its bytes *(deviation)*. The first
+   * client a process builds emits one `ExperimentalWarning`.
    */
   constructor(options: {
     /** The producer configs: a plain object of Java's ProducerConfig keys. */

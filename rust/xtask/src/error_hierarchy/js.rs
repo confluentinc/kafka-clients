@@ -1345,7 +1345,9 @@ fn message_doc(m: &Message) -> String {
             " The message is the cause's `String()`, as Java's is `cause.toString()` (`''` for a null cause).".into()
         },
         Message::Null => " The message is empty, Java's null.".into(),
-        Message::Text(t) => format!(" The message is Java's own: \"{t}\"."),
+        // The text itself is the form table's (`setForms`): the TSDoc stays
+        // within 150% of the Javadoc (check-doc-size).
+        Message::Text(_) => " The message is Java's own.".into(),
         Message::Expr(_) => " The message is the one Java's constructor builds from the payload.".into(),
     }
 }
@@ -1359,16 +1361,13 @@ fn form_sigs(form: &JsForm, bare_cause: &str) -> Vec<Sig> {
         name => format!("{} {name}", p.java_ty),
     };
     let java_sig: Vec<String> = form.typed.iter().map(java).collect();
-    let summary = if java_sig.is_empty() {
-        format!("Java's no-argument constructor.{}{}", message_doc(&form.message), form.gives)
+    let head = if java_sig.is_empty() {
+        "Java's no-argument constructor".to_string()
     } else {
-        format!(
-            "Java's `({})` constructor.{}{}",
-            java_sig.join(", "),
-            message_doc(&form.message),
-            form.gives
-        )
+        format!("Java's `({})` constructor", java_sig.join(", "))
     };
+    let rest = format!("{}{}", message_doc(&form.message), form.gives);
+    let summary = format!("{head}.{rest}");
     let field = |p: &JsParam| match p.name.as_str() {
         "message" => (
             "message: string | null".to_string(),
@@ -1450,7 +1449,7 @@ fn form_sigs(form: &JsForm, bare_cause: &str) -> Vec<Sig> {
         };
         let ty = decl.split_once(": ").unwrap().1.to_string();
         sigs.push(Sig {
-            doc: format!("{summary} Given the {p} on its own, the same as `{{ {p} }}`.\n\n@param {p} - {doc}"),
+            doc: format!("{head}, given the {p} alone.{rest}\n\n@param {p} - {doc}"),
             params: decl,
             tuple: format!("[{ty}]"),
         });
@@ -1476,7 +1475,7 @@ fn class_doc(info: &ClassInfo, constructible: bool) -> String {
         parts.push(format!("Java: ``{}``.", info.java_fqn));
     }
     if info.is_abstract {
-        parts.push("A catch-only base: constructing it throws ``TypeError``.".into());
+        parts.push("A catch-only base.".into());
     } else if !constructible {
         parts.push(
             "Not constructible yet: Java's constructors take a payload the client does not translate yet; \

@@ -46,18 +46,14 @@ export class RetriableCommitFailedError extends RetriableError {
   static override readonly _ffiId: number = -23;
 
   /**
-   * Java's `(Throwable cause)` constructor. The message is Java's own: "Offset
-   * commit failed with a retriable exception. You should retry committing the
-   * latest consumed offsets.".
+   * Java's `(Throwable cause)` constructor. The message is Java's own.
    *
    * @param options - the cause
    */
   constructor(options: { /** The cause (`Error`'s `cause`). */ cause: unknown; name?: never });
   /**
-   * Java's `(Throwable cause)` constructor. The message is Java's own: "Offset
-   * commit failed with a retriable exception. You should retry committing the
-   * latest consumed offsets.". Given the cause on its own, the same as `{ cause
-   * }`.
+   * Java's `(Throwable cause)` constructor, given the cause alone. The message
+   * is Java's own.
    *
    * @param cause - the cause (`Error`'s `cause`)
    */
@@ -69,8 +65,7 @@ export class RetriableCommitFailedError extends RetriableError {
    */
   constructor(options: { /** The message; `null` reads as `''`. */ message: string | null; name?: never });
   /**
-   * Java's `(String message)` constructor. Given the message on its own, the
-   * same as `{ message }`.
+   * Java's `(String message)` constructor, given the message alone.
    *
    * @param message - the message; `null` reads as `''`
    */
