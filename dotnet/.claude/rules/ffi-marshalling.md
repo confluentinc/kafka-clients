@@ -1064,7 +1064,8 @@ dispatcher (the old Option B) are both gone with the pre-`0035d9ff` ABI.
     at `851c8d95`; ledger 80, pick 4):
       - `Flush` throws at once a `KafkaException` with Java's message "KafkaProducer.flush()
         invocation inside a callback is not permitted because it may lead to deadlock."
-        (`KafkaProducer.java:1299-1300`). Python checks this itself, before calling native
+        (`KafkaProducer.java:1299-1300`), after writing that message once to `Trace.TraceError`, as
+        Java's `log.error` and Python's `_LOG.error` log it. Python checks this itself, before calling native
         (`python/confluent_kafka/producer/producer.py:593-595` at `851c8d95`); the core's
         `flush_cb` reports the same error from a `KafkaProducer`'s callback (BH:38283-38287,
         BH:38298-38313). The mocks follow Java's mock as far as the core allows:
