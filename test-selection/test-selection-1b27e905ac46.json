@@ -1,0 +1,153 @@
+{
+  "base": "origin/master",
+  "c": {
+    "integration": [],
+    "unit": [
+      "serialization",
+      "bindings_header",
+      "abort_on_null",
+      "mock_consumer",
+      "kafka_consumer",
+      "consumer_callbacks",
+      "mock_producer",
+      "kafka_producer"
+    ]
+  },
+  "changed_files": [
+    "M .claude/rules/consumer-threading.md",
+    "M c/tests/test_serialization.c",
+    "M design/current/design.md",
+    "M rust/CHANGELOG.md",
+    "M rust/src/common/header/internals/record_header.rs",
+    "M rust/src/common/header/internals/record_headers.rs",
+    "M rust/src/common/record/internal/default_record.rs",
+    "M rust/src/common/utils/utils.rs",
+    "M rust/src/consumer/consumer_record.rs",
+    "M rust/src/consumer/internals/completed_fetch.rs",
+    "M rust/src/consumer/internals/fetch_collector.rs",
+    "M rust/src/ffi/common/header/internals/record_headers.rs",
+    "M rust/src/ffi/common/header/mod.rs",
+    "M rust/src/ffi/consumer/consumer_record.rs",
+    "M rust/src/ffi/precondition.rs",
+    "M rust/src/ffi/producer/producer_record.rs",
+    "M rust/src/producer/internals/producer_batch.rs",
+    "M rust/xtask/src/lint_custom/ffi_translation.rs"
+  ],
+  "created": 1795513085,
+  "dotnet": {
+    "grpc": [],
+    "performance": [
+      "Confluent.Kafka.Performance.Tests.PerfV3SmokeTests",
+      "Confluent.Kafka.Performance.Tests.ConsumerCompressionTypeTests"
+    ],
+    "soak": [
+      "Confluent.Kafka.Soak.Tests.DeliveryReportTests"
+    ],
+    "solution": [
+      "Confluent.Kafka.UnitTests",
+      "Confluent.Kafka.IntegrationTests"
+    ]
+  },
+  "head": "1b27e905ac46e31f589fc297aeecf48c7dcae429",
+  "merge_base": "82fc1f86df028ad7286a91cddba12d5e43bb95af",
+  "python": {
+    "grpc": [],
+    "integration": [
+      "test/integration/test_asyncio_broker.py",
+      "test/integration/test_deserializer_failure_broker.py",
+      "test/integration/test_kafka_consumer_broker.py",
+      "test/integration/test_kafka_producer_broker.py",
+      "test/integration/test_listener_release_broker.py",
+      "test/integration/test_metadata_edges_broker.py",
+      "test/integration/test_producer_lifecycle_broker.py",
+      "test/integration/test_rebalance_broker.py",
+      "test/integration/test_timed_overloads_broker.py",
+      "test/integration/test_transactions_broker.py"
+    ],
+    "performance": [
+      "test/performance/consumer_performance_test.py",
+      "test/performance/producer_performance_test.py",
+      "test/performance/transactional_producer_performance_test.py"
+    ],
+    "soak": [
+      "soak/test/test_soakclient.py"
+    ],
+    "static": [
+      "test/static/test_ffi_twins.py",
+      "test/static/test_error_payload_views.py"
+    ],
+    "unit": [
+      "test/unit/test_headers.py",
+      "test/unit/test_kafka_consumer.py",
+      "test/unit/test_kafka_producer.py",
+      "test/unit/test_mock_consumer.py",
+      "test/unit/test_mock_producer.py",
+      "test/unit/test_consumer_family.py",
+      "test/unit/test_consumer_types.py",
+      "test/unit/test_consumer_callbacks_family.py",
+      "test/unit/test_producer_family.py",
+      "test/unit/test_producer_types.py",
+      "test/unit/test_producer_send_path.py",
+      "test/unit/test_serialization.py",
+      "test/unit/test_serde_supply.py",
+      "test/unit/test_keyword_callables.py",
+      "test/unit/test_errors.py",
+      "test/unit/test_typing.py",
+      "test/unit/test_native_copy.py",
+      "test/unit/test_common_types.py",
+      "test/unit/test_stub_counts.py",
+      "test/unit/test_none_is_null_consumer.py",
+      "test/unit/test_none_is_null_producer_common.py",
+      "test/unit/test_none_reaches_the_ffi.py",
+      "test/unit/test_none_dereference.py",
+      "test/unit/test_none_stored.py"
+    ],
+    "verifiable_clients": [
+      "verifiable_clients/test/test_verifiable_consumer.py",
+      "verifiable_clients/test/test_verifiable_producer.py"
+    ]
+  },
+  "reasons": {
+    "c.integration": "The gRPC C arm runs consumer and producer cases through the changed core.",
+    "c.unit": "test_serialization.c changes, a new Header__key_bytes export reaches the bindings header, and Header_key, Headers add/remove/lookups and consumer-record headers behave differently.",
+    "dotnet.grpc": "The gRPC .NET arm runs consumer and producer cases through the changed core.",
+    "dotnet.performance": "The smoke and consumer-compression tests consume through the changed fetch path, including compressed-record headers.",
+    "dotnet.soak": "DeliveryReportTests drive the producer through the changed core.",
+    "dotnet.solution": "The ABI conformance tests see the new export, and the header, consumer and producer unit and broker tests run the changed FFI and fetch path.",
+    "python.grpc": "The gRPC Python arm runs consumer and producer cases through the changed core.",
+    "python.integration": "Broker produce/consume tests run the changed fetch and header path.",
+    "python.performance": "The consumer and producer performance tests run the changed path.",
+    "python.soak": "The soak client produces and consumes through the changed core.",
+    "python.static": "test_ffi_twins and test_error_payload_views read the generated bindings header, which gains a new function.",
+    "python.unit": "The header, consumer, producer and null-argument tests go through the changed Header/Headers FFI and record headers.",
+    "python.verifiable_clients": "The verifiable consumer and producer run the changed core.",
+    "rust.chaos": "Produces and consumes records through the changed fetch and header path.",
+    "rust.consumer": "The fetch path now hands out lazily parsed headers sliced from the fetched data.",
+    "rust.consumer-perf": "Consumes records through the changed fetch path.",
+    "rust.doc": "Existing doctests on headers, records, consumers and producers run the changed header representation.",
+    "rust.integration": "Consumer and producer integration tests, and the multi-language ones, run the changed header and fetch code.",
+    "rust.integrity": "Checks the integrity of consumed records, including headers, through the changed fetch path.",
+    "rust.lib": "RecordHeader/RecordHeaders, DefaultRecord, utils, completed_fetch, fetch_collector, producer_batch and the FFI header/consumer-record modules change, with new unit tests in each.",
+    "rust.multilanguage-test-server": "Translates records and headers between the core and the binding clients.",
+    "rust.performance": "Measures the consumer and producer paths whose header handling changed.",
+    "rust.producer": "Producer batch splitting now reuses record headers directly, and the header type changed.",
+    "rust.verifiable-clients": "The verifiable producer and consumer run the changed core.",
+    "rust.xtask": "lint_custom/ffi_translation.rs gains the C_ONLY_STRING_VIEWS allowlist."
+  },
+  "rust": {
+    "chaos": [],
+    "consumer": [],
+    "consumer-perf": [],
+    "doc": [],
+    "integration": [],
+    "integrity": [],
+    "lib": [],
+    "multilanguage-test-server": [],
+    "performance": [],
+    "producer": [],
+    "verifiable-clients": [],
+    "xtask": []
+  },
+  "tree": "3501b645f5393ac9a230a65c9ed9b51d57959a80",
+  "version": 2
+}
