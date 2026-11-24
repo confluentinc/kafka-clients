@@ -22,6 +22,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Errors;
+using Confluent.Kafka.Common.Metrics;
 using Confluent.Kafka.Common.Quota;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Common.Resource;
@@ -100,6 +101,8 @@ public sealed class PublicJavaEnumConstantsTests
                 (typeof(SslClientAuth), Ordinals("REQUIRED", "REQUESTED", "NONE")),
             ["org.apache.kafka.common.errors.RecordDeserializationException.DeserializationExceptionOrigin"] =
                 (typeof(RecordDeserializationException.DeserializationExceptionOrigin), Ordinals("KEY", "VALUE")),
+            ["org.apache.kafka.common.metrics.Sensor.RecordingLevel"] =
+                (typeof(Sensor.RecordingLevel), Ids(("INFO", 0), ("DEBUG", 1), ("TRACE", 2))),
             ["org.apache.kafka.common.record.TimestampType"] = (
                 typeof(TimestampType),
                 Ids(("NO_TIMESTAMP_TYPE", -1), ("CREATE_TIME", 0), ("LOG_APPEND_TIME", 1))),
@@ -158,7 +161,7 @@ public sealed class PublicJavaEnumConstantsTests
             .Where(type => type.IsEnum && type != typeof(ClientQuotaMatchType))
             .Select(type => type.FullName!);
 
-        Assert.Equal(22, s_java.Count);
+        Assert.Equal(23, s_java.Count);
         Assert.Equal(
             pinned.OrderBy(name => name, StringComparer.Ordinal),
             exported.OrderBy(name => name, StringComparer.Ordinal));

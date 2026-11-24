@@ -430,6 +430,11 @@ public sealed class ErrorPayloadReaderTests
                 Assert.Equal("d-é", e.Metric().MetricName().Description());
                 Assert.Equal(new Dictionary<string, string> { ["client-id"] = "c-日本" }, e.Metric().MetricName().Tags());
                 Assert.Equal(12.5, e.Metric().MetricValue());
+                Assert.False(e.Metric().IsMeasurable());
+                Assert.Null(e.Metric().Config());
+                Assert.Equal(
+                    "Not a measurable: the metric of a quota violation holds only its name and its value",
+                    Assert.Throws<IllegalStateException>(() => e.Metric().Measurable()).Message);
             }
 
             views.AssertOnlyAsked(View.QuotaViolation);
