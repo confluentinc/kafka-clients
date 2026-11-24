@@ -981,7 +981,7 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
     return new Promise<T>((resolve, reject) => {
       if (this.#waiters === null) this.#waiters = [];
       this.#waiters.push(resolve, reject);
-      const onTimeout = (error: Error | null, failed: boolean): void => {
+      const onTimeout = (error: unknown, failed: boolean): void => {
         const waiters = this.#waiters;
         const i = waiters?.indexOf(resolve) ?? -1;
         if (waiters === null || i < 0) {
@@ -994,8 +994,10 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
         reject(error);
       };
       if (!this.#record) {
-        native.adminFutureGet(handle, slot, millis, (error, timedOut) => {
-          if (timedOut) onTimeout(error, false);
+        native.adminFutureGet(handle, slot, millis, (error, timedOut, failed) => {
+          if (timedOut) onTimeout(error, failed);
+          // The outcome comes from the untimed wait: this one's failure only warns.
+          else if (failed) warn(error);
         });
         return;
       }
