@@ -178,7 +178,7 @@ public sealed class AdminP7SubmitArgumentTests
             () => admin.DescribeUserScramCredentials(new[] { "al\0ice" }));
 
         Assert.Equal("users", thrown.ParamName);
-        Assert.Equal(new ArgumentException(AdminStrings.InvalidStringMessage, "users").Message, thrown.Message);
+        Assert.Equal(new ArgumentException(NativeStrings.InvalidAdminStringMessage, "users").Message, thrown.Message);
     }
 
     [Fact]

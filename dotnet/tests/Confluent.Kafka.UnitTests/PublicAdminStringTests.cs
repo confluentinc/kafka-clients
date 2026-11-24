@@ -45,7 +45,7 @@ public sealed class PublicAdminStringTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
-    private const string InvalidStringMessage =
+    private const string InvalidAdminStringMessage =
         "An admin request string must not contain a NUL character: such a string cannot be passed to the native " +
         "client unchanged.";
 
@@ -316,7 +316,7 @@ public sealed class PublicAdminStringTests
         ArgumentException rejected = Assert.Throws<ArgumentException>(() => call(admin, s_badStrings[kind]));
 
         Assert.Equal(parameter, rejected.ParamName);
-        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -331,7 +331,7 @@ public sealed class PublicAdminStringTests
             () => { _ = result.Description(s_badStrings[kind]); });
 
         Assert.Equal("userName", rejected.ParamName);
-        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -346,7 +346,7 @@ public sealed class PublicAdminStringTests
             Assert.Throws<ArgumentException>(() => admin.ListConsumerGroupOffsets(s_badStrings[kind]));
 
         Assert.Equal("groupId", rejected.ParamName);
-        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -358,7 +358,7 @@ public sealed class PublicAdminStringTests
         ArgumentException rejected = Assert.Throws<ArgumentException>(
             () => admin.CreateTopics(new[] { new NewTopic("a\0b", 1, 1), new NewTopic("a\0c", 1, 1) }));
         Assert.Equal("newTopics", rejected.ParamName);
-        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
 
         // Nothing named "a" was created by the rejected call.
         AsyncDescribeTopicsResult described = admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "a" }));
@@ -442,4 +442,15 @@ public sealed class PublicAdminStringTests
         {
             [new TopicPartition(topic, 0)] = new OffsetAndMetadata(1, metadata),
         };
+
+    // Java's constructor takes any user; the salt is random, and AlterUserScramCredentials refuses the NUL before it
+    // sends anything.
+    [Fact]
+    public void UserScramCredentialUpsertion_AUserWithANul_IsBuilt()
+    {
+        UserScramCredentialUpsertion upsertion = new UserScramCredentialUpsertion(
+            "us\0er", new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), "password");
+        Assert.Equal("us\0er", upsertion.User());
+        Assert.NotEmpty(upsertion.Salt());
+    }
 }

@@ -489,7 +489,7 @@ internal sealed partial class NativeConsumer
         OffsetsSnapshot snapshot = CheckInAUse(() =>
         {
             RequireCallback(callback);
-            return search ?? throw NullCommitKey();
+            return CommitOffsetsError(search) is { } error ? throw error : search.GetValueOrDefault();
         });
 
         if (RoutesToTheHandle)

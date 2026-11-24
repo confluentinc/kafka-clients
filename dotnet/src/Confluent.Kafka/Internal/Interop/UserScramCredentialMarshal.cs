@@ -88,6 +88,8 @@ internal static unsafe class UserScramCredentialMarshal
             return Array.Empty<byte>();
         }
 
+        // Only the random salt is kept, so a NUL in the user is not refused here, as Java's constructor accepts it;
+        // AlterUserScramCredentials refuses it before anything is sent.
         IntPtr native = NewNativeUpsertion(user, credentialInfo, password, null);
         try
         {
