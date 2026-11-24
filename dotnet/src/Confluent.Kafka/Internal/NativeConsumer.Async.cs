@@ -1352,10 +1352,10 @@ internal sealed partial class NativeConsumer
 
                     return result;
                 }
-                catch (Exception exception)
+                catch (Exception)
                 {
                     bool ending = cancellationToken.IsCancellationRequested;
-                    bool woken = exception is KafkaException { Code: WakeupCode };
+                    bool woken = completion.ErrorCode == WakeupCode;
                     if (!wakeable || !OwnWakeOutcome(completion.OwnWakeMark, woken, ending))
                     {
                         if (ending)
