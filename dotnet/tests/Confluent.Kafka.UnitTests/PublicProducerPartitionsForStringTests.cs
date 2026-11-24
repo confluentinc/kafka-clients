@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -23,9 +24,10 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// A topic holding a NUL character makes <c>PartitionsFor</c> throw <see cref="ArgumentException"/> at the call, on
-/// all four producers, as <c>Send</c> refuses such a topic: the C ABI would cut it at the NUL and answer for another
-/// topic.
+/// A topic holding a NUL character makes <c>PartitionsFor</c> throw <see cref="ArgumentException"/> at the call on
+/// <c>KafkaProducer</c> and <c>AsyncKafkaProducer</c>, as <c>Send</c> refuses such a topic: the C ABI would cut it at
+/// the NUL and answer for another topic. The mocks answer as Java's <c>MockProducer</c>: an empty list, or the
+/// injected exception.
 /// </summary>
 public sealed class PublicProducerPartitionsForStringTests
 {
@@ -54,23 +56,43 @@ public sealed class PublicProducerPartitionsForStringTests
     }
 
     [Fact]
-    public void MockProducer_PartitionsFor_ATopicWithANul_ThrowsArgumentException()
+    public void MockProducer_PartitionsFor_ATopicWithANul_ReturnsAnEmptyList()
     {
         using MockProducer<string, string> producer =
             new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer());
 
-        AssertRejected(Assert.Throws<ArgumentException>(() => producer.PartitionsFor(NulTopic)));
-        Assert.Empty(producer.PartitionsFor("t"));
+        Assert.Empty(producer.PartitionsFor(NulTopic));
     }
 
     [Fact]
-    public async Task AsyncMockProducer_PartitionsFor_ATopicWithANul_ThrowsArgumentExceptionAtTheCall()
+    public async Task AsyncMockProducer_PartitionsFor_ATopicWithANul_ReturnsAnEmptyList()
     {
         await using AsyncMockProducer<string, string> producer =
             new AsyncMockProducer<string, string>(new AsyncStringSerializer(), new AsyncStringSerializer());
 
-        AssertRejected(Assert.Throws<ArgumentException>(() => { _ = producer.PartitionsFor(NulTopic); }));
-        Assert.Empty(await producer.PartitionsFor("t"));
+        Assert.Empty(await producer.PartitionsFor(NulTopic));
+    }
+
+    [Fact]
+    public void MockProducer_PartitionsFor_ATopicWithANul_ThrowsTheInjectedException()
+    {
+        using MockProducer<string, string> producer =
+            new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer());
+        KafkaException injected = new KafkaException("partitionsFor");
+        producer.SetPartitionsForException(injected);
+
+        Assert.Same(injected, Assert.Throws<KafkaException>(() => producer.PartitionsFor(NulTopic)));
+    }
+
+    [Fact]
+    public async Task AsyncMockProducer_PartitionsFor_ATopicWithANul_ThrowsTheInjectedException()
+    {
+        await using AsyncMockProducer<string, string> producer =
+            new AsyncMockProducer<string, string>(new AsyncStringSerializer(), new AsyncStringSerializer());
+        KafkaException injected = new KafkaException("partitionsFor");
+        producer.SetPartitionsForException(injected);
+
+        Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => producer.PartitionsFor(NulTopic)));
     }
 
     private static void AssertRejected(ArgumentException rejected)

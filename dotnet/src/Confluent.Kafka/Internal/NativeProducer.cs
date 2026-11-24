@@ -298,7 +298,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         ThrowIfClosed();
-        AdminStrings.Validate(topic, AdminStrings.InvalidTopicMessage, nameof(topic));
+        ValidatePartitionsForTopic(topic);
         cancellationToken.ThrowIfCancellationRequested();
         if (IsMock && _completion.IsCurrentThread)
         {
@@ -440,7 +440,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         ThrowIfClosed();
-        AdminStrings.Validate(topic, AdminStrings.InvalidTopicMessage, nameof(topic));
+        ValidatePartitionsForTopic(topic);
         if (IsMock && _completion.IsCurrentThread)
         {
             return PartitionsForBlocking(topic);
@@ -459,6 +459,16 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         }
 
         return PartitionsOf(payload);
+    }
+
+    // The mocks answer a NUL topic as Java's MockProducer does: no mock constructor takes a cluster, so the topic the
+    // C ABI cuts at the NUL finds no partitions, and an injected exception still comes first.
+    private void ValidatePartitionsForTopic(string topic)
+    {
+        if (!IsMock)
+        {
+            AdminStrings.Validate(topic, AdminStrings.InvalidTopicMessage, nameof(topic));
+        }
     }
 
     internal IReadOnlyDictionary<MetricName, IMetric> Metrics()

@@ -865,8 +865,10 @@ each goes when the reason it gives goes:
   string argument throws `ArgumentException` at the call, because a C string cannot carry it; Java
   sends it and the broker rejects the name. A NUL in a `SubscriptionPattern` throws too, on the
   mocks as well, since they pass the pattern to the C ABI like the real consumers; Java sends it,
-  and the broker evaluates it as a regular expression that no topic name can match. Goes when the C
-  ABI takes length-delimited strings.
+  and the broker evaluates it as a regular expression that no topic name can match. The mock
+  producers' `PartitionsFor` takes a NUL topic and answers as Java's `MockProducer`: an empty list,
+  or the injected exception, since no mock constructor takes a cluster and the topic cut at the NUL
+  finds no partitions. Goes when the C ABI takes length-delimited strings.
 - **A null header key.** A user `IHeader` whose `Key()` returns `null` makes `Send` throw Java's
   `IllegalArgumentException` "Invalid null header key found in headers" on all four producers, at
   every read of the key, so a key that turns `null` at a later read throws too (ledger 603). On an
