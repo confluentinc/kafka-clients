@@ -21,6 +21,7 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way
 import native = require('./native');
 import { KafkaFuture } from '../common/kafka_future';
+import { warn } from './warn';
 
 /** The native admin client handle (`internal/native.ts`). */
 export type AdminHandle = ReturnType<typeof native.adminCreate>;
@@ -39,7 +40,14 @@ export type ResultBox = ReturnType<typeof native.adminListTopics>;
 function waiting<T>(handle: AdminHandle, slot: number, post: (raw: unknown) => T): KafkaFuture<T> {
   const future = KafkaFuture.internalCreate<T>(false);
   future.internalSetNative(handle, slot);
-  native.adminFutureWait(handle, slot, (value, error) => {
+  native.adminFutureWait(handle, slot, (value, error, failed) => {
+    // An answer the addon could not build fails the future with the failure,
+    // as nothing else completes it, or warns once it is done (cancelled).
+    if (failed) {
+      if (future.isDone()) warn(error);
+      else future.internalSetDelivery(null as T, error);
+      return;
+    }
     if (error !== null) {
       future.internalSetDelivery(null as T, error);
       return;

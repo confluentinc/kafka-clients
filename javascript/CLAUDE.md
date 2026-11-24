@@ -1443,12 +1443,17 @@ adds:
   blocking C function. The wait's completion (`future_on_wait`) converts the
   borrowed value and completes the JS `KafkaFuture` in the client's drain,
   then drops the context; `get({ timeout })` calls `get_with_timeout_cb` for
-  the deadline alone. No Promise exists until a `get()` or
-  `toCompletionStage()`, so a failed future nobody reads raises no unhandled
-  rejection. Each wait is counted as a `_cb` call ("Threads and liveness"),
-  so a closed client with an unanswered future holds Node until the core
-  answers it (entry 33). The outcome arrives on a later turn of the event
-  loop, never inside the call, the mock's included (entry 36). The Results
+  the deadline alone. An admin future has no delivery, so an answer the wait
+  can't build (boundary rule 9) fails the future with the failure, or warns
+  once the future is done; a timed wait that timed out rejects its `get()`
+  with it, and one that didn't warns, and a `close()` whose answer can't be
+  built rejects with it, the client closed all the same. No Promise exists
+  until a `get()` or `toCompletionStage()`, so a failed future nobody reads
+  raises no unhandled rejection. Each wait is counted as a `_cb` call
+  ("Threads and liveness"), so a closed client with an unanswered future
+  holds Node until the core answers it (entry 33). The outcome arrives on a
+  later turn of the event loop, never inside the call, the mock's included
+  (entry 36). The Results
   are Java's classes in TypeScript, holding the futures Java's constructor
   holds and composing `all()`, `values()` and the refinements with `allOf` and
   `thenApply` where Java does; where Python's Result takes the C future

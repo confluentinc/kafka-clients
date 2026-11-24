@@ -99,11 +99,11 @@ void js_warn_thrown(napi_env env);
 // Deletes `*ref` (a no-op for NULL) and resets it to NULL.
 void delete_ref(napi_env env, napi_ref* ref);
 
-// The steps the test-only faultNext() makes fail: a producer's notify
+// The steps the test-only faultNext() makes fail: a client's notify
 // registration, the conversion of a completion's answer to JS (a record's
 // metadata, a core error, a send's slot number, a partitionsFor list, a
-// close's answer), a delivery callback's wait for its turn (send_enqueue),
-// and the failure js_take_failure makes of one.
+// close's answer, an admin future's value), a delivery callback's wait for
+// its turn (send_enqueue), and the failure js_take_failure makes of one.
 typedef enum {
     FAULT_NONE,
     FAULT_NOTIFY,
@@ -113,6 +113,7 @@ typedef enum {
     FAULT_PARTITIONS,
     FAULT_CLOSE,
     FAULT_ENQUEUE,
+    FAULT_VALUE,
     FAULT_FAILURE,
     FAULT_STEPS
 } FaultStep;
