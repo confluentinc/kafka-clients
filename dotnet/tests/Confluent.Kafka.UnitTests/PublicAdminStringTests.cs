@@ -442,4 +442,15 @@ public sealed class PublicAdminStringTests
         {
             [new TopicPartition(topic, 0)] = new OffsetAndMetadata(1, metadata),
         };
+
+    // Java's constructor takes any user; the salt is random, and AlterUserScramCredentials refuses the NUL before it
+    // sends anything.
+    [Fact]
+    public void UserScramCredentialUpsertion_AUserWithANul_IsBuilt()
+    {
+        UserScramCredentialUpsertion upsertion = new UserScramCredentialUpsertion(
+            "us\0er", new ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), "password");
+        Assert.Equal("us\0er", upsertion.User());
+        Assert.NotEmpty(upsertion.Salt());
+    }
 }

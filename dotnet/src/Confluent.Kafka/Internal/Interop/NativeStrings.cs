@@ -51,9 +51,19 @@ internal static class NativeStrings
         "A configuration value must not contain a NUL character: such a string cannot be passed to the native " +
         "client unchanged.";
 
+    internal const string InvalidArgumentStringMessage =
+        "A string argument must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
+
+    internal const string InvalidOffsetMetadataMessage =
+        "Offset metadata must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
+
+    internal static bool ContainsNul(string? value) => value is not null && value.IndexOf('\0') >= 0;
+
     internal static void Validate(string? value, string message, string parameterName)
     {
-        if (value is not null && value.IndexOf('\0') >= 0)
+        if (ContainsNul(value))
         {
             throw new ArgumentException(message, parameterName);
         }

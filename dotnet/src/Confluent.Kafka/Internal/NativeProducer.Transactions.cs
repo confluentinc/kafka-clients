@@ -62,14 +62,14 @@ internal sealed partial class NativeProducer
         ConsumerGroupMetadata? groupMetadata)
     {
         ThrowIfClosed();
-        WithTransactionOffsets(offsets, groupMetadata, (map, metadata, nullKey) =>
+        WithTransactionOffsets(offsets, groupMetadata, (map, metadata, deferred) =>
         {
             Transaction(
                 SendOffsetsOperation,
                 waitsForReports: false,
                 opaque => NativeMethods.ProducerSendOffsetsToTransactionCb(_handle, map, metadata, s_voidCompletion, opaque),
                 (ref IntPtr outErr) => NativeMethods.ProducerSendOffsetsToTransaction(_handle, map, metadata, ref outErr));
-            return nullKey ? throw OffsetsSnapshot.NullKey() : 0;
+            return deferred is null ? 0 : throw deferred;
         });
     }
 
@@ -113,7 +113,7 @@ internal sealed partial class NativeProducer
 
         // The core copies the map and takes its own reference on the metadata during the call, so both are freed
         // once the submit has returned.
-        return WithTransactionOffsets(offsets, groupMetadata, (map, metadata, nullKey) =>
+        return WithTransactionOffsets(offsets, groupMetadata, (map, metadata, deferred) =>
         {
             Task sent = TransactionWithCallback(
                 SendOffsetsOperation,
@@ -121,15 +121,15 @@ internal sealed partial class NativeProducer
                 opaque => NativeMethods.ProducerSendOffsetsToTransactionCb(_handle, map, metadata, s_voidCompletion, opaque),
                 (ref IntPtr outErr) => NativeMethods.ProducerSendOffsetsToTransaction(_handle, map, metadata, ref outErr),
                 cancellationToken);
-            return nullKey ? NullKeyAfter(sent) : sent;
+            return deferred is null ? sent : ThrowAfter(sent, deferred);
         });
     }
 
-    // Answers a null key once the checks the core made for the empty map sent in its place have passed.
-    private static async Task NullKeyAfter(Task checks)
+    // Answers a null key or a NUL once the checks the core made for the empty map sent in its place have passed.
+    private static async Task ThrowAfter(Task checks, Exception deferred)
     {
         await checks.ConfigureAwait(false);
-        throw OffsetsSnapshot.NullKey();
+        throw deferred;
     }
 
     // Commit and abort flush, so they also wait for the async callbacks of serializer failures, as Flush does.
@@ -227,17 +227,17 @@ internal sealed partial class NativeProducer
     /// reports with Java's error; with a null group metadata the offsets are not read, as the core reads them only
     /// after it. Java's producers read a key only after the checks they make for an empty map (Java's
     /// <c>MockProducer</c> after its state checks and its injected exception), so offsets with a null key cross as an
-    /// empty map, for the core to make those checks, and the call's third argument tells the caller to answer the
-    /// null key once they have passed.
+    /// empty map, for the core to make those checks, and the call's third argument is the error the caller throws once
+    /// they have passed. A topic or metadata holding a NUL, which the C string would cut, is answered the same way.
     /// </summary>
     private static T WithTransactionOffsets<T>(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets,
         ConsumerGroupMetadata? groupMetadata,
-        Func<IntPtr, IntPtr, bool, T> call)
+        Func<IntPtr, IntPtr, Exception?, T> call)
     {
         if (groupMetadata is null)
         {
-            return call(IntPtr.Zero, IntPtr.Zero, false);
+            return call(IntPtr.Zero, IntPtr.Zero, null);
         }
 
         SafeConsumerGroupMetadataHandle metadata = groupMetadata.Handle;
@@ -246,17 +246,19 @@ internal sealed partial class NativeProducer
         try
         {
             IntPtr map = IntPtr.Zero;
-            bool nullKey = false;
+            Exception? deferred = null;
             if (offsets is not null)
             {
                 OffsetsSnapshot? snapshot = OffsetsSnapshot.TryOf(offsets);
-                nullKey = snapshot is null;
+                deferred = snapshot is null ? OffsetsSnapshot.NullKey()
+                    : snapshot.Value.NulMessage is { } message ? OffsetsSnapshot.NulString(message)
+                    : null;
                 arguments = new NativeCallArguments();
-                map = arguments.OffsetMap(snapshot.GetValueOrDefault());
+                map = arguments.OffsetMap(deferred is null ? snapshot.GetValueOrDefault() : default);
             }
 
             metadata.DangerousAddRef(ref added);
-            return call(map, metadata.DangerousGetHandle(), nullKey);
+            return call(map, metadata.DangerousGetHandle(), deferred);
         }
         finally
         {

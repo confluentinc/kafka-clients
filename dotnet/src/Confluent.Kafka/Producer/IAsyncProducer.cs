@@ -227,6 +227,10 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> fired.</exception>
     /// <exception cref="KafkaException">The producer has encountered a previous fatal or abortable error, or any
     /// other unexpected error.</exception>
+    /// <exception cref="ArgumentException">
+    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     Task SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, Consumer.OffsetAndMetadata> offsets,
         Consumer.ConsumerGroupMetadata groupMetadata,

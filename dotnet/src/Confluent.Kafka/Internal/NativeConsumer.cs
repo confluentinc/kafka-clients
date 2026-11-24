@@ -49,6 +49,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // The strategy the mock consumers' two-argument constructors pass.
     internal const string DefaultOffsetResetStrategy = "latest";
 
+    private const string ByDurationStrategyPrefix = "by_duration:";
+
     private const int LocalConcurrentModification = -2;
 
     private const int WakeupCode = -18;
@@ -370,9 +372,18 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     // A null strategy crosses as NULL, which the core refuses with Java's IllegalArgumentException
-    // ("Auto offset reset strategy is null"), as Java's AutoOffsetResetStrategy.fromString does.
+    // ("Auto offset reset strategy is null"), as Java's AutoOffsetResetStrategy.fromString does. A strategy holding a
+    // NUL names no strategy, so the binding gives fromString's answer for it, which needs no native call.
     internal static NativeConsumer CreateMock(string? autoOffsetReset = DefaultOffsetResetStrategy, bool withPump = true)
     {
+        if (NativeStrings.ContainsNul(autoOffsetReset))
+        {
+            throw new IllegalArgumentException(
+                autoOffsetReset!.StartsWith(ByDurationStrategyPrefix, StringComparison.Ordinal)
+                    ? "Unable to parse duration string in by_duration offset reset strategy."
+                    : "Unknown auto offset reset strategy: " + autoOffsetReset);
+        }
+
         IntPtr outErr = IntPtr.Zero;
         IntPtr classPointer;
         using (Utf8Marshal.PinnedUtf8String? strategy = autoOffsetReset is null ? null : Utf8Marshal.Pin(autoOffsetReset))
@@ -439,6 +450,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         CallSync(arguments =>
         {
             IntPtr outErr = IntPtr.Zero;
+            // Neither Java's seek nor the core reads the metadata, so a NUL in it is not refused.
             NativeMethods.ConsumerSeekWithOffsetAndMetadata(
                 _handle,
                 arguments.TopicPartition(topic, number),
@@ -949,7 +961,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // KafkaConsumer refuses a null collection or topic with Java's messages, and the core refuses a blank topic
     // with the same text. Java's KafkaConsumer checks group.id first, so without one the refusal is the core's
     // InvalidGroupIdException, which the binding throws itself where it refuses the topics. Java's MockConsumer has no
-    // check of its own (a null is its NullPointerException).
+    // check of its own (a null is its NullPointerException). A NUL in a topic, which the C string would cut, is refused
+    // after the null checks (NativeStrings), still after the group.id check.
     private string[] SnapshotTopics(IReadOnlyCollection<string> topics)
     {
         if (topics is null)
@@ -971,6 +984,16 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             }
 
             topicArray[index++] = topic;
+        }
+
+        foreach (string topic in topicArray)
+        {
+            if (NativeStrings.ContainsNul(topic))
+            {
+                throw GroupIdMissing
+                    ? GroupIdNotDefined()
+                    : new ArgumentException(NativeStrings.InvalidTopicMessage, nameof(topics));
+            }
         }
 
         return topicArray;
@@ -1288,13 +1311,25 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             ThrowIfNoGroupIdBefore(timeout);
             long ms = TimerTimeoutMs(timeout);
-            return snapshot is null ? throw NullCommitKey() : ms;
+            return CommitOffsetsError(snapshot) is { } error ? throw error : ms;
         });
         return (snapshot.GetValueOrDefault(), timeoutMs);
     }
 
-    private OffsetsSnapshot SnapshotCommitOffsetsWhenOpen(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
-        TrySnapshotCommitOffsetsWhenOpen(offsets) ?? CheckInAUse<OffsetsSnapshot>(() => throw NullCommitKey());
+    private OffsetsSnapshot SnapshotCommitOffsetsWhenOpen(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
+    {
+        OffsetsSnapshot? snapshot = TrySnapshotCommitOffsetsWhenOpen(offsets);
+        return CommitOffsetsError(snapshot) is { } error
+            ? CheckInAUse<OffsetsSnapshot>(() => throw error)
+            : snapshot.GetValueOrDefault();
+    }
+
+    // A NUL in a topic or a metadata string, which the C string would cut, is answered where a null key is.
+    private Exception? CommitOffsetsError(OffsetsSnapshot? snapshot) =>
+        snapshot is null ? NullCommitKey()
+        : snapshot.Value.NulMessage is { } message
+            ? GroupIdMissing ? GroupIdNotDefined() : OffsetsSnapshot.NulString(message)
+            : null;
 
     // Java's commitSync and commitAsync copy the map before acquire(), a null key included, and only the background
     // thread reads the key, after the group check: on a KafkaConsumer a null key gives no snapshot, for the caller to
@@ -1362,12 +1397,12 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         if (IsMock)
         {
-            CheckInAUse(() => RequireAssignedPartition(partition));
+            CheckInAUse(() => RequireAssignedPartition(partition, nameof(partition)));
             return;
         }
 
         RequireSeekOffset(offset);
-        CheckInAUse(() => RequireAssignedPartition(partition));
+        CheckInAUse(() => RequireAssignedPartition(partition, nameof(partition)));
     }
 
     // Java's KafkaConsumer reads the offset before acquire(); Java's MockConsumer after ensureNotClosed(). With a
@@ -1391,7 +1426,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 throw new KafkaException(new ArgumentNullException(nameof(partition)));
             }
 
-            RequireAssignedPartition(partition);
+            RequireAssignedPartition(partition, nameof(partition));
         });
     }
 
@@ -1417,9 +1452,13 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             return SnapshotPartitions(partitions!, nullElement: NullElement.Skipped);
         }
 
-        return GroupIdMissing
-            ? TrySnapshotPartitions(partitions!) ?? throw GroupIdNotDefined()
-            : SnapshotPartitions(partitions!);
+        if (GroupIdMissing)
+        {
+            (string Topic, int Partition)[]? snapshot = TrySnapshotPartitions(partitions!, rejectNulTopics: false);
+            return snapshot is null || HasNulTopic(snapshot) ? throw GroupIdNotDefined() : snapshot;
+        }
+
+        return SnapshotPartitions(partitions!);
     }
 
     // Java's MockConsumer answers a partition it has no offset for, which a null one never has, with
@@ -1462,6 +1501,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         if (topic is not null)
         {
+            NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
             return;
         }
 
@@ -1768,14 +1808,17 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     // A null partition or a null topic is never assigned and cannot cross the C ABI, so the binding throws what Java's
-    // SubscriptionState.assignedState throws for a partition that is not assigned. A negative partition goes to the
-    // core, which answers as Java does.
-    internal static void RequireAssignedPartition(TopicPartition? partition)
+    // SubscriptionState.assignedState throws for a partition that is not assigned. A NUL in the topic, which the C
+    // string would cut, is refused next (NativeStrings). A negative partition goes to the core, which answers as Java
+    // does.
+    internal static void RequireAssignedPartition(TopicPartition? partition, string paramName)
     {
         if (partition is null || partition.Topic() is null)
         {
             throw new IllegalStateException(NoCurrentAssignment(partition));
         }
+
+        NativeStrings.Validate(partition.Topic(), NativeStrings.InvalidTopicMessage, paramName);
     }
 
     // Java's MockConsumer answers a lag of 0 for a partition it has no end offset for, which a null partition or a null
@@ -1788,7 +1831,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             return true;
         }
 
-        RequireAssignedPartition(partition);
+        RequireAssignedPartition(partition, "topicPartition");
         return false;
     }
 
@@ -1809,6 +1852,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 ? new IllegalArgumentException(PositionNotAssigned)
                 : new IllegalStateException(PositionNotAssigned);
         }
+
+        NativeStrings.Validate(partition.Topic(), NativeStrings.InvalidTopicMessage, nameof(partition));
     }
 
     internal void CloseSync() => CloseSync(IntPtr.Zero);
@@ -2002,6 +2047,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             throw new ArgumentNullException(nameof(leaderHost));
         }
 
+        NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
+        NativeStrings.Validate(leaderHost, NativeStrings.InvalidArgumentStringMessage, nameof(leaderHost));
+
         if (partitionCount < 0)
         {
             throw new ArgumentOutOfRangeException(
@@ -2050,6 +2098,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             snapshot[i] = (topic, partition);
         }
 
+        if (HasNulTopic(snapshot))
+        {
+            throw new ArgumentException(NativeStrings.InvalidTopicMessage, nameof(topicPartitions));
+        }
+
         RunPartitionsSync(snapshot, NativeMethods.ConsumerAssign);
     }
 
@@ -2071,6 +2124,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 nameof(partition), partition, "Partition must not be negative.");
         }
 
+        NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
         CallMock((mock, arguments) =>
         {
             IntPtr keyBytes = KeepRecordBytes(key);
@@ -2381,6 +2435,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             index++;
         }
 
+        foreach (string topic in topics)
+        {
+            NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(newOffsets));
+        }
+
         CallMock((mock, arguments) =>
         {
             IntPtr outErr = IntPtr.Zero;
@@ -2674,6 +2733,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             }
             else
             {
+                // Java's KIP-848 consumer only logs the reason, so a NUL in it is not refused.
                 NativeMethods.ConsumerEnforceRebalanceWithReason(_handle, arguments.Utf8(reason), ref outErr);
             }
 
@@ -2835,9 +2895,16 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             throw new IllegalArgumentException("Partitions collection cannot be null");
         }
 
-        return CheckWhenOpen(() => TrySnapshotPartitions(partitions))
-            ?? CheckInAUse<(string Topic, int Partition)[]>(
-                () => throw new IllegalStateException(NoCurrentAssignment(null)));
+        (string Topic, int Partition)[]? snapshot = CheckWhenOpen(() => TrySnapshotPartitions(partitions, rejectNulTopics: false));
+        if (snapshot is null)
+        {
+            return CheckInAUse<(string Topic, int Partition)[]>(() => throw new IllegalStateException(NoCurrentAssignment(null)));
+        }
+
+        return HasNulTopic(snapshot)
+            ? CheckInAUse<(string Topic, int Partition)[]>(
+                () => throw new ArgumentException(NativeStrings.InvalidTopicMessage, nameof(partitions)))
+            : snapshot;
     }
 
     /// <summary>What a partition collection's snapshot does with a <see langword="null"/> element.</summary>
@@ -2861,7 +2928,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         bool nullTopicIsUnassigned = false,
         string paramName = "partitions",
         NullElement nullElement = NullElement.Refused) =>
-        Snapshot(partitions, nullTopicIsUnassigned, paramName, nullElement)!;
+        Snapshot(partitions, nullTopicIsUnassigned, paramName, nullElement, rejectNulTopics: true)!;
 
     // Java's pause and resume look every partition up in the assignment, which holds no null partition or null topic.
     private static (string Topic, int Partition)[] SnapshotPausePartitions(IReadOnlyCollection<TopicPartition> partitions) =>
@@ -2869,15 +2936,17 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     // The snapshot, or null when an element is null, for the caller to answer it; the elements after it are not read.
     private static (string Topic, int Partition)[]? TrySnapshotPartitions(
-        IReadOnlyCollection<TopicPartition> partitions, string paramName = "partitions") =>
-        Snapshot(partitions, nullTopicIsUnassigned: false, paramName, nullElement: null);
+        IReadOnlyCollection<TopicPartition> partitions, string paramName = "partitions", bool rejectNulTopics = true) =>
+        Snapshot(partitions, nullTopicIsUnassigned: false, paramName, nullElement: null, rejectNulTopics);
 
-    // Gives no snapshot for a null element only when nullElement is null.
+    // Gives no snapshot for a null element only when nullElement is null. A topic holding a NUL, which the C string
+    // would cut, is refused once every element has passed the null checks, as Java reaches a later null element.
     private static (string Topic, int Partition)[]? Snapshot(
         IReadOnlyCollection<TopicPartition> partitions,
         bool nullTopicIsUnassigned,
         string paramName,
-        NullElement? nullElement)
+        NullElement? nullElement,
+        bool rejectNulTopics)
     {
         if (partitions is null)
         {
@@ -2918,7 +2987,25 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             Array.Resize(ref snapshot, index);
         }
 
+        if (rejectNulTopics && HasNulTopic(snapshot))
+        {
+            throw new ArgumentException(NativeStrings.InvalidTopicMessage, paramName);
+        }
+
         return snapshot;
+    }
+
+    private static bool HasNulTopic((string Topic, int Partition)[] snapshot)
+    {
+        foreach ((string topic, int _) in snapshot)
+        {
+            if (NativeStrings.ContainsNul(topic))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>The validated timestamps to search, as the parallel arrays the timestamp map is built from.</summary>
@@ -2987,6 +3074,22 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             index++;
         }
 
+        // A topic holding a NUL, which the C string would cut, is answered where a null key is: the mocks answer
+        // every map as Java's MockConsumer does, so it gives no snapshot there.
+        foreach (string topic in topics)
+        {
+            if (NativeStrings.ContainsNul(topic))
+            {
+                if (nullKeyGivesNone)
+                {
+                    return null;
+                }
+
+                ThrowIfATargetTimeIsNegative(timestampsToSearch);
+                throw new ArgumentException(NativeStrings.InvalidTopicMessage, nameof(timestampsToSearch));
+            }
+        }
+
         return new TimestampsSnapshot(topics, partitionArray, timestamps, count);
     }
 
@@ -3023,6 +3126,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             throw new ArgumentOutOfRangeException(nameof(partition), partition, "Partition must not be negative.");
         }
 
+        NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
         CallMock((mock, arguments) =>
         {
             IntPtr offsets = arguments.LongMap(new[] { topic }, new[] { partition }, new[] { offset }, 1);
