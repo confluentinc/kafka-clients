@@ -21,9 +21,10 @@
  * Invented *(js-only)*: `TopicPartitionMap` and `TopicPartitionSet`, Java's
  * `Map<TopicPartition, V>` and the `Set<TopicPartition>` the client returns,
  * `MetricNameMap`, the `Map<MetricName, ? extends Metric>` that `metrics()`
- * returns, and `UuidMap` and `TopicPartitionReplicaMap`, Java's
- * `Map<Uuid, V>` and `Map<TopicPartitionReplica, V>`: JavaScript has no value
- * equality for map keys.
+ * returns, `UuidMap` and `TopicPartitionReplicaMap`, Java's `Map<Uuid, V>`
+ * and `Map<TopicPartitionReplica, V>`, and `UuidSet`, Java's `Set<Uuid>`
+ * (`Uuid.RESERVED`): JavaScript has no value equality for map keys or set
+ * members.
  *
  * Not translated: Java's deprecated `ConsumerGroupState`, which `GroupState`
  * replaces.
@@ -51,6 +52,7 @@ export { TopicPartitionReplicaMap } from './topic_partition_replica_map';
 export { TopicPartitionSet } from './topic_partition_set';
 export { Uuid } from './uuid';
 export { UuidMap } from './uuid_map';
+export { UuidSet } from './uuid_set';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { InvalidRecordError } from './invalid_record_error';
 export { KafkaError } from './kafka_error';

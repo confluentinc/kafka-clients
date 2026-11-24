@@ -28,7 +28,8 @@
 // as the Python client's errors), and so are the classes the JS conventions
 // make public (`PUBLIC_BY_RULE`). Invented items (lint-mapping.json's
 // `invented`) translate nothing. A test-fixture class the client keeps public
-// (`TEST_FIXTURES`) is exempt from the audience, as in the Rust core.
+// (`TEST_FIXTURES`), with the classes nested in it, is exempt from the
+// audience, as in the Rust core.
 
 const { atNode } = require('../location');
 const { javaIndexOf, mappedItems, shortName } = require('../java_ts');
@@ -44,7 +45,9 @@ const PUBLIC_BY_RULE = new Map([
 
 /**
  * The Java test-fixture classes the client exports although Java ships them
- * in its test jar, by fully qualified name, with the reason.
+ * in its test jar, by fully qualified name, with the reason. A class nested in
+ * one (`MockAdminClient.Builder`) ships in the same jar, so the exemption and
+ * its reason are its outer class's (`isTestFixture`).
  */
 const TEST_FIXTURES = new Map([
   [
@@ -53,6 +56,18 @@ const TEST_FIXTURES = new Map([
       'the client has no separate test artifact',
   ],
 ]);
+
+/**
+ * Whether `cls` is a test-fixture class or a class nested in one: its
+ * outermost class's name (the fully qualified name to the first `$`) is in
+ * `TEST_FIXTURES`.
+ *
+ * @param {{ fqn: string }} cls the Java class
+ * @returns {boolean}
+ */
+function isTestFixture(cls) {
+  return TEST_FIXTURES.has(cls.fqn.split('$')[0]);
+}
 
 module.exports = {
   name: 'check-public-audience',
@@ -73,7 +88,7 @@ module.exports = {
       checked += 1;
       const cls = java.cls;
       const subject = `${item.rel}:${item.name}`;
-      if (!cls.public_audience && !TEST_FIXTURES.has(cls.fqn)) {
+      if (!cls.public_audience && !isTestFixture(cls)) {
         findings.push({
           kind: 'not-public-audience',
           subject,

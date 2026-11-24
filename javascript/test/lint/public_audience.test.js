@@ -82,6 +82,31 @@ test("a class the JS conventions make public is exempt: Java's internal RecordHe
   ]);
 });
 
+test('a class nested in a test-fixture class is exempt, as its outer class is; one nested in another class is not', () => {
+  const classes = [
+    ...CLASSES,
+    javaClass('clients.admin.MockAdminClient', { public_audience: false }),
+    javaClass('clients.admin.MockAdminClient$Builder', { public_audience: false }),
+    javaClass('clients.producer.Sealed', { public_audience: false }),
+    javaClass('clients.producer.Sealed$Inner', { public_audience: false }),
+  ];
+  const r = lint(
+    fixture(
+      {
+        'src/admin/mock_admin_client.ts':
+          'export class MockAdminClient {}\nexport declare namespace MockAdminClient {\n  export class Builder {}\n}\n',
+        'src/producer/sealed.ts': 'export class Sealed {}\nexport declare namespace Sealed {\n  export class Inner {}\n}\n',
+      },
+      classes,
+    ),
+    [RULE],
+  );
+  assert.deepEqual(findings(r), [
+    'src/producer/sealed.ts:Sealed: translates clients.producer.Sealed, which is not @InterfaceAudience.Public in Kafka 4.4.0-rc3',
+    'src/producer/sealed.ts:Sealed.Inner: translates clients.producer.Sealed$Inner, which is not @InterfaceAudience.Public in Kafka 4.4.0-rc3',
+  ]);
+});
+
 test('an invented export translates nothing, so it is not checked', () => {
   const invented = { ...INVENTED, 'src/producer/sealed.ts:Sealed': 'A JavaScript helper.' };
   const r = lint(

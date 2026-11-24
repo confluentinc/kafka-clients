@@ -38,11 +38,19 @@ test("OffsetSpec's factories make Java's nested specs, each a new one", () => {
   // A constructor of no parameter refuses an argument with the form error.
   // @ts-expect-error a wrong argument: Java's constructor takes none
   assert.throws(() => new OffsetSpec(1), { name: 'IllegalArgumentError', message: 'OffsetSpec() takes one of (); got a number' });
-  // @ts-expect-error a wrong argument: the nested specs inherit it
-  assert.throws(() => new OffsetSpec.EarliestSpec(1), {
-    name: 'IllegalArgumentError',
-    message: 'OffsetSpec() takes one of (); got a number',
-  });
+  // Each nested spec has Java's own: its form error names it.
+  for (const Spec of [
+    OffsetSpec.EarliestSpec,
+    OffsetSpec.LatestSpec,
+    OffsetSpec.MaxTimestampSpec,
+    OffsetSpec.EarliestLocalSpec,
+    OffsetSpec.LatestTieredSpec,
+    OffsetSpec.EarliestPendingUploadSpec,
+  ]) {
+    assert.ok(new Spec() instanceof OffsetSpec);
+    // @ts-expect-error a wrong argument: Java's constructor takes none
+    assert.throws(() => new Spec(1), { name: 'IllegalArgumentError', message: `${Spec.name}() takes one of (); got a number` });
+  }
 });
 
 test('OffsetSpec.forTimestamp takes a Java long; the factories of no parameter refuse an argument', () => {
