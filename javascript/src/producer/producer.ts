@@ -151,12 +151,11 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    * are copied during the call. Without a serializer, a key or value is
    * bytes or null: a string rejects with a `TypeError` pointing to
    * `stringSerializer()`. The record's
-   * headers become read-only once its fields are checked: a later `add` or
+   * headers become read-only once the serializers have run: a later `add` or
    * `remove` throws `IllegalStateError` "RecordHeaders has been closed.".
-   * *(deviation: Java's `send()` seals them only after its metadata wait;
-   * here they are sealed before it. Why: the headers cross the C ABI during
-   * `send()`, before the core's metadata wait. Goes when: the core seals the
-   * headers itself, after that wait.)*
+   * *(deviation, as in Python: Java's `send()` makes them read-only only
+   * after its metadata wait. Why: the serializers run in JavaScript before
+   * the record reaches the core.)*
    *
    * Every failure rejects the returned Promise, an argument check's and the
    * closed producer's included: `send()` never throws. *(deviation: on a

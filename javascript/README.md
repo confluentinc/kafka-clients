@@ -406,53 +406,57 @@ as it is, as Java's mock does.
 
 ### Headers
 
-`Header` and `Headers` are in `common/header`, with Java's members. A
-`Header` keeps Java's methods: `new Header({ key, value })`, then
-`header.key()` and `header.value()`. The value is bytes or `null`, as Java's
-`byte[]`: it is taken as a `Uint8Array` (a `Buffer` is one), so a string value
-throws `TypeError`: encode it first. `Headers` keeps Java's methods: `add(header)` or `add({ key, value })`,
-`remove(key)`, `lastHeader(key)`, `headers(key)`, `toArray()`, iteration
+`Header`, `RecordHeader` and `Headers` are in `common/header`, with Java's
+members. `Header` is Java's interface, with `key()` and `value()`, and
+`RecordHeader` is the class you build one with: `new RecordHeader({ key,
+value })`, then `header.key()` and `header.value()`. The value is bytes or
+`null`, as Java's `byte[]`: it is taken as a `Uint8Array` (a `Buffer` is one),
+so a string value throws `TypeError`: encode it first. `Headers` keeps Java's
+methods: `add(header)` or `add({ key, value })`, `remove(key)`,
+`lastHeader(key)`, `headers(key)`, `toArray()`, iteration
 (`for (const header of headers)`) and Java's `toString()`; `new Headers()`,
 `new Headers(headers)` or `new Headers({ headers })`.
 
 Where headers are taken (`ProducerRecord`'s `headers`, `new Headers(...)`),
-they are a `Headers` or an iterable of `Header`s, as Java takes them:
+they are a `Headers` or an iterable of `Header` objects and `[key, value]`
+pairs, in any order; a pair becomes a new `RecordHeader`:
 
 <!-- snippet: fragment -->
 ```js
-const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
+const { Headers, RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const record = new ProducerRecord({
   topic: 'demo', partition: null, key: 'k', value: 'v',
-  headers: [new Header({ key: 'trace', value: Buffer.from('abc') }), new Header({ key: 'flag', value: null })],
+  headers: [new RecordHeader({ key: 'trace', value: Buffer.from('abc') }), ['flag', null]],
 });
 record.headers.add({ key: 'more', value: Buffer.from([1]) });
 ```
 
-`Header` and `Headers` are the client core's own `RecordHeader` and
-`RecordHeaders`, so the core holds the headers and refuses a change once they
-are read-only. A `Header` copies its key and value when it is made, and
-`header.value()` is a `Buffer` over the header's own bytes, the same `Buffer`
-on every call: a later write to the bytes you gave leaves the header as it
-was, where Java's keeps your array. A key crosses as its UTF-8 bytes, so a key
-holding a NUL throws `TypeError`, and `key()` reads a lone surrogate back as
-`?`. `add(header)` and `new Headers([...])` store copies, so your `Header`
-stays your own. Reading a header back from a `Headers` that can still change,
-such as your own before `send()` (`lastHeader`, `headers(key)`, `toArray()`,
-iteration), gives a copy of it, which stays as it is when the `Headers`
-changes later, as Java's does. Once the `Headers` is read-only, after
-`send()`, a header read from it is a view of the core's header, with no copy,
-and keeps that `Headers` alive.
+`Headers` and `RecordHeader` are plain classes that hold their own data, as
+Java's do. A `RecordHeader` keeps the key and the value you give it, without
+copying them, and `header.value()` is a `Buffer` over the same memory, the
+same `Buffer` on every call: a later write to those bytes changes the
+header's value, as in Java. A `Headers` holds the very `Header` objects you
+add, so a header read back from it is the object you added, and stays as it
+is however the `Headers` changes later. A `Header` is any object with
+`key()` and `value()` methods, as Java takes any implementation of its
+interface; give one written as a plain object to `add` by name,
+`add({ header })`, as a plain object on its own is read as `{ key, value }`.
+An iterator over a `Headers` sees a change made during the iteration, as a
+JavaScript array's iterator does, and throws nothing *(deviation: Java's
+throws `ConcurrentModificationException`, on a best-effort basis. Why: the
+headers are a JavaScript array, as Python's are a Python list)*.
 
 A record's `headers` is its own `Headers` (an empty one when it has none),
-copied from what was given, as Java's `new RecordHeaders(headers)`. `send()`
-makes it read-only once the record's fields are checked: a later `add` or
-`remove` throws `IllegalStateError` "RecordHeaders has been closed.", as in
-Java. They are sealed before the core's metadata wait *(deviation: Java's
-`send()` seals them only after that wait, so in Java a record whose send times
-out on metadata keeps writable headers. Why: the headers cross the C ABI
-during `send()`, before the core waits for metadata, and the binding cannot see
-when that wait ends. Goes when: the core seals the headers itself, after its
-metadata wait)*.
+holding the headers given, as Java's `new RecordHeaders(headers)`. `send()`
+makes it read-only once the serializers have run: a later `add` or `remove`
+throws `IllegalStateError` "RecordHeaders has been closed.", as in Java. Only
+then does the client copy the headers for the client core, each key as its
+UTF-8 bytes, so a key holding a NUL makes `send()` reject with `TypeError` and
+a lone surrogate is sent as `?`. The headers become read-only before the
+core's metadata wait *(deviation, as in Python: Java makes them read-only
+after that wait, so in Java a record whose send times out on metadata keeps
+writable headers. Why: the serializers run in JavaScript before the record
+reaches the core)*. `MockProducer` leaves them writable, as Java's mock does.
 
 ### MockProducer
 
@@ -698,7 +702,7 @@ code relying on them keeps running with another meaning: check each.
 | `new KafkaProducer(configs)` | the same, or `new KafkaProducer({ configs })` |
 | `new ProducerRecord({ ... })` with any subset of the fields | exactly one of Java's six constructors: a record with headers or a timestamp names `partition` (`null` lets the producer choose), and `{ topic, partition, value }` is no Java constructor |
 | a field set to `undefined` meant "not given" | leave the key out; `undefined` throws `TypeError` (`null` is Java's null), except a config value, which is still dropped |
-| headers as `{ key, value }` objects or `[key, value]` pairs, string values accepted | `Header` objects, the value bytes or `null`; a string value throws `TypeError` |
+| headers as `{ key, value }` objects or `[key, value]` pairs, string values accepted | `RecordHeader` objects or `[key, value]` pairs, the value bytes or `null`; a `{ key, value }` object or a string value throws `TypeError` |
 | `header.key`, `header.value` | `header.key()`, `header.value()`, Java's methods; the value is a `Buffer` |
 | `require('@confluentinc/kafka-javascript').producer`, `.common.errors` (namespaces) | gone: import each package from its own path, `@confluentinc/kafka-javascript/producer`, `.../common/errors`; the root keeps the Java built-in errors and `Duration` |
 | `CloseOptions` (a type) | `CloseArgs`, the options of `close(Duration)`, `{ timeout }` |
@@ -732,15 +736,16 @@ code relying on them keeps running with another meaning: check each.
 The entry points (`@confluentinc/kafka-javascript`, `/producer`, `/common`,
 ...) keep their paths, but no index re-exports another package any more. `ProducerRecordOptions` is no longer exported: each Java
 constructor is a signature of its own. The `Header` type is no longer
-exported from `/producer`: `Header` is now a class, in `/common/header`
-(`import { Header } from '@confluentinc/kafka-javascript/common/header'`). `Duration` is exported from the
+exported from `/producer`: `Header` is now Java's interface, in
+`/common/header`, beside `RecordHeader`, the class that builds one
+(`import { RecordHeader } from '@confluentinc/kafka-javascript/common/header'`). `Duration` is exported from the
 package root.
 
 ## Limitations
 
 - **One copy of the package per application.** The client's classes are
-  checked by `instanceof`: a `ProducerRecord`, `Header` or `Headers` made by
-  one copy of the package is refused by a `KafkaProducer` of another copy
+  checked by `instanceof`: a `ProducerRecord` made by one copy of the package
+  is refused by a `KafkaProducer` of another copy
   (`send(record)` throws `IllegalArgumentError` "send() takes one of (record),
   (record, callback); got a ProducerRecord", and `send({ record })` throws
   `TypeError` "record must be a ProducerRecord"), and an error of one copy is
@@ -757,8 +762,8 @@ package root.
   client's objects (a producer, a future, a record) stay in the thread that
   made them. A record's fields cross as they are once copied out, except its
   headers: `postMessage` and `structuredClone` copy a `Headers` as an empty
-  object, so convert them to plain pairs first, and rebuild the record and
-  its `Header`s on the other side:
+  object, so convert them to `[key, value]` pairs first, which a record on the
+  other side takes as they are:
 
   <!-- snippet: fragment -->
   ```js
@@ -770,10 +775,7 @@ package root.
   };
   parentPort.postMessage(message);
   // In the main thread, which owns the producer: a record of its own.
-  const copy = new ProducerRecord({
-    ...message,
-    headers: message.headers.map(([key, value]) => new Header({ key, value })),
-  });
+  const copy = new ProducerRecord(message);
   ```
 
   A delivered record's `RecordMetadata` is a data object: `{ ...metadata }`
