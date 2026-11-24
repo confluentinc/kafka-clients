@@ -191,3 +191,17 @@ test('a src/ exporting nothing fails: 0 items checked', () => {
   assert.equal(r.status, 1);
   assert.ok(r.err.includes('❌ check-java-name: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });
+
+test("a nested class sits in its outer class's file, under its namespace: no file or one-type-per-file finding", () => {
+  const index = javaIndex([...JSON.parse(INDEX).classes, javaClass('clients.producer.Rec$Part')]);
+  const r = lint(
+    fixture({
+      'java-index.json': index,
+      'src/producer/rec.ts': 'export class Rec {}\nexport declare namespace Rec {\n  export class Part {}\n}\n',
+    }),
+    [RULE],
+  );
+  assert.equal(r.status, 0, r.text);
+  // The nested Rec.Part is not one of the exports this rule names.
+  assert.ok(r.out.includes('✅ check-java-name: 5 item(s) checked'), r.text);
+});

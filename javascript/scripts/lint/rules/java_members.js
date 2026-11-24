@@ -22,7 +22,9 @@
 // Java's constructors (scripts/lint/java_ts.js), each of its own static-ness
 // (a mismatch is a `static-mismatch`). An exported interface or object type
 // mapped to a Java class is checked as a class is, the members of an
-// interface's runtime object (`Admin.create`) as its static methods. A member on the list of
+// interface's runtime object (`Admin.create`) as its static methods, and a
+// nested class (`Outer.Inner`, scripts/lint/java_ts.js `mappedItems`) as its
+// Java nested class's (`Outer$Inner`). A member on the list of
 // invented names (lint-mapping.json's `invented`) is exempt, one in its
 // `javaTargets` maps to the `<fqn>#<member>` listed. An error class keeps the
 // fields javascript/CLAUDE.md "Errors" lists, its Java singletons and the

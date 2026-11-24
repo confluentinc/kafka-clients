@@ -49,6 +49,10 @@ module.exports = {
     const firstOf = new Map();
     let checked = 0;
     for (const { item, java, isError } of mappedItems(ctx)) {
+      // A nested type is its outer class's namespace member, in its file,
+      // found by its Java nested class's name (root CLAUDE.md §2: each Java
+      // class in its own file, with all its nested classes).
+      if (item.outer) continue;
       checked += 1;
       if (item.tags.jsOnly) continue;
       const subject = `${item.rel}:${item.name}`;
