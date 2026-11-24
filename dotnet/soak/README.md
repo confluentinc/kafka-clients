@@ -375,10 +375,14 @@ The supervisor additionally: tracks the **real child PID** (never
 marker; doubles its restart delay only while failures keep being rapid; and
 rotates the log **without stopping the client**, **only** when it has actually
 reached `SOAK_LOG_LIMIT_BYTES`. Rotation copies the log aside, truncates it in
-place while the client keeps appending, compresses the copy in the background,
-and deletes rotated logs after `SOAK_LOG_KEEP_DAYS` (30). A crash-restart never
-rotates, so the crash's own output stays in the live log, where an operator
-looks first.
+place while the client keeps appending, and compresses the copy in the
+background, one at a time. Rotated logs are deleted once older than
+`SOAK_LOG_KEEP_DAYS` (14) or beyond `SOAK_LOG_KEEP_BYTES` (twice the limit, at
+least 2 GiB) in all, though the size cap never deletes the newest, which may not
+be compressed yet; and a rotation that would leave less than
+`SOAK_LOG_MIN_FREE_BYTES` (1 GiB) of disk free waits until there is room. A
+crash-restart never rotates, so the crash's own output stays in the live log,
+where an operator looks first.
 
 ---
 
