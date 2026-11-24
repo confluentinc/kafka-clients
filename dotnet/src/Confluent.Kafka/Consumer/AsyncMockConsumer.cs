@@ -357,8 +357,14 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// or leaves them for the next <see cref="Poll"/>.
     /// </summary>
     /// <param name="record">The record to queue.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null, or its headers hold a null
+    /// header.</exception>
+    /// <exception cref="IllegalArgumentException">A header key is null.</exception>
+    /// <exception cref="ArgumentException">A header key contains a NUL character, which the native client cannot
+    /// receive unchanged.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
+    /// <remarks>Java's <c>addRecord</c> refuses none of these headers; the binding refuses them as a producer's
+    /// <c>Send</c> does, since the record crosses the native client. A refused record is not queued.</remarks>
     public void AddRecord(ConsumerRecord<TKey, TValue> record) => _native.AddRecord(record, _slots);
 
     /// <summary>
