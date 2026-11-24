@@ -897,7 +897,22 @@ each goes when the reason it gives goes:
   constructor, which only makes the random salt there (`AlterUserScramCredentials` refuses it). The mock
   producers' `PartitionsFor` takes a NUL topic and answers as Java's `MockProducer`: an empty list,
   or the injected exception, since no mock constructor takes a cluster and the topic cut at the NUL
-  finds no partitions. Goes when the C ABI takes length-delimited strings.
+  finds no partitions. Goes when the C ABI takes length-delimited strings. Two metrics strings
+  differ from the `?` rule, and stay, since the core holds them as UTF-8 text, which has no form for
+  an unpaired surrogate. A tag key or value of a `MetricConfig` that crosses to the core
+  (`KafkaMetric.Config(MetricConfig)`, `Measure` on the measurable `KafkaMetric.Measurable()`
+  returns) holding an unpaired surrogate throws `ArgumentException`, as a NUL does, because
+  `Config()` would give it back as `?` where Java's metric keeps the string (ledger 652). A
+  `Metrics()` lookup (`ContainsKey`, `TryGetValue`, the indexer) whose `MetricName` holds an
+  unpaired surrogate in its name, group or a tag is not found, without a call into the core, rather
+  than matching a metric whose name holds the `?` the encoding would produce (ledger 653); the
+  description, which equality ignores, crosses as `?`. The trade-off: a client whose configuration
+  holds an unpaired surrogate (`client.id`, a topic) registers its metrics under the `?` that
+  configuration crossed as, so a lookup by the configured string does not find the client's own
+  metrics, which Java's finds, and only a lookup by the `?` form does. A valid surrogate pair
+  crosses unchanged in both. A filter justified by "the core holds no such string" also turns away
+  keys a caller builds from its own configuration, since configuration crosses as `?`: a new one
+  states its effect on those keys.
 - **A null header key.** A user `IHeader` whose `Key()` returns `null` makes `Send` throw Java's
   `IllegalArgumentException` "Invalid null header key found in headers" on all four producers, at
   every read of the key, so a key that turns `null` at a later read throws too (ledger 603). On an
@@ -1048,6 +1063,9 @@ each goes when the reason it gives goes:
   when the native object outlives `Close`. `Metrics()` is not on this list: it answers after close,
   as Java's, on the real clients and the mock producers, since its map reads the view the client
   took at construction, and it throws on the mock consumers, as Java's `MockConsumer` (ledger 633).
+  One value differs: `kafka-metrics-count`'s `count` reads 0 once the client is closed, where Java's
+  reads the number of metrics left *(recorded gap of the core: its gauge holds the registry weakly,
+  and the view holds only the registry's metric map. Goes when the core's gauge reads the map)*.
 - **The core admin mock.** `MockAdminClient.Builder` checks that live only in the core mock
   (`controller(int)` out of range, `numBrokers` below the log-dir count, `Build()` with no
   brokers, `AddTopic` with a leader without log dirs) and `SetFetchesRemainingUntilVisible` on an
@@ -1849,23 +1867,29 @@ keeps its whole batch. Copy-out stays the default: a span deserializer and `Byte
 unchanged, and a client with only span deserializers creates no handle and no manager. No other code may store
 a `ReadOnlyMemory<byte>` over native batch memory.
 
-**Keep-alive of a metric and of the metrics view (ledgers 626, 633).** The second sanctioned keep-alive form, on
-the producers and the consumers. Each client takes one `kafka_common_metrics_MetricsView_t` at construction and
-keeps it in a `SafeMetricsViewHandle`; every map `Metrics()` returns is a new read-only wrapper over that view, which
-reads the registry at each call, so a map taken before the first record sees the metrics registered later. Each value
-of a map is a `KafkaMetric` over its own owned `kafka_common_metrics_KafkaMetric_t`, taken with
-`kafka_common_metrics_MetricsView_get_err`, by a lookup or while the view's iterator entry is current. The view and
-each metric are independent of the client and stay valid after it is destroyed, so a map answers and `MetricValue()`
-measures the metric on each call, as Java's do, also after the client is closed. Neither handle takes a reference on
-the client's handle; the client's teardown frees neither, and the GC releases each once nothing holds it (the view:
-the client and every map over it). `KafkaMetric` is not `IDisposable`. Its `Config()` copies the metric's
-configuration out of the owned `kafka_common_metrics_MetricConfig_t` that `KafkaMetric_config_err` returns, and
-`Config(MetricConfig)` builds a transient one that `KafkaMetric_set_config_err` copies, so neither keeps a native config
-(ledger 640). `Measurable()` returns a new `NativeMeasurable` over the `kafka_common_metrics_Measurable_t` borrowed from
-the metric's handle: it holds its `KafkaMetric`, so the handle outlives it, and each `Measure` takes a call-scoped
-reference on that handle (ledger 641). A metric a `QuotaViolationException` names holds a name and a value, as the
-error's payload carries no metric handle: it is not measurable, and keeps a copy of a configuration set on it (ledger
-639). ffi §A2 and §B2 Category 6 give the mechanics.
+**Keep-alive of a metric and of the metrics view (ledgers 626, 633).** The second sanctioned keep-alive form, on the
+producers and the consumers. Each client takes one `kafka_common_metrics_MetricsView_t` at construction and keeps it in
+a `SafeMetricsViewHandle`; every map `Metrics()` returns is a new read-only wrapper over that view, which reads the
+registry at each call, so a map taken before the first record sees the metrics registered later. Each value of a map is
+a `KafkaMetric` over its own owned `kafka_common_metrics_KafkaMetric_t`, taken with
+`kafka_common_metrics_MetricsView_get_err`, by a lookup or while the view's iterator entry is current. The view and each
+metric are independent of the client and stay valid after it is destroyed, so a map answers and `MetricValue()` measures
+the metric on each call, as Java's do, also after the client is closed, except `kafka-metrics-count`'s `count`, which
+reads 0 then (§3 **After close**). Neither handle takes a reference on the client's handle; the client's teardown frees
+neither, and the GC releases each once nothing holds it (the view: the client, every map over it and every `Keys` or
+`Values` of one). The view keeps the registry's metric map, and so what each metric's value provider holds, and a metric
+keeps its provider: on a producer the `waiting-threads`, `buffer-total-bytes` and `buffer-available-bytes` gauges hold
+its `BufferPool`, whose close keeps its pooled buffers, so a closed producer whose map, a `Keys` or `Values` of one, or
+one of those metrics is kept keeps up to `buffer.memory` of native memory, which the GC does not see, until they are
+released *(recorded gap of the core. Goes when the pool's close returns its pooled buffers)*. `KafkaMetric` is not
+`IDisposable`. Its `Config()` copies the metric's configuration out of the owned `kafka_common_metrics_MetricConfig_t`
+that `KafkaMetric_config_err` returns, and `Config(MetricConfig)` builds a transient one that
+`KafkaMetric_set_config_err` copies, so neither keeps a native config (ledger 640). `Measurable()` returns a new
+`NativeMeasurable` over the `kafka_common_metrics_Measurable_t` borrowed from the metric's handle: it holds its
+`KafkaMetric`, so the handle outlives it, and each `Measure` takes a call-scoped reference on that handle (ledger 641).
+A metric a `QuotaViolationException` names holds a name and a value, as the error's payload carries no metric handle: it
+is not measurable, and keeps a copy of a configuration set on it (ledger 639). ffi §A2 and §B2 Category 6 give the
+mechanics.
 
 ---
 

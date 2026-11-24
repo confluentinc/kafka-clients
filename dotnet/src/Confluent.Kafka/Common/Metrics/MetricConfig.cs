@@ -52,8 +52,9 @@ public class MetricConfig
         _recordingLevel = Sensor.RecordingLevel.INFO;
     }
 
-    // The values a native config holds, read back as they are: the core keeps a time window in milliseconds, which a
-    // TimeSpan may not hold, and does not check the number of samples.
+    // The values a native config holds, read back as they are, without the setters' checks: the core keeps a time
+    // window in milliseconds, which a TimeSpan may not hold. The number of samples is at least 1, as the core's
+    // set_samples panics below 1, as Java's samples(int) throws.
     internal MetricConfig(
         Quota? quota,
         int samples,
@@ -123,7 +124,10 @@ public class MetricConfig
     /// A <see langword="null"/> map, key or value is accepted here, as Java accepts it. The core cannot hold one:
     /// <see cref="KafkaMetric.Config(MetricConfig)"/> sets no tags for a <see langword="null"/> map, so the metric's
     /// configuration then has none, and throws <see cref="ArgumentNullException"/> for a <see langword="null"/> key or
-    /// value.
+    /// value. A key or value holding a NUL character or an unpaired surrogate is accepted here too, and
+    /// <see cref="KafkaMetric.Config(MetricConfig)"/> throws <see cref="ArgumentException"/> for it: a NUL would cut
+    /// the string, and an unpaired surrogate would come back as <c>?</c>, where Java keeps the string. A valid
+    /// surrogate pair is kept.
     /// </remarks>
     public MetricConfig Tags(IReadOnlyDictionary<string, string>? tags)
     {

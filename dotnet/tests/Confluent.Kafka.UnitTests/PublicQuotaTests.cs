@@ -21,6 +21,27 @@ namespace Confluent.Kafka.UnitTests;
 /// <see cref="Quota"/> is Java's class: Java's <c>MetricsTest.testQuotasEquality</c>, translated, and Java's
 /// <c>acceptable</c>, <c>equals</c>, <c>hashCode</c> and <c>toString</c>.
 /// </summary>
+/// <remarks>
+/// <para>
+/// Not translated: Java's other <c>MetricsTest</c> tests, <c>testMetricName</c>, <c>testSimpleStats</c>,
+/// <c>testHierarchicalSensors</c>, <c>testBadSensorHierarchy</c>, <c>testRemoveChildSensor</c>,
+/// <c>testRemoveSensor</c>, <c>testRemoveInactiveMetrics</c>, <c>testRemoveMetric</c>, <c>testTimeWindowing</c>,
+/// <c>testOldDataHasNoEffect</c>, <c>testSampledStatReturnsNaNWhenNoValuesExist</c>,
+/// <c>testSampledStatReturnsInitialValueWhenNoValuesExist</c>, <c>testDuplicateMetricName</c>, <c>testQuotas</c>,
+/// <c>testPercentiles</c>, <c>shouldPinSmallerValuesToMin</c>, <c>shouldPinLargerValuesToMax</c>,
+/// <c>testPercentilesWithRandomNumbersAndLinearBucketing</c>, <c>testRateWindowing</c>, <c>testSimpleRate</c>,
+/// <c>testMetricInstances</c>, <c>testConcurrentReadUpdate</c> and <c>testConcurrentReadUpdateReport</c>: they build a
+/// <c>Metrics</c> registry, its sensors and its stats, and record and report through them; the binding hands out none
+/// of these (the registry is the native client's) and does not translate the stats or the reporters.
+/// </para>
+/// <para>
+/// For the same reason the other test classes of Java's <c>org.apache.kafka.common.metrics</c> package and its
+/// <c>internals</c> and <c>stats</c> packages are not translated: <c>JmxReporterTest</c>, <c>KafkaMbeanTest</c>,
+/// <c>KafkaMetricsContextTest</c>, <c>TokenBucketTest</c>, <c>IntGaugeSuiteTest</c>, <c>MetricsUtilsTest</c>,
+/// <c>PluginMetricsImplTest</c>, <c>FrequenciesTest</c>, <c>HistogramTest</c>, <c>MeterTest</c>, <c>RateTest</c> and
+/// <c>SampledStatTest</c>. <c>KafkaMetricTest</c> is in <see cref="PublicKafkaMetricMembersTests"/>.
+/// </para>
+/// </remarks>
 public sealed class PublicQuotaTests
 {
     [Fact]

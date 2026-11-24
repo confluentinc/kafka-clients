@@ -470,12 +470,18 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// The returned map is an unmodifiable live view of the metrics. Changes to the underlying metrics will be
     /// reflected in the returned map. Each value is a <see cref="Common.Metrics.KafkaMetric"/>, which measures the
     /// metric again on each <see cref="IMetric.MetricValue()"/>, and a lookup returns a new one each time. The map
-    /// answers after the producer is closed, as Java's does. An <see cref="AsyncMockProducer{TKey, TValue}"/>'s map holds no metric.
-    /// The map holds the producer's own metrics. It lacks Java's network and app-info metrics, which the native
-    /// core does not register yet: the connection, authentication, request and I/O metrics Java's <c>Selector</c>
-    /// adds to <c>producer-metrics</c> (<c>connection-count</c>, <c>request-total</c>, ...), the per-node
-    /// <c>producer-node-metrics</c> group, and the <c>app-info</c> group (<c>version</c>, <c>commit-id</c>,
-    /// <c>start-time-ms</c>), so a dashboard or alert built on those Java names finds nothing.
+    /// answers after the producer is closed, as Java's does, except <c>kafka-metrics-count</c>'s <c>count</c>, which
+    /// then reads 0 where Java's reads the number of metrics left. A map kept after the producer is closed, its
+    /// <c>Keys</c> or <c>Values</c>, or its <c>waiting-threads</c>, <c>buffer-total-bytes</c> or
+    /// <c>buffer-available-bytes</c> metric, also keeps the producer's buffer pool and the buffers it pools, up to
+    /// <c>buffer.memory</c> of native memory that the garbage collector does not see, until they are released. Both
+    /// are recorded gaps of the native core.
+    /// An <see cref="AsyncMockProducer{TKey, TValue}"/>'s map holds no metric. The map holds the producer's own
+    /// metrics. It lacks Java's network and app-info metrics, which the native core does not register yet: the
+    /// connection, authentication, request and I/O metrics Java's <c>Selector</c> adds to <c>producer-metrics</c>
+    /// (<c>connection-count</c>, <c>request-total</c>, ...), the per-node <c>producer-node-metrics</c> group, and the
+    /// <c>app-info</c> group (<c>version</c>, <c>commit-id</c>, <c>start-time-ms</c>), so a dashboard or alert built on
+    /// those Java names finds nothing.
     /// </remarks>
     /// <returns>An unmodifiable live view of the map of metrics currently maintained by the producer.</returns>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();

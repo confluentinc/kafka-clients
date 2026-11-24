@@ -489,7 +489,11 @@ The producer's `kafka_common_metrics_MetricsView_t`, taken once at construction
 (`kafka_producer_Producer_metrics_err`) and held in a `SafeMetricsViewHandle`, and a metric a
 `Metrics()` value keeps (an owned `KafkaMetric_t` in a `SafeKafkaMetricHandle`) are none of these:
 both outlive the call and the producer, and are released by the GC (§B2 Category 6, ledgers 626,
-633).
+633). What they keep is native memory the GC does not see: the view keeps the registry's metric map,
+whose `waiting-threads`, `buffer-total-bytes` and `buffer-available-bytes` gauges hold the producer's
+`BufferPool`, and the core's close keeps the pool's pooled buffers, so a closed producer whose view or
+one of those metrics is kept keeps up to `buffer.memory` until they are released (a recorded core gap,
+ledger 645).
 
 | Handle | Category | Created by | Freed by |
 |---|---|---|---|
@@ -504,7 +508,7 @@ both outlive the call and the producer, and are released by the GC (§B2 Categor
 | an owned `kafka_common_Error_t` | 2 | an `out_err` slot; a `_cb` completion | the error-table read, then `Error_destroy_err` |
 | `kafka_common_MetricName_t`, for a `Metrics()` map's lookup | 2 | the binding (`MetricName_new_err`), per lookup | the binding, after the lookup, in a `finally` (`MetricName_destroy_err`) |
 | `kafka_Iterator_t` (a `Metrics()` map's enumeration), `kafka_List_t` (partitions) | 3 | `MetricsView_iterator_err`; `PartitionsFor`'s `_cb` completion | the reader, after copying out, in a `finally` |
-| `kafka_common_metrics_MetricsView_t` | kept (§B2 Category 6) | `Producer_metrics_err`, once, at construction | `SafeMetricsViewHandle.ReleaseHandle` → `MetricsView_destroy_err`, when the GC releases it once the producer and every map over it are unreachable; never the producer's teardown |
+| `kafka_common_metrics_MetricsView_t` | kept (§B2 Category 6) | `Producer_metrics_err`, once, at construction | `SafeMetricsViewHandle.ReleaseHandle` → `MetricsView_destroy_err`, when the GC releases it once the producer, every map over it and every `Keys` or `Values` of one are unreachable; never the producer's teardown |
 | `kafka_common_metrics_KafkaMetric_t`, one per `Metrics()` value | kept (§B2 Category 6) | `MetricsView_get_err`, per lookup or iterator entry | `SafeKafkaMetricHandle.ReleaseHandle` → `KafkaMetric_destroy_err`, when the GC releases its `KafkaMetric`; the metric stays registered |
 | `kafka_common_metrics_MetricConfig_t`, for a metric's `Config()` / `Config(MetricConfig)` | 2 | `KafkaMetric_config_err` (an owned copy); the binding (`MetricConfig_new_err`), with a transient `Quota_t` and `kafka_Map_t` that `set_quota_err` / `set_tags_err` copy | the binding, in a `finally`: after copying it out (its quota is borrowed, its tags map owned and freed), or after `KafkaMetric_set_config_err` / `Measurable_measure_err` read it (`MetricConfig_destroy_err`) (ledger 640) |
 | `kafka_common_metrics_Measurable_t`, from `KafkaMetric_measurable` | borrowed (§B2 Category 4) | `kafka_common_metrics_KafkaMetric_measurable`, valid as long as the metric's handle | nobody: the `NativeMeasurable` over it holds its `KafkaMetric`, and each `Measure` takes a call-scoped reference on the metric's handle (ledger 641) |
@@ -1618,7 +1622,7 @@ is the core's, so the binding adds none there.
 | `ConsumerRebalanceListener_t` | 5 — registration copied by the callee | the **binding**, right after the `subscribe_*` call returns (success or error), or when no call was made (`ConsumerRebalanceListener_destroy_err`); `self_` follows §B6 (decision 23) |
 | `OffsetCommitCallback_t` (including the no-op one a `ConsumerHandle` commit passes, ledger 104) | 5 — registration copied by the callee | the **binding**, right after the `commit_async*` call that took it returns, or when no call was made (`OffsetCommitCallback_destroy_err`); `self_` follows §B6 |
 | `ConsumerHandle_t` | 6 — caller-owned, weak to its parent | the **binding**, whenever it chooses: `ReleaseHandle` → `ConsumerHandle_destroy_err`, never during one of its own ops (BH:31940-31945 at `3f8a5bc6`). No reference on the consumer (ledger 34 (i)) |
-| `kafka_common_metrics_MetricsView_t`, taken once at construction (`Consumer_metrics_err`) | 6 — caller-owned, independent of the client | the **GC**: `SafeMetricsViewHandle.ReleaseHandle` → `MetricsView_destroy_err` once the consumer and every map over it are unreachable; never the consumer's teardown. No reference on the client (ledger 633) |
+| `kafka_common_metrics_MetricsView_t`, taken once at construction (`Consumer_metrics_err`) | 6 — caller-owned, independent of the client | the **GC**: `SafeMetricsViewHandle.ReleaseHandle` → `MetricsView_destroy_err` once the consumer, every map over it and every `Keys` or `Values` of one are unreachable; never the consumer's teardown. No reference on the client (ledger 633) |
 | `kafka_common_metrics_KafkaMetric_t`, one per `Metrics()` value (`MetricsView_get_err`) | 6 — caller-owned, independent of the view and the client | the **GC**: `SafeKafkaMetricHandle.ReleaseHandle` → `KafkaMetric_destroy_err` when its `KafkaMetric` is collected; the metric stays registered. No reference on the client (ledger 626) |
 | `kafka_common_metrics_MetricConfig_t`, for a metric's `Config()` / `Config(MetricConfig)` (`KafkaMetric_config_err`, an owned copy, or the binding's `MetricConfig_new_err`) | 2 — flat transient | the binding, in a `finally`, after copying it out or after `KafkaMetric_set_config_err` / `Measurable_measure_err` read it (`MetricConfig_destroy_err`); its quota is borrowed, its tags map owned (ledger 640) |
 | `kafka_common_metrics_Measurable_t` (`kafka_common_metrics_KafkaMetric_measurable`) | 4 — borrowed view, valid as long as the metric's handle | **nobody**: the `NativeMeasurable` over it holds its `KafkaMetric`, and each `Measure` takes a call-scoped reference on the metric's handle (ledger 641) |
@@ -1807,11 +1811,14 @@ const-ness and its header text decide, not the type name:
     registry: `Count` reads `MetricsView_len_err`, a lookup builds a `MetricName_t` and calls
     `_contains_key_err` / `_get_err`, and an enumeration reads the view's snapshot iterator
     (Categories 2 and 3 above). The view reads the registry at each call and stays valid after
-    the client's destroy, so a map answers after close, as Java's does; a `Metrics()` call
+    the client's destroy, so a map answers after close, as Java's does, except
+    `kafka-metrics-count:count`, which the core reads as 0 once the client is destroyed (ledger
+    644). It keeps the registry's metric map and what each value provider holds: on a producer
+    the buffer pool and its pooled buffers, up to `buffer.memory` (§A2, ledger 645); a `Metrics()` call
     takes no use and makes no closed check on the real clients (the mock consumers keep
     Java's closed check). The client's teardown never frees the view; the GC releases it once
-    the client and every map over it are unreachable, and `ReleaseHandle` calls
-    `MetricsView_destroy_err` once. Every view P/Invoke takes the `SafeMetricsViewHandle`, so
+    the client, every map over it and every `Keys` or `Values` of one (each holds the view)
+    are unreachable, and `ReleaseHandle` calls `MetricsView_destroy_err` once. Every view P/Invoke takes the `SafeMetricsViewHandle`, so
     the marshaller holds a call-scoped reference (CKRDA0005).
   - **Category 6 — a kept metric** (`kafka_common_metrics_KafkaMetric_t`, on the
     producers and the consumers, ledger 626). Each `Metrics()` value is a `KafkaMetric` over

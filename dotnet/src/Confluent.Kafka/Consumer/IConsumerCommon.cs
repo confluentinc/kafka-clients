@@ -125,8 +125,10 @@ public interface IConsumerCommon
     /// metric again on each <see cref="IMetric.MetricValue()"/>, and a lookup returns a new one each time. Keys compare
     /// by name, group and tags, not description. On <see cref="KafkaConsumer{TKey, TValue}"/> and
     /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> another thread's call does not refuse it, as Java's
-    /// <c>KafkaConsumer.metrics()</c> takes no <c>acquire()</c>, and the map answers after the consumer is closed. The
-    /// mocks wait for it and their map holds no metric, as Java's synchronized <c>MockConsumer.metrics()</c>.
+    /// <c>KafkaConsumer.metrics()</c> takes no <c>acquire()</c>, and the map answers after the consumer is closed, as
+    /// Java's does, except <c>kafka-metrics-count</c>'s <c>count</c>, which then reads 0 where Java's reads the number
+    /// of metrics left (a recorded gap of the native core). The mocks wait for it and their map holds no metric, as
+    /// Java's synchronized <c>MockConsumer.metrics()</c>.
     /// On <see cref="KafkaConsumer{TKey, TValue}"/> and <see cref="AsyncKafkaConsumer{TKey, TValue}"/> the map lacks
     /// Java's network and app-info metrics, which the native core does not register yet: the connection, request and
     /// I/O metrics Java's <c>Selector</c> adds to <c>consumer-metrics</c> (<c>connection-count</c>,
