@@ -117,24 +117,28 @@ public interface IConsumerCommon
     void EnforceRebalance(string? reason);
 
     /// <summary>
-    /// Returns a snapshot of the consumer's metrics (Java <c>Map&lt;MetricName, ? extends Metric&gt;
-    /// metrics()</c>), keyed by <see cref="MetricName"/>.
+    /// Get the metrics kept by the consumer (Java <c>Map&lt;MetricName, ? extends Metric&gt; metrics()</c>).
     /// </summary>
     /// <remarks>
-    /// Each <see cref="IMetric.MetricValue()"/> was measured once, by this call; the entries do not measure again. Keys
-    /// compare by name, group and tags, not description, so per-partition metrics that share a name are distinct
-    /// keys. As Java's <c>KafkaConsumer.metrics()</c> takes no <c>acquire()</c>, another thread's call does not
-    /// refuse it on <see cref="KafkaConsumer{TKey, TValue}"/> and <see cref="AsyncKafkaConsumer{TKey, TValue}"/>; the
-    /// mocks wait for it, as Java's synchronized <c>MockConsumer.metrics()</c> does. On
-    /// <see cref="KafkaConsumer{TKey, TValue}"/> and <see cref="AsyncKafkaConsumer{TKey, TValue}"/> the map lacks
+    /// The returned map is an unmodifiable live view of the metrics. Changes to the underlying metrics will be
+    /// reflected in the returned map. Each value is a <see cref="Common.Metrics.KafkaMetric"/>, which measures the
+    /// metric again on each <see cref="IMetric.MetricValue()"/>, and a lookup returns a new one each time. Keys compare
+    /// by name, group and tags, not description. On <see cref="KafkaConsumer{TKey, TValue}"/> and
+    /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> another thread's call does not refuse it, as Java's
+    /// <c>KafkaConsumer.metrics()</c> takes no <c>acquire()</c>, and the map answers after the consumer is closed, as
+    /// Java's does, except <c>kafka-metrics-count</c>'s <c>count</c>, which then reads 0 where Java's reads the number
+    /// of metrics left (a recorded gap of the native core). The mocks wait for it and their map holds no metric, as
+    /// Java's synchronized <c>MockConsumer.metrics()</c>.
+    /// On <see cref="KafkaConsumer{TKey, TValue}"/> and <see cref="AsyncKafkaConsumer{TKey, TValue}"/> the map lacks
     /// Java's network and app-info metrics, which the native core does not register yet: the connection, request and
     /// I/O metrics Java's <c>Selector</c> adds to <c>consumer-metrics</c> (<c>connection-count</c>,
     /// <c>request-total</c>, ...), the per-node <c>consumer-node-metrics</c> group, and the <c>app-info</c> group
     /// (<c>version</c>, <c>commit-id</c>, <c>start-time-ms</c>).
     /// </remarks>
-    /// <returns>An owned, immutable snapshot (empty when no metrics are registered — e.g. a mock).</returns>
+    /// <returns>An unmodifiable live view of the map of metrics currently maintained by the consumer.</returns>
     /// <exception cref="IllegalStateException">
-    /// The consumer is closed: the native handle is gone, where Java's consumer still answers.
+    /// A <see cref="MockConsumer{TKey, TValue}"/> or <see cref="AsyncMockConsumer{TKey, TValue}"/> is closed, as Java's
+    /// mock throws.
     /// </exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
 }

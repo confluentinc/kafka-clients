@@ -53,7 +53,8 @@ public sealed class PublicProducerCloseWithTimeoutTests
             using IDisposable producerDisposal = TestTimeout.Disposal(producer);
             AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => producer.Close(s_negative)));
 
-            Assert.NotNull(producer.Metrics());
+            // Still open: a Flush with nothing to send returns, where a closed producer's throws.
+            TestTimeout.Run(producer.Flush, Deadline);
             TestTimeout.Run(() => producer.Close(TimeSpan.Zero), Deadline);
             Assert.Throws<IllegalStateException>(() => producer.Send(Record(Topic("negative-close"))));
         }
@@ -63,7 +64,7 @@ public sealed class PublicProducerCloseWithTimeoutTests
             await using IAsyncDisposable producerDisposal = TestTimeout.AsyncDisposal(producer);
             AssertNegativeTimeout(Assert.Throws<IllegalArgumentException>(() => { _ = producer.Close(s_negative); }));
 
-            Assert.NotNull(producer.Metrics());
+            await TestTimeout.Run(() => producer.Flush(), Deadline);
             await TestTimeout.Run(() => producer.Close(TimeSpan.Zero), Deadline);
             Assert.Throws<IllegalStateException>(() => { _ = producer.Send(Record(Topic("negative-close"))); });
         }
