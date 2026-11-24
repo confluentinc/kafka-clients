@@ -69,6 +69,8 @@ public sealed class PublicConsumerHandleProtectionTests
         Assert.Throws<IllegalStateException>(() => consumer.Subscription());
         Assert.Throws<IllegalStateException>(() => consumer.Paused());
         Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
+
+        // Java's MockConsumer.metrics() throws after close too; the real consumers answer (ledger 633).
         Assert.Throws<IllegalStateException>(() => consumer.Metrics());
 
         // Java's enforceRebalance makes no closed check.

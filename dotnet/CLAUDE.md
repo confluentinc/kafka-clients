@@ -379,8 +379,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 
 **Clipped to today's ABI.** The sketch is the *producer* surface the current ABI
 can back — it omits Java members the ABI doesn't expose yet (`metrics()` is **no
-longer** among them: it shipped in M11/P8 as a Mode-A port over the already-present
-`kafka_producer_Producer_metrics` + `kafka_producer_MetricMap_*` family; and
+longer** among them: it shipped in M11/P8, and is now a live map over the
+`kafka_common_metrics_MetricsView_t` that `kafka_producer_Producer_metrics` returns, ledger 631; and
 `send(record, Callback)` now goes through the ABI's per-record `Callback_t`, ffi §A6, decision 10;
 `ProducerRecord.headers()` shipped in M21/P2): `MockProducer.history()` and `MockProducer.uncommittedRecords()`.
 Java returns the records as they were sent, typed `ProducerRecord<K, V>`. The ABI returns the records too
@@ -483,7 +483,7 @@ public interface IConsumerCommon {               // shared sync surface (IAsyncC
     // CommitAsync, Seek and CurrentLag live on each flavor's interface (decisions 13 and 22,
     // ledger 103): the async flavor returns a Task.
 
-    // Metrics (M9/P2) — Python parity, a SHIPPED sync state read (§4). No ClientId(): Java's
+    // Metrics (M9/P2) — a SHIPPED sync read, Java's live view (§4, ledger 631). No ClientId(): Java's
     // clientId() is package-private and Python has no client_id() (ledger 102).
     IReadOnlyDictionary<MetricName, IMetric> Metrics();                        // Java Map<MetricName, ? extends Metric> metrics()
 
@@ -1004,14 +1004,16 @@ each goes when the reason it gives goes:
   `GroupMembershipOperation`), the call throws `ArgumentOutOfRangeException`. An instance member reads the
   value as it is and never throws (`((AclOperation)99).Code()` is `99`). It stays: a C# cast can always make
   such a value.
-- **After close.** The producer's `Flush`, `PartitionsFor` and `Metrics`, the consumer's
-  `Metrics`, and `MockProducer`'s and `AsyncMockProducer`'s `PartitionsFor`, `Metrics`,
+- **After close.** The producer's `Flush` and `PartitionsFor`, and `MockProducer`'s and
+  `AsyncMockProducer`'s `PartitionsFor`,
   `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, `SetSendException`, `SetFlushException`,
   `SetPartitionsForException`, the five `Set*TransactionException` setters
   and the transaction state readers (`TransactionInitialized` to `UncommittedOffsets`) throw the
   closed client's `IllegalStateException`, because the native handle is gone; Java answers (Java's
   mock checks for close only in `send`, `flush`, `fenceProducer` and the transaction methods). Goes
-  when the native object outlives `Close`.
+  when the native object outlives `Close`. `Metrics()` is not on this list: it answers after close,
+  as Java's, on the real clients and the mock producers, since its map reads the view the client
+  took at construction, and it throws on the mock consumers, as Java's `MockConsumer` (ledger 633).
 - **The core admin mock.** `MockAdminClient.Builder` checks that live only in the core mock
   (`controller(int)` out of range, `numBrokers` below the log-dir count, `Build()` with no
   brokers, `AddTopic` with a leader without log dirs) and `SetFetchesRemainingUntilVisible` on an
@@ -1257,10 +1259,12 @@ snapshot per call), `GroupMetadata()` (without `group.id` it throws
 before the C call, as Java's `throwIfGroupIdNotDefined` and Python's `InvalidGroupIdError`
 do; ledger 105), `Wakeup()`, `Metrics()`
 (**shipped M9/P2** — `IReadOnlyDictionary<MetricName, IMetric> Metrics()`, Java
-`metrics()`; on `KafkaConsumer` and `AsyncKafkaConsumer` it makes no owner check, as Java's
-takes no `acquire()`, and holds only the use that keeps the handle alive; the core answers it
-while an op holds its flag, BH:30592-30606 at `3f8a5bc6`; the mocks wait, as Java's
-`synchronized` mock; after close it throws, the call-site list below §3's idiom map), and
+`metrics()`; it returns Java's live view, a read-only map over the
+`kafka_common_metrics_MetricsView_t` the consumer took at construction, which reads the registry
+and not the consumer (ledger 631); on `KafkaConsumer` and `AsyncKafkaConsumer` it makes no owner
+check and takes no use, as Java's takes no `acquire()`, so it answers while an op runs and after
+close (ledger 633); the mocks wait, as Java's `synchronized` mock, and after close throw Java's
+"This consumer has already been closed."), and
 `EnforceRebalance(string? reason
 = null)` (a no-op that only logs under KIP-848; one method collapses Java's two overloads). It
 makes no owner check and, once the consumer is closed, returns without calling the core, as Java's
@@ -1270,11 +1274,11 @@ this list since M19/P1: both block in Java, so each is a `Task` on `IAsyncConsum
 blocking member on `IConsumer` (decision 22, ledger 103). There is no `ClientId()` since
 M19/P1: Java's `clientId()` is package-private and Python has no `client_id()` (ledger 102). **On the
 producer:** `Metrics` (**shipped M11/P8** — `IReadOnlyDictionary<MetricName, IMetric> Metrics()`,
-Java `metrics()`, on **both** `IProducer` and `IAsyncProducer`; it maps **no**
-concurrent-access null — the producer ABI documents none, it takes the core `Mutex` and blocks —
-so its defensive null guard carries a producer-accurate message, decision D-5; it holds the core's
-producer metrics only, none of Java's network and app-info metrics: not the connection,
-authentication, request and I/O metrics Java's `Selector` adds to `producer-metrics`
+Java `metrics()`, on **both** `IProducer` and `IAsyncProducer`; the same live view, over the
+view the producer took at construction, answering after close on the real producers and the mocks,
+ledgers 631 and 633; it holds the core's producer metrics only, none of Java's network and
+app-info metrics: not the connection, authentication, request and I/O metrics Java's `Selector`
+adds to `producer-metrics`
 (`connection-count`, `request-total`, ...), not the per-node `producer-node-metrics` group and not
 the `app-info` group *(recorded gap; Python's binding returns the same set. Why: the core registers
 none of them. Goes when: the core does)*).
@@ -1796,15 +1800,18 @@ keeps its whole batch. Copy-out stays the default: a span deserializer and `Byte
 unchanged, and a client with only span deserializers creates no handle and no manager. No other code may store
 a `ReadOnlyMemory<byte>` over native batch memory.
 
-**Keep-alive of a metric (ledger 626).** The second sanctioned keep-alive form, on every client. Each value of
-`Metrics()` is a `KafkaMetric` over its own owned `kafka_common_metrics_KafkaMetric_t`, taken with
-`kafka_common_metrics_MetricsView_get_err` while the view's iterator entry is current. The handle is independent of
-the view and of the client and stays valid after both are destroyed, so `MetricValue()` measures the metric on each
-call, as Java's does, also after the client is closed. A `SafeKafkaMetricHandle` holds it, takes no reference on the
-client's handle, and is released by the GC; `KafkaMetric` is not `IDisposable`, and the client's teardown frees no
-metric. A metrics view (`kafka_common_metrics_MetricsView_t`) may be kept under the same rule: it reads the registry
-at each call and stays valid after its client is destroyed. A metric a `QuotaViolationException` names holds a name
-and a value, as the error's payload carries no metric handle. ffi §A2 and §B2 Category 6 give the mechanics.
+**Keep-alive of a metric and of the metrics view (ledgers 626, 633).** The second sanctioned keep-alive form, on
+the producers and the consumers. Each client takes one `kafka_common_metrics_MetricsView_t` at construction and
+keeps it in a `SafeMetricsViewHandle`; every map `Metrics()` returns is a new read-only wrapper over that view, which
+reads the registry at each call, so a map taken before the first record sees the metrics registered later. Each value
+of a map is a `KafkaMetric` over its own owned `kafka_common_metrics_KafkaMetric_t`, taken with
+`kafka_common_metrics_MetricsView_get_err`, by a lookup or while the view's iterator entry is current. The view and
+each metric are independent of the client and stay valid after it is destroyed, so a map answers and `MetricValue()`
+measures the metric on each call, as Java's do, also after the client is closed. Neither handle takes a reference on
+the client's handle; the client's teardown frees neither, and the GC releases each once nothing holds it (the view:
+the client and every map over it). `KafkaMetric` is not `IDisposable`. A metric a `QuotaViolationException` names
+holds a name and a value, as the error's payload carries no metric handle. ffi §A2 and §B2 Category 6 give the
+mechanics.
 
 ---
 

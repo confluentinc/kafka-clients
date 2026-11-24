@@ -25,8 +25,6 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Metrics;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
-using Confluent.Kafka.Internal;
-using Confluent.Kafka.Internal.Interop;
 using Confluent.Kafka.Producer;
 using Xunit;
 
@@ -107,7 +105,8 @@ public sealed class PublicKafkaMetricValueTests
             Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
 
-        SetMockMetric(mock, real, FlushTime);
+        KafkaMetric flushTime = MockProducerMetrics.Find(real.Metrics(), FlushTime);
+        MockProducerMetrics.Set(mock, flushTime.MetricName(), flushTime);
         IReadOnlyDictionary<MetricName, IMetric> metrics = mock.Metrics();
 
         AssertEveryValueIsAKafkaMetric(metrics);
@@ -126,7 +125,8 @@ public sealed class PublicKafkaMetricValueTests
             new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
 
-        SetMockMetric(mock, real, FlushTime);
+        KafkaMetric flushTime = MockProducerMetrics.Find(real.Metrics(), FlushTime);
+        MockProducerMetrics.Set(mock, flushTime.MetricName(), flushTime);
         IReadOnlyDictionary<MetricName, IMetric> metrics = mock.Metrics();
 
         AssertEveryValueIsAKafkaMetric(metrics);
@@ -419,91 +419,5 @@ public sealed class PublicKafkaMetricValueTests
             GC.WaitForPendingFinalizers();
             GC.Collect();
         }
-    }
-
-    private static void SetMockMetric(object mock, object real, string name)
-    {
-        NativeProducer mockNative = NativeOf(mock);
-        NativeProducer realNative = NativeOf(real);
-        IntPtr outErr = IntPtr.Zero;
-        IntPtr view = NativeMethods.ProducerMetrics(realNative.Handle, ref outErr);
-        KafkaException.ThrowIfFfiFailed(ref outErr);
-        IntPtr iterator = IntPtr.Zero;
-        try
-        {
-            iterator = NativeMethods.MetricsViewIterator(view, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            while (NativeMethods.IteratorHasNext(iterator, ref outErr) != 0)
-            {
-                IntPtr entry = NativeMethods.IteratorNext(iterator, ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
-                IntPtr key = NativeMethods.MapEntryKey(entry, ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
-                if (MetricsViewMarshal.CopyOutName(key).Name() != name)
-                {
-                    continue;
-                }
-
-                IntPtr metric = NativeMethods.MetricsViewGet(view, key, ref outErr);
-                KafkaException.ThrowIfFfiFailed(ref outErr);
-                try
-                {
-                    SetMockMetrics(mockNative.Handle, key, metric);
-                }
-                finally
-                {
-                    IntPtr metricErr = IntPtr.Zero;
-                    NativeMethods.KafkaMetricDestroy(metric, ref metricErr);
-                    KafkaException.ThrowIfFfiFailed(ref metricErr);
-                }
-
-                return;
-            }
-
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            throw new InvalidOperationException("the real producer has no metric " + name);
-        }
-        finally
-        {
-            IntPtr iteratorErr = IntPtr.Zero;
-            NativeMethods.IteratorDestroy(iterator, ref iteratorErr);
-            IntPtr viewErr = IntPtr.Zero;
-            NativeMethods.MetricsViewDestroy(view, ref viewErr);
-            KafkaException.ThrowIfFfiFailed(ref iteratorErr);
-            KafkaException.ThrowIfFfiFailed(ref viewErr);
-        }
-    }
-
-    private static void SetMockMetrics(SafeProducerHandle mock, IntPtr name, IntPtr metric)
-    {
-        IntPtr outErr = IntPtr.Zero;
-        bool added = false;
-        try
-        {
-            Native.MockProducerSetMockMetrics(mock.DangerousAddRefClass(ref added), name, metric, ref outErr);
-        }
-        finally
-        {
-            if (added)
-            {
-                mock.DangerousRelease();
-            }
-        }
-
-        KafkaException.ThrowIfFfiFailed(ref outErr);
-    }
-
-    private static NativeProducer NativeOf(object producer) =>
-        (NativeProducer)producer.GetType()
-            .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .GetValue(producer)!;
-
-    /// <summary>The C ABI calls only these tests make: a mock producer's metric, set from a real producer's.</summary>
-    private static class Native
-    {
-        private const string DllName = "confluent_kafka";
-
-        [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_set_mock_metrics_err", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void MockProducerSetMockMetrics(IntPtr self, IntPtr name, IntPtr metric, ref IntPtr outErr);
     }
 }
