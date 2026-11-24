@@ -30,7 +30,7 @@ namespace Confluent.Kafka.GrpcServer.UnitTests.Fixtures;
 internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockConsumerOperations
 {
     private readonly MockConsumer<byte[], byte[]> _inner =
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
+        new MockConsumer<byte[], byte[]>("earliest");
 
     private readonly ConsumerScript _script;
 
@@ -214,7 +214,7 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
     }
 
     void IMockConsumerOperations.AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
-        _inner.AddRecord(topic, partition, offset, key, value);
+        _inner.AddRecord(new ConsumerRecord<byte[], byte[]>(topic, partition, offset, key, value));
 
     void IMockConsumerOperations.SetPollException(KafkaException? exception) => _inner.SetPollException(exception);
 }

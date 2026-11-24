@@ -855,7 +855,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
     private static void Block(Func<Task> operation) => TestTimeout.Run(operation, s_deadline).GetAwaiter().GetResult();
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        new AsyncMockConsumer<byte[], byte[]>("latest");
 
     private static Dictionary<TopicPartition, OffsetAndMetadata> Offsets() =>
         new Dictionary<TopicPartition, OffsetAndMetadata> { [s_tp0] = new OffsetAndMetadata(1) };
@@ -877,7 +877,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
 
         internal static Mock Create(bool asyncMock) => asyncMock
             ? new Mock(null, NewAsyncMock())
-            : new Mock(new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null);
+            : new Mock(new MockConsumer<byte[], byte[]>("latest"), null);
 
         internal void Subscribe(IConsumerRebalanceListener listener)
         {

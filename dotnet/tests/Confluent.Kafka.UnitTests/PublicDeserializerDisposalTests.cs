@@ -807,12 +807,6 @@ public sealed class PublicDeserializerDisposalTests
         Assert.Equal(
             NullDeserializer("value.deserializer"),
             (await Assert.ThrowsAsync<ConfigException>(async () => await Consumer(flavor, Unreachable(), key, null!))).Message);
-        Assert.Equal(
-            NullDeserializer("key.deserializer"),
-            Assert.Throws<ConfigException>(() => Mock(flavor, null!, value)).Message);
-        Assert.Equal(
-            NullDeserializer("value.deserializer"),
-            Assert.Throws<ConfigException>(() => Mock(flavor, key, null!)).Message);
 
         Assert.Equal(0, key.Disposals);
         Assert.Equal(0, value.Disposals);
@@ -882,32 +876,6 @@ public sealed class PublicDeserializerDisposalTests
         Assert.Equal(0, value.Disposals);
     }
 
-    [Theory]
-    [InlineData(SyncFlavor, CloseHow)]
-    [InlineData(SyncFlavor, CloseWithOptionsHow)]
-    [InlineData(SyncFlavor, DisposeHow)]
-    [InlineData(AsyncFlavor, CloseHow)]
-    [InlineData(AsyncFlavor, CloseWithOptionsHow)]
-    [InlineData(AsyncFlavor, DisposeHow)]
-    [InlineData(AsyncFlavor, DisposeAsyncHow)]
-    public async Task TheMockConsumers_NeverDisposeTheirDeserializers(string flavor, string how)
-    {
-        DisposableDeserializer key = new DisposableDeserializer("key");
-        DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Mock(flavor, key, value);
-        try
-        {
-            _ = await CloseBy(consumer, how);
-        }
-        finally
-        {
-            await DisposeBounded(consumer);
-        }
-
-        Assert.Equal(0, key.Disposals);
-        Assert.Equal(0, value.Disposals);
-    }
-
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?>
         {
@@ -925,11 +893,6 @@ public sealed class PublicDeserializerDisposalTests
         flavor == SyncFlavor
             ? KafkaConsumer<byte[], byte[]>.Create(configs, key, value)
             : await AsyncKafkaConsumer<byte[], byte[]>.Create(configs, key.AsAsync(), value.AsAsync());
-
-    private static IConsumerCommon Mock(string flavor, IDeserializer<byte[]> key, IDeserializer<byte[]> value) =>
-        flavor == SyncFlavor
-            ? new MockConsumer<byte[], byte[]>(key, value)
-            : new AsyncMockConsumer<byte[], byte[]>(key.AsAsync(), value.AsAsync());
 
     // Only the C mock returns records without a broker: the real consumers built over it own the given deserializers
     // as the ones Create builds do, so their Poll and teardown dispose them as on a broker.

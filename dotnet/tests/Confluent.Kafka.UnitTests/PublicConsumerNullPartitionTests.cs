@@ -882,8 +882,8 @@ public sealed class PublicConsumerNullPartitionTests
     {
         "KafkaConsumer" => KafkaConsumer<byte[], byte[]>.Create(Config(groupId, defaultApiTimeoutMs), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
         "AsyncKafkaConsumer" => await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(groupId, defaultApiTimeoutMs), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
-        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
-        _ => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
+        "MockConsumer" => new MockConsumer<byte[], byte[]>("latest"),
+        _ => new AsyncMockConsumer<byte[], byte[]>("latest"),
     };
 
     private static Dictionary<string, object?> Config(bool groupId, object? defaultApiTimeoutMs)

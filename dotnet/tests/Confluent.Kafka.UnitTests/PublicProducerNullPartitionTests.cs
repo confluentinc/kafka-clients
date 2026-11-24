@@ -252,7 +252,7 @@ public sealed class PublicProducerNullPartitionTests
     private static ConsumerGroupMetadata GroupMetadata()
     {
         using MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new MockConsumer<byte[], byte[]>("latest");
         return consumer.GroupMetadata();
     }
 

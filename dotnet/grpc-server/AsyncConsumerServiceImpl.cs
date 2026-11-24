@@ -100,7 +100,7 @@ internal sealed class AsyncConsumerServiceImpl
             // An empty or all-blank config selects an AsyncMockConsumer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), "earliest");
+                consumer = new AsyncMockConsumer<byte[], byte[]>("earliest");
             }
             else
             {

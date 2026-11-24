@@ -301,7 +301,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
     [Fact]
     public async Task OnTheMock_TheTimedOverloads_AnswerAsTheUntimedOnes()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
             IAsyncConsumer<byte[], byte[]> async = consumer;
@@ -360,7 +360,7 @@ public sealed class PublicAsyncConsumerTimedOverloadTests
         new Dictionary<TopicPartition, long> { [s_tp0] = timestamp };
 
     private static async Task<IAsyncConsumer<byte[], byte[]>> Create(bool mock) => mock
-        ? new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer())
+        ? new AsyncMockConsumer<byte[], byte[]>("latest")
         : await Real(defaultApiTimeoutMs: 60_000);
 
     private static async Task<AsyncKafkaConsumer<byte[], byte[]>> Real(int defaultApiTimeoutMs) => await AsyncKafkaConsumer<byte[], byte[]>.Create(

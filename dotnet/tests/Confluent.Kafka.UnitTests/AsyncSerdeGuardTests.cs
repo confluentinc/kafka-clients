@@ -140,20 +140,6 @@ public sealed class AsyncSerdeGuardTests
     }
 
     [Theory]
-    [MemberData(nameof(Refused))]
-    public async Task AnAsyncMockConsumer_TakesEveryShape_SinceItDisposesNothing(Type shape, string what)
-    {
-        Assert.NotEmpty(what);
-        Serde serde = (Serde)Activator.CreateInstance(shape)!;
-        Disposable other = new Disposable();
-
-        await TestTimeout.DisposeAsync(new AsyncMockConsumer<string, string>(serde, other));
-
-        Assert.Equal(0, serde.Disposals);
-        Assert.Equal(0, other.Disposals);
-    }
-
-    [Theory]
     [MemberData(nameof(Accepted))]
     public async Task AnAsyncKafkaConsumer_TakesASerdeItDisposesThroughIAsyncDisposable_AndCallsOnlyItsDisposeAsyncOnce(Type shape)
     {
@@ -260,10 +246,8 @@ public sealed class AsyncSerdeGuardTests
         SerdeGuard.Check((IAsyncSerializer<string>)serde, DefaultMethodGuard.Producer, disposes: true);
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task AnAsyncConsumer_RefusesAHeadersFormItWouldNeverCall(bool mock)
+    [Fact]
+    public async Task AnAsyncConsumer_RefusesAHeadersFormItWouldNeverCall()
     {
         foreach (bool asKey in new[] { true, false })
         {
@@ -274,9 +258,7 @@ public sealed class AsyncSerdeGuardTests
 
             IllegalArgumentException e = await Assert.ThrowsAsync<IllegalArgumentException>(async () =>
             {
-                IAsyncDisposable consumer = mock
-                    ? new AsyncMockConsumer<string, string>(key, value)
-                    : await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), key, value);
+                IAsyncDisposable consumer = await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), key, value);
                 await TestTimeout.DisposeAsync(consumer);
             });
 
@@ -288,16 +270,12 @@ public sealed class AsyncSerdeGuardTests
         }
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task AnAsyncConsumer_TakesAHeadersFormThroughIAsyncDeserializerWithHeaders(bool mock)
+    [Fact]
+    public async Task AnAsyncConsumer_TakesAHeadersFormThroughIAsyncDeserializerWithHeaders()
     {
         HeadersDeserialize serde = new HeadersDeserialize();
 
-        IAsyncDisposable consumer = mock
-            ? new AsyncMockConsumer<string, string>(serde, serde)
-            : await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), serde, serde);
+        IAsyncDisposable consumer = await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), serde, serde);
         await TestTimeout.DisposeAsync(consumer);
 
         SerdeGuard.Check((IAsyncDeserializer<string>)serde, DefaultMethodGuard.Consumer, disposes: true);

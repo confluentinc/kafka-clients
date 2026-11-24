@@ -19,7 +19,6 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
-using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka.Consumer;
@@ -35,75 +34,34 @@ namespace Confluent.Kafka.Consumer;
 /// <see cref="AsyncMockConsumer{TKey, TValue}"/> and pass it where an <see cref="IAsyncConsumer{TKey, TValue}"/>
 /// is expected.
 /// </para>
-/// <para>
-/// Two deviations from Java's <c>MockConsumer</c>, shared with <see cref="MockConsumer{TKey, TValue}"/>: the
-/// constructor takes the deserializers, because <see cref="Poll"/> decodes bytes as
-/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> does; and <see cref="AddRecord"/> takes bytes, not a typed record.
-/// </para>
 /// </remarks>
-/// <typeparam name="TKey">The key type produced by the key deserializer.</typeparam>
-/// <typeparam name="TValue">The value type produced by the value deserializer.</typeparam>
+/// <typeparam name="TKey">The record key type.</typeparam>
+/// <typeparam name="TValue">The record value type.</typeparam>
 public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValue>
 {
     private readonly NativeConsumer _native;
-    private readonly AsyncDeserializerCall<TKey> _key;
-    private readonly AsyncDeserializerCall<TValue> _value;
+    private readonly MockRecordSlots<TKey, TValue> _slots = new MockRecordSlots<TKey, TValue>();
 
     /// <summary>
-    /// Creates a broker-free mock consumer with the default reset strategy, <c>"latest"</c>: the three-argument
-    /// constructor with <c>"latest"</c>.
+    /// Creates a broker-free mock consumer (Java <c>MockConsumer(String offsetResetStrategy)</c>).
     /// </summary>
-    /// <param name="keyDeserializer">
-    /// Deserializer for record keys, called or awaited as <see cref="AsyncKafkaConsumer{TKey, TValue}"/> does.
-    /// </param>
-    /// <param name="valueDeserializer">Deserializer for record values, as for keys.</param>
-    /// <exception cref="ConfigException">
-    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
-    /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/>.
-    /// </exception>
-    public AsyncMockConsumer(IAsyncDeserializer<TKey> keyDeserializer, IAsyncDeserializer<TValue> valueDeserializer)
-        : this(keyDeserializer, valueDeserializer, NativeConsumer.DefaultOffsetResetStrategy)
-    {
-    }
-
-    /// <summary>
-    /// Creates a broker-free mock consumer whose <see cref="Poll"/> decodes the records queued by
-    /// <see cref="AddRecord"/> with the two asynchronous deserializers, which it never disposes.
-    /// </summary>
-    /// <param name="keyDeserializer">
-    /// Deserializer for record keys, called or awaited as <see cref="AsyncKafkaConsumer{TKey, TValue}"/> does.
-    /// </param>
-    /// <param name="valueDeserializer">Deserializer for record values, as for keys.</param>
-    /// <param name="autoOffsetReset">
+    /// <param name="offsetResetStrategy">
     /// The reset-strategy name (<c>"earliest"</c> / <c>"latest"</c> / <c>"none"</c> /
     /// <c>"by_duration:&lt;ISO-8601&gt;"</c>).
     /// </param>
-    /// <exception cref="ConfigException">
-    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null, as on
-    /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/>.
-    /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// <paramref name="autoOffsetReset"/> is <see langword="null"/> ("Auto offset reset strategy is null", as
+    /// <paramref name="offsetResetStrategy"/> is <see langword="null"/> ("Auto offset reset strategy is null", as
     /// Java's <c>MockConsumer(String)</c>) or not a valid strategy.
     /// </exception>
-    public AsyncMockConsumer(
-        IAsyncDeserializer<TKey> keyDeserializer,
-        IAsyncDeserializer<TValue> valueDeserializer,
-        string autoOffsetReset)
+    public AsyncMockConsumer(string offsetResetStrategy)
     {
-        IAsyncDeserializer<TKey> key = NativeConsumer.RequireDeserializer(keyDeserializer, "key.deserializer");
-        IAsyncDeserializer<TValue> value = NativeConsumer.RequireDeserializer(valueDeserializer, "value.deserializer");
-        SerdeGuard.Check(key, DefaultMethodGuard.Consumer, disposes: false);
-        SerdeGuard.Check(value, DefaultMethodGuard.Consumer, disposes: false);
-        _key = new AsyncDeserializerCall<TKey>(key);
-        _value = new AsyncDeserializerCall<TValue>(value);
-        _native = NativeConsumer.CreateMock(autoOffsetReset);
+        _native = NativeConsumer.CreateMock(offsetResetStrategy);
+        _native.OnTornDown(_slots.Clear);
     }
 
     /// <inheritdoc/>
     public Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
-        _native.PollWithCallback(
-            timeout, _key, _value, cancellationToken);
+        _native.PollWithCallback(timeout, _slots, cancellationToken);
 
     /// <inheritdoc/>
     public Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default) =>
@@ -379,18 +337,13 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.UpdatePartitions(topic, partitionCount, leaderId, leaderHost, leaderPort);
 
     /// <summary>
-    /// Queues a record for the next <see cref="Poll"/> (Java <c>addRecord</c>). The partition must be assigned.
+    /// Queues <paramref name="record"/> for the next <see cref="Poll"/> (Java <c>MockConsumer.addRecord</c>). The
+    /// record's partition must be assigned; <see cref="Poll"/> returns its key and value as the same objects.
     /// </summary>
-    /// <param name="topic">The record topic.</param>
-    /// <param name="partition">The record partition (must be assigned; non-negative).</param>
-    /// <param name="offset">The record offset.</param>
-    /// <param name="key">The key bytes, or <see langword="null"/> for an absent key.</param>
-    /// <param name="value">The value bytes, or <see langword="null"/> for a tombstone.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
+    /// <param name="record">The record to queue.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
-    public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
-        _native.AddRecord(topic, partition, offset, key, value);
+    public void AddRecord(ConsumerRecord<TKey, TValue> record) => _native.AddRecord(record, _slots);
 
     /// <summary>
     /// Makes the next <see cref="Poll"/> fault with <paramref name="exception"/>, the same instance (Java
@@ -495,7 +448,10 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.LosePartitionsWithCallback(partitionsLost, cancellationToken);
 
     /// <inheritdoc/>
-    public void Dispose() => _native.Dispose();
+    public void Dispose()
+    {
+        _native.Dispose();
+    }
 
     /// <inheritdoc/>
     public ValueTask DisposeAsync() => _native.DisposeAsync();

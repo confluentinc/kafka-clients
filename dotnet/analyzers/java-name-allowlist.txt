@@ -31,26 +31,11 @@ kind T:Confluent.Kafka.Common.KafkaFuture.BiConsumer`2
 # as a static class, which nothing constructs or derives from.
 kind T:Confluent.Kafka.Common.Serialization.Serdes
 
-# C1: the mock consumer takes deserializers: it runs on the core's mock, which holds bytes (dotnet/CLAUDE.md §3).
-missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)
-missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#MockConsumer(String)
-overload M:Confluent.Kafka.Consumer.MockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1},System.String)
-# The asynchronous mock takes the asynchronous deserializers, as AsyncKafkaConsumer does (M23/P7, ledger 539).
-overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IAsyncDeserializer{`0},Confluent.Kafka.Common.Serialization.IAsyncDeserializer{`1},System.String)
-
-# C2: the two-argument mock constructors replace an optional argument (the default reset strategy, autoComplete
-# true) with an overload, so a parameter added later breaks no compiled caller. The mock producer's other forms
-# stay in the baseline: Java's take a partitioner and a cluster, which are not translated.
-overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IAsyncDeserializer{`0},Confluent.Kafka.Common.Serialization.IAsyncDeserializer{`1})
-overload M:Confluent.Kafka.Consumer.MockConsumer`2.#ctor(Confluent.Kafka.Common.Serialization.IDeserializer{`0},Confluent.Kafka.Common.Serialization.IDeserializer{`1})
+# C2: the two-argument mock producer constructors replace an optional argument (autoComplete true) with an
+# overload, so a parameter added later breaks no compiled caller. The mock producer's other forms stay in the
+# baseline: Java's take a partitioner and a cluster, which are not translated.
 overload M:Confluent.Kafka.Producer.AsyncMockProducer`2.#ctor(Confluent.Kafka.Common.Serialization.IAsyncSerializer{`0},Confluent.Kafka.Common.Serialization.IAsyncSerializer{`1})
 overload M:Confluent.Kafka.Producer.MockProducer`2.#ctor(Confluent.Kafka.Common.Serialization.ISerializer{`0},Confluent.Kafka.Common.Serialization.ISerializer{`1})
-
-# M9: AddRecord takes bytes, which the mock deserializes on Poll, for the same reason.
-missing T:Confluent.Kafka.Consumer.AsyncMockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#addRecord(ConsumerRecord)
-missing T:Confluent.Kafka.Consumer.MockConsumer`2 org.apache.kafka.clients.consumer.MockConsumer#addRecord(ConsumerRecord)
-overload M:Confluent.Kafka.Consumer.AsyncMockConsumer`2.AddRecord(System.String,System.Int32,System.Int64,System.Byte[],System.Byte[])
-overload M:Confluent.Kafka.Consumer.MockConsumer`2.AddRecord(System.String,System.Int32,System.Int64,System.Byte[],System.Byte[])
 
 # M2: Java's commitSync is Commit, as Python's commit(): every binding uses that one name, and CommitSync would
 # put "Sync" on the async consumers.

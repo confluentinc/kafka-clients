@@ -38,7 +38,7 @@ public sealed class PublicConsumerPositionTests
     private static async Task<AsyncMockConsumer<byte[], byte[]>> ReadyForPosition(
         long seekOffset, string topic = Topic, int partition = Partition)
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         await TestTimeout.Run(
             () => consumer.Assign(new[] { new TopicPartition(topic, partition) }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(new TopicPartition(topic, partition), seekOffset), s_deadline);

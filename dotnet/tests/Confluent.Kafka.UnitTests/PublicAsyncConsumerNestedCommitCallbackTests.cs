@@ -525,7 +525,7 @@ public sealed class PublicAsyncConsumerNestedCommitCallbackTests
     private static async Task<AsyncMockConsumer<byte[], byte[]>> NewAsyncMockConsumer()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), "earliest");
+            new AsyncMockConsumer<byte[], byte[]>("earliest");
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         consumer.UpdateBeginningOffset(Topic, 0, 0);
         return consumer;

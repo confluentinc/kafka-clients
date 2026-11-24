@@ -500,7 +500,7 @@ public sealed class PublicProducerTransactionTests
     public void GroupMetadata_OutlivesTheConsumerThatGaveIt()
     {
         ConsumerGroupMetadata metadata;
-        using (MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()))
+        using (MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest"))
         {
             metadata = consumer.GroupMetadata();
         }
@@ -902,7 +902,7 @@ public sealed class PublicProducerTransactionTests
 
     private static ConsumerGroupMetadata GroupMetadata()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         return consumer.GroupMetadata();
     }
 

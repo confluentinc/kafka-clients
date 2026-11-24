@@ -77,7 +77,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
             // An empty or all-blank config selects a MockConsumer, as Python's servicer does.
             if (IsEmptyConfig(request.Config))
             {
-                consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), "earliest");
+                consumer = new MockConsumer<byte[], byte[]>("earliest");
             }
             else
             {
