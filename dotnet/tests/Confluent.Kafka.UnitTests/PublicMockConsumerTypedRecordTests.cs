@@ -36,7 +36,9 @@ namespace Confluent.Kafka.UnitTests;
 /// <see cref="AsyncMockConsumer{TKey, TValue}.AddRecord"/>, as Java's <c>MockConsumer.addRecord</c> takes them: the
 /// polled record holds the very key and value objects added and every field of the record, and the table that
 /// carries a key and a value across the native mock (<c>MockRecordSlots</c>) is emptied by delivery and by
-/// <c>Close</c>. Each case runs on both mocks.
+/// <c>Close</c>. A user's own <see cref="IHeaders"/> crosses with its order, duplicates and null values, each header
+/// read once; the headers the binding refuses leave no entry; a polled record's headers are its own and writable.
+/// Each case runs on both mocks.
 /// </summary>
 public sealed class PublicMockConsumerTypedRecordTests
 {
@@ -314,6 +316,132 @@ public sealed class PublicMockConsumerTypedRecordTests
         Assert.Equal(0, consumer.ValueCount);
     }
 
+    // A user's own IHeaders, the only kind a user outside the binding can build (RecordHeaders is internal), is
+    // enumerated once and each header's key and value read once; the polled record carries them in order, duplicates
+    // and a null value kept, an empty value distinct from a null one.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AUsersOwnHeaders_ArePolledInOrder_EachReadOnce(bool async)
+    {
+        await using Mock<string, string> consumer = await Assigned<string, string>(async);
+        CountingHeader[] given =
+        {
+            new CountingHeader("h1", Bytes("one")),
+            new CountingHeader("h2", null),
+            new CountingHeader("h1", Bytes("again")),
+            new CountingHeader("e", Array.Empty<byte>()),
+        };
+        CountingHeaders headers = new CountingHeaders(given);
+
+        consumer.AddRecord(WithHeaders(headers));
+        ConsumerRecord<string, string> polled = Assert.Single(await consumer.Poll());
+
+        Assert.Equal(1, headers.Enumerations);
+        Assert.All(given, header => Assert.Equal(1, header.KeyReads));
+        Assert.All(given, header => Assert.Equal(1, header.ValueReads));
+        IHeader[] polledHeaders = polled.Headers().ToArray();
+        Assert.Equal(4, polledHeaders.Length);
+        Assert.Equal("h1", polledHeaders[0].Key());
+        Assert.Equal(Bytes("one"), polledHeaders[0].Value());
+        Assert.Equal("h2", polledHeaders[1].Key());
+        Assert.Null(polledHeaders[1].Value());
+        Assert.Equal("h1", polledHeaders[2].Key());
+        Assert.Equal(Bytes("again"), polledHeaders[2].Value());
+        Assert.Equal("e", polledHeaders[3].Key());
+        Assert.Equal(Array.Empty<byte>(), polledHeaders[3].Value());
+        Assert.Equal(0, consumer.KeyCount);
+        Assert.Equal(0, consumer.ValueCount);
+    }
+
+    // The binding's refusal, as a producer's send answers (Java's addRecord refuses nothing): the C ABI cannot carry
+    // a null key, and would cut a key at a NUL. The ids are removed again, and the consumer stays usable.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AUserHeaderWithANullKey_IsRefused_AndLeavesNoEntry(bool async)
+    {
+        await using Mock<string, string> consumer = await Assigned<string, string>(async);
+
+        IllegalArgumentException error = Assert.Throws<IllegalArgumentException>(() => consumer.AddRecord(
+            WithHeaders(new CountingHeaders(new[] { new CountingHeader("ok", null), new CountingHeader(null, null) }))));
+
+        Assert.Equal("Invalid null header key found in headers", error.Message);
+        await AssertNoEntryAndUsable(consumer);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ANullHeaderInAUsersHeaders_IsRefused_AndLeavesNoEntry(bool async)
+    {
+        await using Mock<string, string> consumer = await Assigned<string, string>(async);
+
+        ArgumentNullException error = Assert.Throws<ArgumentNullException>(() => consumer.AddRecord(
+            WithHeaders(new CountingHeaders(new[] { new CountingHeader("ok", null), null }))));
+
+        Assert.StartsWith("Header cannot be null.", error.Message, StringComparison.Ordinal);
+        await AssertNoEntryAndUsable(consumer);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AHeaderKeyWithANul_IsRefused_AndLeavesNoEntry(bool async)
+    {
+        await using Mock<string, string> consumer = await Assigned<string, string>(async);
+
+        ArgumentException error = Assert.Throws<ArgumentException>(() => consumer.AddRecord(
+            WithHeaders(new CountingHeaders(new[] { new CountingHeader("a\0b", null) }))));
+
+        Assert.IsNotType<IllegalArgumentException>(error);
+        Assert.Equal("record", error.ParamName);
+        await AssertNoEntryAndUsable(consumer);
+    }
+
+    // A polled record's headers are never null, are not the object given, and are writable: a record of its own.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ThePolledHeaders_AreNeverNull_AndWritable_OnePerRecord(bool async)
+    {
+        await using Mock<string, string> consumer = await Assigned<string, string>(async);
+        CountingHeaders given = new CountingHeaders(new[] { new CountingHeader("h", Bytes("v")) });
+
+        consumer.AddRecord(WithHeaders(given));
+        consumer.AddRecord(new ConsumerRecord<string, string>(Topic, 0, 1, "k", "v"));
+        consumer.AddRecord(new ConsumerRecord<string, string>(Topic, 0, 2, "k", "v"));
+        ConsumerRecord<string, string>[] polled = (await consumer.Poll()).ToArray();
+
+        Assert.Equal(3, polled.Length);
+        Assert.NotSame(given, polled[0].Headers());
+        Assert.NotSame(polled[1].Headers(), polled[2].Headers());
+        Assert.Empty(polled[1].Headers());
+        foreach (ConsumerRecord<string, string> record in polled)
+        {
+            Assert.NotNull(record.Headers());
+            record.Headers().Add("added", Bytes("x")).Remove("h");
+            Assert.Equal(Bytes("x"), record.Headers().LastHeader("added")!.Value());
+        }
+
+        Assert.Empty(polled[0].Headers().Headers("h"));
+        Assert.Single(given.ToArray());
+    }
+
+    private static ConsumerRecord<string, string> WithHeaders(IHeaders headers) =>
+        new ConsumerRecord<string, string>(
+            Topic, 0, 0, ConsumerRecord<string, string>.NO_TIMESTAMP, TimestampType.NO_TIMESTAMP_TYPE, -1, -1, "k", "v",
+            headers, null);
+
+    private static async Task AssertNoEntryAndUsable(Mock<string, string> consumer)
+    {
+        Assert.Equal(0, consumer.KeyCount);
+        Assert.Equal(0, consumer.ValueCount);
+        consumer.AddRecord(new ConsumerRecord<string, string>(Topic, 0, 0, "k", "v"));
+        Assert.Equal("k", Assert.Single(await consumer.Poll()).Key());
+        Assert.Equal(0, consumer.KeyCount);
+    }
+
     private static byte[] Bytes(string text) => Encoding.UTF8.GetBytes(text);
 
     private static async Task<Mock<TKey, TValue>> Assigned<TKey, TValue>(
@@ -341,6 +469,78 @@ public sealed class PublicMockConsumerTypedRecordTests
         internal Payload(string text) => Text = text;
 
         internal string Text { get; }
+    }
+
+    // A header of the user's own that counts the reads of its key and value.
+    private sealed class CountingHeader : IHeader
+    {
+        private readonly string? _key;
+        private readonly byte[]? _value;
+        private int _keyReads;
+        private int _valueReads;
+
+        internal CountingHeader(string? key, byte[]? value)
+        {
+            _key = key;
+            _value = value;
+        }
+
+        internal int KeyReads => Volatile.Read(ref _keyReads);
+
+        internal int ValueReads => Volatile.Read(ref _valueReads);
+
+        public string Key()
+        {
+            Interlocked.Increment(ref _keyReads);
+            return _key!;
+        }
+
+        public byte[]? Value()
+        {
+            Interlocked.Increment(ref _valueReads);
+            return _value;
+        }
+    }
+
+    // Headers of the user's own, a fixed list (a null element included) that counts its enumerations.
+    private sealed class CountingHeaders : IHeaders
+    {
+        private readonly List<IHeader?> _headers;
+        private int _enumerations;
+
+        internal CountingHeaders(IEnumerable<IHeader?> headers) => _headers = headers.ToList();
+
+        internal int Enumerations => Volatile.Read(ref _enumerations);
+
+        public IHeaders Add(IHeader header)
+        {
+            _headers.Add(header);
+            return this;
+        }
+
+        public IHeaders Add(string key, byte[]? value) => Add(new CountingHeader(key, value));
+
+        public IHeaders Remove(string key)
+        {
+            _headers.RemoveAll(header => string.Equals(header?.Key(), key, StringComparison.Ordinal));
+            return this;
+        }
+
+        public IHeader? LastHeader(string key) =>
+            _headers.LastOrDefault(header => string.Equals(header?.Key(), key, StringComparison.Ordinal));
+
+        public IEnumerable<IHeader> Headers(string key) =>
+            _headers.Where(header => string.Equals(header?.Key(), key, StringComparison.Ordinal)).ToList()!;
+
+        public IHeader[] ToArray() => _headers.ToArray()!;
+
+        public IEnumerator<IHeader> GetEnumerator()
+        {
+            Interlocked.Increment(ref _enumerations);
+            return _headers.GetEnumerator()!;
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     // One shape over both mocks, so each case states its steps once and runs on both.
