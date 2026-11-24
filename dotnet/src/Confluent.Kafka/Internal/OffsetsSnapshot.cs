@@ -17,6 +17,7 @@ using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Internal.Interop;
 
 namespace Confluent.Kafka.Internal;
 
@@ -28,7 +29,8 @@ namespace Confluent.Kafka.Internal;
 internal readonly struct OffsetsSnapshot
 {
     private OffsetsSnapshot(
-        string[] topics, int[] partitions, long[] offsets, int[] leaderEpochs, string[] metadata, int count)
+        string[] topics, int[] partitions, long[] offsets, int[] leaderEpochs, string[] metadata, int count,
+        string? nulMessage)
     {
         Topics = topics;
         Partitions = partitions;
@@ -36,6 +38,7 @@ internal readonly struct OffsetsSnapshot
         LeaderEpochs = leaderEpochs;
         Metadata = metadata;
         Count = count;
+        NulMessage = nulMessage;
     }
 
     internal string[] Topics { get; }
@@ -50,8 +53,16 @@ internal readonly struct OffsetsSnapshot
 
     internal int Count { get; }
 
-    internal static OffsetsSnapshot Of(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
-        Snapshot(offsets, nullKeyGivesNone: false).GetValueOrDefault();
+    // The message for the first topic or metadata holding a NUL, which the C ABI would cut: the caller answers it
+    // where it answers a null key, and the snapshot never crosses the C ABI.
+    internal string? NulMessage { get; }
+
+    // Throws for a null key, then for a NUL, as Java reaches the null key wherever it is in the map.
+    internal static OffsetsSnapshot Of(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
+    {
+        OffsetsSnapshot snapshot = Snapshot(offsets, nullKeyGivesNone: false).GetValueOrDefault();
+        return snapshot.NulMessage is null ? snapshot : throw NulString(snapshot.NulMessage);
+    }
 
     // The snapshot, or null when a key is null, for the caller to answer it where Java does; the entries after it are
     // not read.
@@ -59,6 +70,8 @@ internal readonly struct OffsetsSnapshot
         Snapshot(offsets, nullKeyGivesNone: true);
 
     internal static ArgumentNullException NullKey() => new ArgumentNullException("offsets", "offsets must not contain null");
+
+    internal static ArgumentException NulString(string message) => new ArgumentException(message, "offsets");
 
     private static OffsetsSnapshot? Snapshot(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, bool nullKeyGivesNone)
     {
@@ -73,6 +86,7 @@ internal readonly struct OffsetsSnapshot
         long[] offsetValues = new long[count];
         int[] leaderEpochs = new int[count];
         string[] metadata = new string[count];
+        string? nulMessage = null;
         int index = 0;
         foreach (KeyValuePair<TopicPartition, OffsetAndMetadata> entry in offsets)
         {
@@ -98,9 +112,12 @@ internal readonly struct OffsetsSnapshot
             offsetValues[index] = value.Offset();
             leaderEpochs[index] = value.LeaderEpoch() ?? -1;
             metadata[index] = value.Metadata() ?? string.Empty;
+            nulMessage ??= NativeStrings.ContainsNul(topics[index]) ? NativeStrings.InvalidTopicMessage
+                : NativeStrings.ContainsNul(metadata[index]) ? NativeStrings.InvalidOffsetMetadataMessage
+                : null;
             index++;
         }
 
-        return new OffsetsSnapshot(topics, partitions, offsetValues, leaderEpochs, metadata, count);
+        return new OffsetsSnapshot(topics, partitions, offsetValues, leaderEpochs, metadata, count, nulMessage);
     }
 }

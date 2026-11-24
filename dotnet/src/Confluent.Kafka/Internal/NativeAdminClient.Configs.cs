@@ -178,7 +178,7 @@ internal sealed partial class NativeAdminClient
                     throw new ArgumentNullException(nameof(configs), "configs must not contain null");
                 }
 
-                AdminStrings.Validate(entry.Key.Name(), nameof(configs));
+                NativeStrings.Validate(entry.Key.Name(), NativeStrings.InvalidAdminStringMessage, nameof(configs));
                 if (entry.Value is null)
                 {
                     throw new ArgumentNullException(nameof(configs), "configs must not contain null");
@@ -198,8 +198,8 @@ internal sealed partial class NativeAdminClient
                         throw new ArgumentNullException(nameof(configs), "configs must not contain null");
                     }
 
-                    AdminStrings.Validate(op.ConfigEntry().Name(), nameof(configs));
-                    AdminStrings.Validate(op.ConfigEntry().Value(), nameof(configs));
+                    NativeStrings.Validate(op.ConfigEntry().Name(), NativeStrings.InvalidAdminStringMessage, nameof(configs));
+                    NativeStrings.Validate(op.ConfigEntry().Value(), NativeStrings.InvalidAdminStringMessage, nameof(configs));
                     ops.Add(op);
                 }
             }
@@ -385,7 +385,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
             }
 
-            AdminStrings.Validate(resource.Name(), parameterName);
+            NativeStrings.Validate(resource.Name(), NativeStrings.InvalidAdminStringMessage, parameterName);
             if (seen.Add(resource))
             {
                 keys.Add(resource);

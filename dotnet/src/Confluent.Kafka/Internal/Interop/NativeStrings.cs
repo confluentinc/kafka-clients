@@ -14,22 +14,21 @@
 
 using System;
 
-namespace Confluent.Kafka.Internal;
+namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Rejects a string that cannot cross the C ABI unchanged, an admin request string, a producer record's topic or
-/// header key, a consumer's subscription pattern, or a client's configuration key or value: one containing
-/// <c>'\0'</c>, which ends the C string. An unpaired
-/// UTF-16 surrogate is not rejected: it crosses as <c>'?'</c>, as Java's <c>String.getBytes(UTF_8)</c> writes it
-/// (<see cref="Interop.Utf8Marshal.QuestionMarkUtf8"/>).
+/// Rejects a string argument that cannot cross the C ABI unchanged: one containing <c>'\0'</c>, which ends the C
+/// string, so the core would act on the part before it. Each kind of string has its own message. An unpaired UTF-16
+/// surrogate is not rejected: it crosses as <c>'?'</c>, as Java's <c>String.getBytes(UTF_8)</c> writes it
+/// (<see cref="Utf8Marshal.QuestionMarkUtf8"/>).
 /// </summary>
 /// <remarks>
 /// A recorded deviation: Java sends a NUL whole, with no error. Here the C ABI would cut the string at the NUL, so the
 /// string could act on another target; it is rejected with <see cref="ArgumentException"/> before anything is pinned.
 /// </remarks>
-internal static class AdminStrings
+internal static class NativeStrings
 {
-    internal const string InvalidStringMessage =
+    internal const string InvalidAdminStringMessage =
         "An admin request string must not contain a NUL character: such a string cannot be passed to the native " +
         "client unchanged.";
 
@@ -52,12 +51,19 @@ internal static class AdminStrings
         "A configuration value must not contain a NUL character: such a string cannot be passed to the native " +
         "client unchanged.";
 
-    internal static void Validate(string? value, string parameterName) =>
-        Validate(value, InvalidStringMessage, parameterName);
+    internal const string InvalidArgumentStringMessage =
+        "A string argument must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
+
+    internal const string InvalidOffsetMetadataMessage =
+        "Offset metadata must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
+
+    internal static bool ContainsNul(string? value) => value is not null && value.IndexOf('\0') >= 0;
 
     internal static void Validate(string? value, string message, string parameterName)
     {
-        if (value is not null && value.IndexOf('\0') >= 0)
+        if (ContainsNul(value))
         {
             throw new ArgumentException(message, parameterName);
         }

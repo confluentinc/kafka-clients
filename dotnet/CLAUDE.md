@@ -866,7 +866,20 @@ each goes when the reason it gives goes:
   string argument throws `ArgumentException` at the call, because a C string cannot carry it; Java
   sends it and the broker rejects the name. A NUL in a `SubscriptionPattern` throws too, on the
   mocks as well, since they pass the pattern to the C ABI like the real consumers; Java sends it,
-  and the broker evaluates it as a regular expression that no topic name can match. The mock
+  and the broker evaluates it as a regular expression that no topic name can match. On the four
+  consumers, and in the four producers' `SendOffsetsToTransaction`, a NUL in a topic or in the
+  metadata of an offset to commit is refused where a null element or key of the same argument is, so the checks
+  Java makes first (closed, a null element, `group.id`, a negative target time) still come first,
+  and so does, in the real consumers' `Subscribe` and `Assign`, a blank topic (Java's `isBlank`: no
+  character above U+0020, so a NUL counts), which the core checks only in the call the NUL stops;
+  the mocks refuse it too, as their native mock could match the cut name to another topic's state.
+  The mock consumers' `OffsetsForTimes` answers a NUL topic as Java's `MockConsumer` answers every
+  map, with `UnsupportedOperationException`, and the mock consumers' constructors answer a NUL
+  strategy as Java's `AutoOffsetResetStrategy.fromString` does, a `by_duration` one with the
+  duration's parse failure as its cause. Not refused, as nothing acts on the
+  cut string: `Seek`'s metadata, which neither Java nor the core reads; `EnforceRebalance`'s reason,
+  which Java's KIP-848 consumer only logs; and the user of a `UserScramCredentialUpsertion`
+  constructor, which only makes the random salt there (`AlterUserScramCredentials` refuses it). The mock
   producers' `PartitionsFor` takes a NUL topic and answers as Java's `MockProducer`: an empty list,
   or the injected exception, since no mock constructor takes a cluster and the topic cut at the NUL
   finds no partitions. Goes when the C ABI takes length-delimited strings.

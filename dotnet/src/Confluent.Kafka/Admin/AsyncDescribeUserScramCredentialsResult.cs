@@ -73,7 +73,7 @@ public sealed class AsyncDescribeUserScramCredentialsResult
     /// </exception>
     public AsyncKafkaFuture<UserScramCredentialsDescription> Description(string? userName)
     {
-        AdminStrings.Validate(userName, nameof(userName));
+        NativeStrings.Validate(userName, NativeStrings.InvalidAdminStringMessage, nameof(userName));
 
         return AsyncAdminFutures.Of(
             NativeAdminClient.DescribeUserScramCredentialsDescription(_native, userName, AdminFlavour.Async));

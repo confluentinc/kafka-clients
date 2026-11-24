@@ -68,7 +68,7 @@ internal sealed class CreateTopicsRefinements
             throw new ArgumentNullException(nameof(topic));
         }
 
-        AdminStrings.Validate(topic, nameof(topic));
+        NativeStrings.Validate(topic, NativeStrings.InvalidAdminStringMessage, nameof(topic));
         IntPtr future;
         using (Utf8Marshal.PinnedUtf8String name = Utf8Marshal.Pin(topic))
         {
