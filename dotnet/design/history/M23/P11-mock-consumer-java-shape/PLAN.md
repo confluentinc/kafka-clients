@@ -265,3 +265,51 @@ dereferenced, on either side, and needs no `GCHandle`. First use: the mock consu
 ## Revision
 
 (none: the preferred factory form was built in S2.)
+
+## Outcome (S1–S4)
+
+Commits: S0 `d60e97154`, S1 `d7c5359cf`, S2 `2822920b2`, S3 `47bd5580a`, S4 (the commit with this text). The
+stacked branch's fixups for Critic 135's issues 1–4 are folded into the steps that wrote the code they fix.
+
+- **C mock slots.** The C mock stores the key and value slots and never reads, frees or compares them: the
+  binding builds it as `MockConsumer<GenericValue, GenericValue>` with `Owns { key: false, value: false }`, and
+  the options record owns nothing. `MockRecordSlotsTests` asserts that the ids come back unchanged, with one NULL.
+- **The copy-out.** `ConsumerRecordsMarshal` walks a batch once, generic over a struct source: the deserializing
+  source forwards to master's unchanged `RecordReader.Copy`, the resolving one to `RecordReader.Resolve`, which
+  reads the same fields plus the delivery count and takes the key and value from the slot table. The real
+  consumers' allocation budgets did not move.
+- **Lists.** The deviations of the old mocks (the missing `(String)` constructor, the deserializer-taking
+  constructors, the bytes `addRecord`) were `java-name-allowlist.txt` lines (blocks C1, C2's mock-consumer lines,
+  M9), not `java-name-baseline.txt` lines. They went in S3, because an allowlist line that matches nothing fails
+  the build (CKRDA0014). The baseline is unchanged; `analyzers/java-api.txt` is generated from Java and is
+  unchanged.
+- **When the slots go.** The table is emptied when the native consumer is torn down (`NativeConsumer.OnTornDown`,
+  set by both mocks), so only by a close or a dispose that closes the consumer, and after every use of it has
+  ended. A close or a dispose that throws, is canceled or is refused leaves the consumer open and the slots in
+  place, so its next `Poll` returns the records, as Java's `MockConsumer`, whose close never touches its records.
+  A dispose inside an async consumer's callback schedules the teardown, which empties the table when it runs.
+- **Poll and a concurrent close.** The mock poll resolves its batch's ids while it still holds its use of the
+  consumer, on both mocks (`NativeConsumer.PollResolved`, `CompletePoll`), so a close or a dispose from another
+  thread cannot empty the table under it. The real consumers' poll path is unchanged.
+  `PublicMockConsumerSlotsAtCloseTests` pins both.
+- **A cancelled asynchronous poll** (ledger 632). The mock never drops a batch the C mock has delivered. A
+  cancellation after the delivery is ignored and `Poll` returns the batch; one that ended the poll before any
+  record was delivered throws `OperationCanceledException` and leaves the records for the next `Poll`. The real
+  consumers still drop a cancelled poll's batch and seek back to it; `ConsumerAsyncCancelTests` runs that test
+  over the C mock through the real path. `PublicAsyncMockConsumerCancelledPollTests` pins both sides.
+- **Tests not written.** "`AddRecord` from a poll task": the .NET mocks have no `SchedulePollTask(Runnable)` (a
+  known gap, `java-name-baseline.txt`). The nearest re-entrant call, `AddRecord` from a rebalance listener run
+  inside `Rebalance`, is refused by the C mock with `ConcurrentModificationException` ("KafkaConsumer is not
+  safe for multi-threaded access."), as the bytes `AddRecord` was before.
+- **Retention.** A record the mock never delivers (below the position, a partition that left the assignment)
+  keeps its entries until the consumer is closed; the XML docs of `AddRecord` say so.
+- **Tests removed or narrowed** (S3; their subject was a deserializer given to a mock): the mock rows of
+  `PublicSyncConsumerPreconditionTests.Constructor_NullDeserializer_ThrowsJavasConfigException`, of the
+  `SerdeGuardTests` consumer theories and `AMockConsumer_TakesADeserializerWithAClose_SinceItDisposesNothing`,
+  `AsyncSerdeGuardTests.AnAsyncMockConsumer_TakesEveryShape_SinceItDisposesNothing` and the mock rows of two
+  headers-form theories, `PublicDeserializerDisposalTests.TheMockConsumers_NeverDisposeTheirDeserializers` and
+  two mock asserts.
+- **Master-only callers.** `PublicAsyncConsumerOwnWakeupTests`, `PublicConsumerNullPartitionTests` and
+  `PublicProducerNullPartitionTests` (from #356) take the Java-shaped mocks;
+  `RecordHeadersTests.Poll_HandsOutWritableHeadersAfterTheDeserializers` runs the real `KafkaConsumer` over the C
+  mock, its subject being the decoding consumer.

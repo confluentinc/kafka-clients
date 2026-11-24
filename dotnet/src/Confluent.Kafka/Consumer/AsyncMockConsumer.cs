@@ -60,6 +60,19 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     }
 
     /// <inheritdoc/>
+    /// <param name="timeout">The maximum time to wait (must be non-negative).</param>
+    /// <param name="cancellationToken">
+    /// Cancels the wait: <c>wakeup()</c> is sent, and the <see cref="Task"/> ends with
+    /// <see cref="OperationCanceledException"/> when the poll ended before any record was delivered. A poll that
+    /// already has its records returns them, whether the token fired or not.
+    /// </param>
+    /// <remarks>
+    /// The mock removes the records a poll delivers, as Java's <c>MockConsumer.poll</c> does, so it cannot deliver
+    /// them again after a seek back. Unlike <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, which drops a cancelled
+    /// poll's records and seeks back to them, this poll never drops a batch: a cancellation that comes after the
+    /// records were delivered is ignored, and one that ends the poll before any record was delivered leaves the
+    /// records added for the next <see cref="Poll"/>.
+    /// </remarks>
     public Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
         _native.PollWithCallback(timeout, _slots, cancellationToken);
 
@@ -339,6 +352,9 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <summary>
     /// Queues <paramref name="record"/> for the next <see cref="Poll"/> (Java <c>MockConsumer.addRecord</c>). The
     /// record's partition must be assigned; <see cref="Poll"/> returns its key and value as the same objects.
+    /// A record that is never returned (below the position, or for a partition no longer assigned) is held until
+    /// the consumer is closed. A cancelled <see cref="Poll"/> drops no record: it returns the records it delivered,
+    /// or leaves them for the next <see cref="Poll"/>.
     /// </summary>
     /// <param name="record">The record to queue.</param>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
