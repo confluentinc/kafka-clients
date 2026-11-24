@@ -21,9 +21,9 @@ namespace Confluent.Kafka.Common.Metrics;
 /// <c>Metrics()</c>, and the metric a <see cref="QuotaViolationException"/> names. A client's metric is measured on each
 /// call to <see cref="MetricValue"/>, as Java's, and stays readable after its client is closed. A quota error's metric
 /// holds the name and the value the core reported, because the error carries no metric of its own. Equality is
-/// identity, as Java's, but two calls to <c>Metrics()</c> return two objects for one metric, where Java returns one.
-/// It has no public constructor, as Java's takes a lock, a <c>MetricValueProvider</c>, a <c>MetricConfig</c> and a
-/// <c>Time</c>, which .NET does not have.
+/// identity, as Java's, but two reads of a <c>Metrics()</c> map return two objects for one metric, where Java returns
+/// one. It has no public constructor, as Java's takes a lock, a <c>MetricValueProvider</c>, a <c>MetricConfig</c> and
+/// a <c>Time</c>, which .NET does not have.
 /// </summary>
 public sealed class KafkaMetric : IMetric
 {

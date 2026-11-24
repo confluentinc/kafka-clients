@@ -102,6 +102,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private readonly SerdeDisposal? _serdes;
 
+    // The live metrics view, taken once at construction and kept, freed by the GC (Metrics()).
+    private SafeMetricsViewHandle? _metricsView;
+
     // Set once the destroy has returned and never cleared: from then on a Close or Dispose from any thread returns at
     // once, as Python's closed check does.
     private volatile bool _destroyed;
@@ -2637,17 +2640,20 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    // Java's KafkaConsumer.metrics() takes no acquire(), so another thread's call does not refuse it; the use only keeps
-    // the handle alive. Java's MockConsumer.metrics() is synchronized, so the mock waits as for any call.
+    // The view taken at construction outlives the consumer, so a KafkaConsumer answers after close, as Java's live view
+    // does, and takes no use: Java's KafkaConsumer.metrics() takes no acquire(). Java's MockConsumer.metrics() is
+    // synchronized and checks for close, so the mock waits as for any call and throws once closed.
     internal IReadOnlyDictionary<MetricName, IMetric> Metrics()
     {
+        if (!IsMock)
+        {
+            return new MetricsMap(_metricsView!);
+        }
+
         int owner = EnterUse(UseKind.OwnedOnMock);
         try
         {
-            IntPtr outErr = IntPtr.Zero;
-            IntPtr view = NativeMethods.ConsumerMetrics(_handle, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-            return MetricsViewMarshal.CopyOutAndDestroy(view);
+            return new MetricsMap(_metricsView!);
         }
         finally
         {
@@ -3550,8 +3556,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     /// <summary>
     /// Whether a use is checked against the owner: <c>Owned</c> always; <c>UnownedOnMock</c>, the calls Java's
     /// MockConsumer leaves unsynchronized but Java's KafkaConsumer guards with acquire(), only on a real consumer;
-    /// <c>OwnedOnMock</c>, Metrics, which Java's KafkaConsumer leaves outside acquire() but Java's MockConsumer
-    /// synchronizes, only on a mock; <c>Unowned</c>, Wakeup, Handle and EnforceRebalance, never.
+    /// <c>OwnedOnMock</c>, the mock's Metrics, which Java's MockConsumer synchronizes, only on a mock; <c>Unowned</c>,
+    /// Wakeup, Handle and EnforceRebalance, never.
     /// </summary>
     private enum UseKind
     {
