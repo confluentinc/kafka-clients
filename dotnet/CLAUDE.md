@@ -869,7 +869,9 @@ each goes when the reason it gives goes:
   and the broker evaluates it as a regular expression that no topic name can match. On the four
   consumers, and in the four producers' `SendOffsetsToTransaction`, a NUL in a topic or in the
   metadata of an offset to commit is refused where a null element or key of the same argument is, so the checks
-  Java makes first (closed, a null element, `group.id`, a negative target time) still come first;
+  Java makes first (closed, a null element, `group.id`, a negative target time) still come first,
+  and so does, in the real consumers' `Subscribe` and `Assign`, a blank topic (Java's `isBlank`: no
+  character above U+0020, so a NUL counts), which the core checks only in the call the NUL stops;
   the mocks refuse it too, as their native mock could match the cut name to another topic's state.
   The mock consumers' `OffsetsForTimes` answers a NUL topic as Java's `MockConsumer` answers every
   map, with `UnsupportedOperationException`, and the mock consumers' constructors answer a NUL

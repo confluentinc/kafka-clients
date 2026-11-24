@@ -82,13 +82,15 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalArgumentException">
     /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null or holds a null or empty
     /// topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, a topic name is null.
-    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged,
+    /// and, on a <see cref="KafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     void Subscribe(IReadOnlyCollection<string> topics);
@@ -117,6 +119,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="callback"/> is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
     /// <c>void OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
     /// but does not implement <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
@@ -126,7 +129,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, a topic name is null.
-    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged,
+    /// and, on a <see cref="KafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a subscribe failure.</exception>
@@ -235,6 +239,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalArgumentException">
     /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null or holds a null partition
     /// or a partition with a null or empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
@@ -242,7 +247,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, an element or an element topic is null.
     /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
-    /// cannot receive unchanged.
+    /// cannot receive unchanged, and, on a <see cref="KafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an assignment failure.</exception>

@@ -102,32 +102,13 @@ internal static class AdminEarlyReturns
     {
         foreach (string? feature in features)
         {
-            if (IsBlank(feature))
+            if (JavaText.IsBlank(feature))
             {
                 return true;
             }
         }
 
         return false;
-    }
-
-    // Java's Utils.isBlank: String.trim() strips every char up to U+0020, not .NET's white space.
-    private static bool IsBlank(string? value)
-    {
-        if (value is null)
-        {
-            return true;
-        }
-
-        foreach (char c in value)
-        {
-            if (c > ' ')
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     private static bool AnyTopicName(IEnumerable<string>? names)

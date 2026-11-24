@@ -101,13 +101,15 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null or holds a null or
     /// empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, a topic name is null.
-    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged,
+    /// and, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">
@@ -146,6 +148,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="callback"/> is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
     /// <c>void OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
     /// but does not implement <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
@@ -155,7 +158,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, a topic name is null.
-    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged,
+    /// and, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">
@@ -185,6 +189,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="callback"/> is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
     /// <c>Task OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
     /// but does not implement <see cref="IAsyncConsumerRebalanceListenerWithPartitionsLost"/>.
@@ -194,7 +199,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, a topic name is null.
-    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged,
+    /// and, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">
@@ -397,6 +403,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null or holds a null
     /// partition or a partition with a null or empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
@@ -404,7 +411,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, an element or an element topic is null.
     /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
-    /// cannot receive unchanged.
+    /// cannot receive unchanged, and, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>

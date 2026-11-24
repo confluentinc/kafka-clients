@@ -962,7 +962,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // with the same text. Java's KafkaConsumer checks group.id first, so without one the refusal is the core's
     // InvalidGroupIdException, which the binding throws itself where it refuses the topics. Java's MockConsumer has no
     // check of its own (a null is its NullPointerException). A NUL in a topic, which the C string would cut, is refused
-    // after the null checks (NativeStrings), still after the group.id check.
+    // after the null checks (NativeStrings), still after the group.id check. On KafkaConsumer a blank topic comes
+    // before it, with Java's message: the core checks blank topics only in the call the NUL stops, and a topic with a
+    // NUL can itself be blank (JavaText.IsBlank).
     private string[] SnapshotTopics(IReadOnlyCollection<string> topics)
     {
         if (topics is null)
@@ -992,7 +994,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             {
                 throw GroupIdMissing
                     ? GroupIdNotDefined()
-                    : new ArgumentException(NativeStrings.InvalidTopicMessage, nameof(topics));
+                    : !IsMock && HasBlankTopic(topicArray)
+                        ? new IllegalArgumentException(NullSubscribeTopicMessage)
+                        : new ArgumentException(NativeStrings.InvalidTopicMessage, nameof(topics));
             }
         }
 
@@ -2845,26 +2849,39 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     // KafkaConsumer refuses a null collection, or a null partition or a partition with a null topic, with Java's
     // messages, and the core refuses a blank topic with the same text. Java's MockConsumer has no check of its own (a
-    // null is its NullPointerException).
+    // null is its NullPointerException). A NUL in a topic, which the C string would cut, is refused after the null
+    // checks (NativeStrings). On KafkaConsumer a blank topic comes before it, with Java's message: the core checks
+    // blank topics only in the call the NUL stops, and a topic with a NUL can itself be blank (JavaText.IsBlank).
     private (string Topic, int Partition)[] SnapshotAssignPartitions(IReadOnlyCollection<TopicPartition> partitions)
     {
-        if (!IsMock)
+        if (IsMock)
         {
-            if (partitions is null)
-            {
-                throw new IllegalArgumentException(NullAssignPartitionsMessage);
-            }
+            return SnapshotPartitions(partitions);
+        }
 
-            foreach (TopicPartition? tp in partitions)
+        if (partitions is null)
+        {
+            throw new IllegalArgumentException(NullAssignPartitionsMessage);
+        }
+
+        foreach (TopicPartition? tp in partitions)
+        {
+            if (tp is null || tp.Topic() is null)
             {
-                if (tp is null || tp.Topic() is null)
-                {
-                    throw new IllegalArgumentException(NullAssignTopicMessage);
-                }
+                throw new IllegalArgumentException(NullAssignTopicMessage);
             }
         }
 
-        return SnapshotPartitions(partitions!);
+        (string Topic, int Partition)[] snapshot = Snapshot(
+            partitions, nullTopicIsUnassigned: false, nameof(partitions), NullElement.Refused, rejectNulTopics: false)!;
+        if (HasNulTopic(snapshot))
+        {
+            throw HasBlankTopic(snapshot)
+                ? new IllegalArgumentException(NullAssignTopicMessage)
+                : new ArgumentException(NativeStrings.InvalidTopicMessage, nameof(partitions));
+        }
+
+        return snapshot;
     }
 
     // KafkaConsumer's seekToBeginning and seekToEnd refuse a null collection with Java's message before acquire(), so
@@ -2987,6 +3004,32 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         foreach ((string topic, int _) in snapshot)
         {
             if (NativeStrings.ContainsNul(topic))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasBlankTopic(string[] topics)
+    {
+        foreach (string topic in topics)
+        {
+            if (JavaText.IsBlank(topic))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasBlankTopic((string Topic, int Partition)[] snapshot)
+    {
+        foreach ((string topic, int _) in snapshot)
+        {
+            if (JavaText.IsBlank(topic))
             {
                 return true;
             }

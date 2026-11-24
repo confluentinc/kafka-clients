@@ -30,7 +30,8 @@ namespace Confluent.Kafka.UnitTests;
 /// A topic, or the metadata of an offset to commit, holding a NUL character, on every consumer method that takes one, on
 /// the four consumers: <see cref="ArgumentException"/> with the parameter's name, before anything reaches the native
 /// client, which would read the string only up to the NUL. Java's checks come first (the closed check, a null element, the
-/// group check, a negative target time), and a consumer call made from a rebalance listener is refused the same way.
+/// group check, a negative target time, a blank topic), and a consumer call made from a rebalance listener is refused the
+/// same way.
 /// </summary>
 public sealed class PublicConsumerTopicStringTests
 {
@@ -44,6 +45,10 @@ public sealed class PublicConsumerTopicStringTests
         "unchanged.";
 
     private const string ClosedMessage = "This consumer has already been closed.";
+
+    private const string BlankSubscribeTopicMessage = "Topic collection to subscribe to cannot contain null or empty topic";
+
+    private const string BlankAssignTopicMessage = "Topic partitions to assign to cannot have null or empty topic";
 
     private const string UnparsableDurationMessage = "Unable to parse duration string in by_duration offset reset strategy.";
 
@@ -268,6 +273,123 @@ public sealed class PublicConsumerTopicStringTests
         Assert.Equal(
             "Topic partitions to assign to cannot have null or empty topic",
             Assert.IsType<IllegalArgumentException>(assign).Message);
+    }
+
+    /// <summary>
+    /// Topic sets holding a NUL topic and a blank one, a topic with no character above U+0020 (Java's <c>isBlank</c>,
+    /// whose <c>trim()</c> strips a NUL too), in either order.
+    /// </summary>
+    public static IEnumerable<object[]> NulAndBlankTopics() =>
+        from kind in RealConsumers()
+        from topics in new[]
+        {
+            new[] { NulTopic, "" },
+            new[] { "", NulTopic },
+            new[] { "\0" },
+            new[] { " \0 " },
+            new[] { NulTopic, " \t" },
+            new[] { NulTopic, "\u0001" },
+        }
+        select new object[] { kind[0], topics };
+
+    /// <summary>
+    /// Topic sets holding a NUL topic and no blank one: U+00A0 and U+3000 are white space to .NET, but above U+0020, so
+    /// not blank to Java.
+    /// </summary>
+    public static IEnumerable<object[]> NulAndNoBlankTopics() =>
+        from kind in RealConsumers()
+        from topics in new[]
+        {
+            new[] { NulTopic },
+            new[] { "\u00A0\0" },
+            new[] { NulTopic, "\u00A0" },
+            new[] { NulTopic, "\u3000" },
+        }
+        select new object[] { kind[0], topics };
+
+    // Java's KafkaConsumer refuses a blank topic in subscribe and assign wherever it is in the collection, and Java has
+    // no NUL check, so the blank topic is Java's answer; it is the answer the core gives for a blank topic it receives.
+    [Theory]
+    [MemberData(nameof(NulAndBlankTopics))]
+    public async Task ABlankTopic_ComesBeforeTheNul(string kind, string[] topics)
+    {
+        object consumer = await Create(kind, groupId: true);
+        using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
+        TopicPartition[] partitions = topics.Select(topic => new TopicPartition(topic, 0)).ToArray();
+
+        Exception? subscribe = await Outcome(consumer, c => c.Subscribe(topics), c => c.Subscribe(topics));
+        Assert.Equal(BlankSubscribeTopicMessage, Assert.IsType<IllegalArgumentException>(subscribe).Message);
+        Exception? subscribeWithListener = await Outcome(
+            consumer, c => c.Subscribe(topics, new NoListener()), c => c.Subscribe(topics, new NoListener()));
+        Assert.Equal(BlankSubscribeTopicMessage, Assert.IsType<IllegalArgumentException>(subscribeWithListener).Message);
+        Exception? assign = await Outcome(consumer, c => c.Assign(partitions), c => c.Assign(partitions));
+        Assert.Equal(BlankAssignTopicMessage, Assert.IsType<IllegalArgumentException>(assign).Message);
+
+        // The core's answer for a blank topic it receives, here one that is blank to Java and to the core alike.
+        string[] blank = { " " };
+        TopicPartition[] blankPartitions = { new TopicPartition(" ", 0) };
+        Exception? fromTheCore = await Outcome(consumer, c => c.Subscribe(blank), c => c.Subscribe(blank));
+        Assert.Equal(subscribe!.GetType(), fromTheCore?.GetType());
+        Assert.Equal(subscribe.Message, fromTheCore!.Message);
+        Exception? assignFromTheCore = await Outcome(consumer, c => c.Assign(blankPartitions), c => c.Assign(blankPartitions));
+        Assert.Equal(assign!.GetType(), assignFromTheCore?.GetType());
+        Assert.Equal(assign.Message, assignFromTheCore!.Message);
+
+        Assert.Empty(((IConsumerCommon)consumer).Subscription());
+        Assert.Empty(((IConsumerCommon)consumer).Assignment());
+    }
+
+    // A topic with characters above U+0020 is not blank to Java, white space to .NET or not, so the NUL is refused.
+    [Theory]
+    [MemberData(nameof(NulAndNoBlankTopics))]
+    public async Task WithNoBlankTopic_TheNulIsRefused(string kind, string[] topics)
+    {
+        object consumer = await Create(kind, groupId: true);
+        using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
+        TopicPartition[] partitions = topics.Select(topic => new TopicPartition(topic, 0)).ToArray();
+
+        AssertNul(await Outcome(consumer, c => c.Subscribe(topics), c => c.Subscribe(topics)), NulTopicMessage, "topics", "Subscribe");
+        AssertNul(
+            await Outcome(consumer, c => c.Subscribe(topics, new NoListener()), c => c.Subscribe(topics, new NoListener())),
+            NulTopicMessage,
+            "topics",
+            "Subscribe+listener");
+        AssertNul(await Outcome(consumer, c => c.Assign(partitions), c => c.Assign(partitions)), NulTopicMessage, "partitions", "Assign");
+        Assert.Empty(((IConsumerCommon)consumer).Subscription());
+        Assert.Empty(((IConsumerCommon)consumer).Assignment());
+    }
+
+    // Java's subscribe checks the group before the topics; Java's assign makes no group check, so its blank topic still
+    // comes before the NUL without a group.id.
+    [Theory]
+    [MemberData(nameof(RealConsumers))]
+    public async Task WithoutAGroupId_ABlankTopicAndANul_GetTheGroupCheckOnSubscribe_AndTheBlankOnAssign(string kind)
+    {
+        object consumer = await Create(kind, groupId: false);
+        using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
+        string[] topics = { NulTopic, "" };
+        TopicPartition[] partitions = { s_nulPartition, new TopicPartition("", 0) };
+        AssertGroupIdNotDefined(await Outcome(consumer, c => c.Subscribe(topics), c => c.Subscribe(topics)));
+        Exception? assign = await Outcome(consumer, c => c.Assign(partitions), c => c.Assign(partitions));
+        Assert.Equal(BlankAssignTopicMessage, Assert.IsType<IllegalArgumentException>(assign).Message);
+    }
+
+    // Java's MockConsumer has no blank check, so on the mocks the NUL is refused, as it is for any topic.
+    [Theory]
+    [MemberData(nameof(Mocks))]
+    public async Task OnTheMocks_ABlankTopic_DoesNotHideTheNul(string kind)
+    {
+        object consumer = await Create(kind, groupId: false);
+        using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
+        foreach (string[] topics in new[] { new[] { NulTopic, "" }, new[] { "\0" } })
+        {
+            TopicPartition[] partitions = topics.Select(topic => new TopicPartition(topic, 0)).ToArray();
+            AssertNul(await Outcome(consumer, c => c.Subscribe(topics), c => c.Subscribe(topics)), NulTopicMessage, "topics", "Subscribe");
+            AssertNul(await Outcome(consumer, c => c.Assign(partitions), c => c.Assign(partitions)), NulTopicMessage, "partitions", "Assign");
+        }
+
+        Assert.Empty(((IConsumerCommon)consumer).Subscription());
+        Assert.Empty(((IConsumerCommon)consumer).Assignment());
     }
 
     // Java checks the group before it reads the topics, the offsets or the partitions.
