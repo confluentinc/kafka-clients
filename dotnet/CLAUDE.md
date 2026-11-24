@@ -683,6 +683,16 @@ was true of the consumer only.) The deserializers get the headers through
 own, writable `RecordHeaders` (ledger 293). ⚠ The typed **producer** is **no longer** deferred — it shipped in
 M11/P5 (generic-only, see the producer sketch above); this line said otherwise until
 M14/P1 corrected it, and the producer completion model (§A7) turned out not to gate it.
+Not offered, the C ABI having no entry point for them: Java's `clientInstanceId(Duration)`,
+`registerMetricForSubscription(KafkaMetric)` and `unregisterMetricFromSubscription(KafkaMetric)`
+(KIP-714), which the Rust core does not translate yet; the XML docs of `IConsumer` and
+`IAsyncConsumer` say so. Goes when the C ABI has them.
+`Metrics()` on the real consumers lacks Java's network and app-info metrics: the connection, request
+and I/O metrics Java's `Selector` adds to `consumer-metrics` (`connection-count`, `request-total`,
+...), the per-node `consumer-node-metrics` group, and the `app-info` group (`version`, `commit-id`,
+`start-time-ms`). The core's `Selector` registers no metrics yet and nothing in the core registers
+Java's `AppInfoParser` metrics, so the binding cannot report them; the XML doc of `Metrics()` says
+so. Goes when the core registers them.
 
 The **admin client** shipped in M15 as `IAdmin` (`KafkaAdminClient` /
 `MockAdminClient`), a Mode A port over the `kafka_admin_*` ABI; its decisions are in
@@ -1248,7 +1258,7 @@ do; ledger 105), `Wakeup()`, `Metrics()`
 `metrics()`; on `KafkaConsumer` and `AsyncKafkaConsumer` it makes no owner check, as Java's
 takes no `acquire()`, and holds only the use that keeps the handle alive; the core answers it
 while an op holds its flag, BH:30592-30606 at `3f8a5bc6`; the mocks wait, as Java's
-`synchronized` mock; after close it throws, the call-site list below §3's idiom map), `Register`/`UnregisterMetricForSubscription`, and
+`synchronized` mock; after close it throws, the call-site list below §3's idiom map), and
 `EnforceRebalance(string? reason
 = null)` (a no-op that only logs under KIP-848; one method collapses Java's two overloads). It
 makes no owner check and, once the consumer is closed, returns without calling the core, as Java's

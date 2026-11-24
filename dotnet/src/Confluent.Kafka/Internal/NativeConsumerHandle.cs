@@ -263,7 +263,7 @@ internal sealed class NativeConsumerHandle : IDisposable
                 continue;
             }
 
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            NativeConsumer.ThrowIfWaitingCallFailed(ref outErr);
             return;
         }
     }
@@ -290,7 +290,7 @@ internal sealed class NativeConsumerHandle : IDisposable
                 continue;
             }
 
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            NativeConsumer.ThrowIfWaitingCallFailed(ref outErr);
             return;
         }
     }
@@ -300,7 +300,7 @@ internal sealed class NativeConsumerHandle : IDisposable
         using ConsumerCallbackReporter.HandleCommitScope commit = _owner.EnterHandleCommit();
         IntPtr outErr = IntPtr.Zero;
         NativeMethods.ConsumerHandleCommitAsync(_handle, ref outErr);
-        KafkaException.ThrowIfFfiFailed(ref outErr);
+        NativeConsumer.ThrowIfWaitingCallFailed(ref outErr);
     }
 
     internal void CommitAsync(IOffsetCommitCallback callback) =>
