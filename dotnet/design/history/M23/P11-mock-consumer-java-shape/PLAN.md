@@ -185,6 +185,7 @@ One commit per step, each passing the gates. The stacked branch's fixups are fol
   constructor's null and invalid strategy; `AddRecord` from another thread while a `Poll` waits.
 - **S4** Docs and lists: XML docs of the two mocks; the ledger rows; the `STATUS.md` outcome.
 - **S5** The accepted rule text M1–M4, where it applies to master verbatim.
+- **S6** `e137a77d0`: M3 with master's wording, on the owner's go-ahead (2026-11-24); see "M3 on master".
 
 ## Verification
 
@@ -267,10 +268,47 @@ and value `Poll` hands back. They cross the C mock as ids in the record's `void 
 table in the mock; a polled record is a new instance copied out of the native batch *(deviation: Java returns
 the instance added)*. The binding's decode tests run the real consumers over the C mock."
 
+The applied text differs from the accepted draft in two places: "a new instance over the native batch" became
+"a new instance copied out of the native batch" (the draft was false on master), and "resolved through
+dictionaries in the mock" became "resolved through a table in the mock". Both are true of the code:
+`MockRecordSlots` is one table holding two dictionaries, on both branches, so the second change was not needed
+on master; it is a rewording, not a correction.
+
 ### M4 — `ffi-marshalling.md`, the generic-slot rows
 
 A generic `void *` slot the core never reads may carry an integer id that the binding resolves; it is never
 dereferenced, on either side, and needs no `GCHandle`. First use: the mock consumers' key and value.
+
+### M5 — `CLAUDE.md` §3 producer sketch, the `AsyncMockProducer` comment (proposed, not applied)
+
+Current text (`dotnet/CLAUDE.md:344-346`): "Mock TAKES the serializers — Java-faithful (MockProducer.java takes
+Serializer<K>/Serializer<V> and serializes records into its history); UNLIKE the consumer, where
+mock-takes-deserializers is a deviation. Send serializes K/V → bytes exactly like the real client (§4)."
+
+Stale because the mock consumers no longer take deserializers (ledger 626): there is no mock-takes-deserializers
+deviation left to contrast with. Proposed: "Mock TAKES the serializers — Java-faithful (MockProducer.java takes
+Serializer<K>/Serializer<V> and serializes records into its history); UNLIKE the consumer, whose mocks take no
+deserializers (ledger 626). Send serializes K/V → bytes exactly like the real client (§4)."
+
+### M6 — `CLAUDE.md`, the disposal steps of the clients (proposed, not applied)
+
+Current text (`dotnet/CLAUDE.md:1631-1632`): "The producer and consumer mocks never dispose their serializers or
+deserializers, as Java's and Python's mocks."
+
+Stale because the consumer mocks hold no deserializer to dispose (ledger 626); the sentence still describes them as
+holding ones they keep. Proposed: "The producer mocks never dispose their serializers, as Java's and Python's mocks;
+the consumer mocks hold no deserializer."
+
+### M7 — `CLAUDE.md`, the producer bullet "Mock-takes-serializers is Java-faithful" (proposed, not applied)
+
+Current text (`dotnet/CLAUDE.md:433-436`): "Java's `MockProducer` takes `Serializer<K>/Serializer<V>` and
+serializes into its history, so the mock ctors take serializers too (`(keySer, valueSer, autoComplete=true)`) —
+**unlike** the consumer, where mock-takes-deserializers was a deviation."
+
+Found by the F2 sweep. The past tense ("was") keeps it true, but `(keySer, valueSer, autoComplete=true)` is not the
+shipped shape: both producer mocks have a two-argument and a three-argument constructor, with no optional
+parameter. Proposed: "… so the mock ctors take serializers too (`(keySer, valueSer)` and
+`(keySer, valueSer, autoComplete)`) — **unlike** the consumer, whose mocks take no deserializers (ledger 626)."
 
 ## Revision
 
@@ -300,7 +338,14 @@ stacked branch's fixups for Critic 135's issues 1–4 are folded into the steps 
   A dispose inside an async consumer's callback schedules the teardown, which empties the table when it runs.
 - **Poll and a concurrent close.** The mock poll resolves its batch's ids while it still holds its use of the
   consumer, on both mocks (`NativeConsumer.PollResolved`, `CompletePoll`), so a close or a dispose from another
-  thread cannot empty the table under it. The real consumers' poll path is unchanged.
+  thread cannot empty the table under it. The real consumers' poll path behaves as on master; its allocations
+  are master's on the synchronous consumer, and 16 B more per `Poll` on the asynchronous one, at every batch size
+  (Critic 135, fourth pass: built-in deserializers 2712 → 2728 B at one record, 272784 → 272800 B at 1024;
+  awaited ones 2832 → 2848 B, 223800 → 223816 B). The 16 B are the `slots` parameter and the `resolveFailure`
+  local, fields of the state machine of the `CompletePoll` both paths share. They stay: removing them needs a
+  mock-only completion method that repeats the shared prologue (`Outcome`, `KeepKeptError`, `HoldRecords`,
+  `ExitUse`) and the release of the records. The allocation budgets are upper bounds and hold with master's
+  constants.
   `PublicMockConsumerSlotsAtCloseTests` pins both.
 - **A cancelled asynchronous poll** (ledger 632). The mock never drops a batch the C mock has delivered. A
   cancellation after the delivery is ignored and `Poll` returns the batch; one that ended the poll before any
