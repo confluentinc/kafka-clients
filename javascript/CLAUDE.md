@@ -439,7 +439,9 @@ These decide every question, in this order:
    runs, and reports, once every callback before it has ended
    (`send_run_queued`, from `js_send_on_settled` once the awaited Promise
    settled; its loop runs the waiting ones in turn, and stops at the next one
-   that returns a Promise). So each record's future still completes only after
+   that returns a Promise). One the run queue can't take (a Node-API call
+   failed) runs at once, out of turn, rather than never, and the callback
+   whose turn it is keeps it. So each record's future still completes only after
    its own callback, and a `flush` or `close` covering a waiting callback
    still waits for it; a later record's future completes only once the
    earlier callback's Promise settled, so a callback's timed
@@ -534,10 +536,11 @@ These decide every question, in this order:
    answer can't be built settles its call with the failure instead (the pending
    JS exception, or an `Error` naming the step: `js_take_failure`), and a
    delivery callback still runs once, with the failure as its error and, when
-   its metadata can't be built, Java's metadata of a failed record. A wait on a
-   record's future fails the future with it only while the future is pending
-   (its delivery reached no JS), and warns it otherwise; a timed wait that
-   timed out rejects its `get()` with it. The
+   its metadata can't be built, Java's metadata of a failed record, with the
+   partition the core gave it. A wait on a record's future fails the future
+   with it only while the future is pending (its delivery reached no JS), and
+   warns it otherwise; a timed wait that timed out rejects its `get()` with it,
+   or warns it once that `get()` settled. The
    error and metadata a delivery callback receives are borrowed: copied,
    never destroyed. If a send fails at hand-over, its per-record context stays
    on the producer's orphan list until after destroy (the delivery callback

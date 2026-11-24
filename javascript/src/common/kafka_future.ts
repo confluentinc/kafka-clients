@@ -943,9 +943,12 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
           return;
         }
         const waiters = this.#waiters;
-        if (waiters === null) return;
-        const i = waiters.indexOf(resolve);
-        if (i < 0) return;
+        const i = waiters?.indexOf(resolve) ?? -1;
+        if (waiters === null || i < 0) {
+          // Its get() settled first: an answer that can't be built still warns.
+          if (failed) warn(error);
+          return;
+        }
         waiters.splice(i, 2);
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the core's TimeoutError, as Java's get(timeout) throws it, or with the failure to build it
         reject(error);

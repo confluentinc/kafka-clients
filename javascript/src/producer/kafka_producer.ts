@@ -218,11 +218,11 @@ function thrownMessage(thrown: unknown): string {
 
 /**
  * Java's metadata of a failed record, `RecordMetadata(topicPartition, -1, -1,
- * NO_TIMESTAMP, -1, -1)`, as the core gives it for a record not partitioned
- * yet: the record's topic, and its partition or -1.
+ * NO_TIMESTAMP, -1, -1)`, as the core gives it: the record's topic, and the
+ * partition the core gave the record, else the record's own or -1.
  *
  * @param topic - the record's topic
- * @param partition - the record's partition, or null
+ * @param partition - the partition the core gave the record, else the record's, or null
  * @returns the metadata
  */
 function failedMetadata(topic: string, partition: number | null): RecordMetadata {
@@ -621,12 +621,17 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     // no Promise. The addon calls this in the callback's turn: one callback at
     // a time, in completion order (native/producer.c, send_on_completion).
     // Metadata the addon could not build is null, its error the failure: the
-    // callback gets Java's metadata of a failed record. Only the topic and
-    // partition are kept for it: the record, and its Buffers, go at the
-    // hand-over.
+    // callback gets Java's metadata of a failed record, with the partition
+    // the core gave the record (`assigned`) when the addon could read it.
+    // Only the topic and partition are kept for it: the record, and its
+    // Buffers, go at the hand-over.
     const { topic, partition } = record;
-    const onComplete = (built: RecordMetadata | null, error: Error | null): string | undefined | Promise<string | undefined> => {
-      const metadata = built ?? failedMetadata(topic, partition);
+    const onComplete = (
+      built: RecordMetadata | null,
+      error: Error | null,
+      assigned?: number,
+    ): string | undefined | Promise<string | undefined> => {
+      const metadata = built ?? failedMetadata(topic, assigned ?? partition);
       let failure: string | undefined;
       let returned: unknown;
       if (userCallback !== null) {

@@ -1641,6 +1641,44 @@ describe("a call whose answer the addon can't build", () => {
     await m.close();
   }, 10000);
 
+  test("a delivery the run queue can't take runs at once, out of turn, and the callback whose turn it is keeps it", async () => {
+    const m = new MockProducer({ autoComplete: true, partitioner: null, keySerializer: null, valueSerializer: null });
+    /** @type {string[]} */
+    const calls = [];
+    /** @type {() => void} */
+    let release = () => {};
+    // With autoComplete, send() waits for its callback's Promise.
+    const first = m.send({
+      record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
+      callback: () =>
+        new Promise((resolve) => {
+          calls.push('first');
+          release = () => resolve(undefined);
+        }),
+    });
+    await untilHolds(() => calls.length === 1);
+    native.faultNext('enqueue');
+    const second = m.send({
+      record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
+      callback: ({ metadata }) => void calls.push(`second ${String(metadata.offset)}`),
+    });
+    await untilHolds(() => calls.length === 2);
+    assert.deepEqual(native.faultNext(null), []);
+    assert.equal((await (await second).get()).offset, 1n);
+    // The first callback's Promise still holds the turn: the next delivery waits behind it.
+    const third = m.send({
+      record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
+      callback: ({ metadata }) => void calls.push(`third ${String(metadata.offset)}`),
+    });
+    for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(calls, ['first', 'second 1']);
+    release();
+    assert.equal((await (await first).get()).offset, 0n);
+    assert.equal((await (await third).get()).offset, 2n);
+    assert.deepEqual(calls, ['first', 'second 1', 'third 2']);
+    await m.close();
+  }, 10000);
+
   /** The failures of waits a test hands to process.emitWarning, while it runs `body`. */
   async function warnedDuring(/** @type {() => Promise<void>} */ body) {
     /** @type {Error[]} */
@@ -1732,6 +1770,36 @@ describe("a call whose answer the addon can't build", () => {
     assert.equal(m.completeNext(), true);
     assert.equal((await future.get()).offset, 0n);
     assert.deepEqual(calls, ['0']);
+    assert.deepEqual(nativeHeld(), base);
+    await m.close();
+  }, 10000);
+
+  test("a timed get() that timed out warns of a failure it can't build once the delivery completed the future first", async () => {
+    const m = new MockProducer();
+    const base = nativeHeld();
+    /** @type {Array<Promise<RecordMetadata>>} */
+    const gets = [];
+    const future = await m.send({
+      record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
+      callback: () => {
+        // Started before the delivery is recorded, the wait times out before
+        // the record's native future completes, after this callback, and its
+        // TimeoutError is not built.
+        native.faultNext('error');
+        gets.push(future.get({ timeout: 0 }));
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      },
+    });
+    const warned = await warnedDuring(async () => {
+      assert.equal(m.completeNext(), true);
+      assert.equal(gets.length, 1);
+      // The get() has the delivery's answer.
+      assert.equal((await gets[0]).offset, 0n);
+      await untilHolds(() => nativeHeld().waits === base.waits);
+    });
+    assert.deepEqual(native.faultNext(null), []);
+    assert.equal(warned.length, 1);
+    assert.match(warned[0].message, ERROR_FAILED);
     assert.deepEqual(nativeHeld(), base);
     await m.close();
   }, 10000);

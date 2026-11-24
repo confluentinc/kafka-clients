@@ -102,7 +102,8 @@ void delete_ref(napi_env env, napi_ref* ref);
 // The steps the test-only faultNext() makes fail: a producer's notify
 // registration, the conversion of a completion's answer to JS (a record's
 // metadata, a core error, a send's slot number, a partitionsFor list, a
-// close's answer), and the failure js_take_failure makes of one.
+// close's answer), a delivery callback's wait for its turn (send_enqueue),
+// and the failure js_take_failure makes of one.
 typedef enum {
     FAULT_NONE,
     FAULT_NOTIFY,
@@ -111,6 +112,7 @@ typedef enum {
     FAULT_SLOT,
     FAULT_PARTITIONS,
     FAULT_CLOSE,
+    FAULT_ENQUEUE,
     FAULT_FAILURE,
     FAULT_STEPS
 } FaultStep;

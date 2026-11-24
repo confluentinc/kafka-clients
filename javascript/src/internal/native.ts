@@ -187,8 +187,13 @@ interface Native {
     // or a Promise of either, settling once the callback's own Promise did:
     // the report waits for it (native/producer.c, send_defer). The metadata
     // is null when the addon could not build it; the error is then the
-    // failure, as it is when the delivery's error could not be built.
-    onComplete: (metadata: RecordMetadata | null, error: Error | null) => string | undefined | Promise<string | undefined>,
+    // failure, as it is when the delivery's error could not be built, and
+    // `partition` the partition of the core's metadata, when it was read.
+    onComplete: (
+      metadata: RecordMetadata | null,
+      error: Error | null,
+      partition?: number,
+    ) => string | undefined | Promise<string | undefined>,
   ): void;
   producerFlush(handle: ProducerHandle, onComplete: (error: unknown) => void): void;
   // Java's metrics() through kafka_producer_Producer_metrics (no _cb twin):
@@ -227,7 +232,11 @@ interface Native {
     timestamp: bigint,
     record: object,
     onHandover: (error: unknown, future: number | null) => void,
-    onComplete: (metadata: RecordMetadata | null, error: Error | null) => string | undefined | Promise<string | undefined>,
+    onComplete: (
+      metadata: RecordMetadata | null,
+      error: Error | null,
+      partition?: number,
+    ) => string | undefined | Promise<string | undefined>,
   ): void;
   // The records the mock holds, the app's own, in send order.
   mockProducerHistory(handle: ProducerHandle): object[];
@@ -287,7 +296,7 @@ interface Native {
   // Arms `times` (1 when left out) more failures of `step` of the addon, each
   // failing the next run of its site as its Node-API call failing would.
   // Test-only.
-  faultNext(step: 'notify' | 'metadata' | 'error' | 'slot' | 'partitions' | 'close' | 'failure', times?: number): undefined;
+  faultNext(step: 'notify' | 'metadata' | 'error' | 'slot' | 'partitions' | 'close' | 'enqueue' | 'failure', times?: number): undefined;
   // Disarms every step, and returns the failures still armed, a name each. Test-only.
   faultNext(step: null): string[];
   // The records the sends built since the last call; arms the capture again for `arm`. Test-only.

@@ -29,6 +29,8 @@ const { stringSerializer } = require('@confluentinc/kafka-javascript/common/seri
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { fetchRecords } = require('./_fetch_records');
 const { createFuture } = require('../_internal');
+// The addon, for its test-only fault switch (native/addon.c, faultNext).
+const native = require('../../dist/internal/native');
 // Every probe child runs with the allocator's poisoning (freed memory filled,
 // guard pages around large blocks), so a use after free or a double free in
 // the native layer, at a collection or a destroy, fails the probe.
@@ -2218,6 +2220,178 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       } finally {
         await producer.close();
       }
+    }
+  },
+  120000,
+);
+
+/** @typedef {{ metadata: ReturnType<RecordMetadata['toJSON']>, exception: Error | null }} Delivery */
+
+// What js_take_failure makes of a delivery whose metadata can't be built (native/producer.c).
+const DELIVERY_FAILED = /^Node-API call failed: converting a record's delivery \(/;
+
+/**
+ * Sends `record`, and answers what its callback got once it ran.
+ *
+ * @param {KafkaProducer<Uint8Array, Uint8Array>} producer
+ * @param {ProducerRecord<Uint8Array, Uint8Array>} record
+ * @returns {Promise<Delivery>}
+ */
+async function deliveryOf(producer, record) {
+  /** @type {(delivery: Delivery) => void} */
+  let ran = () => {};
+  /** @type {Promise<Delivery>} */
+  const delivery = new Promise((resolve) => {
+    ran = resolve;
+  });
+  await producer.send({ record, callback: ({ metadata, exception }) => ran({ metadata: metadata.toJSON(), exception }) });
+  return delivery;
+}
+
+/**
+ * The key of the records a test sends, with the delivery the core gave one:
+ * none for a keyless record, partitioned by the core, and else the first
+ * `key-<n>` the core sends to a partition other than 0.
+ *
+ * @param {KafkaProducer<Uint8Array, Uint8Array>} producer
+ * @param {boolean} keyed
+ * @param {(key: Uint8Array | null) => ProducerRecord<Uint8Array, Uint8Array>} record
+ * @returns {Promise<{ key: Uint8Array | null, delivery: Delivery }>}
+ */
+async function keyFor(producer, keyed, record) {
+  if (!keyed) {
+    const delivery = await deliveryOf(producer, record(null));
+    assert.ok(delivery.metadata.partition >= 0, `not partitioned: ${String(delivery.exception)}`);
+    return { key: null, delivery };
+  }
+  for (let n = 0; n < 50; n++) {
+    const key = Buffer.from(`key-${n}`);
+    const delivery = await deliveryOf(producer, record(key));
+    if (delivery.metadata.partition > 0) return { key, delivery };
+  }
+  throw new Error('no key of 50 went to a partition other than 0');
+}
+
+/**
+ * Waits until the addon took the failure armed for `step`: each check disarms
+ * it and arms it again, on the JS thread, where the addon takes it.
+ *
+ * @param {'metadata'} step
+ */
+async function untilTaken(step) {
+  for (let i = 0; i < 1000; i++) {
+    if (native.faultNext(null).length === 0) return;
+    native.faultNext(step);
+    await sleep(10);
+  }
+  assert.fail(`the ${step} failure armed was never taken`);
+}
+
+(SKIP ? test.skip : test)(
+  "a record failed once partitioned, whose metadata the addon can't build, gets the core's metadata of it: Java's of a failed record, with the partition the core gave it",
+  async () => {
+    const { RecordTooLargeError } = require('@confluentinc/kafka-javascript/common/errors');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'max.request.size': 1048576 } });
+    try {
+      // A keyless record on one partition, over the topic's max.message.bytes:
+      // the broker refuses it once the core partitioned it to 0. A keyed one
+      // on three, over max.request.size: send() fails it once partition()
+      // gave it its key's partition, as Java's doSend does (a keyless one,
+      // partitioned later, in the accumulator, fails there with -1).
+      /** @type {Array<{ what: string, keyed: boolean, partitions: number, configs: Record<string, string>, size: number }>} */
+      const cases = [
+        { what: 'broker', keyed: false, partitions: 1, configs: { 'max.message.bytes': '1000' }, size: 2000 },
+        { what: 'client', keyed: true, partitions: 3, configs: {}, size: 1048577 },
+      ];
+      for (const { what, keyed, partitions, configs, size } of cases) {
+        const topic = await newTopic(`failed-partitioned-${what}`, { partitions, configs });
+        /** @param {Uint8Array | null} key */
+        const record = (key) => new ProducerRecord({ topic, key, value: Buffer.alloc(size) });
+        // The core's own metadata of the record, which fails once partitioned.
+        const { key, delivery } = await keyFor(producer, keyed, record);
+        assert.ok(delivery.exception instanceof RecordTooLargeError, String(delivery.exception));
+        native.faultNext('metadata');
+        const faulted = await deliveryOf(producer, record(key));
+        assert.deepEqual(native.faultNext(null), []);
+        assert.deepEqual(faulted.metadata, delivery.metadata);
+        assert.ok(faulted.exception instanceof Error);
+        assert.match(faulted.exception.message, DELIVERY_FAILED);
+      }
+    } finally {
+      native.faultNext(null);
+      await producer.close();
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  "a delivered record whose metadata the addon can't build gets Java's metadata of a failed record with the partition the core gave it, at once or in its turn",
+  async () => {
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+    try {
+      // A keyless record on one partition, and a keyed one on three.
+      for (const { keyed, partitions } of [
+        { keyed: false, partitions: 1 },
+        { keyed: true, partitions: 3 },
+      ]) {
+        const topic = await newTopic(`delivered-partitioned-${partitions}`, { partitions });
+        /** @param {Uint8Array | null} key */
+        const record = (key) => new ProducerRecord({ topic, key, value: Buffer.from('v') });
+        // The core's own metadata of the record, delivered.
+        const { key, delivery } = await keyFor(producer, keyed, record);
+        assert.equal(delivery.exception, null);
+        for (const inTurn of [false, true]) {
+          /** @type {() => void} */
+          let release = () => {};
+          /** @type {Promise<void>} */
+          let held = Promise.resolve();
+          if (inTurn) {
+            // A callback holding the turn until released, which arms the
+            // failure once its own metadata was built: the next delivery's.
+            /** @type {() => void} */
+            let started = () => {};
+            held = new Promise((resolve) => {
+              started = resolve;
+            });
+            await producer.send({
+              record: record(key),
+              callback: () =>
+                new Promise((resolve) => {
+                  native.faultNext('metadata');
+                  release = () => resolve(undefined);
+                  started();
+                }),
+            });
+          } else {
+            native.faultNext('metadata');
+          }
+          const faulted = deliveryOf(producer, record(key));
+          if (inTurn) {
+            // Once the delivery took the failure, it waits behind the callback
+            // holding the turn, which is then released.
+            await held;
+            await untilTaken('metadata');
+            release();
+          }
+          const { metadata, exception } = await faulted;
+          assert.deepEqual(native.faultNext(null), []);
+          assert.deepEqual(metadata, {
+            ...delivery.metadata,
+            offset: '-1',
+            hasOffset: false,
+            timestamp: '-1',
+            hasTimestamp: false,
+            serializedKeySize: -1,
+            serializedValueSize: -1,
+          });
+          assert.ok(exception instanceof Error);
+          assert.match(exception.message, DELIVERY_FAILED);
+        }
+      }
+    } finally {
+      native.faultNext(null);
+      await producer.close();
     }
   },
   120000,
