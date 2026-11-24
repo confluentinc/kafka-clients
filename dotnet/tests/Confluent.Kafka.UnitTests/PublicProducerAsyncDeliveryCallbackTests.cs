@@ -503,18 +503,6 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
     }
 
     [Fact]
-    public async Task Send_NullAsyncDeliveryCallback_ThrowsArgumentNullException()
-    {
-        await WithProducer(producer =>
-        {
-            ArgumentNullException refused = Assert.Throws<ArgumentNullException>(
-                () => { _ = producer.Send(Record(Topic("async-null-callback")), (IAsyncCallback)null!); });
-            Assert.Equal("callback", refused.ParamName);
-            return Task.CompletedTask;
-        });
-    }
-
-    [Fact]
     public async Task ThenApply_OnAnAsyncCallbackSend_RunsOnThePumpThread()
     {
         TaskCompletionSource<bool> gate = NewGate();

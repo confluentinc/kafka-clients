@@ -25,9 +25,11 @@ public interface IAsyncCallback
 {
     /// <summary>
     /// Called on the producer's pump thread when the record's delivery completes, or, on
-    /// <c>AsyncKafkaProducer</c>, inside <c>Send</c>, on the caller's thread, when a serializer threw an
-    /// <see cref="Common.Errors.ApiException"/>; only the record's future then waits for the task.
-    /// <c>AsyncMockProducer</c> rethrows that exception from <c>Send</c> instead, as Java's <c>MockProducer</c> does.
+    /// <c>AsyncKafkaProducer</c>, when a serializer threw an <see cref="Common.Errors.ApiException"/>: inside
+    /// <c>Send</c>, on the caller's thread, or, behind an awaited serializer, on the thread that ended the
+    /// serialization; only the record's future then waits for the task. <c>AsyncMockProducer</c> rethrows that
+    /// exception from <c>Send</c> instead, or, behind an awaited serializer, ends the first stage with it, as Java's
+    /// <c>MockProducer</c> throws it.
     /// </summary>
     /// <param name="metadata">The record's metadata; on failure, the placeholder with offset -1.</param>
     /// <param name="exception">The failure, or <c>null</c> when the record was delivered.</param>
