@@ -185,7 +185,7 @@ One commit per step, each passing the gates. The stacked branch's fixups are fol
   constructor's null and invalid strategy; `AddRecord` from another thread while a `Poll` waits.
 - **S4** Docs and lists: XML docs of the two mocks; the ledger rows; the `STATUS.md` outcome.
 - **S5** The accepted rule text M1–M4, where it applies to master verbatim.
-- **S6** `e137a77d0`: M3 with master's wording, on the owner's go-ahead (2026-11-24); see "M3 on master".
+- **S6** M3 with master's wording, on the owner's go-ahead (2026-11-24); see "M3 on master".
 
 ## Verification
 
@@ -281,7 +281,7 @@ dereferenced, on either side, and needs no `GCHandle`. First use: the mock consu
 
 ### M5 — `CLAUDE.md` §3 producer sketch, the `AsyncMockProducer` comment (proposed, not applied)
 
-Current text (`dotnet/CLAUDE.md:344-346`): "Mock TAKES the serializers — Java-faithful (MockProducer.java takes
+Current text (`dotnet/CLAUDE.md:345-347`): "Mock TAKES the serializers — Java-faithful (MockProducer.java takes
 Serializer<K>/Serializer<V> and serializes records into its history); UNLIKE the consumer, where
 mock-takes-deserializers is a deviation. Send serializes K/V → bytes exactly like the real client (§4)."
 
@@ -316,7 +316,8 @@ parameter. Proposed: "… so the mock ctors take serializers too (`(keySer, valu
 
 ## Outcome (S1–S4)
 
-Commits: S0 `d60e97154`, S1 `d7c5359cf`, S2 `2822920b2`, S3 `47bd5580a`, S4 (the commit with this text). The
+Commits: S0 `d60e97154`, S1 `d7c5359cf`, S2 `2822920b2`, then S3 and S4 (the commit with this text), named by step since their hashes change when the
+fixups are squashed. The
 stacked branch's fixups for Critic 135's issues 1–4 are folded into the steps that wrote the code they fix.
 
 - **C mock slots.** The C mock stores the key and value slots and never reads, frees or compares them: the
