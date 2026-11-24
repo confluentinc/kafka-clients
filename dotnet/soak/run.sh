@@ -484,11 +484,14 @@ rotate_log() {
 # modification time, which pruning goes by, and the rotated log is deleted
 # only once its .bz2 is in place. $$ is run.sh's PID even in the background
 # job, so a compression that a previous run.sh left running never shares the
-# temporary file.
+# temporary file. A run.sh started meanwhile deletes that file, though, as left
+# incomplete: `touch -c` keeps it deleted, so the `mv` fails and the rotated log
+# stays for the new run.sh to compress, rather than an empty file taking the
+# .bz2's name and the log being deleted.
 compress_part() {
     local part="$1" tmp="$1.bz2.tmp.$$"
     if nice -n 19 bzip2 -c -- "$part" > "$tmp" &&
-            touch -r "$part" "$tmp" && mv -f -- "$tmp" "$part.bz2"; then
+            touch -c -r "$part" "$tmp" && mv -f -- "$tmp" "$part.bz2"; then
         rm -f -- "$part"
     else
         rm -f -- "$tmp"

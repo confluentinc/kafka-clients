@@ -438,10 +438,10 @@ def supervisor_env(tmp_path, stub, extra=None):
 
 
 @contextlib.contextmanager
-def supervising(tmp_path, env):
+def supervising(tmp_path, env, out_name="supervisor.out"):
     """Run run.sh in the background for the duration of the block, then stop
     it with SIGTERM, as an operator would. Yields the path of its output."""
-    out_path = tmp_path / "supervisor.out"
+    out_path = tmp_path / out_name
     with open(str(out_path), "w") as out:
         proc = subprocess.Popen(["bash", RUN_SH, "client.config"],
                                 cwd=str(tmp_path), env=env, stdout=out,
@@ -626,6 +626,51 @@ def test_a_truncated_bz2_beside_its_rotated_log_is_redone_at_startup(tmp_path):
     run_supervisor(tmp_path, ["client.config"])
 
     assert wait_for(lambda: not part.exists())
+    assert bz2.open(str(compressed)).read() == content
+
+
+def test_a_restart_during_a_compression_loses_nothing(tmp_path):
+    """A compression goes on after its run.sh is stopped, and a run.sh started
+    meanwhile deletes its temporary file as left incomplete. The old
+    compression, ending first, must then leave the rotated log alone, not put
+    an empty .bz2 in its place, so that the new run.sh compresses all of it."""
+    path = fake_tool(tmp_path, "bzip2", (
+        "# Each run.sh's compression waits for its own go-ahead.\n"
+        'while [ ! -e "$BZIP2_GO" ]; do sleep 0.05; done\n'
+        "exec '{}' \"$@\"\n").format(shutil.which("bzip2")))
+    part = tmp_path / "t1-848-normal.log.20261122T000000Z"
+    content = b"rotated output\n" * 1000
+    part.write_bytes(content)
+    compressed = tmp_path / (part.name + ".bz2")
+    stub = write_stub(tmp_path, "exec sleep 600\n")
+    go_old, go_new = tmp_path / "go-old", tmp_path / "go-new"
+    env = supervisor_env(tmp_path, stub, {"PATH": path,
+                                          "BZIP2_GO": str(go_old)})
+    try:
+        with supervising(tmp_path, env, "old.out") as old_out:
+            assert wait_for(lambda: list(tmp_path.glob("*.bz2.tmp.*"))), \
+                "the compression never started"
+        # run.sh is stopped, and its compression still waits.
+        with supervising(tmp_path, dict(env, BZIP2_GO=str(go_new)),
+                         "new.out") as new_out:
+            assert wait_for(lambda: "left incomplete" in new_out.read_text())
+            go_old.touch()
+            assert wait_for(lambda: "Could not compress" in old_out.read_text()
+                            or not part.exists()), \
+                "the old compression never ended"
+            go_new.touch()
+            assert wait_for(lambda: compressed.exists() and not part.exists()
+                            and not list(tmp_path.glob("*.bz2.tmp.*"))
+                            or "Could not compress" in new_out.read_text())
+    finally:
+        # Never leave a compression waiting after the test.
+        go_old.touch()
+        go_new.touch()
+
+    assert compressed.exists() and not part.exists(), \
+        sorted(p.name for p in tmp_path.iterdir())
+    assert compressed.stat().st_size > 0, \
+        "the .bz2 is empty, and the rotated log is gone"
     assert bz2.open(str(compressed)).read() == content
 
 
