@@ -442,7 +442,7 @@ test("a serializer's serialize may also return a Promise of the bytes it takes (
   assert.match(findings(r)[0], /^Serializer\.serialize: return: Java byte\[\] is not TypeScript /);
 });
 
-test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition, MetricName, Uuid, ConfigResource, TopicPartitionReplica, AclBinding, AclBindingFilter, ClientQuotaEntity and MemberToRemove collections; integer keys are a Map of numbers; an OptionalLong is a bigint or null', () => {
+test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition, MetricName, Uuid, ConfigResource, TopicPartitionReplica, AclBinding, AclBindingFilter, ClientQuotaEntity and MemberToRemove collections, a set of Uuid included; integer keys are a Map of numbers; an OptionalLong is a bigint or null', () => {
   const coll = javaClass('clients.producer.Coll', {
     overloads: [
       method('take', ['Node[]'], { param_types: ['Node[]'], return_type: 'void', param_names: ['nodes'] }),
@@ -461,6 +461,7 @@ test('a Java array or collection taken is any iterable; one returned is an array
       method('byFilter', [], { return_type: 'Map<AclBindingFilter, String>' }),
       method('byEntity', [], { return_type: 'Map<ClientQuotaEntity, Map<String, Double>>' }),
       method('members', [], { return_type: 'Set<MemberToRemove>' }),
+      method('reserved', [], { return_type: 'Set<Uuid>' }),
       method('total', [], { return_type: 'OptionalLong' }),
       method('assignments', [], { return_type: 'Map<Integer, List<Integer>>' }),
     ],
@@ -496,12 +497,13 @@ test('a Java array or collection taken is any iterable; one returned is an array
     byFilter: 'byFilter(): AclBindingFilterMap<string> { return new AclBindingFilterMap(); }',
     byEntity: 'byEntity(): ClientQuotaEntityMap<Map<string, number>> { return new ClientQuotaEntityMap(); }',
     members: 'members(): MemberToRemoveSet { return new MemberToRemoveSet(); }',
+    reserved: 'reserved(): UuidSet { return new UuidSet(); }',
     total: 'total(): bigint | null { return null; }',
     assignments: 'assignments(): ReadonlyMap<number, readonly number[]> { return new Map(); }',
   };
   const source = (/** @type {Record<string, string>} */ members) =>
     "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
-    "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport type { KafkaFuture } from '../common/kafka_future';\nimport { AclBindingFilterMap, AclBindingMap, ClientQuotaEntityMap, ConfigResourceMap, MemberToRemoveSet, MetricNameMap, TopicPartitionMap, TopicPartitionReplicaMap, TopicPartitionSet, UuidMap } from './collections';\n" +
+    "import type { MetricName } from '../common/metric_name';\nimport type { Metric } from '../common/metric';\nimport type { KafkaFuture } from '../common/kafka_future';\nimport { AclBindingFilterMap, AclBindingMap, ClientQuotaEntityMap, ConfigResourceMap, MemberToRemoveSet, MetricNameMap, TopicPartitionMap, TopicPartitionReplicaMap, TopicPartitionSet, UuidMap, UuidSet } from './collections';\n" +
     `void TopicPartition;\nexport class Coll {\n${Object.values(members)
       .map((m) => `  ${m}\n`)
       .join('')}}\n`;
@@ -521,7 +523,7 @@ test('a Java array or collection taken is any iterable; one returned is an array
         'export class TopicPartitionSet { private readonly b = 1; }\nexport class TopicPartitionMap<V> { private readonly v: V | null = null; }\n' +
         'export class MetricNameMap<V> { private readonly v: V | null = null; }\nexport class UuidMap<V> { private readonly v: V | null = null; }\n' +
         'export class ConfigResourceMap<V> { private readonly v: V | null = null; }\nexport class TopicPartitionReplicaMap<V> { private readonly v: V | null = null; }\n' +
-        'export class MemberToRemoveSet { private readonly m = 1; }\n' +
+        'export class MemberToRemoveSet { private readonly m = 1; }\nexport class UuidSet { private readonly u = 1; }\n' +
         'export class AclBindingMap<V> { private readonly v: V | null = null; }\nexport class AclBindingFilterMap<V> { private readonly v: V | null = null; }\n' +
         'export class ClientQuotaEntityMap<V> { private readonly v: V | null = null; }\n',
       'src/producer/coll.ts': source(members),
@@ -587,6 +589,7 @@ test('a Java array or collection taken is any iterable; one returned is an array
       'members(): Set<string> { return new Set(); }',
       'Coll.members: return: Java Set<MemberToRemove> is not TypeScript Set<string>',
     ],
+    ['reserved', 'reserved(): Set<string> { return new Set(); }', 'Coll.reserved: return: Java Set<Uuid> is not TypeScript Set<string>'],
     ['total', 'total(): number | null { return null; }', 'Coll.total: return: Java OptionalLong is not TypeScript number | null'],
     [
       'assignments',

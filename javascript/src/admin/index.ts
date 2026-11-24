@@ -31,11 +31,12 @@
  * `QuorumInfo`, `RaftVoterEndpoint` and `EndpointType`).
  *
  * Not translated: `AdminClient`, Java's abstract base class of
- * `KafkaAdminClient`; and Java's deprecated API, `ForwardingAdmin`,
- * `listConsumerGroups` with `ConsumerGroupListing`,
- * `ListConsumerGroupsOptions` and `ListConsumerGroupsResult`, and
- * `listClientMetricsResources` with its classes (use `listGroups` and
- * `listConfigResources`).
+ * `KafkaAdminClient`; and Java's deprecated API, `listConsumerGroups` with
+ * `ConsumerGroupListing`, `ListConsumerGroupsOptions` and
+ * `ListConsumerGroupsResult`, and `listClientMetricsResources` with its
+ * classes (use `listGroups` and `listConfigResources`). `ForwardingAdmin`,
+ * public and not deprecated in Java, is left out as well: it is no client
+ * class, nothing the client hands out reaches it, and the core has none.
  *
  * `AdminClientConfig` holds Java's constants only, as its `ConfigDef`
  * machinery is not translated: `AdminClientConfig(Map)`, `configNames()`,

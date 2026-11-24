@@ -59,6 +59,7 @@
 // | Set<T>, returned (a constant: read-only)     | Set<T> or ReadonlySet<T>                |
 // | Set<TopicPartition>, returned                | TopicPartitionSet                       |
 // | Set<MemberToRemove>, returned                | MemberToRemoveSet                       |
+// | Set<Uuid>, returned                          | UuidSet                                 |
 // | Map<TopicPartition, V>                       | TopicPartitionMap<V>                    |
 // | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
 // | Map<Uuid, V>                                 | UuidMap<V>                              |
@@ -93,7 +94,10 @@ const VALUE_KEYED_MAPS = new Map([
   ['ClientQuotaEntity', 'ClientQuotaEntityMap'],
 ]);
 /** The sets of a value class returned (DECISIONS.md entry 38): the Java member class, and the TypeScript class of its set. */
-const VALUE_KEYED_SETS = new Map([['MemberToRemove', 'MemberToRemoveSet']]);
+const VALUE_KEYED_SETS = new Map([
+  ['MemberToRemove', 'MemberToRemoveSet'],
+  ['Uuid', 'UuidSet'],
+]);
 const { mappedMembers } = require('./java_members');
 const { liveForms, optionName, formOptionNames, signaturesOf } = require('./overload_shape');
 const { waitingMembers } = require('./waiting_call_promise');

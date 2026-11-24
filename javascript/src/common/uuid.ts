@@ -22,8 +22,8 @@ import { randomBytes } from 'node:crypto';
 
 import { JavaForms, kind } from '../internal/args';
 import { checkLong } from '../internal/java_number';
-import { readOnlySet } from '../internal/read_only_set';
 import { IllegalArgumentError } from '../illegal_argument_error';
+import { UuidSet } from './uuid_set';
 
 const CONSTRUCTOR_FORMS = new JavaForms('Uuid', [['mostSigBits', 'leastSigBits']]);
 const FROM_STRING_FORMS = new JavaForms('fromString', [['str']], { bareTypes: { str: (v) => v === null || typeof v === 'string' } });
@@ -123,7 +123,7 @@ export class Uuid {
   static readonly ZERO_UUID: Uuid = new Uuid({ mostSigBits: 0n, leastSigBits: 0n });
 
   /** The set of reserved UUIDs that will never be returned by the randomUuid method. */
-  static readonly RESERVED: ReadonlySet<Uuid> = readOnlySet([Uuid.ZERO_UUID, Uuid.ONE_UUID]);
+  declare static readonly RESERVED: UuidSet;
 
   /**
    * Static factory to retrieve a type 4 (pseudo randomly generated) UUID.
@@ -349,3 +349,16 @@ export class Uuid {
     return this.toString();
   }
 }
+
+// Uuid.RESERVED, Java's Set.of(ZERO_UUID, ONE_UUID), a read-only UuidSet:
+// made on its first read, since UuidSet's module reads this one's, and kept
+// from then on as a constant property.
+Object.defineProperty(Uuid, 'RESERVED', {
+  configurable: true,
+  enumerable: true,
+  get(): UuidSet {
+    const reserved = new UuidSet([Uuid.ZERO_UUID, Uuid.ONE_UUID]).internalSetReadOnly();
+    Object.defineProperty(Uuid, 'RESERVED', { value: reserved, enumerable: true });
+    return reserved;
+  },
+});

@@ -20,7 +20,7 @@
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');
-const { Uuid } = require('@confluentinc/kafka-javascript/common');
+const { Uuid, UuidSet } = require('@confluentinc/kafka-javascript/common');
 
 test('testSignificantBits', () => {
   const id = new Uuid({ mostSigBits: 34n, leastSigBits: 98n });
@@ -128,11 +128,29 @@ test("fromString refuses what Java's base64 decoder refuses, with its messages",
   assert.ok(Uuid.fromString({ str: 'UXyU9i5ARn6W00ON2taeWA' }).equals(Uuid.fromString('UXyU9i5ARn6W00ON2taeWA')));
 });
 
+test("RESERVED holds its members by value, as Java's Set.of compares them with equals, and is read-only", () => {
+  assert.equal(Uuid.RESERVED.has(new Uuid({ mostSigBits: 0n, leastSigBits: 0n })), true);
+  assert.equal(Uuid.RESERVED.has(Uuid.fromString(Uuid.ZERO_UUID.toString())), true);
+  assert.equal(Uuid.RESERVED.has(new Uuid({ mostSigBits: 0n, leastSigBits: 1n })), true);
+  assert.equal(Uuid.RESERVED.has(new Uuid({ mostSigBits: 0n, leastSigBits: 2n })), false);
+  assert.equal(Uuid.RESERVED, Uuid.RESERVED);
+  assert.ok(Uuid.RESERVED instanceof UuidSet);
+  for (const write of [
+    () => Uuid.RESERVED.add(Uuid.randomUuid()),
+    () => Uuid.RESERVED.delete(Uuid.ZERO_UUID),
+    () => Uuid.RESERVED.clear(),
+  ]) {
+    assert.throws(write, { name: 'UnsupportedOperationError', message: '' });
+  }
+  assert.equal(Uuid.RESERVED.size(), 2);
+  assert.equal(Uuid.RESERVED.toString(), '[AAAAAAAAAAAAAAAAAAAAAA, AAAAAAAAAAAAAAAAAAAAAQ]');
+});
+
 test('the constants, the long halves and the JSON form', () => {
   assert.equal(Uuid.ONE_UUID.toString(), 'AAAAAAAAAAAAAAAAAAAAAQ');
   assert.equal(Uuid.METADATA_TOPIC_ID, Uuid.ONE_UUID);
   assert.ok(Uuid.RESERVED.has(Uuid.ZERO_UUID) && Uuid.RESERVED.has(Uuid.ONE_UUID));
-  assert.equal(Uuid.RESERVED.size, 2);
+  assert.equal(Uuid.RESERVED.size(), 2);
   const negative = new Uuid({ mostSigBits: -1n, leastSigBits: -(2n ** 63n) });
   assert.equal(negative.getMostSignificantBits(), -1n);
   assert.ok(Uuid.fromString(negative.toString()).equals(negative));

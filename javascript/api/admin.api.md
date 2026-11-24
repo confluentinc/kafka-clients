@@ -959,9 +959,15 @@ export namespace CreateTopicsResult {
             numPartitions: number;
             replicationFactor: number;
             config: Config | null;
+            exception?: never;
         });
+        constructor(exception: ApiError | null);
         constructor(options: {
             exception: ApiError | null;
+            topicId?: never;
+            numPartitions?: never;
+            replicationFactor?: never;
+            config?: never;
         });
         config(): Config | null;
         numPartitions(): number;
@@ -3009,7 +3015,7 @@ export namespace MockAdminClient {
             clusterId?: string;
             brokers?: Iterable<Node>;
             controller?: number;
-            brokerLogDirs?: ReadonlyArray<ReadonlyArray<string>>;
+            brokerLogDirs?: Iterable<Iterable<string>>;
             defaultPartitions?: number;
             usingRaftController?: boolean;
             defaultReplicationFactor?: number;
@@ -3152,16 +3158,22 @@ export class OffsetSpec {
 // @public (undocumented)
 export namespace OffsetSpec {
     export class EarliestLocalSpec extends OffsetSpec {
+        constructor();
     }
     export class EarliestPendingUploadSpec extends OffsetSpec {
+        constructor();
     }
     export class EarliestSpec extends OffsetSpec {
+        constructor();
     }
     export class LatestSpec extends OffsetSpec {
+        constructor();
     }
     export class LatestTieredSpec extends OffsetSpec {
+        constructor();
     }
     export class MaxTimestampSpec extends OffsetSpec {
+        constructor();
     }
     export class TimestampSpec extends OffsetSpec {
     }
