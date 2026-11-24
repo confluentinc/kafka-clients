@@ -196,7 +196,8 @@ public sealed class RecordHeaderClassMembersTests
 
     // A built header and a polled one are one class, as Java's RecordHeader.equals compares classes: the key and the
     // value are each one object field (a string or a buffer, an array or a buffer), so a header built from a string has
-    // no buffer field; a polled header adds its batch, its native header and whether its value has been read.
+    // no buffer field; a polled header adds its batch and its native header, and marks a value not read yet with
+    // RecordHeader.UnreadValue in the value field, not with a flag field.
     [Fact]
     public void RecordHeader_HoldsItsKeyAndValueInOneFieldEach_PlusThePolledHeadersBatchAndNativeHeader()
     {
@@ -209,10 +210,35 @@ public sealed class RecordHeaderClassMembersTests
                 ("_header", typeof(IntPtr)),
                 ("_key", typeof(object)),
                 ("_value", typeof(object)),
-                ("_valueRead", typeof(bool)),
             },
             fields.Select(field => (field.Name, field.FieldType)).OrderBy(field => field.Name, StringComparer.Ordinal));
     }
+
+    // GC.GetAllocatedBytesForCurrentThread has no net462 equivalent.
+#if NET8_0_OR_GREATER
+    // The size the four fields give: the object header and method table, then four pointer-sized fields (48 B on a
+    // 64-bit runtime). A fifth field, which no allocation budget of a send or a poll would see as the records are
+    // built outside their measured window, fails here.
+    [Fact]
+    public void ARecordHeaderBuiltFromAKeyAndAValue_AllocatesItsFourFieldsOnly()
+    {
+        const int Count = 1000;
+        byte[] value = { 1 };
+        RecordHeader[] built = new RecordHeader[Count];
+        built[0] = new RecordHeader("k", value);
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < Count; i++)
+        {
+            built[i] = new RecordHeader("k", value);
+        }
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(6L * IntPtr.Size * Count, allocated);
+        GC.KeepAlive(built);
+    }
+#endif
 
     [Fact]
     public void SetReadOnlyAndIsReadOnly_AreMethods_NotAProperty()

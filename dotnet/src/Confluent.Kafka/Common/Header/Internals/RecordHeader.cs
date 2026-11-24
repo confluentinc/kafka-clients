@@ -39,6 +39,10 @@ namespace Confluent.Kafka.Common.Header.Internals;
 /// </remarks>
 internal sealed class RecordHeader : IHeader
 {
+    // What a fetched header's _value holds until Value() has copied the value out of the batch: null cannot stand for
+    // "not read yet", as it is a value. One field for the value and this state keeps a header at four fields.
+    internal static readonly object UnreadValue = new object();
+
     // The polled batch a fetched header reads its key and value from, and the header's view in it; null for a header
     // built from a key and a value or from buffers.
     private readonly SafeConsumerRecordsHandle? _batch;
@@ -47,10 +51,9 @@ internal sealed class RecordHeader : IHeader
     // The key is its string or, for a header built from buffers, its buffer until the first read replaces it under the
     // lock; for a fetched header null until its first read decodes it. The value is null, its array or, for a header
     // built from buffers, its buffer until the first read replaces it under the lock; for a fetched header it is
-    // copied on its first read, once _valueRead is set.
+    // UnreadValue until its first read through Value() replaces that with the copy, or with null.
     private volatile object? _key;
     private volatile object? _value;
-    private volatile bool _valueRead;
 
     /// <summary>Initializes a header with a key and a value, which may be <see langword="null"/>.</summary>
     /// <param name="key">The header's key.</param>
@@ -81,6 +84,7 @@ internal sealed class RecordHeader : IHeader
     {
         _batch = batch;
         _header = header;
+        _value = UnreadValue;
     }
 
     /// <inheritdoc/>
@@ -118,12 +122,12 @@ internal sealed class RecordHeader : IHeader
     /// </remarks>
     public byte[]? Value()
     {
-        if (_batch is not null)
+        object? value = _value;
+        if (ReferenceEquals(value, UnreadValue))
         {
-            return _valueRead ? (byte[]?)_value : ReadValue();
+            return ReadValue();
         }
 
-        object? value = _value;
         if (value is not StrongBox<ReadOnlyMemory<byte>>)
         {
             return (byte[]?)value;
@@ -147,12 +151,12 @@ internal sealed class RecordHeader : IHeader
     // buffer until Value() has copied it, then that array; for a header built with a byte[] it is that array.
     internal ReadOnlyMemory<byte>? ValueMemory()
     {
-        // _valueRead is set after _value is published, so once it is seen the cached array is the value.
-        if (_batch is null || _valueRead)
+        // One read of _value: once it is not UnreadValue it is the value, for a fetched header the one Value() cached.
+        object? value = _value;
+        if (!ReferenceEquals(value, UnreadValue))
         {
             // Not a conditional with a null branch: null converts to ReadOnlyMemory<byte> through its byte[]
             // conversion, giving an empty memory instead of null.
-            object? value = _value;
             if (value is null)
             {
                 return null;
@@ -172,7 +176,7 @@ internal sealed class RecordHeader : IHeader
             return null;
         }
 
-        ReadOnlyMemory<byte> memory = _batch.HandOut(bytes.Data, bytes.Length);
+        ReadOnlyMemory<byte> memory = _batch!.HandOut(bytes.Data, bytes.Length);
         GC.KeepAlive(_batch);
         return memory;
     }
@@ -233,9 +237,9 @@ internal sealed class RecordHeader : IHeader
     // reads the span. False for a null value.
     internal unsafe bool ValueSpan(out ReadOnlySpan<byte> value)
     {
-        if (_batch is null || _valueRead)
+        object? current = _value;
+        if (!ReferenceEquals(current, UnreadValue))
         {
-            object? current = _value;
             switch (current)
             {
                 case null:
@@ -285,9 +289,10 @@ internal sealed class RecordHeader : IHeader
         }
 
         GC.KeepAlive(_batch);
-        byte[]? value = copy is null ? null : (byte[]?)Interlocked.CompareExchange(ref _value, copy, null) ?? copy;
-        _valueRead = true;
-        return value;
+
+        // The first reader's copy is the one every call returns; a null value is published as null.
+        object? prior = Interlocked.CompareExchange(ref _value, copy, UnreadValue);
+        return ReferenceEquals(prior, UnreadValue) ? copy : (byte[]?)prior;
     }
 
     // The caller keeps the batch alive until it has read the view.

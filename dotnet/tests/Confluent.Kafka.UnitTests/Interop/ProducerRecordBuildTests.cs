@@ -164,7 +164,9 @@ public sealed class ProducerRecordBuildTests
         // The send read each value as a view of the batch: none was copied into a managed array.
         foreach (IHeader header in headers)
         {
-            Assert.Null(typeof(RecordHeader).GetField("_value", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(header));
+            Assert.Same(
+                RecordHeader.UnreadValue,
+                typeof(RecordHeader).GetField("_value", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(header));
         }
     }
 

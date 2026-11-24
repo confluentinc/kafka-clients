@@ -167,9 +167,9 @@ public sealed class ConsumerRecordWrappedHeadersTests
         IHeader header = Assert.Single(headers);
         Assert.IsType<List<IHeader>>(Field(headers, "_state"));
         Assert.Null(Field(header, "_key"));
-        Assert.Null(Field(header, "_value"));
+        Assert.Same(RecordHeader.UnreadValue, Field(header, "_value"));
         Assert.Equal("h", header.Key());
-        Assert.Null(Field(header, "_value"));
+        Assert.Same(RecordHeader.UnreadValue, Field(header, "_value"));
     }
 
     [Fact]
