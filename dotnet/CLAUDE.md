@@ -185,8 +185,10 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
   class and a package can. Inside any `Confluent.Kafka.Common.*` namespace the simple name of a
   segment under `Common` (`Config`, `Record`, `Header`) means that namespace (CS0118), whatever the
   `using` lines say, so a type of that name is written qualified there: the admin client's `Config`
-  as `Admin.Config`. No type under `Common` has such a name (Java's `Header` is `IHeader`, ledger
-  596); a later one follows the same rule. CA1724 stays at its default, off.
+  as `Admin.Config`. One type under `Common` has such a name, `Confluent.Kafka.Common.Metrics.Quota`
+  (Java's `org.apache.kafka.common.metrics.Quota`, beside the namespace `Confluent.Kafka.Common.Quota`): its own
+  namespace finds it by its simple name, and the rest of `Common` writes it `Metrics.Quota` (ledger 642). Java's
+  `Header` is `IHeader` (ledger 596). A later one follows the same rule. CA1724 stays at its default, off.
 - **`using` lines.** A file imports each namespace it uses with one `using` line outside its
   namespace (IDE0065), in `dotnet format`'s order; there is no `global using`. Code in a
   `Confluent.Kafka.*` namespace (the tests, the gRPC server, soak, perf) imports them like user code
@@ -1809,9 +1811,14 @@ of a map is a `KafkaMetric` over its own owned `kafka_common_metrics_KafkaMetric
 each metric are independent of the client and stay valid after it is destroyed, so a map answers and `MetricValue()`
 measures the metric on each call, as Java's do, also after the client is closed. Neither handle takes a reference on
 the client's handle; the client's teardown frees neither, and the GC releases each once nothing holds it (the view:
-the client and every map over it). `KafkaMetric` is not `IDisposable`. A metric a `QuotaViolationException` names
-holds a name and a value, as the error's payload carries no metric handle. ffi §A2 and §B2 Category 6 give the
-mechanics.
+the client and every map over it). `KafkaMetric` is not `IDisposable`. Its `Config()` copies the metric's
+configuration out of the owned `kafka_common_metrics_MetricConfig_t` that `KafkaMetric_config_err` returns, and
+`Config(MetricConfig)` builds a transient one that `KafkaMetric_set_config_err` copies, so neither keeps a native config
+(ledger 640). `Measurable()` returns a new `NativeMeasurable` over the `kafka_common_metrics_Measurable_t` borrowed from
+the metric's handle: it holds its `KafkaMetric`, so the handle outlives it, and each `Measure` takes a call-scoped
+reference on that handle (ledger 641). A metric a `QuotaViolationException` names holds a name and a value, as the
+error's payload carries no metric handle: it is not measurable, and keeps a copy of a configuration set on it (ledger
+639). ffi §A2 and §B2 Category 6 give the mechanics.
 
 ---
 
