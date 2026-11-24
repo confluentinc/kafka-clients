@@ -714,9 +714,86 @@ mod grpc_backends {
             crate::common::backend_pool::uses_containers()
         }
     }
+
+    /// Backend that drives the Node.js producer (`javascript/src/producer`)
+    /// through `javascript/grpc-server/grpc_server.js`, natively or in the
+    /// `confluent-kafka-rust/javascript-grpc-server:<MULTILANG_IMAGE_TAG>`
+    /// Docker image.
+    ///
+    /// Producer only. The JavaScript binding has no consumer or admin client
+    /// yet, so the server registers only `ProducerService` and there is no
+    /// [`AdminBackendFactory`] impl (the admin and consumer macros have no
+    /// `__grpc_js` arm).
+    pub struct JsGrpcFactory {
+        channel: Channel,
+        /// The same backend without the channel's per-request timeout, for the
+        /// producer's blocking RPCs.
+        untimed_channel: Channel,
+    }
+
+    impl JsGrpcFactory {
+        pub fn new(channel: Channel, untimed_channel: Channel) -> Self {
+            Self { channel, untimed_channel }
+        }
+    }
+
+    impl ProducerBackendFactory for JsGrpcFactory {
+        type Producer = MultilanguageProducer;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
+            MultilanguageProducer::new(self.channel.clone(), self.untimed_channel.clone(), config, "js").await
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Self::Producer, ProducerCallbackLog), Error> {
+            producer_with_log(&self.channel, &self.untimed_channel, config, "js").await
+        }
+
+        fn name(&self) -> &'static str {
+            "js"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            crate::common::backend_pool::uses_containers()
+        }
+    }
+
+    /// Present only so the producer test bodies bounded on
+    /// `ProducerBackendFactory + ConsumerBackendFactory` (the transaction
+    /// tests that read back through a consumer) instantiate for the
+    /// `__grpc_js` arm. The JavaScript server does not register
+    /// `ConsumerService`, so every call fails with gRPC `UNIMPLEMENTED`; those
+    /// tests are skipped through `JS_GRPC_SKIPS` in `rust/Makefile`.
+    impl ConsumerBackendFactory for JsGrpcFactory {
+        async fn create(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, Error> {
+            Ok(Box::new(
+                MultilanguageConsumer::new(self.channel.clone(), self.untimed_channel.clone(), config, "js").await?,
+            ))
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Box<dyn DynConsumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), Error> {
+            consumer_with_log(&self.channel, &self.untimed_channel, config, "js").await
+        }
+
+        fn name(&self) -> &'static str {
+            "js"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            crate::common::backend_pool::uses_containers()
+        }
+    }
 }
 
 #[cfg(feature = "multilanguage-tests")]
 pub use grpc_backends::{
-    CGrpcFactory, DotnetAsyncGrpcFactory, DotnetGrpcFactory, PythonAsyncGrpcFactory, PythonGrpcFactory,
+    CGrpcFactory, DotnetAsyncGrpcFactory, DotnetGrpcFactory, JsGrpcFactory, PythonAsyncGrpcFactory, PythonGrpcFactory,
 };
