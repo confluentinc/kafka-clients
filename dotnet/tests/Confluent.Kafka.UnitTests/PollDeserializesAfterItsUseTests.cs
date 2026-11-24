@@ -41,7 +41,8 @@ public sealed class BlockingTraceCollection
 /// <summary>
 /// <c>Poll</c> deserializes its records after its use of the consumer has ended, on the sync and the async consumer:
 /// a deserializer that disposes the consumer does not deadlock, and after a failing record every partition is sought
-/// back in one use of the poll's thread, which another thread's call on a mock waits for.
+/// back in one use of the poll's thread, which another thread's call on the consumer waits for. The consumers are the
+/// real ones, built over the C mock.
 /// </summary>
 [Collection(BlockingTraceCollection.Name)]
 public sealed class PollDeserializesAfterItsUseTests

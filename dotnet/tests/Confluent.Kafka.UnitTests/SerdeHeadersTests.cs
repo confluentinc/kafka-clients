@@ -36,10 +36,10 @@ namespace Confluent.Kafka.UnitTests;
 /// Java's headers overloads of <c>Serializer</c> and <c>Deserializer</c>: the extension methods run the object's
 /// headers form, or the form without headers; the real producers call the key's, then the value's serializer's headers
 /// form with the record's own headers, which they make read-only after it, and the mock producers call each with a new,
-/// empty headers object, as Java's <c>MockProducer</c> does; the two mock consumers call the key's and the value's
-/// deserializer's headers form with the headers the record then carries, and that a
+/// empty headers object, as Java's <c>MockProducer</c> does; the real consumers, built over the C mock, call the key's
+/// and the value's deserializer's headers form with the headers the record then carries, and that a
 /// <see cref="RecordDeserializationException"/> carries; a serializer or deserializer without the headers form gets the
-/// call without headers. The real consumers need a broker: <c>SerdeHeadersBrokerTests</c>.
+/// call without headers. The mock consumers call no deserializer. A broker run is in <c>SerdeHeadersBrokerTests</c>.
 /// </summary>
 public sealed class SerdeHeadersTests
 {
