@@ -38,13 +38,19 @@ namespace Confluent.Kafka.Consumer;
 /// be called from any thread, and a <see cref="IDisposable.Dispose"/> from another thread wakes the call in progress, waits for it, and closes the consumer.
 /// </para>
 /// <para>
-/// Rebalance listeners run on the calling thread, only inside <c>Poll</c>, <c>Unsubscribe</c> and <c>Close</c>;
-/// commit callbacks run on it inside the blocking call that delivers them. What a callback may call on its own
+/// Rebalance listeners run on the calling thread: on <see cref="KafkaConsumer{TKey, TValue}"/> only inside
+/// <c>Poll</c>, <c>Unsubscribe</c>, a <c>Subscribe</c> or <c>Assign</c> given an empty collection, which
+/// unsubscribes, and <c>Close</c>; on <see cref="MockConsumer{TKey, TValue}"/> only inside <c>Rebalance</c> and
+/// <c>LosePartitions</c>, as in Java's mock. Commit callbacks run on it inside the blocking call that delivers them. What a callback may call on its own
 /// consumer is in <see cref="IConsumerRebalanceListener"/>.
 /// </para>
 /// <para>
 /// A <see cref="KafkaConsumer{TKey, TValue}"/> disposes its deserializers, given or built from its configuration,
 /// when it closes, as its <c>Create</c> says; a <see cref="MockConsumer{TKey, TValue}"/> does not.
+/// </para>
+/// <para>
+/// Java's <c>clientInstanceId(Duration)</c>, <c>registerMetricForSubscription(KafkaMetric)</c> and
+/// <c>unregisterMetricFromSubscription(KafkaMetric)</c> are not offered: the native core has no entry point for them yet.
 /// </para>
 /// </remarks>
 /// <typeparam name="TKey">The deserialized key type.</typeparam>

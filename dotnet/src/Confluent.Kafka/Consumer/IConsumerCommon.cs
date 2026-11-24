@@ -125,7 +125,12 @@ public interface IConsumerCommon
     /// compare by name, group and tags, not description, so per-partition metrics that share a name are distinct
     /// keys. As Java's <c>KafkaConsumer.metrics()</c> takes no <c>acquire()</c>, another thread's call does not
     /// refuse it on <see cref="KafkaConsumer{TKey, TValue}"/> and <see cref="AsyncKafkaConsumer{TKey, TValue}"/>; the
-    /// mocks wait for it, as Java's synchronized <c>MockConsumer.metrics()</c> does.
+    /// mocks wait for it, as Java's synchronized <c>MockConsumer.metrics()</c> does. On
+    /// <see cref="KafkaConsumer{TKey, TValue}"/> and <see cref="AsyncKafkaConsumer{TKey, TValue}"/> the map lacks
+    /// Java's network and app-info metrics, which the native core does not register yet: the connection, request and
+    /// I/O metrics Java's <c>Selector</c> adds to <c>consumer-metrics</c> (<c>connection-count</c>,
+    /// <c>request-total</c>, ...), the per-node <c>consumer-node-metrics</c> group, and the <c>app-info</c> group
+    /// (<c>version</c>, <c>commit-id</c>, <c>start-time-ms</c>).
     /// </remarks>
     /// <returns>An owned, immutable snapshot (empty when no metrics are registered — e.g. a mock).</returns>
     /// <exception cref="IllegalStateException">
