@@ -163,6 +163,10 @@ public sealed class PolledHeadersTests
     [InlineData("CopyConstructor")]
     [InlineData("ProducerRecord")]
     [InlineData("SetReadOnly")]
+    [InlineData("IsReadOnly")]
+    [InlineData("GetEnumerator")]
+    [InlineData("EqualsAnotherUnread")]
+    [InlineData("ToOwned")]
     public void EachMember_AsTheFirstAccessOfPolledHeaders_BehavesAsOnBuiltHeaders(string member)
     {
         MockConsumer<byte[], byte[]> consumer = Ready(out IDisposable blocks);
@@ -253,6 +257,36 @@ public sealed class PolledHeadersTests
                     IllegalStateException e = Assert.Throws<IllegalStateException>(() => polled.Add("d", null));
                     Assert.Equal("RecordHeaders has been closed.", e.Message);
                     Assert.Equal(Rendering.Replace("isReadOnly = false", "isReadOnly = true"), polled.ToString());
+                    break;
+                case "IsReadOnly":
+                    Assert.False(polled.IsReadOnly());
+                    Assert.Equal(built.ToArray(), polled.ToArray());
+                    break;
+                case "GetEnumerator":
+                    List<IHeader> enumerated = new List<IHeader>();
+                    using (IEnumerator<IHeader> enumerator = polled.GetEnumerator())
+                    {
+                        while (enumerator.MoveNext())
+                        {
+                            enumerated.Add(enumerator.Current);
+                        }
+                    }
+
+                    Assert.Equal(built.ToArray(), enumerated);
+                    break;
+                case "EqualsAnotherUnread":
+                    // Two headers objects over the same native record, neither read yet: both sides materialize.
+                    RecordHeaders other = new RecordHeaders(
+                        Assert.IsType<SafeConsumerRecordsHandle>(Field(polled, "_state")),
+                        (IntPtr)Field(polled, "_record")!);
+                    Assert.True(polled.Equals(other));
+                    Assert.Equal(other.GetHashCode(), polled.GetHashCode());
+                    Assert.Equal(built.ToArray(), other.ToArray());
+                    break;
+                case "ToOwned":
+                    RecordHeaders owned = polled.ToOwned();
+                    Assert.Equal(built, owned);
+                    Assert.All(owned, header => Assert.Null(Field(header, "_batch")));
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(member), member, null);
