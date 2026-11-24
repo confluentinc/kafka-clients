@@ -312,3 +312,71 @@ Ledger rows (Proposed): 587 is revised to the zero-copy form above; 633 (596 bef
 cached as Java's `RecordHeader`, `ValueMemory()` never copied (a view until `Value()`, its array after). Rule
 drafts W1, W2 and W3 say a fetched record's headers are read from the batch on first use, their values views of the
 batch until `Value()` copies one.
+
+## Rule drafts after the merge of PR #356 (2026-11-24): W8–W14
+
+PR #356 made Java's interfaces `IHeader` / `IHeaders` the public types and its classes `RecordHeader` /
+`RecordHeaders` internal, and rewrote the rule text W2 and W3 replace, so their "Before" no longer matches. The
+drafts below take PR #356's text as "Before". Applied only on the owner's explicit OK; this branch changes no rule
+file. W1 and W4–W7 still apply, with W1's names changed by W10 and W4–W7 read as W14 says.
+
+### W8 — `CLAUDE.md` §3 consumer sketch, the `Headers()` line (replaces W2)
+
+Before: `public IHeaders Headers();   // the record's own, writable headers`
+
+After: `public IHeaders Headers();   // the record's own and writable; read from the batch on first use, its values views of the batch until Value() copies one`
+
+### W9 — `CLAUDE.md` type table, the `Headers` / `Header` and `RecordHeaders` / `RecordHeader` row (replaces W3)
+
+Before (end of the row's second cell): "… never on the mocks; a fetched record's are its own and writable *(Python
+keeps `Header` / `Headers`)*"; the class list names only "`RecordHeader(key, value)` and, for Java's `ByteBuffer`
+form, `RecordHeader(ReadOnlyMemory<byte>, ReadOnlyMemory<byte>?)`, decoded on first read".
+
+After: "… never on the mocks; a fetched record's are its own, read from the batch on first use into `RecordHeader`s
+backed by it, each key decoded (`JavaCharset.Utf8`) and each value copied on its first read and cached, as Java's
+`RecordHeader` (ledger 634), and writable. `HeaderExtensions.ValueMemory(this IHeader header)` gives a value as
+`ReadOnlyMemory<byte>?`: for a fetched header a view of the batch until `Value()` copies it, that array after, for
+any other header the array its `Value()` returns (ledger 633, a deviation: Java's `Header` has only `value()`)
+*(Python keeps `Header` / `Headers`)*". The class list gains "and, internal to the binding, a header over the poll
+batch, read on first use". The third cell gains "633, 634".
+
+### W10 — W1's "After" paragraph, the header names
+
+In W1's "After" (`CLAUDE.md` §6.4), "into a writable list of `Header`s that view the batch" becomes "into a writable
+list of `RecordHeader`s that view the batch", and "a kept record, `Headers`, `Header`, or header memory taken before
+`Value()`" becomes "a kept record, its `IHeaders`, an `IHeader` of it, or a `ValueMemory()` taken before `Value()`".
+
+### W11 — `CLAUDE.md` §3 Java names, rule 10, one sentence at the end
+
+Add: "A method the binding adds to a Java interface as a deviation, for every implementer, follows the same shape
+without the `I<Interface>With<Method>` interface: an extension method in the `<Interface>Extensions` class beside
+the interface, answering from the binding's own class when the object is one and from the interface's members
+otherwise (`HeaderExtensions.ValueMemory(this IHeader header)`, ledger 633), listed in the analyzer allowlist as an
+unmatched member."
+
+### W12 — `ffi-marshalling.md` §A4, the bullet "**Headers are read through `IHeader`.**"
+
+Before: "The send reads its `Value()` once, in the build, and checks its key at every read: …"
+
+After: "The send reads a user `IHeader`'s `Value()` once, in the build, and a `RecordHeader`'s value through its
+internal span, fixed for the call, so a fetched header forwarded to a producer makes no managed copy (ledger 634);
+it checks the key at every read: …" (the rest unchanged).
+
+### W13 — `ffi-marshalling.md` §B3 string table, the row "Out — borrowed from a record"
+
+Before: "`ConsumerRecord_topic`, a header's `Header_key` | `Utf8Marshal.PtrToString(ptr)` — NUL-scan"
+
+After: "`ConsumerRecord_topic` | `Utf8Marshal.PtrToString(ptr)` — NUL-scan", and a new row "Out — a view of the batch,
+valid until `ConsumerRecords_destroy` | a header's key, `Header__key_bytes` (`kafka_Bytes_t`) |
+`JavaCharset.Utf8.Decode` over the span — no NUL-scan, a NUL byte kept (ledger 634)".
+
+### W14 — W4–W7, their "Before" text
+
+M23/P10 applied P7's R1–R5 (`15a565ed9`), so the rule text W4–W7 quote as "Before" has changed since they were
+written: `CLAUDE.md`'s `byte[]` row now reads "receive: copy-out (default), keep-alive for a memory-form
+deserializer — ffi §B4 / §6.4", and `ffi-marshalling.md`'s `ConsumerRecords_t` row "**copy-out default**
+(CLAUDE.md §6.4), keep-alive for the memory-form deserializers"; Category 3 and §B4 name the keep-alive
+`SafeConsumerRecordsHandle` the same way. Their "After" text stands and replaces the current text of the same
+places. W1's "Before" (`CLAUDE.md` §6.4 "Default — copy-out") still matches; its instruction for the "Deferred
+alternative — keep-alive" paragraph is already done by P7's R1, which made it "**Keep-alive (zero-copy), through
+`BytesMemoryManager` only (M23/P7, ledger 535–537).**"
