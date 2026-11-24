@@ -596,7 +596,13 @@ export function close(handle: AdminHandle, args: unknown, count: number): Promis
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks threw: an Error of the client's or JavaScript's (typed unknown by catch)
     return Promise.reject(error);
   }
-  return new Promise<void>((resolve) => {
-    native.adminClose(handle, timeoutMs, () => resolve());
+  return new Promise<void>((resolve, reject) => {
+    native.adminClose(handle, timeoutMs, (error) => {
+      // An answer the addon could not build rejects with the failure; the
+      // client closed all the same.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the failure to build the answer, typed unknown at the native boundary
+      if (error !== null) reject(error);
+      else resolve();
+    });
   });
 }

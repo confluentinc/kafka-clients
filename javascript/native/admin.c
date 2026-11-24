@@ -31,6 +31,9 @@
 // core completes the future, as Java's admin thread completes it; a timed
 // `get` is `get_with_timeout_cb`. Both completions are queued on the admin
 // client's callback vector, which its CallbackQueue drains on the JS thread.
+// An admin future has no delivery: its untimed wait is the only thing that
+// completes the JS future, so one whose answer can't be built fails it with
+// the failure (javascript/CLAUDE.md, rule 9).
 //
 // Every `_cb` call is counted on the queue (javascript/CLAUDE.md, "Threads and
 // liveness"): `cbq_call_begin` right before the call and `cbq_call_end` as the
@@ -267,7 +270,11 @@ static int may_run_js(const Admin* a) {
 // The completion of the untimed wait (kafka_common_KafkaFuture_get_cb_t): run
 // by the client's drain, or by its destroy; on the JS thread. `value` is
 // borrowed from the future until this returns, so it is converted here.
-// `done(value | null, error | null)`.
+// `done(value | null, error | null, failed)`: an answer that can't be built
+// (`failed`, the value or the core's error) comes as the failure (the pending
+// JS exception, or an Error naming the step: js_take_failure), which fails
+// the future, or warns once it is done (src/internal/admin_result.ts). Only
+// when even the failure can't be made is it a warning, and the future left.
 static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
     FutureWait* w = (FutureWait*)opaque;
@@ -275,29 +282,24 @@ static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaqu
     Admin* a = f->a;
     napi_env env = a->env;
     if (may_run_js(a)) {
-        napi_value argv[2];
+        napi_value argv[3] = {NULL, NULL, NULL};
         if (error != NULL) {
-            napi_get_null(env, &argv[0]);
             argv[1] = error_take_to_js(env, error);
             error = NULL;
-        } else {
+            if (argv[1] != NULL && napi_get_null(env, &argv[0]) != napi_ok) argv[0] = NULL;
+        } else if (napi_get_null(env, &argv[1]) == napi_ok) {
             AdminFuture* outer = converting;
             converting = f;
-            argv[0] = f->conv != NULL ? f->conv(env, value) : NULL;
+            // faultNext('value'): the value can't be built.
+            if (f->conv != NULL) argv[0] = fault_due(FAULT_VALUE) ? NULL : f->conv(env, value);
+            else if (napi_get_null(env, &argv[0]) != napi_ok) argv[0] = NULL;
             converting = outer;
-            if (argv[0] == NULL && f->conv == NULL) napi_get_null(env, &argv[0]);
-            if (argv[0] == NULL) {
-                // The conversion failed: the pending exception is the future's failure.
-                napi_value exc = NULL;
-                bool pending = false;
-                if (napi_is_exception_pending(env, &pending) == napi_ok && pending) napi_get_and_clear_last_exception(env, &exc);
-                napi_get_null(env, &argv[0]);
-                argv[1] = exc;
-            } else {
-                napi_get_null(env, &argv[1]);
-            }
         }
-        if (argv[1] != NULL) call_ref(env, w->done, 2, argv, NULL);
+        int failed = argv[0] == NULL || argv[1] == NULL;
+        if (failed && napi_get_null(env, &argv[0]) != napi_ok) argv[0] = NULL;
+        if (napi_get_boolean(env, failed != 0, &argv[2]) != napi_ok) argv[0] = NULL;
+        if (failed && argv[0] != NULL) argv[1] = js_take_failure(env, "converting an admin future's answer");
+        if (argv[0] != NULL && argv[1] != NULL) call_ref(env, w->done, 3, argv, NULL);
         else js_warn_thrown(env);
     }
     error_discard(error);
@@ -314,8 +316,10 @@ static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaqu
 }
 
 // The completion of a timed wait (kafka_common_KafkaFuture_get_with_timeout_cb_t).
-// `done(error | null, timedOut)`: the outcome itself comes from the untimed
-// wait.
+// `done(error | null, timedOut, failed)`: the outcome itself comes from the
+// untimed wait. An error that can't be built (`failed`) comes as the failure,
+// which ends that get() when the wait timed out, and warns otherwise
+// (src/common/kafka_future.ts).
 static void future_on_timed_wait(void* value, kafka_common_Error_t* error, void* opaque) {
     (void)value;
     error_stat_owned(error);
@@ -331,10 +335,14 @@ static void future_on_timed_wait(void* value, kafka_common_Error_t* error, void*
             error_warn(env, 1, FFI_SET(code, (int)kafka_common_Error__enum_err(error, &ffi_err)));
             timed_out = code == kafka_common_Error_LOCAL_TIMEOUT;
         }
-        napi_value argv[2];
+        napi_value argv[3] = {NULL, NULL, NULL};
         argv[0] = error_take_to_js(env, error);
         error = NULL;
-        if (argv[0] != NULL && napi_get_boolean(env, timed_out != 0, &argv[1]) == napi_ok) call_ref(env, w->done, 2, argv, NULL);
+        int failed = argv[0] == NULL;
+        if (napi_get_boolean(env, timed_out != 0, &argv[1]) != napi_ok || napi_get_boolean(env, failed != 0, &argv[2]) != napi_ok)
+            argv[1] = NULL;
+        if (failed && argv[1] != NULL) argv[0] = js_take_failure(env, "converting an admin future's answer");
+        if (argv[0] != NULL && argv[1] != NULL) call_ref(env, w->done, 3, argv, NULL);
         else js_warn_thrown(env);
     }
     error_discard(error);
@@ -365,7 +373,8 @@ static AdminFuture* future_at(napi_env env, Admin* a, napi_value slot_value) {
 
 // adminFutureWait(handle, slot, done): the untimed wait on the future in
 // `slot`, through `get_cb`, started once, when JS makes the future. `done(value
-// | null, error | null)` runs once it completed, from the client's drain.
+// | null, error | null, failed)` runs once it completed, from the client's
+// drain (future_on_wait).
 napi_value js_admin_future_wait(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value argv[3];
@@ -404,7 +413,8 @@ napi_value js_admin_future_wait(napi_env env, napi_callback_info info) {
 
 // adminFutureGet(handle, slot, timeoutMs, done): a timed wait on the future
 // in `slot` through `get_with_timeout_cb`, which keeps the time (a negative
-// timeout waits no time). `done(error | null, timedOut)`.
+// timeout waits no time). `done(error | null, timedOut, failed)`
+// (future_on_timed_wait).
 napi_value js_admin_future_get(napi_env env, napi_callback_info info) {
     size_t argc = 4;
     napi_value argv[4];
@@ -749,15 +759,21 @@ static void admin_destroy(napi_env env, Admin* a) {
 // admin client's close always closes it (Java's close throws nothing), so the
 // handle object may be collected and Node may exit once no call made on the
 // client waits for its answer, this close included until its cbq_call_end.
-// `done(closedNow)`.
+// `done(error | null, closedNow)`: an answer that can't be built rejects the
+// close with the failure (js_take_failure), the client closed all the same.
 static void close_on_complete(void* opaque) {
     CloseCtx* ctx = (CloseCtx*)opaque;
     Admin* a = ctx->a;
     napi_env env = a->env;
     int closed_now = a->queue.finalizing ? 0 : cbq_closed(env, &a->queue);
     if (!a->queue.finalizing) {
-        napi_value argv[1];
-        if (napi_get_boolean(env, closed_now != 0, &argv[0]) == napi_ok) call_ref(env, ctx->done, 1, argv, NULL);
+        napi_value argv[2] = {NULL, NULL};
+        // faultNext('close'): the answer can't be built.
+        if (fault_due(FAULT_CLOSE) || napi_get_null(env, &argv[0]) != napi_ok) argv[0] = NULL;
+        if (napi_get_boolean(env, closed_now != 0, &argv[1]) != napi_ok) argv[1] = NULL;
+        if (argv[0] == NULL && argv[1] != NULL) argv[0] = js_take_failure(env, "converting a close's answer");
+        if (argv[0] != NULL && argv[1] != NULL) call_ref(env, ctx->done, 2, argv, NULL);
+        else js_warn_thrown(env);
     }
     delete_ref(env, &ctx->done);
     free(ctx);
@@ -768,7 +784,7 @@ static void close_on_complete(void* opaque) {
 // else close(Duration.ofMillis(timeoutMs)), through the `_cb` twins: the form
 // called picks the call. A negative timeoutMs goes to the core as it is, which
 // reads it as zero. timeoutMs is a number, or a bigint (Long.MAX_VALUE, the
-// no-limit timeout). `done(closedNow)`.
+// no-limit timeout). `done(error | null, closedNow)` (close_on_complete).
 napi_value js_admin_close(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value argv[3];
@@ -900,12 +916,20 @@ static napi_value admin_handle_new(napi_env env, kafka_admin_Admin_t* owned, kaf
         a->owners = 2;  // and the handle object
         if (cbq_attach(env, &a->queue, result) != 0) thrown = 1;
     }
-    if (!thrown) err = FFI_ERR(kafka_admin_Admin__set_callbacks_notify_err(a->view, cbq_notify, &a->queue, &ffi_err));
+    // A test's faultNext('notify') fails the registration through the FFI's
+    // own error path, as a panic the FFI caught would: a NULL view.
+    if (!thrown)
+        err = FFI_ERR(kafka_admin_Admin__set_callbacks_notify_err(fault_due(FAULT_NOTIFY) ? NULL : a->view, cbq_notify, &a->queue,
+                                                                &ffi_err));
     if (err != NULL || thrown) {
         class_destroy(env, owned, mock);
         a->owned = NULL;
         a->mock = NULL;
         a->destroying = 1;
+        // The handle object, never handed out, may be collected: its
+        // finalizer releases its unit of a, a destroyed client's.
+        cbq_detach(env, &a->queue);
+        // Releases the tsfn, whose finalizer frees a when it is the only owner.
         cbq_release(env, &a->queue);
         if (err != NULL) error_throw_owned(env, err);
         return NULL;

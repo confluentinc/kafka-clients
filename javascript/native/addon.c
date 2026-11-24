@@ -147,7 +147,7 @@ atomic_int fault_armed = 0;
 
 // The failures armed for each step, and the names faultNext() takes, by FaultStep.
 static atomic_int fault_left[FAULT_STEPS];
-static const char* const FAULT_NAMES[FAULT_STEPS] = {NULL, "notify", "metadata", "error", "slot", "partitions", "close", "enqueue", "failure"};
+static const char* const FAULT_NAMES[FAULT_STEPS] = {NULL, "notify", "metadata", "error", "slot", "partitions", "close", "enqueue", "value", "failure"};
 
 int fault_take(FaultStep step) {
     int left = atomic_load(&fault_left[step]);
@@ -161,7 +161,7 @@ int fault_take(FaultStep step) {
 }
 
 // faultNext(step, times): arms `times` (1 when left out) more failures of
-// `step` (notify, metadata, error, slot, partitions, close, enqueue or
+// `step` (notify, metadata, error, slot, partitions, close, enqueue, value or
 // failure), each failing the next run of its site. faultNext(null) disarms
 // every step and returns the failures still armed, a name each, so a test
 // sees that the steps it armed ran. A process-wide switch. Test-only.
@@ -184,7 +184,7 @@ static napi_value js_fault_next(napi_env env, napi_callback_info info) {
     if (step < 0) {
         napi_throw_type_error(env, NULL,
                               "faultNext(step, times): step null, or notify, metadata, error, slot, partitions, close, "
-                              "enqueue or failure; times a positive count");
+                              "enqueue, value or failure; times a positive count");
         return NULL;
     }
     if (step != FAULT_NONE) {
