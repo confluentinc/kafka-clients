@@ -148,7 +148,18 @@ internal sealed class ConsumerCompletion<T> : ConsumerCompletion
                 return;
             }
 
-            _result.TrySetException(_exceptionOf(error));
+            Exception exception;
+            try
+            {
+                exception = _exceptionOf(error);
+            }
+            catch (Exception failure)
+            {
+                // A converter frees the error before it throws.
+                exception = failure;
+            }
+
+            _result.TrySetException(exception);
             return;
         }
 
