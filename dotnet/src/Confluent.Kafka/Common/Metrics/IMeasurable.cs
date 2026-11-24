@@ -30,6 +30,19 @@ public interface IMeasurable : IMetricValueProvider<double>
     /// <param name="config">The configuration for this metric.</param>
     /// <param name="now">The POSIX time in milliseconds the measurement is being taken.</param>
     /// <returns>The measured value.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="config"/> is <see langword="null"/>, on the measurable <see cref="KafkaMetric.Measurable"/>
+    /// returns: the native core cannot take a <see langword="null"/> configuration.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A tag of <paramref name="config"/> holds a NUL character or an unpaired surrogate, on the measurable
+    /// <see cref="KafkaMetric.Measurable"/> returns, as <see cref="KafkaMetric.Config(MetricConfig)"/> throws.
+    /// </exception>
+    /// <exception cref="IllegalStateException">
+    /// On the measurable <see cref="KafkaMetric.Measurable"/> returns, for a rate whose <paramref name="config"/> has a
+    /// zero time window: the native core's caught panic, where Java's <c>Rate.windowSize</c> throws
+    /// <c>ArithmeticException</c> (a recorded difference).
+    /// </exception>
     double Measure(MetricConfig config, long now);
 }
 

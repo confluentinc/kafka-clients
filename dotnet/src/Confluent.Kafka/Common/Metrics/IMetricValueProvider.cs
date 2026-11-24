@@ -15,7 +15,7 @@
 namespace Confluent.Kafka.Common.Metrics;
 
 /// <summary>
-/// Super-interface for <see cref="IMeasurable"/> or <c>Gauge</c> that provides metric values, Java's
+/// Super-interface for <see cref="IMeasurable"/> or <see cref="IGauge{T}"/> that provides metric values, Java's
 /// <c>org.apache.kafka.common.metrics.MetricValueProvider</c>.
 /// </summary>
 /// <typeparam name="T">The type of the metric's value.</typeparam>

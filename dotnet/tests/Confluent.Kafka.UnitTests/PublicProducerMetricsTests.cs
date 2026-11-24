@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Metrics;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Producer;
 using Xunit;
@@ -26,7 +27,10 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The producer's <c>Metrics()</c>, Java's <c>metrics()</c>, on the four producer types: the mocks' map is empty, as
 /// Java's MockProducer's is until <c>setMockMetrics</c>, and a real producer's is populated with well-formed,
-/// value-keyed entries; every map is a live view that answers after close; both interfaces declare it.
+/// value-keyed entries; every map is a live view that answers after close; both interfaces declare it. Java's
+/// <c>KafkaProducerTest.testMetricConfigRecordingLevel</c> and <c>testFlushMeasureLatency</c> are translated here;
+/// the metrics tests of <c>KafkaProducerTest</c> that are not are listed, with their reasons, on
+/// <see cref="PublicMetricsLiveMapTests"/>.
 /// </summary>
 public sealed class PublicProducerMetricsTests
 {
@@ -177,6 +181,54 @@ public sealed class PublicProducerMetricsTests
         AssertMetricsRemovedOnClose(producer.Metrics());
     }
 
+    // Java's KafkaProducerTest.testFlushMeasureLatency. Java runs it on a MockTime that advances a millisecond per read
+    // and a MockClient; its assertions hold on real time too, as each flush takes some time, so the producer runs on
+    // real time against an unreachable broker.
+    [Fact]
+    public void FlushMeasureLatency()
+    {
+        Dictionary<string, object?> configs = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "localhost:9000",
+        };
+        KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(
+            configs, Serdes.String().Serializer(), Serdes.String().Serializer());
+        using (TestTimeout.Disposal(producer))
+        {
+            producer.Flush();
+            double first = GetMetricValue(producer, "flush-time-ns-total");
+            Assert.True(first > 0);
+            producer.Flush();
+            Assert.True(GetMetricValue(producer, "flush-time-ns-total") > first);
+        }
+    }
+
+    // Java's KafkaProducerTest.testMetricConfigRecordingLevel. Java reads the level of the Metrics registry's
+    // configuration, which the binding does not hand out; every metric the registry adds without a configuration of its
+    // own carries the registry's, so the level is read from the metrics' configurations.
+    [Fact]
+    public void MetricConfigRecordingLevel()
+    {
+        Dictionary<string, object?> props = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "localhost:9000",
+        };
+        KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
+            props, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        using (TestTimeout.Disposal(producer))
+        {
+            AssertRecordLevel(Sensor.RecordingLevel.INFO, producer.Metrics());
+        }
+
+        props["metrics.recording.level"] = "DEBUG";
+        KafkaProducer<byte[], byte[]> producer2 = KafkaProducer<byte[], byte[]>.Create(
+            props, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+        using (TestTimeout.Disposal(producer2))
+        {
+            AssertRecordLevel(Sensor.RecordingLevel.DEBUG, producer2.Metrics());
+        }
+    }
+
     // Declared on each interface, with no shared base.
 
     [Fact]
@@ -195,6 +247,30 @@ public sealed class PublicProducerMetricsTests
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IAsyncProducer<byte[], byte[]> producer = mock;
         Assert.Empty(producer.Metrics());
+    }
+
+    // Java's getMetricValue: the producer-metrics metric of that name.
+    private static double GetMetricValue(KafkaProducer<string, string> producer, string name)
+    {
+        foreach (KeyValuePair<MetricName, IMetric> entry in producer.Metrics())
+        {
+            if (entry.Key.Name() == name && entry.Key.Group() == "producer-metrics")
+            {
+                return (double)entry.Value.MetricValue();
+            }
+        }
+
+        throw new KeyNotFoundException(name);
+    }
+
+    private static void AssertRecordLevel(
+        Sensor.RecordingLevel expected, IReadOnlyDictionary<MetricName, IMetric> metrics)
+    {
+        Assert.NotEmpty(metrics);
+        foreach (IMetric metric in metrics.Values)
+        {
+            Assert.Equal(expected, Assert.IsType<KafkaMetric>(metric).Config()!.RecordLevel());
+        }
     }
 
     private static void AssertPopulatedAndWellFormed(IReadOnlyDictionary<MetricName, IMetric> metrics)

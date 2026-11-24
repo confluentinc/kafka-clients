@@ -116,22 +116,26 @@ internal static class MetricsViewMarshal
 
     /// <summary>
     /// An owned <c>kafka_common_MetricName_t</c> for <paramref name="name"/>, freed with <see cref="DestroyName"/>; or
-    /// <see cref="IntPtr.Zero"/> when a C string cannot carry its name, group or tags (a <c>'\0'</c>, or a
-    /// <see langword="null"/> tag value). No registered metric has such a name, since every name the core holds is
-    /// a C string or a core literal, so a lookup by it finds nothing, as Java's does. The description is not part of
-    /// the name's equality, so a <c>'\0'</c> in it only shortens it.
+    /// <see cref="IntPtr.Zero"/> when its name, group or tags would not cross the C ABI unchanged (a <c>'\0'</c>, an
+    /// unpaired surrogate, which would cross as <c>'?'</c>, or a <see langword="null"/> tag value). The core holds
+    /// every name as UTF-8 text with no NUL, so a lookup by such a name finds nothing, without a call into the core,
+    /// never a metric whose name holds the <c>'?'</c> (ledger 653). The trade-off: a client whose configuration holds
+    /// an unpaired surrogate (its <c>client.id</c>, a topic) registers its metrics under the <c>'?'</c> that
+    /// configuration crossed as, so a lookup by the configured string does not find them, where Java's finds them, and
+    /// only a lookup by the <c>'?'</c> form does. The description is not part of the name's equality, so a
+    /// <c>'\0'</c> in it only shortens it, and an unpaired surrogate in it crosses as <c>'?'</c>.
     /// </summary>
     internal static IntPtr ToNativeName(MetricName name)
     {
         IReadOnlyDictionary<string, string> tags = name.Tags();
-        if (!IsCString(name.Name()) || !IsCString(name.Group()))
+        if (!CrossesUnchanged(name.Name()) || !CrossesUnchanged(name.Group()))
         {
             return IntPtr.Zero;
         }
 
         foreach (KeyValuePair<string, string> tag in tags)
         {
-            if (!IsCString(tag.Key) || !IsCString(tag.Value))
+            if (!CrossesUnchanged(tag.Key) || !CrossesUnchanged(tag.Value))
             {
                 return IntPtr.Zero;
             }
@@ -278,7 +282,8 @@ internal static class MetricsViewMarshal
         }
     }
 
-    private static bool IsCString(string? value) => value is not null && value.IndexOf('\0') < 0;
+    private static bool CrossesUnchanged(string? value) =>
+        value is not null && value.IndexOf('\0') < 0 && !Utf8Marshal.HasUnpairedSurrogate(value);
 
     private static void ForEachEntry(SafeMetricsViewHandle view, Action<IntPtr> entry)
     {

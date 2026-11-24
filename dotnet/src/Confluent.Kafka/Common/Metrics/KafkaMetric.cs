@@ -23,12 +23,14 @@ namespace Confluent.Kafka.Common.Metrics;
 /// <summary>
 /// A metric and its value, Java's <c>org.apache.kafka.common.metrics.KafkaMetric</c>: each value of a client's
 /// <c>Metrics()</c>, and the metric a <see cref="QuotaViolationException"/> names. A client's metric is measured on each
-/// call to <see cref="MetricValue"/>, as Java's, and stays readable after its client is closed. A quota error's metric
-/// holds the name and the value the core reported, because the error carries no metric of its own: it is not
-/// measurable, and has no configuration until one is set. Equality is identity, as Java's, but two reads of a
-/// <c>Metrics()</c> map return two objects for one metric, where Java returns one. It has no public constructor, as
-/// Java's takes a lock, a <c>MetricValueProvider</c>, a <c>MetricConfig</c> and a <c>Time</c>, which .NET does not
-/// have.
+/// call to <see cref="MetricValue"/>, as Java's, and stays readable after its client is closed, except
+/// <c>kafka-metrics-count</c>'s <c>count</c>, which reads 0 once its client is closed, where Java's reads the number of
+/// metrics left (a recorded gap of the native core). A quota error's metric holds the name and the value the core
+/// reported, because the error carries no metric of its own: it is not measurable, and has no configuration until one
+/// is set. Equality is identity, as Java's, but two reads of a <c>Metrics()</c> map return two objects for one metric,
+/// where Java returns one. It has no public constructor: Java's, public for testing, takes a lock, a
+/// <see cref="Common.MetricName"/>, an <see cref="IMetricValueProvider{T}"/>, a <see cref="MetricConfig"/> and a
+/// <c>Time</c>, and <c>Time</c> is not public API, so the binding has no type for it.
 /// </summary>
 public sealed class KafkaMetric : IMetric
 {
@@ -57,10 +59,18 @@ public sealed class KafkaMetric : IMetric
     // The metric's own handle, which a NativeMeasurable reads through; null for a quota error's metric.
     internal SafeKafkaMetricHandle? Handle => _handle;
 
-    /// <inheritdoc/>
+    /// <summary>Get the metric name.</summary>
+    /// <returns>Return the name of this metric.</returns>
     public MetricName MetricName() => _metricName;
 
-    /// <inheritdoc/>
+    /// <summary>
+    /// Take the metric and return the value via <see cref="IMetricValueProvider{T}.Value(MetricConfig, long)"/>.
+    /// </summary>
+    /// <returns>Return the metric value.</returns>
+    /// <exception cref="IllegalStateException">
+    /// The metric is a rate whose configuration has a zero time window: the native core's caught panic, where Java's
+    /// <c>Rate.windowSize</c> throws <c>ArithmeticException</c> (a recorded difference).
+    /// </exception>
     public object MetricValue() => _handle is null ? _constantValue! : MetricsViewMarshal.Measure(_handle);
 
     /// <summary>Get the configuration of this metric. This is supposed to be used by server only.</summary>
@@ -94,11 +104,24 @@ public sealed class KafkaMetric : IMetric
     /// <paramref name="config"/> is <see langword="null"/>, or one of its tags has a <see langword="null"/> key or
     /// value, which the core cannot hold; Java stores a <see langword="null"/> config.
     /// </exception>
-    /// <exception cref="ArgumentException">A tag holds a NUL character, which the core cannot hold.</exception>
+    /// <exception cref="ArgumentException">
+    /// A tag key or value holds a NUL character or an unpaired surrogate, which the core cannot hold: a NUL would cut
+    /// the string, and an unpaired surrogate would come back from <see cref="Config()"/> as <c>?</c>, where Java keeps
+    /// the string. A valid surrogate pair is kept.
+    /// </exception>
     /// <exception cref="IllegalArgumentException">
     /// The recording level is no <see cref="Sensor.RecordingLevel"/> member, with the message of
     /// <see cref="RecordingLevelMethods.ForId(int)"/>.
     /// </exception>
+    /// <remarks>
+    /// A zero time window on a rate metric with a quota makes every record on the metric's sensor fail, as in Java,
+    /// whose <c>Rate.windowSize</c> then throws <c>ArithmeticException</c> in the thread that records the sensor: for
+    /// some sensors the thread that calls <c>send</c> (<c>buffer-exhausted-rate</c>, <c>bufferpool-wait-ratio</c>,
+    /// <c>record-error-rate</c>) or <c>poll</c> (the consumer's fetch rates), for the others the I/O thread. Where
+    /// the native core records on the <c>Send</c> or <c>Poll</c> call (<c>buffer-exhausted-rate</c>,
+    /// <c>bufferpool-wait-ratio</c>, the fetch rates), that call throws <see cref="IllegalStateException"/> (the
+    /// native core's caught panic) where Java's throws <c>ArithmeticException</c> (a recorded difference).
+    /// </remarks>
     public void Config(MetricConfig config)
     {
         MetricConfigMarshal.Validate(config, nameof(config));
@@ -142,7 +165,10 @@ public sealed class KafkaMetric : IMetric
     /// <summary>Get the underlying metric provider, which should be a <see cref="IMeasurable"/>.</summary>
     /// <returns>
     /// Return the metric provider: a new object on each call, which measures the metric's own provider, where Java
-    /// returns the provider itself.
+    /// returns the provider itself. Its <see cref="IMeasurable.Measure"/> throws <see cref="ArgumentNullException"/>
+    /// for a <see langword="null"/> configuration, which the native core cannot take, and checks the configuration's
+    /// tags and recording level as <see cref="Config(MetricConfig)"/> does; for a rate whose configuration has a zero
+    /// time window it throws <see cref="IllegalStateException"/>, where Java's throws <c>ArithmeticException</c>.
     /// </returns>
     /// <exception cref="IllegalStateException">
     /// If the underlying metric is not a <see cref="IMeasurable"/>, with the core's message, which begins
