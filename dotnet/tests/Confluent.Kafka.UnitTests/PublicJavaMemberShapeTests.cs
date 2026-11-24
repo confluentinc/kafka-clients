@@ -23,6 +23,7 @@ using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Common.Security.Auth;
@@ -89,7 +90,7 @@ public class PublicJavaMemberShapeTests
         Assert.Equal(2, ((IReadOnlyCollection<ConsumerRecord<byte[], byte[]>>)records).Count);
 
         static ConsumerRecord<byte[], byte[]> Record(long offset) => new ConsumerRecord<byte[], byte[]>(
-            "t", 0, offset, 0, TimestampType.CREATE_TIME, 1, 1, new byte[] { 1 }, new byte[] { 2 }, new Headers(),
+            "t", 0, offset, 0, TimestampType.CREATE_TIME, 1, 1, new byte[] { 1 }, new byte[] { 2 }, new RecordHeaders(),
             leaderEpoch: null);
     }
 

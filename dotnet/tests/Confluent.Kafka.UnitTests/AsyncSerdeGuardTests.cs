@@ -239,7 +239,7 @@ public sealed class AsyncSerdeGuardTests
             });
 
             Assert.Equal(
-                Prefix + "StrayHeadersSerialize declares Serialize(string, Headers, string, CancellationToken) but does "
+                Prefix + "StrayHeadersSerialize declares Serialize(string, IHeaders, string, CancellationToken) but does "
                     + "not implement IAsyncSerializerWithHeaders<string>, so the producer would never call it.",
                 e.Message);
         }
@@ -281,7 +281,7 @@ public sealed class AsyncSerdeGuardTests
             });
 
             Assert.Equal(
-                Prefix + "StrayHeadersDeserialize declares Deserialize(string, Headers, ReadOnlyMemory<byte>, "
+                Prefix + "StrayHeadersDeserialize declares Deserialize(string, IHeaders, ReadOnlyMemory<byte>, "
                     + "CancellationToken) but does not implement IAsyncDeserializerWithHeaders<string>, so the consumer "
                     + "would never call it.",
                 e.Message);
@@ -343,28 +343,28 @@ public sealed class AsyncSerdeGuardTests
     private sealed class StrayHeadersSerialize : Serde
     {
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+            string topic, IHeaders headers, string? data, CancellationToken cancellationToken) => default;
     }
 
     /// <summary>A serde whose headers form of Serialize is IAsyncSerializerWithHeaders's.</summary>
     private sealed class HeadersSerialize : Serde, IAsyncSerializerWithHeaders<string>
     {
         public ValueTask<ReadOnlyMemory<byte>?> Serialize(
-            string topic, Headers headers, string? data, CancellationToken cancellationToken) => default;
+            string topic, IHeaders headers, string? data, CancellationToken cancellationToken) => default;
     }
 
     /// <summary>A serde with a public headers form of Deserialize but not IAsyncDeserializerWithHeaders.</summary>
     private sealed class StrayHeadersDeserialize : Serde
     {
         public ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
+            string topic, IHeaders headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
     }
 
     /// <summary>A serde whose headers form of Deserialize is IAsyncDeserializerWithHeaders's.</summary>
     private sealed class HeadersDeserialize : Serde, IAsyncDeserializerWithHeaders<string>
     {
         public ValueTask<string?> Deserialize(
-            string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
+            string topic, IHeaders headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken) => default;
     }
 
     /// <summary>A serde with a public DisposeAsync() but not IAsyncDisposable.</summary>

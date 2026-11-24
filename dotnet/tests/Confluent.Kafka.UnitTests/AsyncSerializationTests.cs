@@ -23,6 +23,7 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Internal;
 
@@ -172,7 +173,7 @@ public sealed class AsyncSerializationTests
             ["key.serializer.encoding"] = "UTF-16",
             ["key.deserializer.encoding"] = "UTF-16",
         };
-        Headers headers = new Headers();
+        RecordHeaders headers = new RecordHeaders();
 
         StringSerializer serializer = new StringSerializer();
         serializer.Configure(configs, true);
@@ -230,7 +231,7 @@ public sealed class AsyncSerializationTests
         ReadOnlyMemory<byte> data = new ReadOnlyMemory<byte>(batch, 2, 3);
 
         ValueTask<ReadOnlyMemory<byte>?> task =
-            new AsyncReadOnlyMemoryDeserializer().Deserialize(Topic, new Headers(), data, CancellationToken.None);
+            new AsyncReadOnlyMemoryDeserializer().Deserialize(Topic, new RecordHeaders(), data, CancellationToken.None);
 
         ReadOnlyMemory<byte> returned = Completed(task)!.Value;
         Assert.True(returned.Equals(data));
@@ -251,7 +252,7 @@ public sealed class AsyncSerializationTests
     public void TheReadOnlyMemoryDeserializer_ReturnsAnEmptyMemory_NotNull_ForNoBytes()
     {
         ValueTask<ReadOnlyMemory<byte>?> task = new AsyncReadOnlyMemoryDeserializer().Deserialize(
-            Topic, new Headers(), ReadOnlyMemory<byte>.Empty, CancellationToken.None);
+            Topic, new RecordHeaders(), ReadOnlyMemory<byte>.Empty, CancellationToken.None);
 
         ReadOnlyMemory<byte>? returned = Completed(task);
         Assert.True(returned.HasValue);
@@ -264,7 +265,7 @@ public sealed class AsyncSerializationTests
         byte[] batch = { 9, 9, 1, 2, 3, 9 };
         ReadOnlyMemory<byte> data = new ReadOnlyMemory<byte>(batch, 2, 3);
 
-        ValueTask<byte[]?> task = new AsyncByteArrayDeserializer().Deserialize(Topic, new Headers(), data, CancellationToken.None);
+        ValueTask<byte[]?> task = new AsyncByteArrayDeserializer().Deserialize(Topic, new RecordHeaders(), data, CancellationToken.None);
 
         byte[] returned = Completed(task)!;
         Assert.NotSame(batch, returned);
@@ -422,7 +423,7 @@ public sealed class AsyncSerializationTests
         Func<T?, object?>? comparable = null)
     {
         comparable ??= given => given;
-        Headers headers = new Headers();
+        RecordHeaders headers = new RecordHeaders();
         ReadOnlyMemory<byte> data = javaBytes;
 
         foreach (CancellationToken token in s_tokens)
@@ -437,7 +438,7 @@ public sealed class AsyncSerializationTests
 
     private static void AssertNull<T>(ISerializer<T> serializer, IAsyncSerializer<T> asyncSerializer, T? value)
     {
-        Headers headers = new Headers();
+        RecordHeaders headers = new RecordHeaders();
 
         foreach (CancellationToken token in s_tokens)
         {
@@ -450,7 +451,7 @@ public sealed class AsyncSerializationTests
         IDeserializer<T> deserializer, IAsyncDeserializer<T> asyncDeserializer, byte[] bytes, string message)
         where TException : Exception
     {
-        Headers headers = new Headers();
+        RecordHeaders headers = new RecordHeaders();
         ReadOnlyMemory<byte> data = bytes;
 
         TException sync = Assert.Throws<TException>(() => { _ = deserializer.Deserialize(Topic, headers, data.Span); });

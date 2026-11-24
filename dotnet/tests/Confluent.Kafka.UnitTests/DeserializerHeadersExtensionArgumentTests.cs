@@ -16,6 +16,7 @@ using System;
 using System.Text;
 
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 
 using Xunit;
@@ -40,8 +41,8 @@ public sealed class DeserializerHeadersExtensionArgumentTests
     {
         IDeserializer<string> deserializer = new StringDeserializer();
 
-        Assert.Equal("value", deserializer.Deserialize(Topic, new Headers(), s_value));
-        Assert.Equal("value", new StringDeserializer().Deserialize(Topic, new Headers(), s_value));
+        Assert.Equal("value", deserializer.Deserialize(Topic, new RecordHeaders(), s_value));
+        Assert.Equal("value", new StringDeserializer().Deserialize(Topic, new RecordHeaders(), s_value));
     }
 
     [Fact]
@@ -50,8 +51,8 @@ public sealed class DeserializerHeadersExtensionArgumentTests
         IDeserializer<string> deserializer = new StringDeserializer();
         ArraySegment<byte> segment = new ArraySegment<byte>(s_batch, 2, 5);
 
-        Assert.Equal("value", deserializer.Deserialize(Topic, new Headers(), segment));
-        Assert.Equal("value", new StringDeserializer().Deserialize(Topic, new Headers(), segment));
+        Assert.Equal("value", deserializer.Deserialize(Topic, new RecordHeaders(), segment));
+        Assert.Equal("value", new StringDeserializer().Deserialize(Topic, new RecordHeaders(), segment));
     }
 
     [Fact]
@@ -61,7 +62,7 @@ public sealed class DeserializerHeadersExtensionArgumentTests
         IDeserializer<string> asInterface = deserializer;
         ReadOnlyMemory<byte> data = new ReadOnlyMemory<byte>(s_batch, 2, 5);
 
-        Assert.Equal("span:value", asInterface.Deserialize(Topic, new Headers(), data.Span));
+        Assert.Equal("span:value", asInterface.Deserialize(Topic, new RecordHeaders(), data.Span));
         Assert.Equal(0, deserializer.MemoryCalls);
     }
 
@@ -73,7 +74,7 @@ public sealed class DeserializerHeadersExtensionArgumentTests
         public string? Deserialize(string topic, ReadOnlySpan<byte> data) =>
             "span:" + Encoding.UTF8.GetString(data.ToArray());
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data)
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlyMemory<byte> data)
         {
             MemoryCalls++;
             return "memory:" + Encoding.UTF8.GetString(data.ToArray());

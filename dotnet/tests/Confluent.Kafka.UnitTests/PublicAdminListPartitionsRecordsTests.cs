@@ -271,12 +271,12 @@ public sealed class PublicAdminListPartitionsRecordsTests
                 new Dictionary<TopicPartition, RecordsToDelete> { [new TopicPartition("t", 0)] = null! }));
         Assert.Equal("recordsToDelete", nullRecords.ParamName);
 
-        // A `default(TopicPartition)` has a null Topic, which the ABI would skip.
+        // A partition with a null topic, which the ABI would skip.
         ArgumentNullException nullTopic = Assert.Throws<ArgumentNullException>(
             () => admin.DeleteRecords(
                 new Dictionary<TopicPartition, RecordsToDelete>
                 {
-                    [default] = RecordsToDelete.BeforeOffset(1),
+                    [new TopicPartition(null!, 0)] = RecordsToDelete.BeforeOffset(1),
                 }));
         Assert.Equal("recordsToDelete", nullTopic.ParamName);
 
@@ -456,8 +456,8 @@ public sealed class PublicAdminListPartitionsRecordsTests
     {
         public static readonly TopicIdentityComparer Instance = new TopicIdentityComparer();
 
-        public bool Equals(TopicPartition x, TopicPartition y) =>
-            ReferenceEquals(x.Topic(), y.Topic()) && x.Partition() == y.Partition();
+        public bool Equals(TopicPartition? x, TopicPartition? y) =>
+            ReferenceEquals(x!.Topic(), y!.Topic()) && x.Partition() == y.Partition();
 
         public int GetHashCode(TopicPartition obj) => RuntimeHelpers.GetHashCode(obj.Topic()) ^ obj.Partition();
     }

@@ -203,7 +203,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        ICallback callback,
+        ICallback? callback,
         CancellationToken cancellationToken = default)
     {
         _native.ThrowIfClosed();
@@ -211,11 +211,6 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
-        }
-
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
         }
 
         return SendValidated(record, callback, cancellationToken);
@@ -224,7 +219,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IAsyncCallback callback,
+        IAsyncCallback? callback,
         CancellationToken cancellationToken = default)
     {
         _native.ThrowIfClosed();
@@ -232,11 +227,6 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
-        }
-
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
         }
 
         return SendValidated(record, null, cancellationToken, callback);
@@ -268,7 +258,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
         }
 
         // As Java's doSend, the headers turn read-only once the serializers ran; the mocks leave them writable.
-        record.Headers().SetReadOnly();
+        record.OwnHeaders.SetReadOnly();
 
         return _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback);
     }
@@ -294,7 +284,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
                 .ConfigureAwait(false);
         }
 
-        record.Headers().SetReadOnly();
+        record.OwnHeaders.SetReadOnly();
 
         return await _native.SendViaPump(serialized, callback, cancellationToken, asyncCallback).ConfigureAwait(false);
     }

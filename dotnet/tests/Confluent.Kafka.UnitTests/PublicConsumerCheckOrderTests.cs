@@ -63,6 +63,7 @@ public sealed class PublicConsumerCheckOrderTests
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromSeconds(20);
 
     private static readonly TopicPartition s_tp0 = new TopicPartition(Topic, 0);
+    private static readonly TopicPartition s_nullTopic = new TopicPartition(null!, 0);
 
     private static readonly TopicPartition[] s_partitions = { s_tp0 };
 
@@ -71,6 +72,15 @@ public sealed class PublicConsumerCheckOrderTests
     private static readonly TopicPartition[] s_negativePartitions = { s_negativePartition };
 
     private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_nullOffsets = null!;
+
+    private static readonly TopicPartition[] s_nullElement = { null! };
+
+    private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_nullKeyOffsets =
+        new EntryMap<TopicPartition, OffsetAndMetadata>(
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(null!, new OffsetAndMetadata(1)));
+
+    private static readonly IReadOnlyDictionary<TopicPartition, long> s_nullKeyTimestamps =
+        new EntryMap<TopicPartition, long>(new KeyValuePair<TopicPartition, long>(null!, 0));
 
     private static readonly IOffsetCommitCallback s_callback = new NoOpCommitCallback();
 
@@ -140,9 +150,11 @@ public sealed class PublicConsumerCheckOrderTests
             ["SeekToBeginning(null)"] = (typeof(IllegalArgumentException), "Partitions collection cannot be null"),
             ["SeekToEnd(null)"] = (typeof(IllegalArgumentException), "Partitions collection cannot be null"),
             ["Seek(partition, null)"] = (typeof(ArgumentNullException), "offsetAndMetadata"),
-            ["Seek(default, negative offset)"] = (typeof(IllegalArgumentException), "seek offset must not be a negative number"),
+            ["Seek(null topic, negative offset)"] = (typeof(IllegalArgumentException), "seek offset must not be a negative number"),
+            ["Seek(null, negative offset)"] = (typeof(IllegalArgumentException), "seek offset must not be a negative number"),
+            ["Seek(null, null)"] = (typeof(ArgumentNullException), "offsetAndMetadata"),
         };
-        Assert.Equal(kind == "AsyncKafkaConsumer" ? 29 : 26, seen.Count);
+        Assert.Equal(kind == "AsyncKafkaConsumer" ? 54 : 50, seen.Count);
         foreach (KeyValuePair<string, Exception?> call in seen)
         {
             if (before.TryGetValue(call.Key, out (Type Type, string Detail) expected))
@@ -214,13 +226,13 @@ public sealed class PublicConsumerCheckOrderTests
 
             Assert.Null(rebalanced);
             Assert.True(returned, "the other thread's calls did not return");
-            Assert.Equal(29, seen.Count);
+            Assert.Equal(54, seen.Count);
             foreach (KeyValuePair<string, Exception?> call in seen)
             {
-                if (call.Key == "CurrentLag(default)")
+                if (call.Key is "CurrentLag(null topic)" or "CurrentLag(null)")
                 {
                     // Java's MockConsumer.currentLag is not synchronized and answers 0 for a partition with no end
-                    // offset, which a null topic never has: the call returns its Task.
+                    // offset, which a null partition or a null topic never has: the call returns its Task.
                     Assert.Equal(
                         "the call returned a Task, RanToCompletion",
                         Assert.IsType<InvalidOperationException>(call.Value).Message);
@@ -372,8 +384,8 @@ public sealed class PublicConsumerCheckOrderTests
         {
             ["Commit(null)"] = (c => c.Commit(null!), c => c.Commit(null!)),
             ["Commit(null, timeout)"] = (c => c.Commit(null!, s_negative), c => c.Commit(null!, s_negative)),
-            ["Position(default)"] = (c => c.Position(default), c => c.Position(default)),
-            ["Position(default, timeout)"] = (c => c.Position(default, s_negative), c => c.Position(default, s_negative)),
+            ["Position(null topic)"] = (c => c.Position(s_nullTopic), c => c.Position(s_nullTopic)),
+            ["Position(null topic, timeout)"] = (c => c.Position(s_nullTopic, s_negative), c => c.Position(s_nullTopic, s_negative)),
             ["Committed(null)"] = (c => c.Committed(null!), c => c.Committed(null!)),
             ["Committed(null, timeout)"] = (c => c.Committed(null!, s_negative), c => c.Committed(null!, s_negative)),
             ["OffsetsForTimes(null)"] = (c => c.OffsetsForTimes(null!), c => c.OffsetsForTimes(null!)),
@@ -393,12 +405,12 @@ public sealed class PublicConsumerCheckOrderTests
             ["Resume(null)"] = (c => c.Resume(null!), c => c.Resume(null!)),
             ["SeekToBeginning(null)"] = (c => c.SeekToBeginning(null!), c => c.SeekToBeginning(null!)),
             ["SeekToEnd(null)"] = (c => c.SeekToEnd(null!), c => c.SeekToEnd(null!)),
-            ["Seek(default, offset)"] = (c => c.Seek(default, 0L), c => c.Seek(default, 0L)),
-            ["Seek(default, negative offset)"] = (c => c.Seek(default, -1L), c => c.Seek(default, -1L)),
+            ["Seek(null topic, offset)"] = (c => c.Seek(s_nullTopic, 0L), c => c.Seek(s_nullTopic, 0L)),
+            ["Seek(null topic, negative offset)"] = (c => c.Seek(s_nullTopic, -1L), c => c.Seek(s_nullTopic, -1L)),
             ["Seek(partition, null)"] = (c => c.Seek(s_tp0, (OffsetAndMetadata)null!), c => c.Seek(s_tp0, (OffsetAndMetadata)null!)),
-            ["Seek(default, offsetAndMetadata)"] = (
-                c => c.Seek(default, new OffsetAndMetadata(1)), c => c.Seek(default, new OffsetAndMetadata(1))),
-            ["CurrentLag(default)"] = (c => c.CurrentLag(default), c => c.CurrentLag(default)),
+            ["Seek(null topic, offsetAndMetadata)"] = (
+                c => c.Seek(s_nullTopic, new OffsetAndMetadata(1)), c => c.Seek(s_nullTopic, new OffsetAndMetadata(1))),
+            ["CurrentLag(null topic)"] = (c => c.CurrentLag(s_nullTopic), c => c.CurrentLag(s_nullTopic)),
         });
         foreach (KeyValuePair<string, (Action<IConsumer<byte[], byte[]>>, Func<IAsyncConsumer<byte[], byte[]>, Task>)> call in NegativePartitionCalls())
         {
@@ -415,13 +427,13 @@ public sealed class PublicConsumerCheckOrderTests
             {
                 ["SeekToBeginning(null)"] = (typeof(IllegalArgumentException), "Partitions collection cannot be null"),
                 ["SeekToEnd(null)"] = (typeof(IllegalArgumentException), "Partitions collection cannot be null"),
-                ["Seek(default, negative offset)"] = (
+                ["Seek(null topic, negative offset)"] = (
                     typeof(IllegalArgumentException), "seek offset must not be a negative number"),
                 ["Seek(partition, negative offset)"] = (
                     typeof(IllegalArgumentException), "seek offset must not be a negative number"),
                 ["Seek(partition, null)"] = (typeof(ArgumentNullException), "offsetAndMetadata"),
             };
-        Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 41 : 38, seen.Count);
+        Assert.Equal(kind.StartsWith("Async", StringComparison.Ordinal) ? 42 : 38, seen.Count);
         foreach (KeyValuePair<string, Exception?> call in seen)
         {
             if (beforeAcquire.TryGetValue(call.Key, out (Type Type, string Detail) expected))
@@ -709,8 +721,8 @@ public sealed class PublicConsumerCheckOrderTests
         {
             ["Commit(null)"] = (c => c.Commit(null!), c => c.Commit(null!)),
             ["Commit(null, timeout)"] = (c => c.Commit(null!, s_second), c => c.Commit(null!, s_second)),
-            ["Position(default)"] = (c => c.Position(default), c => c.Position(default)),
-            ["Position(default, timeout)"] = (c => c.Position(default, s_second), c => c.Position(default, s_second)),
+            ["Position(null topic)"] = (c => c.Position(s_nullTopic), c => c.Position(s_nullTopic)),
+            ["Position(null topic, timeout)"] = (c => c.Position(s_nullTopic, s_second), c => c.Position(s_nullTopic, s_second)),
             ["Committed(null)"] = (c => c.Committed(null!), c => c.Committed(null!)),
             ["Committed(null, timeout)"] = (c => c.Committed(null!, s_second), c => c.Committed(null!, s_second)),
             ["OffsetsForTimes(null)"] = (c => c.OffsetsForTimes(null!), c => c.OffsetsForTimes(null!)),
@@ -729,12 +741,44 @@ public sealed class PublicConsumerCheckOrderTests
             ["Resume(null)"] = (c => c.Resume(null!), c => c.Resume(null!)),
             ["SeekToBeginning(null)"] = (c => c.SeekToBeginning(null!), c => c.SeekToBeginning(null!)),
             ["SeekToEnd(null)"] = (c => c.SeekToEnd(null!), c => c.SeekToEnd(null!)),
-            ["Seek(default, offset)"] = (c => c.Seek(default, 0L), c => c.Seek(default, 0L)),
-            ["Seek(default, negative offset)"] = (c => c.Seek(default, -1L), c => c.Seek(default, -1L)),
+            ["Seek(null topic, offset)"] = (c => c.Seek(s_nullTopic, 0L), c => c.Seek(s_nullTopic, 0L)),
+            ["Seek(null topic, negative offset)"] = (c => c.Seek(s_nullTopic, -1L), c => c.Seek(s_nullTopic, -1L)),
             ["Seek(partition, null)"] = (c => c.Seek(s_tp0, (OffsetAndMetadata)null!), c => c.Seek(s_tp0, (OffsetAndMetadata)null!)),
-            ["Seek(default, offsetAndMetadata)"] = (
-                    c => c.Seek(default, new OffsetAndMetadata(1)), c => c.Seek(default, new OffsetAndMetadata(1))),
-            ["CurrentLag(default)"] = (c => c.CurrentLag(default), c => c.CurrentLag(default)),
+            ["Seek(null topic, offsetAndMetadata)"] = (
+                    c => c.Seek(s_nullTopic, new OffsetAndMetadata(1)), c => c.Seek(s_nullTopic, new OffsetAndMetadata(1))),
+            ["CurrentLag(null topic)"] = (c => c.CurrentLag(s_nullTopic), c => c.CurrentLag(s_nullTopic)),
+            ["Pause(null element)"] = (c => c.Pause(s_nullElement), c => c.Pause(s_nullElement)),
+            ["Resume(null element)"] = (c => c.Resume(s_nullElement), c => c.Resume(s_nullElement)),
+            ["SeekToBeginning(null element)"] = (c => c.SeekToBeginning(s_nullElement), c => c.SeekToBeginning(s_nullElement)),
+            ["SeekToEnd(null element)"] = (c => c.SeekToEnd(s_nullElement), c => c.SeekToEnd(s_nullElement)),
+            ["Position(null)"] = (c => c.Position(null!), c => c.Position(null!)),
+            ["Position(null, timeout)"] = (c => c.Position(null!, s_second), c => c.Position(null!, s_second)),
+            ["Seek(null, offset)"] = (c => c.Seek(null!, 0L), c => c.Seek(null!, 0L)),
+            ["Seek(null, negative offset)"] = (c => c.Seek(null!, -1L), c => c.Seek(null!, -1L)),
+            ["Seek(null, offsetAndMetadata)"] = (
+                    c => c.Seek(null!, new OffsetAndMetadata(1)), c => c.Seek(null!, new OffsetAndMetadata(1))),
+            ["Seek(null, offsetAndMetadata with a leader epoch)"] = (
+                    c => c.Seek(null!, new OffsetAndMetadata(1, 2, "")), c => c.Seek(null!, new OffsetAndMetadata(1, 2, ""))),
+            ["Seek(null, null)"] = (c => c.Seek(null!, (OffsetAndMetadata)null!), c => c.Seek(null!, (OffsetAndMetadata)null!)),
+            ["CurrentLag(null)"] = (c => c.CurrentLag(null!), c => c.CurrentLag(null!)),
+            ["Committed(null element)"] = (c => c.Committed(s_nullElement), c => c.Committed(s_nullElement)),
+            ["Committed(null element, timeout)"] = (
+                    c => c.Committed(s_nullElement, s_second), c => c.Committed(s_nullElement, s_second)),
+            ["OffsetsForTimes(null key)"] = (c => c.OffsetsForTimes(s_nullKeyTimestamps), c => c.OffsetsForTimes(s_nullKeyTimestamps)),
+            ["OffsetsForTimes(null key, timeout)"] = (
+                    c => c.OffsetsForTimes(s_nullKeyTimestamps, s_second), c => c.OffsetsForTimes(s_nullKeyTimestamps, s_second)),
+            ["BeginningOffsets(null element)"] = (c => c.BeginningOffsets(s_nullElement), c => c.BeginningOffsets(s_nullElement)),
+            ["BeginningOffsets(null element, timeout)"] = (
+                    c => c.BeginningOffsets(s_nullElement, s_second), c => c.BeginningOffsets(s_nullElement, s_second)),
+            ["EndOffsets(null element)"] = (c => c.EndOffsets(s_nullElement), c => c.EndOffsets(s_nullElement)),
+            ["EndOffsets(null element, timeout)"] = (
+                    c => c.EndOffsets(s_nullElement, s_second), c => c.EndOffsets(s_nullElement, s_second)),
+            ["Commit(null key)"] = (c => c.Commit(s_nullKeyOffsets), c => c.Commit(s_nullKeyOffsets)),
+            ["Commit(null key, timeout)"] = (c => c.Commit(s_nullKeyOffsets, s_second), c => c.Commit(s_nullKeyOffsets, s_second)),
+            ["CommitAsync(null key)"] = (
+                    c => c.CommitAsync(s_nullKeyOffsets, null), c => c.CommitAsync(s_nullKeyOffsets, (IOffsetCommitCallback?)null)),
+            ["CommitAsync(null key, callback)"] = (
+                    c => c.CommitAsync(s_nullKeyOffsets, s_callback), c => c.CommitAsync(s_nullKeyOffsets, s_callback)),
         });
 
     // Java's KafkaConsumer checks these arguments after acquireAndEnsureOpen(); the listener of subscribe(topics,
@@ -786,6 +830,7 @@ public sealed class PublicConsumerCheckOrderTests
             ["CommitAsync(null async callback)"] = c => c.CommitAsync((IAsyncOffsetCommitCallback)null!),
             ["CommitAsync(null, async callback)"] = c => c.CommitAsync(null!, s_asyncCallback),
             ["CommitAsync(offsets, null async callback)"] = c => c.CommitAsync(Offsets(), (IAsyncOffsetCommitCallback)null!),
+            ["CommitAsync(null key, async callback)"] = c => c.CommitAsync(s_nullKeyOffsets, s_asyncCallback),
         };
 
     private static Dictionary<string, (Action<IConsumer<byte[], byte[]>>, Func<IAsyncConsumer<byte[], byte[]>, Task>)> NegativePartitionCalls() =>

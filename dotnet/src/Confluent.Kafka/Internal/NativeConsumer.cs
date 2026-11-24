@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -40,6 +41,8 @@ namespace Confluent.Kafka.Internal;
 internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 {
     private const string GroupIdConfig = "group.id";
+
+    private const string DefaultApiTimeoutMsConfig = "default.api.timeout.ms";
 
     internal const string ConstructionFailedMessage = "Failed to construct kafka consumer";
 
@@ -91,6 +94,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private readonly HandleUses _uses = new HandleUses();
     private readonly SemaphoreSlim _closeGate = new SemaphoreSlim(1, 1);
     private readonly bool _groupIdDefined;
+
+    // Whether default.api.timeout.ms, the timeout Java's no-timeout BeginningOffsets and EndOffsets pass, is zero.
+    private readonly bool _defaultApiTimeoutZero;
     private readonly SerdeDisposal? _serdes;
 
     // Set once the destroy has returned and never cleared: from then on a Close or Dispose from any thread returns at
@@ -177,10 +183,12 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private bool _closeEnded;
 
-    private NativeConsumer(SafeConsumerHandle handle, bool groupIdDefined, bool withPump, SerdeDisposal? serdes)
+    private NativeConsumer(
+        SafeConsumerHandle handle, bool groupIdDefined, bool defaultApiTimeoutZero, bool withPump, SerdeDisposal? serdes)
     {
         _handle = handle;
         _groupIdDefined = groupIdDefined;
+        _defaultApiTimeoutZero = defaultApiTimeoutZero;
         _serdes = serdes;
 #pragma warning disable CKRDA0005 // Reports use the raw view: the destroy runs pending callbacks while this SafeHandle is being released.
         _reporter = new ConsumerCallbackReporter(handle.DangerousGetHandle(), PulseOwnerWaiters);
@@ -356,6 +364,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return Start(
             new SafeKafkaConsumerHandle(view, classPointer),
             groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
+            defaultApiTimeoutZero: IsZeroMs(ConfigMarshal.TextOf(prepared, DefaultApiTimeoutMsConfig)),
             withPump,
             disposal);
     }
@@ -381,23 +390,30 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        return Start(new SafeMockConsumerHandle(view, classPointer), groupIdDefined: false, withPump, serdes: null);
+        return Start(
+            new SafeMockConsumerHandle(view, classPointer),
+            groupIdDefined: false,
+            defaultApiTimeoutZero: false,
+            withPump,
+            serdes: null);
     }
 
-    internal void Seek(string topic, int partition, long offset)
+    internal void Seek(TopicPartition partition, long offset)
     {
-        CheckSeekArguments(topic, partition, offset);
+        CheckSeekArguments(partition, offset);
+        string topic = partition.Topic();
+        int number = partition.Partition();
         if (RoutesToTheHandle)
         {
-            Route(handle => handle.Seek(topic, partition, offset));
+            Route(handle => handle.Seek(topic, number, offset));
             return;
         }
 
         CallSync(arguments =>
         {
             IntPtr outErr = IntPtr.Zero;
-            NativeMethods.ConsumerSeekWithOffset(_handle, arguments.TopicPartition(topic, partition), offset, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            NativeMethods.ConsumerSeekWithOffset(_handle, arguments.TopicPartition(topic, number), offset, ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
     }
 
@@ -409,12 +425,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    internal void SeekWithMetadata(string topic, int partition, OffsetAndMetadata offsetAndMetadata)
+    internal void SeekWithMetadata(TopicPartition partition, OffsetAndMetadata offsetAndMetadata)
     {
-        CheckSeekArguments(topic, partition, offsetAndMetadata);
+        CheckSeekArguments(partition, offsetAndMetadata);
+        string topic = partition.Topic();
+        int number = partition.Partition();
         if (RoutesToTheHandle)
         {
-            Route(handle => handle.SeekWithMetadata(topic, partition, offsetAndMetadata));
+            Route(handle => handle.SeekWithMetadata(topic, number, offsetAndMetadata));
             return;
         }
 
@@ -423,32 +441,34 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerSeekWithOffsetAndMetadata(
                 _handle,
-                arguments.TopicPartition(topic, partition),
+                arguments.TopicPartition(topic, number),
                 arguments.OffsetAndMetadata(
                     offsetAndMetadata.Offset(), offsetAndMetadata.LeaderEpoch() ?? -1, offsetAndMetadata.Metadata()),
                 ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
     }
 
-    internal long? CurrentLag(string topic, int partition)
+    internal long? CurrentLag(TopicPartition partition)
     {
-        if (CheckInAUse(() => LagOfANullTopic(topic, partition), UseKind.UnownedOnMock))
+        if (CheckInAUse(() => LagOfAnUnknownPartition(partition), UseKind.UnownedOnMock))
         {
             return 0;
         }
 
+        string topic = partition.Topic();
+        int number = partition.Partition();
         if (RoutesToTheHandle)
         {
-            return Route(handle => handle.CurrentLag(topic, partition));
+            return Route(handle => handle.CurrentLag(topic, number));
         }
 
         return QuerySync<long?>(arguments =>
         {
             IntPtr outErr = IntPtr.Zero;
             sbyte present = NativeMethods.ConsumerCurrentLag(
-                _handle, arguments.TopicPartition(topic, partition), out long lag, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+                _handle, arguments.TopicPartition(topic, number), out long lag, ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return present != 0 ? lag : null;
         },
         UseKind.UnownedOnMock);
@@ -466,7 +486,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerCommitAsync(_handle, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
     }
 
@@ -548,7 +568,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             ParkCommitCallback(registration);
         }
 
-        KafkaException.ThrowIfFfiFailed(ref outErr);
+        ThrowIfWaitingCallFailed(ref outErr);
     }
 
     internal ConsumerCallbackReporter.HandleCommitScope EnterHandleCommit() => _reporter.EnterHandleCommit();
@@ -602,7 +622,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             IntPtr polled = NativeMethods.ConsumerPoll(_handle, timeoutMs, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             HoldRecords();
             return polled;
         });
@@ -674,7 +694,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                         arguments.TopicPartition(position.Key.Topic(), position.Key.Partition()),
                         position.Value,
                         ref outErr);
-                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    ThrowIfWaitingCallFailed(ref outErr);
                 }
                 catch (Exception exception)
                 {
@@ -709,7 +729,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerSubscribeWithTopics(_handle, arguments.StringList(topicArray), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             SettleListener(null, subscribed: true, Unsubscribes(topicArray));
         });
     }
@@ -733,7 +753,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerSubscribeWithPattern(_handle, arguments.SubscriptionPattern(patternText), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             SettleListener(null, subscribed: true, notRegistered: false);
         });
     }
@@ -773,7 +793,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                     called = true;
                     subscribed = outErr == IntPtr.Zero;
                     notRegistered |= KafkaException.RefusedBeforeRegistering(outErr);
-                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    ThrowIfWaitingCallFailed(ref outErr);
                 }
                 finally
                 {
@@ -807,13 +827,32 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost)
     {
-        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitionsLost, paramName: nameof(partitionsLost));
+        (string Topic, int Partition)[] snapshot = TrySnapshotPartitions(partitionsLost, nameof(partitionsLost))
+            ?? throw NotAssignedToLose(partitionsLost);
         CallMock((mock, arguments) =>
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.MockConsumerLosePartitions(mock, arguments.TopicPartitionList(snapshot), ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
+    }
+
+    // A null partition is never assigned and cannot cross the C ABI, so the binding gives Java's MockConsumer answer
+    // itself: every lost partition that is not assigned, once each, in the given order, as the core lists them.
+    private IllegalStateException NotAssignedToLose(IReadOnlyCollection<TopicPartition> partitionsLost)
+    {
+        HashSet<TopicPartition> assignment = new HashSet<TopicPartition>(Assignment());
+        List<TopicPartition?> notAssigned = new List<TopicPartition?>();
+        foreach (TopicPartition? tp in partitionsLost)
+        {
+            if ((tp is null || !assignment.Contains(tp)) && !notAssigned.Contains(tp))
+            {
+                notAssigned.Add(tp);
+            }
+        }
+
+        return new IllegalStateException(
+            "Cannot lose partitions that are not currently assigned: " + JavaText.ValueOf(notAssigned));
     }
 
     private void SettleListener(ListenerRegistration? registration, bool subscribed, bool notRegistered)
@@ -990,7 +1029,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerUnsubscribe(_handle, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
     }
 
@@ -999,13 +1038,13 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void Pause(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            CheckInAUse(() => SnapshotPartitions(partitions, nullTopicIsUnassigned: true)),
+            CheckInAUse(() => SnapshotPausePartitions(partitions)),
             NativeMethods.ConsumerPause,
             (handle, snapshot) => handle.Pause(snapshot));
 
     internal void Resume(IReadOnlyCollection<TopicPartition> partitions) =>
         RunPartitionsSync(
-            CheckInAUse(() => SnapshotPartitions(partitions, nullTopicIsUnassigned: true)),
+            CheckInAUse(() => SnapshotPausePartitions(partitions)),
             NativeMethods.ConsumerResume,
             (handle, snapshot) => handle.Resume(snapshot));
 
@@ -1067,8 +1106,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal void CommitSyncOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout)
     {
-        OffsetsSnapshot snapshot = SnapshotCommitOffsetsWhenOpen(offsets);
-        long timeoutMs = CommitTimeoutMs(timeout);
+        (OffsetsSnapshot snapshot, long timeoutMs) = CommitArguments(offsets, timeout);
         if (RoutesToTheHandle)
         {
             Route(handle => handle.CommitSync(snapshot, timeoutMs));
@@ -1115,7 +1153,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     internal IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
     {
-        TimestampsSnapshot snapshot = CheckInAUse(() => SnapshotTimestamps(timestampsToSearch));
+        TimestampsSnapshot snapshot =
+            CheckInAUse(() => SnapshotSearch(timestampsToSearch)) ?? throw NotImplementedOnMock();
         return RoutesToTheHandle
             ? Route(handle => handle.OffsetsForTimes(snapshot, timeoutMs: null))
             : OffsetsForTimes(snapshot, timeoutMs: null);
@@ -1124,8 +1163,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     internal IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, TimeSpan timeout)
     {
-        (TimestampsSnapshot snapshot, long timeoutMs) =
-            CheckInAUse(() => (SnapshotTimestamps(timestampsToSearch), TimeoutMs(timeout)));
+        (TimestampsSnapshot? search, long timeoutMs) =
+            CheckInAUse(() => (SnapshotSearch(timestampsToSearch), TimeoutMs(timeout)));
+        TimestampsSnapshot snapshot = search ?? throw NotImplementedOnMock();
         return RoutesToTheHandle
             ? Route(handle => handle.OffsetsForTimes(snapshot, timeoutMs))
             : OffsetsForTimes(snapshot, timeoutMs);
@@ -1163,8 +1203,13 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private IReadOnlyDictionary<TopicPartition, long> LookUpOffsets(
         IReadOnlyCollection<TopicPartition> partitions, TimeSpan? timeout, bool beginning)
     {
-        ((string Topic, int Partition)[] snapshot, long? timeoutMs) =
-            CheckInAUse(() => (SnapshotPartitions(partitions), OptionalTimeoutMs(timeout)));
+        ((string Topic, int Partition)[]? snapshot, long? timeoutMs) =
+            CheckInAUse(() => (SnapshotOffsetPartitions(partitions, timeout), OptionalTimeoutMs(timeout)));
+        if (snapshot is null)
+        {
+            return IsMock ? throw NoOffsetOnMock(beginning) : new Dictionary<TopicPartition, long>();
+        }
+
         if (RoutesToTheHandle)
         {
             return Route(handle => beginning
@@ -1233,8 +1278,39 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             return timeoutMs;
         });
 
+    // Java's commitSync(Map, Duration) builds its Timer, which checks the timeout, after the group check and before it
+    // waits for the commit, which a null key fails.
+    private (OffsetsSnapshot Snapshot, long TimeoutMs) CommitArguments(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout)
+    {
+        OffsetsSnapshot? snapshot = TrySnapshotCommitOffsetsWhenOpen(offsets);
+        long timeoutMs = CheckInAUse(() =>
+        {
+            ThrowIfNoGroupIdBefore(timeout);
+            long ms = TimerTimeoutMs(timeout);
+            return snapshot is null ? throw NullCommitKey() : ms;
+        });
+        return (snapshot.GetValueOrDefault(), timeoutMs);
+    }
+
     private OffsetsSnapshot SnapshotCommitOffsetsWhenOpen(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
-        CheckWhenOpen(() => OffsetsSnapshot.Of(offsets));
+        TrySnapshotCommitOffsetsWhenOpen(offsets) ?? CheckInAUse<OffsetsSnapshot>(() => throw NullCommitKey());
+
+    // Java's commitSync and commitAsync copy the map before acquire(), a null key included, and only the background
+    // thread reads the key, after the group check: on a KafkaConsumer a null key gives no snapshot, for the caller to
+    // answer it there. Java's MockConsumer stores the map after ensureNotClosed(), which the mock's use makes.
+    private OffsetsSnapshot? TrySnapshotCommitOffsetsWhenOpen(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
+    {
+        if (IsMock)
+        {
+            return CheckInAUse(() => OffsetsSnapshot.Of(offsets));
+        }
+
+        ThrowIfClosed();
+        return OffsetsSnapshot.TryOf(offsets);
+    }
+
+    private Exception NullCommitKey() => GroupIdMissing ? GroupIdNotDefined() : OffsetsSnapshot.NullKey();
 
     // Java checks these before acquire(), so on a KafkaConsumer they come after the closed check and before the owner
     // check, as in Python; on the mocks they come inside the use, after the owner wait, as Python's mock takes its
@@ -1282,20 +1358,22 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     // Java's KafkaConsumer checks the offset before acquire(), so before the closed and owner checks; Java's
     // MockConsumer checks no offset, and the core mock answers a negative one as Java's does.
-    private void CheckSeekArguments(string topic, int partition, long offset)
+    private void CheckSeekArguments(TopicPartition partition, long offset)
     {
         if (IsMock)
         {
-            CheckInAUse(() => RequireAssignedTopic(topic, partition));
+            CheckInAUse(() => RequireAssignedPartition(partition));
             return;
         }
 
         RequireSeekOffset(offset);
-        CheckInAUse(() => RequireAssignedTopic(topic, partition));
+        CheckInAUse(() => RequireAssignedPartition(partition));
     }
 
-    // Java's KafkaConsumer reads the offset before acquire(); Java's MockConsumer after ensureNotClosed().
-    private void CheckSeekArguments(string topic, int partition, OffsetAndMetadata offsetAndMetadata)
+    // Java's KafkaConsumer reads the offset before acquire(); Java's MockConsumer after ensureNotClosed(). With a
+    // leader epoch, Java's KafkaConsumer records the epoch for the partition first, which wraps its
+    // NullPointerException for a null partition in a KafkaException.
+    private void CheckSeekArguments(TopicPartition partition, OffsetAndMetadata offsetAndMetadata)
     {
         CheckBeforeAcquire(() =>
         {
@@ -1306,7 +1384,15 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
             return true;
         });
-        CheckInAUse(() => RequireAssignedTopic(topic, partition));
+        CheckInAUse(() =>
+        {
+            if (partition is null && !IsMock && offsetAndMetadata.LeaderEpoch() is not null)
+            {
+                throw new KafkaException(new ArgumentNullException(nameof(partition)));
+            }
+
+            RequireAssignedPartition(partition);
+        });
     }
 
     private static void RequireCallback(object callback)
@@ -1317,7 +1403,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    // Java's committed checks the group before it reads the partitions.
+    // Java's committed checks the group before it reads the partitions. Java's MockConsumer keeps only the partitions
+    // it has a committed offset for, which a null one never has.
     private (string Topic, int Partition)[] CommittedPartitions(IReadOnlyCollection<TopicPartition> partitions)
     {
         if (partitions is null && GroupIdMissing)
@@ -1325,8 +1412,49 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             throw GroupIdNotDefined();
         }
 
-        return SnapshotPartitions(partitions!);
+        if (IsMock)
+        {
+            return SnapshotPartitions(partitions!, nullElement: NullElement.Skipped);
+        }
+
+        return GroupIdMissing
+            ? TrySnapshotPartitions(partitions!) ?? throw GroupIdNotDefined()
+            : SnapshotPartitions(partitions!);
     }
+
+    // Java's MockConsumer answers a partition it has no offset for, which a null one never has, with
+    // IllegalStateException. It checks the partitions in order, after the offsets exception; since the core cannot
+    // receive a null one, the mocks give no snapshot for it and the binding answers it before the call. Java's
+    // KafkaConsumer reads a null one only on its background thread, which a zero timeout does not wait for: it returns
+    // an empty map, so a zero timeout gives no snapshot either. Without a timeout Java passes default.api.timeout.ms.
+    private (string Topic, int Partition)[]? SnapshotOffsetPartitions(
+        IReadOnlyCollection<TopicPartition> partitions, TimeSpan? timeout) =>
+        IsMock || (timeout is TimeSpan given ? IsZeroTimeout(given) : _defaultApiTimeoutZero)
+            ? TrySnapshotPartitions(partitions)
+            : SnapshotPartitions(partitions);
+
+    // A timeout below a millisecond reaches the core as zero, where the other partitions take Java's zero path.
+    private static bool IsZeroTimeout(TimeSpan timeout) => timeout >= TimeSpan.Zero && TimeoutMs(timeout) == 0;
+
+    // The core accepted the text as Java's ConfigDef reads an int: trimmed, an optional sign and ASCII digits.
+    private static bool IsZeroMs(string? text) =>
+        text is not null
+        && int.TryParse(JavaText.Trim(text), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int ms)
+        && ms == 0;
+
+    private static IllegalStateException NoOffsetOnMock(bool beginning) =>
+        new IllegalStateException(
+            beginning
+                ? "The partition null does not have a beginning offset."
+                : "The partition null does not have an end offset.");
+
+    // Java's MockConsumer answers every map with UnsupportedOperationException; since the core cannot receive a null
+    // key, the mocks give no snapshot for it and the binding gives that answer itself.
+    private TimestampsSnapshot? SnapshotSearch(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch) =>
+        IsMock ? TrySnapshotTimestamps(timestampsToSearch) : SnapshotTimestamps(timestampsToSearch);
+
+    private static UnsupportedOperationException NotImplementedOnMock() =>
+        new UnsupportedOperationException("Not implemented yet.");
 
     // Java's partitionsFor finds no partitions for a null topic, so a zero timeout times out at once; Java's mock
     // answers none, which a null topic cannot reach through the native mock.
@@ -1370,7 +1498,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             long position = timeoutMs is long ms
                 ? NativeMethods.ConsumerPositionWithTimeout(_handle, topicPartition, ms, ref outErr)
                 : NativeMethods.ConsumerPosition(_handle, topicPartition, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return position;
         });
 
@@ -1387,7 +1515,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 NativeMethods.ConsumerCommitSync(_handle, ref outErr);
             }
 
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
 
     private void CommitSyncOffsets(OffsetsSnapshot snapshot, long? timeoutMs) =>
@@ -1404,7 +1532,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 NativeMethods.ConsumerCommitSyncWithOffsets(_handle, offsets, ref outErr);
             }
 
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
 
     private IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
@@ -1416,7 +1544,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr map = timeoutMs is long ms
                 ? NativeMethods.ConsumerCommittedWithTimeout(_handle, partitions, ms, ref outErr)
                 : NativeMethods.ConsumerCommitted(_handle, partitions, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return CopyCommitted(map, snapshot);
         });
 
@@ -1446,7 +1574,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                     : NativeMethods.ConsumerEndOffsets(_handle, partitions, ref outErr);
             }
 
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return LongOffsetMapMarshal.CopyOutAndDestroy(map);
         });
 
@@ -1459,7 +1587,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr map = timeoutMs is long ms
                 ? NativeMethods.ConsumerOffsetsForTimesWithTimeout(_handle, timestamps, ms, ref outErr)
                 : NativeMethods.ConsumerOffsetsForTimes(_handle, timestamps, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return CopyOffsetsForTimes(map, snapshot);
         });
 
@@ -1475,7 +1603,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr list = timeoutMs is long ms
                 ? NativeMethods.ConsumerPartitionsForWithTimeout(_handle, topicPointer, ms, ref outErr)
                 : NativeMethods.ConsumerPartitionsFor(_handle, topicPointer, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return PartitionInfoListMarshal.CopyOutAndDestroy(list);
         });
 
@@ -1486,7 +1614,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr map = timeoutMs is long ms
                 ? NativeMethods.ConsumerListTopicsWithTimeout(_handle, ms, ref outErr)
                 : NativeMethods.ConsumerListTopics(_handle, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return TopicPartitionInfoMapMarshal.CopyOutAndDestroy(map);
         });
 
@@ -1512,7 +1640,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             call(_handle, arguments.TopicPartitionList(snapshot), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
     }
 
@@ -1639,32 +1767,34 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return (long)timeout.TotalMilliseconds;
     }
 
-    // A null topic is never assigned and cannot cross the C ABI, so the binding throws what Java's
+    // A null partition or a null topic is never assigned and cannot cross the C ABI, so the binding throws what Java's
     // SubscriptionState.assignedState throws for a partition that is not assigned. A negative partition goes to the
     // core, which answers as Java does.
-    internal static void RequireAssignedTopic(string? topic, int partition)
+    internal static void RequireAssignedPartition(TopicPartition? partition)
     {
-        if (topic is null)
+        if (partition is null || partition.Topic() is null)
         {
             throw new IllegalStateException(NoCurrentAssignment(partition));
         }
     }
 
-    // Java's MockConsumer answers a lag of 0 for a partition it has no end offset for, which a null topic never has;
-    // Java's KafkaConsumer refuses the partition as not assigned. Returns whether the lag is the mock's 0.
-    private bool LagOfANullTopic(string? topic, int partition)
+    // Java's MockConsumer answers a lag of 0 for a partition it has no end offset for, which a null partition or a null
+    // topic never has; Java's KafkaConsumer refuses the partition as not assigned. Returns whether the lag is the
+    // mock's 0.
+    private bool LagOfAnUnknownPartition(TopicPartition? partition)
     {
-        if (topic is null && IsMock)
+        if ((partition is null || partition.Topic() is null) && IsMock)
         {
             return true;
         }
 
-        RequireAssignedTopic(topic, partition);
+        RequireAssignedPartition(partition);
         return false;
     }
 
-    internal static string NoCurrentAssignment(int partition) =>
-        "No current assignment for partition null-" + partition.ToString(CultureInfo.InvariantCulture);
+    // Java's text for a partition that is not assigned, a null partition and a null topic printed as Java prints them.
+    internal static string NoCurrentAssignment(TopicPartition? partition) =>
+        "No current assignment for partition " + JavaText.ValueOf(partition);
 
     internal const string PositionNotAssigned =
         "You can only check the position for partitions assigned to this consumer.";
@@ -1673,7 +1803,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // IllegalArgumentException.
     private void RequirePositionPartition(TopicPartition partition)
     {
-        if (partition.Topic() is null)
+        if (partition is null || partition.Topic() is null)
         {
             throw IsMock
                 ? new IllegalArgumentException(PositionNotAssigned)
@@ -2239,6 +2369,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         int index = 0;
         foreach (KeyValuePair<TopicPartition, long> entry in newOffsets)
         {
+            if (entry.Key is null)
+            {
+                throw new ArgumentNullException(nameof(newOffsets), "newOffsets must not contain null");
+            }
+
             topics[index] = entry.Key.Topic() ?? throw new ArgumentNullException(
                 nameof(newOffsets), "newOffsets must not contain a TopicPartition with a null topic");
             partitions[index] = entry.Key.Partition();
@@ -2661,9 +2796,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         _handle.CloseExplicitly();
     }
 
-    // KafkaConsumer refuses a null collection, or a partition with a null topic, with Java's messages, and the core
-    // refuses a blank topic with the same text. Java's MockConsumer has no check of its own (a null is its
-    // NullPointerException).
+    // KafkaConsumer refuses a null collection, or a null partition or a partition with a null topic, with Java's
+    // messages, and the core refuses a blank topic with the same text. Java's MockConsumer has no check of its own (a
+    // null is its NullPointerException).
     private (string Topic, int Partition)[] SnapshotAssignPartitions(IReadOnlyCollection<TopicPartition> partitions)
     {
         if (!IsMock)
@@ -2673,9 +2808,9 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 throw new IllegalArgumentException(NullAssignPartitionsMessage);
             }
 
-            foreach (TopicPartition tp in partitions)
+            foreach (TopicPartition? tp in partitions)
             {
-                if (tp.Topic() is null)
+                if (tp is null || tp.Topic() is null)
                 {
                     throw new IllegalArgumentException(NullAssignTopicMessage);
                 }
@@ -2686,24 +2821,63 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     // KafkaConsumer's seekToBeginning and seekToEnd refuse a null collection with Java's message before acquire(), so
-    // before the closed and owner checks; Java's MockConsumer has no check of its own.
+    // before the closed and owner checks; Java's MockConsumer has no check of its own. A null partition is one that is
+    // not assigned, which Java finds after acquire(), so after the owner check too.
     private (string Topic, int Partition)[] SnapshotSeekPartitions(IReadOnlyCollection<TopicPartition> partitions)
     {
-        if (partitions is null && !IsMock)
+        if (IsMock)
+        {
+            return CheckInAUse(() => SnapshotPartitions(partitions, nullElement: NullElement.NotAssigned));
+        }
+
+        if (partitions is null)
         {
             throw new IllegalArgumentException("Partitions collection cannot be null");
         }
 
-        return CheckWhenOpen(() => SnapshotPartitions(partitions!));
+        return CheckWhenOpen(() => TrySnapshotPartitions(partitions))
+            ?? CheckInAUse<(string Topic, int Partition)[]>(
+                () => throw new IllegalStateException(NoCurrentAssignment(null)));
     }
 
-    // A partition number goes to the core, which answers as Java does. A null topic cannot cross the C ABI: where Java
-    // looks the partition up in the assignment (pause, resume), it is refused as Java refuses a partition that is not
-    // assigned.
+    /// <summary>What a partition collection's snapshot does with a <see langword="null"/> element.</summary>
+    internal enum NullElement
+    {
+        /// <summary>Throws <c>ArgumentNullException</c> "&lt;param&gt; must not contain null".</summary>
+        Refused,
+
+        /// <summary>Throws Java's answer for a partition that is not assigned.</summary>
+        NotAssigned,
+
+        /// <summary>Leaves it out.</summary>
+        Skipped,
+    }
+
+    // A partition number goes to the core, which answers as Java does. A null partition or a null topic cannot cross the
+    // C ABI: where Java looks the partition up in the assignment (pause, resume), it is refused as Java refuses a
+    // partition that is not assigned.
     internal static (string Topic, int Partition)[] SnapshotPartitions(
         IReadOnlyCollection<TopicPartition> partitions,
         bool nullTopicIsUnassigned = false,
-        string paramName = "partitions")
+        string paramName = "partitions",
+        NullElement nullElement = NullElement.Refused) =>
+        Snapshot(partitions, nullTopicIsUnassigned, paramName, nullElement)!;
+
+    // Java's pause and resume look every partition up in the assignment, which holds no null partition or null topic.
+    private static (string Topic, int Partition)[] SnapshotPausePartitions(IReadOnlyCollection<TopicPartition> partitions) =>
+        SnapshotPartitions(partitions, nullTopicIsUnassigned: true, nullElement: NullElement.NotAssigned);
+
+    // The snapshot, or null when an element is null, for the caller to answer it; the elements after it are not read.
+    private static (string Topic, int Partition)[]? TrySnapshotPartitions(
+        IReadOnlyCollection<TopicPartition> partitions, string paramName = "partitions") =>
+        Snapshot(partitions, nullTopicIsUnassigned: false, paramName, nullElement: null);
+
+    // Gives no snapshot for a null element only when nullElement is null.
+    private static (string Topic, int Partition)[]? Snapshot(
+        IReadOnlyCollection<TopicPartition> partitions,
+        bool nullTopicIsUnassigned,
+        string paramName,
+        NullElement? nullElement)
     {
         if (partitions is null)
         {
@@ -2712,16 +2886,36 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
         (string Topic, int Partition)[] snapshot = new (string, int)[partitions.Count];
         int index = 0;
-        foreach (TopicPartition tp in partitions)
+        foreach (TopicPartition? tp in partitions)
         {
+            if (tp is null)
+            {
+                switch (nullElement)
+                {
+                    case null:
+                        return null;
+                    case NullElement.Skipped:
+                        continue;
+                    case NullElement.NotAssigned:
+                        throw new IllegalStateException(NoCurrentAssignment(null));
+                    default:
+                        throw new ArgumentNullException(paramName, paramName + " must not contain null");
+                }
+            }
+
             if (tp.Topic() is null)
             {
                 throw nullTopicIsUnassigned
-                    ? new IllegalStateException(NoCurrentAssignment(tp.Partition()))
+                    ? new IllegalStateException(NoCurrentAssignment(tp))
                     : new ArgumentNullException(paramName, paramName + " must not contain a TopicPartition with a null topic");
             }
 
             snapshot[index++] = (Topic: tp.Topic(), Partition: tp.Partition());
+        }
+
+        if (index != snapshot.Length)
+        {
+            Array.Resize(ref snapshot, index);
         }
 
         return snapshot;
@@ -2747,8 +2941,15 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         internal int Count { get; }
     }
 
-    // A negative timestamp is passed through: ListOffsets uses negative special timestamps.
-    internal static TimestampsSnapshot SnapshotTimestamps(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
+    internal static TimestampsSnapshot SnapshotTimestamps(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch) =>
+        SnapshotTimestamps(timestampsToSearch, nullKeyGivesNone: false).GetValueOrDefault();
+
+    // The snapshot, or null when a key is null, for the caller to answer it.
+    private static TimestampsSnapshot? TrySnapshotTimestamps(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch) =>
+        SnapshotTimestamps(timestampsToSearch, nullKeyGivesNone: true);
+
+    private static TimestampsSnapshot? SnapshotTimestamps(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, bool nullKeyGivesNone)
     {
         if (timestampsToSearch is null)
         {
@@ -2762,7 +2963,18 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         int index = 0;
         foreach (KeyValuePair<TopicPartition, long> entry in timestampsToSearch)
         {
-            TopicPartition tp = entry.Key;
+            TopicPartition? tp = entry.Key;
+            if (tp is null)
+            {
+                if (nullKeyGivesNone)
+                {
+                    return null;
+                }
+
+                ThrowIfATargetTimeIsNegative(timestampsToSearch);
+                throw new ArgumentNullException(nameof(timestampsToSearch), "timestampsToSearch must not contain null");
+            }
+
             if (tp.Topic() is null)
             {
                 throw new ArgumentNullException(
@@ -2776,6 +2988,21 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         return new TimestampsSnapshot(topics, partitionArray, timestamps, count);
+    }
+
+    // Java's offsetsForTimes checks every target time at the call, which the core repeats for a map it receives; only
+    // Java's background thread reads a null key, so a negative target time is reported first.
+    private static void ThrowIfATargetTimeIsNegative(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
+    {
+        foreach (KeyValuePair<TopicPartition, long> entry in timestampsToSearch)
+        {
+            if (entry.Value < 0)
+            {
+                throw new IllegalArgumentException(
+                    "The target time for partition " + JavaText.ValueOf(entry.Key) + " is "
+                    + entry.Value.ToString(CultureInfo.InvariantCulture) + ". The target time cannot be negative.");
+            }
+        }
     }
 
     internal void UpdateBeginningOffset(string topic, int partition, long offset) =>
@@ -3055,6 +3282,60 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             NativeMethods.ErrorDestroy(error);
             error = IntPtr.Zero;
         }
+    }
+
+    internal static void ThrowIfWaitingCallFailed(ref IntPtr outErr)
+    {
+        IntPtr error = outErr;
+        outErr = IntPtr.Zero;
+        if (error != IntPtr.Zero)
+        {
+            ExceptionDispatchInfo.Capture(WaitingCallException(error)).Throw();
+        }
+    }
+
+    // A waiting call's error, read as Python's binding reads it: a KafkaException a callback threw, carried in the
+    // error's cause chain, is thrown as the same instance, as Java's maybeWrapAsKafkaException leaves it unwrapped where
+    // the core wraps a listener's in "User rebalance callback throws an error" (Poll, Unsubscribe, and Subscribe or
+    // Assign with an empty collection, which unsubscribe). Close keeps its own wrap.
+    internal static Exception WaitingCallException(IntPtr error)
+    {
+        Exception? carried;
+        try
+        {
+            carried = CarriedInTheChain(error);
+        }
+        catch
+        {
+            NativeMethods.ErrorDestroy(error);
+            throw;
+        }
+
+        if (carried is KafkaException)
+        {
+            NativeMethods.ErrorDestroy(error);
+            return carried;
+        }
+
+        return KafkaException.FromFfiError(error, owned: true)!;
+    }
+
+    private static Exception? CarriedInTheChain(IntPtr error)
+    {
+        for (IntPtr current = error; current != IntPtr.Zero;)
+        {
+            Exception? carried = ManagedExceptionCarrier.Carried(current);
+            if (carried is not null)
+            {
+                return carried;
+            }
+
+            IntPtr outErr = IntPtr.Zero;
+            current = NativeMethods.ErrorSource(current, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+        }
+
+        return null;
     }
 
     private void ThrowIfClosed()

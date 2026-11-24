@@ -101,6 +101,34 @@ public sealed class PublicProducerInCallbackTests
     }
 
     [Theory]
+    [InlineData(SyncFlavor)]
+    [InlineData(AsyncFlavor)]
+    public async Task Flush_FromADeliveryCallback_TracesJavasDeadlockMessageAsAnError(string flavor)
+    {
+        using TraceCapture trace = new TraceCapture(FlushMessage);
+        int flushThread = -1;
+        await Run(
+            flavor,
+            "in-callback-flush-trace",
+            producer =>
+            {
+                flushThread = Environment.CurrentManagedThreadId;
+                if (producer is KafkaProducer<byte[], byte[]> sync)
+                {
+                    _ = Record(() => sync.Flush());
+                }
+                else
+                {
+                    _ = ((AsyncKafkaProducer<byte[], byte[]>)producer).Flush();
+                }
+            },
+            maxBlockMs: AtOnceMaxBlockMs);
+
+        Assert.Equal(FlushMessage, Assert.Single(trace.LinesFrom(flushThread)));
+        Assert.Contains((TraceEventType.Error, FlushMessage), trace.Events());
+    }
+
+    [Theory]
     [InlineData(SyncFlavor, "string")]
     [InlineData(SyncFlavor, "int")]
     [InlineData(SyncFlavor, "long")]

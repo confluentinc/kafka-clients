@@ -73,7 +73,7 @@ namespace Confluent.Kafka.Producer;
 /// whose producer is closed, while a serializer is awaited is not sent, although its headers are then already
 /// read-only. On
 /// <see cref="AsyncMockProducer{TKey, TValue}"/> each awaited serializer gets a new, empty
-/// <see cref="Headers"/> that is then dropped, and the record's headers stay writable, as on
+/// headers object that is then dropped, and the record's headers stay writable, as on
 /// <see cref="MockProducer{TKey, TValue}"/>;</description></item>
 /// <item><description>the bytes a serializer returns are pinned, not copied, from the end of the serialization
 /// until the producer has taken the record; <see langword="null"/> is a null key or value and an empty memory
@@ -213,7 +213,9 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <returns>A task that completes when the coordinator has acknowledged the offsets.</returns>
     /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
     /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null, a key of it is null or has a null
+    /// topic, or a value is null. For a null key the <see cref="Task"/> faults with it, after the checks an empty
+    /// <paramref name="offsets"/> makes.</exception>
     /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
     /// been started, or the producer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">Another transaction method is running on this
@@ -324,12 +326,13 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <remarks>
     /// Don't change or reuse the key and value buffers until <c>Send</c> throws or the
     /// <see cref="ValueTask{TResult}"/> it returns has completed. A <see langword="null"/>
-    /// <paramref name="callback"/> is rejected, where Java accepts it:
-    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/> already sends without one. The
+    /// <paramref name="callback"/> means no callback: the record is sent as
+    /// <see cref="Send(ProducerRecord{TKey, TValue}, CancellationToken)"/> sends it, as in Java. A bare
+    /// <c>null</c> argument matches this overload and the <see cref="IAsyncCallback"/> one, so cast it. The
     /// callback's contract is in <see cref="ICallback"/>.
     /// </remarks>
     /// <param name="record">The record to publish.</param>
-    /// <param name="callback">The delivery callback (non-null).</param>
+    /// <param name="callback">The delivery callback, or <see langword="null"/> for none.</param>
     /// <param name="cancellationToken">
     /// Never cancels the record. If it fires while the first stage is pending, that stage ends with
     /// <see cref="OperationCanceledException"/> once the producer has taken or refused the record. See the
@@ -341,9 +344,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <see cref="RecordMetadata"/>, or for an <c>ExecutionException</c> around the delivery failure. Await the
     /// <see cref="ValueTask{TResult}"/> once; call <see cref="ValueTask{TResult}.AsTask"/> to store it.
     /// </returns>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="record"/> or <paramref name="callback"/> is null.
-    /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
     /// cannot receive unchanged (thrown synchronously, or ending the first stage when a serializer is awaited).</exception>
     /// <exception cref="SerializationException">On <c>AsyncKafkaProducer</c>, a serializer threw an
@@ -353,7 +354,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        ICallback callback,
+        ICallback? callback,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -366,15 +367,15 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <see cref="ValueTask{TResult}"/> it returns has completed.
     /// </remarks>
     /// <param name="record">The record to send.</param>
-    /// <param name="callback">The callback; not <c>null</c>.</param>
+    /// <param name="callback">The callback, or <see langword="null"/> for none, as with the <see cref="ICallback"/>
+    /// overload.</param>
     /// <param name="cancellationToken">
     /// Never cancels the record. If it fires while the first stage is pending, that stage ends with
     /// <see cref="OperationCanceledException"/> once the producer has taken or refused the record. See the
     /// type's remarks.
     /// </param>
     /// <returns>The first stage, which hands back the record's future.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="record"/> or <paramref name="callback"/> is
-    /// <c>null</c>.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is <c>null</c>.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
     /// cannot receive unchanged (thrown synchronously, or ending the first stage when a serializer is awaited).</exception>
     /// <exception cref="SerializationException">On <c>AsyncKafkaProducer</c>, a serializer threw an
@@ -384,7 +385,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IAsyncCallback callback,
+        IAsyncCallback? callback,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -453,6 +454,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <see cref="KafkaException"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="topic"/> contains a NUL character, which the native client
+    /// cannot receive unchanged, on <c>AsyncKafkaProducer</c> (thrown synchronously).</exception>
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -460,6 +463,13 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// synchronous on both producer interfaces. An <see cref="AsyncMockProducer{TKey, TValue}"/> returns an
     /// empty snapshot.
     /// </summary>
+    /// <remarks>
+    /// The snapshot holds the producer's own metrics. It lacks Java's network and app-info metrics, which the native
+    /// core does not register yet: the connection, authentication, request and I/O metrics Java's <c>Selector</c>
+    /// adds to <c>producer-metrics</c> (<c>connection-count</c>, <c>request-total</c>, ...), the per-node
+    /// <c>producer-node-metrics</c> group, and the <c>app-info</c> group (<c>version</c>, <c>commit-id</c>,
+    /// <c>start-time-ms</c>), so a dashboard or alert built on those Java names finds nothing.
+    /// </remarks>
     /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();

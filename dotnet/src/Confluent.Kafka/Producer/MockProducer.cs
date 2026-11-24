@@ -53,7 +53,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
+    /// A serializer declares a public <c>Serialize(string, IHeaders, T)</c> but does not implement
     /// <see cref="ISerializerWithHeaders{T}"/>: the producer would never call that method.
     /// </exception>
     public MockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer)
@@ -77,7 +77,7 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
+    /// A serializer declares a public <c>Serialize(string, IHeaders, T)</c> but does not implement
     /// <see cref="ISerializerWithHeaders{T}"/>: the producer would never call that method.
     /// </exception>
     public MockProducer(
@@ -108,18 +108,13 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     }
 
     /// <inheritdoc/>
-    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback callback)
+    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback? callback)
     {
         ThrowIfRefused();
 
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
-        }
-
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
         }
 
         return SendValidated(record, callback);

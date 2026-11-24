@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
@@ -438,11 +439,11 @@ public sealed class SerializationTests
 
         byte[] heap = new byte[serializedBytes.Length << 1];
         serializedBytes.CopyTo(heap, 0);
-        Assert.Equal(data, deserializer.Deserialize(Topic, new Headers(), heap.AsSpan(0, serializedBytes.Length)));
+        Assert.Equal(data, deserializer.Deserialize(Topic, new RecordHeaders(), heap.AsSpan(0, serializedBytes.Length)));
 
         using NativeMemoryManager direct = new NativeMemoryManager(serializedBytes.Length << 2);
         serializedBytes.CopyTo(direct.GetSpan());
-        Assert.Equal(data, deserializer.Deserialize(Topic, new Headers(), direct.GetSpan().Slice(0, serializedBytes.Length)));
+        Assert.Equal(data, deserializer.Deserialize(Topic, new RecordHeaders(), direct.GetSpan().Slice(0, serializedBytes.Length)));
     }
 
     [Fact]
@@ -792,9 +793,9 @@ public sealed class SerializationTests
                 "Should get the original " + name + " after serialization and deserialization");
 
             T? withHeaders = value is byte[] array
-                ? serde.Deserializer().Deserialize(Topic, new Headers(), array)
+                ? serde.Deserializer().Deserialize(Topic, new RecordHeaders(), array)
                 : serialized is ReadOnlyMemory<byte> headersBytes
-                    ? serde.Deserializer().Deserialize(Topic, new Headers(), headersBytes.Span)
+                    ? serde.Deserializer().Deserialize(Topic, new RecordHeaders(), headersBytes.Span)
                     : default;
             Assert.True(
                 equal is null ? Equals(value, withHeaders) : equal(value, withHeaders),

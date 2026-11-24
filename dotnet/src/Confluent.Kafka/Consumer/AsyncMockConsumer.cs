@@ -414,7 +414,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// </summary>
     /// <param name="newOffsets">The offset of each partition.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="newOffsets"/> is null, or a partition in it has a null topic.
+    /// <paramref name="newOffsets"/> or a partition in it is null, or a partition in it has a null topic.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
@@ -453,11 +453,19 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// faults with <see cref="ArgumentException"/>, as Java's <c>IllegalArgumentException</c>.
     /// </remarks>
     /// <param name="newAssignment">The new full assignment.</param>
+    /// <param name="cancellationToken">
+    /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
+    /// operation has ended; no <c>wakeup()</c> is sent.
+    /// </param>
     /// <returns>A <see cref="Task"/> that completes when the rebalance is done.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="newAssignment"/> is null.</exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentException">An element or an element topic is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
-    public Task Rebalance(IReadOnlyCollection<TopicPartition> newAssignment) => _native.RebalanceWithCallback(newAssignment);
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    public Task Rebalance(
+        IReadOnlyCollection<TopicPartition> newAssignment,
+        CancellationToken cancellationToken = default) =>
+        _native.RebalanceWithCallback(newAssignment, cancellationToken);
 
     /// <summary>
     /// Simulates losing <paramref name="partitionsLost"/> without a clean revocation (Java
@@ -468,16 +476,23 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <c>OnPartitionsLost</c> extension method (<see cref="ConsumerRebalanceListenerExtensions"/> or
     /// <see cref="AsyncConsumerRebalanceListenerExtensions"/>) runs with them on the consumer's drain thread; then they
     /// leave the <see cref="Assignment"/>. The <see cref="Task"/> completes after the listener has ended; an exception from
-    /// it faults the <see cref="Task"/> with the same instance. A partition not currently assigned faults it with
-    /// <see cref="IllegalStateException"/>, as Java's.
+    /// it faults the <see cref="Task"/> with the same instance. A partition not currently assigned, a null one included,
+    /// faults it with <see cref="IllegalStateException"/>, as Java's.
     /// </remarks>
     /// <param name="partitionsLost">The partitions to lose; every one must be currently assigned.</param>
+    /// <param name="cancellationToken">
+    /// Cancels the wait: the <see cref="Task"/> ends with <see cref="OperationCanceledException"/> once the
+    /// operation has ended; no <c>wakeup()</c> is sent.
+    /// </param>
     /// <returns>A <see cref="Task"/> that completes when the partitions are lost.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitionsLost"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
-    public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost) =>
-        _native.LosePartitionsWithCallback(partitionsLost);
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
+    public Task LosePartitions(
+        IReadOnlyCollection<TopicPartition> partitionsLost,
+        CancellationToken cancellationToken = default) =>
+        _native.LosePartitionsWithCallback(partitionsLost, cancellationToken);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

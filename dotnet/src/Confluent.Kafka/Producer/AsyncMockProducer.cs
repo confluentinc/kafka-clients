@@ -108,7 +108,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        ICallback callback,
+        ICallback? callback,
         CancellationToken cancellationToken = default)
     {
         _native.ThrowIfClosed();
@@ -120,11 +120,6 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
-        }
-
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
         }
 
         return SendValidated(record, callback, cancellationToken);
@@ -133,7 +128,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(
         ProducerRecord<TKey, TValue> record,
-        IAsyncCallback callback,
+        IAsyncCallback? callback,
         CancellationToken cancellationToken = default)
     {
         _native.ThrowIfClosed();
@@ -145,11 +140,6 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
-        }
-
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
         }
 
         return SendValidated(record, null, cancellationToken, callback);

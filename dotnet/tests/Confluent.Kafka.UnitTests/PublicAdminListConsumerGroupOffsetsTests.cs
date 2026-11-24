@@ -223,7 +223,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
             nullSpec.Message,
             StringComparison.Ordinal);
 
-        // A default(TopicPartition) has a null Topic, which the ABI would read as an absent name.
+        // A partition with a null topic, which the ABI would read as an absent name.
         ArgumentNullException nullTopic = Assert.Throws<ArgumentNullException>(
             () =>
             {
@@ -231,7 +231,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsTests
                     new Dictionary<string, ListConsumerGroupOffsetsSpec>(StringComparer.Ordinal)
                     {
                         ["p5-lcgo-bad-tp"] = new ListConsumerGroupOffsetsSpec()
-                            .TopicPartitions(new[] { default(TopicPartition) }),
+                            .TopicPartitions(new[] { new TopicPartition(null!, 0) }),
                     });
             });
         Assert.Equal("groupSpecs", nullTopic.ParamName);

@@ -36,6 +36,11 @@ public sealed class JavaNameAnalyzerTests
         + "ctor\torg.apache.kafka.common.Node\tNode()\n"
         + "method\torg.apache.kafka.common.Node\tinstance\thost()\n";
 
+    private const string Header =
+        "type\torg.apache.kafka.common.header.Header\tinterface\t-\n"
+        + "method\torg.apache.kafka.common.header.Header\tinstance\tkey()\n"
+        + "method\torg.apache.kafka.common.header.Header\tinstance\tvalue()\n";
+
     private const string Callback =
         "type\torg.apache.kafka.clients.producer.Callback\tinterface\t-\n"
         + "method\torg.apache.kafka.clients.producer.Callback\tinstance\tonCompletion(RecordMetadata metadata, Exception exception)\n";
@@ -84,6 +89,200 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.common.Node\tinstance\tid()\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
                 + "field\torg.apache.kafka.common.Node\tstatic\tNO_ID\n"));
+
+    [Fact]
+    public Task AJavaInterface_TranslatedAsAnInterface_IsNotReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Header
+            {
+                public interface IHeader
+                {
+                    string Key();
+
+                    byte[] Value();
+                }
+            }
+            """,
+            Files(Header));
+
+    [Fact]
+    public Task AJavaInterface_TranslatedAsAClass_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Header
+            {
+                public sealed class {|#0:Header|}
+                {
+                    private Header()
+                    {
+                    }
+
+                    public string Key() => "";
+
+                    public byte[] Value() => null;
+                }
+            }
+            """,
+            Files(Header),
+            Name(0, "kind T:Confluent.Kafka.Common.Header.Header: translates the Java interface "
+                + "org.apache.kafka.common.header.Header; declare it as the interface IHeader"));
+
+    [Fact]
+    public Task AJavaInterface_TranslatedAsADelegate_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public delegate TB {|#0:BaseFunction|}<in TA, out TB>(TA a);
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.BaseFunction\tinterface\t-\n"
+                + "method\torg.apache.kafka.common.BaseFunction\tinstance\tapply(Object a)\n"),
+            Name(0, "kind T:Confluent.Kafka.Common.BaseFunction`2: translates the Java interface "
+                + "org.apache.kafka.common.BaseFunction; declare it as the interface IBaseFunction"));
+
+    [Fact]
+    public Task AJavaInterface_TranslatedAsAClass_IsNotReportedWhenAllowlisted() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Header
+            {
+                public sealed class Header
+                {
+                    private Header()
+                    {
+                    }
+
+                    public string Key() => "";
+
+                    public byte[] Value() => null;
+                }
+            }
+            """,
+            Files(Header, allowlist: "# Kept on purpose.\nkind T:Confluent.Kafka.Common.Header.Header\n"));
+
+    [Fact]
+    public Task AJavaClass_TranslatedAsAStruct_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public readonly struct {|#0:Uuid|}
+                {
+                    public long GetMostSignificantBits() => 0;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Uuid\tclass\t-\n"
+                + "method\torg.apache.kafka.common.Uuid\tinstance\tgetMostSignificantBits()\n"),
+            Name(0, "kind T:Confluent.Kafka.Common.Uuid: translates the Java class org.apache.kafka.common.Uuid; "
+                + "declare it as a class"));
+
+    [Fact]
+    public Task AJavaClass_TranslatedAsAStaticClass_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Serialization
+            {
+                public static class {|#0:Serdes|}
+                {
+                    public static object Long() => null;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.serialization.Serdes\tclass\t-\n"
+                + "method\torg.apache.kafka.common.serialization.Serdes\tstatic\tLong()\n"),
+            Name(0, "kind T:Confluent.Kafka.Common.Serialization.Serdes: translates the Java class "
+                + "org.apache.kafka.common.serialization.Serdes; declare it as a class"));
+
+    [Fact]
+    public Task AJavaClass_TranslatedAsAnAbstractClass_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public abstract class {|#0:Node|}
+                {
+                    public Node()
+                    {
+                    }
+
+                    public string Host() => "";
+                }
+            }
+            """,
+            Files(Node),
+            Name(0, "kind T:Confluent.Kafka.Common.Node: translates the Java class org.apache.kafka.common.Node; "
+                + "declare it as a class"));
+
+    [Fact]
+    public Task AJavaAbstractClass_TranslatedAsASealedClass_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class {|#0:KafkaFuture|}
+                {
+                    public bool IsDone() => true;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.KafkaFuture\tabstract class\t-\n"
+                + "method\torg.apache.kafka.common.KafkaFuture\tinstance\tisDone()\n"),
+            Name(0, "kind T:Confluent.Kafka.Common.KafkaFuture: translates the Java abstract class "
+                + "org.apache.kafka.common.KafkaFuture; declare it as an abstract class"));
+
+    [Fact]
+    public Task AJavaEnum_TranslatedAsAClass_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common.Record
+            {
+                public sealed class {|#0:TimestampType|}
+                {
+                    private TimestampType()
+                    {
+                    }
+                }
+            }
+            """,
+            Files("type\torg.apache.kafka.common.record.TimestampType\tenum\t-\n"),
+            Name(0, "kind T:Confluent.Kafka.Common.Record.TimestampType: translates the Java enum "
+                + "org.apache.kafka.common.record.TimestampType; declare it as an enum"));
+
+    [Fact]
+    public Task AJavaAbstractClassAndEnum_TranslatedWithTheirKinds_AreNotReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public abstract class KafkaFuture
+                {
+                    protected KafkaFuture()
+                    {
+                    }
+
+                    public bool IsDone() => true;
+                }
+            }
+
+            namespace Confluent.Kafka.Common.Record
+            {
+                public enum TimestampType
+                {
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.KafkaFuture\tabstract class\t-\n"
+                + "ctor\torg.apache.kafka.common.KafkaFuture\tKafkaFuture()\n"
+                + "method\torg.apache.kafka.common.KafkaFuture\tinstance\tisDone()\n"
+                + "type\torg.apache.kafka.common.record.TimestampType\tenum\t-\n"));
 
     [Fact]
     public Task APropertyWhereJavaHasAMethod_IsReportedOnce() =>
@@ -407,7 +606,7 @@ public sealed class JavaNameAnalyzerTests
             """
             namespace Confluent.Kafka.Common
             {
-                public readonly struct TopicPartition : System.IEquatable<TopicPartition>
+                public sealed class TopicPartition : System.IEquatable<TopicPartition>
                 {
                     public TopicPartition(string topic, int partition)
                     {
@@ -1560,7 +1759,7 @@ public sealed class JavaNameAnalyzerTests
 
             namespace Confluent.Kafka.Common
             {
-                public readonly struct KafkaFuture
+                public readonly struct {|#1:KafkaFuture|}
                 {
                     public void Get()
                     {
@@ -1583,7 +1782,9 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.common.KafkaFuture\tinstance\tget(long timeout, TimeUnit unit)\n"),
             Name(0, "missing T:Confluent.Kafka.Common.Errors.RetriableException "
                 + "org.apache.kafka.common.errors.RetriableException#RetriableException(Throwable): has no counterpart of "
-                + "Java's org.apache.kafka.common.errors.RetriableException#RetriableException(Throwable)"));
+                + "Java's org.apache.kafka.common.errors.RetriableException#RetriableException(Throwable)"),
+            Name(1, "kind T:Confluent.Kafka.Common.KafkaFuture: translates the Java abstract class "
+                + "org.apache.kafka.common.KafkaFuture; declare it as an abstract class"));
 
     [Fact]
     public Task APropertiesOverload_IsItsMapOverload_AndARegexPatternOverloadIsNotTranslated() =>
@@ -1618,8 +1819,12 @@ public sealed class JavaNameAnalyzerTests
             """
             namespace Confluent.Kafka.Common
             {
-                public readonly struct Uuid : System.IEquatable<Uuid>
+                public sealed class Uuid : System.IEquatable<Uuid>
                 {
+                    private Uuid()
+                    {
+                    }
+
                     public bool Equals(Uuid other) => true;
 
                     public override bool Equals(object obj) => false;

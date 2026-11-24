@@ -14,6 +14,7 @@
 
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Internal.Interop;
 
@@ -147,7 +148,7 @@ public sealed class TransactionDescription
             int partitions = 0;
             foreach (TopicPartition topicPartition in _topicPartitions)
             {
-                partitions += topicPartition.GetHashCode();
+                partitions += topicPartition?.GetHashCode() ?? 0;
             }
 
             return (hash * 31) + partitions;
@@ -172,5 +173,5 @@ public sealed class TransactionDescription
             _transactionStartTimeMs.HasValue
                 ? "OptionalLong[" + _transactionStartTimeMs.Value.ToString(CultureInfo.InvariantCulture) + "]"
                 : "OptionalLong.empty",
-            string.Join(", ", _topicPartitions));
+            string.Join(", ", _topicPartitions.Select(static topicPartition => topicPartition?.ToString() ?? "null")));
 }

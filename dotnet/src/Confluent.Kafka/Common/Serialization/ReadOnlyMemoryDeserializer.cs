@@ -31,5 +31,5 @@ public sealed class ReadOnlyMemoryDeserializer : IDeserializerWithReadOnlyMemory
         new ReadOnlyMemory<byte>(data.ToArray());
 
     /// <inheritdoc/>
-    public ReadOnlyMemory<byte>? Deserialize(string topic, Headers headers, ReadOnlyMemory<byte> data) => data;
+    public ReadOnlyMemory<byte>? Deserialize(string topic, IHeaders headers, ReadOnlyMemory<byte> data) => data;
 }

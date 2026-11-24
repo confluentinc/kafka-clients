@@ -722,6 +722,12 @@ hazard, fixed by pinning.)
     pointer with length 0 (the sentinel byte above: `fixed` over an empty array yields `NULL`, which the
     ABI reads as a `null` value). The copy is a recorded deviation from root `CLAUDE.md` §14 (ledger 301):
     the C API has no borrowed header value (ledger 305), as for Python's binding.
+  - **Headers are read through `IHeader`.** The record's `RecordHeaders` may hold a user's `IHeader`, which
+    may answer differently at each call. The send reads its `Value()` once, in the build, and checks its key
+    at every read: before anything is pinned, and again in the build. A `null` key throws Java's
+    `IllegalArgumentException` and a NUL the existing rejection (`dotnet/CLAUDE.md` §3 call-site checks,
+    ledger 603), so a header that changes between reads cannot reach the ABI. On the async send the later
+    read comes after the key and value pins, which its failure path releases, once each.
 
 **Why:** the borrow ends when the sync call returns, or at the async handover `cb`, so a pin
 of exactly that span is sufficient; Task-scoped pinning is unnecessary and fragments the heap.
@@ -755,6 +761,9 @@ per-message allocation CLAUDE.md §12 exists to prevent.
     it becomes collectable.
   - A record with headers sends them: a `null` value, an empty value and a non-ASCII key read back
     from the native record; a send with headers adds no managed allocation per header.
+  - A user header whose key turns invalid after the async send's pin is rejected with the pins
+    balanced: each pin released once, its `Value()` never read
+    (`AsyncMockSend_AUserHeaderWhoseKeyIsNullOnlyAtALaterRead_UnpinsTheKeyAndValueOnce`).
 
 ---
 
@@ -811,6 +820,15 @@ call and raise the class Java raises there — never `KafkaException`.
     not be null" (→ `ArgumentNullException`, without the binding's `ParamName`) and any other
     panic as -4 (→ `IllegalStateException`), neither of them Java's error; the binding's own
     check throws Java's.
+  - **A null element of a collection of value classes** (`TopicPartition`, `Uuid`), or a null key
+    of a map of them, is checked like a null collection, before the argument crosses the C ABI, by
+    the five cases of `dotnet/CLAUDE.md` §3 (**A null `TopicPartition` or `Uuid`**): Java's class
+    and message where Java checks the null or looks it up and finds nothing, else
+    `ArgumentNullException` "<param> must not contain null". It never reaches `Topic()` or a BCL
+    dictionary key. On the producer that is `SendOffsetsToTransaction`'s `offsets`: they cross as an
+    empty map, for which the core makes the checks Java makes before it reads a key, and then the
+    binding throws `ArgumentNullException("offsets", "offsets must not contain null")`; the
+    asynchronous producers fault the `Task` with it.
   - **Configuration errors are not preconditions.** A value of a type its key does not accept, a
     `null` its key's validator refuses, or a `null` key throws `ConfigException`
     (`Confluent.Kafka.Common.Config`, code −10) with Java's message, before any P/Invoke; the core's
@@ -844,6 +862,10 @@ class, so one condition never has two types.
   - Null record → `ArgumentNullException`; null topic, negative partition and negative timestamp →
     `IllegalArgumentException` with Java's message; post-`Dispose` → `IllegalStateException`
     with the producer's closed message — each before any native call.
+  - A null key in `SendOffsetsToTransaction`'s `offsets` → `ArgumentNullException` with its message
+    and `ParamName`, after the checks Java makes first (closed, group metadata, transaction state, a
+    mock's injected exception), thrown by the sync producers and faulting the asynchronous `Task`;
+    nothing is sent or recorded.
   - A config value of the wrong type and a `null` its validator refuses → `ConfigException` with
     Java's exact message, before any native call; a configuration the core refuses →
     `ConfigException` too.
@@ -864,9 +886,10 @@ end of this section).
 
 One producer callback runs on none of these threads and crosses no ABI: when a serializer throws an
 `ApiException` on `KafkaProducer` / `AsyncKafkaProducer`, the record never reaches the core, and the
-binding runs the user's delivery callback itself, once, inside `Send` on the caller's thread, with
-Java's placeholder metadata, before it returns the failed future (CLAUDE.md §3, as Java's `doSend`).
-The mocks rethrow that exception from `Send`, as Java's `MockProducer` does.
+binding runs the user's delivery callback itself, once, inside `Send` on the caller's thread (behind an
+awaited serializer, on the thread that ended the serialization), with Java's placeholder metadata, before
+it returns the failed future (CLAUDE.md §3, as Java's `doSend`). The mocks rethrow that exception from
+`Send`, as Java's `MockProducer` does, or, behind an awaited serializer, end the first stage with it.
 
   - **The `_cb` completions:** the async `Send`'s handover `cb`, `flush_cb`, `close_cb` /
     `close_with_timeout_cb`, the transaction `_cb`s, `partitions_for_cb`. Each fires once with the
@@ -1041,7 +1064,8 @@ dispatcher (the old Option B) are both gone with the pre-`0035d9ff` ABI.
     at `851c8d95`; ledger 80, pick 4):
       - `Flush` throws at once a `KafkaException` with Java's message "KafkaProducer.flush()
         invocation inside a callback is not permitted because it may lead to deadlock."
-        (`KafkaProducer.java:1299-1300`). Python checks this itself, before calling native
+        (`KafkaProducer.java:1299-1300`), after writing that message once to `Trace.TraceError`, as
+        Java's `log.error` and Python's `_LOG.error` log it. Python checks this itself, before calling native
         (`python/confluent_kafka/producer/producer.py:593-595` at `851c8d95`); the core's
         `flush_cb` reports the same error from a `KafkaProducer`'s callback (BH:38283-38287,
         BH:38298-38313). The mocks follow Java's mock as far as the core allows:
@@ -1989,7 +2013,14 @@ the binding *before* the FFI call and raise the class Java raises there — neve
     or nothing, keeps `ArgumentNullException` (a null `PartitionsFor` topic; a null
     `Pause` / `Resume`, `Committed`, `BeginningOffsets` or `EndOffsets` collection or
     `OffsetsForTimes` map; a null config; a `SubscriptionPattern` whose `Pattern()` is
-    null) or `ArgumentOutOfRangeException`. **Mandatory**, not
+    null) or `ArgumentOutOfRangeException`. A null element of a collection of value classes
+    (`TopicPartition`), or a null key of a map of them, is checked like a null collection, before
+    the argument crosses the C ABI, by the five cases of `dotnet/CLAUDE.md` §3 (**A null
+    `TopicPartition` or `Uuid`**): Java's class and message where Java checks the null (`Assign`:
+    "Topic partitions to assign to cannot have null or empty topic") or looks it up and finds
+    nothing (`Pause`: `IllegalStateException` "No current assignment for partition null"), else
+    `ArgumentNullException` "<param> must not contain null"; it never reaches `Topic()` or a BCL
+    dictionary key. **Mandatory**, not
     optional: a `NULL` where the header asks for a mandatory pointer comes back as -32
     "<param> must not be null" (`LocalNullPointerError`), which the error table maps to
     `ArgumentNullException` with the core's message and no `ParamName`. Any other panic in
@@ -2147,6 +2178,9 @@ same `ConcurrentModificationException`, sync or async (decision 17).
     `Pattern()` is null → `ArgumentNullException`; a negative timeout → `IllegalArgumentException`
     with Java's or the core's message; post-`Dispose` → `IllegalStateException` with the
     closed message; each before any native call.
+  - A null element or key in each `TopicPartition` argument, on every consumer class → the class,
+    message and `ParamName` its case gives, after the closed and owner checks and before the
+    argument crosses the C ABI.
   - A config value of the wrong type and a `null` its validator refuses → `ConfigException` with
     Java's exact message, before any native call; a configuration the core refuses →
     `ConfigException` too.
@@ -2249,8 +2283,13 @@ ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
     `local_callback` error carrying it (`kafka_common_Error_local_callback_err`, `opaque`
     a `GCHandle` over the exception, `release` a no-throw delegate that frees that
     `GCHandle`; ledger 12) and pass it to `Consumer__set_callback_result`. The core takes
-    it over, and it propagates out of the consumer call that ran the listener as the same
-    instance.
+    it over, and it propagates out of the consumer call that ran the listener: `Poll`,
+    `Unsubscribe`, and a `Subscribe` or `Assign` given an empty collection, which unsubscribes,
+    throw a `KafkaException` as the same instance and wrap any other in
+    `KafkaException("User rebalance callback throws an error")`, as Java's
+    `maybeWrapAsKafkaException` does; `Close` wraps it in
+    `KafkaException("Failed to close kafka consumer")`. Every waiting call but `Close` reads
+    its error this way (`NativeConsumer.WaitingCallException`), as Python's binding does.
   - **The partitions are borrowed** for the call: copy them out; never destroy them.
   - **Report exactly once per call**, on every path, including a method that throws
     before it returns a `Task` (the async listener, §B1). The async listener reports from

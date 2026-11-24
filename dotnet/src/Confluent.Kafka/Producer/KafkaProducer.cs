@@ -110,7 +110,7 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// returns the serializer.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
-    /// A given serializer declares a public <c>Serialize(string, Headers, T)</c> but does not implement
+    /// A given serializer declares a public <c>Serialize(string, IHeaders, T)</c> but does not implement
     /// <see cref="ISerializerWithHeaders{T}"/>, or a public <c>Close()</c> but is not <see cref="IDisposable"/>: the
     /// producer would never call that method.
     /// </exception>
@@ -164,18 +164,13 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     }
 
     /// <inheritdoc/>
-    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback callback)
+    public KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback? callback)
     {
         _native.ThrowIfClosed();
 
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
-        }
-
-        if (callback is null)
-        {
-            throw new ArgumentNullException(nameof(callback));
         }
 
         return SendValidated(record, callback);
@@ -195,7 +190,7 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
         }
 
         // As Java's doSend, the headers turn read-only once the serializers ran; the mocks leave them writable.
-        record.Headers().SetReadOnly();
+        record.OwnHeaders.SetReadOnly();
 
         return _native.Send(serialized, callback);
     }

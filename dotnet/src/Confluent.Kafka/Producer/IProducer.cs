@@ -145,19 +145,21 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// </para>
     /// <para>
     /// A null <paramref name="groupMetadata"/> is refused before <paramref name="offsets"/> is read, and a null
-    /// <paramref name="offsets"/> before the state is checked. With an empty <paramref name="offsets"/>,
-    /// <see cref="KafkaProducer{TKey, TValue}"/> and <see cref="AsyncKafkaProducer{TKey, TValue}"/> return without
-    /// contacting the coordinator and without checking the transaction state, as Java's does: beyond those null
-    /// checks they throw only on a closed producer, or on one with no transaction support
-    /// (<c>enable.idempotence=false</c>). The mocks make their state checks first, as Java's mock does.
+    /// <paramref name="offsets"/> before the state is checked; a null key after the checks an empty
+    /// <paramref name="offsets"/> makes, as Java reads a key only after them. With an empty
+    /// <paramref name="offsets"/>, <see cref="KafkaProducer{TKey, TValue}"/> and
+    /// <see cref="AsyncKafkaProducer{TKey, TValue}"/> return without contacting the coordinator and without checking
+    /// the transaction state, as Java's does: beyond those null checks they throw only on a closed producer, or on one
+    /// with no transaction support (<c>enable.idempotence=false</c>). The mocks make their state checks first, as
+    /// Java's mock does.
     /// </para>
     /// </remarks>
     /// <param name="offsets">The offsets to commit with the transaction.</param>
     /// <param name="groupMetadata">The consumer group metadata, from the consumer's <c>GroupMetadata()</c>.</param>
     /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
     /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
-    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null, a key of it has a null topic, or a
-    /// value is null.</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null, a key of it is null or has a null
+    /// topic, or a value is null.</exception>
     /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
     /// been started, or the producer is closed.</exception>
     /// <exception cref="ProducerFencedException">Fatal error indicating another producer with the same
@@ -291,18 +293,16 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// the returned future's <see cref="KafkaFuture{T}.Get()"/> returns or throws.
     /// </summary>
     /// <remarks>
-    /// A <see langword="null"/> <paramref name="callback"/> is rejected, where Java accepts it:
-    /// <see cref="Send(ProducerRecord{TKey, TValue})"/> already sends without one. The callback's contract is
-    /// in <see cref="ICallback"/>.
+    /// A <see langword="null"/> <paramref name="callback"/> means no callback: the record is sent as
+    /// <see cref="Send(ProducerRecord{TKey, TValue})"/> sends it, as in Java. The callback's contract is in
+    /// <see cref="ICallback"/>.
     /// </remarks>
     /// <param name="record">The record to publish.</param>
-    /// <param name="callback">The delivery callback (non-null).</param>
+    /// <param name="callback">The delivery callback, or <see langword="null"/> for none.</param>
     /// <returns>The send's delivery handle; its <see cref="KafkaFuture{T}.Get()"/> returns the published
     /// record's <see cref="RecordMetadata"/> or throws an <c>ExecutionException</c> around the delivery
     /// failure.</returns>
-    /// <exception cref="ArgumentNullException">
-    /// <paramref name="record"/> or <paramref name="callback"/> is null.
-    /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ArgumentException">The topic or a header key contains a NUL character, which the native client
     /// cannot receive unchanged.</exception>
     /// <exception cref="SerializationException">On <c>KafkaProducer</c>, a serializer threw an
@@ -312,7 +312,7 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core rejected the record synchronously (a delivery failure
     /// surfaces from <see cref="KafkaFuture{T}.Get()"/> instead).</exception>
-    KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback callback);
+    KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, ICallback? callback);
 
     /// <summary>
     /// Blocks until every record whose <c>Send</c> returned before this call has completed, and its
@@ -332,6 +332,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <returns>The topic's partitions (empty on a <see cref="MockProducer{TKey, TValue}"/>).</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
+    /// <exception cref="ArgumentException"><paramref name="topic"/> contains a NUL character, which the native client
+    /// cannot receive unchanged, on <c>KafkaProducer</c>.</exception>
     /// <exception cref="KafkaException">The core reported a failure.</exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
 
@@ -340,6 +342,13 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// synchronous on both producer interfaces. A <see cref="MockProducer{TKey, TValue}"/> returns an empty
     /// snapshot.
     /// </summary>
+    /// <remarks>
+    /// The snapshot holds the producer's own metrics. It lacks Java's network and app-info metrics, which the native
+    /// core does not register yet: the connection, authentication, request and I/O metrics Java's <c>Selector</c>
+    /// adds to <c>producer-metrics</c> (<c>connection-count</c>, <c>request-total</c>, ...), the per-node
+    /// <c>producer-node-metrics</c> group, and the <c>app-info</c> group (<c>version</c>, <c>commit-id</c>,
+    /// <c>start-time-ms</c>), so a dashboard or alert built on those Java names finds nothing.
+    /// </remarks>
     /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();

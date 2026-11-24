@@ -47,7 +47,7 @@ public class NoOffsetForPartitionException : global::Confluent.Kafka.Consumer.In
     public NoOffsetForPartitionException(IReadOnlyCollection<TopicPartition> partitions)
         : base("Undefined offset with no reset policy for partitions: " + JavaText.ValueOf(partitions))
     {
-        _partitions = new HashSet<TopicPartition>(partitions ?? throw new ArgumentNullException(nameof(partitions)));
+        _partitions = new HashSet<TopicPartition>(partitions ?? throw new ArgumentNullException(nameof(partitions))) is var copied && !copied.Contains(null!) ? copied : throw new ArgumentNullException(nameof(partitions), "partitions must not contain null");
     }
 
     internal NoOffsetForPartitionException(CoreError _, string? message, Exception? innerException, IReadOnlyCollection<TopicPartition> partitions)

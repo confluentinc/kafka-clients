@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
@@ -60,7 +61,7 @@ public sealed class SerdeHeadersTests
     public void SerializerExtensions_Serialize_CallsTheHeadersForm_OfASerializerWithHeaders()
     {
         HeaderAddingSerializer serializer = new HeaderAddingSerializer();
-        Headers headers = new Headers();
+        RecordHeaders headers = new RecordHeaders();
 
         ReadOnlyMemory<byte>? bytes = ((ISerializer<string>)serializer).Serialize(Topic, headers, "v");
 
@@ -74,7 +75,7 @@ public sealed class SerdeHeadersTests
     public void SerializerExtensions_Serialize_RunsJavasDefault_ForASerializerWithoutTheHeadersForm()
     {
         PlainSerializer serializer = new PlainSerializer();
-        Headers headers = new Headers(new[] { new Header("h", Bytes("1")) });
+        RecordHeaders headers = new RecordHeaders(new[] { new RecordHeader("h", Bytes("1")) });
 
         ReadOnlyMemory<byte>? bytes = serializer.Serialize(Topic, headers, "v");
 
@@ -87,7 +88,7 @@ public sealed class SerdeHeadersTests
     public void SerializerExtensions_Serialize_NullSerializer_ThrowsArgumentNullException()
     {
         ArgumentNullException e = Assert.Throws<ArgumentNullException>(
-            () => SerializerExtensions.Serialize<string>(null!, Topic, new Headers(), "v"));
+            () => SerializerExtensions.Serialize<string>(null!, Topic, new RecordHeaders(), "v"));
 
         Assert.Equal("serializer", e.ParamName);
     }
@@ -96,7 +97,7 @@ public sealed class SerdeHeadersTests
     public void DeserializerExtensions_Deserialize_CallsTheHeadersForm_OfADeserializerWithHeaders()
     {
         HeaderReadingDeserializer deserializer = new HeaderReadingDeserializer();
-        Headers headers = new Headers(new[] { new Header(SchemaId, Bytes("7")) });
+        RecordHeaders headers = new RecordHeaders(new[] { new RecordHeader(SchemaId, Bytes("7")) });
 
         string? value = ((IDeserializer<string>)deserializer).Deserialize(Topic, headers, Bytes("v"));
 
@@ -110,7 +111,7 @@ public sealed class SerdeHeadersTests
     {
         PlainDeserializer deserializer = new PlainDeserializer();
 
-        string? value = deserializer.Deserialize(Topic, new Headers(new[] { new Header(SchemaId, Bytes("7")) }), Bytes("v"));
+        string? value = deserializer.Deserialize(Topic, new RecordHeaders(new[] { new RecordHeader(SchemaId, Bytes("7")) }), Bytes("v"));
 
         Assert.Equal("v", value);
         Assert.Equal(new[] { (Topic, "v") }, deserializer.Calls);
@@ -120,7 +121,7 @@ public sealed class SerdeHeadersTests
     public void DeserializerExtensions_Deserialize_NullDeserializer_ThrowsArgumentNullException()
     {
         ArgumentNullException e = Assert.Throws<ArgumentNullException>(
-            () => DeserializerExtensions.Deserialize<string>(null!, Topic, new Headers(), Bytes("v")));
+            () => DeserializerExtensions.Deserialize<string>(null!, Topic, new RecordHeaders(), Bytes("v")));
 
         Assert.Equal("deserializer", e.ParamName);
     }
@@ -386,14 +387,14 @@ public sealed class SerdeHeadersTests
         Assert.Equal(new[] { false }, value.ReadOnlyWhenCalled);
         Assert.Equal(0, value.ShortCalls);
         Assert.Equal(new[] { "h" }, HeaderKeys(record.Headers()));
-        Assert.False(record.Headers().IsReadOnly);
+        Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
     }
 
     private static void AssertBothSerializedWithNewHeaders(
         ProducerRecord<string, string> record, HeaderAddingSerializer key, HeaderAddingSerializer value)
     {
-        Headers keyHeaders = Assert.Single(key.Seen);
-        Headers valueHeaders = Assert.Single(value.Seen);
+        IHeaders keyHeaders = Assert.Single(key.Seen);
+        IHeaders valueHeaders = Assert.Single(value.Seen);
         Assert.NotSame(record.Headers(), keyHeaders);
         Assert.NotSame(record.Headers(), valueHeaders);
         Assert.NotSame(keyHeaders, valueHeaders);
@@ -402,12 +403,12 @@ public sealed class SerdeHeadersTests
         Assert.Equal(0, key.ShortCalls);
         Assert.Equal(0, value.ShortCalls);
         Assert.Equal(new[] { "h" }, HeaderKeys(record.Headers()));
-        Assert.False(record.Headers().IsReadOnly);
+        Assert.False(((RecordHeaders)record.Headers()).IsReadOnly());
     }
 
-    private static void AssertReadOnly(Headers headers)
+    private static void AssertReadOnly(IHeaders headers)
     {
-        Assert.True(headers.IsReadOnly);
+        Assert.True(((RecordHeaders)headers).IsReadOnly());
         IllegalStateException closed = Assert.Throws<IllegalStateException>(() => headers.Add("after", Bytes("x")));
         Assert.Equal(Closed, closed.Message);
     }
@@ -436,7 +437,7 @@ public sealed class SerdeHeadersTests
     private static void AssertTheFailureCarriesTheHeaders(RecordDeserializationException e, HeaderReadingDeserializer value)
     {
         Assert.Equal(RecordDeserializationException.DeserializationExceptionOrigin.VALUE, e.Origin());
-        Headers seen = Assert.Single(value.Seen);
+        IHeaders seen = Assert.Single(value.Seen);
         Assert.Same(seen, e.Headers());
         Assert.Equal(Bytes("7"), seen.LastHeader(SchemaId)?.Value());
         Assert.Equal("bad v", e.InnerException?.Message);
@@ -452,7 +453,7 @@ public sealed class SerdeHeadersTests
             .GetValue(consumer)!;
 
     private static ProducerRecord<string, string> Record() =>
-        new ProducerRecord<string, string>(Topic, value: "value", key: "key", headers: new[] { new Header("h", Bytes("1")) }, partition: null);
+        new ProducerRecord<string, string>(Topic, value: "value", key: "key", headers: new[] { new RecordHeader("h", Bytes("1")) }, partition: null);
 
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?>
@@ -463,7 +464,7 @@ public sealed class SerdeHeadersTests
 
     private static byte[] Bytes(string value) => Encoding.UTF8.GetBytes(value);
 
-    private static string[] HeaderKeys(Headers headers) => Array.ConvertAll(headers.ToArray(), header => header.Key());
+    private static string[] HeaderKeys(IHeaders headers) => Array.ConvertAll(headers.ToArray(), header => header.Key());
 
     private static string? Text(ReadOnlyMemory<byte>? bytes) =>
         bytes is ReadOnlyMemory<byte> memory ? Encoding.UTF8.GetString(memory.ToArray()) : null;
@@ -490,7 +491,7 @@ public sealed class SerdeHeadersTests
 
         internal HeaderAddingSerializer(string header = SchemaId) => _header = header;
 
-        internal List<Headers> Seen { get; } = new List<Headers>();
+        internal List<IHeaders> Seen { get; } = new List<IHeaders>();
 
         internal List<string[]> KeysWhenCalled { get; } = new List<string[]>();
 
@@ -504,11 +505,11 @@ public sealed class SerdeHeadersTests
             return data is null ? (ReadOnlyMemory<byte>?)null : Bytes(data);
         }
 
-        public ReadOnlyMemory<byte>? Serialize(string topic, Headers headers, string? data)
+        public ReadOnlyMemory<byte>? Serialize(string topic, IHeaders headers, string? data)
         {
             Seen.Add(headers);
             KeysWhenCalled.Add(HeaderKeys(headers));
-            ReadOnlyWhenCalled.Add(headers.IsReadOnly);
+            ReadOnlyWhenCalled.Add(((RecordHeaders)headers).IsReadOnly());
             headers.Add(_header, Bytes("1"));
             return data is null ? (ReadOnlyMemory<byte>?)null : Bytes(data);
         }
@@ -537,7 +538,7 @@ public sealed class SerdeHeadersTests
 
         internal HeaderReadingDeserializer(bool fail = false) => _fail = fail;
 
-        internal List<Headers> Seen { get; } = new List<Headers>();
+        internal List<IHeaders> Seen { get; } = new List<IHeaders>();
 
         internal int ShortCalls { get; private set; }
 
@@ -547,7 +548,7 @@ public sealed class SerdeHeadersTests
             return Encoding.UTF8.GetString(data.ToArray());
         }
 
-        public string? Deserialize(string topic, Headers headers, ReadOnlySpan<byte> data)
+        public string? Deserialize(string topic, IHeaders headers, ReadOnlySpan<byte> data)
         {
             Seen.Add(headers);
             string text = Encoding.UTF8.GetString(data.ToArray());

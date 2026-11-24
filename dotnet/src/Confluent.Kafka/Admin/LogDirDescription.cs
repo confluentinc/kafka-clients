@@ -203,7 +203,7 @@ public sealed class LogDirDescription
             }
 
             first = false;
-            replicas.Append(replica.Key).Append('=').Append(replica.Value);
+            replicas.Append(replica.Key?.ToString() ?? "null").Append('=').Append(replica.Value);
         }
 
         replicas.Append('}');
