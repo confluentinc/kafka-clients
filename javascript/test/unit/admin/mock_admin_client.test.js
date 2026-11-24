@@ -2243,7 +2243,7 @@ async function untilDone(future) {
  * each check disarms them and arms those left again, on the JS thread, where
  * the addon takes them.
  *
- * @param {'error'} step
+ * @param {'error' | 'value'} step
  */
 async function untilTaken(step) {
   for (let i = 0; i < 1000; i++) {
@@ -2336,20 +2336,38 @@ describe("an admin call whose answer the addon can't build", () => {
     assert.ok((await failure(mock.deleteTopics(['absent']).all())) instanceof UnknownTopicOrPartitionError);
   }, 10000);
 
-  test("a cancelled future warns of a failure it can't build, and stays cancelled", async () => {
-    const mock = track(new MockAdminClient());
-    native.faultNext('error');
-    const values = /** @type {Map<string, KafkaFuture<void>>} */ (mock.deleteTopics(['absent']).topicNameValues());
-    const future = /** @type {KafkaFuture<void>} */ (values.get('absent'));
-    const warned = await warnedDuring(async () => {
-      assert.equal(future.cancel(true), true);
-      await untilTaken('error');
-    });
-    assert.deepEqual(native.faultNext(null), []);
-    assert.equal(warned.length, 1);
-    assert.match(warned[0].message, ERROR_FAILED);
-    assert.equal(future.isCancelled(), true);
-  }, 10000);
+  // The value's case fails with the fix reverted: the addon used to drop a
+  // value it could not build, with no warning. The core error's case warns
+  // either way, as the addon warned that pending exception before too.
+  for (const { step, failed, made } of [
+    {
+      step: /** @type {'value'} */ ('value'),
+      failed: VALUE_FAILED,
+      made: (/** @type {MockAdminClient} */ mock) => mock.listTopics().namesToListings(),
+    },
+    {
+      step: /** @type {'error'} */ ('error'),
+      failed: ERROR_FAILED,
+      made: (/** @type {MockAdminClient} */ mock) =>
+        /** @type {KafkaFuture<void>} */ (
+          /** @type {Map<string, KafkaFuture<void>>} */ (mock.deleteTopics(['absent']).topicNameValues()).get('absent')
+        ),
+    },
+  ]) {
+    test(`a cancelled future warns of a failure it can't build (its ${step}), and stays cancelled`, async () => {
+      const mock = track(new MockAdminClient());
+      native.faultNext(step);
+      const future = made(mock);
+      const warned = await warnedDuring(async () => {
+        assert.equal(future.cancel(true), true);
+        await untilTaken(step);
+      });
+      assert.deepEqual(native.faultNext(null), []);
+      assert.equal(warned.length, 1);
+      assert.match(warned[0].message, failed);
+      assert.equal(future.isCancelled(), true);
+    }, 10000);
+  }
 
   test('a timed get() that does not time out leaves the future to its untimed wait, and warns of its own failure', async () => {
     const mock = track(new MockAdminClient());
