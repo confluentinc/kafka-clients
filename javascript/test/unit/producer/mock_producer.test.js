@@ -1422,3 +1422,227 @@ test('two close() calls at once on an open mock both settle, in each of 25 round
   // Java's close() returns, both times.
   assert.equal(r.stdout, 'all settled: fulfilled\n');
 });
+
+// A call whose answer the addon can't build still settles (native/producer.c,
+// js_take_failure in native/error.c): flush(), partitionsFor() and close()
+// reject with the failure, send() rejects for a refused record and resolves
+// for an accepted one, and a failed wait on a record's future completes
+// nothing, so the delivery still completes the future, only a timed get()
+// that timed out rejecting with the failure. The test-only faultNext()
+// (native/addon.c) makes one step of the addon fail once, as its Node-API
+// call failing would.
+const native = require('../../../dist/internal/native');
+// What a failed conversion of a core error throws (native/error.c,
+// error_to_js), and what js_take_failure makes, naming the step, when no
+// exception is pending.
+const ERROR_FAILED = /^Node-API call failed: converting a kafka_common_Error_t \(/;
+const PARTITIONS_FAILED = /^Node-API call failed: converting a partitionsFor answer \(/;
+const CLOSE_FAILED = /^Node-API call failed: converting a close's answer \(/;
+
+/**
+ * The producer's record-future slots and waits still held (native/producer.c, producerStats()).
+ *
+ * @returns {{ slots: number, waits: number }} the slots taken and not given back, and the waits not completed
+ */
+function nativeHeld() {
+  const s = native.producerStats();
+  return { slots: s.slotsTaken - s.slotsReturned, waits: s.waitsStarted - s.waitsCompleted };
+}
+
+/**
+ * Turns the event loop until `holds()` is true.
+ *
+ * @param {() => boolean} holds the condition
+ */
+async function untilHolds(holds) {
+  for (let i = 0; i < 1000 && !holds(); i++) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(holds(), 'the condition never held');
+}
+
+describe("a call whose answer the addon can't build", () => {
+  // A step left armed by a test that failed before it ran would fail the next test's.
+  afterEach(() => {
+    native.faultNext(null);
+  }, 10000);
+
+  test("a construction whose notify registration fails throws the FFI's error", () => {
+    native.faultNext('notify');
+    assert.throws(() => new MockProducer(), { name: 'TypeError', message: 'self_ must not be null' });
+    assert.equal(native.faultNext(null), null);
+  }, 10000);
+
+  test("flush() rejects with the failure when its error can't be built", async () => {
+    const m = new MockProducer();
+    await m.close();
+    native.faultNext('error');
+    await assert.rejects(m.flush(), { name: 'Error', message: ERROR_FAILED });
+    assert.equal(native.faultNext(null), null);
+    // The mock's own state is whole: the next flush has the core's answer.
+    await assert.rejects(m.flush(), { name: 'IllegalStateError', message: 'MockProducer is already closed.' });
+  }, 10000);
+
+  test('partitionsFor() rejects with the failure, its error or its partitions not built', async () => {
+    const m = new MockProducer();
+    m.setPartitionsForException(new Error('injected'));
+    native.faultNext('error');
+    await assert.rejects(m.partitionsFor('t'), { name: 'Error', message: ERROR_FAILED });
+    m.setPartitionsForException(null);
+    native.faultNext('partitions');
+    await assert.rejects(m.partitionsFor('t'), { name: 'Error', message: PARTITIONS_FAILED });
+    assert.equal(native.faultNext(null), null);
+    assert.deepEqual(await m.partitionsFor('t'), []);
+    await m.close();
+  }, 10000);
+
+  test('close() rejects with the failure, and the mock is closed', async () => {
+    const m = new MockProducer();
+    native.faultNext('close');
+    await assert.rejects(m.close(), { name: 'Error', message: CLOSE_FAILED });
+    assert.equal(native.faultNext(null), null);
+    assert.equal(m.closed(), true);
+    await m.close();
+  }, 10000);
+
+  test("send() rejects for a refused record whose error can't be built", async () => {
+    const m = new MockProducer();
+    m.setSendException(new Error('refused'));
+    native.faultNext('error');
+    await assert.rejects(m.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })), {
+      name: 'Error',
+      message: ERROR_FAILED,
+    });
+    assert.equal(native.faultNext(null), null);
+    assert.deepEqual(m.history(), []);
+    m.setSendException(null);
+    await m.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') }));
+    assert.equal(m.history().length, 1);
+    await m.close();
+  }, 10000);
+
+  test("send() resolves for an accepted record whose slot can't be made, its future completed by the delivery", async () => {
+    const m = new MockProducer();
+    const base = nativeHeld();
+    /** @type {string[]} */
+    const calls = [];
+    native.faultNext('slot');
+    const future = await m.send({
+      record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
+      callback: ({ metadata, exception }) => {
+        calls.push(`${String(metadata.offset)} ${String(exception)}`);
+      },
+    });
+    assert.equal(native.faultNext(null), null);
+    assert.equal(future.isDone(), false);
+    // No native wait: a timed get runs on the JS timer.
+    await assert.rejects(future.get({ timeout: 20 }), { name: 'TimeoutError', message: 'Timeout after waiting for 20 ms.' });
+    assert.equal(m.completeNext(), true);
+    const metadata = await future.get();
+    assert.ok(metadata instanceof RecordMetadata);
+    assert.equal(metadata.offset, 0n);
+    assert.deepEqual(calls, ['0 null']);
+    // The slot taken for the record went back once its future was destroyed.
+    assert.deepEqual(nativeHeld(), base);
+    await m.close();
+  }, 10000);
+
+  test("an untimed get() resolves with the delivery's metadata when its wait's answer can't be built", async () => {
+    const m = new MockProducer();
+    const base = nativeHeld();
+    /** @type {string[]} */
+    const calls = [];
+    const future = await m.send({
+      record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
+      // The delivery's own metadata is built: the wait's, next, is not.
+      callback: ({ metadata }) => {
+        calls.push(String(metadata.offset));
+        native.faultNext('metadata');
+      },
+    });
+    const got = future.get();
+    assert.equal(m.completeNext(), true);
+    const metadata = await got;
+    assert.ok(metadata instanceof RecordMetadata);
+    assert.equal(metadata.offset, 0n);
+    await untilHolds(() => nativeHeld().waits === base.waits);
+    assert.equal(native.faultNext(null), null);
+    assert.deepEqual(calls, ['0']);
+    assert.deepEqual(nativeHeld(), base);
+    assert.equal((await future.get()).offset, 0n);
+    await m.close();
+  }, 10000);
+
+  test("a timed get() that does not time out resolves with the delivery's metadata when its wait's answer can't be built", async () => {
+    const m = new MockProducer();
+    const base = nativeHeld();
+    const future = await m.send({
+      record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
+      callback: () => void native.faultNext('metadata'),
+    });
+    const got = future.get({ timeout: 60000 });
+    assert.equal(m.completeNext(), true);
+    assert.equal((await got).offset, 0n);
+    await untilHolds(() => nativeHeld().waits === base.waits);
+    assert.equal(native.faultNext(null), null);
+    assert.deepEqual(nativeHeld(), base);
+    await m.close();
+  }, 10000);
+
+  test('a timed get() that times out rejects with the failure at its deadline, and leaves the future to the delivery', async () => {
+    const m = new MockProducer();
+    const base = nativeHeld();
+    /** @type {string[]} */
+    const calls = [];
+    const future = await m.send({
+      record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
+      callback: ({ metadata }) => {
+        calls.push(String(metadata.offset));
+      },
+    });
+    native.faultNext('error');
+    const started = performance.now();
+    await assert.rejects(future.get({ timeout: 50 }), { name: 'Error', message: ERROR_FAILED });
+    const waited = performance.now() - started;
+    assert.ok(waited >= 45, `rejected after ${waited} ms`);
+    assert.equal(native.faultNext(null), null);
+    assert.equal(future.isDone(), false);
+    assert.equal(m.completeNext(), true);
+    assert.equal((await future.get()).offset, 0n);
+    assert.deepEqual(calls, ['0']);
+    assert.deepEqual(nativeHeld(), base);
+    await m.close();
+  }, 10000);
+});
+
+// A call made on a closed mock holds Node until it settles, and so does the
+// close that closes it, when its answer can't be built too: each child has
+// nothing else holding Node and prints a line once the call settled. Without
+// the settle it would exit with 0 in the middle of the await.
+const FAULT_AFTER_CLOSE = [
+  { closed: true, step: 'error', call: 'm.flush()' },
+  { closed: true, step: 'close', call: 'm.close()' },
+  { closed: false, step: 'close', call: 'm.close()' },
+];
+
+for (const { closed, step, call } of FAULT_AFTER_CLOSE) {
+  test(`${call} ${closed ? 'after close()' : 'closing the mock'} settles while nothing else holds Node when its answer can't be built`, () => {
+    const r = runNode(
+      `
+      const native = require('./dist/internal/native');
+      const { MockProducer } = require('@confluentinc/kafka-javascript/producer');
+      const m = new MockProducer();
+      (async () => {
+        if (${String(closed)}) await m.close();
+        native.faultNext('${step}');
+        const outcome = await ${call}.then(
+          () => 'resolved',
+          (e) => e.constructor.name + ': ' + e.message,
+        );
+        console.log('after the call: ' + outcome);
+      })();
+    `,
+      30000,
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^after the call: Error: Node-API call failed: converting (a kafka_common_Error_t|a close's answer) \(/);
+  }, 40000);
+}

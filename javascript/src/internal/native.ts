@@ -238,12 +238,13 @@ interface Native {
   // A wait on a record's future through get_cb (timeoutMs null) or
   // get_with_timeout_cb; `done` runs once it completed, from the producer's
   // drain, or inside the call once the producer is destroyed. timedOut: the
-  // wait timed out, the error the core's TimeoutError.
+  // wait timed out, the error the core's TimeoutError. failed: the answer
+  // could not be built, the error the failure, any thrown value.
   recordFutureGet(
     handle: ProducerHandle,
     future: number,
     timeoutMs: number | null,
-    done: (metadata: RecordMetadata | null, error: Error | null, timedOut: boolean) => void,
+    done: (metadata: RecordMetadata | null, error: unknown, timedOut: boolean, failed: boolean) => void,
   ): void;
   // Java's RecordHeaders() (form 0, headers null), RecordHeaders(Header[])
   // (form 1) and RecordHeaders(Iterable<Header>) (form 2); the core copies
@@ -280,6 +281,10 @@ interface Native {
   producerStats(): ProducerStats;
   // The counts of native/error.c. Test-only.
   errorStats(): ErrorStats;
+  // Arms `step` of the addon to fail once, the next time it runs, as its
+  // Node-API call failing would make it; null disarms. Returns the step armed
+  // before, or null. Test-only.
+  faultNext(step: 'notify' | 'metadata' | 'error' | 'slot' | 'partitions' | 'close' | null): string | null;
   // The records the sends built since the last call; arms the capture again for `arm`. Test-only.
   recordSpy(arm: boolean): SpiedRecord[];
 }

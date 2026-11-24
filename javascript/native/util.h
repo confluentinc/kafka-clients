@@ -23,6 +23,7 @@
 
 #include <node_api.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -98,6 +99,24 @@ void js_warn_thrown(napi_env env);
 // Deletes `*ref` (a no-op for NULL) and resets it to NULL.
 void delete_ref(napi_env env, napi_ref* ref);
 
+// The steps the test-only faultNext() makes fail once: a producer's notify
+// registration, and the conversion of a completion's answer to JS (a record's
+// metadata, a core error, a send's slot number, a partitionsFor list, a
+// close's answer).
+typedef enum { FAULT_NONE, FAULT_NOTIFY, FAULT_METADATA, FAULT_ERROR, FAULT_SLOT, FAULT_PARTITIONS, FAULT_CLOSE } FaultStep;
+
+// The step armed, FAULT_NONE when none is.
+extern atomic_int fault_armed;
+
+// Disarms `step`: 1 when it was the one armed, else 0.
+int fault_take(FaultStep step);
+
+// Whether the site of `step` fails this time, as its Node-API call failing
+// would: once per arming. Unarmed, a site costs one load and branch.
+static inline int fault_due(FaultStep step) {
+    return atomic_load_explicit(&fault_armed, memory_order_relaxed) == (int)step && fault_take(step);
+}
+
 // ---- error.c ----------------------------------------------------------------
 
 // A KafkaError for a BORROWED error (never destroyed here), or `null` for
@@ -160,6 +179,14 @@ int payload_topic_partition_offset_map(napi_env env, napi_value obj, const char*
 // (a pending JS exception is kept and thrown again after), then destroyed;
 // otherwise only destroyed. A no-op for NULL.
 void error_warn(napi_env env, int js, kafka_common_Error_t* e);
+
+// The failure of a completion whose answer can't be built, so that its call
+// still settles: the pending JS exception, cleared, or, when none is pending
+// (or it is null, which the JS side would read as success), the Error
+// js_throw_last_napi_error(env, what) throws, taken back. NULL only when even
+// that fails, the exception, if any, left pending for the caller's warning.
+// A completion takes it after its other arguments, so none is lost.
+napi_value js_take_failure(napi_env env, const char* what);
 
 // ---- callback_queue.c -------------------------------------------------------
 //

@@ -29,7 +29,10 @@
 // Each request has its own context (SendCtx, FlushCtx, CloseCtx, FutureWait,
 // PartitionsForCtx), whose pointer is what the core receives as the
 // completion's opaque. A send that fails at hand-over parks its context on
-// the orphan list, freed only after destroy.
+// the orphan list, freed only after destroy. A completion whose answer can't
+// be built still calls its JS function, with the failure (js_take_failure), so
+// its call settles; a wait on a record's future then completes nothing
+// (future_on_wait).
 //
 // Every `_cb` call is counted on the producer's queue (javascript/CLAUDE.md,
 // "Threads and liveness"): `cbq_call_begin` as the statement right before the
@@ -384,7 +387,8 @@ static napi_value metadata_to_js(napi_env env, const kafka_producer_RecordMetada
 
     AddonData* data = addon_data(env);
     if (data == NULL || data->metadata_factory == NULL) return obj;
-    return call_ref(env, data->metadata_factory, 1, &obj, NULL);
+    // faultNext('metadata'): the factory's call fails.
+    return fault_due(FAULT_METADATA) ? NULL : call_ref(env, data->metadata_factory, 1, &obj, NULL);
 }
 
 static int is_function(napi_env env, napi_value v) {
@@ -486,7 +490,7 @@ typedef struct {
     SendCtx* ctx;
     Producer* p;
     int timed;
-    napi_ref done;                             // JS (metadata | null, error | null, timedOut) => void
+    napi_ref done;                             // JS (metadata | null, error, timedOut, failed) => void
 } FutureWait;
 
 // The completion of a wait (kafka_common_KafkaFuture_get_cb_t and
@@ -496,7 +500,10 @@ typedef struct {
 // `error` is owned. A completion the destroy runs, from the handle object's
 // finalizer, reaches no JS, and its JS wait never settles: nothing in the FFI
 // orders it before the close's completion, and no other wait is known to
-// stay pending past a completed close.
+// stay pending past a completed close. An answer that can't be built
+// (`failed`) completes no future: the delivery completes it, with the
+// record's outcome, and a timed wait that timed out ends its get() with the
+// failure.
 static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
     FutureWait* w = (FutureWait*)opaque;
@@ -513,11 +520,19 @@ static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaqu
             // not the record.
             timed_out = code == kafka_common_Error_LOCAL_TIMEOUT;
         }
-        napi_value argv[3];
+        napi_value argv[4];
         argv[0] = metadata_to_js(env, (const kafka_producer_RecordMetadata_t*)value);
-        argv[1] = argv[0] != NULL ? error_take_to_js(env, error) : NULL;
-        error = NULL;
-        if (argv[1] != NULL && napi_get_boolean(env, timed_out != 0, &argv[2]) == napi_ok) call_ref(env, w->done, 3, argv, NULL);
+        argv[1] = NULL;
+        if (argv[0] != NULL) {
+            argv[1] = error_take_to_js(env, error);
+            error = NULL;
+        }
+        int failed = argv[1] == NULL;
+        if (failed && napi_get_null(env, &argv[0]) != napi_ok) argv[0] = NULL;
+        if (napi_get_boolean(env, timed_out != 0, &argv[2]) != napi_ok || napi_get_boolean(env, failed != 0, &argv[3]) != napi_ok)
+            argv[0] = NULL;
+        if (failed && argv[0] != NULL) argv[1] = js_take_failure(env, "converting a record future's answer");
+        if (argv[0] != NULL && argv[1] != NULL) call_ref(env, w->done, 4, argv, NULL);
         else js_warn_thrown(env);
     }
     error_discard(error);
@@ -541,8 +556,9 @@ static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaqu
 // `future` is the slot number the hand-over gave JS for the record, which JS
 // calls this with, and the producer's handle, only until it records the
 // delivery. `done(metadata | null, error | null,
-// timedOut)` runs once it completed (future_on_wait), from the drain, or
-// inside this call once the producer is destroyed.
+// timedOut, failed)` runs once it completed (future_on_wait), from the drain,
+// or inside this call once the producer is destroyed; `failed`: the answer
+// could not be built, `error` being the failure.
 napi_value js_record_future_get(napi_env env, napi_callback_info info) {
     size_t argc = 4;
     napi_value argv[4];
@@ -622,16 +638,25 @@ static void send_on_handover(kafka_common_KafkaFuture_t* value, kafka_common_Err
         argv[0] = error_take_to_js(env, error);
         error = NULL;
         argv[1] = NULL;
-        if (argv[0] != NULL) {
-            if (value == NULL) {
-                if (napi_get_null(env, &argv[1]) != napi_ok) argv[1] = NULL;
-            } else {
-                ctx->slot = slot_take(p, ctx);
-                if (ctx->slot < 0 || napi_create_int32(env, ctx->slot, &argv[1]) != napi_ok) argv[1] = NULL;
-            }
+        int holds = 0;
+        if (value == NULL) {
+            // A refused record whose error can't be built: send() rejects
+            // with the failure.
+            if (napi_get_null(env, &argv[1]) != napi_ok) argv[1] = NULL;
+            if (argv[0] == NULL && argv[1] != NULL) argv[0] = js_take_failure(env, "converting a send's answer");
+        } else if (argv[0] != NULL) {
+            ctx->slot = slot_take(p, ctx);
+            // faultNext('slot'): the slot taken can't be made a number.
+            if (ctx->slot >= 0 && !fault_due(FAULT_SLOT) && napi_create_int32(env, ctx->slot, &argv[1]) == napi_ok)
+                holds = 1;
+            // A record taken whose slot JS can't get: send() resolves with a
+            // future the delivery completes. A slot taken goes back once that
+            // future is destroyed (`js_holds` 0).
+            else if (napi_get_null(env, &argv[1]) != napi_ok)
+                argv[1] = NULL;
         }
         if (argv[0] != NULL && argv[1] != NULL) {
-            ctx->js_holds = value != NULL;
+            ctx->js_holds = holds;
             call_ref(env, ctx->on_handover, 2, argv, NULL);
         } else {
             js_warn_thrown(env);
@@ -1179,7 +1204,10 @@ static void flush_on_complete(kafka_common_Error_t* error, void* opaque) {
     if (!p->queue.finalizing) {
         napi_value arg = error_take_to_js(env, error);
         error = NULL;
+        // An answer that can't be built rejects the flush with the failure.
+        if (arg == NULL) arg = js_take_failure(env, "converting a flush's answer");
         if (arg != NULL) call_ref(env, ctx->done, 1, &arg, NULL);
+        else js_warn_thrown(env);
     }
     error_discard(error);
     delete_ref(env, &ctx->done);
@@ -1322,7 +1350,8 @@ static napi_value partitions_take_to_js(napi_env env, kafka_List_t* list) {
     error_warn(env, 1, FFI_SET(size, kafka_List_size_err(list, &ffi_err)));
     napi_value arr;
     napi_value result = NULL;
-    if (napi_create_array_with_length(env, (size_t)size, &arr) == napi_ok) {
+    // faultNext('partitions'): the array can't be made.
+    if (!fault_due(FAULT_PARTITIONS) && napi_create_array_with_length(env, (size_t)size, &arr) == napi_ok) {
         result = arr;
         for (int32_t i = 0; i < size && result != NULL; i++) {
             const kafka_common_PartitionInfo_t* info = NULL;
@@ -1336,8 +1365,9 @@ static napi_value partitions_take_to_js(napi_env env, kafka_List_t* list) {
 }
 
 // The partitions_for_cb completion, on the JS thread: `done(error, null)` or
-// `done(null, partitions)`, then the end of the call's count (a call made on a
-// closed producer holds Node until then).
+// `done(null, partitions)`, or `done(failure, null)` for an answer that can't
+// be built, then the end of the call's count (a call made on a closed
+// producer holds Node until then).
 static void partitions_for_on_complete(kafka_List_t* value, kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
     PartitionsForCtx* ctx = (PartitionsForCtx*)opaque;
@@ -1348,7 +1378,10 @@ static void partitions_for_on_complete(kafka_List_t* value, kafka_common_Error_t
         if (error != NULL) {
             argv[0] = error_take_to_js(env, error);
             error = NULL;
-            if (argv[0] != NULL && napi_get_null(env, &argv[1]) == napi_ok) call_ref(env, ctx->done, 2, argv, NULL);
+            if (napi_get_null(env, &argv[1]) != napi_ok) argv[1] = NULL;
+            if (argv[0] == NULL && argv[1] != NULL) argv[0] = js_take_failure(env, "converting a partitionsFor answer");
+            if (argv[0] != NULL && argv[1] != NULL) call_ref(env, ctx->done, 2, argv, NULL);
+            else js_warn_thrown(env);
             if (value != NULL) {
                 kafka_common_Error_t* ffi_err = NULL;
                 error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(value, &ffi_err)));
@@ -1356,8 +1389,14 @@ static void partitions_for_on_complete(kafka_List_t* value, kafka_common_Error_t
         } else {
             argv[1] = value == NULL ? NULL : partitions_take_to_js(env, value);
             value = NULL;
-            if (argv[1] == NULL) js_warn_thrown(env);
-            else if (napi_get_null(env, &argv[0]) == napi_ok) call_ref(env, ctx->done, 2, argv, NULL);
+            if (napi_get_null(env, &argv[0]) != napi_ok) argv[0] = NULL;
+            // No partitions built (or no list, which the FFI rules out).
+            if (argv[1] == NULL && argv[0] != NULL) {
+                argv[1] = argv[0];
+                argv[0] = js_take_failure(env, "converting a partitionsFor answer");
+            }
+            if (argv[0] != NULL && argv[1] != NULL) call_ref(env, ctx->done, 2, argv, NULL);
+            else js_warn_thrown(env);
         }
     } else if (value != NULL) {
         kafka_common_Error_t* ffi_err = NULL;
@@ -1661,8 +1700,14 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
         napi_value argv[2];
         argv[0] = error_take_to_js(env, error);
         error = NULL;
-        if (argv[0] != NULL && napi_get_boolean(env, closed_now != 0, &argv[1]) == napi_ok)
-            call_ref(env, ctx->done, 2, argv, NULL);
+        // faultNext('close'): the answer can't be built.
+        if (fault_due(FAULT_CLOSE)) argv[0] = NULL;
+        if (napi_get_boolean(env, closed_now != 0, &argv[1]) != napi_ok) argv[1] = NULL;
+        // An answer that can't be built rejects the close with the failure,
+        // `closedNow` as the core's answer made it.
+        if (argv[0] == NULL && argv[1] != NULL) argv[0] = js_take_failure(env, "converting a close's answer");
+        if (argv[0] != NULL && argv[1] != NULL) call_ref(env, ctx->done, 2, argv, NULL);
+        else js_warn_thrown(env);
     }
     error_discard(error);
     delete_ref(env, &ctx->done);
@@ -1892,13 +1937,19 @@ static napi_value producer_handle_new(napi_env env, kafka_producer_KafkaProducer
         atomic_fetch_add(&stat_owner_units_taken, 1);
         if (cbq_attach(env, &p->queue, result) != 0) thrown = 1;
     }
+    // A test's faultNext('notify') fails the registration through the FFI's
+    // own error path, as a panic the FFI caught would: a NULL view.
     if (!thrown)
-        err = FFI_ERR(kafka_producer_Producer__set_callbacks_notify_err(p->view, cbq_notify, &p->queue, &ffi_err));
+        err = FFI_ERR(kafka_producer_Producer__set_callbacks_notify_err(fault_due(FAULT_NOTIFY) ? NULL : p->view, cbq_notify,
+                                                                       &p->queue, &ffi_err));
     if (err != NULL || thrown) {
         class_destroy(env, kp, mock);
         p->kp = NULL;
         p->mock = NULL;
         p->destroying = 1;
+        // The handle object, never handed out, may be collected: its
+        // finalizer releases its unit of p, a destroyed client's.
+        cbq_detach(env, &p->queue);
         // Releases the tsfn, whose finalizer frees p when it is the only owner.
         cbq_release(env, &p->queue);
         if (err != NULL) error_throw_owned(env, err);

@@ -530,7 +530,12 @@ These decide every question, in this order:
    destroy of a handle, a JS exception the addon would clear) is handed to
    `process.emitWarning` through the `warn` function `src/internal/native.ts`
    registers (`error_warn`, `js_warn_thrown`) wherever JS can run; at an
-   environment teardown, where none can, it is only freed. The
+   environment teardown, where none can, it is only freed. A completion whose
+   answer can't be built settles its call with the failure instead (the pending
+   JS exception, or an `Error` naming the step: `js_take_failure`), except a
+   wait on a record's future, which then completes nothing, the delivery
+   completing the future; only a timed wait that timed out rejects its `get()`
+   with it. The
    error and metadata a delivery callback receives are borrowed: copied,
    never destroyed. If a send fails at hand-over, its per-record context stays
    on the producer's orphan list until after destroy (the delivery callback
@@ -625,7 +630,9 @@ binding:
   the close (`cbq_attach` / `cbq_closed`), so garbage collection never
   finalizes an open producer, even once the `KafkaProducer` object is
   collected; after the close the reference is weak, and the finalizer
-  destroys the closed producer (rule 10).
+  destroys the closed producer (rule 10). A construction that fails once the
+  handle object exists drops the reference (`cbq_detach`), so the finalizer
+  frees the struct.
 - A producer never closed gets no warning. The code once counted the open
   producers and warned at `process` `'beforeExit'`, but an open producer
   keeps the event loop from emptying, so `'beforeExit'` never comes while

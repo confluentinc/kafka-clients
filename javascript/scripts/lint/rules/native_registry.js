@@ -80,6 +80,14 @@ const TEST_ONLY = new Map([
       reason: "a test-only registration: the record a send built, read back, which proves the key and value are the caller's memory",
     },
   ],
+  [
+    'faultNext',
+    {
+      test: 'test/unit/producer/kafka_producer.test.js',
+      reason:
+        "a test-only registration: the fault switch that fails one step of the addon once, which proves a call settles when its answer can't be built",
+    },
+  ],
 ]);
 
 /** The module specifiers `sf` imports or requires, with their lines. */
