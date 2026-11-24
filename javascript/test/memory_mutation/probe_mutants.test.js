@@ -228,8 +228,8 @@ const MUTANTS = [
       ],
       [
         'native/producer.c',
-        '    int deferred = 0;\n    mock_pending_unlink(ctx);\n',
-        '    int deferred = 0;\n    send_ctx_release_buffers(env, ctx);\n    mock_pending_unlink(ctx);\n',
+        '    ctx->turn = 0;\n    mock_pending_unlink(ctx);\n',
+        '    ctx->turn = 0;\n    send_ctx_release_buffers(env, ctx);\n    mock_pending_unlink(ctx);\n',
       ],
     ],
     probes: [PROBES.handOver],
