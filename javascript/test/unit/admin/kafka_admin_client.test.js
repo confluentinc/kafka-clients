@@ -1660,3 +1660,122 @@ test("the feature and controller calls' forms and null arguments: TypeError nami
     await client.close({ timeout: 0 });
   }
 });
+
+// ---- an answer the addon can't build ----------------------------------------
+//
+// The test-only fault switch (native/addon.c, faultNext) fails a step of the
+// addon as its Node-API call failing would: each call still settles, with
+// the failure (native/admin.c). Over an unreachable bootstrap address a
+// future waits until its deadline or the close.
+
+const native = require('../../../dist/internal/native');
+
+// What a failed conversion of a core error throws (native/error.c, error_to_js).
+const ERROR_FAILED = /^Node-API call failed: converting a kafka_common_Error_t \(/;
+
+/**
+ * How `promise` settled, or that it did not within `ms`.
+ *
+ * @param {Promise<unknown>} promise
+ * @param {number} ms
+ * @returns {Promise<{ outcome: string, error: unknown }>}
+ */
+async function settledWithin(promise, ms) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timer;
+  /** @type {Promise<{ outcome: string, error: unknown }>} */
+  const late = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ outcome: 'not settled', error: null }), ms);
+  });
+  try {
+    return await Promise.race([
+      promise.then(
+        () => ({ outcome: 'resolved', error: null }),
+        (/** @type {unknown} */ error) => ({ outcome: 'rejected', error }),
+      ),
+      late,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+describe("an admin call whose answer the addon can't build", () => {
+  // A step left armed by a test that failed before it ran would fail the next test's.
+  afterEach(() => {
+    native.faultNext(null);
+  }, 10000);
+
+  test('a timed get() that times out rejects with the failure at its deadline, and leaves the future to its untimed wait', async () => {
+    const client = admin();
+    try {
+      const values = /** @type {Map<string, KafkaFuture<void>>} */ (client.deleteTopics(['t']).topicNameValues());
+      const future = /** @type {KafkaFuture<void>} */ (values.get('t'));
+      native.faultNext('error');
+      const started = performance.now();
+      const { outcome, error } = await settledWithin(future.get({ timeout: 50 }), 5000);
+      const waited = performance.now() - started;
+      assert.equal(outcome, 'rejected');
+      assert.ok(error instanceof Error && !(error instanceof ExecutionError), String(error));
+      assert.match(error.message, ERROR_FAILED);
+      assert.ok(waited >= 45, `rejected after ${waited} ms`);
+      assert.deepEqual(native.faultNext(null), []);
+      assert.equal(future.isDone(), false);
+    } finally {
+      await client.close({ timeout: 0 });
+    }
+  }, 20000);
+
+  test("a future the close fails, whose error can't be built, fails with the failure", async () => {
+    const client = admin();
+    const future = client.deleteTopics(['t']).all();
+    native.faultNext('error');
+    await client.close({ timeout: 0 });
+    const { outcome, error } = await settledWithin(future.get(), 5000);
+    assert.equal(outcome, 'rejected');
+    assert.ok(error instanceof ExecutionError, String(error));
+    assert.ok(error.cause instanceof Error);
+    assert.match(error.cause.message, ERROR_FAILED);
+    assert.deepEqual(native.faultNext(null), []);
+  }, 20000);
+});
+
+// A call made on a closed admin client holds Node until it settles, and so
+// does the close that closes it, when its answer can't be built too: each
+// child has nothing else holding Node and prints a line once the call
+// settled. Without the settle it would exit with 0 in the middle of the await.
+const FAULT_AFTER_CLOSE = [
+  {
+    client: "Admin.create({ 'bootstrap.servers': '127.0.0.1:1' })",
+    closed: true,
+    step: 'error',
+    call: "a.deleteTopics(['t']).all().get()",
+  },
+  { client: "Admin.create({ 'bootstrap.servers': '127.0.0.1:1' })", closed: true, step: 'close', call: 'a.close()' },
+  { client: "Admin.create({ 'bootstrap.servers': '127.0.0.1:1' })", closed: false, step: 'close', call: 'a.close()' },
+  { client: 'new MockAdminClient()', closed: false, step: 'close', call: 'a.close()' },
+];
+
+for (const { client, closed, step, call } of FAULT_AFTER_CLOSE) {
+  test(`${call} on ${client} ${closed ? 'after close()' : 'closing it'} settles while nothing else holds Node when its answer can't be built`, () => {
+    const r = runNode(`
+      const native = require('./dist/internal/native');
+      const { Admin, MockAdminClient } = require('@confluentinc/kafka-javascript/admin');
+      const a = ${client};
+      (async () => {
+        if (${String(closed)}) await a.close();
+        native.faultNext('${step}');
+        const outcome = await ${call}.then(
+          () => 'resolved',
+          (e) => e.constructor.name + ': ' + e.message,
+        );
+        console.log('after the call: ' + outcome);
+      })();
+    `);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(
+      r.stdout,
+      /^after the call: (ExecutionError: )?Error: Node-API call failed: converting (a kafka_common_Error_t|a close's answer) \(/,
+    );
+  }, 40000);
+}
