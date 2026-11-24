@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Common.Serialization;
 /// Java's <c>Deserializer&lt;T&gt;</c> that an asynchronous consumer takes, for a deserializer that waits, as one that
 /// reads a schema registry does. Its method is Java's <c>deserialize(String, byte[])</c>, over a memory; its headers
 /// overload is
-/// <see cref="AsyncDeserializerExtensions.Deserialize{T}(IAsyncDeserializer{T}, string, Headers, ReadOnlyMemory{byte}, CancellationToken)"/>,
+/// <see cref="AsyncDeserializerExtensions.Deserialize{T}(IAsyncDeserializer{T}, string, IHeaders, ReadOnlyMemory{byte}, CancellationToken)"/>,
 /// Java's <c>deserialize(String, Headers, ByteBuffer)</c>, which a deserializer replaces by implementing
 /// <see cref="IAsyncDeserializerWithHeaders{T}"/>. Java's <c>configure</c> is
 /// <see cref="AsyncDeserializerExtensions.Configure{T}(IAsyncDeserializer{T}, IReadOnlyDictionary{string, object}, bool, CancellationToken)"/>,
@@ -71,7 +71,7 @@ public interface IAsyncDeserializer<T>
 /// <remarks>
 /// A consumer calls this form, and not the one without headers, of a deserializer that implements it. A consumer
 /// refuses a deserializer that declares a public
-/// <c>Deserialize(string, Headers, ReadOnlyMemory&lt;byte&gt;, CancellationToken)</c> without this interface, which it
+/// <c>Deserialize(string, IHeaders, ReadOnlyMemory&lt;byte&gt;, CancellationToken)</c> without this interface, which it
 /// would never call.
 /// </remarks>
 /// <typeparam name="T">The type the bytes are decoded to.</typeparam>
@@ -96,13 +96,13 @@ public interface IAsyncDeserializerWithHeaders<T> : IAsyncDeserializer<T>
     /// <exception cref="SerializationException">The bytes are not a valid <typeparamref name="T"/>. It is thrown by
     /// the call or carried by the returned <see cref="ValueTask{TResult}"/>.</exception>
     ValueTask<T?> Deserialize(
-        string topic, Headers headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
+        string topic, IHeaders headers, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
 /// An asynchronous deserializer that may keep or return the memory it is given. The interface has no member of its
 /// own: it changes what
-/// <see cref="IAsyncDeserializerWithHeaders{T}.Deserialize(string, Headers, ReadOnlyMemory{byte}, CancellationToken)"/>,
+/// <see cref="IAsyncDeserializerWithHeaders{T}.Deserialize(string, IHeaders, ReadOnlyMemory{byte}, CancellationToken)"/>,
 /// the form a consumer calls, may do with its <c>data</c>.
 /// </summary>
 /// <remarks>
@@ -150,7 +150,7 @@ public static class AsyncDeserializerExtensions
 {
     /// <summary>
     /// Decodes <paramref name="data"/>, Java's <c>Deserializer.deserialize(String, Headers, ByteBuffer)</c>:
-    /// <see cref="IAsyncDeserializerWithHeaders{T}.Deserialize(string, Headers, ReadOnlyMemory{byte}, CancellationToken)"/>
+    /// <see cref="IAsyncDeserializerWithHeaders{T}.Deserialize(string, IHeaders, ReadOnlyMemory{byte}, CancellationToken)"/>
     /// when <paramref name="deserializer"/> implements it, and otherwise
     /// <see cref="IAsyncDeserializer{T}.Deserialize(string, ReadOnlyMemory{byte}, CancellationToken)"/> without the
     /// headers, as Java's default.
@@ -168,7 +168,7 @@ public static class AsyncDeserializerExtensions
     public static ValueTask<T?> Deserialize<T>(
         this IAsyncDeserializer<T> deserializer,
         string topic,
-        Headers headers,
+        IHeaders headers,
         ReadOnlyMemory<byte> data,
         CancellationToken cancellationToken = default)
     {

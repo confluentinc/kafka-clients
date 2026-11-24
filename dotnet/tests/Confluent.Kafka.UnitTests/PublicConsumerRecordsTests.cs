@@ -88,7 +88,7 @@ public sealed class PublicConsumerRecordsTests
     }
 
     [Fact]
-    public void RecordsOfAPartitionNotPolled_OrOfADefaultPartition_IsEmpty()
+    public void RecordsOfAPartitionNotPolled_OfANullTopic_OrOfANullPartition_IsEmpty()
     {
         MockConsumer<string, string> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
@@ -96,8 +96,8 @@ public sealed class PublicConsumerRecordsTests
 
         Assert.Empty(records.Records(new TopicPartition(TopicA, 7)));
         Assert.Empty(records.Records(new TopicPartition("records-c", 0)));
-        Assert.Empty(records.Records(default(TopicPartition)));
         Assert.Empty(records.Records(new TopicPartition(null!, 0)));
+        Assert.Empty(records.Records((TopicPartition)null!));
     }
 
     [Fact]

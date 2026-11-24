@@ -195,6 +195,11 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (KeyValuePair<TopicPartition, RecordsToDelete> entry in recordsToDelete)
             {
+                if (entry.Key is null)
+                {
+                    throw new ArgumentNullException(nameof(recordsToDelete), "recordsToDelete must not contain null");
+                }
+
                 if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentNullException(
@@ -312,6 +317,12 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (KeyValuePair<TopicPartition, OffsetSpec> entry in topicPartitionOffsets)
             {
+                if (entry.Key is null)
+                {
+                    throw new ArgumentNullException(
+                        nameof(topicPartitionOffsets), "topicPartitionOffsets must not contain null");
+                }
+
                 if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentNullException(

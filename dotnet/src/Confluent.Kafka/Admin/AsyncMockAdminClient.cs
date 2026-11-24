@@ -114,7 +114,8 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
 
     /// <inheritdoc/>
     public AsyncDeleteTopicsResult DeleteTopics(TopicCollection topics, DeleteTopicsOptions options) =>
-        AsyncDeleteTopicsResult.OfClient(_native.DeleteTopics(topics, options ?? new DeleteTopicsOptions()));
+        AsyncDeleteTopicsResult.OfClient(
+            _native.DeleteTopics(_native.CheckTopicIds(topics), options ?? new DeleteTopicsOptions()));
 
     /// <inheritdoc/>
     public AsyncDeleteTopicsResult DeleteTopics(IReadOnlyCollection<string> topics) =>
@@ -133,7 +134,8 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
 
     /// <inheritdoc/>
     public AsyncDescribeTopicsResult DescribeTopics(TopicCollection topics, DescribeTopicsOptions options) =>
-        AsyncDescribeTopicsResult.OfClient(_native.DescribeTopics(topics, options ?? new DescribeTopicsOptions()));
+        AsyncDescribeTopicsResult.OfClient(
+            _native.DescribeTopics(_native.CheckTopicIds(topics), options ?? new DescribeTopicsOptions()));
 
     /// <inheritdoc/>
     public AsyncDescribeTopicsResult DescribeTopics(IReadOnlyCollection<string> topicNames) =>
@@ -698,7 +700,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// </summary>
     /// <param name="newOffsets">The beginning offset per topic partition.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="newOffsets"/> is null, or a key has a null topic.
+    /// <paramref name="newOffsets"/> is null, or has a null key or a key with a null topic.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// A key has a topic containing a NUL character (see the <see cref="IAdmin"/> remarks).
@@ -714,7 +716,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// </summary>
     /// <param name="newOffsets">The end offset per topic partition.</param>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="newOffsets"/> is null, or a key has a null topic.
+    /// <paramref name="newOffsets"/> is null, or has a null key or a key with a null topic.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// A key has a topic containing a NUL character (see the <see cref="IAdmin"/> remarks).
@@ -733,7 +735,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// parameter; the real client has no such restriction.
     /// </remarks>
     /// <exception cref="ArgumentNullException">
-    /// <paramref name="newOffsets"/> is null, or a key has a null topic.
+    /// <paramref name="newOffsets"/> is null, or has a null key or a key with a null topic.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// A key has a topic containing a NUL character (see the <see cref="IAdmin"/> remarks).

@@ -779,6 +779,25 @@ internal sealed partial class NativeAdminClient
                 null,
                 result);
 
+    // A null topic id, which the C ABI cannot carry, is refused at the call on all four clients, after the closed
+    // check and before anything reads the ids (AdminEarlyReturns on the real clients).
+    internal TopicCollection CheckTopicIds(TopicCollection topics)
+    {
+        if (topics is TopicCollection.TopicIdCollection ids)
+        {
+            ThrowIfClosed();
+            foreach (Uuid? id in ids.TopicIds())
+            {
+                if (id is null)
+                {
+                    throw new ArgumentNullException(nameof(topics), "topics must not contain null");
+                }
+            }
+        }
+
+        return topics;
+    }
+
     private static IntPtr NewNativeTopicCollection(TopicCollection? topics, string operation)
     {
         switch (topics)

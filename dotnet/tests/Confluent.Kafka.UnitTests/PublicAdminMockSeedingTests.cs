@@ -163,7 +163,7 @@ public class PublicAdminMockSeedingTests
         MockAdminClient admin = MockAdminClient.Create().Build();
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         Dictionary<TopicPartition, long> withNullTopic =
-            new Dictionary<TopicPartition, long> { [default] = 1 };
+            new Dictionary<TopicPartition, long> { [new TopicPartition(null!, 0)] = 1 };
 
         Assert.Throws<ArgumentNullException>(() => admin.UpdateBeginningOffsets(withNullTopic));
         Assert.Throws<ArgumentNullException>(() => admin.UpdateEndOffsets(withNullTopic));

@@ -179,7 +179,7 @@ public sealed class AdminP4Stage2SubmitArgumentTests
         Assert.Equal("Unknown isolation level 7", isolation.Message);
 
         ArgumentNullException nullTopic = Assert.Throws<ArgumentNullException>(() =>
-            admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [default] = OffsetSpec.Latest() }, new ListOffsetsOptions()));
+            admin.ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [new TopicPartition(null!, 0)] = OffsetSpec.Latest() }, new ListOffsetsOptions()));
         Assert.Equal("topicPartitionOffsets", nullTopic.ParamName);
 
         Assert.Equal(

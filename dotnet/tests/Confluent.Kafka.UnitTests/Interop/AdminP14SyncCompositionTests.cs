@@ -333,15 +333,15 @@ public sealed class AdminP14SyncCompositionTests
         "per-key-independence",
         "erasure-identity");
 
-    // Omitted: null-key (TopicPartition is a value type, so a null key cannot be expressed); memoization (no
-    // projection); erasure identity (no per-key void view; All() is covered by the outcome rows, and the per-key
-    // futures' equal-on-every-read half is the key-identity row).
+    // Omitted: memoization (no projection); erasure identity (no per-key void view; All() is covered by the outcome
+    // rows, and the per-key futures' equal-on-every-read half is the key-identity row).
     public static TheoryData<string, string> DeleteRecordsRows => Rows(
         "all-succeed",
         "one-fails",
         "two-fail-first-in-key-order",
         "all-fail",
         "unknown-key",
+        "null-key",
         "per-key-independence",
         "key-identity");
 
@@ -769,13 +769,13 @@ public sealed class AdminP14SyncCompositionTests
         "memoization",
         "identity");
 
-    // Omitted: null-key (TopicPartition is a value type, so a null key cannot be expressed); memoization (no projection
-    // — its only composite is All()); two-fail and all-fail (All() reports the first failure to complete, not the
-    // first in key order).
+    // Omitted: memoization (no projection — its only composite is All()); two-fail and all-fail (All() reports the
+    // first failure to complete, not the first in key order).
     public static TheoryData<string, string> AlterPartitionReassignmentsRows => Rows(
         "all-succeed",
         "one-fails",
         "unknown-key",
+        "null-key",
         "per-key-independence",
         "erasure-identity");
 
@@ -787,14 +787,14 @@ public sealed class AdminP14SyncCompositionTests
         "fails",
         "identity");
 
-    // Omitted: null-key (TopicPartition is a value type, so a null key cannot be expressed); erasure identity (no void
-    // view; its equal-on-every-read half is the key-identity row).
+    // Omitted: erasure identity (no void view; its equal-on-every-read half is the key-identity row).
     public static TheoryData<string, string> ListOffsetsRows => Rows(
         "all-succeed",
         "one-fails",
         "two-fail-first-in-key-order",
         "all-fail",
         "unknown-key",
+        "null-key",
         "per-key-independence",
         "memoization",
         "key-identity");
@@ -991,17 +991,27 @@ public sealed class AdminP14SyncCompositionTests
         TopicPartition[] partitions = TopicPartitions();
         ListOffsetsHarness harness = ListOffsetsHarness.For(flavour, partitions);
         TopicPartition unknown = new TopicPartition("gamma", 0);
-        if (row != "unknown-key")
+        switch (row)
         {
-            await RunKeyedRow(row, harness, unknown);
-            return;
-        }
+            case "unknown-key":
+                // PartitionResult is the only per-key member, and its guard is Java's: synchronous, at the call, an
+                // IllegalArgumentException with Java's message — not a dictionary's KeyNotFoundException.
+                AssertIllegalArgument(
+                    harness.CallIndexer(unknown), "List Offsets for partition \"gamma-0\" was not attempted");
+                Assert.False(harness.ContainsKey(unknown));
+                Assert.True(harness.ContainsKey(partitions[0]));
+                break;
 
-        // PartitionResult is the only per-key member, and its guard is Java's:
-        // synchronous, at the call, an IllegalArgumentException with Java's message — not a dictionary's KeyNotFoundException.
-        AssertIllegalArgument(harness.CallIndexer(unknown), "List Offsets for partition \"gamma-0\" was not attempted");
-        Assert.False(harness.ContainsKey(unknown));
-        Assert.True(harness.ContainsKey(partitions[0]));
+            case "null-key":
+                // A null partition was not requested either: the same guard, null printed as Java prints it.
+                AssertIllegalArgument(harness.CallIndexer(null!), "List Offsets for partition \"null\" was not attempted");
+                Assert.False(harness.ContainsKey(null!));
+                break;
+
+            default:
+                await RunKeyedRow(row, harness, unknown);
+                break;
+        }
     }
 
     public static TheoryData<string, string> ListGroupsRows => Rows(
@@ -1717,14 +1727,14 @@ public sealed class AdminP14SyncCompositionTests
         "memoization",
         "key-identity");
 
-    // Omitted: null-key (TopicPartition is a value type); erasure identity (no void view; its equal-on-every-read half
-    // is the key-identity row).
+    // Omitted: erasure identity (no void view; its equal-on-every-read half is the key-identity row).
     public static TheoryData<string, string> DescribeProducersRows => Rows(
         "all-succeed",
         "one-fails",
         "two-fail-first-in-key-order",
         "all-fail",
         "unknown-key",
+        "null-key",
         "per-key-independence",
         "memoization",
         "key-identity");
@@ -1923,6 +1933,17 @@ public sealed class AdminP14SyncCompositionTests
 
                     SucceedEvery(harness);
                     AssertIllegalArgument(harness.CallIndexer(unknown), expected);
+                    break;
+                }
+
+            case "null-key":
+                {
+                    const string Expected = "Topic partition null was not included in the request";
+                    AssertIllegalArgument(harness.CallIndexer(null!), Expected);
+                    Assert.False(harness.ContainsKey(null!));
+
+                    SucceedEvery(harness);
+                    AssertIllegalArgument(harness.CallIndexer(null!), Expected);
                     break;
                 }
 

@@ -189,6 +189,11 @@ internal sealed partial class NativeAdminClient
             HashSet<TopicPartition> seen = new HashSet<TopicPartition>();
             foreach (KeyValuePair<TopicPartition, NewPartitionReassignment?> entry in reassignments)
             {
+                if (entry.Key is null)
+                {
+                    throw new ArgumentNullException(nameof(reassignments), "reassignments must not contain a null key");
+                }
+
                 if (entry.Key.Topic() is null)
                 {
                     throw new ArgumentNullException(

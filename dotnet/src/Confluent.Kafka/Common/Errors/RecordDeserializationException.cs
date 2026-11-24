@@ -32,7 +32,7 @@ public class RecordDeserializationException : SerializationException
     private readonly long _timestamp;
     private readonly byte[]? _keyBuffer;
     private readonly byte[]? _valueBuffer;
-    private readonly Headers? _headers;
+    private readonly IHeaders? _headers;
 
     /// <summary>
     /// Initializes an exception for the record at <paramref name="offset"/> of <paramref name="partition"/>, with
@@ -46,7 +46,7 @@ public class RecordDeserializationException : SerializationException
         TimestampType timestampType,
         byte[]? keyBuffer,
         byte[]? valueBuffer,
-        Headers? headers,
+        IHeaders? headers,
         string? message,
         Exception? innerException)
         : base(message, innerException)
@@ -102,7 +102,7 @@ public class RecordDeserializationException : SerializationException
 
     /// <summary>The record's headers, Java's <c>headers()</c>.</summary>
     /// <returns>The record's headers, or <see langword="null"/> when the constructor was given none.</returns>
-    public Headers? Headers() => _headers;
+    public IHeaders? Headers() => _headers;
 
     internal override int FfiId => -27;
 }

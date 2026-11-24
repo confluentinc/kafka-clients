@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Common;
 /// signed low half.
 /// </summary>
 /// <remarks>It is not a <see cref="System.Guid"/>, whose text form and byte order differ from Kafka's.</remarks>
-public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
+public sealed class Uuid : IEquatable<Uuid>, IComparable<Uuid>
 {
     private const int ByteCount = 16;
 
@@ -45,7 +45,7 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     }
 
     /// <summary>The all-zero id, Java's <c>Uuid.ZERO_UUID</c>.</summary>
-    public static readonly Uuid ZERO_UUID = default;
+    public static readonly Uuid ZERO_UUID = new Uuid(0L, 0L);
 
     /// <summary>The id <c>(0, 1)</c>, Java's <c>Uuid.ONE_UUID</c>.</summary>
     public static readonly Uuid ONE_UUID = new Uuid(0L, 1L);
@@ -71,11 +71,12 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     /// <returns>The low 64 bits.</returns>
     public long GetLeastSignificantBits() => _leastSignificantBits;
 
-    /// <summary>Determines whether two ids are equal.</summary>
-    public static bool operator ==(Uuid left, Uuid right) => left.Equals(right);
+    /// <summary>Determines whether two ids are equal; two <see langword="null"/> references are equal.</summary>
+    public static bool operator ==(Uuid? left, Uuid? right) =>
+        ReferenceEquals(left, right) || (left is not null && left.Equals(right));
 
     /// <summary>Determines whether two ids differ.</summary>
-    public static bool operator !=(Uuid left, Uuid right) => !left.Equals(right);
+    public static bool operator !=(Uuid? left, Uuid? right) => !(left == right);
 
     /// <summary>
     /// Creates an id from the URL-safe base64 text form <see cref="ToString"/> writes, padded or not: Java's
@@ -146,9 +147,19 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     /// </summary>
     public static Uuid RandomUuid() => RandomUuid(s_unsafeRandomUuid);
 
-    /// <inheritdoc/>
-    public int CompareTo(Uuid other)
+    /// <summary>
+    /// Compares two ids by the signed high half, then the signed low half: Java's <c>compareTo</c>.
+    /// </summary>
+    /// <param name="other">The id to compare with.</param>
+    /// <returns>-1, 0 or 1 as this id is less than, equal to or greater than <paramref name="other"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="other"/> is null.</exception>
+    public int CompareTo(Uuid? other)
     {
+        if (other is null)
+        {
+            throw new ArgumentNullException(nameof(other));
+        }
+
         if (GetMostSignificantBits() > other.GetMostSignificantBits())
         {
             return 1;
@@ -173,7 +184,8 @@ public readonly struct Uuid : IEquatable<Uuid>, IComparable<Uuid>
     }
 
     /// <inheritdoc/>
-    public bool Equals(Uuid other) =>
+    public bool Equals(Uuid? other) =>
+        other is not null &&
         GetMostSignificantBits() == other.GetMostSignificantBits() &&
         GetLeastSignificantBits() == other.GetLeastSignificantBits();
 

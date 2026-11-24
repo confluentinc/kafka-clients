@@ -49,8 +49,8 @@ public sealed class AsyncAlterConsumerGroupOffsetsResult
     /// an <see cref="ArgumentException"/>, as Java's does.
     /// </returns>
     /// <exception cref="ArgumentException">
-    /// <paramref name="partition"/> has a topic with a NUL character. One with a null topic was not attempted, so its
-    /// future fails with Java's <see cref="Confluent.Kafka.IllegalArgumentException"/>.
+    /// <paramref name="partition"/> has a topic with a NUL character. A null one, or one with a null topic, was not
+    /// attempted, so its future fails with Java's <see cref="Confluent.Kafka.IllegalArgumentException"/>.
     /// </exception>
     public AsyncKafkaFuture PartitionResult(TopicPartition partition) =>
         new AsyncKafkaFuture(NativeAdminClient.AlterConsumerGroupOffsetsPartitionResult(_native, partition));
