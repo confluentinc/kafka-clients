@@ -532,10 +532,12 @@ These decide every question, in this order:
    registers (`error_warn`, `js_warn_thrown`) wherever JS can run; at an
    environment teardown, where none can, it is only freed. A completion whose
    answer can't be built settles its call with the failure instead (the pending
-   JS exception, or an `Error` naming the step: `js_take_failure`), except a
-   wait on a record's future, which then completes nothing, the delivery
-   completing the future; only a timed wait that timed out rejects its `get()`
-   with it. The
+   JS exception, or an `Error` naming the step: `js_take_failure`), and a
+   delivery callback still runs once, with the failure as its error and, when
+   its metadata can't be built, Java's metadata of a failed record. A wait on a
+   record's future fails the future with it only while the future is pending
+   (its delivery reached no JS), and warns it otherwise; a timed wait that
+   timed out rejects its `get()` with it. The
    error and metadata a delivery callback receives are borrowed: copied,
    never destroyed. If a send fails at hand-over, its per-record context stays
    on the producer's orphan list until after destroy (the delivery callback

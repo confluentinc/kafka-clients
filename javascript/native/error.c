@@ -88,7 +88,8 @@ void error_warn(napi_env env, int js, kafka_common_Error_t* e) {
 napi_value js_take_failure(napi_env env, const char* what) {
     bool pending = false;
     napi_value failure = NULL;
-    if (napi_is_exception_pending(env, &pending) != napi_ok) return NULL;
+    // faultNext('failure'): even the failure can't be made.
+    if (fault_due(FAULT_FAILURE) || napi_is_exception_pending(env, &pending) != napi_ok) return NULL;
     if (pending) {
         if (napi_get_and_clear_last_exception(env, &failure) != napi_ok) return NULL;
         napi_valuetype type = napi_undefined;

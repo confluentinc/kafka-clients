@@ -99,22 +99,32 @@ void js_warn_thrown(napi_env env);
 // Deletes `*ref` (a no-op for NULL) and resets it to NULL.
 void delete_ref(napi_env env, napi_ref* ref);
 
-// The steps the test-only faultNext() makes fail once: a producer's notify
-// registration, and the conversion of a completion's answer to JS (a record's
+// The steps the test-only faultNext() makes fail: a producer's notify
+// registration, the conversion of a completion's answer to JS (a record's
 // metadata, a core error, a send's slot number, a partitionsFor list, a
-// close's answer).
-typedef enum { FAULT_NONE, FAULT_NOTIFY, FAULT_METADATA, FAULT_ERROR, FAULT_SLOT, FAULT_PARTITIONS, FAULT_CLOSE } FaultStep;
+// close's answer), and the failure js_take_failure makes of one.
+typedef enum {
+    FAULT_NONE,
+    FAULT_NOTIFY,
+    FAULT_METADATA,
+    FAULT_ERROR,
+    FAULT_SLOT,
+    FAULT_PARTITIONS,
+    FAULT_CLOSE,
+    FAULT_FAILURE,
+    FAULT_STEPS
+} FaultStep;
 
-// The step armed, FAULT_NONE when none is.
+// The failures armed, every step's together: 0 when none is.
 extern atomic_int fault_armed;
 
-// Disarms `step`: 1 when it was the one armed, else 0.
+// Takes one of the failures armed for `step`: 1 when it had one, else 0.
 int fault_take(FaultStep step);
 
 // Whether the site of `step` fails this time, as its Node-API call failing
-// would: once per arming. Unarmed, a site costs one load and branch.
+// would: once per failure armed. Unarmed, a site costs one load and branch.
 static inline int fault_due(FaultStep step) {
-    return atomic_load_explicit(&fault_armed, memory_order_relaxed) == (int)step && fault_take(step);
+    return atomic_load_explicit(&fault_armed, memory_order_relaxed) != 0 && fault_take(step);
 }
 
 // ---- error.c ----------------------------------------------------------------

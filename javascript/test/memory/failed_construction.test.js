@@ -58,7 +58,7 @@ test('a producer whose construction fails frees its native struct once collected
     })();
   `);
   assert.deepEqual(out.thrown, ['TypeError: self_ must not be null', 'TypeError: self_ must not be null']);
-  assert.equal(out.armed, null);
+  assert.deepEqual(out.armed, []);
   assert.deepEqual(out.leaks, NO_LEAKS);
   assert.equal(out.stats.producersMade, 3);
 });

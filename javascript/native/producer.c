@@ -31,8 +31,7 @@
 // completion's opaque. A send that fails at hand-over parks its context on
 // the orphan list, freed only after destroy. A completion whose answer can't
 // be built still calls its JS function, with the failure (js_take_failure), so
-// its call settles; a wait on a record's future then completes nothing
-// (future_on_wait).
+// its call settles, and so does a delivery callback (send_on_completion).
 //
 // Every `_cb` call is counted on the producer's queue (javascript/CLAUDE.md,
 // "Threads and liveness"): `cbq_call_begin` as the statement right before the
@@ -501,9 +500,10 @@ typedef struct {
 // finalizer, reaches no JS, and its JS wait never settles: nothing in the FFI
 // orders it before the close's completion, and no other wait is known to
 // stay pending past a completed close. An answer that can't be built
-// (`failed`) completes no future: the delivery completes it, with the
-// record's outcome, and a timed wait that timed out ends its get() with the
-// failure.
+// (`failed`) fails the future only while it is still pending: the core
+// completes the native future only once the delivery's callback reported, so
+// its delivery reached no JS. Otherwise the failure is a warning, and a timed
+// wait that timed out ends only its get() with it (src/common/kafka_future.ts).
 static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
     FutureWait* w = (FutureWait*)opaque;
@@ -929,6 +929,17 @@ static int send_queued_args(napi_env env, SendCtx* ctx, napi_value* argv) {
     return have;
 }
 
+// The values of a delivery whose metadata or error can't be built, so that
+// its callback still runs once: the metadata when it was built, else null,
+// which src/ makes Java's empty metadata of a failed record, and the failure
+// (js_take_failure) as its error. Returns 1, or 0 when even the failure can't
+// be made (a JS exception may be pending then).
+static int send_failure_args(napi_env env, napi_value* argv) {
+    if (argv[0] == NULL && napi_get_null(env, &argv[0]) != napi_ok) argv[0] = NULL;
+    argv[1] = argv[0] != NULL ? js_take_failure(env, "converting a record's delivery") : NULL;
+    return argv[1] != NULL;
+}
+
 // Java's Callback.onCompletion (kafka_producer_Callback_on_completion_fn_t),
 // run by the drain or by destroy on the JS thread. Both arguments are
 // BORROWED: they are made into the callback's JS values here. Order
@@ -961,6 +972,12 @@ static int send_queued_args(napi_env env, SendCtx* ctx, napi_value* argv) {
 // while it runs. Those delivered during a turn (a send() whose pump runs the
 // core's queue) wait for send_run_queued's loop, which runs them next.
 //
+// Values that can't be built (send_failure_args) still run the callback once,
+// with the failure as its error, so the future fails with it and a flush()
+// covering the record finds it done, as Java runs every record's callback.
+// Only when even the failure can't be made is the delivery a warning, and
+// reported as returned.
+//
 // `callback_id` stays in C: it is an int64_t the core may number past
 // 2^53, which a JS number cannot hold exactly, so it is never handed to JS. It
 // is used only here, in the one __set_callback_result report, or kept on the
@@ -983,7 +1000,7 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
     napi_value on_complete_fn = NULL;
     if (ctx->on_complete != NULL && napi_get_reference_value(env, ctx->on_complete, &on_complete_fn) != napi_ok) on_complete_fn = NULL;
     if (!p->queue.finalizing && on_complete_fn != NULL) {
-        napi_value argv[2];
+        napi_value argv[2] = {NULL, NULL};
         int have;
         if (turn) {
             have = send_queued_args(env, ctx, argv);
@@ -991,12 +1008,13 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
             argv[0] = metadata_to_js(env, metadata);
             argv[1] = argv[0] != NULL ? error_to_js(env, error) : NULL;
             have = argv[0] != NULL && argv[1] != NULL;
-            if (have && (p->current != NULL || p->run_head != NULL)) {
-                // Not its turn: it waits behind the others. One that cannot
-                // wait is reported as returned.
-                if (send_enqueue(env, ctx, argv, callback_id) == 0) return;
-                have = 0;
-            }
+        }
+        if (!have) have = send_failure_args(env, argv);
+        if (have && !turn && (p->current != NULL || p->run_head != NULL)) {
+            // Not its turn: it waits behind the others. One that cannot
+            // wait is reported as returned.
+            if (send_enqueue(env, ctx, argv, callback_id) == 0) return;
+            have = 0;
         }
         if (have) {
             char* thrown = NULL;
