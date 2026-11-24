@@ -107,6 +107,53 @@ test('a class nested in a test-fixture class is exempt, as its outer class is; o
   ]);
 });
 
+test("a private class nested in a test-fixture class is refused: the exemption covers only the fixture's public nested classes", () => {
+  const classes = [
+    ...CLASSES,
+    javaClass('clients.admin.MockAdminClient', { public_audience: false }),
+    javaClass('clients.admin.MockAdminClient$Builder', { public_audience: false }),
+    javaClass('clients.admin.MockAdminClient$TopicMetadata', { public_audience: false, visibility: 'private' }),
+  ];
+  const r = lint(
+    fixture(
+      {
+        'src/admin/mock_admin_client.ts':
+          'export class MockAdminClient {}\nexport declare namespace MockAdminClient {\n  export class Builder {}\n  export class TopicMetadata {}\n}\n',
+      },
+      classes,
+    ),
+    [RULE],
+  );
+  assert.deepEqual(findings(r), [
+    'src/admin/mock_admin_client.ts:MockAdminClient.TopicMetadata: translates clients.admin.MockAdminClient$TopicMetadata, which is not @InterfaceAudience.Public in Kafka 4.4.0-rc3',
+    'src/admin/mock_admin_client.ts:MockAdminClient.TopicMetadata: translates clients.admin.MockAdminClient$TopicMetadata, a private nested class in Java',
+  ]);
+});
+
+test("a class nested in a Public class is refused unless Java declares it public, though the index gives it its outer class's audience", () => {
+  const classes = [
+    ...CLASSES,
+    javaClass('clients.producer.Rec$Secret', { visibility: 'private' }),
+    javaClass('clients.producer.Rec$Kept', { visibility: 'package-private' }),
+    javaClass('clients.producer.Rec$Open', {}),
+  ];
+  const r = lint(
+    fixture(
+      {
+        'src/producer/rec.ts':
+          LIB['src/producer/rec.ts'] +
+          'export declare namespace Rec {\n  export class Secret {}\n  export class Kept {}\n  export class Open {}\n}\n',
+      },
+      classes,
+    ),
+    [RULE],
+  );
+  assert.deepEqual(findings(r), [
+    'src/producer/rec.ts:Rec.Secret: translates clients.producer.Rec$Secret, a private nested class in Java',
+    'src/producer/rec.ts:Rec.Kept: translates clients.producer.Rec$Kept, a package-private nested class in Java',
+  ]);
+});
+
 test('an invented export translates nothing, so it is not checked', () => {
   const invented = { ...INVENTED, 'src/producer/sealed.ts:Sealed': 'A JavaScript helper.' };
   const r = lint(
