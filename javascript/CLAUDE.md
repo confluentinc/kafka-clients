@@ -1587,7 +1587,8 @@ adds:
   `adminFutureGet` for `check-completion-order`, the destroys taken into the
   descriptor tables for `check-ownership`, the constructors' failure paths
   for `check-out-err`); `check-public-audience` keeps `MockAdminClient`, a
-  Java test fixture, public, with the classes nested in it (its `Builder`);
+  Java test fixture, public, with the public classes nested in it (its
+  `Builder`), and refuses any nested class Java does not declare public;
   `check-java-completeness` reads Java's `MockAdminClient` and its `Builder`
   from the Java index and counts
   `Admin.create` on the runtime object; `check-java-supertypes` reads
