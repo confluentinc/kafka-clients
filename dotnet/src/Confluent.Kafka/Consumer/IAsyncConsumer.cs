@@ -60,7 +60,7 @@ namespace Confluent.Kafka.Consumer;
 /// form to prefer. Both swallow a close error and are idempotent.
 /// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> disposes its deserializers, given or built from its
 /// configuration, when it closes, through <see cref="IAsyncDisposable"/> only, as its <c>Create</c> says; an
-/// <see cref="AsyncMockConsumer{TKey, TValue}"/> does not.
+/// <see cref="AsyncMockConsumer{TKey, TValue}"/> holds none.
 /// </para>
 /// <para>
 /// Java's <c>clientInstanceId(Duration)</c>, <c>registerMetricForSubscription(KafkaMetric)</c> and
