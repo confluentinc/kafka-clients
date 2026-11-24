@@ -137,7 +137,7 @@ struct SendCtx {
     napi_ref settle_ref;                       // holds that function strongly until the report: no GC reports early
     SendCtx* await_prev;
     SendCtx* await_next;
-    napi_ref q_args;                           // a callback waiting for its turn: [RecordMetadata, error | null]
+    napi_ref q_args;                           // a callback waiting for its turn: its onComplete arguments
     int queued;                                // on p->run_head's list
     int turn;                                  // send_run_queued runs the callback in its turn
     SendCtx* run_next;
@@ -503,7 +503,8 @@ typedef struct {
 // (`failed`) fails the future only while it is still pending: the core
 // completes the native future only once the delivery's callback reported, so
 // its delivery reached no JS. Otherwise the failure is a warning, and a timed
-// wait that timed out ends only its get() with it (src/common/kafka_future.ts).
+// wait that timed out ends only its get() with it, or warns it once that
+// get() settled (src/common/kafka_future.ts).
 static void future_on_wait(void* value, kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
     FutureWait* w = (FutureWait*)opaque;
@@ -879,21 +880,21 @@ static int send_defer(napi_env env, SendCtx* ctx, napi_value promise, int64_t ca
     return 0;
 }
 
-// Puts a delivered callback at the end of the run queue, with the
-// RecordMetadata and error it will receive (`argv`), kept in an array the
-// context references until it runs. A mock's function, weak while src/ holds
-// it (SendCtx.mock_pending), is held strongly from now on: its record
+// Puts a delivered callback at the end of the run queue, with the `argc`
+// arguments it will receive (`argv`: send_on_completion's), kept in an array
+// the context references until it runs. A mock's function, weak while src/
+// holds it (SendCtx.mock_pending), is held strongly from now on: its record
 // completed, so it runs in its turn even once src/ let it go (clear() drops
 // the functions of the sends still waiting), as Java's MockProducer ran the
 // callback of every record it completed. Returns 0, or -1 when a Node-API
 // call failed (a JS exception may be pending).
-static int send_enqueue(napi_env env, SendCtx* ctx, napi_value* argv, int64_t callback_id) {
+static int send_enqueue(napi_env env, SendCtx* ctx, size_t argc, napi_value* argv, int64_t callback_id) {
     Producer* p = ctx->p;
     napi_value args;
-    if (napi_create_array_with_length(env, 2, &args) != napi_ok || napi_set_element(env, args, 0, argv[0]) != napi_ok
-        || napi_set_element(env, args, 1, argv[1]) != napi_ok
-        || napi_create_reference(env, args, 1, &ctx->q_args) != napi_ok)
-        return -1;
+    if (fault_due(FAULT_ENQUEUE) || napi_create_array_with_length(env, argc, &args) != napi_ok) return -1;
+    for (size_t i = 0; i < argc; i++)
+        if (napi_set_element(env, args, (uint32_t)i, argv[i]) != napi_ok) return -1;
+    if (napi_create_reference(env, args, 1, &ctx->q_args) != napi_ok) return -1;
     if (p->mock != NULL && napi_reference_ref(env, ctx->on_complete, NULL) != napi_ok) {
         delete_ref(env, &ctx->q_args);
         return -1;
@@ -918,26 +919,41 @@ static SendCtx* send_dequeue(Producer* p) {
     return ctx;
 }
 
-// The RecordMetadata and error a callback was queued with, into `argv`, and
-// the reference on them dropped. Returns 1, or 0 when they cannot be read.
-static int send_queued_args(napi_env env, SendCtx* ctx, napi_value* argv) {
+// The arguments a callback was queued with, into `argv`, their count into
+// `*argc`, and the reference on them dropped. Returns 1, or 0 when they
+// cannot be read.
+static int send_queued_args(napi_env env, SendCtx* ctx, size_t* argc, napi_value* argv) {
     napi_value args;
+    uint32_t n = 0;
     int have = ctx->q_args != NULL && napi_get_reference_value(env, ctx->q_args, &args) == napi_ok && args != NULL
-               && napi_get_element(env, args, 0, &argv[0]) == napi_ok
-               && napi_get_element(env, args, 1, &argv[1]) == napi_ok;
+               && napi_get_array_length(env, args, &n) == napi_ok && n >= 2 && n <= 3;
+    for (uint32_t i = 0; have && i < n; i++) have = napi_get_element(env, args, i, &argv[i]) == napi_ok;
+    if (have) *argc = n;
     delete_ref(env, &ctx->q_args);
     return have;
 }
 
 // The values of a delivery whose metadata or error can't be built, so that
 // its callback still runs once: the metadata when it was built, else null,
-// which src/ makes Java's empty metadata of a failed record, and the failure
-// (js_take_failure) as its error. Returns 1, or 0 when even the failure can't
-// be made (a JS exception may be pending then).
-static int send_failure_args(napi_env env, napi_value* argv) {
-    if (argv[0] == NULL && napi_get_null(env, &argv[0]) != napi_ok) argv[0] = NULL;
+// which src/ makes Java's metadata of a failed record, and the failure
+// (js_take_failure) as its error. For a null metadata, the partition of the
+// core's (`metadata`, read in C) goes as a third argument, so that metadata
+// keeps the partition the core gave the record; with no handle, src/ uses
+// the record's. Returns 1, or 0 when even the failure can't be made (a JS
+// exception may be pending then).
+static int send_failure_args(napi_env env, size_t* argc, napi_value* argv, const kafka_producer_RecordMetadata_t* metadata) {
+    int built = argv[0] != NULL;
+    if (!built && napi_get_null(env, &argv[0]) != napi_ok) argv[0] = NULL;
     argv[1] = argv[0] != NULL ? js_take_failure(env, "converting a record's delivery") : NULL;
-    return argv[1] != NULL;
+    if (argv[1] == NULL) return 0;
+    if (!built && metadata != NULL) {
+        kafka_common_Error_t* ffi_err = NULL;
+        int32_t partition = -1;
+        kafka_common_Error_t* failed = FFI_SET(partition, kafka_producer_RecordMetadata_partition_err(metadata, &ffi_err));
+        if (failed != NULL) error_warn(env, 1, failed);
+        else if (napi_create_int32(env, partition, &argv[2]) == napi_ok) *argc = 3;
+    }
+    return 1;
 }
 
 // Java's Callback.onCompletion (kafka_producer_Callback_on_completion_fn_t),
@@ -976,7 +992,8 @@ static int send_failure_args(napi_env env, napi_value* argv) {
 // with the failure as its error, so the future fails with it and a flush()
 // covering the record finds it done, as Java runs every record's callback.
 // Only when even the failure can't be made is the delivery a warning, and
-// reported as returned.
+// reported as returned. A callback the run queue can't take (send_enqueue)
+// runs at once, out of turn, rather than never.
 //
 // `callback_id` stays in C: it is an int64_t the core may number past
 // 2^53, which a JS number cannot hold exactly, so it is never handed to JS. It
@@ -1000,27 +1017,33 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
     napi_value on_complete_fn = NULL;
     if (ctx->on_complete != NULL && napi_get_reference_value(env, ctx->on_complete, &on_complete_fn) != napi_ok) on_complete_fn = NULL;
     if (!p->queue.finalizing && on_complete_fn != NULL) {
-        napi_value argv[2] = {NULL, NULL};
+        napi_value argv[3] = {NULL, NULL, NULL};
+        size_t argc = 2;
         int have;
         if (turn) {
-            have = send_queued_args(env, ctx, argv);
+            have = send_queued_args(env, ctx, &argc, argv);
         } else {
             argv[0] = metadata_to_js(env, metadata);
             argv[1] = argv[0] != NULL ? error_to_js(env, error) : NULL;
             have = argv[0] != NULL && argv[1] != NULL;
         }
-        if (!have) have = send_failure_args(env, argv);
+        if (!have) have = send_failure_args(env, &argc, argv, metadata);
+        SendCtx* holder = NULL;
+        int out_of_turn = 0;
         if (have && !turn && (p->current != NULL || p->run_head != NULL)) {
-            // Not its turn: it waits behind the others. One that cannot
-            // wait is reported as returned.
-            if (send_enqueue(env, ctx, argv, callback_id) == 0) return;
-            have = 0;
+            // Not its turn: it waits behind the others.
+            if (send_enqueue(env, ctx, argc, argv, callback_id) == 0) return;
+            // One that cannot wait runs now, out of turn, instead of never;
+            // the callback whose turn it is keeps it.
+            js_warn_thrown(env);
+            holder = p->current;
+            out_of_turn = 1;
         }
         if (have) {
             char* thrown = NULL;
             // Its turn: a callback the core delivers meanwhile waits behind it.
             p->current = ctx;
-            napi_value r = call_ref(env, ctx->on_complete, 2, argv, &thrown);
+            napi_value r = call_ref(env, ctx->on_complete, argc, argv, &thrown);
             napi_valuetype type = napi_undefined;
             if (r != NULL && napi_typeof(env, r, &type) != napi_ok) type = napi_undefined;
             // JS recorded the delivery unless its callback returned a Promise
@@ -1040,6 +1063,7 @@ static void send_on_completion(void* self_, const kafka_producer_RecordMetadata_
             // The turn ends with the callback, or, for an awaited one, with
             // its report (send_awaited_report).
             if (!deferred && p->current == ctx) p->current = NULL;
+            if (out_of_turn) p->current = holder;
         } else {
             js_warn_thrown(env);
         }
