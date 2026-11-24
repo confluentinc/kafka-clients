@@ -225,7 +225,7 @@ One commit per step, each passing the gates. The stacked branch's fixups are fol
 | 628 | Design, ids | Fields copied at `AddRecord` | timestamp, timestamp type, sizes, headers, leader epoch and delivery count are copied into the C record at `AddRecord`. *(Deviation: a change made to the record's `Headers` after `AddRecord` does not reach the polled record; Java shares the object.)* | Agreed |
 | 629 | Design, decode tests | Decode tests | the binding's decode tests run the real consumers over the C mock through the internal factories `KafkaConsumer.CreateOverMock` / `AsyncKafkaConsumer.CreateOverMock` (the preferred form; no fallback, "Revision" stays empty), shared through one fixture per test project; the public mocks no longer decode | Agreed |
 | 630 | Design, poll | Mock batch pressure | a mock poll keeps no native batch: its records are copied out and the batch destroyed by the poll, so it reports no memory pressure, and its slots, being ids, are never read as bytes | Agreed |
-| 631 | Rule drafts | Rule text M1–M4 | drafts below, checked against what was built (S4); on master (S5, 2026-11-24) M1 and M2 applied verbatim to `dotnet/CLAUDE.md` and M4 to `dotnet/.claude/rules/ffi-marshalling.md` (as a row of the type table); M3 stays a draft (see below) | Agreed |
+| 631 | Rule drafts | Rule text M1–M4 | drafts below, checked against what was built (S4); on master (S5, 2026-11-24) M1 and M2 applied verbatim to `dotnet/CLAUDE.md` and M4 to `dotnet/.claude/rules/ffi-marshalling.md` (as a row of the type table); M3 applied with master's wording on the owner's go-ahead (2026-11-24, see below) | Agreed |
 | 632 | Design, poll; cancellation | A cancelled `AsyncMockConsumer.Poll` | a batch the C mock has delivered is never dropped: once the native poll has returned records, the mock resolves them and `Poll` completes with them even if the token has fired; `OperationCanceledException` only when the cancellation ended the poll before the C mock delivered a record (a token cancelled at the call, the cancellation's own `wakeup` reaching the C mock before it takes a record, or an empty poll the token fired on), and the records added stay for the next `Poll`. No seek back on this path. The C mock removes what it delivers, as Java's `MockConsumer.poll` does, so a dropped batch could not be delivered again; Java's mock checks its `wakeup` before it takes a record and returns what it took. *(Deviation from `AsyncKafkaConsumer` and the `IAsyncConsumer.Poll` contract, which drop a cancelled poll's records and seek back to them, ending with `OperationCanceledException`; stated on `AsyncMockConsumer.Poll`.)* (Critic 135 issue 4) | Agreed |
 
 Rows 627 and 630 are reworded for master's copied records (section "Port onto master"); their decisions are the
@@ -257,15 +257,15 @@ consumers take no deserializers, as Java's: `AddRecord` takes a typed `ConsumerR
 the mock; a polled record is a new instance over the native batch *(deviation: Java returns the instance
 added)*. The binding's decode tests run the real consumers over the C mock."
 
-**M3 on master: not applied, a draft.** Its sentence "a polled record is a new instance over the native batch"
-is false on master, where a polled record is copied out of the batch, and master's "Consumer deserializers"
-paragraph ends with a different sentence ("The mock consumers have no configuration, so a null deserializer
-always throws it *(Java's `MockConsumer` takes no deserializers)*"), which is now stale since the mocks take no
-deserializer. Proposed wording for master, for the owner: replace that sentence with "The mock consumers take no
-deserializers, as Java's: `AddRecord` takes a typed `ConsumerRecord`, whose key and value `Poll` hands back. They
-cross the C mock as ids in the record's `void *` slots, resolved through a table in the mock; a polled record is
-a new instance copied out of the native batch *(deviation: Java returns the instance added)*. The binding's
-decode tests run the real consumers over the C mock."
+**M3 on master: applied with master's wording (2026-11-24, on the owner's go-ahead).** The sentence above, "a
+polled record is a new instance over the native batch", is false on master, where a polled record is copied out
+of the batch, and master's "Consumer deserializers" paragraph ended with a different sentence ("The mock
+consumers have no configuration, so a null deserializer always throws it *(Java's `MockConsumer` takes no
+deserializers)*"), stale since the mocks take no deserializer. That sentence is replaced in `dotnet/CLAUDE.md`
+with: "The mock consumers take no deserializers, as Java's: `AddRecord` takes a typed `ConsumerRecord`, whose key
+and value `Poll` hands back. They cross the C mock as ids in the record's `void *` slots, resolved through a
+table in the mock; a polled record is a new instance copied out of the native batch *(deviation: Java returns
+the instance added)*. The binding's decode tests run the real consumers over the C mock."
 
 ### M4 — `ffi-marshalling.md`, the generic-slot rows
 

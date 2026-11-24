@@ -1019,8 +1019,10 @@ each goes when the reason it gives goes:
   deserializer is an argument of `Create` or, for an argument that is null, a function under `key.deserializer` /
   `value.deserializer` (§4 **Serializers**); a null argument whose key is missing or null throws Java's
   `ConfigException` "Invalid value null for configuration key.deserializer: must be non-null." (the value
-  likewise). The mock consumers have no configuration, so a null deserializer always throws it *(Java's
-  `MockConsumer` takes no deserializers)*.
+  likewise). The mock consumers take no deserializers, as Java's: `AddRecord` takes a typed `ConsumerRecord`,
+  whose key and value `Poll` hands back. They cross the C mock as ids in the record's `void *` slots, resolved
+  through a table in the mock; a polled record is a new instance copied out of the native batch *(deviation:
+  Java returns the instance added)*. The binding's decode tests run the real consumers over the C mock.
 - **Negative partitions.** The consumer leaves a negative partition to the core, which answers as
   Java does: `seek`, `pause`, `resume` and the real consumers' `currentLag` throw
   `IllegalStateException` "No current assignment for partition t--1"; `position` throws "You can
