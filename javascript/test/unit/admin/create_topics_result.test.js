@@ -45,6 +45,30 @@ test('TopicMetadataAndConfig: the values, or the failure each accessor throws', 
   }
 });
 
+test("TopicMetadataAndConfig(exception) takes the error on its own, as Java's one-parameter form, or null", () => {
+  const error = new TopicExistsError('Topic t already exists.');
+  const failed = new CreateTopicsResult.TopicMetadataAndConfig(error);
+  for (const read of [() => failed.topicId(), () => failed.numPartitions(), () => failed.replicationFactor(), () => failed.config()]) {
+    assert.throws(read, (thrown) => thrown === error);
+  }
+  // Java's null exception: no failure, and the form's starting values.
+  const none = new CreateTopicsResult.TopicMetadataAndConfig(null);
+  assert.equal(none.topicId(), Uuid.ZERO_UUID);
+  assert.equal(none.numPartitions(), -1);
+  assert.equal(none.replicationFactor(), -1);
+  assert.equal(none.config(), null);
+  assert.deepEqual(none.toJSON(), new CreateTopicsResult.TopicMetadataAndConfig({ exception: null }).toJSON());
+  // Neither an ApiError nor null nor a form's options: no Java form.
+  assert.throws(
+    // @ts-expect-error a wrong argument: an Error is no ApiError
+    () => new CreateTopicsResult.TopicMetadataAndConfig(new Error('x')),
+    {
+      name: 'IllegalArgumentError',
+      message: 'TopicMetadataAndConfig() takes one of (topicId, numPartitions, replicationFactor, config), (exception); got an Error',
+    },
+  );
+});
+
 /** A subclass that reaches Java's protected constructor, as Java's tests in the package do. */
 class Subclass extends CreateTopicsResult {
   /** @param {Map<string, Future<CreateTopicsResult.TopicMetadataAndConfig>>} futures */

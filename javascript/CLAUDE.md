@@ -1544,7 +1544,10 @@ adds:
 - **The value-keyed maps** (entry 38) are each a class over a `Map` keyed by a
   string made from the fields the Java class's `equals` compares, built as
   `TopicPartitionMap` is (Java shape, JS idiom), with its methods, and listed
-  in `lint-mapping.json` as invented names. A map keyed by strings that a
+  in `lint-mapping.json` as invented names; so are the value sets
+  (`MemberToRemoveSet`, and `UuidSet` for Java's `Set<Uuid>`, which
+  `Uuid.RESERVED` is, read-only as Java's `Set.of`, and made on its first
+  read, since `uuid_set.ts` reads `Uuid`). A map keyed by strings that a
   call takes is a `Map` or a plain object (entry 49); one a Result returns is
   a `Map`, keyed by `number` for broker ids (a `ReadonlyMap` for Java's
   unmodifiable view) **(not decided yet in the JS conventions**: the
@@ -1584,8 +1587,9 @@ adds:
   `adminFutureGet` for `check-completion-order`, the destroys taken into the
   descriptor tables for `check-ownership`, the constructors' failure paths
   for `check-out-err`); `check-public-audience` keeps `MockAdminClient`, a
-  Java test fixture, public; `check-java-completeness` reads Java's
-  `MockAdminClient` and its `Builder` from the Java index and counts
+  Java test fixture, public, with the classes nested in it (its `Builder`);
+  `check-java-completeness` reads Java's `MockAdminClient` and its `Builder`
+  from the Java index and counts
   `Admin.create` on the runtime object; `check-java-supertypes` reads
   `KafkaAdminClient` and `MockAdminClient` as implementing `Admin` through
   Java's `AdminClient`, which is not translated; `check-native-wrappers`
