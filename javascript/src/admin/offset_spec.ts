@@ -15,7 +15,8 @@
 // Java's org.apache.kafka.clients.admin.OffsetSpec, a class hierarchy: the
 // base class, with Java's public no-argument constructor and its static
 // factories, and its nested subclasses, classes of the namespace merged with
-// it (javascript/CLAUDE.md, JavaScript Binding Conventions, Names).
+// it (javascript/CLAUDE.md, JavaScript Binding Conventions, Names), each with
+// Java's public no-argument constructor.
 // TimestampSpec's Java constructor and `timestamp()` are package-private: a
 // private constructor built through `internalCreate`, and the `@internal`
 // `internalTimestamp()` the admin client reads. The specs hold no public
@@ -32,6 +33,15 @@ const EARLIEST_LOCAL_FORMS = READER('earliestLocal');
 const LATEST_TIERED_FORMS = READER('latestTiered');
 const EARLIEST_PENDING_UPLOAD_FORMS = READER('earliestPendingUpload');
 const CONSTRUCTOR_FORMS = new JavaForms('OffsetSpec', [[]]);
+// The forms of each nested spec's no-argument constructor, by its name.
+const SPEC_FORMS = {
+  EarliestSpec: new JavaForms('EarliestSpec', [[]]),
+  LatestSpec: new JavaForms('LatestSpec', [[]]),
+  MaxTimestampSpec: new JavaForms('MaxTimestampSpec', [[]]),
+  EarliestLocalSpec: new JavaForms('EarliestLocalSpec', [[]]),
+  LatestTieredSpec: new JavaForms('LatestTieredSpec', [[]]),
+  EarliestPendingUploadSpec: new JavaForms('EarliestPendingUploadSpec', [[]]),
+};
 const FOR_TIMESTAMP_FORMS = new JavaForms('forTimestamp', [['timestamp']], {
   bareTypes: { timestamp: (value) => typeof value === 'number' || typeof value === 'bigint' },
 });
@@ -163,22 +173,88 @@ export class OffsetSpec {
 // eslint-disable-next-line @typescript-eslint/no-namespace -- Java's nested classes OffsetSpec.*Spec, reached through the class name as in Java
 export namespace OffsetSpec {
   /** The spec of the earliest offset. */
-  export class EarliestSpec extends OffsetSpec {}
+  export class EarliestSpec extends OffsetSpec {
+    /**
+     * Java's public no-argument constructor.
+     *
+     * @throws `IllegalArgumentError` when it is given an argument
+     */
+    constructor();
+    constructor(args?: unknown) {
+      super();
+      SPEC_FORMS.EarliestSpec.match(args, arguments.length);
+    }
+  }
 
   /** The spec of the latest offset. */
-  export class LatestSpec extends OffsetSpec {}
+  export class LatestSpec extends OffsetSpec {
+    /**
+     * Java's public no-argument constructor.
+     *
+     * @throws `IllegalArgumentError` when it is given an argument
+     */
+    constructor();
+    constructor(args?: unknown) {
+      super();
+      SPEC_FORMS.LatestSpec.match(args, arguments.length);
+    }
+  }
 
   /** The spec of the offset with the largest timestamp. */
-  export class MaxTimestampSpec extends OffsetSpec {}
+  export class MaxTimestampSpec extends OffsetSpec {
+    /**
+     * Java's public no-argument constructor.
+     *
+     * @throws `IllegalArgumentError` when it is given an argument
+     */
+    constructor();
+    constructor(args?: unknown) {
+      super();
+      SPEC_FORMS.MaxTimestampSpec.match(args, arguments.length);
+    }
+  }
 
   /** The spec of the local log start offset. */
-  export class EarliestLocalSpec extends OffsetSpec {}
+  export class EarliestLocalSpec extends OffsetSpec {
+    /**
+     * Java's public no-argument constructor.
+     *
+     * @throws `IllegalArgumentError` when it is given an argument
+     */
+    constructor();
+    constructor(args?: unknown) {
+      super();
+      SPEC_FORMS.EarliestLocalSpec.match(args, arguments.length);
+    }
+  }
 
   /** The spec of the highest offset in remote storage. */
-  export class LatestTieredSpec extends OffsetSpec {}
+  export class LatestTieredSpec extends OffsetSpec {
+    /**
+     * Java's public no-argument constructor.
+     *
+     * @throws `IllegalArgumentError` when it is given an argument
+     */
+    constructor();
+    constructor(args?: unknown) {
+      super();
+      SPEC_FORMS.LatestTieredSpec.match(args, arguments.length);
+    }
+  }
 
   /** The spec of the earliest offset pending upload to remote storage. */
-  export class EarliestPendingUploadSpec extends OffsetSpec {}
+  export class EarliestPendingUploadSpec extends OffsetSpec {
+    /**
+     * Java's public no-argument constructor.
+     *
+     * @throws `IllegalArgumentError` when it is given an argument
+     */
+    constructor();
+    constructor(args?: unknown) {
+      super();
+      SPEC_FORMS.EarliestPendingUploadSpec.match(args, arguments.length);
+    }
+  }
 
   /**
    * The spec of the earliest offset whose timestamp is at least the given

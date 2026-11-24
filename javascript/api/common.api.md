@@ -548,7 +548,7 @@ export class Uuid {
     static readonly METADATA_TOPIC_ID: Uuid;
     static readonly ONE_UUID: Uuid;
     static randomUuid(): Uuid;
-    static readonly RESERVED: ReadonlySet<Uuid>;
+    static readonly RESERVED: UuidSet;
     static toArray(list: Iterable<Uuid> | null): Uuid[] | null;
     static toArray(options: {
         list: Iterable<Uuid> | null;
@@ -591,6 +591,34 @@ export class UuidMap<V> implements Iterable<[Uuid, V]> {
     toJSON(): Record<string, unknown>;
     toString(): string;
     values(): IterableIterator<V>;
+}
+
+// @public
+export class UuidSet implements Iterable<Uuid> {
+    [Symbol.iterator](): IterableIterator<Uuid>;
+    constructor();
+    constructor(options: {
+        values: Iterable<Uuid | null>;
+    });
+    constructor(values: Iterable<Uuid | null>);
+    add(options: {
+        value: Uuid | null;
+    }): this;
+    add(value: Uuid | null): this;
+    clear(): void;
+    delete(options: {
+        value: Uuid | null;
+    }): boolean;
+    delete(value: Uuid | null): boolean;
+    forEach(callback: (value: Uuid, key: Uuid, set: UuidSet) => void): void;
+    has(options: {
+        value: Uuid | null;
+    }): boolean;
+    has(value: Uuid | null): boolean;
+    size(): number;
+    toJSON(): Array<Uuid | null>;
+    toString(): string;
+    values(): IterableIterator<Uuid>;
 }
 
 ```

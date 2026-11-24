@@ -306,10 +306,13 @@ export class CreateTopicsResult {
   }
 }
 
-const METADATA_FORMS = new JavaForms('TopicMetadataAndConfig', [
-  ['topicId', 'numPartitions', 'replicationFactor', 'config'],
-  ['exception'],
-]);
+const METADATA_FORMS = new JavaForms(
+  'TopicMetadataAndConfig',
+  [['topicId', 'numPartitions', 'replicationFactor', 'config'], ['exception']],
+  {
+    bareTypes: { exception: (value) => value === null || value instanceof ApiError },
+  },
+);
 
 // eslint-disable-next-line @typescript-eslint/no-namespace -- Java's nested class CreateTopicsResult.TopicMetadataAndConfig, reached through the class name as in Java
 export namespace CreateTopicsResult {
@@ -338,9 +341,17 @@ export namespace CreateTopicsResult {
       replicationFactor: number;
       /** The configuration. */
       config: Config | null;
+      exception?: never;
     });
     /**
      * The topic's failure: its accessors throw it.
+     *
+     * @param exception - the error, on its own
+     * @throws `IllegalArgumentError` when the given parameters are no Java form
+     */
+    constructor(exception: ApiError | null);
+    /**
+     * The topic's failure, the error given by name.
      *
      * @param options - the error
      * @throws `IllegalArgumentError` when the given parameters are no Java form
@@ -349,6 +360,10 @@ export namespace CreateTopicsResult {
     constructor(options: {
       /** The error. */
       exception: ApiError | null;
+      topicId?: never;
+      numPartitions?: never;
+      replicationFactor?: never;
+      config?: never;
     });
     constructor(options: unknown) {
       const form = METADATA_FORMS.match(options, arguments.length);

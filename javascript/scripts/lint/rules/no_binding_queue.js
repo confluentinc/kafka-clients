@@ -173,6 +173,7 @@ const ALLOWED = [
     reason: "one partition's last known eligible leader replicas (Java's List<Node>), not a store of records",
   },
   { key: 'UuidMap.#entries', reason: "the entries of Java's Map<Uuid, V> the caller builds or a call returns, not a store of records" },
+  { key: 'UuidSet.#members', reason: "the members of Java's Set<Uuid>, Uuid.RESERVED's or the caller's, not a store of records" },
   {
     key: 'ConfigResourceMap.#entries',
     reason: "the entries of Java's Map<ConfigResource, V> the caller builds or a call returns, not a store of records",
