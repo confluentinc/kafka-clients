@@ -53,7 +53,7 @@ internal sealed partial class NativeAdminClient
 
     private static readonly Func<IntPtr, FeatureMetadata?> s_copyOutFeatureMetadata = FeatureMetadataMarshal.CopyOut;
 
-    internal (KafkaFutureImpl<FeatureMetadata?> FeatureMetadata, SafeAdminResultHandle Result) DescribeFeatures(
+    internal (IKafkaFutureImpl<FeatureMetadata?> FeatureMetadata, SafeAdminResultHandle Result) DescribeFeatures(
         DescribeFeaturesOptions? options)
     {
         EnterUse();
@@ -73,7 +73,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) UpdateFeatures(
+    internal (IReadOnlyDictionary<string, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) UpdateFeatures(
         IReadOnlyDictionary<string, FeatureUpdate> featureUpdates, UpdateFeaturesOptions? options)
     {
         EnterUse();

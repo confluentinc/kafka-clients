@@ -21,17 +21,29 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// Builds the done and failed futures a test hands to a Result's constructor.
+/// Builds the done and failed futures, of either flavor, a test hands to a Result's constructor.
 /// </summary>
 internal static class TestFutures
 {
-    internal static KafkaFutureImpl<object?> Done() => KafkaFutureImpl.CompletedFuture<object?>(null);
+    internal static KafkaFutureImpl<object?> Done() => FutureState.CompletedFuture<KafkaFutureImpl<object?>, object?>(new(), null);
 
     internal static KafkaFutureImpl<object?> Failed(Exception error) => Failed<object?>(error);
 
     internal static KafkaFutureImpl<T> Failed<T>(Exception error)
     {
         KafkaFutureImpl<T> future = new KafkaFutureImpl<T>();
+        Assert.True(future.CompleteWithError(error));
+        return future;
+    }
+
+    internal static AsyncKafkaFutureImpl<object?> AsyncDone() =>
+        FutureState.CompletedFuture<AsyncKafkaFutureImpl<object?>, object?>(new(), null);
+
+    internal static AsyncKafkaFutureImpl<object?> AsyncFailed(Exception error) => AsyncFailed<object?>(error);
+
+    internal static AsyncKafkaFutureImpl<T> AsyncFailed<T>(Exception error)
+    {
+        AsyncKafkaFutureImpl<T> future = new AsyncKafkaFutureImpl<T>();
         Assert.True(future.CompleteWithError(error));
         return future;
     }

@@ -59,7 +59,7 @@ public sealed class AsyncListConfigResourcesResult
     public AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>> All() => _future.ThenApply(static resources => resources);
 
     internal static AsyncListConfigResourcesResult OfClient(
-        (KafkaFutureImpl<IReadOnlyCollection<ConfigResource>> All, SafeAdminResultHandle Result) native) =>
+        (IKafkaFutureImpl<IReadOnlyCollection<ConfigResource>> All, SafeAdminResultHandle Result) native) =>
         new AsyncListConfigResourcesResult(
-            new AsyncKafkaFuture<IReadOnlyCollection<ConfigResource>>(native.All), native.Result);
+            AsyncAdminFutures.Of(native.All), native.Result);
 }

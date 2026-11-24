@@ -32,13 +32,13 @@ namespace Confluent.Kafka.Admin;
 public sealed class AsyncAlterReplicaLogDirsResult
 {
     private readonly IReadOnlyDictionary<TopicPartitionReplica, AsyncKafkaFuture> _values;
-    private readonly IReadOnlyList<KafkaFutureImpl> _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl> _nativeFutures;
     private readonly SafeAdminResultHandle _native;
 
 
     private AsyncAlterReplicaLogDirsResult(
         IReadOnlyDictionary<TopicPartitionReplica, AsyncKafkaFuture> values,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -60,17 +60,17 @@ public sealed class AsyncAlterReplicaLogDirsResult
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
     public AsyncKafkaFuture All() =>
-        new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures));
+        AsyncAdminFutures.Of(FutureState.AllOf(new AsyncKafkaFutureImpl<object?>(), _nativeFutures));
 
     internal static AsyncAlterReplicaLogDirsResult OfClient(
-        (IReadOnlyDictionary<TopicPartitionReplica, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<TopicPartitionReplica, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<TopicPartitionReplica, AsyncKafkaFuture> values =
             new Dictionary<TopicPartitionReplica, AsyncKafkaFuture>(native.Values.Count);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
-        foreach (KeyValuePair<TopicPartitionReplica, KafkaFutureImpl<object?>> entry in native.Values)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<TopicPartitionReplica, IKafkaFutureImpl<object?>> entry in native.Values)
         {
-            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            values.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

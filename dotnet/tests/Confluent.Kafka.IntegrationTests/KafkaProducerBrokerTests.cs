@@ -130,7 +130,8 @@ public sealed class KafkaProducerBrokerTests
         await _broker.AddPartitionsAsync(topic, 2);
         Assert.True(waiting.Join(s_partitionWait), "the first Send still waits after the partition appeared");
         Assert.Null(firstFailure);
-        Assert.Equal(1, Assert.NotNull(first).Get(s_partitionWait).Partition());
+        Assert.NotNull(first);
+        Assert.Equal(1, first.Get(s_partitionWait).Partition());
     }
 
     [SkippableFact]

@@ -35,11 +35,11 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="AsyncListTransactionsResult"/>
 public sealed class ListTransactionsResult
 {
-    private readonly KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> _future;
+    private readonly IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> _future;
     private readonly SafeAdminResultHandle _native;
 
     private ListTransactionsResult(
-        KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> future,
+        IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> future,
         SafeAdminResultHandle native)
     {
         _future = future;
@@ -54,8 +54,8 @@ public sealed class ListTransactionsResult
     /// <returns>A future yielding every broker's listings, flattened.</returns>
     /// <remarks>Each call builds a new future.</remarks>
     public KafkaFuture<IReadOnlyCollection<TransactionListing>> All() =>
-        new KafkaFuture<IReadOnlyCollection<TransactionListing>>(
-            AllByBroker(_future).ThenApply<IReadOnlyCollection<TransactionListing>>(Flatten));
+        SyncAdminFutures.Of(
+            AllByBroker(_future, AdminFlavour.Sync).ThenApplyFunc<IReadOnlyCollection<TransactionListing>>(Flatten));
 
     /// <summary>
     /// One future per broker, keeping each broker's own outcome — Java's <c>byBrokerId()</c>.
@@ -66,8 +66,7 @@ public sealed class ListTransactionsResult
     /// </returns>
     /// <remarks>Each call builds a new future over the same per-broker futures, as Java's <c>byBrokerId()</c> does.</remarks>
     public KafkaFuture<IReadOnlyDictionary<int, KafkaFuture<IReadOnlyCollection<TransactionListing>>>> ByBrokerId() =>
-        new KafkaFuture<IReadOnlyDictionary<int, KafkaFuture<IReadOnlyCollection<TransactionListing>>>>(
-            ByBroker(_future, static broker => new KafkaFuture<IReadOnlyCollection<TransactionListing>>(broker)));
+        SyncAdminFutures.Of(ByBroker(_future, static broker => SyncAdminFutures.Of(broker), AdminFlavour.Sync));
 
     /// <summary>
     /// Every listing keyed by the broker hosting it, failing with the first error — Java's
@@ -80,18 +79,20 @@ public sealed class ListTransactionsResult
     /// Each call builds a new future.
     /// </remarks>
     public KafkaFuture<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> AllByBrokerId() =>
-        new KafkaFuture<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>>(AllByBroker(_future));
+        SyncAdminFutures.Of(AllByBroker(_future, AdminFlavour.Sync));
 
     internal static ListTransactionsResult OfClient(
-        (KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> ByBrokerId,
+        (IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> ByBrokerId,
             SafeAdminResultHandle Result) native) =>
         new ListTransactionsResult(native.ByBrokerId, native.Result);
 
-    internal static KafkaFutureImpl<IReadOnlyDictionary<int, TFuture>> ByBroker<TFuture>(
-        KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> future,
-        Func<KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>, TFuture> wrap)
+    internal static IKafkaFutureImpl<IReadOnlyDictionary<int, TFuture>> ByBroker<TFuture>(
+        IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> future,
+        Func<IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>, TFuture> wrap,
+        AdminFlavour flavour)
     {
-        KafkaFutureImpl<IReadOnlyDictionary<int, TFuture>> byBroker = new KafkaFutureImpl<IReadOnlyDictionary<int, TFuture>>();
+        IKafkaFutureImpl<IReadOnlyDictionary<int, TFuture>> byBroker =
+            NativeAdminClient.NewFuture<IReadOnlyDictionary<int, TFuture>>(flavour);
         future.AddListener(_ =>
         {
             if (future.Failure is { } failure)
@@ -100,9 +101,9 @@ public sealed class ListTransactionsResult
                 return;
             }
 
-            IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> brokers = future.GetNow(null!);
+            IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> brokers = future.GetNowUnwrapped(null!);
             Dictionary<int, TFuture> wrapped = new Dictionary<int, TFuture>(brokers.Count);
-            foreach (KeyValuePair<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> broker in brokers)
+            foreach (KeyValuePair<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> broker in brokers)
             {
                 wrapped.Add(broker.Key, wrap(broker.Value));
             }
@@ -112,11 +113,12 @@ public sealed class ListTransactionsResult
         return byBroker;
     }
 
-    internal static KafkaFutureImpl<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> AllByBroker(
-        KafkaFutureImpl<IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> future)
+    internal static IKafkaFutureImpl<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> AllByBroker(
+        IKafkaFutureImpl<IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>>> future,
+        AdminFlavour flavour)
     {
-        KafkaFutureImpl<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> all =
-            new KafkaFutureImpl<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>>();
+        IKafkaFutureImpl<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>> all =
+            NativeAdminClient.NewFuture<IReadOnlyDictionary<int, IReadOnlyCollection<TransactionListing>>>(flavour);
         future.AddListener(_ =>
         {
             if (future.Failure is { } failure)
@@ -125,16 +127,16 @@ public sealed class ListTransactionsResult
                 return;
             }
 
-            IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> brokers = future.GetNow(null!);
+            IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> brokers = future.GetNowUnwrapped(null!);
             object gate = new object();
             Dictionary<int, IReadOnlyCollection<TransactionListing>> listings =
                 new Dictionary<int, IReadOnlyCollection<TransactionListing>>(brokers.Count);
             HashSet<int> remaining = new HashSet<int>(brokers.Keys);
             bool decided = false;
-            foreach (KeyValuePair<int, KafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> broker in brokers)
+            foreach (KeyValuePair<int, IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>>> broker in brokers)
             {
                 int brokerId = broker.Key;
-                KafkaFutureImpl<IReadOnlyCollection<TransactionListing>> listing = broker.Value;
+                IKafkaFutureImpl<IReadOnlyCollection<TransactionListing>> listing = broker.Value;
                 listing.AddListener(settled =>
                 {
                     Exception? error = listing.Failure;
@@ -148,7 +150,7 @@ public sealed class ListTransactionsResult
 
                         if (error is null)
                         {
-                            listings.Add(brokerId, listing.GetNow(null!));
+                            listings.Add(brokerId, listing.GetNowUnwrapped(null!));
                             remaining.Remove(brokerId);
                             complete = remaining.Count == 0;
                         }

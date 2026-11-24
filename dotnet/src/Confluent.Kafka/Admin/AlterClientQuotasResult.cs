@@ -34,7 +34,7 @@ namespace Confluent.Kafka.Admin;
 public sealed class AlterClientQuotasResult
 {
     private readonly IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture> _values;
-    private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
     /// <summary>Creates a result over the given futures, keyed by quota entity.</summary>
@@ -58,7 +58,7 @@ public sealed class AlterClientQuotasResult
 
     private AlterClientQuotasResult(
         IReadOnlyDictionary<ClientQuotaEntity, KafkaFuture> values,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -79,19 +79,22 @@ public sealed class AlterClientQuotasResult
     /// failure to complete if any entity failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch. Its <c>Get()</c> waits for every entity.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// A future the Result was constructed with is <see langword="null"/>.
+    /// </exception>
     public KafkaFuture All() =>
         _nativeFutures is not null
-            ? new KafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures))
+            ? FutureState.AllOf(new KafkaFutureImpl<object?>(), _nativeFutures)
             : SyncAdminFutures.AllOf(_values.Values);
 
     internal static AlterClientQuotasResult OfClient(
-        (IReadOnlyDictionary<ClientQuotaEntity, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<ClientQuotaEntity, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<ClientQuotaEntity, KafkaFuture> values = new Dictionary<ClientQuotaEntity, KafkaFuture>(native.Values.Count);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
-        foreach (KeyValuePair<ClientQuotaEntity, KafkaFutureImpl<object?>> entry in native.Values)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<ClientQuotaEntity, IKafkaFutureImpl<object?>> entry in native.Values)
         {
-            values.Add(entry.Key, new KafkaFuture(entry.Value));
+            values.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

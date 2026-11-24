@@ -32,11 +32,11 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="ListPartitionReassignmentsResult"/>
 public sealed class AsyncListPartitionReassignmentsResult
 {
-    private readonly KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> _reassignments;
+    private readonly IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> _reassignments;
     private readonly SafeAdminResultHandle _native;
 
     private AsyncListPartitionReassignmentsResult(
-        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> reassignments,
+        IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> reassignments,
         SafeAdminResultHandle native)
     {
         _reassignments = reassignments;
@@ -55,10 +55,10 @@ public sealed class AsyncListPartitionReassignmentsResult
     /// </returns>
     /// <remarks>Every call returns the same future, as Java's accessor returns its stored field.</remarks>
     public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> Reassignments() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(_reassignments);
+        AsyncAdminFutures.Of(_reassignments);
 
     internal static AsyncListPartitionReassignmentsResult OfClient(
-        (KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> Reassignments,
+        (IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> Reassignments,
             SafeAdminResultHandle Result) native) =>
         new AsyncListPartitionReassignmentsResult(native.Reassignments, native.Result);
 }

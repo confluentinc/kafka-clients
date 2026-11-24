@@ -54,7 +54,7 @@ public sealed class DescribeProducersResult
     /// message.
     /// </exception>
     public KafkaFuture<PartitionProducerState> PartitionResult(TopicPartition partition) =>
-        partition is not null && _futures.TryGetValue(partition, out KafkaFuture<PartitionProducerState> future)
+        partition is not null && _futures.TryGetValue(partition, out KafkaFuture<PartitionProducerState>? future)
             ? future
             : throw new IllegalArgumentException(
                 string.Format(
@@ -82,7 +82,7 @@ public sealed class DescribeProducersResult
             Dictionary<TopicPartition, PartitionProducerState> states = new Dictionary<TopicPartition, PartitionProducerState>(futures.Count);
             foreach (KeyValuePair<TopicPartition, KafkaFuture<PartitionProducerState>> entry in futures)
             {
-                states.Add(entry.Key, entry.Value.Impl.GetNow(null!));
+                states.Add(entry.Key, ((IKafkaFutureImpl<PartitionProducerState>)entry.Value).GetNowUnwrapped(null!));
             }
 
             return states;
@@ -90,13 +90,13 @@ public sealed class DescribeProducersResult
     }
 
     internal static DescribeProducersResult OfClient(
-        (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<PartitionProducerState>> Partitions, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<PartitionProducerState>> Partitions, SafeAdminResultHandle Result) native)
     {
         Dictionary<TopicPartition, KafkaFuture<PartitionProducerState>> futures =
             new Dictionary<TopicPartition, KafkaFuture<PartitionProducerState>>(native.Partitions.Count);
-        foreach (KeyValuePair<TopicPartition, KafkaFutureImpl<PartitionProducerState>> entry in native.Partitions)
+        foreach (KeyValuePair<TopicPartition, IKafkaFutureImpl<PartitionProducerState>> entry in native.Partitions)
         {
-            futures.Add(entry.Key, new KafkaFuture<PartitionProducerState>(entry.Value));
+            futures.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
         }
 
         return new DescribeProducersResult(futures, native.Result);

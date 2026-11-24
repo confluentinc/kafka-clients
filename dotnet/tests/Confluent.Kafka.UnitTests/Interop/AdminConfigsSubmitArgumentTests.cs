@@ -175,7 +175,7 @@ public sealed class AdminConfigsSubmitArgumentTests
     [Fact]
     public async Task IncrementalAlterConfigs_AnEmptyValueSets_AndANullDeleteRemoves()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         await CreateTopic(admin);
 
@@ -197,7 +197,7 @@ public sealed class AdminConfigsSubmitArgumentTests
     [Fact]
     public async Task IncrementalAlterConfigs_ValueEqualResources_MergeTheirOperations()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         await CreateTopic(admin);
 
@@ -226,7 +226,7 @@ public sealed class AdminConfigsSubmitArgumentTests
     [InlineData(true)]
     public async Task IncrementalAlterConfigs_AResourceWithNoOperations_IsSentAndAnswered(bool validateOnly)
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         await CreateTopic(admin);
 
@@ -244,7 +244,7 @@ public sealed class AdminConfigsSubmitArgumentTests
     [Fact]
     public async Task IncrementalAlterConfigs_AnEmptyMap_ResolvesToNoKeys()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncAlterConfigsResult result = AsyncAlterConfigsResult.OfClient(admin.IncrementalAlterConfigs(
@@ -257,7 +257,7 @@ public sealed class AdminConfigsSubmitArgumentTests
     [Fact]
     public void DescribeConfigs_DeduplicatesResources()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         AsyncDescribeConfigsResult result = AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(

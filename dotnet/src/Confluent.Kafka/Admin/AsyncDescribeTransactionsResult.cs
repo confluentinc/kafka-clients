@@ -57,7 +57,7 @@ public sealed class AsyncDescribeTransactionsResult
     public AsyncKafkaFuture<TransactionDescription?> Description(string transactionalId)
     {
         // Java's map holds no null key, so a null id was not requested either.
-        return transactionalId is not null && _futures.TryGetValue(transactionalId, out AsyncKafkaFuture<TransactionDescription?> future)
+        return transactionalId is not null && _futures.TryGetValue(transactionalId, out AsyncKafkaFuture<TransactionDescription?>? future)
             ? future
             : throw new IllegalArgumentException(
                 "TransactionalId `" + JavaText.ValueOf(transactionalId) + "` was not included in the request");
@@ -87,7 +87,7 @@ public sealed class AsyncDescribeTransactionsResult
                 new Dictionary<string, TransactionDescription?>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, AsyncKafkaFuture<TransactionDescription?>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null));
+                descriptions.Add(entry.Key, AsyncAdminFutures.Engine(entry.Value).GetNowUnwrapped(null));
             }
 
             return descriptions;
@@ -95,13 +95,13 @@ public sealed class AsyncDescribeTransactionsResult
     }
 
     internal static AsyncDescribeTransactionsResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<TransactionDescription?>> Descriptions, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<TransactionDescription?>> Descriptions, SafeAdminResultHandle Result) native)
     {
         Dictionary<string, AsyncKafkaFuture<TransactionDescription?>> futures =
             new Dictionary<string, AsyncKafkaFuture<TransactionDescription?>>(native.Descriptions.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, KafkaFutureImpl<TransactionDescription?>> entry in native.Descriptions)
+        foreach (KeyValuePair<string, IKafkaFutureImpl<TransactionDescription?>> entry in native.Descriptions)
         {
-            futures.Add(entry.Key, new AsyncKafkaFuture<TransactionDescription?>(entry.Value));
+            futures.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
         }
 
         return new AsyncDescribeTransactionsResult(futures, native.Result);

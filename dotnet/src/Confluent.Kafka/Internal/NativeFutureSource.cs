@@ -22,9 +22,9 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The value source of a <see cref="KafkaFutureImpl{T}"/> over a native <c>kafka_common_KafkaFuture_t</c>: one
-/// <c>get_cb</c> settles it and then releases the handle; until then every read asks the handle, and a read that finds
-/// it released reads the settled managed state.
+/// The value source of a future engine of the admin client's flavor, over a native <c>kafka_common_KafkaFuture_t</c>:
+/// one <c>get_cb</c> settles it and then releases the handle; until then every read asks the handle, and a read that
+/// finds it released reads the settled managed state.
 /// </summary>
 internal sealed class NativeFutureSource<T> : IFutureValueSource<T>
 {
@@ -34,19 +34,22 @@ internal sealed class NativeFutureSource<T> : IFutureValueSource<T>
 
     private readonly Func<IntPtr, T> _convert;
 
-    private readonly KafkaFutureImpl<T> _future;
+    private readonly IKafkaFutureImpl<T> _future;
 
     private readonly Action<IntPtr>? _onDelivered;
 
-    private NativeFutureSource(SafeKafkaFutureHandle handle, Func<IntPtr, T> convert, Action<IntPtr>? onDelivered)
+    private NativeFutureSource(
+        SafeKafkaFutureHandle handle, Func<IntPtr, T> convert, AdminFlavour flavour, Action<IntPtr>? onDelivered)
     {
         _handle = handle;
         _convert = convert;
         _onDelivered = onDelivered;
-        _future = new KafkaFutureImpl<T>(mayCancel: true, this);
+        _future = flavour == AdminFlavour.Sync
+            ? new KafkaFutureImpl<T>(mayCancel: true, this)
+            : new AsyncKafkaFutureImpl<T>(mayCancel: true, this);
     }
 
-    internal KafkaFutureImpl<T> Future => _future;
+    internal IKafkaFutureImpl<T> Future => _future;
 
     public bool IsDone
     {
@@ -72,16 +75,16 @@ internal sealed class NativeFutureSource<T> : IFutureValueSource<T>
         }
     }
 
-    internal static KafkaFutureImpl<T> Start(SafeKafkaFutureHandle handle, Func<IntPtr, T> convert)
+    internal static IKafkaFutureImpl<T> Start(SafeKafkaFutureHandle handle, Func<IntPtr, T> convert, AdminFlavour flavour)
     {
-        NativeFutureSource<T> source = Create(handle, convert);
+        NativeFutureSource<T> source = Create(handle, convert, flavour);
         source.Issue();
         return source._future;
     }
 
     internal static NativeFutureSource<T> Create(
-        SafeKafkaFutureHandle handle, Func<IntPtr, T> convert, Action<IntPtr>? onDelivered = null) =>
-        new NativeFutureSource<T>(handle, convert, onDelivered);
+        SafeKafkaFutureHandle handle, Func<IntPtr, T> convert, AdminFlavour flavour, Action<IntPtr>? onDelivered = null) =>
+        new NativeFutureSource<T>(handle, convert, flavour, onDelivered);
 
     internal void Issue()
     {

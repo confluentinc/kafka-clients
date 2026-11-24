@@ -54,13 +54,15 @@ internal class DeliveryState
     private Exception? _failure;
     private long _callbackId;
 
-    internal DeliveryState(DeliveryReporter reporter, ICallback? callback, string topic, int partition)
-        : this(reporter, callback, null, topic, partition)
+    internal DeliveryState(
+        DeliveryReporter reporter, IKafkaFutureImpl<RecordMetadata> future, ICallback? callback, string topic, int partition)
+        : this(reporter, future, callback, null, topic, partition)
     {
     }
 
     internal DeliveryState(
         DeliveryReporter reporter,
+        IKafkaFutureImpl<RecordMetadata> future,
         ICallback? callback,
         IAsyncCallback? asyncCallback,
         string topic,
@@ -71,10 +73,10 @@ internal class DeliveryState
         _asyncCallback = asyncCallback;
         _topic = topic;
         _partition = partition;
-        Future = KafkaFutureImpl<RecordMetadata>.ForSend();
+        Future = future;
     }
 
-    internal KafkaFutureImpl<RecordMetadata> Future { get; }
+    internal IKafkaFutureImpl<RecordMetadata> Future { get; }
 
     internal static void DestroyFuture(IntPtr future)
     {

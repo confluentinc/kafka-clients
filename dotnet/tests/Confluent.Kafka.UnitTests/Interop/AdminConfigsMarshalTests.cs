@@ -162,7 +162,7 @@ public sealed class AdminConfigsMarshalTests
     [Fact]
     public async Task DescribeConfigs_APresentTopic_DeliversItsConfigs()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         await CreateTopic(admin, new Dictionary<string, string>
         {
@@ -190,7 +190,7 @@ public sealed class AdminConfigsMarshalTests
     [Fact]
     public async Task AFailedResource_FailsOnlyItsOwnFuture()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         await CreateTopic(admin, null);
 

@@ -34,7 +34,7 @@ public sealed class DeleteTopicsResult
 {
     private readonly IReadOnlyDictionary<Uuid, KafkaFuture>? _topicIdValues;
     private readonly IReadOnlyDictionary<string, KafkaFuture>? _topicNameValues;
-    private readonly IReadOnlyList<KafkaFutureImpl>? _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
     // Internal, unlike Java's protected constructor: a recorded deviation. Exactly one of the two
@@ -61,7 +61,7 @@ public sealed class DeleteTopicsResult
     private DeleteTopicsResult(
         IReadOnlyDictionary<Uuid, KafkaFuture>? topicIdFutures,
         IReadOnlyDictionary<string, KafkaFuture>? nameFutures,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
         : this(topicIdFutures, nameFutures)
     {
@@ -102,15 +102,15 @@ public sealed class DeleteTopicsResult
     /// </remarks>
     public KafkaFuture All() =>
         _nativeFutures is not null
-            ? new KafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures))
+            ? FutureState.AllOf(new KafkaFutureImpl<object?>(), _nativeFutures)
             : SyncAdminFutures.AllOf(_topicIdValues is not null ? _topicIdValues.Values : _topicNameValues!.Values);
 
     internal static DeleteTopicsResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<object?>>? ByName,
-            IReadOnlyDictionary<Uuid, KafkaFutureImpl<object?>>? ById,
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<object?>>? ByName,
+            IReadOnlyDictionary<Uuid, IKafkaFutureImpl<object?>>? ById,
             SafeAdminResultHandle Result) native)
     {
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>();
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>();
         return new DeleteTopicsResult(
             native.ById is null ? null : Views(native.ById, EqualityComparer<Uuid>.Default, nativeFutures),
             native.ByName is null ? null : Views(native.ByName, StringComparer.Ordinal, nativeFutures),
@@ -119,15 +119,15 @@ public sealed class DeleteTopicsResult
     }
 
     private static Dictionary<TKey, KafkaFuture> Views<TKey>(
-        IReadOnlyDictionary<TKey, KafkaFutureImpl<object?>> futures,
+        IReadOnlyDictionary<TKey, IKafkaFutureImpl<object?>> futures,
         IEqualityComparer<TKey> comparer,
-        List<KafkaFutureImpl> nativeFutures)
+        List<IKafkaFutureImpl> nativeFutures)
         where TKey : notnull
     {
         Dictionary<TKey, KafkaFuture> views = new Dictionary<TKey, KafkaFuture>(futures.Count, comparer);
-        foreach (KeyValuePair<TKey, KafkaFutureImpl<object?>> entry in futures)
+        foreach (KeyValuePair<TKey, IKafkaFutureImpl<object?>> entry in futures)
         {
-            views.Add(entry.Key, new KafkaFuture(entry.Value));
+            views.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

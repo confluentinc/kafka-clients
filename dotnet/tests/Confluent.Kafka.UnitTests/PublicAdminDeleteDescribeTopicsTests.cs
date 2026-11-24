@@ -143,7 +143,7 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
         Assert.Equal($"Topic {Absent} not found.", describeFailure.Message);
 
         await FutureAssert.ThrowsAsync<UnknownTopicOrPartitionException>(
-            () => TestTimeout.Run(() => described.AllTopicNames()!.Value.Get(), s_deadline));
+            () => TestTimeout.Run(() => described.AllTopicNames()!.Get(), s_deadline));
     }
 
     [Fact]
@@ -444,8 +444,8 @@ public sealed class PublicAdminDeleteDescribeTopicsTests
 
             DescribeTopicsOptions describeTimeout = new DescribeTopicsOptions().TimeoutMs(-1);
             AssertSameTimeout(
-                await Failure(() => real.DescribeTopics(TopicCollection.OfTopicNames(names), describeTimeout).AllTopicNames()!.Value.Get()),
-                await Failure(() => real.DescribeTopics(names, describeTimeout).AllTopicNames()!.Value.Get()));
+                await Failure(() => real.DescribeTopics(TopicCollection.OfTopicNames(names), describeTimeout).AllTopicNames()!.Get()),
+                await Failure(() => real.DescribeTopics(names, describeTimeout).AllTopicNames()!.Get()));
         }
         finally
         {

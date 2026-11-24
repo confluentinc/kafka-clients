@@ -36,10 +36,10 @@ public sealed class AsyncKafkaFutureTests : KafkaFutureTestBase
     [Fact]
     public async Task TestLeakCompletableFuture()
     {
-        var impl = new KafkaFutureImpl<string>();
-        var future = new AsyncKafkaFuture<string>(impl);
+        var impl = new AsyncKafkaFutureImpl<string>();
+        AsyncKafkaFuture<string> future = impl;
         Task<string> stage = future.ToCompletionStage();
-        Assert.Same(impl.GetAsync(), stage);
+        Assert.Same(stage, future.ToCompletionStage());
         Assert.NotSame(future.Get(), stage);
         MethodInfo[] completers = stage.GetType()
             .GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static)
@@ -65,8 +65,8 @@ public sealed class AsyncKafkaFutureTests : KafkaFutureTestBase
     [Fact]
     public async Task TestTheInnerFutureFollowsTheFuture()
     {
-        var impl = new KafkaFutureImpl<int>();
-        var future = new AsyncKafkaFuture<int>(impl);
+        var impl = new AsyncKafkaFutureImpl<int>();
+        AsyncKafkaFuture<int> future = impl;
         Task<int> inner = future.ToCompletionStage();
         Assert.Same(inner, future.ToCompletionStage());
         var completer = new Thread(() => impl.Complete(7));
@@ -77,8 +77,7 @@ public sealed class AsyncKafkaFutureTests : KafkaFutureTestBase
         Assert.True(future.IsDone());
     }
 
-    private protected override FutureView<T> Wrap<T>(KafkaFutureImpl<T> impl) =>
-        new View<T>(new AsyncKafkaFuture<T>(impl));
+    private protected override FutureView<T> New<T>() => new View<T>(new AsyncKafkaFutureImpl<T>());
 
     private protected override FutureView<T> CompletedFuture<T>(T value) =>
         new View<T>(AsyncKafkaFuture.CompletedFuture(value));
@@ -97,14 +96,11 @@ public sealed class AsyncKafkaFutureTests : KafkaFutureTestBase
     /// <summary>An <see cref="AsyncKafkaFuture{T}"/> as the shared tests see it.</summary>
     private sealed class View<T> : FutureView<T>
     {
-        private static readonly FieldInfo s_impl =
-            typeof(AsyncKafkaFuture<T>).GetField("_impl", BindingFlags.NonPublic | BindingFlags.Instance)!;
-
         internal View(AsyncKafkaFuture<T> future) => Future = future;
 
         internal AsyncKafkaFuture<T> Future { get; }
 
-        internal override KafkaFutureImpl<T> Impl => (KafkaFutureImpl<T>)s_impl.GetValue(Future)!;
+        internal override IKafkaFutureImpl<T> Impl => (IKafkaFutureImpl<T>)Future;
 
         internal override bool IsDone => Future.IsDone();
 

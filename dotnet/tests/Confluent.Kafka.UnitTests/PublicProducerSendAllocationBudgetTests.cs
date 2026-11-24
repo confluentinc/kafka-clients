@@ -52,17 +52,17 @@ public sealed class PublicProducerSendAllocationBudgetTests
     private const int MeasurementAttempts = 4;
 
     // The absolute per-send budget, which the marginal budget cannot see: the measured 472 B (net8.0, net10.0; the
-    // delivery state, its KafkaFutureImpl with the field that caches the Get() task, the delivery task, the record and
-    // the record's RecordHeaders) plus 8 B, less than one more object.
+    // delivery state, the record's future, an AsyncKafkaFutureImpl with the field that caches the Get() task, the
+    // delivery task, the record and the record's RecordHeaders) plus 8 B, less than one more object.
     private const long FastPathPerSendBudgetBytes = 480;
 
     // The same send through two serializers that are not built-ins and complete at once, so the awaited path runs with
-    // no wait: the measured 536 B (net8.0, net10.0; the fast path's 472 B and the mock's new RecordHeaders for each of the
-    // two awaited serializers) plus 8 B.
+    // no wait: the measured 472 B (net8.0, net10.0), the fast path's, as the mock makes a new RecordHeaders for a
+    // serializer only when it has the headers form, which these have not; the budget is 72 B above it.
     private const long AwaitedPathPerSendBudgetBytes = 544;
 
     // The same on an unoptimized (Debug) library, where each async method's state machine is a heap object although
-    // the serializers complete at once: the measured 1224 B (net8.0, net10.0) plus 8 B.
+    // the serializers complete at once: the measured 1160 B (net8.0, net10.0); the budget is 72 B above it.
     private const long AwaitedPathPerSendUnoptimizedBudgetBytes = 1232;
 
     // More attempts than the marginal test, as an absolute figure has no matched pair to cancel a one-off allocation.
@@ -145,7 +145,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
             perSend <= FastPathPerSendBudgetBytes,
             $"Fast-path Send per-send caller-thread allocation {perSend} B exceeded the budget " +
             $"{FastPathPerSendBudgetBytes} B ({bytes} B over {SendCount} sends) — the first stage must " +
-            "stay a struct over the delivery task when a permit is free.");
+            "allocate nothing of its own, and the record's future must stay one engine object.");
     }
 
     [Fact]

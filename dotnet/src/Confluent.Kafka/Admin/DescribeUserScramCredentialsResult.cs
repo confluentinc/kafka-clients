@@ -47,8 +47,7 @@ public sealed class DescribeUserScramCredentialsResult
     /// </summary>
     /// <returns>A future over the whole map.</returns>
     public KafkaFuture<IReadOnlyDictionary<string, UserScramCredentialsDescription>> All() =>
-        new KafkaFuture<IReadOnlyDictionary<string, UserScramCredentialsDescription>>(
-            NativeAdminClient.DescribeUserScramCredentialsAll(_native));
+        SyncAdminFutures.Of(NativeAdminClient.DescribeUserScramCredentialsAll(_native, AdminFlavour.Sync));
 
     /// <summary>
     /// The users the response carried — Java's <c>users()</c>.
@@ -59,7 +58,7 @@ public sealed class DescribeUserScramCredentialsResult
     /// </remarks>
     /// <returns>A future over the user names.</returns>
     public KafkaFuture<IReadOnlyList<string>> Users() =>
-        new KafkaFuture<IReadOnlyList<string>>(NativeAdminClient.DescribeUserScramCredentialsUsers(_native));
+        SyncAdminFutures.Of(NativeAdminClient.DescribeUserScramCredentialsUsers(_native, AdminFlavour.Sync));
 
     /// <summary>
     /// One user's credentials — Java's <c>description(String)</c>. Fails with <c>RESOURCE_NOT_FOUND</c> when the
@@ -75,8 +74,7 @@ public sealed class DescribeUserScramCredentialsResult
     {
         AdminStrings.Validate(userName, nameof(userName));
 
-        return new KafkaFuture<UserScramCredentialsDescription>(
-            NativeAdminClient.DescribeUserScramCredentialsDescription(_native, userName));
+        return SyncAdminFutures.Of(NativeAdminClient.DescribeUserScramCredentialsDescription(_native, userName, AdminFlavour.Sync));
     }
 
     internal static DescribeUserScramCredentialsResult OfClient(SafeAdminResultHandle native) =>
