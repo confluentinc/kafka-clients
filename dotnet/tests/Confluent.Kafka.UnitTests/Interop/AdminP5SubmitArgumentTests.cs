@@ -176,7 +176,7 @@ public sealed class AdminP5SubmitArgumentTests
             () => admin.ListGroups(new ListGroupsOptions().WithProtocolTypes(new[] { "con\0sumer" })));
 
         Assert.Equal("options", failure.ParamName);
-        Assert.StartsWith(AdminStrings.InvalidStringMessage, failure.Message, StringComparison.Ordinal);
+        Assert.StartsWith(NativeStrings.InvalidAdminStringMessage, failure.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -289,7 +289,7 @@ public sealed class AdminP5SubmitArgumentTests
 
         ArgumentException nul = Assert.Throws<ArgumentException>(() => describe(new[] { "g\0" }));
         Assert.Equal("groupIds", nul.ParamName);
-        Assert.StartsWith(AdminStrings.InvalidStringMessage, nul.Message, StringComparison.Ordinal);
+        Assert.StartsWith(NativeStrings.InvalidAdminStringMessage, nul.Message, StringComparison.Ordinal);
     }
 
     [Fact]

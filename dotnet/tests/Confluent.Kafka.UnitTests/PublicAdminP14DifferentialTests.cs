@@ -29,6 +29,7 @@ using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Security.Token.Delegation;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
+using Confluent.Kafka.Internal.Interop;
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
@@ -1560,11 +1561,11 @@ public sealed class PublicAdminP14DifferentialTests
             "entries must not contain null",
             "entries",
             () => sync.AlterClientQuotas(nullAlteration!));
-        AssertArgument(AdminStrings.InvalidStringMessage, "acls", () => sync.CreateAcls(nulBinding));
-        AssertArgument(AdminStrings.InvalidStringMessage, "filters", () => sync.DeleteAcls(nulFilter));
-        AssertArgument(AdminStrings.InvalidStringMessage, "filter", () => sync.DescribeAcls(nulFilter[0]));
-        AssertArgument(AdminStrings.InvalidStringMessage, "filter", () => sync.DescribeClientQuotas(nulQuotaFilter));
-        AssertArgument(AdminStrings.InvalidStringMessage, "entries", () => sync.AlterClientQuotas(nulAlteration));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "acls", () => sync.CreateAcls(nulBinding));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "filters", () => sync.DeleteAcls(nulFilter));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "filter", () => sync.DescribeAcls(nulFilter[0]));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "filter", () => sync.DescribeClientQuotas(nulQuotaFilter));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "entries", () => sync.AlterClientQuotas(nulAlteration));
     }
 
     [Fact]
@@ -1872,11 +1873,11 @@ public sealed class PublicAdminP14DifferentialTests
             () => sync.AlterUserScramCredentials(nullAlteration!));
         AssertNullArgument(
             "featureUpdates must not contain null", "featureUpdates", () => sync.UpdateFeatures(nullUpdate));
-        AssertArgument(AdminStrings.InvalidStringMessage, "users", () => sync.DescribeUserScramCredentials(nulUser));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "users", () => sync.DescribeUserScramCredentials(nulUser));
         AssertArgument(
-            AdminStrings.InvalidStringMessage, "alterations", () => sync.AlterUserScramCredentials(nulAlteration));
-        AssertArgument(AdminStrings.InvalidStringMessage, "featureUpdates", () => sync.UpdateFeatures(nulFeature));
-        AssertArgument(AdminStrings.InvalidStringMessage, "userName", () => syncResult.Description("diff\0ar"));
+            NativeStrings.InvalidAdminStringMessage, "alterations", () => sync.AlterUserScramCredentials(nulAlteration));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "featureUpdates", () => sync.UpdateFeatures(nulFeature));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "userName", () => syncResult.Description("diff\0ar"));
         AssertNullArgument(
             "CreateDelegationTokenOptions.Renewers must not be null",
             "options",
@@ -2136,13 +2137,13 @@ public sealed class PublicAdminP14DifferentialTests
             "spec must not have a TopicPartition with a null topic",
             "spec",
             () => sync.AbortTransaction(nullTopicSpec));
-        AssertArgument(AdminStrings.InvalidStringMessage, "transactionalIds", () => sync.FenceProducers(nulId));
-        AssertArgument(AdminStrings.InvalidStringMessage, "transactionalIds", () => sync.DescribeTransactions(nulId));
-        AssertArgument(AdminStrings.InvalidStringMessage, "partitions", () => sync.DescribeProducers(nulTopic));
-        AssertArgument(AdminStrings.InvalidStringMessage, "options", () => sync.ListTransactions(nulPattern));
-        AssertArgument(AdminStrings.InvalidStringMessage, "spec", () => sync.AbortTransaction(nulTopicSpec));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "transactionalIds", () => sync.FenceProducers(nulId));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "transactionalIds", () => sync.DescribeTransactions(nulId));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "partitions", () => sync.DescribeProducers(nulTopic));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "options", () => sync.ListTransactions(nulPattern));
+        AssertArgument(NativeStrings.InvalidAdminStringMessage, "spec", () => sync.AbortTransaction(nulTopicSpec));
         AssertArgument(
-            AdminStrings.InvalidStringMessage, "transactionalId", () => sync.ForceTerminateTransaction("diff\0pg"));
+            NativeStrings.InvalidAdminStringMessage, "transactionalId", () => sync.ForceTerminateTransaction("diff\0pg"));
         Assert.Equal(
             "TransactionalId `diff-missing` was not included in the request",
             Assert.Throws<IllegalArgumentException>(() => syncFenced.ProducerId("diff-missing")).Message);

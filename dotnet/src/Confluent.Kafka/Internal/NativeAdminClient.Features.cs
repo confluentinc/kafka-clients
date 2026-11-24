@@ -95,7 +95,7 @@ internal sealed partial class NativeAdminClient
                     throw new IllegalArgumentException("Provided feature can not be empty.");
                 }
 
-                AdminStrings.Validate(entry.Key, nameof(featureUpdates));
+                NativeStrings.Validate(entry.Key, NativeStrings.InvalidAdminStringMessage, nameof(featureUpdates));
                 if (entry.Value is null)
                 {
                     throw new ArgumentNullException(nameof(featureUpdates), "featureUpdates must not contain null");

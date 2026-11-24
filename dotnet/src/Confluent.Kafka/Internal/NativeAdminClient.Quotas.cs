@@ -72,8 +72,8 @@ internal sealed partial class NativeAdminClient
 
             foreach (ClientQuotaFilterComponent component in filter.Components())
             {
-                AdminStrings.Validate(component.EntityType(), nameof(filter));
-                AdminStrings.Validate(component.Match(), nameof(filter));
+                NativeStrings.Validate(component.EntityType(), NativeStrings.InvalidAdminStringMessage, nameof(filter));
+                NativeStrings.Validate(component.Match(), NativeStrings.InvalidAdminStringMessage, nameof(filter));
             }
 
             IntPtr native = IntPtr.Zero;
@@ -225,13 +225,13 @@ internal sealed partial class NativeAdminClient
 
             foreach (KeyValuePair<string, string?> part in alteration.Entity().Entries())
             {
-                AdminStrings.Validate(part.Key, parameterName);
-                AdminStrings.Validate(part.Value, parameterName);
+                NativeStrings.Validate(part.Key, NativeStrings.InvalidAdminStringMessage, parameterName);
+                NativeStrings.Validate(part.Value, NativeStrings.InvalidAdminStringMessage, parameterName);
             }
 
             foreach (ClientQuotaAlteration.Op op in alteration.Ops())
             {
-                AdminStrings.Validate(op.Key(), parameterName);
+                NativeStrings.Validate(op.Key(), NativeStrings.InvalidAdminStringMessage, parameterName);
             }
 
             alterations.Add(alteration);
