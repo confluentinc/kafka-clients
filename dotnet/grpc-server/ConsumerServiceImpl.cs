@@ -28,9 +28,9 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// Serves <c>ConsumerService</c> over the sync <see cref="KafkaConsumer{TKey, TValue}"/> and
-/// <see cref="MockConsumer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray()"/>),
-/// the C# port of the consumer half of Python's <c>grpc_server.py</c>.
+/// Serves <c>ConsumerService</c> over the sync <see cref="KafkaConsumer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>,
+/// <see cref="Serdes.ByteArray()"/>) and <see cref="MockConsumer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>, which
+/// takes no deserializer), the C# port of the consumer half of Python's <c>grpc_server.py</c>.
 /// </summary>
 internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServiceBase, IDisposable
 {

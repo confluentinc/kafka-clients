@@ -29,8 +29,9 @@ namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
 /// The async twin of <see cref="ConsumerServiceImpl"/>: serves <c>ConsumerService</c> over
-/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> and <see cref="AsyncMockConsumer{TKey, TValue}"/>
-/// (<c>&lt;byte[], byte[]&gt;</c>, <see cref="Serdes.ByteArray()"/>), the C# port of the consumer half of
+/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>, <see cref="AsyncByteArrayDeserializer"/>)
+/// and <see cref="AsyncMockConsumer{TKey, TValue}"/> (<c>&lt;byte[], byte[]&gt;</c>, which takes no deserializer), the
+/// C# port of the consumer half of
 /// Python's <c>grpc_server_async.py</c>. Handlers await the binding's tasks.
 /// </summary>
 internal sealed class AsyncConsumerServiceImpl
