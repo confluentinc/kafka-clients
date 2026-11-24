@@ -28,12 +28,12 @@ namespace Confluent.Kafka.Admin;
 public sealed class AsyncUpdateFeaturesResult
 {
     private readonly IReadOnlyDictionary<string, AsyncKafkaFuture> _values;
-    private readonly IReadOnlyList<KafkaFutureImpl> _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl> _nativeFutures;
     private readonly SafeAdminResultHandle _native;
 
     private AsyncUpdateFeaturesResult(
         IReadOnlyDictionary<string, AsyncKafkaFuture> values,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -54,17 +54,17 @@ public sealed class AsyncUpdateFeaturesResult
     /// feature failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures));
+    public AsyncKafkaFuture All() => AsyncAdminFutures.Of(FutureState.AllOf(new AsyncKafkaFutureImpl<object?>(), _nativeFutures));
 
     internal static AsyncUpdateFeaturesResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<string, AsyncKafkaFuture> values =
             new Dictionary<string, AsyncKafkaFuture>(native.Values.Count, StringComparer.Ordinal);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
-        foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in native.Values)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<string, IKafkaFutureImpl<object?>> entry in native.Values)
         {
-            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            values.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

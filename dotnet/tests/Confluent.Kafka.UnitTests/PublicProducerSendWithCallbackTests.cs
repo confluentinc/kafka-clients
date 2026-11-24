@@ -64,7 +64,7 @@ public sealed class PublicProducerSendWithCallbackTests
             {
                 foreach (string topic in topics)
                 {
-                    KafkaFuture<RecordMetadata> future = default;
+                    KafkaFuture<RecordMetadata> future = null!;
                     TestTimeout.Run(() => future = producer.Send(Record(topic), callback), s_deadline);
                     failures[topic] = FutureAssert.Unwrapped(Capture(() => future.Get()));
                 }
@@ -186,8 +186,8 @@ public sealed class PublicProducerSendWithCallbackTests
             KafkaProducer<byte[], byte[]> producer = SyncUnreachable(MaxBlockMs);
             try
             {
-                KafkaFuture<RecordMetadata> future = default;
-                KafkaFuture<RecordMetadata> otherFuture = default;
+                KafkaFuture<RecordMetadata> future = null!;
+                KafkaFuture<RecordMetadata> otherFuture = null!;
                 TestTimeout.Run(
                     () =>
                     {
@@ -247,7 +247,7 @@ public sealed class PublicProducerSendWithCallbackTests
             KafkaProducer<byte[], byte[]> producer = SyncUnreachable(MaxBlockMs);
             try
             {
-                KafkaFuture<RecordMetadata> future = default;
+                KafkaFuture<RecordMetadata> future = null!;
                 TestTimeout.Run(() => future = producer.Send(Record(topic), callback), s_deadline);
                 failure = Capture(() => future.Get());
                 await callback.WaitForFirst(s_deadline);
@@ -301,7 +301,7 @@ public sealed class PublicProducerSendWithCallbackTests
         NestedSendCallback outer = new NestedSendCallback(second, Record(prefix + "2"), middle);
         try
         {
-            KafkaFuture<RecordMetadata> future = default;
+            KafkaFuture<RecordMetadata> future = null!;
             TestTimeout.Run(() => future = first.Send(Record(prefix + "1"), outer), s_deadline);
 
             Exception firstOutcome = Capture(() => future.Get());
@@ -414,7 +414,7 @@ public sealed class PublicProducerSendWithCallbackTests
     private sealed class OrderProbe : ICallback
     {
         private readonly ManualResetEventSlim _published = new ManualResetEventSlim();
-        private KafkaFuture<RecordMetadata> _future;
+        private KafkaFuture<RecordMetadata> _future = null!;
 
         internal bool GetReturned;
 

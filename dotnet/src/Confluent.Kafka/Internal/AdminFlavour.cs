@@ -18,7 +18,7 @@ namespace Confluent.Kafka.Internal;
 
 /// <summary>
 /// Which public admin surface a native admin client serves, the sync one or the async one; it names the client's drain
-/// thread.
+/// thread and is the flavor of the futures it makes.
 /// </summary>
 internal enum AdminFlavour
 {

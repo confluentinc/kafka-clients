@@ -74,12 +74,12 @@ public sealed class AsyncDeleteConsumerGroupsResult
     }
 
     internal static AsyncDeleteConsumerGroupsResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> DeletedGroups, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<object?>> DeletedGroups, SafeAdminResultHandle Result) native)
     {
         Dictionary<string, AsyncKafkaFuture> futures = new Dictionary<string, AsyncKafkaFuture>(native.DeletedGroups.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in native.DeletedGroups)
+        foreach (KeyValuePair<string, IKafkaFutureImpl<object?>> entry in native.DeletedGroups)
         {
-            futures.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            futures.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
         }
 
         return new AsyncDeleteConsumerGroupsResult(futures, native.Result);

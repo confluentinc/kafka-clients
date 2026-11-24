@@ -84,6 +84,7 @@ public static class ScramMechanismMethods
             {
                 ScramMechanism.SCRAM_SHA_256 => "SCRAM-SHA-256",
                 ScramMechanism.SCRAM_SHA_512 => "SCRAM-SHA-512",
+                ScramMechanism.UNKNOWN => "UNKNOWN",
                 _ => "UNKNOWN",
             };
 

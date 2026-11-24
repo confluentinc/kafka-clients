@@ -209,7 +209,8 @@ dotnet_diagnostic.CKRDA0001.severity = warning
 #   CKRDA0010  no nint, nuint or UIntPtr in a P/Invoke (§0.1)
 #   CKRDA0011  no Java or Python source-line reference in a comment (CLAUDE.md §4 Comments)
 #   CKRDA0012  no phase or review id in a comment (CLAUDE.md §4 Comments)
-#   CKRDA0015  an <Enum>Methods class's s_values or VALUES lists each member once, in order (CLAUDE.md §3 rule 9)
+#   CKRDA0015  an <Enum>Methods class's s_values or VALUES lists each member once, in order, and its switch
+#              lookups give each member one arm (CLAUDE.md §3 rule 9)
 [*.cs]
 dotnet_diagnostic.CKRDA0002.severity = warning
 dotnet_diagnostic.CKRDA0003.severity = warning

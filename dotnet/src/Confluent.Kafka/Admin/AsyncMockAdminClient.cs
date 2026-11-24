@@ -156,7 +156,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     public AsyncListTopicsResult ListTopics(ListTopicsOptions options)
     {
         var (namesToListings, result) = _native.ListTopics(options ?? new ListTopicsOptions());
-        return new AsyncListTopicsResult(new AsyncKafkaFuture<IReadOnlyDictionary<string, TopicListing>>(namesToListings), result);
+        return new AsyncListTopicsResult(AsyncAdminFutures.Of(namesToListings), result);
     }
 
     /// <inheritdoc/>

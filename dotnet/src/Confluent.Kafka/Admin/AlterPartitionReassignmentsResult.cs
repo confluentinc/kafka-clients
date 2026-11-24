@@ -32,12 +32,12 @@ namespace Confluent.Kafka.Admin;
 public sealed class AlterPartitionReassignmentsResult
 {
     private readonly IReadOnlyDictionary<TopicPartition, KafkaFuture> _values;
-    private readonly IReadOnlyList<KafkaFutureImpl> _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl> _nativeFutures;
     private readonly SafeAdminResultHandle _native;
 
     private AlterPartitionReassignmentsResult(
         IReadOnlyDictionary<TopicPartition, KafkaFuture> values,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -58,16 +58,16 @@ public sealed class AlterPartitionReassignmentsResult
     /// complete if any partition failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch. Its <c>Get()</c> waits for every partition.</returns>
-    public KafkaFuture All() => new KafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures));
+    public KafkaFuture All() => FutureState.AllOf(new KafkaFutureImpl<object?>(), _nativeFutures);
 
     internal static AlterPartitionReassignmentsResult OfClient(
-        (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<TopicPartition, KafkaFuture> values = new Dictionary<TopicPartition, KafkaFuture>(native.Values.Count);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
-        foreach (KeyValuePair<TopicPartition, KafkaFutureImpl<object?>> entry in native.Values)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<TopicPartition, IKafkaFutureImpl<object?>> entry in native.Values)
         {
-            values.Add(entry.Key, new KafkaFuture(entry.Value));
+            values.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

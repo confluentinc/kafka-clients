@@ -81,7 +81,7 @@ public sealed class ListConsumerGroupOffsetsResult
     {
         // Java's map holds no null key, so a null group id was not requested either.
         if (groupId is null ||
-            !_futures.TryGetValue(groupId, out KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future))
+            !_futures.TryGetValue(groupId, out KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>? future))
         {
             throw new IllegalArgumentException(
                 "Offsets for consumer group '" + JavaText.ValueOf(groupId) + "' were not requested.");
@@ -110,7 +110,7 @@ public sealed class ListConsumerGroupOffsetsResult
             Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> offsets = new Dictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> entry in futures)
             {
-                offsets.Add(entry.Key, entry.Value.Impl.GetNow(null!));
+                offsets.Add(entry.Key, ((IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>)entry.Value).GetNowUnwrapped(null!));
             }
 
             return offsets;
@@ -118,12 +118,12 @@ public sealed class ListConsumerGroupOffsetsResult
     }
 
     internal static ListConsumerGroupOffsetsResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> Futures, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> Futures, SafeAdminResultHandle Result) native)
     {
         Dictionary<string, KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures = new Dictionary<string, KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(native.Futures.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> entry in native.Futures)
+        foreach (KeyValuePair<string, IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> entry in native.Futures)
         {
-            futures.Add(entry.Key, new KafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(entry.Value));
+            futures.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
         }
 
         return new ListConsumerGroupOffsetsResult(futures, native.Result);

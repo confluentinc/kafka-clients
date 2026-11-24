@@ -76,24 +76,6 @@ internal static class JavaText
         _ => CollectionText(value, ValueOf) ?? InvariantText(value),
     };
 
-    // Java's String.trim(): every char up to U+0020 removed from both ends.
-    internal static string Trim(string text)
-    {
-        int start = 0;
-        int end = text.Length;
-        while (start < end && text[start] <= ' ')
-        {
-            start++;
-        }
-
-        while (end > start && text[end - 1] <= ' ')
-        {
-            end--;
-        }
-
-        return text.Substring(start, end - start);
-    }
-
     internal static string ToString(Exception exception) =>
         exception is IExceptionText text ? text.TypeAndMessage() : TypeAndMessage(exception, exception.Message);
 

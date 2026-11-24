@@ -38,7 +38,7 @@ internal static class FutureFailure
     {
         // A throw from the callback leaves the send, as it leaves Java's.
         callback?.OnCompletion(Placeholder(topic, partition), error);
-        return new KafkaFuture<RecordMetadata>(Failed(error));
+        return Failed(KafkaFutureImpl<RecordMetadata>.ForSend(), error);
     }
 
     internal static ValueTask<AsyncKafkaFuture<RecordMetadata>> SendAsync(
@@ -55,11 +55,12 @@ internal static class FutureFailure
         if (asyncCallback is null)
         {
             callback?.OnCompletion(placeholder, error);
-            return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(new AsyncKafkaFuture<RecordMetadata>(Failed(error)));
+            return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(
+                Failed(AsyncKafkaFutureImpl<RecordMetadata>.ForSend(), error));
         }
 
         // As on the delivery path, the future fails once the callback's task has ended.
-        KafkaFutureImpl<RecordMetadata> future = KafkaFutureImpl<RecordMetadata>.ForSend();
+        AsyncKafkaFutureImpl<RecordMetadata> future = AsyncKafkaFutureImpl<RecordMetadata>.ForSend();
         PendingCallbacks.Calling? calling = null;
         Task task = pending is null
             ? asyncCallback.OnCompletion(placeholder, error)
@@ -78,7 +79,7 @@ internal static class FutureFailure
             pending?.Add(ended);
         }
 
-        return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(new AsyncKafkaFuture<RecordMetadata>(future));
+        return new ValueTask<AsyncKafkaFuture<RecordMetadata>>(future);
     }
 
     /// <summary>
@@ -124,7 +125,7 @@ internal static class FutureFailure
         // The record's future fails with the callback's frame pushed, so the future's listeners count as inside the
         // callback, as a record future's listeners count as a callback: a close or flush there does not wait for
         // itself. The callback counts as ended only after them.
-        internal void End(Calling calling, Task? task, KafkaFutureImpl<RecordMetadata> future, ApiException error)
+        internal void End(Calling calling, Task? task, IKafkaFutureImpl<RecordMetadata> future, ApiException error)
         {
             Calling? outer = _calling.Value;
             _calling.Value = calling;
@@ -245,16 +246,16 @@ internal static class FutureFailure
     private static RecordMetadata Placeholder(string topic, int? partition) =>
         new RecordMetadata(topic, partition ?? -1, -1L, -1L, -1, -1);
 
-    private static KafkaFutureImpl<RecordMetadata> Failed(ApiException error)
+    private static TFuture Failed<TFuture>(TFuture future, ApiException error)
+        where TFuture : IKafkaFutureImpl<RecordMetadata>
     {
-        KafkaFutureImpl<RecordMetadata> future = KafkaFutureImpl<RecordMetadata>.ForSend();
         future.CompleteWithError(error);
         return future;
     }
 
     private static void EndAsyncCallback(
         Task? task,
-        KafkaFutureImpl<RecordMetadata> future,
+        IKafkaFutureImpl<RecordMetadata> future,
         ApiException error,
         PendingCallbacks? pending,
         PendingCallbacks.Calling? calling)
@@ -269,7 +270,7 @@ internal static class FutureFailure
         }
     }
 
-    private static void EndAsyncCallback(Task? task, KafkaFutureImpl<RecordMetadata> future, ApiException error)
+    private static void EndAsyncCallback(Task? task, IKafkaFutureImpl<RecordMetadata> future, ApiException error)
     {
         try
         {

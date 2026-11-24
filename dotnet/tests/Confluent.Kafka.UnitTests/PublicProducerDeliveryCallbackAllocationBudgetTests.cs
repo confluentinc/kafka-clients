@@ -54,8 +54,9 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
     private const int MeasurementAttempts = 4;
 
     // The absolute per-send budget of the callback overload: the measured 472 B (net8.0, net10.0; the delivery
-    // state, which holds the callback, its KafkaFutureImpl with the field that caches the Get() task, the delivery
-    // task, the record and the record's RecordHeaders) plus 8 B, less than one more object (24 B).
+    // state, which holds the callback, the record's future, an AsyncKafkaFutureImpl with the field that caches the
+    // Get() task, the delivery task, the record and the record's RecordHeaders) plus 8 B, less than one more object
+    // (24 B).
     private const long CallbackFastPathPerSendBudgetBytes = 480;
 
     // More attempts than the paired tests, as an absolute figure has no matched pair to cancel a one-off allocation.
@@ -201,7 +202,7 @@ public sealed class PublicProducerDeliveryCallbackAllocationBudgetTests
             perSend <= CallbackFastPathPerSendBudgetBytes,
             $"Fast-path callback Send per-send caller-thread allocation {perSend} B exceeded the budget " +
             $"{CallbackFastPathPerSendBudgetBytes} B ({bytes} B over {SendCount} sends) — the first stage " +
-            "must stay a struct over the delivery task when a permit is free.");
+            "must allocate nothing of its own, and the record's future must stay one engine object.");
     }
 
     private static async Task Warmup(
