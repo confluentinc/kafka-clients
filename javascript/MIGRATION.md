@@ -11,8 +11,8 @@ KafkaJS. 4.x has one API, shaped like Java's: code written for either API of
 This guide lists what users of 1.x and KafkaJS lose and what replaces it: the
 call sites to rewrite, what is not offered, what is not available yet, and the
 code that keeps running with another meaning. It is not exhaustive. The
-preview, `4.4.0-beta.1`, has the **producer only**: the rows about the
-consumer and the admin client say what comes with them.
+preview, `4.4.0-beta.1`, has the **producer and the admin client**: the rows
+about the consumer say what comes with it.
 
 Two rules explain most rows at once:
 
@@ -129,12 +129,12 @@ producer for them.
 | 1.x / KafkaJS | 4.x | Note |
 |---|---|---|
 | `RecordMetadata[]` from `send()`: `{ topicName, partition, baseOffset, errorCode }` | `RecordMetadata` from `future.get()`: `metadata.topic`, `.partition`, `.offset`, `.hasOffset`, `.timestamp`, `.serializedKeySize`, ... | A **data object**: Java's getters are `readonly` fields, so they read without `()`. **Silent:** `offset` and `timestamp`, Java's `long`, are bigints (`metadata.offset === 0n`), where 1.x's callback API gives numbers and its KafkaJS-style API strings; `JSON.stringify` writes them as decimal strings |
-| other reads | methods, with `()`: `header.key()`, `header.value()`, `future.isDone()`, `SecurityProtocol.SSL.name()` | Only the data objects (`ProducerRecord`, `RecordMetadata`, `TopicPartition`, `Node`; on the consumer side the records) read through fields. Without the `()` a read returns the function itself and raises no error |
+| other reads | methods, with `()`: `header.key()`, `header.value()`, `future.isDone()`, `SecurityProtocol.SSL.name()` | Only the data objects (`ProducerRecord`, `RecordMetadata`, `TopicPartition`, `Node`, `OffsetAndMetadata`, the admin client's seven `*Description` classes; on the consumer side the records) read through fields. Without the `()` a read returns the function itself and raises no error |
 | `err.code`, `err.type`, `err.retriable`, `KafkaJSError` subclasses | Java's classes, `Exception` read as `Error`: `instanceof RetriableError`, `instanceof TopicAuthorizationError`, `err.name` as the fallback | An error has no `code` or `retriable` field; they read `undefined`. The classes follow Java's `extends` chain and are in their packages (`common/errors`, `producer`, ...) |
 | an error's details as fields (KafkaJS's `KafkaJSProtocolError.type`, 1.x's `err.message` parsed for the topics) | Java's payload getters, methods with `()`: `err.unauthorizedTopics()` (a `Set`), `err.recordTooLargePartitions()` (a `TopicPartitionMap<bigint>`, or `null`), `err.invalidTopics()`, `err.groupId()`, `err.throttleTimeMs()` | Each returns a new collection the caller may change. An error is built with them by name: `new TopicAuthorizationError({ unauthorizedTopics: ['t'] })` |
 | a map or set keyed by `'topic:partition'` strings, or by `{ topic, partition }` objects | `TopicPartitionMap` and `TopicPartitionSet` (`common`) | A `Map` compares object keys by identity, so a new `TopicPartition` would miss; these compare by topic and partition and keep the original `TopicPartition`s. Where Java takes a `Map<TopicPartition, V>` only a `TopicPartitionMap` is taken, and a `Map` throws `TypeError` with a hint |
 | a failed `await send()` rejected with the delivery error | `send()` rejects with what Java's `send()` throws (a closed producer, a metadata timeout); `future.get()` rejects with an `ExecutionError` whose `cause` is the delivery error | Only `get()` wraps the failure, as Java's `Future.get()` does; the callback's `exception` and `toCompletionStage()` give the error itself |
-| deep imports: `@confluentinc/kafka-javascript/types/kafkajs`, `.../lib/...` | each package from its own path: `@confluentinc/kafka-javascript/producer`, `/common`, `/common/errors`, `/common/header`, `/common/config`, ... | A deep import fails with Node's `ERR_PACKAGE_PATH_NOT_EXPORTED`. The package root exports only Java's built-in errors and the `Duration` type |
+| deep imports: `@confluentinc/kafka-javascript/types/kafkajs`, `.../lib/...` | each package from its own path: `@confluentinc/kafka-javascript/producer`, `/admin`, `/common`, `/common/errors`, `/common/header`, `/common/config`, `/common/acl`, ... | A deep import fails with Node's `ERR_PACKAGE_PATH_NOT_EXPORTED`. The package root exports only Java's built-in errors and the `Duration` type |
 
 ### Configuration
 
@@ -201,6 +201,62 @@ const value = await serializer.serialize(topic, { fullName: 'John Doe' });
 await (await producer.send(new ProducerRecord({ topic, key: Buffer.from('k'), value }))).get();
 ```
 
+### The admin client
+
+1.x's callback `AdminClient` (`Kafka.AdminClient.create(conf)`), the admin of
+its KafkaJS-style API and KafkaJS's (`kafka.admin()`) become Java's `Admin`
+(`@confluentinc/kafka-javascript/admin`). Three things change at every call
+site:
+
+- **A call returns its Result at once, not a Promise.** Each call is a plain
+  method returning its `*Result` class, which holds a `KafkaFuture` per key
+  (topic, group, partition, resource): `await result.values().get(topic).get()`
+  for one key, `await result.all().get()` for all. A failure rejects `get()`
+  with an `ExecutionError`, the key's own error its `cause`; one key's failure
+  does not fail the others. Only `get()` wraps the failure: `whenComplete`
+  and `toCompletionStage()` give the error itself.
+- **Results and options are classes.** Options are `*Options` classes built
+  with their fields, `new CreateTopicsOptions({ timeoutMs: 5000, validateOnly:
+  true })`, or with Java's setters; the inputs are value classes too
+  (`NewTopic`, `NewPartitions`, `ConfigResource`, `AclBinding`, ...), and a
+  plain object in their place throws, with a hint.
+- **Reads need `()`, except on data objects.** The seven `*Description`
+  classes (`TopicDescription`, `ConsumerGroupDescription`, ...) are data
+  objects, read through fields (`description.name`, `description.partitions`);
+  every other class keeps Java's methods (`listing.name()`,
+  `partitionInfo.leader()`, `config.get('retention.ms')`). Without the `()` a
+  read returns the function and raises no error.
+
+| 1.x / KafkaJS | 4.x | Note |
+|---|---|---|
+| `Kafka.AdminClient.create(conf)`, `kafka.admin()` then `await admin.connect()` | `Admin.create({ 'bootstrap.servers': 'host:9092' })` | Returns a `KafkaAdminClient`, ready at once; Java's keys (`AdminClientConfig`) |
+| `admin.disconnect()` | `await admin.close()`, or `await using admin = Admin.create(...)` (Node.js 24 and later) | `close()` has no time limit, as on the producer; `close(timeout)` sets one. An open admin client keeps Node running: close every one |
+| `createTopic({ topic, num_partitions, replication_factor, config }, timeout, cb)`, `createTopics({ topics: [{ topic, numPartitions, replicationFactor, configEntries }] })` | `createTopics([new NewTopic({ name, numPartitions, replicationFactor }).configs({ 'cleanup.policy': 'compact' })])` | 1.x's KafkaJS-style API and KafkaJS resolve `false` when a topic exists; here that topic's future fails with `TopicExistsError`. `validateOnly` and `timeoutMs` are `CreateTopicsOptions` |
+| `deleteTopic(topic, timeout, cb)`, `deleteTopics({ topics })` | `deleteTopics(['orders'])`, or a `TopicCollection` of names or ids | One future per topic |
+| `createPartitions(topic, total, timeout, cb)`, `createPartitions({ topicPartitions: [{ topic, count }] })` | `createPartitions({ newPartitions: { orders: NewPartitions.increaseTo(6) } })` | A `Map` or a plain object of topic to `NewPartitions`, under its name |
+| `listTopics()` | `await admin.listTopics().names().get()` | A `Set` of names; `listings()` for `TopicListing`s, `new ListTopicsOptions({ listInternal: true })` for the internal ones |
+| `describeTopics(topics, options, cb)`, `fetchTopicMetadata({ topics })` | `admin.describeTopics({ topicNames: ['orders'] })` then `topicNameValues()` | `TopicDescription` fields; each partition a `TopicPartitionInfo` with `partition()`, `leader()`, `replicas()`, `isr()` |
+| `describeCluster()` | `describeCluster()`: `nodes()`, `controller()`, `clusterId()`, each a future | `Node` is a data object (`node.id`, `node.host`) |
+| `listOffsets(partitions, options, cb)`, `fetchTopicOffsets(topic)`, `fetchTopicOffsetsByTimestamp(topic, ts)` | `listOffsets(new TopicPartitionMap([[tp, OffsetSpec.latest()]]))`, `OffsetSpec.earliest()`, `OffsetSpec.forTimestamp(ts)` | Keyed by `TopicPartition` in a `TopicPartitionMap`; each `ListOffsetsResultInfo`'s `offset()` and `timestamp()` are bigints, where 1.x gives numbers or strings |
+| `listGroups(options, cb)`, `listGroups()` | `listGroups()` then `all()` | `GroupListing`s with `groupId()`, `type()`, `groupState()`, `protocol()` |
+| `describeGroups(groups, options, cb)`, `describeGroups(groupIds)` | `describeConsumerGroups(['g'])` (KIP-848 and classic consumer groups), `describeClassicGroups(['g'])` | `ConsumerGroupDescription` fields, members as `MemberDescription`s |
+| `deleteGroups(groups, options, cb)`, `deleteGroups(groupIds)` | `deleteConsumerGroups(['g'])` | One future per group |
+| `listConsumerGroupOffsets(...)`, `fetchOffsets({ groupId, topics })` | `listConsumerGroupOffsets('g')` then `partitionsToOffsetAndMetadata().get()` | A `TopicPartitionMap` of `OffsetAndMetadata`; several groups through `{ groupSpecs }` |
+| `setOffsets({ groupId, topic, partitions })`, `resetOffsets(...)` | `alterConsumerGroupOffsets({ groupId: 'g', offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(42n)]]) })` | Resetting to the earliest or latest offset is `listOffsets` then `alterConsumerGroupOffsets`, as in Java |
+| `deleteRecords(delRecords, options, cb)`, `deleteTopicRecords({ topic, partitions: [{ partition, offset }] })` | `deleteRecords(new TopicPartitionMap([[tp, RecordsToDelete.beforeOffset(42n)]]))` | `lowWatermark()` of each `DeletedRecords` is a bigint |
+| `describeConfigs({ resources: [{ type, name, configNames }] })` | `describeConfigs([new ConfigResource({ type: ConfigResource.Type.TOPIC, name: 'orders' })])` | A `ConfigResourceMap` of futures of `Config`; `config.get(name)` gives a `ConfigEntry` |
+| `alterConfigs({ resources })` | `incrementalAlterConfigs(new ConfigResourceMap([[resource, [new AlterConfigOp({ configEntry, operationType: AlterConfigOp.OpType.SET })]]]))` | Java 4.4's `Admin` has no `alterConfigs`: use `incrementalAlterConfigs`; `ConfigResourceMap` is the only map taken |
+| `createAcls({ acl })`, `describeAcls(filter)`, `deleteAcls({ filters })` | `createAcls([new AclBinding({ pattern, entry })])`, `describeAcls(filter)`, `deleteAcls([filter])` | `ResourcePattern`, `AccessControlEntry` and their filters (`common/resource`, `common/acl`); results keyed by `AclBindingMap` / `AclBindingFilterMap` |
+| a hand-written admin mock | `new MockAdminClient()`, or `MockAdminClient.create()`'s `Builder` | The core's own mock: `addTopic`, `updateEndOffsets`, ... A call Java's mock does not implement fails its futures with `UnsupportedOperationError`, where Java's mock throws |
+
+Maps keyed by value classes are classes of their own *(js-only)*, as
+`TopicPartitionMap` is: `UuidMap`, `TopicPartitionReplicaMap`,
+`ConfigResourceMap`, `AclBindingMap`, `AclBindingFilterMap`,
+`ClientQuotaEntityMap` and the set `MemberToRemoveSet`. Their `keys()` are
+the key objects, and `get()` with an equal new key finds the entry.
+`README.md` ("The admin client") is the reference, and
+`examples/admin/` has one example per call.
+
 ### Calls and arguments
 
 | 1.x / KafkaJS | 4.x | Note |
@@ -229,15 +285,15 @@ await (await producer.send(new ProducerRecord({ topic, key: Buffer.from('k'), va
 | Feature | Comes with |
 |---|---|
 | The consumer: `KafkaConsumer` with `poll()`, `subscribe()`, `assign()`, `commitSync()` and `commitAsync()` | the consumer |
-| The admin client: `Admin.create()`, its RPCs, `*Options` and `*Result` classes | the admin client |
 | Transactions: `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()`, `abortTransaction()` | a later release: left out of the preview |
 | `clientInstanceId()` | the Rust core's C API, which has no entry point for it yet |
+| The admin calls the C API has no entry point for: the Raft voter, metadata quorum, metrics and telemetry calls, `unregisterBroker`, and the share-group and streams-group calls | the Rust core's C API |
 | The built-in serializer factories other than `stringSerializer()` | the serdes |
 | Schema Registry | the release of `@confluentinc/schemaregistry` that supports 4.x |
 | Musl (Alpine), Linux arm64 and Windows packages | later releases; build from source until then |
 
-When the consumer and the admin client come, this guide gains their rows. What
-is decided for them already:
+When the consumer comes, this guide gains its rows. What is decided for it
+already:
 
 - **Listeners must finish, and must await what they start.** A rebalance
   listener (`onPartitionsRevoked`, `onPartitionsAssigned`, `onPartitionsLost`)
@@ -260,10 +316,6 @@ is decided for them already:
   `tp.partition`), not strings.
 - **Every consumer sets `group.protocol: 'consumer'`** (KIP-848) until the
   core changes its default.
-- **The admin results and options are classes** (`new CreateTopicsOptions({
-  timeoutMs: 5000 })`, `result.values()`), each RPC returning its `*Result` at
-  once, with a `KafkaFuture` per key; and **`close()` has no time limit on the
-  admin client either**.
 - **Serdes go in the constructor, or in `key.serializer` / `value.serializer`
   as a function `({ configs, isKey }) => serializer`**, never as a class
   name, and a string key or value needs `stringSerializer()`.
@@ -278,7 +330,9 @@ is decided for them already:
   `instanceof`, and Java's messages word for word.
 - TypeScript declarations of every form: one overload signature per Java form,
   so `tsc` rejects a set of parameters Java has no form for.
-- `await using` closes a producer (`[Symbol.asyncDispose]`).
+- `await using` closes a producer or an admin client (`[Symbol.asyncDispose]`).
+- Java's whole `Admin`, 45 calls, each returning its Result at once with a
+  `KafkaFuture` per key, and Java's `MockAdminClient`, the client's own mock.
 - `Temporal.Duration` timeouts, beside milliseconds.
 - Java's config constants (`ProducerConfig`, `SslConfigs`, `SaslConfigs`,
   `SecurityConfig`) with Java's documentation strings.
@@ -302,12 +356,14 @@ behaves otherwise.
 | `await send()` | resolves on delivery, with the metadata (KafkaJS-style API, KafkaJS) | resolves on acceptance, with a `KafkaFuture` | Code that treats "resolved" as "delivered" loses records silently on a later failure (Read this first) |
 | Keyed record → partition | murmur2 (KafkaJS-style API, KafkaJS); CRC-32 (node-rdkafka style) | CRC-32 | The same key lands on another partition; set `partitioner.type: 'Murmur2RandomPartitioner'` (Read this first) |
 | A `Buffer` key or value changed after `send()` | the bytes at the call are sent: 1.x copies a plain Buffer inside `send()` (`RK_MSG_COPY`) | the client reads the Buffer after `send()` returns, until its Promise settles | A Buffer reused or written to before `send()` settles sends other bytes; await `send()` first, and have a serializer return a new Buffer for each record |
-| 64-bit values (`RecordMetadata.offset`, `.timestamp`) | numbers (callback API) or strings (KafkaJS-style API) | `bigint`s, Java's `long`, exact at every value | `offset === 0` is false for `0n`, and arithmetic mixing a `bigint` and a number throws `TypeError`; `JSON.stringify` writes them as decimal strings |
+| 64-bit values (`RecordMetadata.offset`, `.timestamp`; the admin client's offsets, timestamps, producer ids and sizes) | numbers (callback API) or strings (KafkaJS-style API) | `bigint`s, Java's `long`, exact at every value | `offset === 0` is false for `0n`, and arithmetic mixing a `bigint` and a number throws `TypeError`; `JSON.stringify` writes them as decimal strings |
 | Keyless record → partition | round-robin or random | a sticky partition chosen by load (KIP-794) | Another distribution and batching |
 | A header read back from your own `Headers` before `send()` (`lastHeader`, `headers(key)`, `toArray()`, iteration) | the object you added | a copy of it, made by the client: equal (`equals()`), not the same object, and unchanged when the `Headers` changes later; after `send()` the headers are read-only and a header read from them is a view, with no copy | Compare headers with `equals()`, never `===`; a write to the bytes you gave a `Header` does not change it, as the header copied them |
-| A lone surrogate in a string key, value, header key or config value | written as U+FFFD (`Buffer.from`) | written as `?`, as Java's `String.getBytes(UTF_8)` writes it | Other bytes on the wire for a malformed string; well-formed strings encode the same |
+| A lone surrogate in a string key, value, header key or config value, or a SCRAM password | written as U+FFFD (`Buffer.from`) | written as `?`, as Java's `String.getBytes(UTF_8)` writes it; a topic name and the admin calls' other strings are still written as U+FFFD | Other bytes on the wire for a malformed string; well-formed strings encode the same |
 | `enable.idempotence` unset | off (librdkafka, KafkaJS) | on, as in Java, unless a conflicting setting turns it off | `acks` is `all` and retries keep each partition's order, as Java's producer does by default |
-| `close()` with no timeout | — | waits without a time limit for the records already sent, as Java's `close()` | Shut down with `close(timeout)` when the process must end in time |
+| `close()` with no timeout | — | waits without a time limit, as Java's `close()`: on the producer for the records already sent, on the admin client for the calls in flight | Shut down with `close(timeout)` when the process must end in time |
+| An admin call's result | a Promise of the outcome | its Result, at once, a `KafkaFuture` per key; the future's outcome arrives on a later turn of the event loop, so right after the call `isDone()` is `false` and `getNow()` returns its argument, even on `MockAdminClient` | Await `future.get()`; do not read `isDone()` or `getNow()` right after the call |
+| `createTopics` for a topic that exists | resolves `false` (KafkaJS-style API, KafkaJS) | that topic's future fails with `TopicExistsError` (`get()` rejects with an `ExecutionError` whose `cause` it is) | Catch the error per topic, or check `listTopics()` first |
 | A delivery callback that throws, or whose Promise rejects | — | the producer logs it, as Java's does, and it reaches no caller; the record's future still completes with its delivery result. The exception is the callback a serializer's `ApiError` runs inside `send()`: its throw or rejection rejects `send()`, as Java's `onCompletion` throws out of `send()` there | Report errors from the callback yourself |
 | Inside a callback: `flush()`, `close()`, or awaiting a record's future | — | in a callback the core runs in its drain, before its first `await`, `flush()` is refused and `close()` closes at once as `close({ timeout: 0 })`, as Java's do, failing the records still pending with "Producer is closed forcefully."; after it, or in a callback that waited for its turn behind an earlier callback's Promise, both wait for the callback itself and can hang; the futures of the callback's own record and of the records sent after it complete only once their callbacks ran, so awaiting one there waits for the callback too | Do not wait on the same producer from inside its callback |
 | A callback Promise that never settles | — | has no time limit, as in Java: it holds its record's future, the callbacks of the records after it, `flush()` and `close()`, `close({ timeout })` included | Make every callback settle |

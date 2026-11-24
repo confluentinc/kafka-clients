@@ -199,7 +199,7 @@ test-all-features-sasl-ssl:
 #
 # The `multilanguage_test!` / `multilanguage_consumer_test!` macros expand each
 # case into one test per backend, named `<case>__rust`, `<case>__grpc_python`,
-# `<case>__grpc_python_async`, `<case>__grpc_c` and (producer only)
+# `<case>__grpc_python_async`, `<case>__grpc_c` and (producer and admin only)
 # `<case>__grpc_js`. So a backend is selectable
 # with a plain libtest name filter -- no cargo feature or env var needed.
 #
@@ -270,16 +270,21 @@ test-integration-grpc-dotnet-native-aot:
 # `build-grpc-native-javascript` builds the addon and checks the gRPC packages
 # `npm ci` installs in javascript/node_modules, where the server loads them.
 #
-# The binding is producer-only, so only `multilanguage_test!` has a `__grpc_js`
-# arm (the consumer and admin macros do not), and
-# javascript/grpc-server/grpc_server.js registers ProducerService alone.
+# The binding has a producer and an admin client but no consumer yet, so
+# `multilanguage_test!` and `multilanguage_admin_test!` have a `__grpc_js` arm
+# (the consumer macro does not), and javascript/grpc-server/grpc_server.js
+# registers ProducerService and AdminService (grpc_admin.js), not
+# ConsumerService.
 #
-# THE TRANSACTION TESTS ARE SKIPPED FOR JAVASCRIPT ONLY, because the
-# JavaScript client has no transactions yet. They are defined once, in
+# THE SKIPS BELOW ARE FOR JAVASCRIPT ONLY. They are defined once, in
 # JS_GRPC_SKIPS, and used only by the two targets below, which only ever run
-# __grpc_js, so no other backend loses coverage.
+# __grpc_js, so no other backend loses coverage. They come in blocks, one per
+# reason, each saying why its scenarios cannot pass on this backend (a core or
+# C FFI limit, or a feature the JS binding leaves out by its rules) and the
+# condition for removing it.
 #
-# The JS producer has no transaction surface (initTransactions /
+# Block 1, the producer's transaction tests. The JS producer has no
+# transaction surface (initTransactions /
 # beginTransaction / sendOffsetsToTransaction / commitTransaction /
 # abortTransaction), so grpc-server/grpc_server.js leaves the five transaction
 # RPCs out and they answer gRPC UNIMPLEMENTED (and the bodies that read back

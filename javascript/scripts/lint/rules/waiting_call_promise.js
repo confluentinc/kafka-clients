@@ -30,7 +30,9 @@
 // A use that leads nowhere (no registration, no C definition) is a finding of
 // its own: an unresolved path never passes. A method with no native use is
 // not checked. A member that reaches a future's waits only to complete the
-// dependant it returns (`DEPENDANTS`) need not return a Promise.
+// dependant it returns (`DEPENDANTS`) need not return a Promise, and neither
+// does an admin RPC, which returns its `*Result` at once, as Java's does,
+// after starting the waits of the Result's futures (src/internal/admin_result.ts).
 
 const { applyAllowlist } = require('../c_model');
 const { atNode } = require('../location');
@@ -45,7 +47,41 @@ const { nativeUses, reachedBodies } = require('../native_uses');
  * returns at once, so theirs does. Each with its reason; an entry that
  * matches nothing is a finding.
  */
-const DEPENDANTS = [{ key: 'KafkaFuture.allOf', reason: "allOf's future, completed once every source's wait completed" }];
+const DEPENDANTS = [
+  { key: 'KafkaFuture.allOf', reason: "allOf's future, completed once every source's wait completed" },
+  { key: 'CreatePartitionsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'CreateTopicsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DeleteRecordsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'AbortTransactionResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DescribeProducersResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DescribeTransactionsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'FenceProducersResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DeleteTopicsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DescribeTopicsResult.allTopicNames', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'DescribeTopicsResult.allTopicIds', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'AlterConfigsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DescribeConfigsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  {
+    key: 'DescribeLogDirsResult.allDescriptions',
+    reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values",
+  },
+  { key: 'DescribeReplicaLogDirsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'AlterReplicaLogDirsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'ListOffsetsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'AlterPartitionReassignmentsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DeleteConsumerGroupsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'DescribeClassicGroupsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'DescribeConsumerGroupsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'ListConsumerGroupOffsetsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures, then the map of their values" },
+  { key: 'CreateAclsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  {
+    key: 'DeleteAclsResult.all',
+    reason: "Java's KafkaFuture.allOf over the Result's futures, then the bindings their FilterResults hold",
+  },
+  { key: 'AlterClientQuotasResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'AlterUserScramCredentialsResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+  { key: 'UpdateFeaturesResult.all', reason: "Java's KafkaFuture.allOf over the Result's futures" },
+];
 
 /** The C call graph of native/*.c: function name -> the names it calls. */
 function callGraph(ctx) {
@@ -90,7 +126,13 @@ function analyse(ctx) {
     const registrations = new Map(propertyDescriptors(ctx.read('native/addon.c')).map((r) => [r.name, r]));
     const graph = callGraph(ctx);
     const header = prototypes(ctx.header());
-    const isTwin = (name) => name.endsWith('_cb') && header.has(name) && header.has(name.slice(0, -'_cb'.length));
+    // A `_cb` twin of a blocking function the header declares under its own
+    // name or, having no out_err of its own, as its `_err` twin.
+    const isTwin = (name) => {
+      if (!name.endsWith('_cb') || !header.has(name)) return false;
+      const base = name.slice(0, -'_cb'.length);
+      return header.has(base) || header.has(`${base}_err`);
+    };
     const out = [];
     for (const item of exportedItems(ctx)) {
       if (item.kind !== 'class') continue;
@@ -166,14 +208,17 @@ module.exports = {
       const at = atNode(ctx, w.m.node);
       for (const message of unresolved) raw.push({ at, kind: 'unresolved-native', subject, message });
       if (unresolved.length > 0) continue;
-      if (twins.size > 0 && !promise) {
+      const futureWaitsOnly = [...twins].every((t) => /^kafka_common_KafkaFuture_get(_with_timeout)?_cb$/.test(t));
+      // An admin RPC: its Result's futures wait, the call does not.
+      const resultMaker = futureWaitsOnly && returned.symbol !== undefined && /Result$/.test(returned.symbol.name);
+      if (twins.size > 0 && !promise && !resultMaker) {
         raw.push({
           at,
           kind: 'not-promise',
           subject,
           message: `reaches ${[...twins].sort().join(', ')} but returns ${checker.typeToString(returned)}`,
           // Only a dependant that reaches nothing but a future's waits.
-          allow: [...twins].every((t) => /^kafka_common_KafkaFuture_get(_with_timeout)?_cb$/.test(t)) ? subject : undefined,
+          allow: futureWaitsOnly ? subject : undefined,
         });
       } else if (twins.size === 0 && promise) {
         raw.push({

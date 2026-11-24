@@ -55,7 +55,7 @@ const {
   functionType,
 } = require('../java_ts');
 const { taggedMember } = require('./java_members');
-const { LEFT_OUT, MERGED_FORMS, liveForms, formOptionNames, formKey } = require('./overload_shape');
+const { LEFT_OUT, MERGED_FORMS, RENAMED_PARAMS, liveForms, formOptionNames, formKey } = require('./overload_shape');
 
 /** The block tags whose text counts whatever Java has: Rust's notes and the sections of no tag. */
 const COUNTED_TAGS = new Set(['remarks', 'see', 'example']);
@@ -220,7 +220,7 @@ function joined(sizes, more) {
 
 /** The Java forms (overloads) signature `sig` of member `jm` translates, by the overload-shape mapping, else all. */
 function signatureForms(ts, checker, sig, jm) {
-  let forms = liveForms(jm.overloads).filter((f) => !LEFT_OUT.has(`${jm.owner.fqn}#${formKey(f)}`));
+  let forms = liveForms(jm.overloads, `${jm.owner.fqn}#${jm.name}`).filter((f) => !LEFT_OUT.has(`${jm.owner.fqn}#${formKey(f)}`));
   if (MERGED_FORMS.has(`${jm.owner.fqn}#${jm.name}`) && forms.length > 0) {
     forms = [forms.reduce((a, f) => (f.params.length > a.params.length ? f : a))];
   }
@@ -258,10 +258,17 @@ function optionsParams(ts, checker, sig) {
   return isOptions ? new Set([ps[0].name.text]) : new Set();
 }
 
-/** The Javadoc sizes of the Java members `jm` names: a field's, or each overload's. */
+/**
+ * The Javadoc sizes of the Java members `jm` names: a field's, or each
+ * overload's, its `@param` names renamed as the conventions rename the
+ * parameters (overload_shape.js `RENAMED_PARAMS`).
+ */
 function sizesOfMember(jm, overloads) {
   if (jm.kind === 'field') return jm.field.javadoc || [];
-  return (overloads || jm.overloads).flatMap((o) => o.javadoc || []);
+  const renamed = RENAMED_PARAMS.get(`${jm.owner.fqn}#${jm.name}`);
+  const sizes = (overloads || jm.overloads).flatMap((o) => o.javadoc || []);
+  if (renamed === undefined) return sizes;
+  return sizes.map((s) => ({ ...s, params: s.params.map(([n, w]) => [renamed.names.get(n) || n, w]) }));
 }
 
 module.exports = {

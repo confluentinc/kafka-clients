@@ -60,6 +60,13 @@ const TEST_ONLY = new Map([
     },
   ],
   [
+    'adminStats',
+    {
+      test: 'test/unit/admin/kafka_admin_client.test.js',
+      reason: "a test-only registration: the counts of native/admin.c, which prove every admin handle's, result's and future's lifetime",
+    },
+  ],
+  [
     'producerStats',
     {
       test: 'test/memory/native_counts.test.js',

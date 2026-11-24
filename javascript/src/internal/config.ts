@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// A producer's configuration object -> the `[key, value]` strings the C FFI's
+// A client's configuration object -> the `[key, value]` strings the C FFI's
 // kafka_Map_t carries (private). The binding has no `ConfigDef` table and
 // checks no value (javascript/CLAUDE.md, JavaScript Binding Conventions,
 // Configuration): the core checks types, ranges, enums, unknown keys and
@@ -191,6 +191,26 @@ export function configEntries(configs: unknown, leftOut: ReadonlySet<string> = N
     if (value === null || value === undefined || isSerializerKey(key)) continue;
     if (leftOut.has(key) && !isProducerConfigKey(key)) continue;
     // Encoded once per client, as Java encodes a string (src/internal/encode.ts).
+    out.push([encodeLikeJava(key), encodeLikeJava(configValue(value))]);
+  }
+  return out;
+}
+
+/**
+ * The `[key, value]` byte pairs of an admin client's `configs`, checked as
+ * `checkConfigs` checks them, each value written as a string; `null` and
+ * `undefined` values are dropped, as an absent key. The admin client has no
+ * serde keys, so every other key reaches the core.
+ *
+ * @param configs - the configuration given
+ * @returns the keys and values to send, encoded
+ */
+export function adminConfigEntries(configs: unknown): Array<[Buffer, Buffer]> {
+  const checked = checkConfigs(configs);
+  const out: Array<[Buffer, Buffer]> = [];
+  for (const key of Object.keys(checked)) {
+    const value = checked[key];
+    if (value === null || value === undefined) continue;
     out.push([encodeLikeJava(key), encodeLikeJava(configValue(value))]);
   }
   return out;

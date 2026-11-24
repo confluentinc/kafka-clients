@@ -8,8 +8,9 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 
 # Multi-stage Docker build for the JavaScript (Node.js) gRPC server image used
-# by the multilanguage integration test harness (the `__grpc_js` producer arm;
-# see javascript/grpc-server/grpc_server.js and rust/tests/common/backend_pool.rs).
+# by the multilanguage integration test harness (the `__grpc_js` producer and
+# admin arms, served as ProducerService and AdminService; see
+# javascript/grpc-server/grpc_server.js and rust/tests/common/backend_pool.rs).
 #
 # Build context MUST be the repo root because we copy from rust/target/,
 # rust/multilanguage-test-server/ and javascript/. The Makefile target sets this
