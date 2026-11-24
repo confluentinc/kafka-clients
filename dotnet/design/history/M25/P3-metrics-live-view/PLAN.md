@@ -1,7 +1,7 @@
 # Plan: live `Metrics()` and a complete `KafkaMetric`
 
-Status: **decisions A1–A3 approved; the three commits are implemented, the Critic review is pending.** One phase,
-three commits, one Critic review after the third commit.
+Status: **done.** Decisions A1–A3 approved. One phase: three commits and one review fixup, one Critic
+review after the third commit (clean after the fixup), and the close gate passed.
 
 ## 1. Goal
 
