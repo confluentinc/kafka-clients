@@ -413,7 +413,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerSeekWithOffset(_handle, arguments.TopicPartition(topic, number), offset, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
     }
 
@@ -445,7 +445,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 arguments.OffsetAndMetadata(
                     offsetAndMetadata.Offset(), offsetAndMetadata.LeaderEpoch() ?? -1, offsetAndMetadata.Metadata()),
                 ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
     }
 
@@ -468,7 +468,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr outErr = IntPtr.Zero;
             sbyte present = NativeMethods.ConsumerCurrentLag(
                 _handle, arguments.TopicPartition(topic, number), out long lag, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return present != 0 ? lag : null;
         },
         UseKind.UnownedOnMock);
@@ -486,7 +486,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerCommitAsync(_handle, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
     }
 
@@ -568,7 +568,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             ParkCommitCallback(registration);
         }
 
-        KafkaException.ThrowIfFfiFailed(ref outErr);
+        ThrowIfWaitingCallFailed(ref outErr);
     }
 
     internal ConsumerCallbackReporter.HandleCommitScope EnterHandleCommit() => _reporter.EnterHandleCommit();
@@ -622,7 +622,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             IntPtr polled = NativeMethods.ConsumerPoll(_handle, timeoutMs, ref outErr);
-            ThrowIfListenerCallFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             HoldRecords();
             return polled;
         });
@@ -694,7 +694,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                         arguments.TopicPartition(position.Key.Topic(), position.Key.Partition()),
                         position.Value,
                         ref outErr);
-                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    ThrowIfWaitingCallFailed(ref outErr);
                 }
                 catch (Exception exception)
                 {
@@ -729,7 +729,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerSubscribeWithTopics(_handle, arguments.StringList(topicArray), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             SettleListener(null, subscribed: true, Unsubscribes(topicArray));
         });
     }
@@ -753,7 +753,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerSubscribeWithPattern(_handle, arguments.SubscriptionPattern(patternText), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             SettleListener(null, subscribed: true, notRegistered: false);
         });
     }
@@ -793,7 +793,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                     called = true;
                     subscribed = outErr == IntPtr.Zero;
                     notRegistered |= KafkaException.RefusedBeforeRegistering(outErr);
-                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    ThrowIfWaitingCallFailed(ref outErr);
                 }
                 finally
                 {
@@ -1029,7 +1029,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             NativeMethods.ConsumerUnsubscribe(_handle, ref outErr);
-            ThrowIfListenerCallFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
     }
 
@@ -1498,7 +1498,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             long position = timeoutMs is long ms
                 ? NativeMethods.ConsumerPositionWithTimeout(_handle, topicPartition, ms, ref outErr)
                 : NativeMethods.ConsumerPosition(_handle, topicPartition, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return position;
         });
 
@@ -1515,7 +1515,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 NativeMethods.ConsumerCommitSync(_handle, ref outErr);
             }
 
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
 
     private void CommitSyncOffsets(OffsetsSnapshot snapshot, long? timeoutMs) =>
@@ -1532,7 +1532,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 NativeMethods.ConsumerCommitSyncWithOffsets(_handle, offsets, ref outErr);
             }
 
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
 
     private IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?> Committed(
@@ -1544,7 +1544,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr map = timeoutMs is long ms
                 ? NativeMethods.ConsumerCommittedWithTimeout(_handle, partitions, ms, ref outErr)
                 : NativeMethods.ConsumerCommitted(_handle, partitions, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return CopyCommitted(map, snapshot);
         });
 
@@ -1574,7 +1574,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                     : NativeMethods.ConsumerEndOffsets(_handle, partitions, ref outErr);
             }
 
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return LongOffsetMapMarshal.CopyOutAndDestroy(map);
         });
 
@@ -1587,7 +1587,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr map = timeoutMs is long ms
                 ? NativeMethods.ConsumerOffsetsForTimesWithTimeout(_handle, timestamps, ms, ref outErr)
                 : NativeMethods.ConsumerOffsetsForTimes(_handle, timestamps, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return CopyOffsetsForTimes(map, snapshot);
         });
 
@@ -1603,7 +1603,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr list = timeoutMs is long ms
                 ? NativeMethods.ConsumerPartitionsForWithTimeout(_handle, topicPointer, ms, ref outErr)
                 : NativeMethods.ConsumerPartitionsFor(_handle, topicPointer, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return PartitionInfoListMarshal.CopyOutAndDestroy(list);
         });
 
@@ -1614,7 +1614,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             IntPtr map = timeoutMs is long ms
                 ? NativeMethods.ConsumerListTopicsWithTimeout(_handle, ms, ref outErr)
                 : NativeMethods.ConsumerListTopics(_handle, ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
             return TopicPartitionInfoMapMarshal.CopyOutAndDestroy(map);
         });
 
@@ -1640,7 +1640,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         {
             IntPtr outErr = IntPtr.Zero;
             call(_handle, arguments.TopicPartitionList(snapshot), ref outErr);
-            KafkaException.ThrowIfFfiFailed(ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
         });
     }
 
@@ -3284,20 +3284,21 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    private static void ThrowIfListenerCallFailed(ref IntPtr outErr)
+    internal static void ThrowIfWaitingCallFailed(ref IntPtr outErr)
     {
         IntPtr error = outErr;
         outErr = IntPtr.Zero;
         if (error != IntPtr.Zero)
         {
-            ExceptionDispatchInfo.Capture(ListenerCallException(error)).Throw();
+            ExceptionDispatchInfo.Capture(WaitingCallException(error)).Throw();
         }
     }
 
-    // Poll and Unsubscribe run the rebalance listener, whose exception the core wraps in "User rebalance callback
-    // throws an error". Java's maybeWrapAsKafkaException leaves a KafkaException unwrapped, so a KafkaException a
-    // callback threw, carried in the error's cause chain, is thrown as the same instance. Close keeps the wrapper.
-    private static Exception ListenerCallException(IntPtr error)
+    // A waiting call's error, read as Python's binding reads it: a KafkaException a callback threw, carried in the
+    // error's cause chain, is thrown as the same instance, as Java's maybeWrapAsKafkaException leaves it unwrapped where
+    // the core wraps a listener's in "User rebalance callback throws an error" (Poll, Unsubscribe, and Subscribe or
+    // Assign with an empty collection, which unsubscribe). Close keeps its own wrap.
+    internal static Exception WaitingCallException(IntPtr error)
     {
         Exception? carried;
         try

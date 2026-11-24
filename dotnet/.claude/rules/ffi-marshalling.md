@@ -2282,11 +2282,13 @@ ignored), and never after the consumer's destroy has returned (BH:29168-29209 at
     `local_callback` error carrying it (`kafka_common_Error_local_callback_err`, `opaque`
     a `GCHandle` over the exception, `release` a no-throw delegate that frees that
     `GCHandle`; ledger 12) and pass it to `Consumer__set_callback_result`. The core takes
-    it over, and it propagates out of the consumer call that ran the listener: `Poll` and
-    `Unsubscribe` throw a `KafkaException` as the same instance and wrap any other in
+    it over, and it propagates out of the consumer call that ran the listener: `Poll`,
+    `Unsubscribe`, and a `Subscribe` or `Assign` given an empty collection, which unsubscribes,
+    throw a `KafkaException` as the same instance and wrap any other in
     `KafkaException("User rebalance callback throws an error")`, as Java's
     `maybeWrapAsKafkaException` does; `Close` wraps it in
-    `KafkaException("Failed to close kafka consumer")`.
+    `KafkaException("Failed to close kafka consumer")`. Every waiting call but `Close` reads
+    its error this way (`NativeConsumer.WaitingCallException`), as Python's binding does.
   - **The partitions are borrowed** for the call: copy them out; never destroy them.
   - **Report exactly once per call**, on every path, including a method that throws
     before it returns a `Task` (the async listener, §B1). The async listener reports from

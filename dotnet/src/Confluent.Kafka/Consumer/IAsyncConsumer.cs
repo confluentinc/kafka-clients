@@ -38,8 +38,8 @@ namespace Confluent.Kafka.Consumer;
 /// </para>
 /// <para>
 /// Rebalance listeners and commit callbacks run on the consumer's drain thread,
-/// <c>confluent-kafka-consumer-pump</c>; listeners run only while <c>Poll</c>, <c>Unsubscribe</c> or
-/// <c>Close</c> runs. What a callback may call on its own consumer is in
+/// <c>confluent-kafka-consumer-pump</c>; listeners run only while <c>Poll</c>, <c>Unsubscribe</c>, a
+/// <c>Subscribe</c> or <c>Assign</c> given an empty collection, which unsubscribes, or <c>Close</c> runs. What a callback may call on its own consumer is in
 /// <see cref="IConsumerRebalanceListener"/>. Inside a callback a call routed to the consumer's own handle runs to its
 /// end before its <see cref="Task"/> is returned: its cancellation token is checked only before it starts, and no
 /// <c>wakeup()</c> is sent.

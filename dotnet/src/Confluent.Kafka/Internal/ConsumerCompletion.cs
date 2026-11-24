@@ -112,7 +112,7 @@ internal sealed class ConsumerCompletion<T> : ConsumerCompletion
     {
         _convert = convert;
         _settle = settle;
-        _exceptionOf = exceptionOf ?? (error => KafkaException.FromFfiError(error, owned: true)!);
+        _exceptionOf = exceptionOf ?? NativeConsumer.WaitingCallException;
     }
 
     internal Task<T> Result => _result.Task;

@@ -29,7 +29,8 @@ using Xunit.Abstractions;
 namespace Confluent.Kafka.IntegrationTests;
 
 /// <summary>
-/// The exception a rebalance listener throws, against a broker: <c>Poll</c> and <c>Unsubscribe</c> throw a
+/// The exception a rebalance listener throws, against a broker: <c>Poll</c>, <c>Unsubscribe</c>, and a
+/// <c>Subscribe</c> or <c>Assign</c> given an empty collection, which unsubscribes, throw a
 /// <see cref="KafkaException"/> as the same instance and wrap any other exception in
 /// <c>KafkaException("User rebalance callback throws an error")</c>, while <c>Close</c> wraps both in
 /// <c>KafkaException("Failed to close kafka consumer")</c>.
@@ -166,6 +167,30 @@ public sealed class RebalanceListenerExceptionBrokerTests
     }
 
     [SkippableFact]
+    public Task SubscribeToNoTopics_ThrowsAListenersKafkaExceptionAsTheSameInstance() =>
+        AssertAnUnsubscribingCallThrowsTheListenersExceptionAsync(consumer => consumer.Subscribe(Array.Empty<string>()));
+
+    [SkippableFact]
+    public Task SubscribeToNoTopicsWithAListener_ThrowsTheCurrentListenersKafkaExceptionAsTheSameInstance() =>
+        AssertAnUnsubscribingCallThrowsTheListenersExceptionAsync(
+            consumer => consumer.Subscribe(Array.Empty<string>(), new RaisingListener()));
+
+    [SkippableFact]
+    public Task AssignNoPartitions_ThrowsAListenersKafkaExceptionAsTheSameInstance() =>
+        AssertAnUnsubscribingCallThrowsTheListenersExceptionAsync(
+            consumer => consumer.Assign(Array.Empty<TopicPartition>()));
+
+    [SkippableFact]
+    public Task AsyncSubscribeToNoTopics_ThrowsAListenersKafkaExceptionAsTheSameInstance() =>
+        AssertAnAsyncUnsubscribingCallThrowsTheListenersExceptionAsync(
+            consumer => consumer.Subscribe(Array.Empty<string>()));
+
+    [SkippableFact]
+    public Task AsyncAssignNoPartitions_ThrowsAListenersKafkaExceptionAsTheSameInstance() =>
+        AssertAnAsyncUnsubscribingCallThrowsTheListenersExceptionAsync(
+            consumer => consumer.Assign(Array.Empty<TopicPartition>()));
+
+    [SkippableFact]
     public async Task Close_WrapsAListenersKafkaException()
     {
         string topic = await NewTopicAsync();
@@ -208,6 +233,51 @@ public sealed class RebalanceListenerExceptionBrokerTests
         {
             Assert.True(elapsed.Elapsed < s_deadline, "the consumer never got its assignment");
             _ = consumer.Poll(s_poll);
+        }
+    }
+
+    private async Task AssertAnUnsubscribingCallThrowsTheListenersExceptionAsync(
+        Action<KafkaConsumer<byte[], byte[]>> unsubscribe)
+    {
+        string topic = await NewTopicAsync();
+        MyCommitFailedException raised = new MyCommitFailedException("revoke boom");
+        using KafkaConsumer<byte[], byte[]> consumer = NewConsumer();
+        try
+        {
+            consumer.Subscribe(new[] { topic }, new RaisingListener(onRevoked: raised));
+            PollUntilAssigned(consumer);
+
+            Assert.Same(raised, Record.Exception(() => unsubscribe(consumer)));
+        }
+        finally
+        {
+            consumer.Close(CloseOptions.Timeout(TimeSpan.Zero));
+        }
+    }
+
+    private async Task AssertAnAsyncUnsubscribingCallThrowsTheListenersExceptionAsync(
+        Func<AsyncKafkaConsumer<byte[], byte[]>, Task> unsubscribe)
+    {
+        string topic = await NewTopicAsync();
+        MyCommitFailedException raised = new MyCommitFailedException("revoke boom");
+        AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(
+            Configs(), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        try
+        {
+            await consumer.Subscribe(new[] { topic }, new RaisingListener(onRevoked: raised));
+            Stopwatch elapsed = Stopwatch.StartNew();
+            while (consumer.Assignment().Count == 0)
+            {
+                Assert.True(elapsed.Elapsed < s_deadline, "the consumer never got its assignment");
+                _ = await consumer.Poll(s_poll);
+            }
+
+            Assert.Same(raised, await Record.ExceptionAsync(() => unsubscribe(consumer)));
+        }
+        finally
+        {
+            await consumer.Close(CloseOptions.Timeout(TimeSpan.Zero));
+            await consumer.DisposeAsync();
         }
     }
 
