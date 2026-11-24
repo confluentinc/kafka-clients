@@ -20,7 +20,8 @@ namespace Confluent.Kafka.Internal.Interop;
 /// The owned <c>kafka_common_metrics_MetricsView_t</c> a client takes at construction and every map its
 /// <c>Metrics()</c> returns reads: a live view that reads the client's metric registry at each call. It takes no
 /// reference on the client and stays valid after the client is destroyed. It is destroyed once, when the handle is
-/// released by the finalizer, after the client and every map over it are unreachable.
+/// released by the finalizer, after the client, every map over it and every <c>Keys</c> or <c>Values</c> of one are
+/// unreachable.
 /// </summary>
 internal sealed class SafeMetricsViewHandle : SafeHandleZeroIsInvalid
 {

@@ -409,6 +409,56 @@ public sealed class PublicKafkaMetricMembersTests
         Assert.Equal(new ArgumentException(MetricConfigMarshal.InvalidTagMessage, "config").Message, e.Message);
     }
 
+    [Fact]
+    public void Config_ATagWithAnUnpairedSurrogate_ThrowsArgumentException_AndKeepsTheConfiguration()
+    {
+        // The core would give the surrogate back as '?', where Java's metric keeps the string. The cases are built in
+        // code, as an attribute cannot carry an unpaired surrogate.
+        KafkaProducer<byte[], byte[]> producer = Producer();
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+        KafkaMetric metric = Find(producer.Metrics(), FlushTime, "producer-metrics");
+        int samples = metric.Config()!.Samples();
+        KafkaMetric quotaErrorsMetric = QuotaErrorsMetric();
+        (string Key, string Value)[] tags =
+        {
+            ("k\uD800", "v"),
+            ("\uDC00k", "v"),
+            ("k", "v\uD83D"),
+            ("k", "\uDE00\uD83Dv"),
+        };
+
+        foreach ((string key, string value) in tags)
+        {
+            MetricConfig config = new MetricConfig()
+                .Samples(samples + 1)
+                .Tags(new Dictionary<string, string> { [key] = value });
+
+            AssertUnpairedSurrogate(() => metric.Config(config));
+            AssertUnpairedSurrogate(() => metric.Measurable().Measure(config, 0));
+            AssertUnpairedSurrogate(() => quotaErrorsMetric.Config(config));
+        }
+
+        Assert.Equal(samples, metric.Config()!.Samples());
+        Assert.Null(quotaErrorsMetric.Config());
+    }
+
+    [Fact]
+    public void Config_ATagWithAValidSurrogatePair_CrossesUnchanged()
+    {
+        const string pair = "\uD83D\uDE00";
+        KafkaProducer<byte[], byte[]> producer = Producer();
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+        KafkaMetric metric = Find(producer.Metrics(), FlushTime, "producer-metrics");
+        Dictionary<string, string> tags = new Dictionary<string, string> { ["k" + pair] = pair + "v", [pair] = pair };
+        MetricConfig config = new MetricConfig().Tags(tags);
+
+        metric.Config(config);
+        double measured = metric.Measurable().Measure(config, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+
+        AssertTags(tags, metric.Config()!.Tags());
+        Assert.True(measured >= 0.0, "flush-time-ns-total measured below 0");
+    }
+
     [Theory]
     [InlineData(3)]
     [InlineData(-1)]
@@ -537,6 +587,14 @@ public sealed class PublicKafkaMetricMembersTests
         Assert.Equal(
             expected.OrderBy(tag => tag.Key, StringComparer.Ordinal),
             actual!.OrderBy(tag => tag.Key, StringComparer.Ordinal));
+    }
+
+    private static void AssertUnpairedSurrogate(Action call)
+    {
+        ArgumentException e = Assert.Throws<ArgumentException>(call);
+        Assert.Equal("config", e.ParamName);
+        Assert.Equal(
+            new ArgumentException(MetricConfigMarshal.UnpairedSurrogateTagMessage, "config").Message, e.Message);
     }
 
     private static void AssertNullArgument(string message, string parameterName, Action call)

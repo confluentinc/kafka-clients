@@ -24,10 +24,19 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// <see cref="Sensor.RecordingLevel"/> and Java's methods on it in <see cref="RecordingLevelMethods"/>: Java's
 /// <c>SensorTest.testRecordLevelEnum</c>, translated, and the messages of <c>forId</c>, <c>forName</c> and
-/// <c>shouldRecord</c>. Java's <c>SensorTest.testUpdatingMetricConfigIsReflectedInTheSensor</c> is not translated:
-/// it builds a <c>Metrics</c> registry and a sensor and records through them, and the binding hands out neither; a
-/// configuration set on a client's metric is read back in <c>PublicKafkaMetricMembersTests</c>.
+/// <c>shouldRecord</c>.
 /// </summary>
+/// <remarks>
+/// Not translated: Java's other <c>SensorTest</c> tests, <c>testShouldRecordForInfoLevelSensor</c>,
+/// <c>testShouldRecordForDebugLevelSensor</c>, <c>testShouldRecordForTraceLevelSensor</c>,
+/// <c>testExpiredSensor</c>, <c>testIdempotentAdd</c>, <c>testCheckQuotasInMultiThreads</c>,
+/// <c>shouldReturnPresenceOfMetrics</c>, <c>testStrictQuotaEnforcementWithRate</c>,
+/// <c>testStrictQuotaEnforcementWithTokenBucket</c>, <c>testRecordAndCheckQuotaUseMetricConfigOfEachStat</c> and
+/// <c>testUpdatingMetricConfigIsReflectedInTheSensor</c>: they build a <c>Metrics</c> registry and a sensor and record
+/// through them, and the binding hands out neither (the registry is the native client's). A configuration set on a
+/// client's metric is read back in <see cref="PublicKafkaMetricMembersTests"/>, and the recording level of a client's
+/// metrics in <see cref="PublicConsumerMetricsTests"/> and <see cref="PublicProducerMetricsTests"/>.
+/// </remarks>
 public sealed class PublicSensorRecordingLevelTests
 {
     [Fact]

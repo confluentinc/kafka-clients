@@ -32,6 +32,29 @@ internal static class Utf8Marshal
 
     internal static PinnedUtf8String Pin(string value) => new PinnedUtf8String(value);
 
+    /// <summary>
+    /// Whether <paramref name="value"/> holds a UTF-16 surrogate that is not half of a pair, which
+    /// <see cref="QuestionMarkUtf8"/> writes as <c>'?'</c>, so the string does not cross the C ABI unchanged. A valid
+    /// pair does.
+    /// </summary>
+    internal static bool HasUnpairedSurrogate(string value)
+    {
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            if (char.IsHighSurrogate(c) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]))
+            {
+                i++;
+            }
+            else if (char.IsSurrogate(c))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     internal static unsafe string? PtrToString(IntPtr ptr)
     {
         if (ptr == IntPtr.Zero)

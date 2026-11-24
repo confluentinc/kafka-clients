@@ -32,6 +32,10 @@ internal static class MetricConfigMarshal
     internal const string InvalidTagMessage =
         "A metric tag must not contain a NUL character: such a string cannot be passed to the native client unchanged.";
 
+    internal const string UnpairedSurrogateTagMessage =
+        "A metric tag must not contain an unpaired surrogate: such a string cannot be passed to the native client " +
+        "unchanged.";
+
     /// <summary>
     /// Checks, before anything native is built, what <see cref="ToNative"/> cannot convert: a <see langword="null"/>
     /// config and a recording level no member has. The tags are checked as <see cref="ToNative"/> reads them, so a map
@@ -50,8 +54,9 @@ internal static class MetricConfigMarshal
     /// <summary>
     /// An owned native config holding <paramref name="config"/>'s values, which <see cref="Validate"/> accepted. A
     /// <see langword="null"/> quota or tags map is not set, so the native config keeps none. A tag with a
-    /// <see langword="null"/> key or value throws <see cref="ArgumentNullException"/>, and one with a NUL
-    /// <see cref="ArgumentException"/>, both naming <paramref name="parameterName"/>.
+    /// <see langword="null"/> key or value throws <see cref="ArgumentNullException"/>, and one with a NUL or an
+    /// unpaired surrogate <see cref="ArgumentException"/>, both naming <paramref name="parameterName"/>: the core would
+    /// give an unpaired surrogate back as <c>'?'</c>, where Java's config keeps the string.
     /// </summary>
     internal static IntPtr ToNative(MetricConfig config, string parameterName)
     {
@@ -219,6 +224,10 @@ internal static class MetricConfigMarshal
 
         AdminStrings.Validate(tag.Key, InvalidTagMessage, parameterName);
         AdminStrings.Validate(tag.Value, InvalidTagMessage, parameterName);
+        if (Utf8Marshal.HasUnpairedSurrogate(tag.Key) || Utf8Marshal.HasUnpairedSurrogate(tag.Value))
+        {
+            throw new ArgumentException(UnpairedSurrogateTagMessage, parameterName);
+        }
     }
 
     // The tags in the core's key order, which a Dictionary keeps while nothing is removed from it.
