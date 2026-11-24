@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 
 import { ExecutionError } from '@confluentinc/kafka-javascript';
 import { KafkaProducer, ProducerRecord } from '@confluentinc/kafka-javascript/producer';
-import { Header } from '@confluentinc/kafka-javascript/common/header';
+import { RecordHeader } from '@confluentinc/kafka-javascript/common/header';
 import * as producerNamespace from '@confluentinc/kafka-javascript/producer';
 
 const MAIN = '@confluentinc/kafka-javascript';
@@ -119,7 +119,7 @@ async function main() {
     partition: null,
     key: Buffer.from('k'),
     value: Buffer.from('v'),
-    headers: [new Header({ key: 'h', value: Buffer.from('1') })],
+    headers: [new RecordHeader({ key: 'h', value: Buffer.from('1') }), ['n', null]],
   });
   const producer = new KafkaProducer({
     configs: {

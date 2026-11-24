@@ -25,8 +25,10 @@
 const assert = require('node:assert/strict');
 
 const { IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
-const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
+const { Headers, RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const { internalHeaders } = require('../../../_internal');
+
+/** @typedef {import('@confluentinc/kafka-javascript/common/header').Header} Header */
 
 /** @param {string} s */
 const bytes = (s) => Buffer.from(s, 'utf8');
@@ -34,7 +36,7 @@ const bytes = (s) => Buffer.from(s, 'utf8');
  * @param {string} key
  * @param {string} value
  */
-const header = (key, value) => new Header({ key, value: bytes(value) });
+const header = (key, value) => new RecordHeader({ key, value: bytes(value) });
 
 /** @param {Headers} headers */
 function getCount(headers) {
@@ -44,13 +46,20 @@ function getCount(headers) {
 /**
  * @param {string} key
  * @param {string} value
- * @param {unknown} actual
+ * @param {Header | null | undefined} actual
  */
 function assertHeader(key, value, actual) {
-  assert.ok(actual instanceof Header);
+  assert.ok(actual);
   assert.equal(actual.key(), key);
   assert.deepEqual(actual.value(), bytes(value));
 }
+
+/** @param {unknown} e */
+const closed = (e) => {
+  assert.ok(e instanceof IllegalStateError);
+  assert.equal(e.message, 'RecordHeaders has been closed.');
+  return true;
+};
 
 test('testAdd', () => {
   const headers = new Headers();
@@ -141,19 +150,13 @@ test('testLastHeader', () => {
 test('testReadOnly', () => {
   const headers = new Headers();
   headers.add(header('key', 'value'));
-  const before = headers[Symbol.iterator]();
-  internalHeaders(headers).internalSetReadOnly();
-  /** @param {unknown} e */
-  const closed = (e) => {
-    assert.ok(e instanceof IllegalStateError);
-    assert.equal(e.message, 'RecordHeaders has been closed.');
-    return true;
-  };
+  const headerIteratorBeforeClose = headers[Symbol.iterator]();
+  internalHeaders(headers).setReadOnly();
   assert.throws(() => headers.add(header('key', 'value')), closed);
   assert.throws(() => headers.add({ key: 'key', value: null }), closed);
   assert.throws(() => headers.remove('key'), closed);
   // Reading still works, through an iterator made before or after.
-  assertHeader('key', 'value', before.next().value);
+  assertHeader('key', 'value', headerIteratorBeforeClose.next().value);
   assertHeader('key', 'value', headers[Symbol.iterator]().next().value);
 });
 
@@ -178,7 +181,7 @@ test('testHeaders', () => {
 test('testNew', () => {
   const headers = new Headers();
   headers.add(header('key', 'value'));
-  internalHeaders(headers).internalSetReadOnly();
+  internalHeaders(headers).setReadOnly();
   const newHeaders = new Headers(headers);
   newHeaders.add(header('key', 'value2'));
   // Ensure existing headers are not modified
@@ -201,8 +204,7 @@ test('shouldThrowNpeWhenAddingCollectionWithNullHeader', () => {
   assert.throws(() => new Headers(new Array(1).fill(null)), { name: 'TypeError', message: 'Header cannot be null.' });
   // @ts-expect-error a null among the headers: the constructor throws TypeError with Java's message
   assert.throws(() => new Headers({ headers: [null] }), { name: 'TypeError', message: 'Header cannot be null.' });
-  // The core reports the first null, and nothing after it is read, as Java's
-  // loop stops there.
+  // Java checks the headers one by one, so nothing after the first null is read.
   function* nullThenThrow() {
     yield header('a', '1');
     yield null;
@@ -214,42 +216,24 @@ test('shouldThrowNpeWhenAddingCollectionWithNullHeader', () => {
   assert.throws(() => new Headers([header('a', '1'), null, 'not a header']), { name: 'TypeError', message: 'Header cannot be null.' });
 });
 
-// The rest: the forms, the null-key checks and toString.
+// The rest: the forms, the [key, value] pairs, the very objects held, the
+// null-key checks and toString.
 
 test("the constructor takes Java's three forms, as {headers} or bare; null is no headers", () => {
   const h = header('a', '1');
   assert.deepEqual(new Headers().toArray(), []);
   assert.deepEqual(new Headers(null).toArray(), []);
   assert.deepEqual(new Headers({ headers: null }).toArray(), []);
-  // The core copies each header: equal, not the same object.
-  for (const taken of [new Headers({ headers: [h] }), new Headers(new Set([h]))]) {
-    const [first] = taken.toArray();
-    assert.ok(first.equals(h));
-    assert.notEqual(first, h);
-  }
   // undefined is never "not given".
   // @ts-expect-error undefined for the headers: the undefined check throws TypeError
   assert.throws(() => new Headers(undefined), {
     name: 'TypeError',
     message: "headers must not be undefined. Leave the argument out, or pass null for Java's null",
   });
-  // A copy of a read-only Headers is writable.
-  const sealed = new Headers([h]);
-  internalHeaders(sealed).internalSetReadOnly();
-  new Headers({ headers: sealed }).add(h);
-  for (const [args, message] of [
-    [[undefined], 'a header must not be undefined. Pass a Header, or leave it out'],
-    [[{ key: 'k', value: null }], 'a header must be a Header'],
-    // Java takes only Header objects: a [key, value] pair is no header.
-    [[['k', null]], 'a header must be a Header'],
-  ]) {
-    // @ts-expect-error values that are no Header: the header check throws TypeError
-    assert.throws(() => new Headers(args), { name: 'TypeError', message }, String(args));
-  }
   // @ts-expect-error a string for the headers: the type check throws TypeError
   assert.throws(() => new Headers({ headers: 'x' }), {
     name: 'TypeError',
-    message: 'headers must be a Headers, or an iterable of Header',
+    message: 'headers must be a Headers, or an iterable of Header objects and [key, value] pairs',
   });
   // A bare value that is no iterable fits no form.
   for (const [bare, kind] of [
@@ -272,6 +256,113 @@ test("the constructor takes Java's three forms, as {headers} or bare; null is no
     name: 'TypeError',
     message: "headers must not be undefined. Leave the key out, or pass null for Java's null",
   });
+  // Each form holds what it is given.
+  for (const taken of [
+    new Headers([h]),
+    new Headers({ headers: [h] }),
+    new Headers(new Set([h])),
+    new Headers({ headers: new Set([h]) }),
+  ]) {
+    assert.equal(taken.toArray()[0], h);
+  }
+});
+
+test('the headers hold the very Header objects given, as Java does; a copy of a Headers holds them too, writable', () => {
+  const a = header('a', '1');
+  const b = header('b', '2');
+  const headers = new Headers([a]);
+  assert.equal(headers.add(b), headers);
+  const [first, second] = headers.toArray();
+  assert.equal(first, a);
+  assert.equal(second, b);
+  assert.equal(headers.lastHeader('b'), b);
+  assert.equal([...headers.headers('a')][0], a);
+  assert.equal([...headers][1], b);
+  // The same header may be added twice, and to other headers.
+  headers.add(a);
+  assert.deepEqual(headers.toArray(), [a, b, a]);
+  // A header read stays valid whatever its headers do later, as Java's does.
+  headers.remove('a');
+  assert.deepEqual(headers.toArray(), [b]);
+  assertHeader('a', '1', a);
+  // Java's new RecordHeaders(headers): a new list of the same objects, writable, the read-only state not copied.
+  internalHeaders(headers).setReadOnly();
+  const copy = new Headers(headers);
+  assert.equal(copy.toArray()[0], b);
+  copy.add(a);
+  assert.equal(getCount(headers), 1);
+  assert.equal(internalHeaders(copy).isReadOnly(), false);
+});
+
+test('a [key, value] pair is a header too, a new RecordHeader, mixed in any order with Header objects', () => {
+  const h = header('h', 'x');
+  const value = bytes('v');
+  /** @type {Array<Header | readonly [string, Uint8Array | null]>} */
+  const given = [['a', value], h, ['n', null], ['e', new Uint8Array(0)]];
+  for (const headers of [new Headers(given), new Headers({ headers: given }), new Headers(new Set(given)), new Headers(given.values())]) {
+    const [a, kept, n, e] = headers.toArray();
+    assert.ok(a instanceof RecordHeader);
+    assert.equal(a.key(), 'a');
+    // The pair's value, kept as a RecordHeader keeps it: no copy.
+    assert.equal(a.value(), value);
+    assert.equal(kept, h);
+    assert.ok(n instanceof RecordHeader && n.value() === null);
+    assert.deepEqual(e.value(), Buffer.alloc(0));
+    assert.equal(e.value()?.length, 0);
+  }
+  // A frozen array is a pair as well, and a pair given as Uint8Array keeps its memory.
+  const u8 = new Uint8Array([1, 2]);
+  const [frozen] = new Headers([Object.freeze(/** @type {const} */ (['f', u8]))]).toArray();
+  assert.equal(frozen.value()?.buffer, u8.buffer);
+});
+
+test('a [key, value] pair is checked with messages naming its position; a null element and a null key are Java NPEs', () => {
+  /** @param {unknown[]} elements */
+  const take = (elements) => () => new Headers(/** @type {Iterable<Header>} */ (/** @type {unknown} */ (elements)));
+  const h = header('h', 'x');
+  for (const [elements, message] of [
+    [[h, ['k', 'v']], 'headers[1] value must be a Buffer, a Uint8Array or null; got string'],
+    [[h, [1, null]], 'headers[1] key must be a string; got number'],
+    [[[undefined, null]], 'headers[0] key must be a string; got undefined'],
+    [[h, h, ['k', undefined]], "headers[2] value must not be undefined. Pass null for Java's null"],
+    [[['k', null, 'extra']], 'headers[0] must be a Header or a [key, value] pair; got Array(3)'],
+    [[['k']], 'headers[0] must be a Header or a [key, value] pair; got Array(1)'],
+    [[h, 5], 'headers[1] must be a Header or a [key, value] pair; got number'],
+    [[{ key: 'k', value: null }], 'headers[0] must be a Header or a [key, value] pair; got Object'],
+    [[new Map([['k', null]])], 'headers[0] must be a Header or a [key, value] pair; got Map'],
+    [[h, ['k', new Uint16Array(1)]], 'headers[1] value must be a Buffer, a Uint8Array or null; got Uint16Array'],
+    [[h, undefined], 'headers[1] must not be undefined. Pass a Header or a [key, value] pair, or leave it out'],
+    // Java's own NullPointerExceptions.
+    [[h, null], 'Header cannot be null.'],
+    [[[null, bytes('v')]], 'Null header keys are not permitted'],
+  ]) {
+    assert.throws(take(/** @type {unknown[]} */ (elements)), { name: 'TypeError', message: String(message) }, String(message));
+  }
+});
+
+test('a Header the app implements is a Header: kept, read through its key() and value()', () => {
+  let reads = 0;
+  /** @type {Header} */
+  const own = {
+    key() {
+      reads++;
+      return 'own';
+    },
+    value() {
+      return bytes('mine');
+    },
+  };
+  const headers = new Headers([own]);
+  assert.equal(headers.lastHeader('own'), own);
+  assert.ok(reads > 0);
+  // add(header) takes it by name: a plain object given bare is the {key, value} options object.
+  headers.add({ header: own });
+  assert.deepEqual(headers.toArray(), [own, own]);
+  // Its equality is identity, as Java's Object.equals.
+  assert.ok(headers.equals(new Headers([own, own])));
+  assert.ok(!headers.equals(new Headers([own, header('own', 'mine')])));
+  // @ts-expect-error a plain object that is no Header: the header check throws TypeError
+  assert.throws(() => headers.add({ header: { key: 'k' } }), { name: 'TypeError', message: 'header must be a Header' });
 });
 
 test('add takes {header}, a bare Header or {key, value}; it returns the headers', () => {
@@ -280,10 +371,17 @@ test('add takes {header}, a bare Header or {key, value}; it returns the headers'
   assert.equal(headers.add(h), headers);
   assert.equal(headers.add({ header: h }), headers);
   assert.equal(headers.add({ key: 'b', value: null }), headers);
+  const added = headers.toArray();
   assert.deepEqual(
-    headers.toArray().map((x) => x.key()),
+    added.map((x) => x.key()),
     ['a', 'a', 'b'],
   );
+  // add(key, value) makes a new RecordHeader, which keeps the value given.
+  const value = bytes('v');
+  headers.add({ key: 'c', value });
+  const c = headers.lastHeader('c');
+  assert.ok(c instanceof RecordHeader);
+  assert.equal(c.value(), value);
   // @ts-expect-error a null key: the header constructor throws TypeError with Java's message
   assert.throws(() => headers.add({ key: null, value: null }), { name: 'TypeError', message: 'Null header keys are not permitted' });
   // @ts-expect-error a string value: the value check throws TypeError
@@ -296,6 +394,11 @@ test('add takes {header}, a bare Header or {key, value}; it returns the headers'
     name: 'IllegalArgumentError',
     message: 'add() takes one of (header), (key, value); got a string',
   });
+  // @ts-expect-error a bare pair: add takes one header, not the pairs of the iterables
+  assert.throws(() => headers.add(['k', null]), {
+    name: 'IllegalArgumentError',
+    message: 'add() takes one of (header), (key, value); got an array',
+  });
   // @ts-expect-error a key without a value: the form check throws IllegalArgumentError
   assert.throws(() => headers.add({ key: 'k' }), {
     name: 'IllegalArgumentError',
@@ -306,10 +409,14 @@ test('add takes {header}, a bare Header or {key, value}; it returns the headers'
     name: 'IllegalArgumentError',
     message: 'add() takes one of (header), (key, value); got 2 arguments, not one object of named parameters',
   });
-  // Java's add(key, value) builds the header before the read-only check.
-  internalHeaders(headers).internalSetReadOnly();
+  // Java's add(header) checks for null before the read-only state, and
+  // add(key, value) builds the header first.
+  internalHeaders(headers).setReadOnly();
+  // @ts-expect-error a null header: add throws TypeError with Java's message
+  assert.throws(() => headers.add(null), { name: 'TypeError', message: 'Header cannot be null.' });
   // @ts-expect-error a null key: the header constructor throws TypeError before the read-only check
   assert.throws(() => headers.add({ key: null, value: null }), { name: 'TypeError', message: 'Null header keys are not permitted' });
+  assert.throws(() => headers.add({ key: 'k', value: null }), closed);
 });
 
 test('a null key is Java\'s IllegalArgumentException "key cannot be null."', () => {
@@ -342,22 +449,18 @@ test('a null key is Java\'s IllegalArgumentException "key cannot be null."', () 
     name: 'TypeError',
     message: "key must not be undefined. Leave the argument out, or pass null for Java's null",
   });
-  // (deviation) Java's remove checks canWrite() before checkKey(): on read-only
-  // headers a null key is the FFI's error, which checks the NULL argument first.
-  internalHeaders(headers).internalSetReadOnly();
-  assert.throws(
-    // @ts-expect-error a null key: remove throws IllegalArgumentError with Java's message
-    () => headers.remove(null),
-    (e) => {
-      assert.ok(e instanceof IllegalArgumentError);
-      assert.equal(e.message, 'key cannot be null.');
-      return true;
-    },
-  );
-  // @ts-expect-error a number key: the key check throws TypeError
+  // Java's remove checks canWrite() before checkKey(): on read-only headers a
+  // null key is the read-only error.
+  internalHeaders(headers).setReadOnly();
+  // @ts-expect-error a null key: on read-only headers remove throws Java's IllegalStateError first
+  assert.throws(() => headers.remove(null), closed);
+  // @ts-expect-error a number key: the key check throws TypeError, before the read-only check
   assert.throws(() => headers.remove({ key: 1 }), { name: 'TypeError', message: 'key must be a string' });
-  assert.throws(() => headers.remove('a'), { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' });
+  assert.throws(() => headers.remove('a'), closed);
   assert.equal(getCount(headers), 1);
+  // The reads still check the key.
+  // @ts-expect-error a null key: lastHeader throws IllegalArgumentError with Java's message
+  assert.throws(() => headers.lastHeader(null), { name: 'IllegalArgumentError', message: 'key cannot be null.' });
 });
 
 test('headers(key) reads the headers when iterated; toArray is a copy', () => {
@@ -380,310 +483,93 @@ test('headers(key) reads the headers when iterated; toArray is a copy', () => {
   assert.throws(() => headers.toArray(1), { name: 'TypeError', message: 'toArray() only reads: it takes no argument' });
 });
 
+test("an iterator sees a change made during the iteration, as a JavaScript array's does", () => {
+  const headers = new Headers([header('a', '1')]);
+  const iterator = headers[Symbol.iterator]();
+  assertHeader('a', '1', iterator.next().value);
+  headers.add(header('b', '2'));
+  assertHeader('b', '2', iterator.next().value);
+  assert.equal(iterator.next().done, true);
+});
+
+test('the read-only state: setReadOnly() and isReadOnly(), the library-only members send() uses', () => {
+  const headers = new Headers();
+  const internal = internalHeaders(headers);
+  assert.equal(internal.isReadOnly(), false);
+  internal.setReadOnly();
+  assert.equal(internal.isReadOnly(), true);
+  // Again: still read-only.
+  internal.setReadOnly();
+  assert.equal(internal.isReadOnly(), true);
+  const call = /** @type {Record<string, (...args: unknown[]) => unknown>} */ (/** @type {unknown} */ (internal));
+  assert.throws(() => call.isReadOnly(1), { name: 'TypeError', message: 'isReadOnly() only reads: it takes no argument' });
+});
+
 test("toString is RecordHeaders' and RecordHeader's; JSON writes the array", () => {
-  const headers = new Headers([new Header({ key: 'k', value: new Uint8Array([1, 255]) }), new Header({ key: 'n', value: null })]);
+  const headers = new Headers([
+    new RecordHeader({ key: 'k', value: new Uint8Array([1, 255]) }),
+    new RecordHeader({ key: 'n', value: null }),
+  ]);
   assert.equal(
     String(headers),
     'RecordHeaders(headers = [RecordHeader(key = k, value = [1, -1]), RecordHeader(key = n, value = null)], isReadOnly = false)',
   );
-  internalHeaders(headers).internalSetReadOnly();
+  internalHeaders(headers).setReadOnly();
   assert.equal(String(new Headers()), 'RecordHeaders(headers = [], isReadOnly = false)');
   assert.match(String(headers), /isReadOnly = true\)$/);
-  assert.equal(JSON.stringify(new Headers([new Header({ key: 'n', value: null })])), '[{"key":"n","value":null}]');
+  assert.equal(JSON.stringify(new Headers([new RecordHeader({ key: 'n', value: null })])), '[{"key":"n","value":null}]');
+  // A Header the app implements prints its own toString(), JavaScript's when it has none.
+  assert.equal(
+    String(new Headers([{ key: () => 'o', value: () => null }])),
+    'RecordHeaders(headers = [[object Object]], isReadOnly = false)',
+  );
 });
 
 // The hash codes Java's own RecordHeaders.hashCode() gives (kafka-clients, run
 // on the same headers): the list's, 31 * h + each header's, from 1.
 test("equals and hashCode are RecordHeaders'", () => {
-  const h1 = new Header({ key: 'k', value: Buffer.from([1, 255, 127, 128]) });
-  const h2 = new Header({ key: '\u{1F600}é', value: null });
+  const h1 = new RecordHeader({ key: 'k', value: Buffer.from([1, 255, 127, 128]) });
+  const h2 = new RecordHeader({ key: '\u{1F600}é', value: null });
   const headers = new Headers([h1, h2]);
   assert.equal(headers.hashCode(), 1733507910);
   assert.equal(new Headers().hashCode(), 1);
   const same = new Headers([
-    new Header({ key: 'k', value: Buffer.from([1, 255, 127, 128]) }),
-    new Header({ key: '\u{1F600}é', value: null }),
+    new RecordHeader({ key: 'k', value: Buffer.from([1, 255, 127, 128]) }),
+    new RecordHeader({ key: '\u{1F600}é', value: null }),
   ]);
   assert.ok(headers.equals(same));
   assert.equal(headers.hashCode(), same.hashCode());
   // The read-only state is not compared.
-  internalHeaders(same).internalSetReadOnly();
+  internalHeaders(same).setReadOnly();
   assert.throws(() => same.add(h1), { name: 'IllegalStateError' });
   assert.ok(headers.equals({ o: same }));
   // The order counts.
   assert.ok(!headers.equals(new Headers([h2, h1])));
   assert.ok(!headers.equals(new Headers([h1])));
   assert.ok(new Headers().equals(new Headers([])));
+  // A pair makes an equal RecordHeader.
+  assert.ok(headers.equals(new Headers([['k', Buffer.from([1, 255, 127, 128])], h2])));
   for (const o of [null, [h1, h2], 'headers']) assert.equal(headers.equals({ o }), false);
   // @ts-expect-error no argument: the form check throws IllegalArgumentError
   assert.throws(() => headers.equals(), { name: 'IllegalArgumentError', message: 'equals() takes one of (o); got ()' });
 });
 
-// Option 1 (javascript/design/current/producer/DECISIONS.md, entry 21): the
-// headers are the core's native RecordHeaders. A Header read from headers
-// that can still change is the binding's own copy; one read from read-only
-// headers is a view of the native header, with no copy. The addon's counts
-// (headerStats(), test-only) show which.
-
-const native = require('../../../../dist/internal/native');
-
-/**
- * How the addon's counts moved while `fn` ran.
- *
- * @template T
- * @param {() => T} fn
- * @returns {{ result: T, delta: Record<string, number> }}
- */
-function counted(fn) {
-  const before = native.headerStats();
-  const result = fn();
-  const after = native.headerStats();
-  /** @type {Record<string, number>} */
-  const delta = {};
-  for (const name of Object.keys(after)) delta[name] = after[name] - before[name];
-  return { result, delta };
-}
-
-test('a Header read from headers that can still change is a copy, which keeps its key and value after they change', () => {
-  const headers = new Headers();
-  headers.add({ key: 'trace', value: bytes('t1') });
-  headers.add({ key: 'span', value: bytes('s1') });
-  const { result: read, delta } = counted(() => ({
-    last: headers.lastHeader('trace'),
-    array: headers.toArray(),
-    iterated: [...headers],
-    byKey: [...headers.headers('span')],
-  }));
-  // One copy per header handed out (1 + 2 + 2 + 1), and no view.
-  assert.equal(delta.headerCopies, 6);
-  assert.equal(delta.headerViews, 0);
-  assert.ok(read.last);
-  const value = read.last.value();
-  // The headers change: Java's Header stays as it was, and so does the copy.
-  headers.add({ key: 'trace', value: bytes('t2') });
-  headers.remove('span');
-  for (let i = 0; i < 100; i++) headers.add({ key: `k${i}`, value: Buffer.alloc(64, i) });
-  headers.remove('trace');
-  assertHeader('trace', 't1', read.last);
-  assert.equal(read.last.value(), value);
-  assert.deepEqual(value, bytes('t1'));
-  assertHeader('trace', 't1', read.array[0]);
-  assertHeader('span', 's1', read.array[1]);
-  assertHeader('span', 's1', read.iterated[1]);
-  assertHeader('span', 's1', read.byKey[0]);
-  assert.equal(headers.lastHeader('trace'), null);
-});
-
-test('a Header read from read-only headers is a view of the native header, with no copy', () => {
-  const headers = new Headers();
-  headers.add({ key: 'trace', value: bytes('t1') });
-  headers.add({ key: 'span', value: null });
-  internalHeaders(headers).internalSetReadOnly();
-  const { result: read, delta } = counted(() => ({
-    last: headers.lastHeader('trace'),
-    array: headers.toArray(),
-    iterated: [...headers],
-    byKey: [...headers.headers('span')],
-  }));
-  assert.equal(delta.headerCopies, 0);
-  assert.equal(delta.headerViews, 6);
-  // The value is a Buffer over the native header's bytes, not a copy of them.
-  const { result: value, delta: valueDelta } = counted(() => {
-    assert.ok(read.last);
-    return read.last.value();
-  });
-  assert.deepEqual(value, bytes('t1'));
-  assert.equal(valueDelta.valueExternal, 1);
-  assert.equal(valueDelta.valueCopied, 0);
-  assertHeader('trace', 't1', read.array[0]);
-  assert.equal(read.iterated[1].key(), 'span');
-  assert.equal(read.byKey[0].value(), null);
-  // A view reads what a copy reads: equal headers.
-  const copy = new Headers(headers).lastHeader('trace');
-  assert.ok(copy);
-  assert.ok(read.last);
-  assert.ok(copy.equals(read.last));
-  assert.equal(copy.hashCode(), read.last.hashCode());
-});
-
-test("add(header) stores a copy: the app's Header stays its own", () => {
-  const mine = header('k', 'v');
-  const headers = new Headers();
-  headers.add(mine);
-  headers.remove('k');
-  assertHeader('k', 'v', mine);
-  assert.equal(getCount(headers), 0);
-  // And the header can go into other headers, or be added twice.
-  headers.add(mine).add(mine);
-  assert.equal(getCount(headers), 2);
-  assert.notEqual(headers.lastHeader('k'), mine);
-});
-
-// The lifetimes of the native headers (native/headers.c): a Header view
-// keeps its read-only Headers' native list alive, a value Buffer keeps its
-// header's native bytes alive, and every handle is destroyed exactly once,
-// when the last of them is collected. Run in a child with --expose-gc (and,
-// on macOS, MallocScribble, which fills freed memory, so a read of a freed
-// header shows), counting through the addon's headerStats().
-
-const { spawnSync } = require('node:child_process');
-const path = require('node:path');
-
-const PACKAGE_ROOT = path.join(__dirname, '..', '..', '..', '..');
-
-const PROBE = `
-const assert = require('node:assert/strict');
-const native = require(${JSON.stringify(path.join(PACKAGE_ROOT, 'dist', 'internal', 'native'))});
-const { Header, Headers } = require(${JSON.stringify(path.join(PACKAGE_ROOT, 'dist', 'common', 'header'))});
-const { KafkaProducer, ProducerRecord } = require(${JSON.stringify(path.join(PACKAGE_ROOT, 'dist', 'producer'))});
-
-// A few collections, with timer turns between them so the finalizers run
-// (an external Buffer's runs from a later task than a wrapped object's).
-async function collect() {
-  for (let i = 0; i < 10; i++) {
-    globalThis.gc();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
-
-function churn() {
-  for (let round = 0; round < 50; round++) {
-    const h = new Headers([new Header({ key: 'a', value: Buffer.alloc(32, round) })]);
-    h.add({ key: 'b', value: null });
-    h.toArray();
-    if (round % 2 === 0) h.internalSetReadOnly();
-    for (const x of h) x.value();
-    [...new Headers(h).headers('a')];
-  }
-}
-
-async function refusedChangesKeepViews() {
-  const record = new ProducerRecord({
-    topic: 't',
-    partition: null,
-    key: null,
-    value: Buffer.from('v'),
-    headers: [
-      new Header({ key: 'trace', value: Buffer.from('abcdefgh') }),
-      new Header({ key: 'span', value: Buffer.from('s1') }),
-      new Header({ key: 'trace', value: Buffer.from('t2') }),
-    ],
-  });
-  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 200 } });
-  try {
-    // send() seals the record's headers; its delivery fails, which is not what is tested.
-    await producer.send(record).catch(() => {});
-    const headers = record.headers;
-    const read = headers.lastHeader('trace');
-    assert.equal(read.key(), 'trace');
-    assert.equal(read.value().toString(), 't2');
-    const unread = { last: headers.lastHeader('span'), array: headers.toArray(), iterated: [...headers], byKey: [...headers.headers('trace')] };
-    const closed = { name: 'IllegalStateError', message: 'RecordHeaders has been closed.' };
-    assert.throws(() => headers.add(new Header({ key: 'x', value: Buffer.from('x') })), closed);
-    assert.throws(() => headers.add({ key: 'x', value: null }), closed);
-    assert.throws(() => headers.remove('span'), closed);
-    assert.throws(() => headers.remove(null), { name: 'IllegalArgumentError', message: 'key cannot be null.' });
-    // The record sent again: a second seal.
-    await producer.send(record).catch(() => {});
-    globalThis.gc();
-    const expect = (h, key, value) => {
-      assert.equal(h.key(), key);
-      assert.equal(h.value().toString(), value);
-    };
-    expect(unread.last, 'span', 's1');
-    for (const list of [unread.array, unread.iterated]) {
-      expect(list[0], 'trace', 'abcdefgh');
-      expect(list[1], 'span', 's1');
-      expect(list[2], 'trace', 't2');
-    }
-    expect(unread.byKey[0], 'trace', 'abcdefgh');
-    expect(unread.byKey[1], 'trace', 't2');
-    // A view already read, and the others, passed on to other headers.
-    const passed = new Headers([read, unread.array[1]]);
-    const other = new Headers();
-    other.add(read).add(unread.byKey[0]).add({ key: 'k', value: null });
-    assert.deepEqual(passed.toArray().map((h) => [h.key(), h.value().toString()]), [['trace', 't2'], ['span', 's1']]);
-    assert.deepEqual(
-      other.toArray().map((h) => [h.key(), h.value() === null ? null : h.value().toString()]),
-      [['trace', 't2'], ['trace', 'abcdefgh'], ['k', null]],
-    );
-    assert.ok(headers.equals(new Headers(record.headers)));
-  } finally {
-    await producer.close();
-  }
-}
-
-(async () => {
-  // The module's shared empty headers, made on first use, live for the process.
-  new Headers().internalSetReadOnly();
-  new Headers().lastHeader('warm');
-  await collect();
-  const base = native.headerStats();
-  const live = () => {
-    const s = native.headerStats();
-    return {
-      headers: (s.headersMade - base.headersMade) - (s.headersFreed - base.headersFreed),
-      header: (s.headerMade - base.headerMade) - (s.headerFreed - base.headerFreed),
-    };
-  };
-
-  // A view keeps its Headers alive, and a value Buffer its header.
-  let headers = new Headers();
-  headers.add({ key: 'trace', value: Buffer.from('abcdefgh') });
-  headers.internalSetReadOnly();
-  let view = headers.lastHeader('trace');
-  headers = null;
-  await collect();
-  assert.deepEqual(live(), { headers: 1, header: 1 }, 'the view keeps its Headers');
-  assert.equal(view.key(), 'trace');
-  let value = view.value();
-  view = null;
-  await collect();
-  assert.deepEqual(live(), { headers: 1, header: 1 }, 'the value keeps its header and its Headers');
-  assert.equal(value.toString(), 'abcdefgh');
-  value = null;
-  await collect();
-  assert.deepEqual(live(), { headers: 0, header: 0 }, 'all freed once nothing holds them');
-
-  // A copy holds nothing of its Headers: they go while it stays.
-  headers = new Headers();
-  headers.add({ key: 'k', value: Buffer.from('copied') });
-  let copy = headers.lastHeader('k');
-  headers = null;
-  await collect();
-  assert.deepEqual(live(), { headers: 0, header: 1 }, 'a copy does not keep its Headers');
-  assert.equal(copy.value().toString(), 'copied');
-  copy = null;
-
-  // The views of read-only headers stay valid through a refused add or remove,
-  // as Java's Header does: the FFI drops a handle's views on every mutating
-  // call, refused or not, so the binding takes the core's refusal from headers
-  // that hand out none. Some views are read before the refused calls, some
-  // after, and a second seal (the record sent again) keeps them too.
-  await refusedChangesKeepViews();
-  await collect();
-  assert.deepEqual(live(), { headers: 0, header: 0 }, 'the views and their Headers freed after the refused calls');
-
-  // Many of each, dropped (in a function of their own, whose frame then holds
-  // none): every handle destroyed exactly once.
-  churn();
-  await collect();
-  assert.deepEqual(live(), { headers: 0, header: 0 }, 'every handle freed');
-  const s = native.headerStats();
-  assert.ok(s.headersFreed <= s.headersMade && s.headerFreed <= s.headerMade, 'nothing freed twice');
-  console.log('ok');
-})().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
-`;
-
-test('a Header keeps its Headers alive, a value Buffer its Header, and each handle is destroyed once', () => {
-  const r = spawnSync(process.execPath, ['--expose-gc', '--no-warnings', '-e', PROBE], {
-    encoding: 'utf8',
-    env: { ...process.env, MallocScribble: '1', MallocGuardEdges: '1' },
-    timeout: 60000,
-  });
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, 'ok\n');
+test("the native send's copy: each key as encodeLikeJava's bytes, each value the header's own, null for none", () => {
+  const value = bytes('v');
+  const headers = new Headers([
+    ['a\uD800', value],
+    ['n', null],
+  ]);
+  const native = internalHeaders(headers).internalToNative();
+  assert.ok(native);
+  assert.deepEqual(
+    native.map((b) => (b === null ? null : Buffer.from(b).toString('hex'))),
+    [Buffer.from('a?').toString('hex'), value.toString('hex'), Buffer.from('n').toString('hex'), null],
+  );
+  // The value is the header's own Buffer: no copy here (the addon copies it into the core's RecordHeaders).
+  assert.equal(native[1], value);
+  assert.equal(internalHeaders(new Headers()).internalToNative(), null);
+  // A Header the app implements is read through its methods; a key that is no string is refused.
+  const bad = new Headers([{ key: () => /** @type {string} */ (/** @type {unknown} */ (5)), value: () => null }]);
+  assert.throws(() => internalHeaders(bad).internalToNative(), { name: 'TypeError', message: 'a header key must be a string' });
 });

@@ -25,17 +25,27 @@
 //     public overload, a public field, a public constructor.
 // The error classes are exempt from the audience: there is one per Java
 // exception the FFI enum names, Public or not (javascript/CLAUDE.md "Errors",
-// as the Python client's errors). Invented items (lint-mapping.json's
+// as the Python client's errors), and so are the classes the JS conventions
+// make public (`PUBLIC_BY_RULE`). Invented items (lint-mapping.json's
 // `invented`) translate nothing.
 
 const { atNode } = require('../location');
 const { javaIndexOf, mappedItems, shortName } = require('../java_ts');
 const { mappedMembers } = require('./java_members');
 
+/** The Java classes the JS conventions make public although Java does not, each with its rule. */
+const PUBLIC_BY_RULE = new Map([
+  [
+    'org.apache.kafka.common.header.internals.RecordHeader',
+    'javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization: RecordHeader is the class an app builds a header with',
+  ],
+]);
+
 module.exports = {
   name: 'check-public-audience',
   kinds: ['not-public-audience', 'internal-package', 'unsupported-package', 'member-not-public'],
   needs: ['program', 'java'],
+  PUBLIC_BY_RULE,
   hint:
     'Export only what Java makes public: a class of `@InterfaceAudience.Public`, outside `internals` and ' +
     'the unsupported packages, and its public members; keep the rest private (root CLAUDE.md §2).',
@@ -45,7 +55,7 @@ module.exports = {
     const findings = [];
     let checked = 0;
     for (const { item, java, isError } of mappedItems(ctx)) {
-      if (item.tags.jsOnly || isError || java === null || !java.cls) continue;
+      if (item.tags.jsOnly || isError || java === null || !java.cls || this.PUBLIC_BY_RULE.has(java.cls.fqn)) continue;
       checked += 1;
       const cls = java.cls;
       const subject = `${item.rel}:${item.name}`;

@@ -16,11 +16,9 @@
 
 // check-native-wrappers (javascript/CLAUDE.md, JavaScript Binding
 // Conventions, Implementation over the FFI: "Only KafkaProducer,
-// KafkaConsumer, the admin client and the three mocks call the addon ...
-// except Headers and RecordHeader, which wrap the C RecordHeaders and
-// RecordHeader and call the addon too"):
-//   - each exported class of that set (`WRAPPERS`; the JS conventions'
-//     `RecordHeader` is this binding's `Header`) holds a native handle: its
+// KafkaConsumer, the admin client and the three mocks call the addon"; the
+// value types, `Headers` and `RecordHeader` among them, are plain TypeScript):
+//   - each exported class of that set (`WRAPPERS`) holds a native handle: its
 //     construction (its constructor, its field initializers and, through
 //     `extends`, a base class's) or a static method that constructs it
 //     (`internalCreate`) reaches a `native.<fn>` use (`not-native`), as the
@@ -54,8 +52,6 @@ const WRAPPERS = [
   { name: /^KafkaConsumer$/, wraps: "the FFI's consumer" },
   { name: /^KafkaAdminClient$/, wraps: "the FFI's admin client" },
   { name: /^Mock[A-Z]/, wraps: "the FFI's mock" },
-  { name: /^Headers$/, wraps: 'the C RecordHeaders' },
-  { name: /^Header$/, wraps: "the C RecordHeader (the JS conventions' RecordHeader)" },
 ];
 
 /** The wrapper row of an exported class named `name`, or undefined. */
@@ -106,7 +102,7 @@ module.exports = {
   needs: ['program'],
   hint:
     'Only the classes the JS conventions name call the addon, each over its native handle (the producer, ' +
-    "consumer and admin client, the mocks over the FFI's mocks, Headers and Header); list any other class, " +
+    "consumer and admin client, the mocks over the FFI's mocks); list any other class, " +
     `export or module code that does in ${MAPPING_FILE}'s \`nativeCallers\` with the reason the rules give ` +
     '(javascript/CLAUDE.md, JavaScript Binding Conventions, Implementation over the FFI).',
   WRAPPERS,

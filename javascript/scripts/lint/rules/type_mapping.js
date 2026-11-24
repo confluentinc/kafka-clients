@@ -52,6 +52,7 @@
 // | ? (an unbounded wildcard)                    | any type                                 |
 // | T, as a bare value's type                    | Bare<T> (Extract<T, BareValue>), at the bare parameter only |
 // | List / Set / Collection / Iterable<T>, T[], taken | Iterable<T>, or an array of T      |
+// | Headers, Iterable<Header>, Header[], taken   | an iterable (an array) of Header | readonly [string, Uint8Array | null]; Headers also as itself |
 // | List / Collection<T>, T[], returned          | an array of T (a new array each call)   |
 // | Iterable<T>, returned                        | Iterable<T>, or an array of T           |
 // | Set<T>, returned (a constant: read-only)     | Set<T> or ReadonlySet<T>                |
@@ -204,6 +205,35 @@ module.exports = {
       return undefined;
     };
     const typeArgs = (t) => t.aliasTypeArguments || checker.getTypeArguments(t);
+    // The [key, value] pair the JS conventions take beside each Header where
+    // Java takes Headers or Iterable<Header> (javascript/CLAUDE.md,
+    // JavaScript Binding Conventions, Types and Serialization):
+    // `readonly [string, Uint8Array | null]`.
+    const isHeaderPair = (p) => {
+      if (!checker.isTupleType(p) || !p.target || !p.target.readonly) return false;
+      const elements = checker.getTypeArguments(p);
+      if (elements.length !== 2) return false;
+      const [k, v] = elements;
+      const vs = parts(v);
+      const bytes = vs.filter((x) => !(x.flags & ts.TypeFlags.Null));
+      return (
+        (k.flags & ts.TypeFlags.String) !== 0 &&
+        vs.some((x) => x.flags & ts.TypeFlags.Null) &&
+        bytes.length > 0 &&
+        bytes.every((x) => symbolName(x) === 'Uint8Array')
+      );
+    };
+    // An element of a collection Java takes: a Header element, of Java's
+    // Iterable<Header> or Header[], is a Header or such a pair, the pair
+    // included.
+    const matchesElement = (elem, e) => {
+      if (outward || elem.name !== 'Header' || elem.dims !== 0) return matches(elem, e);
+      const ps = parts(strip(e));
+      if (ps.some((p) => matches(elem, p) === 'unmapped')) return 'unmapped';
+      return (
+        ps.some(isHeaderPair) && ps.some((p) => matches(elem, p) === true) && ps.every((p) => isHeaderPair(p) || matches(elem, p) === true)
+      );
+    };
 
     /** Whether TS type `t` (null stripped) is what Java type `j` maps to: true, false, or 'unmapped'. */
     const matches = (j, t0) => {
@@ -218,7 +248,7 @@ module.exports = {
           return parts(t).every((p) => (outward ? ['Buffer'] : ['Buffer', 'Uint8Array']).includes(symbolName(p)));
         }
         const e = elementOf(t);
-        return e === undefined ? false : matches({ ...j, dims: j.dims - 1 }, e);
+        return e === undefined ? false : matchesElement({ ...j, dims: j.dims - 1 }, e);
       }
       if (NUMBERS.has(j.name)) return (t.flags & ts.TypeFlags.NumberLike) !== 0;
       if (LONGS.has(j.name)) {
@@ -311,7 +341,7 @@ module.exports = {
         const e = elementOf(t, !outward || j.name === 'Iterable');
         if (e === undefined) return false;
         const elem = j.args[0];
-        return elem === undefined ? true : matches(elem, e);
+        return elem === undefined ? true : matchesElement(elem, e);
       }
       if (j.name === 'Map' || j.name === 'Properties') {
         const configsType = (x) => ((x.aliasSymbol && x.aliasSymbol.name) || symbolName(x)).endsWith('Configs');
@@ -323,6 +353,16 @@ module.exports = {
         return configsType(t) ? true : 'unmapped';
       }
       if (/^[A-Z]$/.test(j.name)) return (t.flags & ts.TypeFlags.TypeParameter) !== 0;
+      if (j.name === 'Headers' && !outward && j.dims === 0) {
+        // Java's Headers taken: the Headers itself, or an iterable of Header
+        // objects and [key, value] pairs.
+        const header = { name: 'Header', args: [], dims: 0 };
+        return parts(t).every((p) => {
+          if (symbolName(p) === tsNames.get('Headers')) return true;
+          const e = elementOf(p);
+          return e !== undefined && matchesElement(header, e) === true;
+        });
+      }
       if (tsNames.has(j.name)) {
         const want = tsNames.get(j.name);
         return symbolName(t) === want || parts(t).every((p) => symbolName(p) === want || checker.typeToString(p) === want);

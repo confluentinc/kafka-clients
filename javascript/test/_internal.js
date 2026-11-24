@@ -31,16 +31,22 @@
  */
 
 /**
- * Headers with the library's own seal, which send() calls (src/common/header/headers.ts).
+ * Headers with the library's own read-only state, which send() sets, and
+ * their copy for the native send (src/common/header/headers.ts).
  *
- * @typedef {import('@confluentinc/kafka-javascript/common/header').Headers & { internalSetReadOnly(): void }} InternalHeaders
+ * @typedef {import('@confluentinc/kafka-javascript/common/header').Headers & {
+ *   setReadOnly(): void;
+ *   isReadOnly(): boolean;
+ *   internalToNative(): (Uint8Array | null)[] | null;
+ * }} InternalHeaders
  */
 
 /**
  * The record as the addon takes it: topic, partition, timestamp, key,
- * value and the native headers (src/producer/producer_record.ts).
+ * value and the headers, each key's bytes then its value
+ * (src/producer/producer_record.ts).
  *
- * @typedef {[string, number, bigint, Uint8Array | null, Uint8Array | null, object | null]} NativeRecord
+ * @typedef {[string, number, bigint, Uint8Array | null, Uint8Array | null, (Uint8Array | null)[] | null]} NativeRecord
  */
 
 /**
@@ -85,7 +91,7 @@ function internalFuture(future) {
 }
 
 /**
- * `headers` with the library's own seal.
+ * `headers` with the library's own read-only state and native copy.
  *
  * @param {import('@confluentinc/kafka-javascript/common/header').Headers} headers the headers
  * @returns {InternalHeaders} the same headers

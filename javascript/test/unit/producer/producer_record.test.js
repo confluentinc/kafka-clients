@@ -18,11 +18,12 @@ const assert = require('node:assert/strict');
 
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
-const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
+const { Headers, RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
-const native = require('../../../dist/internal/native');
 const { internalHeaders, internalRecord } = require('../../_internal');
+
+/** @typedef {import('@confluentinc/kafka-javascript/common/header').Header} Header */
 
 /** @param {string} s */
 const bytes = (s) => Buffer.from(s, 'utf8');
@@ -30,21 +31,24 @@ const bytes = (s) => Buffer.from(s, 'utf8');
  * @param {string} key
  * @param {Uint8Array | null} value
  */
-const H = (key, value) => new Header({ key, value });
+const H = (key, value) => new RecordHeader({ key, value });
 /**
- * What the native send's RecordHeaders holds, read back through the addon: [key, value] per header.
+ * The headers the native send copies into the core's RecordHeaders, as
+ * [key, value] pairs: each key's bytes as text, each value as it crosses.
  *
- * @param {object | null} handle
+ * @param {(Uint8Array | null)[] | null} crossed
  */
-const keysAsText = (handle) =>
-  handle === null ? null : native.headersToArray(handle).map((/** @type {unknown} */ h) => [native.headerKey(h), native.headerValue(h)]);
-/**
- * Whether two header lists hold equal headers (Java's RecordHeader.equals), in order.
- *
- * @param {Header[]} a
- * @param {Header[]} b
- */
-const sameHeaders = (a, b) => a.length === b.length && a.every((h, i) => h.equals(b[i]));
+const keysAsText = (crossed) => {
+  if (crossed === null) return null;
+  /** @type {Array<[string, Uint8Array | null]>} */
+  const pairs = [];
+  for (let i = 0; i < crossed.length; i += 2) {
+    const key = crossed[i];
+    assert.ok(key);
+    pairs.push([Buffer.from(key).toString('utf8'), crossed[i + 1]]);
+  }
+  return pairs;
+};
 // ProducerRecord's constructor as its implementation takes its parameter: for
 // a table of Java's forms, valid each, whose union tsc cannot pick one
 // overload for (each form is typed where it is written on its own), and for
@@ -68,7 +72,7 @@ test('the fields Java leaves out default to null and no headers', () => {
 // A data object: Java's getters are own enumerable fields, set once in the
 // constructor, so spread, JSON.stringify and structuredClone keep them.
 test('the fields are own data properties, in Java order, kept by spread, JSON and structuredClone', () => {
-  const headers = [new Header({ key: 'h', value: bytes('x') })];
+  const headers = [new RecordHeader({ key: 'h', value: bytes('x') })];
   const r = new ProducerRecord({ topic: 't', partition: 1, timestamp: 5, key: 'k', value: 'v', headers });
   const names = ['topic', 'partition', 'timestamp', 'key', 'value', 'headers'];
   assert.deepEqual(Object.keys(r), names);
@@ -91,12 +95,12 @@ test('the fields are own data properties, in Java order, kept by spread, JSON an
     headers: [{ key: 'h', value: { type: 'Buffer', data: [120] } }],
   });
   assert.deepEqual(structuredClone(r), { ...fields, headers: {} });
-  // Frozen; the headers are the record's own Headers, holding copies of the
-  // given headers (the core copies them, where Java's new
-  // RecordHeaders(headers) keeps the objects), and stay writable.
+  // Frozen; the headers are the record's own Headers, holding the very
+  // Header objects given, as Java's new RecordHeaders(headers) does, and stay
+  // writable.
   assert.equal(Object.isFrozen(r), true);
-  assert.ok(sameHeaders(r.headers.toArray(), headers));
-  assert.notEqual(r.headers.toArray()[0], headers[0]);
+  assert.deepEqual(r.headers.toArray(), headers);
+  assert.equal(r.headers.toArray()[0], headers[0]);
   // A record with no headers has its own, empty and writable, Headers.
   const empty = new ProducerRecord({ topic: 't', value: 'v' });
   assert.notEqual(empty.headers, new ProducerRecord({ topic: 'u', value: null }).headers);
@@ -104,27 +108,49 @@ test('the fields are own data properties, in Java order, kept by spread, JSON an
   assert.equal(empty.headers.toArray().length, 1);
 });
 
-test('headers are taken as Java takes an Iterable<Header>: a Headers is copied, each header copied by the core', () => {
-  const given = new Headers([new Header({ key: 'a', value: bytes('1') })]);
-  internalHeaders(given).internalSetReadOnly();
+test("headers are taken as Java's new RecordHeaders(headers) takes them: a Headers is copied, holding the same Header objects", () => {
+  const a = new RecordHeader({ key: 'a', value: bytes('1') });
+  const given = new Headers([a]);
+  internalHeaders(given).setReadOnly();
   const r = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: given });
-  // A copy, writable, holding equal headers.
+  // A new Headers, writable, holding the same headers.
   assert.notEqual(r.headers, given);
-  assert.ok(sameHeaders(r.headers.toArray(), given.toArray()));
+  assert.equal(r.headers.toArray()[0], a);
   r.headers.add({ key: 'b', value: null });
   assert.equal(given.toArray().length, 1);
   // An iterable that is not an array, and null.
-  const k = new Header({ key: 'k', value: null });
-  const l = new Header({ key: 'l', value: bytes('x') });
+  const k = new RecordHeader({ key: 'k', value: null });
+  const l = new RecordHeader({ key: 'l', value: bytes('x') });
   const set = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: new Set([k, l]) });
-  assert.ok(sameHeaders(set.headers.toArray(), [k, l]));
-  // A [key, value] pair is no Header: Java takes only Header objects.
-  // @ts-expect-error a [key, value] pair for a Header: the class check throws TypeError
-  assert.throws(() => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [['k', null]] }), {
-    name: 'TypeError',
-    message: 'a header must be a Header',
-  });
+  assert.deepEqual(set.headers.toArray(), [k, l]);
   assert.deepEqual(new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: null }).headers.toArray(), []);
+});
+
+test('headers may be [key, value] pairs, mixed with Header objects: each pair becomes a new RecordHeader', () => {
+  const h = new RecordHeader({ key: 'h', value: null });
+  const value = bytes('v');
+  const r = new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [['p', value], h, ['n', null]] });
+  const [p, kept, n] = r.headers.toArray();
+  assert.ok(p instanceof RecordHeader && n instanceof RecordHeader);
+  assert.deepEqual([p.key(), n.key(), n.value()], ['p', 'n', null]);
+  assert.equal(p.value(), value);
+  assert.equal(kept, h);
+  // A pair that is no [string, bytes or null]: Python's messages, naming its position.
+  // @ts-expect-error a string header value: the pair check throws TypeError
+  assert.throws(() => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [h, ['k', 'v']] }), {
+    name: 'TypeError',
+    message: 'headers[1] value must be a Buffer, a Uint8Array or null; got string',
+  });
+  // @ts-expect-error a number header key: the pair check throws TypeError
+  assert.throws(() => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [[1, null]] }), {
+    name: 'TypeError',
+    message: 'headers[0] key must be a string; got number',
+  });
+  // @ts-expect-error a null header key: the pair check throws TypeError with Java's message
+  assert.throws(() => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [[null, null]] }), {
+    name: 'TypeError',
+    message: 'Null header keys are not permitted',
+  });
 });
 
 const FORMS =
@@ -257,8 +283,14 @@ test("Java's constructor checks keep Java's messages", () => {
   });
   assert.throws(
     () =>
-      // @ts-expect-error a null header key: the header's null check throws TypeError
-      new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [new Header({ key: null, value: bytes('x') })] }),
+      new ProducerRecord({
+        topic: 't',
+        partition: null,
+        key: null,
+        value: 'v',
+        // @ts-expect-error a null header key: the header's null check throws TypeError
+        headers: [new RecordHeader({ key: null, value: bytes('x') })],
+      }),
     {
       name: 'TypeError',
       message: 'Null header keys are not permitted',
@@ -273,7 +305,7 @@ test("Java's constructor checks keep Java's messages", () => {
 });
 
 test("Java's six constructors each build the record they name", () => {
-  const h = [new Header({ key: 'h', value: bytes('x') })];
+  const h = [new RecordHeader({ key: 'h', value: bytes('x') })];
   const cases = /** @type {const} */ ([
     [{ topic: 't', partition: 1, timestamp: 2, key: 'k', value: 'v', headers: h }, [1, 2n, 'k', 'v', 1]],
     [{ topic: 't', partition: 1, timestamp: 2n, key: 'k', value: 'v' }, [1, 2n, 'k', 'v', 0]],
@@ -312,19 +344,24 @@ test("a parameter given as undefined is a TypeError; value's message says null s
 });
 
 test("undefined inside the headers is a TypeError; a null header value is Java's null", () => {
-  /** @param {Iterable<Header> | null} headers */
+  /** @param {Iterable<Header | readonly [string, Uint8Array | null]> | null} headers */
   const record = (headers) => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers });
-  const [header] = record([new Header({ key: 'h', value: null })]).headers.toArray();
+  const [header] = record([new RecordHeader({ key: 'h', value: null })]).headers.toArray();
   assert.deepEqual([header.key(), header.value()], ['h', null]);
   // @ts-expect-error an undefined header: the undefined check throws TypeError
   assert.throws(() => record([undefined]), {
     name: 'TypeError',
-    message: 'a header must not be undefined. Pass a Header, or leave it out',
+    message: 'headers[0] must not be undefined. Pass a Header or a [key, value] pair, or leave it out',
   });
   // @ts-expect-error an undefined header value: the undefined check throws TypeError
-  assert.throws(() => new Header({ key: 'h', value: undefined }), {
+  assert.throws(() => new RecordHeader({ key: 'h', value: undefined }), {
     name: 'TypeError',
     message: "value must not be undefined. Pass null for Java's null",
+  });
+  // @ts-expect-error an undefined pair value: the undefined check throws TypeError
+  assert.throws(() => record([['h', undefined]]), {
+    name: 'TypeError',
+    message: "headers[0] value must not be undefined. Pass null for Java's null",
   });
 });
 
@@ -466,13 +503,13 @@ test('values of the wrong type are TypeErrors', () => {
   // @ts-expect-error a string for the headers: the type check throws TypeError
   assert.throws(() => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: 'x' }), {
     name: 'TypeError',
-    message: 'headers must be a Headers, or an iterable of Header',
+    message: 'headers must be a Headers, or an iterable of Header objects and [key, value] pairs',
   });
-  // A {key, value} object is not a Header.
-  // @ts-expect-error a plain object for a Header: the class check throws TypeError
+  // A {key, value} object is not a Header: its key and value are no methods.
+  // @ts-expect-error a plain object for a Header: the header check throws TypeError
   assert.throws(() => new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [{ key: 'h', value: null }] }), {
     name: 'TypeError',
-    message: 'a header must be a Header',
+    message: 'headers[0] must be a Header or a [key, value] pair; got Object',
   });
 });
 
@@ -578,12 +615,11 @@ test('the record is frozen: a field cannot be reassigned, so send reads what the
   assert.ok(value);
   assert.deepEqual([topic, partition, timestamp, Buffer.from(key).toString(), Buffer.from(value).toString()], ['t', 0, 1n, 'k', 'v']);
   assert.deepEqual(keysAsText(headers), [['h', bytes('x')]]);
-  // A Header keeps its state in private fields: nothing to reassign.
-  const header = H('h', null);
-  // @ts-expect-error a write over a method: a Header keeps its state in private fields, so nothing changes
-  header.value = 'x';
-  const withHeader = new ProducerRecord({ topic: 't', partition: null, key: null, value: Buffer.from('v'), headers: [header] });
-  assert.deepEqual(keysAsText(sending(withHeader).internalToNative()[5]), [['h', null]]);
+  // The headers are read-only once converted, as Java's doSend seals them.
+  assert.equal(internalHeaders(r.headers).isReadOnly(), true);
+  // A record with no headers sends none.
+  const none = new ProducerRecord({ topic: 't', partition: null, key: null, value: Buffer.from('v') });
+  assert.equal(sending(none).internalToNative()[5], null);
 });
 
 test('toString follows Java', () => {
@@ -601,7 +637,7 @@ test('toString follows Java', () => {
     timestamp: 5,
     key: 'k',
     value: 'v',
-    headers: [H('a', bytes('vé')), new Header({ key: 'b', value: new Uint8Array([118]) })],
+    headers: [H('a', bytes('vé')), ['b', new Uint8Array([118])]],
   });
   assert.equal(
     s.toString(),
@@ -613,12 +649,11 @@ test('toString follows Java', () => {
 // toString() and hashCode() as Java's kafka-clients computes them, read from
 // test/java_vectors.json (tools/java-vectors/JavaVectors.java).
 test("toString() and hashCode() match Java's for records, record metadata and headers, as Kafka's kafka-clients wrote them", () => {
-  const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
   const { TopicPartition } = require('@confluentinc/kafka-javascript/common');
   const { RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
   /** @type {{ objects: Array<{ what: string, toString: string, hashCode?: number }> }} */
   const vectors = require('../../java_vectors.json');
-  const headers = () => new Headers([new Header({ key: 'h', value: Buffer.from('v') }), new Header({ key: 'n', value: null })]);
+  const headers = () => new Headers([new RecordHeader({ key: 'h', value: Buffer.from('v') }), ['n', null]]);
   /** @type {Record<string, () => { toString(): string, hashCode?: () => number }>} */
   const made = {
     'ProducerRecord(t, v)': () => new ProducerRecord({ topic: 't', value: 'v' }),
@@ -644,8 +679,8 @@ test("toString() and hashCode() match Java's for records, record metadata and he
         serializedKeySize: -1,
         serializedValueSize: -1,
       }),
-    'RecordHeader(h, v)': () => new Header({ key: 'h', value: Buffer.from('v') }),
-    'RecordHeader(n, null)': () => new Header({ key: 'n', value: null }),
+    'RecordHeader(h, v)': () => new RecordHeader({ key: 'h', value: Buffer.from('v') }),
+    'RecordHeader(n, null)': () => new RecordHeader({ key: 'n', value: null }),
     'RecordHeaders(h=v, n=null)': headers,
   };
   assert.deepEqual(vectors.objects.map((v) => v.what).sort(), Object.keys(made).sort());

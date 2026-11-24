@@ -37,6 +37,7 @@ const path = require('node:path');
 const { ExecutionError, IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { RecordTooLargeError } = require('@confluentinc/kafka-javascript/common/errors');
+const { RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { MockProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 // Every probe child runs with the allocator's poisoning (freed memory filled,
@@ -327,6 +328,24 @@ test('the serializers run on every send, each with fresh empty headers, and the 
   // Java's mock serializes with fresh headers and does not seal the record's.
   assert.equal(record.headers.toArray().length, 0);
   record.headers.add({ key: 'later', value: null });
+  await producer.close();
+});
+
+test("history() keeps the app's record with its own Headers, holding the Header objects given and writable, as Java's mock leaves them", async () => {
+  const producer = new MockProducer({ autoComplete: true, partitioner: null, keySerializer: null, valueSerializer: null });
+  const h = new RecordHeader({ key: 'h', value: Buffer.from('v') });
+  const record = new ProducerRecord({ topic, partition: null, key: null, value: Buffer.from('v'), headers: [h, ['p', null]] });
+  await producer.send(record);
+  const [kept] = producer.history();
+  assert.equal(kept, record);
+  assert.equal(kept.headers, record.headers);
+  const [first, pair] = kept.headers.toArray();
+  assert.equal(first, h);
+  assert.ok(pair instanceof RecordHeader);
+  assert.deepEqual([pair.key(), pair.value()], ['p', null]);
+  // Java's MockProducer does not seal the headers: a change after send() is seen in history().
+  record.headers.add({ key: 'later', value: null });
+  assert.equal(producer.history()[0].headers.lastHeader('later')?.key(), 'later');
   await producer.close();
 });
 

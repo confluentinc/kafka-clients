@@ -25,23 +25,24 @@ const { NO_LEAKS, CRASH_TEXT, lastJson } = require('./_probe');
 
 // The headers model: a record's Headers driven through random sequences of
 // add, remove, lastHeader, headers(key), toArray, iteration, a copy, a send
-// (which seals them) and collections, each read checked against a plain-JS
-// model of Java's org.apache.kafka.common.header.internals.RecordHeaders: an
-// ordered list of (key, value) pairs, read-only once the record is sent, a
-// change then refused with RecordHeaders#canWrite's IllegalStateException
-// ("RecordHeaders has been closed."). While the headers can change, a Header
-// read from them is a copy; once read-only, a view into them
-// (javascript/CLAUDE.md, the headers' option 1), and a change is refused
-// without freeing the views held (boundary rule 1). Every Header read is
-// kept for a while and checked again, after the headers changed and after
-// collections, some across sequences. In a probe child with the allocator's
-// poisoning, a view or a value Buffer left over freed memory reads garbage or
-// crashes. Each sequence comes from a seeded generator, the seeds from
-// HEADERS_MODEL_SEED (the first) and HEADERS_MODEL_SEEDS (how many), so a
-// failure is reproduced from the seed it prints.
+// (which makes them read-only) and collections, each read checked against a
+// plain-JS model of Java's
+// org.apache.kafka.common.header.internals.RecordHeaders: an ordered list of
+// the Header objects added, read-only once the record is sent, a change then
+// refused with RecordHeaders#canWrite's IllegalStateException
+// ("RecordHeaders has been closed."). A read hands out the very Header object
+// added, which keeps its key and value however the headers change later, as
+// Java's does; a [key, value] pair becomes a new RecordHeader. Each send's
+// native record is read back (native/record_spy.c recordSpy()): the copy of
+// the headers the core got holds what the model holds then, in order, byte
+// for byte. Every Header read is kept for a while and checked again, after
+// the headers changed and after collections, some across sequences. Each
+// sequence comes from a seeded generator, the seeds from HEADERS_MODEL_SEED
+// (the first) and HEADERS_MODEL_SEEDS (how many), so a failure is reproduced
+// from the seed it prints.
 
 const HEADERS_MODEL_PROBE = `
-const { Header, Headers } = require(D + '/common/header');
+const { Headers, RecordHeader } = require(D + '/common/header');
 const { KafkaProducer, ProducerRecord } = require(D + '/producer');
 
 const FIRST_SEED = Number(process.env.HEADERS_MODEL_SEED);
@@ -80,6 +81,7 @@ function randomValue(g) {
 }
 
 const pairs = (headers) => headers.map((h) => [h.key(), hex(h.value())]);
+const modelPairs = (model) => model.map((m) => [m.key, m.value]);
 
 function check(what, actual, expected) {
   const a = JSON.stringify(actual);
@@ -87,7 +89,14 @@ function check(what, actual, expected) {
   if (a !== e) throw new Error(what + ': read ' + a + ', the model has ' + e);
 }
 
-// How many of each operation ran, before and after the seal, so the test
+// The very objects the model holds, in order.
+function same(what, actual, expected) {
+  if (actual.length !== expected.length || actual.some((h, i) => h !== expected[i].header)) {
+    throw new Error(what + ': read other Header objects than the ones added');
+  }
+}
+
+// How many of each operation ran, before and after the send, so the test
 // shows it reached both.
 const ops = {};
 const count = (name) => (ops[name] = (ops[name] ?? 0) + 1);
@@ -105,22 +114,25 @@ function refused(what, change) {
   }
 }
 
-async function sequence(seed, producer, carried) {
+async function sequence(seed, producer, carried, out) {
   const g = generator(seed);
   const trace = [];
-  const initial = Array.from({ length: g.int(4) }, () => [g.pick(KEYS), randomValue(g)]);
-  const record = new ProducerRecord({
-    topic: 'headers-model',
-    partition: null,
-    key: null,
-    value: Buffer.from('v'),
-    headers: initial.map(([key, value]) => new Header({ key, value })),
+  // The initial headers: RecordHeader objects and [key, value] pairs.
+  const initial = Array.from({ length: g.int(4) }, () => {
+    const key = g.pick(KEYS);
+    const value = randomValue(g);
+    return g.next() < 0.5 ? new RecordHeader({ key, value }) : [key, value];
   });
+  const record = new ProducerRecord({ topic: 'headers-model', partition: null, key: null, value: Buffer.from('v'), headers: initial });
   const h = record.headers;
-  let model = initial.map(([key, value]) => [key, hex(value)]);
+  // The model: each header's key, value and the very object the headers hold.
+  let model = h.toArray().map((header) => ({ key: header.key(), value: hex(header.value()), header }));
+  initial.forEach((given, i) => {
+    if (given instanceof RecordHeader && model[i].header !== given) throw new Error('the record copied a Header it was given');
+  });
   let sealed = false;
   // Every Header read, with the key and value it had then, and some of their
-  // value Buffers on their own, which keep their Header alive.
+  // value Buffers on their own.
   let held = [];
   const hold = (headers) => {
     for (const header of headers) {
@@ -147,19 +159,20 @@ async function sequence(seed, producer, carried) {
           if (sealed) refused('add', () => h.add({ key, value }));
           else {
             h.add({ key, value });
-            model.push([key, hex(value)]);
+            const all = h.toArray();
+            model.push({ key, value: hex(value), header: all[all.length - 1] });
           }
           break;
         }
         case 'addHeader': {
-          // A new Header, or one read before (a copy, or a view of other headers).
+          // A new RecordHeader, or one read before.
           const headers = held.filter((x) => x.header !== undefined);
-          const header = headers.length > 0 && g.next() < 0.5 ? g.pick(headers).header : new Header({ key, value: randomValue(g) });
-          const pair = [header.key(), hex(header.value())];
+          const header = headers.length > 0 && g.next() < 0.5 ? g.pick(headers).header : new RecordHeader({ key, value: randomValue(g) });
+          const entry = { key: header.key(), value: hex(header.value()), header };
           if (sealed) refused('add(header)', () => h.add(header));
           else {
             h.add(header);
-            model.push(pair);
+            model.push(entry);
           }
           break;
         }
@@ -167,48 +180,59 @@ async function sequence(seed, producer, carried) {
           if (sealed) refused('remove', () => h.remove(key));
           else {
             h.remove(key);
-            model = model.filter(([k]) => k !== key);
+            model = model.filter((m) => m.key !== key);
           }
           break;
         case 'last': {
           const got = h.lastHeader(key);
-          const expected = model.filter(([k]) => k === key).pop() ?? null;
-          check('lastHeader', got === null ? null : [got.key(), hex(got.value())], expected);
+          const expected = model.filter((m) => m.key === key).pop() ?? null;
+          if (got !== (expected === null ? null : expected.header)) throw new Error('lastHeader: another object than the one added');
           if (got !== null) hold([got]);
           break;
         }
         case 'byKey': {
           const got = [...h.headers(key)];
-          check('headers(key)', pairs(got), model.filter(([k]) => k === key));
+          const expected = model.filter((m) => m.key === key);
+          check('headers(key)', pairs(got), modelPairs(expected));
+          same('headers(key)', got, expected);
           hold(got.slice(0, 2));
           break;
         }
         case 'toArray': {
           const got = h.toArray();
-          check('toArray', pairs(got), model);
+          check('toArray', pairs(got), modelPairs(model));
+          same('toArray', got, model);
           hold(got.filter(() => g.next() < 0.3));
           break;
         }
         case 'iterate': {
           const got = [...h];
-          check('iteration', pairs(got), model);
+          check('iteration', pairs(got), modelPairs(model));
+          same('iteration', got, model);
           hold(got.filter(() => g.next() < 0.3));
           break;
         }
         case 'copy': {
-          // Java's new RecordHeaders(headers): writable, apart from these.
+          // Java's new RecordHeaders(headers): the same Header objects, writable, apart from these.
           const copy = new Headers(h);
-          check('a copy', pairs(copy.toArray()), model);
+          same('a copy', copy.toArray(), model);
           copy.add({ key: 'copy-only', value: null });
-          check('after a change to a copy', pairs(h.toArray()), model);
+          check('after a change to a copy', pairs(h.toArray()), modelPairs(model));
           break;
         }
-        case 'send':
-          // send() seals the record's headers; the record's delivery, which
-          // fails against the unreachable broker, is not what is checked.
+        case 'send': {
+          // send() makes the record's headers read-only and copies them into
+          // the core's RecordHeaders; the record's delivery, which fails
+          // against the unreachable broker, is not what is checked.
+          native.recordSpy(true);
           await producer.send(record);
+          const spied = native.recordSpy(false);
+          if (spied.length !== 1) throw new Error('the send built ' + spied.length + ' records');
+          check('the headers the core got', spied[0].headers.map(([k, v]) => [k, hex(v)]), modelPairs(model));
+          out.sends++;
           sealed = true;
           break;
+        }
         case 'gc':
           globalThis.gc();
           break;
@@ -221,7 +245,8 @@ async function sequence(seed, producer, carried) {
       }
       if (held.length > 0 && g.next() < 0.2) checkHeld('after ' + op);
     }
-    check('in the end', pairs(h.toArray()), model);
+    check('in the end', pairs(h.toArray()), modelPairs(model));
+    same('in the end', h.toArray(), model);
     checkHeld('in the end');
     for (const x of held.slice(0, 3)) carried.push({ seed, ...x });
     return null;
@@ -232,12 +257,7 @@ async function sequence(seed, producer, carried) {
 
 (async () => {
   const hold = setInterval(() => {}, 1000);
-  const out = { sequences: 0, failures: [] };
-  // The shared empty RecordHeaders, made on first use, live for the process.
-  new Headers().internalSetReadOnly();
-  new Headers().lastHeader('warm');
-  await settle();
-  const base = native.headerStats();
+  const out = { sequences: 0, sends: 0, failures: [] };
   await (async () => {
     const producer = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 1 } });
     // Headers read in a sequence, checked again once later sequences ran and
@@ -246,7 +266,7 @@ async function sequence(seed, producer, carried) {
     for (let seed = FIRST_SEED; seed < FIRST_SEED + SEEDS; seed++) {
       // A crash ends the child: the last seed it printed is the one.
       console.log('seed ' + seed);
-      const failure = await sequence(seed, producer, carried);
+      const failure = await sequence(seed, producer, carried, out);
       out.sequences++;
       if (failure !== null) out.failures.push(failure);
     }
@@ -263,12 +283,6 @@ async function sequence(seed, producer, carried) {
     await producer.close();
   })();
   await settle();
-  const s = native.headerStats();
-  out.live = {
-    headers: s.headersMade - base.headersMade - (s.headersFreed - base.headersFreed),
-    header: s.headerMade - base.headerMade - (s.headerFreed - base.headerFreed),
-  };
-  out.reads = { copies: s.headerCopies - base.headerCopies, views: s.headerViews - base.headerViews };
   out.ops = ops;
   out.leaks = leaks();
   console.log(JSON.stringify(out));
@@ -278,7 +292,8 @@ async function sequence(seed, producer, carried) {
 
 /**
  * Checks the headers model's outcome: no crash, every read as the model has
- * it, every sequence run, both kinds of Header read, every handle freed.
+ * it, every sequence run, the sends' native copies as the model, every handle
+ * freed.
  *
  * @param {{ status: number | null, signal: string | null, stdout: string, stderr: string }} r the probe's outcome
  * @param {number} seeds how many sequences it ran
@@ -291,21 +306,19 @@ function checkHeadersModel(r, seeds) {
   assert.doesNotMatch(r.stderr, CRASH_TEXT, `crashed in ${last} (${reproduce(last.slice(5))})`);
   assert.equal(r.status, 0, `${last} (${reproduce(last.slice(5))}):\n${r.stderr}`);
   const out =
-    /** @type {{ sequences: number, failures: { seed: number }[], carried: number, live: unknown, reads: { copies: number, views: number }, ops: Record<string, number>, leaks: unknown }} */ (
+    /** @type {{ sequences: number, sends: number, failures: { seed: number }[], carried: number, ops: Record<string, number>, leaks: unknown }} */ (
       lastJson(r)
     );
   assert.deepEqual(out.failures, [], out.failures.map((f) => `seed ${f.seed} (${reproduce(f.seed)}): ${JSON.stringify(f)}`).join('\n'));
   assert.equal(out.sequences, seeds);
+  assert.ok(out.sends > 0, 'no record was sent');
   assert.ok(out.carried > 0, 'no Header was kept across sequences');
   // Every change and every read ran on headers that could still change and
   // on read-only ones.
   for (const op of ['add', 'addHeader', 'remove', 'last', 'byKey', 'toArray', 'iterate', 'copy']) {
     for (const name of [op, `${op} sealed`]) assert.ok((out.ops[name] ?? 0) > 0, `${name} never ran: ${JSON.stringify(out.ops)}`);
   }
-  // Both kinds of Header were read, and every native handle was destroyed,
-  // once, when its last holder was collected (native/headers.c headerStats()).
-  assert.ok(out.reads.copies > 0 && out.reads.views > 0, JSON.stringify(out.reads));
-  assert.deepEqual(out.live, { headers: 0, header: 0 });
+  // Every native handle, each send's RecordHeaders included, was destroyed once.
   assert.deepEqual(out.leaks, NO_LEAKS);
 }
 
@@ -316,13 +329,13 @@ function checkHeadersModel(r, seeds) {
 // the heap, where a compaction moves them; a Buffer of its own; a slice of
 // Node's Buffer pool; a view into the middle of a larger ArrayBuffer; an
 // empty one; null. Each record the sends built is read back
-// (native/headers.c recordSpy()) and compared, byte for byte, with what was
+// (native/record_spy.c recordSpy()) and compared, byte for byte, with what was
 // given, and its key and value must be the caller's own memory. Then 200
 // strings through stringSerializer(), the bytes the client makes itself.
 // Every record fails with the metadata timeout, which each future, read
 // after the collections, holds.
 const SEND_PROBE = `
-const { Header } = require(D + '/common/header');
+const { RecordHeader } = require(D + '/common/header');
 const { stringSerializer } = require(D + '/common/serialization');
 const { KafkaProducer, ProducerRecord } = require(D + '/producer');
 const hex = (b) => (b === null ? null : Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('hex'));
@@ -364,11 +377,11 @@ function churn(i) {
         const i = round * 25 + j;
         const key = bytes(i);
         const value = bytes(i + 3);
-        const headers = i % 3 === 0 ? [new Header({ key: 'h' + (i % 5), value: bytes(i + 1) }), new Header({ key: 'n', value: null })] : [];
+        const headers = i % 3 === 0 ? [new RecordHeader({ key: 'h' + (i % 5), value: bytes(i + 1) }), ['n', null]] : [];
         expected.push({
           key: hex(key),
           value: hex(value),
-          headers: headers.map((h) => [h.key(), hex(h.value())]),
+          headers: headers.map((h) => (Array.isArray(h) ? [h[0], hex(h[1])] : [h.key(), hex(h.value())])),
           keyInPlace: key !== null && key.length > 0,
           valueInPlace: value !== null && value.length > 0,
         });

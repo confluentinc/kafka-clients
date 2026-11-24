@@ -49,7 +49,8 @@
         "error_payload.c",
         "headers.c",
         "producer.c",
-        "record.c"
+        "record.c",
+        "record_spy.c"
       ],
       "include_dirs": [
         "<(ck_include_dir)",

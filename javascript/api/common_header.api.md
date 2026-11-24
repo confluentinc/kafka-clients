@@ -10,22 +10,8 @@
 export const __esModule: true;
 
 // @public
-export class Header {
-    constructor(options: {
-        key: string;
-        value: Uint8Array | null;
-    });
-    equals(options: {
-        o: unknown;
-    }): boolean;
-    equals(o: unknown): boolean;
-    hashCode(): number;
+export interface Header {
     key(): string;
-    toJSON(): {
-        key: string;
-        value: Buffer | null;
-    };
-    toString(): string;
     value(): Buffer | null;
 }
 
@@ -34,13 +20,13 @@ class Headers_2 implements Iterable<Header> {
     [Symbol.iterator](): Iterator<Header>;
     constructor();
     constructor(options: {
-        headers: readonly Header[] | null;
+        headers: readonly (Header | readonly [string, Uint8Array | null])[] | null;
     });
     constructor(options: {
-        headers: Iterable<Header> | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
     });
-    constructor(headers: readonly Header[] | null);
-    constructor(headers: Iterable<Header> | null);
+    constructor(headers: readonly (Header | readonly [string, Uint8Array | null])[] | null);
+    constructor(headers: Iterable<Header | readonly [string, Uint8Array | null]> | null);
     add(options: {
         header: Header;
         key?: never;
@@ -74,5 +60,27 @@ class Headers_2 implements Iterable<Header> {
     toString(): string;
 }
 export { Headers_2 as Headers }
+
+// @public
+export class RecordHeader implements Header {
+    constructor(options: {
+        key: string;
+        value: Uint8Array | null;
+    });
+    equals(options: {
+        o: unknown;
+    }): boolean;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    // (undocumented)
+    key(): string;
+    toJSON(): {
+        key: string;
+        value: Buffer | null;
+    };
+    toString(): string;
+    // (undocumented)
+    value(): Buffer | null;
+}
 
 ```

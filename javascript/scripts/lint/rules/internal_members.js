@@ -32,7 +32,10 @@ const { isInternal, errorRegistry } = require('../java_ts');
 //     the error tree, `KafkaError` (src/common/kafka_error.ts), declares it
 //     (`ffi-id-missing`), reached by dot or bracket access;
 //   - a member named `internal<Upper>...` is marked `@internal`, and an
-//     `@internal` member is named so, which keeps the two readable together;
+//     `@internal` member is named so, which keeps the two readable together,
+//     but the members the JS conventions name by Java's names (`JAVA_NAMED`:
+//     `Headers`' `setReadOnly()` and `isReadOnly()`), each of which is an
+//     `@internal` member of its class (`java-named-unused` otherwise);
 //   - an `@internal` member is not `private`, `protected` or an ES `#` one
 //     (another class of the library calls it; the TypeScript modifier would
 //     refuse that, and the tag already hides it from users);
@@ -61,10 +64,35 @@ const FFI_ID = '_ffiId';
 /** The module of the head of the error tree, which declares the FFI id. */
 const ERROR_HEAD = { rel: 'src/common/kafka_error.ts', name: 'KafkaError' };
 
+/**
+ * The library-only members the JS conventions name by Java's name, keyed
+ * `src/<module>.ts:<Class>.<member>`, each with its rule.
+ */
+const JAVA_NAMED = new Map([
+  [
+    'src/common/header/headers.ts:Headers.setReadOnly',
+    "javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization: Headers' read-only state, whose setReadOnly() is @internal",
+  ],
+  [
+    'src/common/header/headers.ts:Headers.isReadOnly',
+    "javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization: Headers' read-only state, whose isReadOnly() is @internal",
+  ],
+]);
+
 module.exports = {
   name: 'check-internal-members',
-  kinds: ['underscore', 'not-tagged', 'not-named', 'hidden', 'internal-constructor', 'bracket-access', 'ffi-id-missing'],
+  kinds: [
+    'underscore',
+    'not-tagged',
+    'not-named',
+    'hidden',
+    'internal-constructor',
+    'bracket-access',
+    'ffi-id-missing',
+    'java-named-unused',
+  ],
   needs: ['program'],
+  JAVA_NAMED,
   hint:
     'Make a member only the library calls a public `@internal` member named `internal...`, called with dot ' +
     "access; make a constructor users must not call `private`; keep an error's FFI id in `_ffiId` " +
@@ -77,6 +105,8 @@ module.exports = {
     const errorClasses = new Set([...errorRegistry(ctx)].map(([rel, row]) => `${rel}:${row.name}`));
     let headDeclares = false;
     let headFound = false;
+    // The JAVA_NAMED entries found as @internal members.
+    const javaNamed = new Set();
     for (const sf of sourceFiles) {
       const rel = ctx.rel(sf.fileName);
       const line = (node) => sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
@@ -105,6 +135,8 @@ module.exports = {
           );
         } else if (INTERNAL_NAME.test(name) && !tagged) {
           push('not-tagged', cls, node, name, `\`${name}\` is named \`internal...\` but its TSDoc has no \`@internal\``);
+        } else if (tagged && !INTERNAL_NAME.test(name) && this.JAVA_NAMED.has(`${key}.${name}`)) {
+          javaNamed.add(`${key}.${name}`);
         } else if (tagged && !INTERNAL_NAME.test(name)) {
           push('not-named', cls, node, name, `\`${name}\` is \`@internal\` but not named \`internal...\``);
         }
@@ -161,6 +193,19 @@ module.exports = {
         ts.forEachChild(node, visit);
       };
       visit(sf);
+    }
+    // An entry whose module is in the program and whose member is no
+    // @internal one of its class is not needed.
+    const modules = new Set(sourceFiles.map((sf) => ctx.rel(sf.fileName)));
+    for (const [entry, rule] of this.JAVA_NAMED) {
+      if (!modules.has(entry.slice(0, entry.indexOf(':')))) continue;
+      checked += 1;
+      if (javaNamed.has(entry)) continue;
+      findings.push({
+        kind: 'java-named-unused',
+        subject: entry,
+        message: `is listed as a library-only member named by Java (${rule}), but is no \`@internal\` member of its class: delete the entry`,
+      });
     }
     if (headFound && !headDeclares) {
       checked += 1;

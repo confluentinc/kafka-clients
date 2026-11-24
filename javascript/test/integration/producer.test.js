@@ -24,7 +24,7 @@ const path = require('node:path');
 const { ExecutionError, TimeoutError: RootTimeoutError } = require('@confluentinc/kafka-javascript');
 const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 const { TimeoutError } = require('@confluentinc/kafka-javascript/common/errors');
-const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
+const { Headers, RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { fetchRecords } = require('./_fetch_records');
@@ -70,7 +70,7 @@ const N = 300;
           partition: null,
           key: Buffer.from('k1'),
           value: Buffer.from('hello-from-node'),
-          headers: [new Header({ key: 'h1', value: Buffer.from('v1') }), new Header({ key: 'h2', value: null })],
+          headers: [new RecordHeader({ key: 'h1', value: Buffer.from('v1') }), new RecordHeader({ key: 'h2', value: null })],
         }),
         callback: ({ metadata: m, exception: error }) => {
           callbacks++;
@@ -498,7 +498,7 @@ const N = 300;
       for (const { key, value, header } of sent) {
         const metadata = await (
           await producer.send({
-            record: new ProducerRecord({ topic, partition: 0, key, value, headers: [new Header({ key: 'h', value: header })] }),
+            record: new ProducerRecord({ topic, partition: 0, key, value, headers: [new RecordHeader({ key: 'h', value: header })] }),
           })
         ).get();
         partition = metadata.partition;
@@ -571,7 +571,7 @@ const N = 300;
             timestamp: BigInt(explicit) + 1n,
             key: null,
             value: Buffer.from('b'),
-            headers: [new Header({ key: 'h', value: Buffer.from('v') })],
+            headers: [new RecordHeader({ key: 'h', value: Buffer.from('v') })],
           }),
         })
       ).get();
@@ -786,7 +786,7 @@ async function assertSendOrder(futures) {
       const key = Buffer.from('key-0');
       const value = new Uint8Array(Buffer.from('value-0'));
       const header = Buffer.from('header-0');
-      const record = new ProducerRecord({ topic, partition: 0, key, value, headers: [new Header({ key: 'h', value: header })] });
+      const record = new ProducerRecord({ topic, partition: 0, key, value, headers: [new RecordHeader({ key: 'h', value: header })] });
       const sent = producer.send(record);
       header.fill(0x7a);
       const future = await sent;
@@ -884,7 +884,9 @@ async function assertSendOrder(futures) {
     try {
       for (const [s] of cases) {
         await (
-          await producer.send(new ProducerRecord({ topic, partition: 0, key: s, value: s, headers: [new Header({ key: s, value: null })] }))
+          await producer.send(
+            new ProducerRecord({ topic, partition: 0, key: s, value: s, headers: [new RecordHeader({ key: s, value: null })] }),
+          )
         ).get();
       }
       const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
@@ -944,7 +946,7 @@ async function assertSendOrder(futures) {
     const topic = freshTopic('sealed');
     const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
     try {
-      const headers = new Headers([new Header({ key: 'a', value: null })]);
+      const headers = new Headers([new RecordHeader({ key: 'a', value: null })]);
       const record = new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('v'), headers });
       record.headers.add({ key: 'b', value: Buffer.from('1') });
       const sent = producer.send(record);
@@ -2612,7 +2614,7 @@ async function untilTaken(step) {
 );
 
 (SKIP ? test.skip : test)(
-  "50 headers with repeated keys, a null value, an empty value, an emoji key and a lone surrogate key arrive in order, the keys as Java's UTF-8",
+  "50 headers, RecordHeader objects and [key, value] pairs, with repeated keys, a null value, an empty value, an emoji key and a lone surrogate key arrive in order, the keys as Java's UTF-8",
   async () => {
     const topic = await newTopic('headers-fidelity');
     const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
@@ -2623,7 +2625,9 @@ async function untilTaken(step) {
       given.push(['null-value', null], ['empty-value', Buffer.alloc(0)], ['\u{1F680}', Buffer.from('rocket')]);
       given.push(['a\uD800b', Buffer.from('lone')], ['k0', Buffer.from('last')], ['été', Buffer.from('accents')]);
       assert.equal(given.length, 50);
-      const headers = given.map(([key, value]) => new Header({ key, value }));
+      // Every other header a RecordHeader, the rest [key, value] pairs.
+      /** @type {Array<import('@confluentinc/kafka-javascript/common/header').Header | readonly [string, Buffer | null]>} */
+      const headers = given.map(([key, value], i) => (i % 2 === 0 ? new RecordHeader({ key, value }) : [key, value]));
       await (await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('v'), headers }))).get();
       const { records } = await fetchRecords(BOOTSTRAP, topic, 0);
       assert.equal(records.length, 1);

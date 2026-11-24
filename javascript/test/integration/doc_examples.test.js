@@ -74,7 +74,7 @@ function freshTopic(what) {
     const topic = freshTopic('headers');
     await createTopic(BOOTSTRAP, topic);
     const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
-    const built = await runBlock(jsBlock('README.md', 'Headers', 'new Header'), {
+    const built = await runBlock(jsBlock('README.md', 'Headers', 'new RecordHeader'), {
       scope: { ProducerRecord },
       replace: [["topic: 'demo'", `topic: ${JSON.stringify(topic)}`]],
       result: 'record',

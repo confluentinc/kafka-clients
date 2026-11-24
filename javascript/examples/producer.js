@@ -22,7 +22,6 @@
 // The package's own name resolves inside the package (Node's self-reference
 // through package.json `exports`), so this runs without an npm install.
 const { ExecutionError } = require('@confluentinc/kafka-javascript');
-const { Header } = require('@confluentinc/kafka-javascript/common/header');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
@@ -41,9 +40,10 @@ async function main(argv) {
   });
   try {
     // Resolves once the producer has the record (Java's send() returning)...
-    // A header value is bytes. A record with headers names its partition
-    // (null: the producer chooses), as Java's constructors do.
-    const headers = [new Header({ key: 'source', value: Buffer.from('examples/producer.js') })];
+    // A header value is bytes, and a header may be a [key, value] pair. A
+    // record with headers names its partition (null: the producer chooses),
+    // as Java's constructors do.
+    const headers = [['source', Buffer.from('examples/producer.js')]];
     const future = await producer.send({
       record: new ProducerRecord({ topic, partition: null, key, value, headers }),
       callback: ({ exception }) => {

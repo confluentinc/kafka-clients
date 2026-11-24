@@ -113,6 +113,11 @@ rules and readings. Newest entries are at the end; dates are in IST.
 
 21. **Option 1: copy while the `Headers` can still change.** The JS conventions' row is still parked ("How a `Header` from a
     `Headers` that can still change … stays valid", Q31), so the rule's text needs this decision added by its owner.
+    - **Superseded on 2026-11-24** by the rules' owner's rule (JS conventions, Serialization, Q31), which settles the
+      three parked header rows: `Headers` and `RecordHeader` are plain TypeScript classes holding their own data, and
+      the core gets a copy of the headers only at `send()`, so a `Header` read stays valid as Java's does without any
+      copy or view. The wrapping below, its copies and views, the shared empty handles and their counts are gone;
+      `native/headers.c` keeps only the send-time copy (`javascript/CLAUDE.md`, "Java shape, JS idiom").
     - **The rule:** in JavaScript, `Headers` and `Header` wrap the FFI's `RecordHeaders` and `RecordHeader`. This is
       js-only; Python and .NET keep plain headers and build the native ones at the send boundary. The reasons are that
       the core holds the headers and enforces read-only after `send()`, and a consumed record's header values stay

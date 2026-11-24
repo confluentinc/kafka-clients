@@ -19,7 +19,7 @@
 const assert = require('node:assert/strict');
 
 const { TSCONFIG, project, lint, findings } = require('./_project');
-const { CLASSES, LIB, javaClass, javaIndex, mapping, INVENTED } = require('./_java_fixture');
+const { CLASSES, LIB, javaClass, javaIndex, mapping, method, INVENTED } = require('./_java_fixture');
 
 const RULE = 'check-public-audience';
 
@@ -53,6 +53,32 @@ test('each finding kind, with its exact text', () => {
     'src/producer/sealed.ts:Sealed: translates clients.producer.Sealed, which is not @InterfaceAudience.Public in Kafka 4.4.0-rc3',
     'Pkg.constructor: translates the package-private constructor clients.producer.Pkg#Pkg',
     'Rec.hidden: translates the private method clients.producer.Rec#hidden',
+  ]);
+});
+
+test("a class the JS conventions make public is exempt: Java's internal RecordHeader, the class an app builds a header with", () => {
+  const recordHeader = javaClass('common.header.internals.RecordHeader', {
+    public_audience: false,
+    overloads: [method('RecordHeader', ['String', 'byte[]'])],
+  });
+  const files = (/** @type {string} */ name) => ({
+    [`src/common/header/${name === 'RecordHeader' ? 'record_header' : 'other_header'}.ts`]: `/** A header. */\nexport class ${name} {}\n`,
+    'lint-mapping.json': mapping({
+      invented: INVENTED,
+      javaTargets: {
+        [`src/common/header/${name === 'RecordHeader' ? 'record_header' : 'other_header'}.ts:${name}`]:
+          name === 'RecordHeader'
+            ? 'org.apache.kafka.common.header.internals.RecordHeader'
+            : 'org.apache.kafka.clients.producer.internals.Acc',
+      },
+    }),
+  });
+  let r = lint(fixture(files('RecordHeader'), [...CLASSES, recordHeader]), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  // Another internal class is not.
+  r = lint(fixture(files('OtherHeader'), [...CLASSES, recordHeader]), [RULE]);
+  assert.deepEqual(findings(r), [
+    'src/common/header/other_header.ts:OtherHeader: translates clients.producer.internals.Acc, whose package clients.producer.internals is internal',
   ]);
 });
 

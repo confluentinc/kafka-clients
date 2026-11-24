@@ -31,7 +31,7 @@ const { Temporal } = require('@js-temporal/polyfill');
 const { ExecutionError, IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
 const { KafkaError, KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 const errors = require('@confluentinc/kafka-javascript/common/errors');
-const { Header } = require('@confluentinc/kafka-javascript/common/header');
+const { RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { createFuture } = require('../../_internal');
@@ -1084,14 +1084,24 @@ test('a string holding a NUL is refused where the C ABI would truncate it', asyn
     name: 'TypeError',
     message: 'topic must be a string without null bytes',
   });
-  // A header key crosses to the core when the header is made (the native
-  // RecordHeader), so a NUL in it is refused there, before any send.
-  assert.throws(() => new Header({ key: 'k\0x', value: Buffer.from('h') }), {
-    name: 'TypeError',
-    message: 'a header key must be a string without null bytes',
-  });
-  // Neither send left anything pending: the close has nothing to wait for and
-  // no callback ran.
+  // A header key crosses to the core only at send(): the RecordHeader keeps it
+  // as Java keeps the String, and send() refuses the NUL, a header given as a
+  // pair too.
+  const header = new RecordHeader({ key: 'k\0x', value: Buffer.from('h') });
+  assert.equal(header.key(), 'k\0x');
+  /** @type {Array<Array<import('@confluentinc/kafka-javascript/common/header').Header | readonly [string, Uint8Array | null]>>} */
+  const given = [[header], [['k\0x', null]]];
+  for (const headers of given) {
+    await assert.rejects(
+      producer.send({
+        record: new ProducerRecord({ topic: 'good', partition: null, key: null, value: Buffer.from('v'), headers }),
+        callback,
+      }),
+      { name: 'TypeError', message: 'a header key must be a string without null bytes' },
+    );
+  }
+  // No send left anything pending: the close has nothing to wait for and no
+  // callback ran.
   const started = Date.now();
   await producer.close();
   assert.ok(Date.now() - started < MAX_BLOCK_MS * 10, `close took ${Date.now() - started} ms`);
@@ -1101,17 +1111,15 @@ test('a string holding a NUL is refused where the C ABI would truncate it', asyn
 test('a refused NUL-holding send leaves nothing pending: the producer then closes at once', () => {
   const r = runNode(`
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
-    const { Header } = require('@confluentinc/kafka-javascript/common/header');
     const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 60000 } });
     (async () => {
       await p
         .send({ record: new ProducerRecord({ topic: 'a\\0b', value: Buffer.from('v') }), callback: () => console.log('callback ran') })
         .catch((e) => console.log(e.name, e.message));
-      try {
-        new Header({ key: 'a\\0b', value: Buffer.from('v') });
-      } catch (e) {
-        console.log(e.name, e.message);
-      }
+      const headers = [['a\\0b', Buffer.from('v')]];
+      await p
+        .send({ record: new ProducerRecord({ topic: 't', partition: null, key: null, value: Buffer.from('v'), headers }), callback: () => console.log('callback ran') })
+        .catch((e) => console.log(e.name, e.message));
       await p.close();
     })();
   `);
@@ -2915,7 +2923,7 @@ test('a send whose metadata wait times out leaves metadata-wait-time-ns-total at
 test('a key, a value and a header value of 2^31 bytes are refused with RangeError, with no callback and nothing pending', () => {
   const r = runNode(`
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
-    const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
+    const { RecordHeader, Headers } = require('@confluentinc/kafka-javascript/common/header');
     let huge;
     try {
       huge = new Uint8Array(2 ** 31);
@@ -2927,26 +2935,18 @@ test('a key, a value and a header value of 2^31 bytes are refused with RangeErro
     let callbacks = 0;
     const callback = () => callbacks++;
     (async () => {
+      // The headers keep the value as Java does: it crosses, and is refused, at send().
+      const headers = new Headers().add({ key: 'h', value: huge });
       for (const [what, record] of [
         ['key', () => new ProducerRecord({ topic: 't', partition: 0, key: huge, value: null })],
         ['value', () => new ProducerRecord({ topic: 't', partition: 0, key: null, value: huge })],
+        ['header', () => new ProducerRecord({ topic: 't', partition: 0, key: null, value: null, headers: [new RecordHeader({ key: 'h', value: huge })] })],
+        ['added header', () => new ProducerRecord({ topic: 't', partition: 0, key: null, value: null, headers })],
       ]) {
         await p.send({ record: record(), callback }).then(
           () => console.log(what, 'accepted'),
           (e) => console.log(what, e.constructor.name, e.message),
         );
-      }
-      try {
-        new Header({ key: 'h', value: huge });
-        console.log('Header accepted');
-      } catch (e) {
-        console.log('Header', e.constructor.name, e.message);
-      }
-      try {
-        new Headers().add({ key: 'h', value: huge });
-        console.log('Headers.add accepted');
-      } catch (e) {
-        console.log('Headers.add', e.constructor.name, e.message);
       }
       const started = Date.now();
       await p.close();
@@ -2956,7 +2956,7 @@ test('a key, a value and a header value of 2^31 bytes are refused with RangeErro
   assert.equal(r.status, 0, r.stderr);
   if (r.stdout.startsWith('skip')) return;
   const refused = 'RangeError a byte array crossing the C FFI is limited to 2^31 - 1 bytes';
-  assert.equal(r.stdout, `key ${refused}\nvalue ${refused}\nHeader ${refused}\nHeaders.add ${refused}\ncallbacks 0 closed at once true\n`);
+  assert.equal(r.stdout, `key ${refused}\nvalue ${refused}\nheader ${refused}\nadded header ${refused}\ncallbacks 0 closed at once true\n`);
 }, 60000);
 
 // One table over the completion paths a producer without a broker reaches:

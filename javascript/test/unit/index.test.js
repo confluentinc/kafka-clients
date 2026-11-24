@@ -131,13 +131,16 @@ test("two copies of the package: their classes are distinct, so calls taking the
   assert.ok(!(state instanceof ours.root.IllegalStateError));
   assert.equal(state.name, 'IllegalStateError');
 
-  // A Header of the other copy is no Header here.
-  const header = new theirs.header.Header({ key: 'h', value: null });
-  assert.throws(() => new ours.header.Headers([header]), { name: 'TypeError', message: 'a header must be a Header' });
-  assert.throws(() => new ours.producer.ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [header] }), {
-    name: 'TypeError',
-    message: 'a header must be a Header',
-  });
+  // Header is an interface: a RecordHeader of the other copy, with its key()
+  // and value(), is a Header here too, kept as it is.
+  const header = new theirs.header.RecordHeader({ key: 'h', value: null });
+  assert.ok(!(header instanceof ours.header.RecordHeader));
+  assert.equal(new ours.header.Headers([header]).toArray()[0], header);
+  const withTheirs = new ours.producer.ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: [header] });
+  assert.equal(withTheirs.headers.lastHeader('h'), header);
+  // So is a Headers of theirs, an iterable of Header: copied, the same objects held.
+  const theirHeaders = new theirs.header.Headers([header]);
+  assert.equal(new ours.header.Headers(theirHeaders).toArray()[0], header);
 
   // A ProducerRecord of the other copy is refused by this copy's producer.
   const record = new theirs.producer.ProducerRecord({ topic: 't', value: 'v' });

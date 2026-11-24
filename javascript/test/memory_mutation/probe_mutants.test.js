@@ -278,10 +278,29 @@ const MUTANTS = [
     probes: [PROBES.counts],
   },
   {
-    name: "a value Buffer that takes no reference on its header, whose bytes then go with the header's last other holder",
+    name: "a send's native RecordHeaders never destroyed once the record's builder copied it",
     native: true,
-    edits: [['native/headers.c', '    if (status == napi_ok) {\n        box->refs++;\n', '    if (status == napi_ok) {\n']],
-    probes: [PROBES.headersModel, PROBES.headersUnderStress],
+    edits: [
+      [
+        'native/record.c',
+        '            err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_headers_err(builder, record_headers, &ffi_err));\n            headers_destroy(env, record_headers);\n',
+        '            err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_headers_err(builder, record_headers, &ffi_err));\n',
+      ],
+    ],
+    probes: [PROBES.counts, PROBES.headersModel],
+  },
+  {
+    // A use after free: the builder copies headers already freed.
+    name: "a send's native RecordHeaders destroyed before the record's builder copies it",
+    native: true,
+    edits: [
+      [
+        'native/record.c',
+        '            err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_headers_err(builder, record_headers, &ffi_err));\n            headers_destroy(env, record_headers);\n',
+        '            headers_destroy(env, record_headers);\n            err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_headers_err(builder, record_headers, &ffi_err));\n',
+      ],
+    ],
+    probes: [PROBES.readBack, PROBES.headersModel],
   },
   {
     name: 'a key or value copied before the core reads it',
@@ -296,14 +315,13 @@ const MUTANTS = [
     probes: [PROBES.readBack],
   },
   {
-    // The use after free the allocator's poisoning once caught: the FFI drops
-    // a handle's header views on every mutating call, refused or not.
-    name: 'a refused change to read-only headers sent to their own handle, which frees the views held',
+    // Java's setReadOnly() is what makes a sent record's headers refuse a change.
+    name: "setReadOnly() that leaves the headers writable: a sent record's headers take a change",
     native: false,
     edits: [
-      ['dist/common/header/headers.js', '        return native.headersIsReadOnly(own) ? sealedEmpty() : own;\n', '        return own;\n'],
+      ['dist/common/header/headers.js', '    setReadOnly() {\n        this.#isReadOnly = true;\n    }\n', '    setReadOnly() {\n    }\n'],
     ],
-    probes: [PROBES.headersModel],
+    probes: [PROBES.headersModel, PROBES.headersUnderStress],
   },
 ];
 

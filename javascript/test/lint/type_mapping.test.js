@@ -315,29 +315,57 @@ test('nothing mapped fails: 0 items checked', () => {
   assert.ok(r.err.includes('❌ check-type-mapping: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });
 
-test('where Java takes an Iterable<Header>, a [key, value] pair is no element: Java takes only Header objects', () => {
+test('where Java takes Headers, an Iterable<Header> or a Header[], an element is a Header or a readonly [string, Uint8Array | null] pair', () => {
   const taker = javaClass('clients.producer.Taker', {
-    overloads: [method('take', ['Iterable'], { param_types: ['Iterable<Header>'], return_type: 'void', param_names: ['headers'] })],
+    overloads: [
+      method('take', ['Iterable'], { param_types: ['Iterable<Header>'], return_type: 'void', param_names: ['headers'] }),
+      method('takeArray', ['Header[]'], { param_types: ['Header[]'], return_type: 'void', param_names: ['headers'] }),
+      method('takeHeaders', ['Headers'], { param_types: ['Headers'], return_type: 'void', param_names: ['headers'] }),
+      method('one', ['Header'], { param_types: ['Header'], return_type: 'void', param_names: ['header'] }),
+    ],
   });
-  const source = (/** @type {string} */ element) =>
+  const headers = javaClass('common.header.Headers', { kind: 'interface', supertypes: ['Iterable'], overloads: [] });
+  const PAIR = 'readonly [string, Uint8Array | null]';
+  const source = (/** @type {Record<string, string>} */ t) =>
     "import type { Header } from '../common/header/header';\n" +
-    `export class Taker {\n  take(headers: Iterable<${element}>): void { void headers; }\n}\n`;
-  const files = (/** @type {string} */ element) =>
+    "import type { Headers } from '../common/header/headers';\n" +
+    'export class Taker {\n' +
+    `  take(headers: Iterable<${t.take ?? `Header | ${PAIR}`}>): void { void headers; }\n` +
+    `  takeArray(headers: readonly (${t.takeArray ?? `Header | ${PAIR}`})[]): void { void headers; }\n` +
+    `  takeHeaders(headers: ${t.takeHeaders ?? `Headers | Iterable<Header | ${PAIR}>`}): void { void headers; }\n` +
+    `  one(header: ${t.one ?? 'Header'}): void { void header; }\n` +
+    '}\n';
+  const files = (/** @type {Record<string, string>} */ t) =>
     project({
       'tsconfig.json': TSCONFIG,
-      'java-index.json': javaIndex([...classes, taker]),
+      'java-index.json': javaIndex([...classes, taker, headers]),
       ...FILES,
       ...LIB,
+      'src/common/header/headers.ts': "import type { Header } from './header';\nexport interface Headers extends Iterable<Header> {}\n",
       'src/producer/typed.ts': TYPED_TS,
       'src/common/kafka_future.ts': FUTURE_TS,
-      'src/producer/taker.ts': source(element),
+      'src/producer/taker.ts': source(t),
     });
-  let r = lint(files('Header'), [RULE]);
+  let r = lint(files({}), [RULE]);
   assert.equal(r.status, 0, r.text);
-  // A string value: TypeScript 5.9 prints Uint8Array as Uint8Array<ArrayBufferLike>.
-  r = lint(files('Header | readonly [key: string, value: string | null]'), [RULE]);
+  // The JS conventions' type is the pair beside the Header: a Header alone,
+  // a pair whose value is a string, a mutable pair, or a pair where Java takes
+  // one Header, is a mismatch. TypeScript 5.9 prints Uint8Array as
+  // Uint8Array<ArrayBufferLike>.
+  r = lint(
+    files({
+      take: 'Header',
+      takeArray: 'Header | readonly [key: string, value: string | null]',
+      takeHeaders: 'Headers | Iterable<Header | [string, Uint8Array | null]>',
+      one: `Header | ${PAIR}`,
+    }),
+    [RULE],
+  );
   assert.deepEqual(findings(r), [
-    'Taker.take: parameter headers: Java Iterable<Header> is not TypeScript Iterable<Header | readonly [key: string, value: string | null]>',
+    'Taker.take: parameter headers: Java Iterable<Header> is not TypeScript Iterable<Header>',
+    'Taker.takeArray: parameter headers: Java Header[] is not TypeScript readonly (Header | readonly [key: string, value: string | null])[]',
+    'Taker.takeHeaders: parameter headers: Java Headers is not TypeScript Headers | Iterable<Header | [string, Uint8Array<ArrayBufferLike> | null]>',
+    'Taker.one: parameter header: Java Header is not TypeScript Header | readonly [string, Uint8Array<ArrayBufferLike> | null]',
   ]);
 });
 

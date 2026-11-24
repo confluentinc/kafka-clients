@@ -24,7 +24,7 @@ const RULE = 'check-native-wrappers';
 
 const NATIVE_TS = `interface Native {
   mockProducerCreate(): number;
-  headerNew(): number;
+  producerCreate(): number;
   recordFutureGet(): void;
 }
 declare const loaded: Native;
@@ -34,13 +34,12 @@ export = native;
 
 const IMPORT = "import native = require('../internal/native');\n";
 
-/** The wrappers of the fixture: the mock, through a helper, and Header, through a field. */
+/** The wrappers of the fixture: the mock, through a helper, and the producer, through a field. */
 const WRAPPERS = {
   'src/producer/mock_producer.ts':
     `${IMPORT}function create(): number { return native.mockProducerCreate(); }\n` +
     'export class MockProducer {\n  readonly #handle: number;\n  constructor() { this.#handle = create(); }\n}\n',
-  'src/common/header/header.ts':
-    "import native = require('../../internal/native');\nexport class Header {\n  readonly #handle = native.headerNew();\n}\n",
+  'src/producer/kafka_producer.ts': `${IMPORT}export class KafkaProducer {\n  readonly #handle = native.producerCreate();\n}\n`,
 };
 
 const fixture = (/** @type {Record<string, string | undefined>} */ files) =>
@@ -101,23 +100,35 @@ test('a wrapper also holds its handle through a static method constructing it, o
   ]);
 });
 
-test('a wrapper holding no native handle is a finding, Header and Headers as the mocks', () => {
+test('a wrapper holding no native handle is a finding, the producer as the mock; Headers and RecordHeader hold none', () => {
   const r = lint(
     fixture({
       'src/producer/mock_producer.ts': 'export class MockProducer {\n  readonly #history: unknown[] = [];\n}\n',
-      'src/common/header/header.ts': 'export class Header {\n  readonly #key = "";\n}\n',
-      'src/common/header/headers.ts': 'export class Headers {}\n',
       'src/producer/kafka_producer.ts': 'export class KafkaProducer {}\n',
+      // Plain TypeScript classes, which the JS conventions name as no wrapper.
+      'src/common/header/record_header.ts': 'export class RecordHeader {\n  readonly #key = "";\n}\n',
+      'src/common/header/headers.ts': 'export class Headers {}\n',
     }),
     [RULE],
   );
   assert.equal(r.status, 1);
   const tail = 'its construction or a static method constructing it reaching native.<fn>';
   assert.deepEqual(findings(r), [
-    `src/common/header/header.ts:Header: holds no native handle: it wraps the C RecordHeader (the JS conventions' RecordHeader), ${tail}`,
-    `src/common/header/headers.ts:Headers: holds no native handle: it wraps the C RecordHeaders, ${tail}`,
     `src/producer/kafka_producer.ts:KafkaProducer: holds no native handle: it wraps the FFI's producer, ${tail}`,
     `src/producer/mock_producer.ts:MockProducer: holds no native handle: it wraps the FFI's mock, ${tail}`,
+  ]);
+});
+
+test('Headers and RecordHeader are plain TypeScript: one reaching the addon is a finding, as any other class', () => {
+  const r = lint(
+    fixture({
+      'src/common/header/headers.ts':
+        "import native = require('../../internal/native');\nexport class Headers {\n  readonly #handle = native.recordFutureGet();\n}\n",
+    }),
+    [RULE],
+  );
+  assert.deepEqual(findings(r), [
+    "src/common/header/headers.ts:Headers: reaches the addon (native.recordFutureGet, src/common/header/headers.ts:3), which only the classes the JS conventions name call: list it in lint-mapping.json's nativeCallers with the reason the rules give, or move the call",
   ]);
 });
 
@@ -223,7 +234,7 @@ test("a call into a wrapper is the wrapper's, not the caller's", () => {
   const r = lint(
     fixture({
       'src/common/topic_partition.ts':
-        "import { Header } from './header/header';\nexport class TopicPartition {\n  header(): Header { return new Header(); }\n}\n",
+        "import { KafkaProducer } from '../producer/kafka_producer';\nexport class TopicPartition {\n  producer(): KafkaProducer { return new KafkaProducer(); }\n}\n",
     }),
     [RULE],
   );

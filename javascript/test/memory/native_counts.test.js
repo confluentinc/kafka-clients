@@ -16,9 +16,10 @@
 
 // The native layer's handles, counted: every producer, unit of a producer's
 // ownership, send context, future slot, record future, wait, callback
-// deferral, Buffer reference, mock record, error JS gave a mock and owned
-// error the addon made is freed once all is closed and collected
-// (native/producer.c producerStats(), native/error.c errorStats()). Each
+// deferral, Buffer reference, mock record, error JS gave a mock, owned
+// error the addon made and native RecordHeaders a send made is freed once all
+// is closed and collected (native/producer.c producerStats(), native/error.c
+// errorStats(), native/headers.c headerStats()). Each
 // probe runs in a child with --expose-gc and the allocator's poisoning, so a
 // handle freed twice, or used after its free, crashes it.
 
@@ -29,14 +30,14 @@ const { NO_LEAKS, probeResult: probe, droppedFuturesProbe, droppedFutureCalls } 
 test('every native handle a producer makes is freed once, after close, collection and destroy', () => {
   const out = probe(`
     const { KafkaProducer, MockProducer, ProducerRecord } = require(D + '/producer');
-    const { Header } = require(D + '/common/header');
+    const { RecordHeader } = require(D + '/common/header');
     const record = (topic) =>
       new ProducerRecord({
         topic,
         partition: null,
         key: Buffer.from('k'),
         value: Buffer.from('v'),
-        headers: [new Header({ key: 'h', value: null })],
+        headers: [new RecordHeader({ key: 'h', value: null }), ['p', Buffer.from('pair')]],
       });
     const swallow = () => {};
     (async () => {
@@ -83,7 +84,7 @@ test('every native handle a producer makes is freed once, after close, collectio
         await m.close();
       })();
       await settle();
-      console.log(JSON.stringify({ leaks: leaks(), stats: native.producerStats(), errors: native.errorStats() }));
+      console.log(JSON.stringify({ leaks: leaks(), stats: native.producerStats(), errors: native.errorStats(), headers: native.headerStats() }));
       clearInterval(hold);
     })();
   `);
@@ -106,6 +107,9 @@ test('every native handle a producer makes is freed once, after close, collectio
   assert.equal(s.producersMade, 2);
   assert.equal(s.deferralsMade, 2);
   assert.ok(out.errors.owned > 0 && out.errors.made > 0 && out.errors.given > 0, JSON.stringify(out.errors));
+  // Each KafkaProducer send copied its record's headers into a native
+  // RecordHeaders, the one after close() included: the mock's sends copy none.
+  assert.equal(out.headers.made, 6, JSON.stringify(out.headers));
 });
 
 test('a hundred thousand timed gets on a pending future leave no wait behind, and a later get resolves', () => {

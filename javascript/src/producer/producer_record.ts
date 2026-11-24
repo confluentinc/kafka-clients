@@ -46,7 +46,7 @@ const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
  * `producerSend`): topic, partition, timestamp, key, value, and the
  * headers' native `RecordHeaders` or null.
  */
-type NativeRecord = [string, number, bigint, Uint8Array | null, Uint8Array | null, object | null];
+type NativeRecord = [string, number, bigint, Uint8Array | null, Uint8Array | null, (Uint8Array | null)[] | null];
 
 const INT32_MIN = -(2 ** 31);
 const INT32_MAX = 2 ** 31 - 1;
@@ -75,9 +75,12 @@ function rawBytes(value: unknown, what: 'key' | 'value'): Uint8Array | null {
   throw new TypeError(`${what} must be a Buffer, a Uint8Array or null when the producer has no ${what} serializer`);
 }
 
-// Java's `new RecordHeaders(headers)`: new headers holding the given ones.
+// Java's `new RecordHeaders(headers)`: new headers holding the given ones,
+// which Headers checks.
 function checkHeaders(headers: unknown): Headers {
-  return Headers.internalTaken(headers === undefined ? null : headers);
+  return new Headers({
+    headers: (headers === undefined ? null : headers) as Iterable<Header | readonly [string, Uint8Array | null]> | null,
+  });
 }
 
 // Java's Integer argument: null, or a whole number in Java's int range.
@@ -188,7 +191,7 @@ export class ProducerRecord<out K = never, out V = never> {
      * iterable of `Header`, copied into the record's own `Headers` (the
      * core copies each header), or null.
      */
-    headers: Iterable<Header> | null;
+    headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
   /**
    * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
@@ -217,7 +220,7 @@ export class ProducerRecord<out K = never, out V = never> {
      * iterable of `Header`, copied into the record's own `Headers` (the
      * core copies each header), or null.
      */
-    headers: Iterable<Header> | null;
+    headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
   /**
    * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
@@ -246,7 +249,7 @@ export class ProducerRecord<out K = never, out V = never> {
      * iterable of `Header`, copied into the record's own `Headers` (the
      * core copies each header), or null.
      */
-    headers: Iterable<Header> | null;
+    headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
   /**
    * Creates a record with a specified timestamp to be sent to a specified
@@ -290,7 +293,7 @@ export class ProducerRecord<out K = never, out V = never> {
      * iterable of `Header`, copied into the record's own `Headers` (the
      * core copies each header), or null.
      */
-    headers: Iterable<Header> | null;
+    headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
   /**
    * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
@@ -408,7 +411,7 @@ export class ProducerRecord<out K = never, out V = never> {
      * iterable of `Header`, copied into the record's own `Headers` (the
      * core copies each header), or null.
      */
-    headers: Iterable<Header> | null;
+    headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
   /**
    * Creates a record, Java's `ProducerRecord(topic, partition, key, value,
@@ -431,7 +434,7 @@ export class ProducerRecord<out K = never, out V = never> {
      * iterable of `Header`, copied into the record's own `Headers` (the
      * core copies each header), or null.
      */
-    headers: Iterable<Header> | null;
+    headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
   /**
    * Creates a record, Java's `ProducerRecord(topic, partition, key, value,
@@ -454,7 +457,7 @@ export class ProducerRecord<out K = never, out V = never> {
      * iterable of `Header`, copied into the record's own `Headers` (the
      * core copies each header), or null.
      */
-    headers: Iterable<Header> | null;
+    headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
   /**
    * Creates a record to be sent to a specified topic and partition, Java's
@@ -477,7 +480,7 @@ export class ProducerRecord<out K = never, out V = never> {
      * iterable of `Header`, copied into the record's own `Headers` (the
      * core copies each header), or null.
      */
-    headers: Iterable<Header> | null;
+    headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
   /**
    * Creates a record, Java's `ProducerRecord(topic, partition, key, value)`,
@@ -802,14 +805,14 @@ export class ProducerRecord<out K = never, out V = never> {
     const { topic, partition, timestamp, headers } = this;
     const keyBytes = key === undefined ? rawBytes(this.key, 'key') : key;
     const valueBytes = value === undefined ? rawBytes(this.value, 'value') : value;
-    headers.internalSetReadOnly();
+    headers.setReadOnly();
     return [
       topic,
       partition === null ? -1 : partition,
       timestamp === null ? -1n : timestamp,
       keyBytes,
       valueBytes,
-      headers.internalNative(),
+      headers.internalToNative(),
     ];
   }
 }

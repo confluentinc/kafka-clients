@@ -142,13 +142,13 @@ async function main() {
   // A producer opens, takes a record with headers and closes; nothing
   // listens at 127.0.0.1:9.
   const { KafkaProducer, ProducerRecord } = projectRequire(`${MAIN}/producer`);
-  const { Header } = projectRequire(`${MAIN}/common/header`);
+  const { RecordHeader } = projectRequire(`${MAIN}/common/header`);
   const record = new ProducerRecord({
     topic: 'package-smoke',
     partition: null,
     key: Buffer.from('k'),
     value: Buffer.from('v'),
-    headers: [new Header({ key: 'h', value: Buffer.from('1') }), new Header({ key: 'n', value: null })],
+    headers: [new RecordHeader({ key: 'h', value: Buffer.from('1') }), ['n', null]],
   });
   const producer = new KafkaProducer({
     configs: {

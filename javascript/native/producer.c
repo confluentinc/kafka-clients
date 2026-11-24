@@ -1143,7 +1143,8 @@ static void send_hand_over(napi_env env, Producer* p, SendCtx* ctx, kafka_produc
 // value a Uint8Array or null, the app's (a serializer's included) or the
 // client's own (an encoded string), never copied: each is kept by a reference
 // until the hand-over (javascript/CLAUDE.md, rule 8); headers null or the
-// record's headers handle object (native/headers.c), copied into the record.
+// record's headers, each key's bytes then its value, copied into the record
+// (native/headers.c).
 // Throws the core's error when the record
 // cannot be built (nothing is sent then).
 napi_value js_producer_send(napi_env env, napi_callback_info info) {

@@ -56,9 +56,13 @@ test("README's Serializers: both ways of giving stringSerializer() build a produ
   assert.deepEqual(value, [...run.created, stringSerializer]);
 });
 
-test("README's Headers: the record built there holds the headers given and the one added", async () => {
+test("README's Headers: the record built there holds the headers given, a pair among them, and the one added", async () => {
+  const { RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
   const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
-  const { error, value } = await runBlock(jsBlock('README.md', 'Headers', 'new Header'), { scope: { ProducerRecord }, result: 'record' });
+  const { error, value } = await runBlock(jsBlock('README.md', 'Headers', 'new RecordHeader'), {
+    scope: { ProducerRecord },
+    result: 'record',
+  });
   assert.equal(error, undefined);
   assert.ok(value instanceof ProducerRecord);
   assert.deepEqual(
@@ -69,6 +73,8 @@ test("README's Headers: the record built there holds the headers given and the o
       ['more', Buffer.from([1])],
     ],
   );
+  // The pair became a RecordHeader, as add({ key, value }) makes one.
+  assert.ok(value.headers.toArray().every((h) => h instanceof RecordHeader));
 });
 
 test("README's MockProducer: it runs as written and prints what its comment says", async () => {
@@ -106,7 +112,7 @@ test("README's Errors: a retriable delivery error is caught, and any other error
 
 test("README's worker example: the record crosses a MessagePort as plain data and is rebuilt the same", async () => {
   const { MessageChannel } = require('node:worker_threads');
-  const { Header } = require('@confluentinc/kafka-javascript/common/header');
+  const { RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
   const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
   const record = new ProducerRecord({
     topic: 'orders',
@@ -114,13 +120,13 @@ test("README's worker example: the record crosses a MessagePort as plain data an
     timestamp: 1700000000000n,
     key: Buffer.from('k'),
     value: Buffer.from('v'),
-    headers: [new Header({ key: 'h', value: Buffer.from('1') }), new Header({ key: 'n', value: null })],
+    headers: [new RecordHeader({ key: 'h', value: Buffer.from('1') }), ['n', null]],
   });
   const { port1, port2 } = new MessageChannel();
   try {
     const received = new Promise((resolve) => port2.once('message', resolve));
     const { error, value } = await runBlock(jsBlock('README.md', 'Limitations', 'parentPort.postMessage'), {
-      scope: { record, parentPort: port1, ProducerRecord, Header },
+      scope: { record, parentPort: port1, ProducerRecord },
       result: 'copy',
     });
     assert.equal(error, undefined);
