@@ -29,8 +29,10 @@ namespace Confluent.Kafka.Producer;
 /// producer's I/O thread: one producer's callbacks never overlap, and a slow callback delays every other
 /// completion of that producer. A callback still pending when the producer closes runs on the thread that
 /// closes it. On <c>KafkaProducer</c> and <c>AsyncKafkaProducer</c>, for a record whose serializer threw an
-/// <see cref="Common.Errors.ApiException"/>, it runs inside <c>Send</c>, on the caller's thread, as Java's
-/// <c>doSend</c> runs it; the mocks rethrow that exception from <c>Send</c>, as Java's <c>MockProducer</c> does. An
+/// <see cref="Common.Errors.ApiException"/>, it runs inside <c>Send</c>, on the caller's thread, or, on
+/// <c>AsyncKafkaProducer</c> behind an awaited serializer, on the thread that ended the serialization, as Java's
+/// <c>doSend</c> runs it; the mocks rethrow that exception from <c>Send</c>, or, on <c>AsyncMockProducer</c>
+/// behind an awaited serializer, end the first stage with it, as Java's <c>MockProducer</c> throws it. An
 /// instance shared across producers can run on several threads at once, so it must be thread-safe.
 /// </para>
 /// <para>
@@ -41,13 +43,16 @@ namespace Confluent.Kafka.Producer;
 /// failure, also when the wait on its future was abandoned, with one case left out, as in Java and Python:
 /// a record whose batch a produce response did not complete, still in flight when a graceful <c>Close</c>
 /// ends, is dropped by the producer without a delivery, so it fires nothing and its future never completes.
-/// A record the producer refuses before appending it with an <see cref="Common.Errors.ApiException"/> (its
+/// On <c>KafkaProducer</c> and <c>AsyncKafkaProducer</c>, a record the producer refuses before appending it with an
+/// <see cref="Common.Errors.ApiException"/> (its
 /// topic's metadata not found within <c>max.block.ms</c>, a record larger than <c>max.request.size</c>) fires it
 /// once and fails its future, as in Java, but later, on the completion thread: when <c>Send</c> returns, or the
 /// asynchronous <c>Send</c>'s first stage completes, the callback may not have run yet and the future may not be
 /// done, and a running callback delays both, where Java runs it inside <c>send</c> and returns a future already
-/// done. A serializer's <see cref="Common.Errors.ApiException"/> on <c>KafkaProducer</c> and
-/// <c>AsyncKafkaProducer</c> fires it inside <c>Send</c> instead (<b>Thread</b>, above). Any other refusal before
+/// done. A serializer's <see cref="Common.Errors.ApiException"/> there fires it where <b>Thread</b> (above) says. On
+/// the mocks, a send exception set with <c>SetSendException</c>, an <see cref="Common.Errors.ApiException"/>
+/// included, fires nothing: <c>MockProducer</c>'s <c>Send</c> throws it and <c>AsyncMockProducer</c>'s
+/// <c>Send</c> ends its first stage with it, as Java's <c>MockProducer.send</c> throws it. Any other refusal before
 /// the append fires nothing: the synchronous <c>Send</c> throws, and the asynchronous <c>Send</c>'s first stage
 /// faults. An error from <c>Send</c> does not prove that the callback will
 /// not fire: a record that reached the accumulator before the send failed (a transactional
