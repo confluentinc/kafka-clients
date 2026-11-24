@@ -343,8 +343,9 @@ public interface IProducer<TKey, TValue> : IDisposable
 
     /// <summary>
     /// Returns a snapshot of the producer's metrics (Java <c>metrics()</c>). It does not block, so it is
-    /// synchronous on both producer interfaces. A <see cref="MockProducer{TKey, TValue}"/> returns an empty
-    /// snapshot.
+    /// synchronous on both producer interfaces. Each value is a <see cref="Common.Metrics.KafkaMetric"/>, which
+    /// measures the metric again on each <see cref="IMetric.MetricValue()"/>. A
+    /// <see cref="MockProducer{TKey, TValue}"/> returns an empty snapshot.
     /// </summary>
     /// <remarks>
     /// The snapshot holds the producer's own metrics. It lacks Java's network and app-info metrics, which the native
