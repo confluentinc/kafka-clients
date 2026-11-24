@@ -47,25 +47,25 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
             [s_uncommitted] = null,
         };
 
-    private static KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Completed(long offset)
+    private static AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Completed(long offset)
     {
-        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future = Pending();
+        AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future = Pending();
         future.Complete(Offsets(offset));
         return future;
     }
 
-    private static KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Pending() =>
-        new KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>();
+    private static AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Pending() =>
+        new AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>();
 
     private static AsyncListConsumerGroupOffsetsResult Result(
-        params (string GroupId, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Future)[] entries)
+        params (string GroupId, AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> Future)[] entries)
     {
         Dictionary<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> futures =
             new Dictionary<string, AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>>(
                 StringComparer.Ordinal);
-        foreach ((string groupId, KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future) in entries)
+        foreach ((string groupId, AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> future) in entries)
         {
-            futures.Add(groupId, new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>(future));
+            futures.Add(groupId, future);
         }
 
         return new AsyncListConsumerGroupOffsetsResult(futures);
@@ -233,7 +233,7 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     [Fact]
     public async Task PerGroupFailure_FaultsOnlyThatGroupAndTheAggregate()
     {
-        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> broken = Pending();
+        AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> broken = Pending();
         AsyncListConsumerGroupOffsetsResult result = Result(("ok", Completed(1)), ("bad", broken));
 
         KafkaException failure = new KafkaException("nope");
@@ -250,8 +250,8 @@ public sealed class PublicAdminListConsumerGroupOffsetsResultTests
     [Fact]
     public async Task All_WaitsForEveryGroupBeforeItFaults()
     {
-        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> broken = Pending();
-        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> slow = Pending();
+        AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> broken = Pending();
+        AsyncKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>> slow = Pending();
         AsyncListConsumerGroupOffsetsResult result = Result(("bad", broken), ("slow", slow));
 
         Task<IReadOnlyDictionary<string, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata?>>> all = result.All().Get();

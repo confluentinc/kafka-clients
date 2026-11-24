@@ -90,9 +90,9 @@ internal sealed partial class NativeAdminClient
         GroupDescriptionMarshal.CopyOutClassicGroupDescription;
 
     internal (
-        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
-        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
-        KafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
+        IKafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
         SafeAdminResultHandle Result) ListGroups(ListGroupsOptions? options)
     {
         EnterUse();
@@ -120,11 +120,11 @@ internal sealed partial class NativeAdminClient
                 (SafeAdminClientHandle admin, IntPtr nativeOptions, ref IntPtr outErr) =>
                     NativeMethods.AdminListGroupsWithOptions(admin, nativeOptions, ref outErr),
                 s_destroyListGroupsResult);
-            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all =
+            IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> all =
                 StartOwnedFuture(result, s_listGroupsAll, s_copyOutGroupListings);
-            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid =
+            IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid =
                 StartOwnedFuture(result, s_listGroupsValid, s_copyOutGroupListings);
-            KafkaFutureImpl<IReadOnlyCollection<Exception>> errors =
+            IKafkaFutureImpl<IReadOnlyCollection<Exception>> errors =
                 StartOwnedFuture(result, s_listGroupsErrors, s_copyOutGroupErrors);
             return (all, valid, errors, result);
         }
@@ -226,7 +226,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<ConsumerGroupDescription>> DescribedGroups, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<string, IKafkaFutureImpl<ConsumerGroupDescription>> DescribedGroups, SafeAdminResultHandle Result)
         DescribeConsumerGroups(IReadOnlyCollection<string> groupIds, DescribeConsumerGroupsOptions? options)
     {
         EnterUse();
@@ -287,7 +287,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<ClassicGroupDescription>> DescribedGroups, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<string, IKafkaFutureImpl<ClassicGroupDescription>> DescribedGroups, SafeAdminResultHandle Result)
         DescribeClassicGroups(IReadOnlyCollection<string> groupIds, DescribeClassicGroupsOptions? options)
     {
         EnterUse();

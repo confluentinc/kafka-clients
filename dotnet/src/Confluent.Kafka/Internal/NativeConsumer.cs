@@ -42,8 +42,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 {
     private const string GroupIdConfig = "group.id";
 
-    private const string DefaultApiTimeoutMsConfig = "default.api.timeout.ms";
-
     internal const string ConstructionFailedMessage = "Failed to construct kafka consumer";
 
     // The strategy the mock consumers' two-argument constructors pass.
@@ -97,8 +95,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private readonly SemaphoreSlim _closeGate = new SemaphoreSlim(1, 1);
     private readonly bool _groupIdDefined;
 
-    // Whether default.api.timeout.ms, the timeout Java's no-timeout BeginningOffsets and EndOffsets pass, is zero.
-    private readonly bool _defaultApiTimeoutZero;
     private readonly SerdeDisposal? _serdes;
 
     // Set once the destroy has returned and never cleared: from then on a Close or Dispose from any thread returns at
@@ -186,11 +182,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     private bool _closeEnded;
 
     private NativeConsumer(
-        SafeConsumerHandle handle, bool groupIdDefined, bool defaultApiTimeoutZero, bool withPump, SerdeDisposal? serdes)
+        SafeConsumerHandle handle, bool groupIdDefined, bool withPump, SerdeDisposal? serdes)
     {
         _handle = handle;
         _groupIdDefined = groupIdDefined;
-        _defaultApiTimeoutZero = defaultApiTimeoutZero;
         _serdes = serdes;
 #pragma warning disable CKRDA0005 // Reports use the raw view: the destroy runs pending callbacks while this SafeHandle is being released.
         _reporter = new ConsumerCallbackReporter(handle.DangerousGetHandle(), PulseOwnerWaiters);
@@ -366,7 +361,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return Start(
             new SafeKafkaConsumerHandle(view, classPointer),
             groupIdDefined: ConfigMarshal.TextOf(prepared, GroupIdConfig) is not null,
-            defaultApiTimeoutZero: IsZeroMs(ConfigMarshal.TextOf(prepared, DefaultApiTimeoutMsConfig)),
             withPump,
             disposal);
     }
@@ -404,7 +398,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return Start(
             new SafeMockConsumerHandle(view, classPointer),
             groupIdDefined: false,
-            defaultApiTimeoutZero: false,
             withPump,
             serdes: null);
     }
@@ -1227,10 +1220,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         IReadOnlyCollection<TopicPartition> partitions, TimeSpan? timeout, bool beginning)
     {
         ((string Topic, int Partition)[]? snapshot, long? timeoutMs) =
-            CheckInAUse(() => (SnapshotOffsetPartitions(partitions, timeout), OptionalTimeoutMs(timeout)));
+            CheckInAUse(() => (SnapshotOffsetPartitions(partitions), OptionalTimeoutMs(timeout)));
         if (snapshot is null)
         {
-            return IsMock ? throw NoOffsetOnMock(beginning) : new Dictionary<TopicPartition, long>();
+            throw NoOffsetOnMock(beginning);
         }
 
         if (RoutesToTheHandle)
@@ -1463,23 +1456,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     // Java's MockConsumer answers a partition it has no offset for, which a null one never has, with
     // IllegalStateException. It checks the partitions in order, after the offsets exception; since the core cannot
-    // receive a null one, the mocks give no snapshot for it and the binding answers it before the call. Java's
-    // KafkaConsumer reads a null one only on its background thread, which a zero timeout does not wait for: it returns
-    // an empty map, so a zero timeout gives no snapshot either. Without a timeout Java passes default.api.timeout.ms.
-    private (string Topic, int Partition)[]? SnapshotOffsetPartitions(
-        IReadOnlyCollection<TopicPartition> partitions, TimeSpan? timeout) =>
-        IsMock || (timeout is TimeSpan given ? IsZeroTimeout(given) : _defaultApiTimeoutZero)
-            ? TrySnapshotPartitions(partitions)
-            : SnapshotPartitions(partitions);
-
-    // A timeout below a millisecond reaches the core as zero, where the other partitions take Java's zero path.
-    private static bool IsZeroTimeout(TimeSpan timeout) => timeout >= TimeSpan.Zero && TimeoutMs(timeout) == 0;
-
-    // The core accepted the text as Java's ConfigDef reads an int: trimmed, an optional sign and ASCII digits.
-    private static bool IsZeroMs(string? text) =>
-        text is not null
-        && int.TryParse(JavaText.Trim(text), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int ms)
-        && ms == 0;
+    // receive a null one, the mocks give no snapshot for it and the binding answers it before the call. A real
+    // consumer refuses a null one before the call, whatever the timeout.
+    private (string Topic, int Partition)[]? SnapshotOffsetPartitions(IReadOnlyCollection<TopicPartition> partitions) =>
+        IsMock ? TrySnapshotPartitions(partitions) : SnapshotPartitions(partitions);
 
     private static IllegalStateException NoOffsetOnMock(bool beginning) =>
         new IllegalStateException(

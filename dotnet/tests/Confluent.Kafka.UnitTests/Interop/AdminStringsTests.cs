@@ -123,7 +123,7 @@ public sealed class AdminStringsTests
     [Fact]
     public async Task CreateTopics_RejectsBeforeTheCall()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.CreateTopics(
@@ -145,7 +145,7 @@ public sealed class AdminStringsTests
     [Fact]
     public async Task DeleteTopics_RejectsBeforeTheCall()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         try
         {
             await TestTimeout.Run(
@@ -172,7 +172,7 @@ public sealed class AdminStringsTests
     [Fact]
     public async Task IncrementalAlterConfigs_AConfigValue_RejectsBeforeTheCall()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         try
         {
             ConfigResource topic = new ConfigResource(ConfigResourceType.TOPIC, "b5-configs");
@@ -208,7 +208,7 @@ public sealed class AdminStringsTests
     [Fact]
     public async Task ListTransactions_ATransactionalIdPattern_RejectsBeforeTheCall()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(
@@ -232,7 +232,7 @@ public sealed class AdminStringsTests
     [Fact]
     public async Task DescribeClientQuotas_AMatchName_RejectsBeforeTheCall()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(
@@ -256,7 +256,7 @@ public sealed class AdminStringsTests
     [Fact]
     public async Task DescribeDelegationToken_AnOwnerName_RejectsBeforeTheCall()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         try
         {
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => admin.DescribeDelegationToken(
@@ -281,7 +281,7 @@ public sealed class AdminStringsTests
     [Fact]
     public async Task DescribeUserScramCredentials_ADescriptionLookup_RejectsSynchronously()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         try
         {
             AsyncDescribeUserScramCredentialsResult result =
@@ -335,7 +335,7 @@ public sealed class AdminStringsTests
     private static Task<long> EarliestOffset(NativeAdminClient admin, TopicPartition partition) =>
         Task.FromResult(admin
             .ListOffsets(new Dictionary<TopicPartition, OffsetSpec> { [partition] = OffsetSpec.Earliest() }, new ListOffsetsOptions())
-            .Futures[partition].Get(s_deadline).Offset());
+            .Futures[partition].GetUnwrapped(s_deadline).Offset());
 
     private static SafeAdminClientHandle HandleOf(NativeAdminClient native) =>
         (SafeAdminClientHandle)typeof(NativeAdminClient)

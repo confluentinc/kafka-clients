@@ -168,7 +168,8 @@ internal sealed partial class NativeAdminClient
             return new CreateTopicsRefinements(
                 result,
                 StartMapFutures(
-                    result, s_createTopicsValues, s_stringKey, StringComparer.Ordinal, s_noValue));
+                    result, s_createTopicsValues, s_stringKey, StringComparer.Ordinal, s_noValue),
+                _flavour);
         }
         finally
         {
@@ -353,7 +354,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    private static Dictionary<TKey, KafkaFutureImpl<TValue>> StartMapFutures<TKey, TValue>(
+    private Dictionary<TKey, IKafkaFutureImpl<TValue>> StartMapFutures<TKey, TValue>(
         SafeAdminResultHandle result,
         ResultFuture accessor,
         Func<IntPtr, TKey> readKey,
@@ -368,14 +369,14 @@ internal sealed partial class NativeAdminClient
             IntPtr outErr = IntPtr.Zero;
             int count = NativeMethods.MapSize(map.DangerousGetHandle(), ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
-            Dictionary<TKey, KafkaFutureImpl<TValue>> futures = new Dictionary<TKey, KafkaFutureImpl<TValue>>(count, comparer);
+            Dictionary<TKey, IKafkaFutureImpl<TValue>> futures = new Dictionary<TKey, IKafkaFutureImpl<TValue>>(count, comparer);
             for (int i = 0; i < count; i++)
             {
                 IntPtr key = NativeMethods.MapKey(map.DangerousGetHandle(), i, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
                 IntPtr future = NativeMethods.MapValue(map.DangerousGetHandle(), i, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
-                futures[readKey(key)] = NativeFutureSource<TValue>.Start(SafeKafkaFutureHandle.Borrowed(future, map), convert);
+                futures[readKey(key)] = NativeFutureSource<TValue>.Start(SafeKafkaFutureHandle.Borrowed(future, map), convert, _flavour);
             }
 
             return futures;
@@ -453,7 +454,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (KafkaFutureImpl<IReadOnlyDictionary<string, TopicListing>> NamesToListings, SafeAdminResultHandle Result)
+    internal (IKafkaFutureImpl<IReadOnlyDictionary<string, TopicListing>> NamesToListings, SafeAdminResultHandle Result)
         ListTopics(ListTopicsOptions? options)
     {
         EnterUse();
@@ -495,10 +496,10 @@ internal sealed partial class NativeAdminClient
     }
 
     internal (
-        KafkaFutureImpl<IReadOnlyCollection<Node>> Nodes,
-        KafkaFutureImpl<Node?> Controller,
-        KafkaFutureImpl<string> ClusterId,
-        KafkaFutureImpl<IReadOnlyCollection<AclOperation>?> AuthorizedOperations,
+        IKafkaFutureImpl<IReadOnlyCollection<Node>> Nodes,
+        IKafkaFutureImpl<Node?> Controller,
+        IKafkaFutureImpl<string> ClusterId,
+        IKafkaFutureImpl<IReadOnlyCollection<AclOperation>?> AuthorizedOperations,
         SafeAdminResultHandle Result) DescribeCluster(DescribeClusterOptions? options)
     {
         EnterUse();
@@ -509,13 +510,13 @@ internal sealed partial class NativeAdminClient
                 s_destroyDescribeClusterOptions,
                 s_adminDescribeClusterWithOptions,
                 s_destroyDescribeClusterResult);
-            KafkaFutureImpl<IReadOnlyCollection<Node>> nodes =
+            IKafkaFutureImpl<IReadOnlyCollection<Node>> nodes =
                 StartOwnedFuture(result, s_describeClusterNodes, s_copyOutNodes);
-            KafkaFutureImpl<Node?> controller =
+            IKafkaFutureImpl<Node?> controller =
                 StartOwnedFuture(result, s_describeClusterController, s_copyOutController);
-            KafkaFutureImpl<string> clusterId =
+            IKafkaFutureImpl<string> clusterId =
                 StartOwnedFuture(result, s_describeClusterClusterId, s_copyOutClusterId);
-            KafkaFutureImpl<IReadOnlyCollection<AclOperation>?> authorizedOperations = StartOwnedFuture(
+            IKafkaFutureImpl<IReadOnlyCollection<AclOperation>?> authorizedOperations = StartOwnedFuture(
                 result, s_describeClusterAuthorizedOperations, s_copyOutAuthorizedOperations);
             return (nodes, controller, clusterId, authorizedOperations, result);
         }
@@ -558,8 +559,8 @@ internal sealed partial class NativeAdminClient
     }
 
     internal (
-        IReadOnlyDictionary<string, KafkaFutureImpl<object?>>? ByName,
-        IReadOnlyDictionary<Uuid, KafkaFutureImpl<object?>>? ById,
+        IReadOnlyDictionary<string, IKafkaFutureImpl<object?>>? ByName,
+        IReadOnlyDictionary<Uuid, IKafkaFutureImpl<object?>>? ById,
         SafeAdminResultHandle Result) DeleteTopics(TopicCollection? topics, DeleteTopicsOptions? options)
     {
         EnterUse();
@@ -602,8 +603,8 @@ internal sealed partial class NativeAdminClient
     }
 
     internal (
-        IReadOnlyDictionary<string, KafkaFutureImpl<object?>>? ByName,
-        IReadOnlyDictionary<Uuid, KafkaFutureImpl<object?>>? ById,
+        IReadOnlyDictionary<string, IKafkaFutureImpl<object?>>? ByName,
+        IReadOnlyDictionary<Uuid, IKafkaFutureImpl<object?>>? ById,
         SafeAdminResultHandle Result) DeleteTopics(IReadOnlyCollection<string> topics, DeleteTopicsOptions? options)
     {
         EnterUse();
@@ -663,8 +664,8 @@ internal sealed partial class NativeAdminClient
     }
 
     internal (
-        IReadOnlyDictionary<string, KafkaFutureImpl<TopicDescription>>? ByName,
-        IReadOnlyDictionary<Uuid, KafkaFutureImpl<TopicDescription>>? ById,
+        IReadOnlyDictionary<string, IKafkaFutureImpl<TopicDescription>>? ByName,
+        IReadOnlyDictionary<Uuid, IKafkaFutureImpl<TopicDescription>>? ById,
         SafeAdminResultHandle Result) DescribeTopics(TopicCollection? topics, DescribeTopicsOptions? options)
     {
         EnterUse();
@@ -695,8 +696,8 @@ internal sealed partial class NativeAdminClient
     }
 
     internal (
-        IReadOnlyDictionary<string, KafkaFutureImpl<TopicDescription>>? ByName,
-        IReadOnlyDictionary<Uuid, KafkaFutureImpl<TopicDescription>>? ById,
+        IReadOnlyDictionary<string, IKafkaFutureImpl<TopicDescription>>? ByName,
+        IReadOnlyDictionary<Uuid, IKafkaFutureImpl<TopicDescription>>? ById,
         SafeAdminResultHandle Result) DescribeTopics(IReadOnlyCollection<string> topicNames, DescribeTopicsOptions? options)
     {
         EnterUse();
@@ -757,9 +758,9 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    private static (
-        IReadOnlyDictionary<string, KafkaFutureImpl<TopicDescription>>? ByName,
-        IReadOnlyDictionary<Uuid, KafkaFutureImpl<TopicDescription>>? ById,
+    private (
+        IReadOnlyDictionary<string, IKafkaFutureImpl<TopicDescription>>? ByName,
+        IReadOnlyDictionary<Uuid, IKafkaFutureImpl<TopicDescription>>? ById,
         SafeAdminResultHandle Result) StartDescribeTopicsFutures(SafeAdminResultHandle result, bool byId) =>
         byId
             ? (null,
@@ -904,13 +905,13 @@ internal sealed partial class NativeAdminClient
         ReleaseError(outErr);
     }
 
-    private static KafkaFutureImpl<T> StartOwnedFuture<T>(
+    private IKafkaFutureImpl<T> StartOwnedFuture<T>(
         SafeAdminResultHandle result, ResultFuture accessor, Func<IntPtr, T> convert)
     {
         try
         {
             IntPtr future = CallAccessor(result, accessor);
-            return NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Owned(future), convert);
+            return NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Owned(future), convert, _flavour);
         }
         catch
         {
@@ -919,13 +920,13 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    private static KafkaFutureImpl<T> StartBorrowedFuture<T>(
+    private IKafkaFutureImpl<T> StartBorrowedFuture<T>(
         SafeAdminResultHandle result, ResultFuture accessor, Func<IntPtr, T> convert)
     {
         try
         {
             IntPtr future = CallAccessor(result, accessor);
-            return NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Borrowed(future, result), convert);
+            return NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Borrowed(future, result), convert, _flavour);
         }
         catch
         {

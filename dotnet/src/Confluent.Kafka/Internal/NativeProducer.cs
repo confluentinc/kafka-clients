@@ -353,7 +353,8 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         EnterUse();
         try
         {
-            DeliveryState state = new DeliveryState(_reporter, callback, record.Topic, record.Partition ?? -1);
+            KafkaFutureImpl<RecordMetadata> delivery = KafkaFutureImpl<RecordMetadata>.ForSend();
+            DeliveryState state = new DeliveryState(_reporter, delivery, callback, record.Topic, record.Partition ?? -1);
             KeepIfMock(state);
             IntPtr outErr = IntPtr.Zero;
             IntPtr future;
@@ -382,7 +383,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
                 KafkaException.ThrowIfFfiFailed(ref outErr);
             }
 
-            return new KafkaFuture<RecordMetadata>(state.Future);
+            return delivery;
         }
         finally
         {

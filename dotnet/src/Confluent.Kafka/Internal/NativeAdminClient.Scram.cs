@@ -113,21 +113,21 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal static KafkaFutureImpl<IReadOnlyDictionary<string, UserScramCredentialsDescription>>
-        DescribeUserScramCredentialsAll(SafeAdminResultHandle result) =>
-        StartResultFuture(result, s_describeUserScramCredentialsAll, s_copyOutScramDescriptions);
+    internal static IKafkaFutureImpl<IReadOnlyDictionary<string, UserScramCredentialsDescription>>
+        DescribeUserScramCredentialsAll(SafeAdminResultHandle result, AdminFlavour flavour) =>
+        StartResultFuture(result, s_describeUserScramCredentialsAll, s_copyOutScramDescriptions, flavour);
 
-    internal static KafkaFutureImpl<IReadOnlyList<string>> DescribeUserScramCredentialsUsers(
-        SafeAdminResultHandle result) =>
-        StartResultFuture(result, s_describeUserScramCredentialsUsers, s_copyOutScramUsers);
+    internal static IKafkaFutureImpl<IReadOnlyList<string>> DescribeUserScramCredentialsUsers(
+        SafeAdminResultHandle result, AdminFlavour flavour) =>
+        StartResultFuture(result, s_describeUserScramCredentialsUsers, s_copyOutScramUsers, flavour);
 
-    internal static KafkaFutureImpl<UserScramCredentialsDescription> DescribeUserScramCredentialsDescription(
-        SafeAdminResultHandle result, string? userName)
+    internal static IKafkaFutureImpl<UserScramCredentialsDescription> DescribeUserScramCredentialsDescription(
+        SafeAdminResultHandle result, string? userName, AdminFlavour flavour)
     {
         if (userName is null)
         {
             // The users future fails only when the call does, as Java's dataFuture.
-            return NoSuchNullUser(DescribeUserScramCredentialsUsers(result));
+            return NoSuchNullUser(DescribeUserScramCredentialsUsers(result, flavour), flavour);
         }
 
         using Utf8Marshal.PinnedUtf8String user = Utf8Marshal.Pin(userName);
@@ -136,16 +136,18 @@ internal sealed partial class NativeAdminClient
             result,
             (IntPtr native, ref IntPtr outErr) =>
                 s_describeUserScramCredentialsDescription(native, pointer, ref outErr),
-            s_copyOutScramDescription);
+            s_copyOutScramDescription,
+            flavour);
     }
 
     /// <summary>
     /// Java's <c>description(null)</c>: it waits for the response, as for any user, and fails with the call's error or,
     /// as no user in the response is null, with <c>"No such user: null"</c>.
     /// </summary>
-    internal static KafkaFutureImpl<UserScramCredentialsDescription> NoSuchNullUser(KafkaFutureImpl response)
+    internal static IKafkaFutureImpl<UserScramCredentialsDescription> NoSuchNullUser(
+        IKafkaFutureImpl response, AdminFlavour flavour)
     {
-        KafkaFutureImpl<UserScramCredentialsDescription> missing = new KafkaFutureImpl<UserScramCredentialsDescription>();
+        IKafkaFutureImpl<UserScramCredentialsDescription> missing = NewFuture<UserScramCredentialsDescription>(flavour);
         response.AddListener(done =>
             missing.CompleteWithError(done.Failure ?? new ResourceNotFoundException("No such user: null")));
         return missing;
@@ -177,7 +179,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<string, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result)
         AlterUserScramCredentials(
             IEnumerable<UserScramCredentialAlteration> alterations, AlterUserScramCredentialsOptions? options)
     {
@@ -300,10 +302,10 @@ internal sealed partial class NativeAdminClient
         return requested;
     }
 
-    private static KafkaFutureImpl<T> StartResultFuture<T>(
-        SafeAdminResultHandle result, ResultFuture accessor, Func<IntPtr, T> convert)
+    private static IKafkaFutureImpl<T> StartResultFuture<T>(
+        SafeAdminResultHandle result, ResultFuture accessor, Func<IntPtr, T> convert, AdminFlavour flavour)
     {
         IntPtr future = CallAccessor(result, accessor);
-        return NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Owned(future), convert);
+        return NativeFutureSource<T>.Start(SafeKafkaFutureHandle.Owned(future), convert, flavour);
     }
 }

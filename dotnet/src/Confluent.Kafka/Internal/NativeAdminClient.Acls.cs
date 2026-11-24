@@ -65,7 +65,7 @@ internal sealed partial class NativeAdminClient
     private static readonly Func<IntPtr, DeleteAclsResult.FilterResults> s_copyOutFilterResults =
         AclMarshal.CopyOutFilterResults;
 
-    internal (IReadOnlyDictionary<AclBinding, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) CreateAcls(
+    internal (IReadOnlyDictionary<AclBinding, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) CreateAcls(
         IEnumerable<AclBinding> acls, CreateAclsOptions? options)
     {
         EnterUse();
@@ -138,7 +138,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (KafkaFutureImpl<IReadOnlyCollection<AclBinding>> Values, SafeAdminResultHandle Result) DescribeAcls(
+    internal (IKafkaFutureImpl<IReadOnlyCollection<AclBinding>> Values, SafeAdminResultHandle Result) DescribeAcls(
         AclBindingFilter filter, DescribeAclsOptions? options)
     {
         EnterUse();
@@ -198,7 +198,7 @@ internal sealed partial class NativeAdminClient
     }
 
     internal (
-        IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> Values,
+        IReadOnlyDictionary<AclBindingFilter, IKafkaFutureImpl<DeleteAclsResult.FilterResults>> Values,
         SafeAdminResultHandle Result) DeleteAcls(IEnumerable<AclBindingFilter> filters, DeleteAclsOptions? options)
     {
         EnterUse();

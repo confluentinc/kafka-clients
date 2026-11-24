@@ -33,19 +33,19 @@ public sealed class AsyncDescribeConfigsResult
 {
     private readonly IReadOnlyDictionary<ConfigResource, AsyncKafkaFuture<Config>> _futures;
     private readonly IEqualityComparer<ConfigResource> _comparer;
-    private readonly IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<Config>> _nativeValues;
+    private readonly IReadOnlyDictionary<ConfigResource, IKafkaFutureImpl<Config>> _nativeValues;
     private readonly SafeAdminResultHandle _native;
 
 
     private AsyncDescribeConfigsResult(
-        IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<Config>> nativeValues, SafeAdminResultHandle native)
+        IReadOnlyDictionary<ConfigResource, IKafkaFutureImpl<Config>> nativeValues, SafeAdminResultHandle native)
     {
         IEqualityComparer<ConfigResource> comparer = EqualityComparer<ConfigResource>.Default;
         Dictionary<ConfigResource, AsyncKafkaFuture<Config>> futures =
             new Dictionary<ConfigResource, AsyncKafkaFuture<Config>>(nativeValues.Count, comparer);
-        foreach (KeyValuePair<ConfigResource, KafkaFutureImpl<Config>> entry in nativeValues)
+        foreach (KeyValuePair<ConfigResource, IKafkaFutureImpl<Config>> entry in nativeValues)
         {
-            futures.Add(entry.Key, new AsyncKafkaFuture<Config>(entry.Value));
+            futures.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
         }
 
         _futures = futures;
@@ -68,9 +68,9 @@ public sealed class AsyncDescribeConfigsResult
     /// </summary>
     /// <returns>A future yielding the whole map, or faulting with the first failure.</returns>
     public AsyncKafkaFuture<IReadOnlyDictionary<ConfigResource, Config>> All() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<ConfigResource, Config>>(KafkaFutureImpl.GatherAll(_nativeValues, _comparer));
+        AsyncAdminFutures.Of(FutureState.GatherAll(new AsyncKafkaFutureImpl<object?>(), _nativeValues, _comparer));
 
     internal static AsyncDescribeConfigsResult OfClient(
-        (IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<Config>> Values, SafeAdminResultHandle Result) native) =>
+        (IReadOnlyDictionary<ConfigResource, IKafkaFutureImpl<Config>> Values, SafeAdminResultHandle Result) native) =>
         new AsyncDescribeConfigsResult(native.Values, native.Result);
 }

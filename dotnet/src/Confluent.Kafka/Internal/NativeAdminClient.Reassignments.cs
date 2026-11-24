@@ -72,7 +72,7 @@ internal sealed partial class NativeAdminClient
     private static readonly Func<IntPtr, IReadOnlyDictionary<TopicPartition, PartitionReassignment>> s_copyOutReassignments =
         PartitionReassignmentMarshal.CopyOutReassignments;
 
-    internal (KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions, SafeAdminResultHandle Result)
+    internal (IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions, SafeAdminResultHandle Result)
         ElectLeaders(
             ElectionType electionType, IReadOnlyCollection<TopicPartition>? partitions, ElectLeadersOptions? options)
     {
@@ -171,7 +171,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result)
         AlterPartitionReassignments(
             IReadOnlyDictionary<TopicPartition, NewPartitionReassignment?> reassignments,
             AlterPartitionReassignmentsOptions? options)
@@ -340,7 +340,7 @@ internal sealed partial class NativeAdminClient
     }
 
     internal (
-        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> Reassignments,
+        IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, PartitionReassignment>> Reassignments,
         SafeAdminResultHandle Result) ListPartitionReassignments(
         IReadOnlyCollection<TopicPartition>? partitions, ListPartitionReassignmentsOptions? options)
     {

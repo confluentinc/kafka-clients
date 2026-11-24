@@ -256,8 +256,8 @@ public sealed class AdminP4SubmitArgumentTests
         var listed = admin.ListPartitionReassignments(partitions, options: new ListPartitionReassignmentsOptions());
         try
         {
-            return new KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(listed.Reassignments)
-                .Get(s_deadline);
+            return listed.Reassignments
+                .GetUnwrapped(s_deadline);
         }
         finally
         {

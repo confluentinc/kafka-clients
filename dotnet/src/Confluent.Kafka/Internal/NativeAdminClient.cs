@@ -64,12 +64,15 @@ internal sealed partial class NativeAdminClient : IDisposable
     private readonly HandleUses _uses = new HandleUses();
 
     private readonly bool _isMock;
+
+    private readonly AdminFlavour _flavour;
     private int _closed;
 
     private NativeAdminClient(SafeAdminClientHandle handle, bool isMock, AdminFlavour flavour)
     {
         _handle = handle;
         _isMock = isMock;
+        _flavour = flavour;
         _completion = new CompletionThread(
             flavour == AdminFlavour.Sync ? SyncDrainThreadName : AsyncDrainThreadName, DrainOf(handle, _uses));
         handle.ReleaseAfterDestroy(_completion.ReleaseNotifyOpaque);
@@ -124,6 +127,9 @@ internal sealed partial class NativeAdminClient : IDisposable
 
         return client;
     }
+
+    internal static IKafkaFutureImpl<T> NewFuture<T>(AdminFlavour flavour) =>
+        flavour == AdminFlavour.Sync ? new KafkaFutureImpl<T>() : new AsyncKafkaFutureImpl<T>();
 
     // The drain holds the handle weakly so that a client never closed can still reach its finalizer and be leaked
     // with a warning.

@@ -36,11 +36,11 @@ public sealed class ElectLeadersResult
     private static readonly Func<IReadOnlyDictionary<TopicPartition, Exception?>, object?> s_firstFailure =
         FirstFailure;
 
-    private readonly KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> _partitions;
+    private readonly IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> _partitions;
     private readonly SafeAdminResultHandle _native;
 
     private ElectLeadersResult(
-        KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> partitions, SafeAdminResultHandle native)
+        IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> partitions, SafeAdminResultHandle native)
     {
         _partitions = partitions;
         _native = native;
@@ -59,7 +59,7 @@ public sealed class ElectLeadersResult
     /// </returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public KafkaFuture<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions() =>
-        new KafkaFuture<IReadOnlyDictionary<TopicPartition, Exception?>>(_partitions);
+        SyncAdminFutures.Of(_partitions);
 
     /// <summary>
     /// Completes when every partition's election succeeded, and fails with the first
@@ -71,10 +71,10 @@ public sealed class ElectLeadersResult
     /// partition; Java iterates a <c>HashMap</c> and promises no order. Every call returns a new
     /// future, as Java's <c>all()</c> does.
     /// </remarks>
-    public KafkaFuture All() => new KafkaFuture(_partitions.ThenApply(s_firstFailure));
+    public KafkaFuture All() => SyncAdminFutures.Of(_partitions.ThenApplyFunc(s_firstFailure));
 
     internal static ElectLeadersResult OfClient(
-        (KafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions, SafeAdminResultHandle Result)
+        (IKafkaFutureImpl<IReadOnlyDictionary<TopicPartition, Exception?>> Partitions, SafeAdminResultHandle Result)
             native) =>
         new ElectLeadersResult(native.Partitions, native.Result);
 

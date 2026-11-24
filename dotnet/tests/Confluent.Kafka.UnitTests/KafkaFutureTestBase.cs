@@ -26,7 +26,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Java's <c>KafkaFutureTest</c>, plus the Python binding's future cases Java lacks, run against one public future
-/// struct through the views a derived class supplies; Java's <c>RuntimeException</c> is
+/// class through the views a derived class supplies; Java's <c>RuntimeException</c> is
 /// <see cref="InvalidOperationException"/>, its <c>CompletionException</c> <see cref="AggregateException"/> and its
 /// <c>CancellationException</c> <see cref="OperationCanceledException"/>.
 /// </summary>
@@ -41,8 +41,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestCompleteFutures()
     {
-        var impl123 = new KafkaFutureImpl<int>();
-        FutureView<int> future123 = Wrap(impl123);
+        FutureView<int> future123 = New<int>();
+        IKafkaFutureImpl<int> impl123 = future123.Impl;
         Assert.True(impl123.Complete(123));
         Assert.False(impl123.Complete(456));
         Assert.False(future123.Cancel(true));
@@ -59,8 +59,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestCompleteFuturesExceptionally()
     {
-        var failImpl = new KafkaFutureImpl<int>();
-        FutureView<int> futureFail = Wrap(failImpl);
+        FutureView<int> futureFail = New<int>();
+        IKafkaFutureImpl<int> failImpl = futureFail.Impl;
         Assert.True(failImpl.CompleteWithError(new InvalidOperationException("We require more vespene gas")));
         AssertIsFailed(futureFail);
         Assert.False(failImpl.CompleteWithError(new InvalidOperationException("We require more minerals")));
@@ -68,8 +68,8 @@ public abstract class KafkaFutureTestBase
         Exception thrown = FutureAssert.Cause<InvalidOperationException>(await Thrown(futureFail.Get()));
         Assert.Equal("We require more vespene gas", thrown.Message);
 
-        var trickyImpl = new KafkaFutureImpl<int>();
-        FutureView<int> tricky1 = Wrap(trickyImpl);
+        FutureView<int> tricky1 = New<int>();
+        IKafkaFutureImpl<int> trickyImpl = tricky1.Impl;
         var tricky = new AggregateException(new OperationCanceledException());
         Assert.True(trickyImpl.CompleteWithError(tricky));
         AssertIsFailed(tricky1);
@@ -79,13 +79,13 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestCompleteFuturesViaCancellation()
     {
-        FutureView<int> viaCancel = Wrap(new KafkaFutureImpl<int>());
+        FutureView<int> viaCancel = New<int>();
         Assert.True(viaCancel.Cancel(true));
         await AssertIsCancelled(viaCancel);
         await AwaitAndAssertCancelled(viaCancel, null);
 
-        var viaExceptionImpl = new KafkaFutureImpl<int>();
-        FutureView<int> viaCancellationException = Wrap(viaExceptionImpl);
+        FutureView<int> viaCancellationException = New<int>();
+        IKafkaFutureImpl<int> viaExceptionImpl = viaCancellationException.Impl;
         Assert.True(viaExceptionImpl.CompleteWithError(new OperationCanceledException("We require more vespene gas")));
         await AssertIsCancelled(viaCancellationException);
         await AwaitAndAssertCancelled(viaCancellationException, "We require more vespene gas");
@@ -94,34 +94,34 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public void TestToString()
     {
-        var successImpl = new KafkaFutureImpl<int>();
-        FutureView<int> success = Wrap(successImpl);
+        FutureView<int> success = New<int>();
+        IKafkaFutureImpl<int> successImpl = success.Impl;
         Assert.Equal("KafkaFuture{value=null,exception=null,done=false}", success.Describe());
         successImpl.Complete(12);
         Assert.Equal("KafkaFuture{value=12,exception=null,done=true}", success.Describe());
 
-        var failureImpl = new KafkaFutureImpl<int>();
-        FutureView<int> failure = Wrap(failureImpl);
+        FutureView<int> failure = New<int>();
+        IKafkaFutureImpl<int> failureImpl = failure.Impl;
         failureImpl.CompleteWithError(new InvalidOperationException("foo"));
         Assert.Equal(
             "KafkaFuture{value=null,exception=System.InvalidOperationException: foo,done=true}", failure.Describe());
 
-        var nullMessageImpl = new KafkaFutureImpl<int>();
-        FutureView<int> nullMessage = Wrap(nullMessageImpl);
+        FutureView<int> nullMessage = New<int>();
+        IKafkaFutureImpl<int> nullMessageImpl = nullMessage.Impl;
         nullMessageImpl.CompleteWithError(new KafkaException());
         Assert.Equal(
             "KafkaFuture{value=null,exception=Confluent.Kafka.Common.KafkaException,done=true}",
             nullMessage.Describe());
 
-        var trickyImpl = new KafkaFutureImpl<int>();
-        FutureView<int> tricky1 = Wrap(trickyImpl);
+        FutureView<int> tricky1 = New<int>();
+        IKafkaFutureImpl<int> trickyImpl = tricky1.Impl;
         var tricky = new AggregateException(new OperationCanceledException());
         trickyImpl.CompleteWithError(tricky);
         Assert.Equal(
             "KafkaFuture{value=null,exception=System.AggregateException: " + tricky.Message + ",done=true}",
             tricky1.Describe());
 
-        FutureView<int> cancelled = Wrap(new KafkaFutureImpl<int>());
+        FutureView<int> cancelled = New<int>();
         cancelled.Cancel(true);
         Assert.Equal(
             "KafkaFuture{value=null,exception=System.OperationCanceledException: "
@@ -132,8 +132,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestCompletingFutures()
     {
-        var impl = new KafkaFutureImpl<string>();
-        FutureView<string> future = Wrap(impl);
+        FutureView<string> future = New<string>();
+        IKafkaFutureImpl<string> impl = future.Impl;
         var myThread = new CompleterThread<string>(impl, "You must construct additional pylons.");
         AssertIsNotCompleted(future);
         Assert.Equal("I am ready", future.GetNow("I am ready"));
@@ -147,8 +147,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestCompletingFuturesExceptionally()
     {
-        var impl = new KafkaFutureImpl<string>();
-        FutureView<string> future = Wrap(impl);
+        FutureView<string> future = New<string>();
+        IKafkaFutureImpl<string> impl = future.Impl;
         var myThread = new CompleterThread<string>(
             impl, null!, new InvalidOperationException("Ultimate efficiency achieved."));
         AssertIsNotCompleted(future);
@@ -163,8 +163,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestCompletingFuturesViaCancellation()
     {
-        var impl = new KafkaFutureImpl<string>();
-        FutureView<string> future = Wrap(impl);
+        FutureView<string> future = New<string>();
+        IKafkaFutureImpl<string> impl = future.Impl;
         var myThread = new CompleterThread<string>(
             impl, null!, new OperationCanceledException("Ultimate efficiency achieved."));
         AssertIsNotCompleted(future);
@@ -179,8 +179,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public void TestThenApplyOnSucceededFuture()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         FutureView<int> doubledFuture = future.ThenApply(integer => 2 * integer);
         Assert.False(doubledFuture.IsDone);
         FutureView<int> tripledFuture = future.ThenApply(integer => 3 * integer);
@@ -196,8 +196,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestThenApplyOnFailedFuture()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         FutureView<int> dependantFuture = future.ThenApply(integer => 2 * integer);
         impl.CompleteWithError(new InvalidOperationException("We require more vespene gas"));
         AssertIsFailed(future);
@@ -213,8 +213,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestThenApplyOnFailedFutureTricky()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         FutureView<int> dependantFuture = future.ThenApply(integer => 2 * integer);
         var tricky = new AggregateException(new InvalidOperationException("We require more vespene gas"));
         impl.CompleteWithError(tricky);
@@ -227,8 +227,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestThenApplyOnFailedFutureTricky2()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         FutureView<int> dependantFuture = future.ThenApply(integer => 2 * integer);
         var tricky = new AggregateException(new OperationCanceledException());
         impl.CompleteWithError(tricky);
@@ -241,8 +241,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestThenApplyOnSucceededFutureAndFunctionThrows()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         FutureView<int> dependantFuture = future.ThenApply<int>(
             integer => throw new InvalidOperationException("We require more vespene gas"));
         impl.Complete(21);
@@ -255,8 +255,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestThenApplyOnSucceededFutureAndFunctionThrowsCompletionException()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         var thrown = new AggregateException(new InvalidOperationException("We require more vespene gas"));
         FutureView<int> dependantFuture = future.ThenApply<int>(integer => throw thrown);
         impl.Complete(21);
@@ -271,8 +271,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestThenApplyOnFailedFutureFunctionNotCalled()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         bool ran = false;
         FutureView<int> dependantFuture = future.ThenApply(integer =>
         {
@@ -290,7 +290,7 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestThenApplyOnCancelledFuture()
     {
-        FutureView<int> future = Wrap(new KafkaFutureImpl<int>());
+        FutureView<int> future = New<int>();
         FutureView<int> dependantFuture = future.ThenApply(integer => 2 * integer);
         future.Cancel(true);
         await AssertIsCancelled(future);
@@ -302,8 +302,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public void TestWhenCompleteOnSucceededFuture()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         int seenValue = -1;
         Exception? seenError = null;
         bool ran = false;
@@ -323,8 +323,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public void TestWhenCompleteOnFailedFuture()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         int seenValue = -1;
         Exception? err = null;
         bool ran = false;
@@ -345,8 +345,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestWhenCompleteOnSucceededFutureAndConsumerThrows()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         bool ran = false;
         FutureView<int> dependantFuture = future.WhenComplete((integer, ex) =>
         {
@@ -364,8 +364,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestWhenCompleteOnFailedFutureAndConsumerThrows()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         bool ran = false;
         FutureView<int> dependantFuture = future.WhenComplete((integer, ex) =>
         {
@@ -383,7 +383,7 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public void TestWhenCompleteOnCancelledFuture()
     {
-        FutureView<int> future = Wrap(new KafkaFutureImpl<int>());
+        FutureView<int> future = New<int>();
         int seenValue = -1;
         Exception? err = null;
         bool ran = false;
@@ -404,12 +404,12 @@ public abstract class KafkaFutureTestBase
     public async Task TestAllOfFutures()
     {
         const int NumThreads = 5;
-        var impls = new KafkaFutureImpl<int>[NumThreads];
+        var impls = new IKafkaFutureImpl<int>[NumThreads];
         var futures = new FutureView<int>[NumThreads];
         for (int i = 0; i < NumThreads; i++)
         {
-            impls[i] = new KafkaFutureImpl<int>();
-            futures[i] = Wrap(impls[i]);
+            futures[i] = New<int>();
+            impls[i] = futures[i].Impl;
         }
 
         FutureView allFuture = AllOf(futures);
@@ -452,12 +452,12 @@ public abstract class KafkaFutureTestBase
     public async Task TestAllOfFuturesWithFailure()
     {
         const int NumThreads = 5;
-        var impls = new KafkaFutureImpl<int>[NumThreads];
+        var impls = new IKafkaFutureImpl<int>[NumThreads];
         var futures = new FutureView<int>[NumThreads];
         for (int i = 0; i < NumThreads; i++)
         {
-            impls[i] = new KafkaFutureImpl<int>();
-            futures[i] = Wrap(impls[i]);
+            futures[i] = New<int>();
+            impls[i] = futures[i].Impl;
         }
 
         FutureView allFuture = AllOf(futures);
@@ -521,14 +521,14 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestFutureTimeoutWithZeroWait()
     {
-        FutureView<string> future = Wrap(new KafkaFutureImpl<string>());
+        FutureView<string> future = New<string>();
         Assert.Equal(string.Empty, Assert.IsType<FutureTimeoutException>(await Thrown(future.Get(TimeSpan.Zero))).Message);
     }
 
     [Fact]
     public async Task TestGetTimeoutReading()
     {
-        FutureView<string> future = Wrap(new KafkaFutureImpl<string>());
+        FutureView<string> future = New<string>();
         TimeSpan[] timeouts =
         {
             TimeSpan.Zero,
@@ -554,8 +554,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestCancellingADependantLeavesItsSource()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         FutureView<int> dependant = future.ThenApply(value => value);
         Assert.True(dependant.Cancel(false));
         Assert.True(dependant.IsCancelled);
@@ -568,9 +568,9 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestAllOfACancelledSourceIsCancelled()
     {
-        FutureView<int> a = Wrap(new KafkaFutureImpl<int>());
-        var bImpl = new KafkaFutureImpl<int>();
-        FutureView<int> b = Wrap(bImpl);
+        FutureView<int> a = New<int>();
+        FutureView<int> b = New<int>();
+        IKafkaFutureImpl<int> bImpl = b.Impl;
         FutureView allFuture = AllOf(a, b);
         a.Cancel(false);
         Assert.False(allFuture.IsDone);
@@ -581,8 +581,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestWaitingTaskCancellationLeavesTheFuture()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         using var cancellation = new CancellationTokenSource();
         Task<int> wait = future.Get(cancellation.Token);
         cancellation.Cancel();
@@ -597,8 +597,8 @@ public abstract class KafkaFutureTestBase
     [Fact]
     public async Task TestEveryListenerRunsWhenOneRaises()
     {
-        var impl = new KafkaFutureImpl<int>();
-        FutureView<int> future = Wrap(impl);
+        FutureView<int> future = New<int>();
+        IKafkaFutureImpl<int> impl = future.Impl;
         var raised = new InvalidOperationException("The function raised.");
         FutureView<int> d1 = future.ThenApply<int>(value => throw raised);
         FutureView<int> d2 = future.ThenApply(value => value + 1);
@@ -640,7 +640,7 @@ public abstract class KafkaFutureTestBase
         return error;
     }
 
-    private protected abstract FutureView<T> Wrap<T>(KafkaFutureImpl<T> impl);
+    private protected abstract FutureView<T> New<T>();
 
     private protected abstract FutureView<T> CompletedFuture<T>(T value);
 
@@ -727,7 +727,7 @@ public abstract class KafkaFutureTestBase
     {
         private readonly Thread _thread;
 
-        internal CompleterThread(KafkaFutureImpl<T> future, T value, Exception? exception = null)
+        internal CompleterThread(IKafkaFutureImpl<T> future, T value, Exception? exception = null)
         {
             _thread = new Thread(() =>
             {
@@ -759,7 +759,7 @@ public abstract class KafkaFutureTestBase
     }
 }
 
-/// <summary>One public future struct as the shared tests see it, every wait returned as a task.</summary>
+/// <summary>One public future as the shared tests see it, every wait returned as a task.</summary>
 internal abstract class FutureView
 {
     internal abstract bool IsDone { get; }
@@ -779,10 +779,10 @@ internal abstract class FutureView
     internal abstract string Describe();
 }
 
-/// <summary>One public future struct with a value, as the shared tests see it.</summary>
+/// <summary>One public future with a value, as the shared tests see it, and its engine.</summary>
 internal abstract class FutureView<T> : FutureView
 {
-    internal abstract KafkaFutureImpl<T> Impl { get; }
+    internal abstract IKafkaFutureImpl<T> Impl { get; }
 
     internal abstract Task<T> Get();
 

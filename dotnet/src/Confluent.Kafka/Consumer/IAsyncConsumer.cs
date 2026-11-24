@@ -1039,8 +1039,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The earliest offset per topic-partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null and the
-    /// <c>default.api.timeout.ms</c> setting is not zero (with zero the result is empty, as for any partition).
+    /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null.
     /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
     /// cannot receive unchanged.
     /// </exception>
@@ -1069,8 +1068,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The earliest offset per topic-partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null and
-    /// <paramref name="timeout"/> is not zero (with a zero timeout the result is empty, as for any partition).
+    /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null, even with a
+    /// zero <paramref name="timeout"/>.
     /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
     /// cannot receive unchanged.
     /// </exception>
@@ -1101,8 +1100,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The latest offset per topic-partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null and the
-    /// <c>default.api.timeout.ms</c> setting is not zero (with zero the result is empty, as for any partition).
+    /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null.
     /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
     /// cannot receive unchanged.
     /// </exception>
@@ -1131,8 +1129,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <returns>The latest offset per topic-partition.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null and
-    /// <paramref name="timeout"/> is not zero (with a zero timeout the result is empty, as for any partition).
+    /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null, even with a
+    /// zero <paramref name="timeout"/>.
     /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
     /// cannot receive unchanged.
     /// </exception>

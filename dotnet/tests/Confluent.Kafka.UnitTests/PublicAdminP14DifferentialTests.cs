@@ -243,15 +243,15 @@ public sealed class PublicAdminP14DifferentialTests
         AssertKafka(
             UnknownTopicOrPartitionCode,
             NotFound,
-            await Agree(FutureProbe.Of(syncResult.AllTopicNames()!.Value), FutureProbe.Of(asyncResult.AllTopicNames()!.Value)));
+            await Agree(FutureProbe.Of(syncResult.AllTopicNames()!), FutureProbe.Of(asyncResult.AllTopicNames()!)));
 
         DescribeTopicsResult syncOne = sync.DescribeTopics(TopicCollection.OfTopicNames(new[] { "diff-d" }));
         AsyncDescribeTopicsResult asyncOne = async.DescribeTopics(TopicCollection.OfTopicNames(new[] { "diff-d" }));
         IReadOnlyDictionary<string, TopicDescription> gathered =
             Assert.IsAssignableFrom<IReadOnlyDictionary<string, TopicDescription>>(
                 await Agree(
-                    FutureProbe.Of(syncOne.AllTopicNames()!.Value),
-                    FutureProbe.Of(asyncOne.AllTopicNames()!.Value),
+                    FutureProbe.Of(syncOne.AllTopicNames()!),
+                    FutureProbe.Of(asyncOne.AllTopicNames()!),
                     static outcome => string.Join(
                         ";",
                         ((IReadOnlyDictionary<string, TopicDescription>)outcome)
@@ -295,15 +295,15 @@ public sealed class PublicAdminP14DifferentialTests
         AssertKafka(
             UnknownTopicIdCode,
             notFound,
-            await Agree(FutureProbe.Of(syncResult.AllTopicIds()!.Value), FutureProbe.Of(asyncResult.AllTopicIds()!.Value)));
+            await Agree(FutureProbe.Of(syncResult.AllTopicIds()!), FutureProbe.Of(asyncResult.AllTopicIds()!)));
 
         DescribeTopicsResult syncOne = sync.DescribeTopics(TopicCollection.OfTopicIds(new[] { syncId }));
         AsyncDescribeTopicsResult asyncOne = async.DescribeTopics(TopicCollection.OfTopicIds(new[] { asyncId }));
         IReadOnlyDictionary<Uuid, TopicDescription> gathered =
             Assert.IsAssignableFrom<IReadOnlyDictionary<Uuid, TopicDescription>>(
                 await Agree(
-                    FutureProbe.Of(syncOne.AllTopicIds()!.Value),
-                    FutureProbe.Of(asyncOne.AllTopicIds()!.Value),
+                    FutureProbe.Of(syncOne.AllTopicIds()!),
+                    FutureProbe.Of(asyncOne.AllTopicIds()!),
                     // The keys are each mock's own id, so only the descriptions are compared across mocks.
                     static outcome => string.Join(
                         ";",

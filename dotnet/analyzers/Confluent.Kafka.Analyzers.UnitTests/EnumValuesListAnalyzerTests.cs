@@ -24,7 +24,8 @@ namespace Confluent.Kafka.Analyzers.UnitTests;
 
 /// <summary>
 /// CKRDA0015 reports an <c>&lt;Enum&gt;Methods</c> class's <c>s_values</c> or <c>VALUES</c> that misses a member,
-/// lists one twice, lists them out of declaration order or does not write them out, and no other field.
+/// lists one twice, lists them out of declaration order or does not write them out, and no other field; and a switch
+/// expression of that class that names a member of its enum but gives another member no arm, or a member two arms.
 /// </summary>
 public sealed class EnumValuesListAnalyzerTests
 {
@@ -91,6 +92,94 @@ public sealed class EnumValuesListAnalyzerTests
     [InlineData("Other", "internal static readonly E[] s_values = { E.B };")]
     public Task AnyOtherField_IsNotChecked(string className, string field) =>
         Verifier.VerifyAsync(Methods(field, className));
+
+    [Theory]
+    [InlineData("public static E? ForId(int id) => id switch { 0 => E.A, 1 => E.B, 2 => E.C, _ => null };")]
+    [InlineData("public static E ForCode(byte code) => code switch { (byte)E.C => E.C, (byte)E.A => E.A, (byte)E.B => E.B, _ => throw new System.ArgumentException() };")]
+    [InlineData("public static E FromString(string s) => s switch { nameof(E.A) => E.A, nameof(E.B) => E.B, _ => E.C };")]
+    [InlineData("public static E FromString(string s) => s switch { nameof(E.A) => E.A, nameof(E.B) => E.B, nameof(E.C) => E.C, _ => E.A };")]
+    [InlineData("public static string Name(E e) => e switch { E.A => \"a\", E.B => \"b\", E.C => \"c\", _ => \"?\" };")]
+    [InlineData("public static int Twice(int x) => x switch { 0 => 0, _ => x * 2 };")]
+    public Task ALookupThatGivesEveryMemberOneArm_IsNotReported(string method) =>
+        Verifier.VerifyAsync(Methods(method));
+
+    [Fact]
+    public Task ALookupWithoutAnArmForAMember_IsReported() =>
+        Verifier.VerifyAsync(
+            Methods("public static string Name(E e) => e {|#0:switch|} { E.A => \"a\", E.B => \"b\", _ => \"?\" };"),
+            Finding(0, "EMethods.Name has no arm for E.C"));
+
+    [Fact]
+    public Task ALookupWithoutAnArmForEachOfTwoMembers_IsReportedForEach() =>
+        Verifier.VerifyAsync(
+            Methods("public static E? ForId(int id) => id {|#0:switch|} { 0 => E.A, _ => null };"),
+            Finding(0, "EMethods.ForId has no arm for E.B"),
+            Finding(0, "EMethods.ForId has no arm for E.C"));
+
+    [Fact]
+    public Task ALookupThatGivesAMemberTwoArms_IsReported() =>
+        Verifier.VerifyAsync(
+            Methods("public static E ForId(int id) => id switch { 0 => E.A, {|#0:1 => E.A|}, 2 => E.B, _ => E.C };"),
+            Finding(0, "EMethods.ForId gives E.A two arms"));
+
+    [Fact]
+    public Task ALookupInAnExtensionBlock_IsChecked() =>
+        Verifier.VerifyAsync(
+            """
+            public enum E
+            {
+                A,
+                B,
+                C,
+            }
+
+            public static class EMethods
+            {
+                extension(E)
+                {
+                    public static E? ForId(int id) => id switch { 0 => E.A, 1 => E.B, 2 => E.C, _ => null };
+                }
+
+                extension(E e)
+                {
+                    public string Name() => e {|#0:switch|} { E.A => "a", E.C => "c", _ => "?" };
+                }
+            }
+            """,
+            Finding(0, "EMethods.Name has no arm for E.B"));
+
+    [Fact]
+    public Task AGuardedDiscardArm_IsAnArmAndCanGiveAMemberItsSecondArm() =>
+        Verifier.VerifyAsync(
+            Methods("public static E? ForId(int id) => id switch { 0 => E.A, {|#0:_ when id > 9 => E.A|}, 1 => E.B, 2 => E.C, _ => null };"),
+            Finding(0, "EMethods.ForId gives E.A two arms"));
+
+    [Fact]
+    public Task ALookupOfAnotherEnum_InAMethodsClass_IsNotChecked() =>
+        Verifier.VerifyAsync(
+            """
+            public enum E
+            {
+                A,
+                B,
+                C,
+            }
+
+            public enum F
+            {
+                X,
+            }
+
+            public static class FMethods
+            {
+                public static string Name(E e) => e switch { E.A => "a", _ => "?" };
+            }
+            """);
+
+    [Fact]
+    public Task ALookupOfAnotherClass_IsNotChecked() =>
+        Verifier.VerifyAsync(
+            Methods("public static string Name(E e) => e switch { E.A => \"a\", _ => \"?\" };", "Other"));
 
     private static DiagnosticResult Finding(int location, string message) =>
         Verifier.Diagnostic(DiagnosticIds.EnumValuesList).WithLocation(location).WithMessage(message);

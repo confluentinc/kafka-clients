@@ -70,7 +70,7 @@ internal sealed partial class NativeAdminClient
     private static readonly Func<IntPtr, IReadOnlyCollection<ConfigResource>> s_copyOutConfigResources =
         CopyOutConfigResources;
 
-    internal (IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<Config>> Values, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<ConfigResource, IKafkaFutureImpl<Config>> Values, SafeAdminResultHandle Result)
         DescribeConfigs(IReadOnlyCollection<ConfigResource> resources, DescribeConfigsOptions? options)
     {
         EnterUse();
@@ -156,7 +156,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<ConfigResource, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<ConfigResource, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result)
         IncrementalAlterConfigs(
             IReadOnlyDictionary<ConfigResource, IReadOnlyCollection<AlterConfigOp>> configs, AlterConfigsOptions? options)
     {
@@ -294,7 +294,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (KafkaFutureImpl<IReadOnlyCollection<ConfigResource>> All, SafeAdminResultHandle Result) ListConfigResources(
+    internal (IKafkaFutureImpl<IReadOnlyCollection<ConfigResource>> All, SafeAdminResultHandle Result) ListConfigResources(
         IReadOnlyCollection<ConfigResourceType>? configResourceTypes, ListConfigResourcesOptions? options)
     {
         EnterUse();

@@ -34,11 +34,11 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="FenceProducersResult"/>
 public sealed class AsyncFenceProducersResult
 {
-    private readonly IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> _futures;
+    private readonly IReadOnlyDictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> _futures;
     private readonly SafeAdminResultHandle _native;
 
     private AsyncFenceProducersResult(
-        IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> futures, SafeAdminResultHandle native)
+        IReadOnlyDictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> futures, SafeAdminResultHandle native)
     {
         _futures = futures;
         _native = native;
@@ -56,9 +56,9 @@ public sealed class AsyncFenceProducersResult
     {
         Dictionary<string, AsyncKafkaFuture> fenced =
             new Dictionary<string, AsyncKafkaFuture>(_futures.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, KafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
+        foreach (KeyValuePair<string, IKafkaFutureImpl<ProducerIdAndEpoch>> entry in _futures)
         {
-            fenced.Add(entry.Key, new AsyncKafkaFuture(entry.Value.ThenApply<object?>(static _ => null)));
+            fenced.Add(entry.Key, AsyncAdminFutures.Of(entry.Value.ThenApplyFunc<object?>(static _ => null)));
         }
 
         return fenced;
@@ -66,19 +66,19 @@ public sealed class AsyncFenceProducersResult
 
     /// <inheritdoc cref="FenceProducersResult.ProducerId"/>
     public AsyncKafkaFuture<long> ProducerId(string transactionalId) =>
-        new AsyncKafkaFuture<long>(
-            FenceProducersResult.Find(_futures, transactionalId).ThenApply(static value => value.ProducerId));
+        AsyncAdminFutures.Of(
+            FenceProducersResult.Find(_futures, transactionalId).ThenApplyFunc(static value => value.ProducerId));
 
     /// <inheritdoc cref="FenceProducersResult.EpochId"/>
     public AsyncKafkaFuture<short> EpochId(string transactionalId) =>
-        new AsyncKafkaFuture<short>(
-            FenceProducersResult.Find(_futures, transactionalId).ThenApply(static value => value.Epoch));
+        AsyncAdminFutures.Of(
+            FenceProducersResult.Find(_futures, transactionalId).ThenApplyFunc(static value => value.Epoch));
 
     /// <inheritdoc cref="FenceProducersResult.All"/>
     public AsyncKafkaFuture All() =>
-        new AsyncKafkaFuture(KafkaFutureImpl.AllOf(new List<KafkaFutureImpl>(_futures.Values)));
+        AsyncAdminFutures.Of(FutureState.AllOf(new AsyncKafkaFutureImpl<object?>(), new List<IKafkaFutureImpl>(_futures.Values)));
 
     internal static AsyncFenceProducersResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<ProducerIdAndEpoch>> Producers, SafeAdminResultHandle Result) native) =>
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<ProducerIdAndEpoch>> Producers, SafeAdminResultHandle Result) native) =>
         new AsyncFenceProducersResult(native.Producers, native.Result);
 }

@@ -99,7 +99,7 @@ internal sealed partial class NativeAdminClient
 
     private static readonly Func<IntPtr, long> s_copyOutTimestamp = static value => Marshal.ReadInt64(value);
 
-    internal (KafkaFutureImpl<DelegationToken> Token, SafeAdminResultHandle Result) CreateDelegationToken(
+    internal (IKafkaFutureImpl<DelegationToken> Token, SafeAdminResultHandle Result) CreateDelegationToken(
         CreateDelegationTokenOptions? options)
     {
         EnterUse();
@@ -144,7 +144,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (KafkaFutureImpl<long> ExpiryTimestamp, SafeAdminResultHandle Result) RenewDelegationToken(
+    internal (IKafkaFutureImpl<long> ExpiryTimestamp, SafeAdminResultHandle Result) RenewDelegationToken(
         byte[]? hmac, RenewDelegationTokenOptions? options)
     {
         EnterUse();
@@ -167,7 +167,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (KafkaFutureImpl<long> ExpiryTimestamp, SafeAdminResultHandle Result) ExpireDelegationToken(
+    internal (IKafkaFutureImpl<long> ExpiryTimestamp, SafeAdminResultHandle Result) ExpireDelegationToken(
         byte[]? hmac, ExpireDelegationTokenOptions? options)
     {
         EnterUse();
@@ -190,7 +190,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (KafkaFutureImpl<IReadOnlyList<DelegationToken>> Tokens, SafeAdminResultHandle Result)
+    internal (IKafkaFutureImpl<IReadOnlyList<DelegationToken>> Tokens, SafeAdminResultHandle Result)
         DescribeDelegationToken(DescribeDelegationTokenOptions? options)
     {
         EnterUse();

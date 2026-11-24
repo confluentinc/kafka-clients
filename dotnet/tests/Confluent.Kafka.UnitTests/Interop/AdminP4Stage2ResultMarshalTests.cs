@@ -76,19 +76,19 @@ public sealed class AdminP4Stage2ResultMarshalTests
             new ListOffsetsOptions());
 
         Assert.Equal(new[] { latest, timestamp }, listed.Futures.Keys);
-        ListOffsetsResult.ListOffsetsResultInfo info = listed.Futures[latest].Get(s_deadline);
+        ListOffsetsResult.ListOffsetsResultInfo info = listed.Futures[latest].GetUnwrapped(s_deadline);
         Assert.Equal(-1L, info.Offset());
         Assert.Equal(-1L, info.Timestamp());
         Assert.Null(info.LeaderEpoch());
 
-        UnsupportedOperationException failure = Assert.Throws<UnsupportedOperationException>(() => listed.Futures[timestamp].Get(s_deadline));
+        UnsupportedOperationException failure = Assert.Throws<UnsupportedOperationException>(() => listed.Futures[timestamp].GetUnwrapped(s_deadline));
         Assert.Equal("Not implement yet", failure.Message);
     }
 
     [Fact]
     public async Task PartitionReassignment_ThreeListsAreCopiedOut_AndSurviveTheDelivery()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(3);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(3, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition partition = SeedTopic(admin, "p4s2-lpr-marshal", replicationFactor: 2);
 
@@ -103,8 +103,8 @@ public sealed class AdminP4Stage2ResultMarshalTests
 
         var listed = admin.ListPartitionReassignments(new[] { partition }, options: new ListPartitionReassignmentsOptions());
         IReadOnlyDictionary<TopicPartition, PartitionReassignment> reassignments =
-            new KafkaFuture<IReadOnlyDictionary<TopicPartition, PartitionReassignment>>(listed.Reassignments)
-                .Get(s_deadline);
+            listed.Reassignments
+                .GetUnwrapped(s_deadline);
         listed.Result.Dispose();
 
         PartitionReassignment reassignment = Assert.Single(reassignments).Value;

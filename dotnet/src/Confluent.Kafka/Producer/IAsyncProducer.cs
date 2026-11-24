@@ -109,7 +109,7 @@ namespace Confluent.Kafka.Producer;
 /// <item><description>after the first stage has completed, it does nothing.</description></item>
 /// </list>
 /// To stop waiting for the delivery, pass a token to <see cref="AsyncKafkaFuture{T}.Get(CancellationToken)"/>.
-/// A send's future cannot be cancelled: <see cref="AsyncKafkaFuture{T}.Cancel(bool)"/> returns
+/// A send's future cannot be cancelled: <see cref="AsyncKafkaFuture.Cancel(bool)"/> returns
 /// <see langword="false"/>.
 /// </para>
 /// <para>

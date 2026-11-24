@@ -172,7 +172,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
         try
         {
-            KafkaFuture<RecordMetadata> future = default;
+            KafkaFuture<RecordMetadata> future = null!;
             TestTimeout.Run(
                 () => future = producer.Send(
                     new ProducerRecord<byte[], byte[]>(ApiTopic, value: Encoding.UTF8.GetBytes("v")), callback),
@@ -566,7 +566,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
 
         private readonly Func<KafkaFuture<RecordMetadata>> _send;
 
-        private KafkaFuture<RecordMetadata> _reentrant;
+        private KafkaFuture<RecordMetadata> _reentrant = null!;
 
         private Exception? _sendFailure;
 
@@ -612,7 +612,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
 
         public void OnCompletion(RecordMetadata metadata, Exception? exception)
         {
-            KafkaFuture<RecordMetadata> reentrant = default;
+            KafkaFuture<RecordMetadata> reentrant = null!;
             Exception? failure = null;
             try
             {
