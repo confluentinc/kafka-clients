@@ -156,6 +156,14 @@ new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers
 // object given bare is the { key, value } options object.
 const ownHeader: Header = { key: () => 'own', value: () => null };
 new Headers([ownHeader]).add({ header: ownHeader });
+new Headers().add({ header: { key: () => 'literal', value: () => null } });
+// Given bare, only a RecordHeader: TypeScript cannot tell another Header from
+// a plain object, which the run time reads as the options object.
+new Headers().add(new RecordHeader({ key: 'r', value: null }));
+// @ts-expect-error a plain object given bare is the { key, value } options object
+new Headers().add({ key: () => 'literal', value: () => null });
+// @ts-expect-error a Header of another class goes by name, add({ header })
+new Headers().add(ownHeader);
 const last = built.lastHeader('a');
 expectTypeOf(last).toEqualTypeOf<Header | null>();
 const byKey = built.headers({ key: 'a' });

@@ -363,9 +363,30 @@ test('a Header the app implements is a Header: kept, read through its key() and 
   assert.ok(!headers.equals(new Headers([own, header('own', 'mine')])));
   // @ts-expect-error a plain object that is no Header: the header check throws TypeError
   assert.throws(() => headers.add({ header: { key: 'k' } }), { name: 'TypeError', message: 'header must be a Header' });
+  // Given bare, a plain object is the {key, value} options object, so
+  // TypeScript takes only a RecordHeader bare.
+  const more = new Headers();
+  // @ts-expect-error a plain object given bare: read as {key, value}, whose key is no string, it throws TypeError
+  assert.throws(() => more.add(own), { name: 'TypeError', message: 'key must be a string' });
+  assert.equal(more.toArray().length, 0);
+  // An instance of the app's own Header class is no plain object, so plain
+  // JavaScript may give it bare.
+  /** A Header class of the app's own. */
+  class Own {
+    key() {
+      return 'class';
+    }
+    value() {
+      return null;
+    }
+  }
+  const instance = new Own();
+  // @ts-expect-error a Header of another class goes by name in TypeScript, while plain JavaScript gives it bare
+  more.add(instance);
+  assert.equal(more.lastHeader('class'), instance);
 });
 
-test('add takes {header}, a bare Header or {key, value}; it returns the headers', () => {
+test('add takes {header}, a bare RecordHeader or {key, value}; it returns the headers', () => {
   const headers = new Headers();
   const h = header('a', '1');
   assert.equal(headers.add(h), headers);
@@ -569,7 +590,14 @@ test("the native send's copy: each key as encodeLikeJava's bytes, each value the
   // The value is the header's own Buffer: no copy here (the addon copies it into the core's RecordHeaders).
   assert.equal(native[1], value);
   assert.equal(internalHeaders(new Headers()).internalToNative(), null);
-  // A Header the app implements is read through its methods; a key that is no string is refused.
+  // A Header the app implements is read through its methods: a null key is
+  // Java's IllegalArgumentException from DefaultRecord, which Java's send()
+  // throws, and a key that is no string is refused.
+  const nullKey = new Headers([{ key: () => /** @type {string} */ (/** @type {unknown} */ (null)), value: () => null }]);
+  assert.throws(() => internalHeaders(nullKey).internalToNative(), {
+    name: 'IllegalArgumentError',
+    message: 'Invalid null header key found in headers',
+  });
   const bad = new Headers([{ key: () => /** @type {string} */ (/** @type {unknown} */ (5)), value: () => null }]);
   assert.throws(() => internalHeaders(bad).internalToNative(), { name: 'TypeError', message: 'a header key must be a string' });
 });

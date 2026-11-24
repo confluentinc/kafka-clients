@@ -329,6 +329,7 @@ test('where Java takes Headers, an Iterable<Header> or a Header[], an element is
   const source = (/** @type {Record<string, string>} */ t) =>
     "import type { Header } from '../common/header/header';\n" +
     "import type { Headers } from '../common/header/headers';\n" +
+    "import type { OtherHeader, RecordHeader } from '../common/header/record_header';\n" +
     'export class Taker {\n' +
     `  take(headers: Iterable<${t.take ?? `Header | ${PAIR}`}>): void { void headers; }\n` +
     `  takeArray(headers: readonly (${t.takeArray ?? `Header | ${PAIR}`})[]): void { void headers; }\n` +
@@ -342,6 +343,10 @@ test('where Java takes Headers, an Iterable<Header> or a Header[], an element is
       ...FILES,
       ...LIB,
       'src/common/header/headers.ts': "import type { Header } from './header';\nexport interface Headers extends Iterable<Header> {}\n",
+      'src/common/header/record_header.ts':
+        "import type { Header } from './header';\n" +
+        "export class RecordHeader implements Header {\n  readonly key = '';\n  readonly #value = null;\n  value(): unknown { return this.#value; }\n}\n" +
+        "export class OtherHeader implements Header {\n  readonly key = '';\n  readonly #value = null;\n  value(): unknown { return this.#value; }\n}\n",
       'src/producer/typed.ts': TYPED_TS,
       'src/common/kafka_future.ts': FUTURE_TS,
       'src/producer/taker.ts': source(t),
@@ -367,6 +372,15 @@ test('where Java takes Headers, an Iterable<Header> or a Header[], an element is
     'Taker.takeHeaders: parameter headers: Java Headers is not TypeScript Headers | Iterable<Header | [string, Uint8Array<ArrayBufferLike> | null]>',
     'Taker.one: parameter header: Java Header is not TypeScript Header | readonly [string, Uint8Array<ArrayBufferLike> | null]',
   ]);
+  // A bare Header may take RecordHeader, a class tsc tells from a plain
+  // object (BARE_CLASSES), and no other class.
+  r = lint(files({ one: 'RecordHeader' }), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  r = lint(files({ one: 'OtherHeader' }), [RULE]);
+  assert.deepEqual(findings(r), ['Taker.one: parameter header: Java Header is not TypeScript OtherHeader']);
+  // Elsewhere than a bare value, a Header stays a Header.
+  r = lint(files({ take: 'RecordHeader' }), [RULE]);
+  assert.deepEqual(findings(r), ['Taker.take: parameter headers: Java Iterable<Header> is not TypeScript Iterable<RecordHeader>']);
 });
 
 test("a serializer's serialize may also return a Promise of the bytes it takes (AWAITED_RETURNS)", () => {
