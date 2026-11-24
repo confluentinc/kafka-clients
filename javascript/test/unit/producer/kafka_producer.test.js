@@ -1108,6 +1108,41 @@ test('a string holding a NUL is refused where the C ABI would truncate it', asyn
   assert.deepEqual(calls, []);
 });
 
+test("a Header the app implements with a null key: send() rejects with Java's IllegalArgumentException, a key of another type with TypeError", async () => {
+  // Java's DefaultRecord refuses a null header key when send() sizes the
+  // record; the core takes no null key, so the binding refuses it at the
+  // hand-over.
+  const producer = new KafkaProducer({ configs: UNREACHABLE });
+  /** @type {string[]} */
+  const calls = [];
+  const callback = () => calls.push('callback');
+  /**
+   * @param {unknown} key the key the header returns
+   * @returns {ProducerRecord<Uint8Array, Uint8Array>} a record holding a Header of the app's with that key
+   */
+  const recordWithKey = (key) =>
+    new ProducerRecord({
+      topic: 'good',
+      partition: null,
+      key: null,
+      value: Buffer.from('v'),
+      headers: [{ key: () => /** @type {string} */ (key), value: () => null }],
+    });
+  try {
+    await assert.rejects(producer.send({ record: recordWithKey(null), callback }), {
+      name: 'IllegalArgumentError',
+      message: 'Invalid null header key found in headers',
+    });
+    await assert.rejects(producer.send({ record: recordWithKey(5), callback }), {
+      name: 'TypeError',
+      message: 'a header key must be a string',
+    });
+  } finally {
+    await producer.close();
+  }
+  assert.deepEqual(calls, []);
+});
+
 test('a refused NUL-holding send leaves nothing pending: the producer then closes at once', () => {
   const r = runNode(`
     const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');

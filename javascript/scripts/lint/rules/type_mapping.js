@@ -51,6 +51,7 @@
 // | Time (not a public Java type)                | unknown                                 |
 // | ? (an unbounded wildcard)                    | any type                                 |
 // | T, as a bare value's type                    | Bare<T> (Extract<T, BareValue>), at the bare parameter only |
+// | Header, as a bare value's type               | RecordHeader (BARE_CLASSES), at the bare parameter only |
 // | List / Set / Collection / Iterable<T>, T[], taken | Iterable<T>, or an array of T      |
 // | Headers, Iterable<Header>, Header[], taken   | an iterable (an array) of Header | readonly [string, Uint8Array | null]; Headers also as itself |
 // | List / Collection<T>, T[], returned          | an array of T (a new array each call)   |
@@ -93,6 +94,23 @@ const AWAITED_RETURNS = new Map([
   [
     'org.apache.kafka.common.serialization.Serializer#serialize',
     'a serializer may return a Promise, which the producer awaits before it hands the record over',
+  ],
+]);
+/**
+ * The Java interfaces whose bare value takes one class of src/ that
+ * implements it, at the bare parameter only (javascript/CLAUDE.md, The
+ * binding's notes, "TypeScript first"): TypeScript cannot tell another
+ * implementation from a plain object, which the run time reads as the options
+ * object, so the bare form takes a class `tsc` tells from a plain object by
+ * its private fields, and any implementation goes by name.
+ */
+const BARE_CLASSES = new Map([
+  [
+    'Header',
+    {
+      ts: 'RecordHeader',
+      reason: 'Headers.add(header) takes a RecordHeader bare, and any Header by name, add({ header })',
+    },
   ],
 ]);
 const { mappedItems, functionType, constantsOnly, formParameters, PLACEHOLDERS, NOT_PUBLIC_TYPES } = require('../java_ts');
@@ -480,7 +498,10 @@ module.exports = {
         if (p0 !== null && bareName !== null && ts.isIdentifier(p0.name) && p0.name.text === bareName) {
           // The bare value of the one-parameter forms: against their Java types.
           const types = forms.filter((f, k) => f.params.length === 1 && names[k][0] === bareName).map((f) => f.types[0]);
-          check(where, `parameter ${bareName}`, types, unwrapBare(checker.getTypeAtLocation(p0)));
+          const bare = unwrapBare(checker.getTypeAtLocation(p0));
+          // A Java interface whose bare value takes its class (BARE_CLASSES).
+          const narrowed = types.length === 1 ? BARE_CLASSES.get(parseJava(types[0]).name) : undefined;
+          if (narrowed === undefined || symbolName(strip(bare)) !== narrowed.ts) check(where, `parameter ${bareName}`, types, bare);
           durationName(where, p0, types[0], forms.find((f) => f.params.length === 1).param_names[0]);
           return;
         }

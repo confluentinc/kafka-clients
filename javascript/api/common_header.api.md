@@ -37,7 +37,7 @@ class Headers_2 implements Iterable<Header> {
         key: string;
         value: Uint8Array | null;
     }): Headers_2;
-    add(header: Header): Headers_2;
+    add(header: RecordHeader): Headers_2;
     equals(options: {
         o: unknown;
     }): boolean;

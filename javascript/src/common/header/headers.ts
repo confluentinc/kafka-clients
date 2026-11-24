@@ -281,13 +281,16 @@ export class Headers implements Iterable<Header> {
     value: Uint8Array | null;
   }): Headers;
   /**
-   * Adds a header (key inside), to the end: the header on its own, the same
-   * as `add({header})`.
+   * Adds a header (key inside), to the end: a `RecordHeader` on its own, the
+   * same as `add({header})`.
    *
    * @param header - the Header to be added.
    * @returns this instance of the Headers, once the header is added.
+   *
+   * @remarks A `Header` of another class goes by name, `add({ header })`,
+   * since TypeScript cannot tell it from a plain object, the options object.
    */
-  add(header: Header): Headers;
+  add(header: RecordHeader): Headers;
   add(options: unknown): Headers {
     let header: Header;
     if (ADD_FORMS.match(options, arguments.length) === 0) {
@@ -542,6 +545,10 @@ export class Headers implements Iterable<Header> {
    * reads them once they are read-only; null when there are none.
    *
    * @returns the keys' bytes and the values, in order, or null
+   * @throws `IllegalArgumentError` when a header's key is null, Java's
+   *   `DefaultRecord` error, which the core cannot report: it takes no null
+   *   key
+   * @throws `TypeError` when a header's key is not a string
    *
    * @internal
    */
@@ -552,6 +559,8 @@ export class Headers implements Iterable<Header> {
     for (let i = 0; i < list.length; i++) {
       const header = list[i];
       const key: unknown = header.key();
+      // Java's DefaultRecord refuses it when send() sizes the record.
+      if (key === null) throw illegalArgument('Invalid null header key found in headers');
       if (typeof key !== 'string') throw new TypeError('a header key must be a string');
       out[2 * i] = encodeLikeJava(key);
       out[2 * i + 1] = header.value();

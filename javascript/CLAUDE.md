@@ -720,10 +720,11 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   over the same memory, the same `Buffer` on every call, or `null`. Its
   `equals`, `hashCode` and `toString` are Java's, read through its `key()` and
   `value()`. `Headers` holds its own list of the very `Header` objects added
-  (`add(header)` stores that object, `add({ key,
-  value })` a new `RecordHeader`), so a `Header` read from it stays valid
-  however it changes later, as in Java; it keeps Java's methods in Java's
-  order, `RecordHeaders`' three constructors as one `headers` parameter
+  (`add(header)` stores that object, a `RecordHeader` given bare and any
+  `Header` by name, `add({ header })`, as "TypeScript first" below says;
+  `add({ key, value })` a new `RecordHeader`), so a `Header` read from it
+  stays valid however it changes later, as in Java; it keeps Java's methods
+  in Java's order, `RecordHeaders`' three constructors as one `headers` parameter
   (`()`, `(Header[])`, `(Iterable<Header>)`: a `Headers` copied as a new list
   of the same objects, its read-only state not), Java's `equals`, `hashCode`
   and `toString`, a `toJSON()` writing its array, and the read-only state,
@@ -1883,7 +1884,9 @@ The rules, each named in its finding:
   (a `byte[]` taken as a `Uint8Array`, returned as a `Buffer`; a `long`
   returned as a `bigint`, taken as a `bigint` or a whole `number`; where Java
   takes `Headers`, `Iterable<Header>` or `Header[]`, an element is a `Header`
-  or a `readonly [string, Uint8Array | null]` pair, the pair included), a nested
+  or a `readonly [string, Uint8Array | null]` pair, the pair included; a bare
+  `Header`, as `Headers.add(header)` takes it, is a `RecordHeader`, the rule's
+  `BARE_CLASSES`, "TypeScript first"), a nested
   class's members' too, a nested class named by its own name
   (`DeserializationExceptionOrigin`); a Java type the rule's table lacks is
   `unmapped`.
@@ -2120,5 +2123,7 @@ left as it is, and point 7 sets where the rules on comments read.
   TypeScript cannot tell a class instance from a plain object and the run
   time reads a plain object as the options object, so a TypeScript caller
   passes an instance of its own class by name, `{ value }`, while plain
-  JavaScript may pass it bare.
+  JavaScript may pass it bare. So does a bare `Header`: `Headers.add(header)`
+  takes only a `RecordHeader` bare, a class `tsc` tells from a plain object
+  by its private fields, and any other `Header` by name, `add({ header })`.
 - Assert the core's exact error messages in tests.

@@ -412,7 +412,7 @@ members. `Header` is Java's interface, with `key()` and `value()`, and
 value })`, then `header.key()` and `header.value()`. The value is bytes or
 `null`, as Java's `byte[]`: it is taken as a `Uint8Array` (a `Buffer` is one),
 so a string value throws `TypeError`: encode it first. `Headers` keeps Java's
-methods: `add(header)` or `add({ key, value })`, `remove(key)`,
+methods: `add(header)`, `add({ header })` or `add({ key, value })`, `remove(key)`,
 `lastHeader(key)`, `headers(key)`, `toArray()`, iteration
 (`for (const header of headers)`) and Java's `toString()`; `new Headers()`,
 `new Headers(headers)` or `new Headers({ headers })`.
@@ -439,8 +439,9 @@ header's value, as in Java. A `Headers` holds the very `Header` objects you
 add, so a header read back from it is the object you added, and stays as it
 is however the `Headers` changes later. A `Header` is any object with
 `key()` and `value()` methods, as Java takes any implementation of its
-interface; give one written as a plain object to `add` by name,
-`add({ header })`, as a plain object on its own is read as `{ key, value }`.
+interface; give one of your own to `add` by name, `add({ header })`, as a
+plain object on its own is read as `{ key, value }`, so TypeScript takes only
+a `RecordHeader` on its own.
 An iterator over a `Headers` sees a change made during the iteration, as a
 JavaScript array's iterator does, and throws nothing *(deviation: Java's
 throws `ConcurrentModificationException`, on a best-effort basis. Why: the
