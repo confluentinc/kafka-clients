@@ -28,7 +28,7 @@ namespace Confluent.Kafka.Common.Serialization;
 /// <see cref="DeserializerExtensions.Configure{T}(IDeserializer{T}, IReadOnlyDictionary{string, object}, bool)"/>, which
 /// a deserializer replaces by implementing <see cref="IDeserializerWithConfigure{T}"/>. Java's <c>close</c> is
 /// <see cref="IDisposable"/>: a consumer disposes a deserializer, given or built from its configuration, that
-/// implements it, and a mock consumer does not.
+/// implements it; a mock consumer holds none.
 /// </summary>
 /// <remarks>
 /// The bytes are a <see cref="ReadOnlySpan{T}"/> over the fetched batch, where Java passes a <c>byte[]</c>, so a

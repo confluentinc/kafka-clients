@@ -112,7 +112,7 @@ public sealed class ConsumeThenProduceZeroCopyTests
     private static ValueTask<AsyncKafkaFuture<RecordMetadata>> PollAndSend(
         AsyncMockProducer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> producer)
     {
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Fetching();
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Fetching();
         ConsumerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> fetched = Assert.Single(consumer.Poll(s_pollTimeout));
 
         ValueTask<AsyncKafkaFuture<RecordMetadata>> firstStage = producer.Send(
@@ -125,16 +125,16 @@ public sealed class ConsumeThenProduceZeroCopyTests
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static ReadOnlyMemory<byte> PollOneValue()
     {
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Fetching();
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Fetching();
         ReadOnlyMemory<byte> value = Assert.Single(consumer.Poll(s_pollTimeout)).Value()!.Value;
         TestTimeout.Dispose(consumer);
         return value;
     }
 
-    private static MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> Fetching()
+    private static KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> Fetching()
     {
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
+            DecodingConsumers.Create<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
                 Serdes.ReadOnlyMemory().Deserializer(), Serdes.ReadOnlyMemory().Deserializer());
         consumer.Assign(new[] { s_tp0 });
         consumer.Seek(s_tp0, 0);

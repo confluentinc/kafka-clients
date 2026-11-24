@@ -568,7 +568,24 @@ internal sealed partial class NativeConsumer
             s_records,
             (_, opaque) => NativeMethods.ConsumerPollCb(_handle, timeoutMs, ConsumerCompletion.Pointer, opaque),
             atPoll: true);
-        return CompletePoll(completion, key, value, cancellationToken);
+        return CompletePoll(completion, key, value, slots: null, cancellationToken);
+    }
+
+    // The asynchronous mock consumer's poll: the batch's key and value slots hold ids, resolved through `slots` as
+    // the synchronous mock's PollResolved does, with nothing awaited per record.
+    internal Task<ConsumerRecords<TKey, TValue>> PollWithCallback<TKey, TValue>(
+        TimeSpan timeout,
+        MockRecordSlots<TKey, TValue> slots,
+        CancellationToken cancellationToken = default)
+    {
+        long timeoutMs = TimerTimeoutMs(timeout);
+        RefuseInsideACallback();
+        ConsumerCompletion<IntPtr> completion = Submit(
+            cancellationToken,
+            s_records,
+            (_, opaque) => NativeMethods.ConsumerPollCb(_handle, timeoutMs, ConsumerCompletion.Pointer, opaque),
+            atPoll: true);
+        return CompletePoll<TKey, TValue>(completion, key: null, value: null, slots, cancellationToken);
     }
 
     internal Task<long> PositionWithCallback(TopicPartition partition, CancellationToken cancellationToken = default)
@@ -1398,13 +1415,22 @@ internal sealed partial class NativeConsumer
     // so its records are dropped and every partition is sought back to its first record, as a failed deserialization
     // seeks back to the first record not returned. Two built-in deserializers copy the batch out as a synchronous
     // consumer does, with nothing awaited per record; any other pair is awaited one record at a time.
+    // A mock's poll passes `slots` and no deserializer calls: its records are resolved, not deserialized, and
+    // before the poll's use ends, so a close or a dispose from another thread clears `slots` only after this batch
+    // has left it. Resolving runs no user code. A mock batch is never dropped: the C mock removes the records it
+    // delivers, as Java's MockConsumer.poll does, so a dropped batch could not be delivered again after a seek back.
+    // Cancellation is cooperative, and a poll that already has its records completes with them; it ends canceled
+    // only when the token ended it before the C mock delivered any record.
     private async Task<ConsumerRecords<TKey, TValue>> CompletePoll<TKey, TValue>(
         ConsumerCompletion<IntPtr> completion,
-        AsyncDeserializerCall<TKey> key,
-        AsyncDeserializerCall<TValue> value,
+        AsyncDeserializerCall<TKey>? key,
+        AsyncDeserializerCall<TValue>? value,
+        MockRecordSlots<TKey, TValue>? slots,
         CancellationToken cancellationToken)
     {
         IntPtr records;
+        ConsumerRecords<TKey, TValue>? copied = null;
+        ExceptionDispatchInfo? resolveFailure = null;
         try
         {
             try
@@ -1423,13 +1449,24 @@ internal sealed partial class NativeConsumer
             }
 
             HoldRecords();
+            if (slots is not null)
+            {
+                try
+                {
+                    copied = ConsumerRecordsMarshal.CopyOut(records, slots);
+                }
+                catch (Exception exception)
+                {
+                    // Thrown once the records are released below.
+                    resolveFailure = ExceptionDispatchInfo.Capture(exception);
+                }
+            }
         }
         finally
         {
             ExitUse(completion.UseOwner);
         }
 
-        ConsumerRecords<TKey, TValue>? copied = null;
         RecordDeserializationException? error = null;
         IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind = Array.Empty<KeyValuePair<TopicPartition, long>>();
         IReadOnlyList<KeyValuePair<TopicPartition, long>>? dropped = null;
@@ -1437,12 +1474,12 @@ internal sealed partial class NativeConsumer
         AsyncCopyOut<TKey, TValue>? awaited = null;
         try
         {
-            if (!cancellationToken.IsCancellationRequested)
+            if (!cancellationToken.IsCancellationRequested && slots is null)
             {
-                if (key.Inner is null || value.Inner is null)
+                if (key!.Inner is null || value!.Inner is null)
                 {
                     awaited = new AsyncCopyOut<TKey, TValue>();
-                    await ConsumerRecordsMarshal.CopyOutAsync(records, key, value, awaited, cancellationToken)
+                    await ConsumerRecordsMarshal.CopyOutAsync(records, key, value!, awaited, cancellationToken)
                         .ConfigureAwait(false);
                     copied = awaited.Records;
                     error = awaited.Error;
@@ -1462,7 +1499,7 @@ internal sealed partial class NativeConsumer
                 }
             }
 
-            if (cancellationToken.IsCancellationRequested)
+            if (cancellationToken.IsCancellationRequested && slots is null)
             {
                 dropped = ConsumerRecordsMarshal.FirstPositions(records);
             }
@@ -1470,6 +1507,14 @@ internal sealed partial class NativeConsumer
         finally
         {
             await ReleaseRecordsAsync(records, batch ?? awaited?.Batch).ConfigureAwait(false);
+        }
+
+        resolveFailure?.Throw();
+
+        // A mock poll the token ended with no record delivered: nothing is lost by ending it canceled.
+        if (slots is not null && cancellationToken.IsCancellationRequested && copied!.Count() == 0)
+        {
+            throw new OperationCanceledException(cancellationToken);
         }
 
         if (dropped is not null)

@@ -46,7 +46,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal const string ConstructionFailedMessage = "Failed to construct kafka consumer";
 
-    // The strategy the mock consumers' two-argument constructors pass.
+    // The strategy CreateMock uses when none is given: the tests' consumers over the C mock.
     internal const string DefaultOffsetResetStrategy = "latest";
 
     private const int LocalConcurrentModification = -2;
@@ -183,6 +183,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private bool _closeEnded;
 
+    private Action? _onTornDown;
+
     private NativeConsumer(
         SafeConsumerHandle handle, bool groupIdDefined, bool defaultApiTimeoutZero, bool withPump, SerdeDisposal? serdes)
     {
@@ -229,15 +231,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => Volatile.Read(ref _commitCallbackRegistration);
-
-    /// <summary>
-    /// A mock consumer constructor's deserializer, or, for a null one, Java's <c>ConfigException</c> "Invalid value null
-    /// for configuration <paramref name="key"/>: must be non-null.", which Java throws when the
-    /// <paramref name="key"/> config is missing too.
-    /// </summary>
-    internal static T RequireDeserializer<T>(T? deserializer, string key)
-        where T : class =>
-        deserializer ?? throw new ConfigException(key, null, "must be non-null.");
 
     /// <summary>
     /// Creates the consumer in Java's order: the binding's and the core's checks of the configuration, bare; then the
@@ -371,7 +364,75 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     // A null strategy crosses as NULL, which the core refuses with Java's IllegalArgumentException
     // ("Auto offset reset strategy is null"), as Java's AutoOffsetResetStrategy.fromString does.
-    internal static NativeConsumer CreateMock(string? autoOffsetReset = DefaultOffsetResetStrategy, bool withPump = true)
+    internal static NativeConsumer CreateMock(string? autoOffsetReset = DefaultOffsetResetStrategy, bool withPump = true) =>
+        Start(NewMockHandle(autoOffsetReset), groupIdDefined: false, defaultApiTimeoutZero: false, withPump, serdes: null);
+
+    /// <summary>
+    /// The C mock under a real consumer, for the binding's decode tests: <paramref name="serdes"/> builds the
+    /// deserializers that were not given and the consumer owns them all, disposing them at its close or on a failure
+    /// here, as one built by <see cref="Create"/> does.
+    /// </summary>
+    internal static NativeConsumer CreateMock(string? autoOffsetReset, bool withPump, ConfiguredSerdes serdes)
+    {
+        SerdeDisposal disposal = serdes.Build();
+        SafeMockConsumerHandle handle;
+        try
+        {
+            handle = NewMockHandle(autoOffsetReset);
+        }
+        catch
+        {
+            // A refused strategy is a check of the configuration, which Java makes before its constructor's try: a
+            // given deserializer stays its owner's.
+            serdes.DisposeBuilt();
+            throw;
+        }
+
+        try
+        {
+            return Start(handle, groupIdDefined: false, defaultApiTimeoutZero: false, withPump, disposal);
+        }
+        catch
+        {
+            disposal.DisposeOnce();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The awaited form of <see cref="CreateMock(string, bool, ConfiguredSerdes)"/>, with the pump, for a
+    /// consumer whose deserializers' <c>Configure</c> may wait.
+    /// </summary>
+    internal static async Task<NativeConsumer> CreateMockAwaited(
+        string? autoOffsetReset,
+        ConfiguredSerdes serdes,
+        CancellationToken cancellationToken)
+    {
+        SerdeDisposal disposal = await serdes.BuildAwaited(cancellationToken).ConfigureAwait(false);
+        SafeMockConsumerHandle handle;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            handle = NewMockHandle(autoOffsetReset);
+        }
+        catch
+        {
+            await serdes.DisposeBuiltAwaited().ConfigureAwait(false);
+            throw;
+        }
+
+        try
+        {
+            return Start(handle, groupIdDefined: false, defaultApiTimeoutZero: false, withPump: true, disposal);
+        }
+        catch
+        {
+            await disposal.DisposeOnceAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static SafeMockConsumerHandle NewMockHandle(string? autoOffsetReset)
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr classPointer;
@@ -390,12 +451,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         }
 
-        return Start(
-            new SafeMockConsumerHandle(view, classPointer),
-            groupIdDefined: false,
-            defaultApiTimeoutZero: false,
-            withPump,
-            serdes: null);
+        return new SafeMockConsumerHandle(view, classPointer);
     }
 
     internal void Seek(TopicPartition partition, long offset)
@@ -661,6 +717,32 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         return copied;
+    }
+
+    // The mock consumer's poll: the batch's key and value slots hold ids, resolved through `slots`, so nothing is
+    // deserialized and nothing is rewound. The ids are resolved while the poll still holds its use, so a close or a
+    // dispose from another thread, which waits for that use, clears `slots` only after this batch has left it.
+    internal ConsumerRecords<TKey, TValue> PollResolved<TKey, TValue>(
+        TimeSpan timeout,
+        MockRecordSlots<TKey, TValue> slots)
+    {
+        long timeoutMs = TimerTimeoutMs(timeout);
+        RefuseInsideACallback();
+        return QuerySync(_ =>
+        {
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr records = NativeMethods.ConsumerPoll(_handle, timeoutMs, ref outErr);
+            ThrowIfWaitingCallFailed(ref outErr);
+            HoldRecords();
+            try
+            {
+                return ConsumerRecordsMarshal.CopyOut(records, slots);
+            }
+            finally
+            {
+                DestroyRecords(records);
+            }
+        });
     }
 
     private void SeekBack(IReadOnlyList<KeyValuePair<TopicPartition, long>> positions)
@@ -2053,6 +2135,47 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         RunPartitionsSync(snapshot, NativeMethods.ConsumerAssign);
     }
 
+    // Java's MockConsumer.addRecord for the typed mocks: every field of the record crosses into a C record, its key
+    // and value as ids into `slots` (see MockRecordSlots). The entries are added before the core takes the record,
+    // so a poll on another thread that delivers it finds them, and removed when the core refuses it.
+    internal void AddRecord<TKey, TValue>(ConsumerRecord<TKey, TValue> record, MockRecordSlots<TKey, TValue> slots)
+    {
+        if (record is null)
+        {
+            throw new ArgumentNullException(nameof(record));
+        }
+
+        CallMock((mock, _) =>
+        {
+            slots.Add(record.Key(), record.Value(), out nint keySlot, out nint valueSlot);
+            bool added = false;
+            try
+            {
+                IntPtr nativeRecord = ConsumerRecordMarshal.BuildRecord(record, keySlot, valueSlot);
+                try
+                {
+                    IntPtr outErr = IntPtr.Zero;
+                    NativeMethods.MockConsumerAddRecord(mock, nativeRecord, ref outErr);
+                    KafkaException.ThrowIfFfiFailed(ref outErr);
+                    added = true;
+                }
+                finally
+                {
+                    IntPtr destroyError = IntPtr.Zero;
+                    NativeMethods.ConsumerRecordDestroy(nativeRecord, ref destroyError);
+                    KafkaException.ThrowIfFfiFailed(ref destroyError);
+                }
+            }
+            finally
+            {
+                if (!added)
+                {
+                    slots.Remove(keySlot, valueSlot);
+                }
+            }
+        });
+    }
+
     internal void AddRecord(
         string topic,
         int partition,
@@ -2794,7 +2917,14 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
         _uses.WaitForNoneThenMarkDestroyed();
         _handle.CloseExplicitly();
+        _onTornDown?.Invoke();
     }
+
+    // The mocks empty the table of their records' ids here: only once the consumer is closed, never on a close or a
+    // dispose that left it open (refused, canceled before it began, or an argument error), and only after every use,
+    // a poll resolving its batch's ids included, has ended. A dispose inside an async consumer's callback reaches it
+    // from the teardown it schedules.
+    internal void OnTornDown(Action action) => _onTornDown = action;
 
     // KafkaConsumer refuses a null collection, or a null partition or a partition with a null topic, with Java's
     // messages, and the core refuses a blank topic with the same text. Java's MockConsumer has no check of its own (a

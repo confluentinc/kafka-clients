@@ -32,7 +32,7 @@ namespace Confluent.Kafka.UnitTests.Interop;
 /// value as <see langword="null"/> and an empty one as an empty array.
 /// </summary>
 /// <remarks>
-/// The mock consumer's <c>AddRecord</c> builds its record with ConsumerRecord_new, which takes no headers, so the
+/// The byte form of <c>NativeConsumer.AddRecord</c> builds its record with ConsumerRecord_new, which takes no headers, so the
 /// record with headers is built here through ConsumerRecord_with_options and added with MockConsumer_add_record.
 /// </remarks>
 public sealed class ConsumerPollHeadersTests

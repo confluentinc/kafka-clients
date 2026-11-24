@@ -33,8 +33,9 @@ namespace Confluent.Kafka.UnitTests;
 /// Which form of an asynchronous deserializer a consumer calls: a plain <see cref="IAsyncDeserializer{T}"/> is called
 /// without headers, an <see cref="IAsyncDeserializerWithHeaders{T}"/> with the record's own headers, and an
 /// <see cref="IAsyncDeserializerWithRetention{T}"/> through its headers form, over a memory it may keep. The
-/// <see cref="AsyncMockConsumer{TKey, TValue}"/> is checked through its public surface, and the poll both consumers
-/// run (<c>NativeConsumer.PollWithCallback</c> over the deserializer calls they build) over a record with headers.
+/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> is checked through its public surface, and the poll it runs
+/// (<c>NativeConsumer.PollWithCallback</c> over the deserializer calls it builds) over a record with headers, the
+/// consumer built over the C mock.
 /// </summary>
 public sealed class AsyncConsumerDeserializerFormsTests
 {
@@ -44,10 +45,10 @@ public sealed class AsyncConsumerDeserializerFormsTests
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromMilliseconds(100);
 
     [Fact]
-    public async Task OnTheMock_APlainDeserializer_IsCalledWithoutHeaders_ForTheKeyThenTheValue()
+    public async Task OverTheCMock_APlainDeserializer_IsCalledWithoutHeaders_ForTheKeyThenTheValue()
     {
         Plain deserializer = new Plain();
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(deserializer, deserializer);
+        AsyncKafkaConsumer<string, string> consumer = DecodingConsumers.CreateAsync<string, string>(deserializer, deserializer);
         await using (TestTimeout.AsyncDisposal(consumer))
         {
             ConsumerRecord<string, string> record = await PollOne(consumer);
@@ -59,10 +60,10 @@ public sealed class AsyncConsumerDeserializerFormsTests
     }
 
     [Fact]
-    public async Task OnTheMock_AHeadersDeserializer_IsCalledWithTheRecordsOwnHeaders_ForTheKeyThenTheValue()
+    public async Task OverTheCMock_AHeadersDeserializer_IsCalledWithTheRecordsOwnHeaders_ForTheKeyThenTheValue()
     {
         WithHeaders deserializer = new WithHeaders();
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(deserializer, deserializer);
+        AsyncKafkaConsumer<string, string> consumer = DecodingConsumers.CreateAsync<string, string>(deserializer, deserializer);
         await using (TestTimeout.AsyncDisposal(consumer))
         {
             ConsumerRecord<string, string> record = await PollOne(consumer);
@@ -76,11 +77,11 @@ public sealed class AsyncConsumerDeserializerFormsTests
     }
 
     [Fact]
-    public async Task OnTheMock_ARetainingDeserializer_IsCalledWithHeaders_AndKeepsItsMemory()
+    public async Task OverTheCMock_ARetainingDeserializer_IsCalledWithHeaders_AndKeepsItsMemory()
     {
         Retaining deserializer = new Retaining();
-        AsyncMockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new AsyncMockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(deserializer, deserializer);
+        AsyncKafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
+            DecodingConsumers.CreateAsync<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(deserializer, deserializer);
         ConsumerRecord<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> record;
         await using (TestTimeout.AsyncDisposal(consumer))
         {
@@ -143,7 +144,7 @@ public sealed class AsyncConsumerDeserializerFormsTests
     }
 
     private static async Task<ConsumerRecord<TKey, TValue>> PollOne<TKey, TValue>(
-        AsyncMockConsumer<TKey, TValue> consumer)
+        AsyncKafkaConsumer<TKey, TValue> consumer)
     {
         TopicPartition partition = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { partition }), s_deadline);

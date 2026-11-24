@@ -34,7 +34,7 @@ using Origin = Confluent.Kafka.Common.Errors.RecordDeserializationException.Dese
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The sync <c>Poll</c>'s memory form on <see cref="MockConsumer{TKey, TValue}"/>: a deserializer that implements
+/// The sync <c>Poll</c>'s memory form on <see cref="KafkaConsumer{TKey, TValue}"/>: a deserializer that implements
 /// <see cref="IDeserializerWithReadOnlyMemory{T}"/> is given the batch's own bytes, which stay valid while the memory
 /// is reachable, past the next poll and the consumer's disposal.
 /// </summary>
@@ -49,7 +49,7 @@ public sealed class ZeroCopyDeserializationTests
     [Fact]
     public void AMemoryValue_StaysReadable_AfterPollReturns_AfterTheNextPoll_AndAfterTheConsumerIsDisposed()
     {
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
         ReadOnlyMemory<byte> key;
         ReadOnlyMemory<byte> value;
         using (TestTimeout.Disposal(consumer))
@@ -81,7 +81,7 @@ public sealed class ZeroCopyDeserializationTests
     [Fact]
     public void AMemoryValue_StaysReadable_HeldWithoutItsRecord()
     {
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ReadOnlyMemory<byte> value = PollOneValue(consumer, 0, "held-alone");
@@ -100,7 +100,7 @@ public sealed class ZeroCopyDeserializationTests
     public void TheValuesOfOnePoll_StayReadable_HeldAsAListWithoutTheirRecords()
     {
         string[] expected = { "first-of-three", "second-of-three", "third-of-three" };
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
         List<ReadOnlyMemory<byte>> values;
         using (TestTimeout.Disposal(consumer))
         {
@@ -123,7 +123,7 @@ public sealed class ZeroCopyDeserializationTests
     [Fact]
     public void ABatchNoMemoryReaches_IsCollected_WhileTheConsumerLives()
     {
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         (WeakReference manager, WeakReference batch) = PollOneManager(consumer);
@@ -138,7 +138,7 @@ public sealed class ZeroCopyDeserializationTests
     [Fact]
     public void ARetainedBatch_ReportsTheBytesOfItsKeysAndValues_AsMemoryPressure()
     {
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, 0, 0, Bytes("key-0"), Bytes("value-0"));
         consumer.AddRecord(Topic, 0, 1, null, Bytes("second"));
@@ -159,7 +159,7 @@ public sealed class ZeroCopyDeserializationTests
     [Fact]
     public void AMemoryKeyOrValue_IsTheBatchsOwnBytes_OneManagerEach_AndNoneForAnEmptyOrAbsentOne()
     {
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, 0, 0, Bytes("k"), Bytes("v"));
         consumer.AddRecord(Topic, 0, 1, Array.Empty<byte>(), Array.Empty<byte>());
@@ -195,7 +195,7 @@ public sealed class ZeroCopyDeserializationTests
     {
         FormRecorder keys = new FormRecorder();
         FormRecorder values = new FormRecorder();
-        MockConsumer<string?, string?> consumer = new MockConsumer<string?, string?>(keys, values);
+        KafkaConsumer<string?, string?> consumer = DecodingConsumers.Create<string?, string?>(keys, values);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0 });
         consumer.Seek(s_tp0, 0);
@@ -216,7 +216,7 @@ public sealed class ZeroCopyDeserializationTests
     {
         HeadersFormRecorder keys = new HeadersFormRecorder();
         SpanFormRecorder values = new SpanFormRecorder();
-        MockConsumer<string?, string?> consumer = new MockConsumer<string?, string?>(keys, values);
+        KafkaConsumer<string?, string?> consumer = DecodingConsumers.Create<string?, string?>(keys, values);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0 });
         consumer.Seek(s_tp0, 0);
@@ -234,8 +234,8 @@ public sealed class ZeroCopyDeserializationTests
     public void AMemoryValueThatFailsMidBatch_IsPolledAgain_AndTheRecordsBeforeItStayReadable()
     {
         FailingMemoryDeserializer values = new FailingMemoryDeserializer(failOn: "x");
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
+            DecodingConsumers.Create<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
                 Serdes.ReadOnlyMemory().Deserializer(), values);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0 });
@@ -278,10 +278,10 @@ public sealed class ZeroCopyDeserializationTests
         AssertBytes("before", before);
     }
 
-    private static MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> Ready()
+    private static KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> Ready()
     {
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
+            DecodingConsumers.Create<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
                 Serdes.ReadOnlyMemory().Deserializer(), Serdes.ReadOnlyMemory().Deserializer());
         consumer.Assign(new[] { s_tp0 });
         consumer.Seek(s_tp0, 0);
@@ -291,7 +291,7 @@ public sealed class ZeroCopyDeserializationTests
     // Not inlined, so the record and its batch are unreachable once it returns and only the memory keeps the bytes.
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static ReadOnlyMemory<byte> PollOneValue(
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer, long offset, string value)
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer, long offset, string value)
     {
         consumer.AddRecord(Topic, 0, offset, Bytes("key"), Bytes(value));
         return Assert.Single(consumer.Poll(s_pollTimeout)).Value()!.Value;
@@ -299,7 +299,7 @@ public sealed class ZeroCopyDeserializationTests
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static List<ReadOnlyMemory<byte>> PollValues(
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer, string[] values)
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer, string[] values)
     {
         for (int i = 0; i < values.Length; i++)
         {
@@ -312,7 +312,7 @@ public sealed class ZeroCopyDeserializationTests
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static (WeakReference Manager, WeakReference Batch) PollOneManager(
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer)
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer)
     {
         ReadOnlyMemory<byte> value = PollOneValue(consumer, 0, "dropped");
         Assert.True(MemoryMarshal.TryGetMemoryManager(value, out BytesMemoryManager? manager));

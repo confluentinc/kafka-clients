@@ -23,7 +23,7 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The typed poll through both mock consumers: a <c>&lt;string, long&gt;</c> round-trip, the
+/// The typed poll through both consumers over the C mock: a <c>&lt;string, long&gt;</c> round-trip, the
 /// <c>&lt;byte[], byte[]&gt;</c> identity, and the three-state null model: an absent field is <c>default(T)</c> and the
 /// deserializer is not called; an empty field deserializes a zero-length span; a present one, its bytes.
 /// </summary>
@@ -38,10 +38,10 @@ public sealed class PublicConsumerTypedPollTests
     private const string Topic = "typed-topic";
     private const int Partition = 0;
 
-    private static MockConsumer<TKey, TValue> ReadyToPoll<TKey, TValue>(
+    private static KafkaConsumer<TKey, TValue> ReadyToPoll<TKey, TValue>(
         IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer)
     {
-        MockConsumer<TKey, TValue> consumer = new MockConsumer<TKey, TValue>(keyDeserializer, valueDeserializer);
+        KafkaConsumer<TKey, TValue> consumer = DecodingConsumers.Create<TKey, TValue>(keyDeserializer, valueDeserializer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         return consumer;
@@ -50,7 +50,7 @@ public sealed class PublicConsumerTypedPollTests
     [Fact]
     public void SyncPoll_StringLong_RoundTripsDecodedKeyAndValue()
     {
-        MockConsumer<string, long?> consumer = ReadyToPoll(Serdes.String().Deserializer(), Serdes.Long().Deserializer());
+        KafkaConsumer<string, long?> consumer = ReadyToPoll(Serdes.String().Deserializer(), Serdes.Long().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         byte[] key = Serdes.String().Serializer().Serialize(Topic, "hello")?.ToArray()!;
         byte[] value = Serdes.Long().Serializer().Serialize(Topic, 1_234_567_890_123L)?.ToArray()!;
@@ -66,8 +66,8 @@ public sealed class PublicConsumerTypedPollTests
     [Fact]
     public async Task AsyncPoll_StringLong_RoundTripsDecodedKeyAndValue()
     {
-        AsyncMockConsumer<string, long?> consumer =
-            new AsyncMockConsumer<string, long?>(new AsyncStringDeserializer(), new AsyncLongDeserializer());
+        AsyncKafkaConsumer<string, long?> consumer =
+            DecodingConsumers.CreateAsync<string, long?>(new AsyncStringDeserializer(), new AsyncLongDeserializer());
         try
         {
             await TestTimeout.Run(
@@ -92,7 +92,7 @@ public sealed class PublicConsumerTypedPollTests
     [Fact]
     public void SyncPoll_ByteArrayIdentity_EquivalentToRawBytes()
     {
-        MockConsumer<byte[], byte[]> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        KafkaConsumer<byte[], byte[]> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         byte[] key = { 1, 2, 3 };
         byte[] value = { 9, 8, 7, 6 };
@@ -108,7 +108,7 @@ public sealed class PublicConsumerTypedPollTests
     public void AbsentValue_ReturnsDefault_DeserializerNotInvoked()
     {
         SpanLengthDeserializer valueDeserializer = new SpanLengthDeserializer();
-        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
+        KafkaConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 1, key: new byte[] { 7 }, value: null);
 
@@ -122,7 +122,7 @@ public sealed class PublicConsumerTypedPollTests
     public void AbsentValue_DoesNotInvoke_EvenAThrowingDeserializer()
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
-        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
+        KafkaConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 2, key: new byte[] { 7 }, value: null);
 
@@ -136,7 +136,7 @@ public sealed class PublicConsumerTypedPollTests
     public void PresentEmptyValue_DeserializesZeroLengthSpan()
     {
         SpanLengthDeserializer valueDeserializer = new SpanLengthDeserializer();
-        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
+        KafkaConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 3, key: new byte[] { 7 }, value: Array.Empty<byte>());
 
@@ -151,7 +151,7 @@ public sealed class PublicConsumerTypedPollTests
     public void PresentValue_DeserializesSpanOfItsLength()
     {
         SpanLengthDeserializer valueDeserializer = new SpanLengthDeserializer();
-        MockConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
+        KafkaConsumer<byte[], int> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 4, key: new byte[] { 7 }, value: new byte[] { 1, 2, 3 });
 
@@ -167,7 +167,7 @@ public sealed class PublicConsumerTypedPollTests
     {
         NullableInt64Deserializer tombstone = new NullableInt64Deserializer();
         {
-            MockConsumer<byte[], long?> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), tombstone);
+            KafkaConsumer<byte[], long?> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), tombstone);
             using (TestTimeout.Disposal(consumer))
             {
                 consumer.AddRecord(Topic, Partition, offset: 5, key: new byte[] { 7 }, value: null);
@@ -179,7 +179,7 @@ public sealed class PublicConsumerTypedPollTests
 
         NullableInt64Deserializer zero = new NullableInt64Deserializer();
         {
-            MockConsumer<byte[], long?> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), zero);
+            KafkaConsumer<byte[], long?> consumer = ReadyToPoll(Serdes.ByteArray().Deserializer(), zero);
             using (TestTimeout.Disposal(consumer))
             {
                 consumer.AddRecord(Topic, Partition, offset: 6, key: new byte[] { 7 }, value: Serdes.Long().Serializer().Serialize(Topic, 0L)?.ToArray());

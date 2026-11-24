@@ -553,13 +553,10 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
 }
 
 public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValue> {    // Java `MockConsumer`
-    // Deviation (§7): the ctor TAKES the deserializers (Java's mock doesn't) — its Poll decodes native
-    // bytes like the real consumer. AddRecord stays BYTES-in (Java's is typed-in) — tests the deserialize
-    // path in isolation + forced by the bytes-only core ABI. Mock helpers are inherent, not on IAsyncConsumer.
-    public AsyncMockConsumer(IAsyncDeserializer<TKey> keyDeserializer, IAsyncDeserializer<TValue> valueDeserializer);  // "latest"
-    public AsyncMockConsumer(IAsyncDeserializer<TKey> keyDeserializer, IAsyncDeserializer<TValue> valueDeserializer,
-        string autoOffsetReset);           // null: IllegalArgumentException, as Java's MockConsumer(String)
-    public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value);
+    // Java's shape: no deserializers, typed records (ledger 626, 627). Mock helpers are inherent, not on
+    // IAsyncConsumer.
+    public AsyncMockConsumer(string offsetResetStrategy);   // null: IllegalArgumentException, as Java's MockConsumer(String)
+    public void AddRecord(ConsumerRecord<TKey, TValue> record);   // Java MockConsumer.addRecord
     public Task Rebalance(IReadOnlyCollection<TopicPartition> newAssignment,
         CancellationToken cancellationToken = default);    // Java MockConsumer.rebalance, rebalance_cb (ledger 48)
     public Task LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost,
@@ -576,7 +573,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
 // (decision 27; ffi §B1). Grown in two sub-phases: the core loop (M5/P8a) + the query family
 // (`Committed` / `OffsetsForTimes` / `BeginningOffsets` / `EndOffsets` / `PartitionsFor` /
 // `ListTopics`, added additively in M5/P8b).
-// KafkaConsumer<K,V> / MockConsumer<K,V> mirror the async pair's 3-param / deserializer-taking ctors.
+// KafkaConsumer<K,V> mirrors AsyncKafkaConsumer<K,V>'s Create; MockConsumer<K,V> has
+// MockConsumer(string offsetResetStrategy) and AddRecord(ConsumerRecord<TKey, TValue> record), as the async mock.
 public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // Java `Consumer<K,V>` (synchronous)
     ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout);      // blocks; Wakeup() interrupts (one-shot)
     void Subscribe(IReadOnlyCollection<string> topics);
@@ -631,10 +629,8 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue> {   //
 }
 
 public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue> {    // Java `MockConsumer`, synchronous
-    public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer);  // "latest"
-    public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
-        string autoOffsetReset);           // deviation §7: takes deserializers (Java's mock doesn't); null as Java's
-    public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value); // bytes-in (§7); inherent
+    public MockConsumer(string offsetResetStrategy);   // null: IllegalArgumentException, as Java's MockConsumer(String)
+    public void AddRecord(ConsumerRecord<TKey, TValue> record);   // Java MockConsumer.addRecord — inherent
     public void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment);  // Java MockConsumer.rebalance — inherent (M9/P6)
     public void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost);  // Java MockConsumer.losePartitions — inherent
     public void SetPollException(KafkaException? exception);                     // Java setPollException (decision 15); null clears
@@ -1023,8 +1019,10 @@ each goes when the reason it gives goes:
   deserializer is an argument of `Create` or, for an argument that is null, a function under `key.deserializer` /
   `value.deserializer` (§4 **Serializers**); a null argument whose key is missing or null throws Java's
   `ConfigException` "Invalid value null for configuration key.deserializer: must be non-null." (the value
-  likewise). The mock consumers have no configuration, so a null deserializer always throws it *(Java's
-  `MockConsumer` takes no deserializers)*.
+  likewise). The mock consumers take no deserializers, as Java's: `AddRecord` takes a typed `ConsumerRecord`,
+  whose key and value `Poll` hands back. They cross the C mock as ids in the record's `void *` slots, resolved
+  through a table in the mock; a polled record is a new instance copied out of the native batch *(deviation:
+  Java returns the instance added)*. The binding's decode tests run the real consumers over the C mock.
 - **Negative partitions.** The consumer leaves a negative partition to the core, which answers as
   Java does: `seek`, `pause`, `resume` and the real consumers' `currentLag` throw
   `IllegalStateException` "No current assignment for partition t--1"; `position` throws "You can

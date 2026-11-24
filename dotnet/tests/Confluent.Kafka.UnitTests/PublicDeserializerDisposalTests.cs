@@ -39,7 +39,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> dispose each one that is <see cref="IDisposable"/> once, key then
 /// value, after the destroy and on the thread that destroyed, or, while a <c>Poll</c> is still deserializing, by that
 /// <c>Poll</c> after it ends, and when the core fails to build the consumer with Java's wrapped error; a close that is
-/// refused disposes nothing, and the mocks never dispose them. Translates Python's deserializer-close tests of
+/// refused disposes nothing. The mock consumers hold no deserializer. Translates Python's deserializer-close tests of
 /// <c>test_kafka_consumer.py</c>.
 /// </summary>
 public sealed class PublicDeserializerDisposalTests
@@ -382,7 +382,7 @@ public sealed class PublicDeserializerDisposalTests
             deserializing.Set();
             _ = release.Wait(Deadline);
         };
-        IConsumerCommon consumer = MockGivenTheDeserializers(flavor, key, value);
+        IConsumerCommon consumer = OverTheMock(flavor, key, value);
         DestroyLog destroys = WatchDestroy(consumer);
         try
         {
@@ -427,7 +427,7 @@ public sealed class PublicDeserializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableDeserializer key = new DisposableDeserializer("key", log);
         DisposableDeserializer value = new DisposableDeserializer("value", log);
-        IConsumerCommon consumer = MockGivenTheDeserializers(flavor, key, value);
+        IConsumerCommon consumer = OverTheMock(flavor, key, value);
         DestroyLog destroys = WatchDestroy(consumer);
         try
         {
@@ -467,7 +467,7 @@ public sealed class PublicDeserializerDisposalTests
         ConcurrentQueue<string> log = new ConcurrentQueue<string>();
         DisposableDeserializer key = new DisposableDeserializer("key", log);
         DisposableDeserializer value = new DisposableDeserializer("value", log);
-        IConsumerCommon consumer = MockGivenTheDeserializers(flavor, key, value);
+        IConsumerCommon consumer = OverTheMock(flavor, key, value);
         Exception? nested = null;
         value.OnDeserialize = () => nested = Xunit.Record.Exception(() =>
         {
@@ -807,12 +807,6 @@ public sealed class PublicDeserializerDisposalTests
         Assert.Equal(
             NullDeserializer("value.deserializer"),
             (await Assert.ThrowsAsync<ConfigException>(async () => await Consumer(flavor, Unreachable(), key, null!))).Message);
-        Assert.Equal(
-            NullDeserializer("key.deserializer"),
-            Assert.Throws<ConfigException>(() => Mock(flavor, null!, value)).Message);
-        Assert.Equal(
-            NullDeserializer("value.deserializer"),
-            Assert.Throws<ConfigException>(() => Mock(flavor, key, null!)).Message);
 
         Assert.Equal(0, key.Disposals);
         Assert.Equal(0, value.Disposals);
@@ -882,32 +876,6 @@ public sealed class PublicDeserializerDisposalTests
         Assert.Equal(0, value.Disposals);
     }
 
-    [Theory]
-    [InlineData(SyncFlavor, CloseHow)]
-    [InlineData(SyncFlavor, CloseWithOptionsHow)]
-    [InlineData(SyncFlavor, DisposeHow)]
-    [InlineData(AsyncFlavor, CloseHow)]
-    [InlineData(AsyncFlavor, CloseWithOptionsHow)]
-    [InlineData(AsyncFlavor, DisposeHow)]
-    [InlineData(AsyncFlavor, DisposeAsyncHow)]
-    public async Task TheMockConsumers_NeverDisposeTheirDeserializers(string flavor, string how)
-    {
-        DisposableDeserializer key = new DisposableDeserializer("key");
-        DisposableDeserializer value = new DisposableDeserializer("value");
-        IConsumerCommon consumer = Mock(flavor, key, value);
-        try
-        {
-            _ = await CloseBy(consumer, how);
-        }
-        finally
-        {
-            await DisposeBounded(consumer);
-        }
-
-        Assert.Equal(0, key.Disposals);
-        Assert.Equal(0, value.Disposals);
-    }
-
     private static Dictionary<string, object?> Unreachable() =>
         new Dictionary<string, object?>
         {
@@ -926,42 +894,28 @@ public sealed class PublicDeserializerDisposalTests
             ? KafkaConsumer<byte[], byte[]>.Create(configs, key, value)
             : await AsyncKafkaConsumer<byte[], byte[]>.Create(configs, key.AsAsync(), value.AsAsync());
 
-    private static IConsumerCommon Mock(string flavor, IDeserializer<byte[]> key, IDeserializer<byte[]> value) =>
-        flavor == SyncFlavor
-            ? new MockConsumer<byte[], byte[]>(key, value)
-            : new AsyncMockConsumer<byte[], byte[]>(key.AsAsync(), value.AsAsync());
-
-    // Only a mock returns records without a broker, so the mock's native consumer is given the SerdeDisposal the real
-    // consumers give NativeConsumer.Create: its Poll and teardown then dispose them as a real consumer does.
-    private static IConsumerCommon MockGivenTheDeserializers(
+    // Only the C mock returns records without a broker: the real consumers built over it own the given deserializers
+    // as the ones Create builds do, so their Poll and teardown dispose them as on a broker.
+    private static IConsumerCommon OverTheMock(
         string flavor,
         DisposableDeserializer key,
-        DisposableDeserializer value)
-    {
-        IConsumerCommon consumer = Mock(flavor, key, value);
-        typeof(NativeConsumer)
-            .GetField("_serdes", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .SetValue(NativeOf(consumer), new SerdeDisposal(key, value));
-        return consumer;
-    }
-
-    private static NativeConsumer NativeOf(IConsumerCommon consumer) =>
-        (NativeConsumer)consumer.GetType()
-            .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .GetValue(consumer)!;
+        DisposableDeserializer value) =>
+        flavor == SyncFlavor
+            ? DecodingConsumers.Create<byte[], byte[]>(key, value)
+            : DecodingConsumers.CreateAsync<byte[], byte[]>(key.AsAsync(), value.AsAsync());
 
     private static async Task ReadyWithARecord(IConsumerCommon consumer)
     {
         await Assign(consumer);
         TopicPartition partition = s_partitions[0];
-        if (consumer is MockConsumer<byte[], byte[]> sync)
+        if (consumer is KafkaConsumer<byte[], byte[]> sync)
         {
             TestTimeout.Run(() => sync.Seek(partition, offset: 0), Deadline);
             sync.AddRecord(partition.Topic(), partition.Partition(), offset: 0, key: new byte[] { 1 }, value: new byte[] { 2 });
             return;
         }
 
-        AsyncMockConsumer<byte[], byte[]> async = (AsyncMockConsumer<byte[], byte[]>)consumer;
+        AsyncKafkaConsumer<byte[], byte[]> async = (AsyncKafkaConsumer<byte[], byte[]>)consumer;
         await TestTimeout.Run(() => async.Seek(partition, offset: 0), Deadline);
         async.AddRecord(partition.Topic(), partition.Partition(), offset: 0, key: new byte[] { 1 }, value: new byte[] { 2 });
     }

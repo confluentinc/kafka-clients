@@ -19,7 +19,6 @@ using System.Dynamic;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Text;
 using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
@@ -46,8 +45,6 @@ internal static class Program
     private static readonly IDeserializer<string> s_deserializer = Serdes.String().Deserializer();
 
     private static readonly IAsyncSerializer<string> s_asyncSerializer = new AsyncStringSerializer();
-
-    private static readonly IAsyncDeserializer<string> s_asyncDeserializer = new AsyncStringDeserializer();
 
     private static int s_failures;
 
@@ -137,16 +134,16 @@ internal static class Program
                 + "headers = RecordHeaders(headers = [], isReadOnly = false), key = k, value = v)",
             () =>
             {
-                using var consumer = new MockConsumer<string, string>(s_deserializer, s_deserializer);
+                using var consumer = new MockConsumer<string, string>("latest");
                 var partition = new TopicPartition("t", 0);
                 consumer.Assign(new[] { partition });
                 consumer.Seek(partition, 0);
-                consumer.AddRecord("t", 0, 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
+                consumer.AddRecord(new ConsumerRecord<string, string>("t", 0, 0, "k", "v"));
                 return consumer.Poll(TimeSpan.FromSeconds(1)).First().ToString();
             });
         Check("consumer: Commit, Committed, Position, Pause", "position=5, committed=5, paused=1", () =>
         {
-            using var consumer = new MockConsumer<string, string>(s_deserializer, s_deserializer);
+            using var consumer = new MockConsumer<string, string>("latest");
             var partition = new TopicPartition("t", 0);
             consumer.Assign(new[] { partition });
             consumer.Seek(partition, 5);
@@ -159,7 +156,7 @@ internal static class Program
         });
         Check("consumer: commit callback", "offsets=1", () =>
         {
-            using var consumer = new MockConsumer<string, string>(s_deserializer, s_deserializer);
+            using var consumer = new MockConsumer<string, string>("latest");
             var partition = new TopicPartition("t", 0);
             consumer.Assign(new[] { partition });
             var callback = new CommitCallback();
@@ -170,7 +167,7 @@ internal static class Program
         });
         Check("consumer: rebalance listener", "assigned t-0", () =>
         {
-            using var consumer = new MockConsumer<string, string>(s_deserializer, s_deserializer);
+            using var consumer = new MockConsumer<string, string>("latest");
             var listener = new AssignmentListener();
             consumer.Subscribe(new[] { "t" }, listener);
             consumer.Rebalance(new[] { new TopicPartition("t", 0) });
@@ -178,7 +175,7 @@ internal static class Program
         });
         Check("consumer: the user's OnPartitionsLost through its interface", "lost t-0", () =>
         {
-            using var consumer = new MockConsumer<string, string>(s_deserializer, s_deserializer);
+            using var consumer = new MockConsumer<string, string>("latest");
             var listener = new LostListener();
             consumer.Subscribe(new[] { "t" }, listener);
             consumer.Rebalance(new[] { new TopicPartition("t", 0) });
@@ -188,7 +185,7 @@ internal static class Program
         Check("consumer: the default-method guard does not fail", "no failure", () =>
         {
             // Native AOT can remove the uncalled method the guard looks for, so either answer is right.
-            using var consumer = new MockConsumer<string, string>(s_deserializer, s_deserializer);
+            using var consumer = new MockConsumer<string, string>("latest");
             try
             {
                 consumer.Subscribe(new[] { "t" }, new ForgottenInterfaceListener());
@@ -205,7 +202,7 @@ internal static class Program
                 + "isReadOnly=false, synonyms=[], type=UNKNOWN, documentation=null)}",
             () =>
             {
-                using var consumer = new MockConsumer<string, string>(s_deserializer, s_deserializer);
+                using var consumer = new MockConsumer<string, string>("latest");
                 consumer.Close(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.LEAVE_GROUP));
                 return new AlterConfigOp(new ConfigEntry("a", "b"), OpType.SET).ToString();
             });
@@ -215,11 +212,11 @@ internal static class Program
     {
         await CheckAsync("async consumer: Poll", "records=1, value=v", async () =>
         {
-            await using var consumer = new AsyncMockConsumer<string, string>(s_asyncDeserializer, s_asyncDeserializer);
+            await using var consumer = new AsyncMockConsumer<string, string>("latest");
             var partition = new TopicPartition("t", 0);
             await consumer.Assign(new[] { partition }).ConfigureAwait(false);
             await consumer.Seek(partition, 0).ConfigureAwait(false);
-            consumer.AddRecord("t", 0, 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
+            consumer.AddRecord(new ConsumerRecord<string, string>("t", 0, 0, "k", "v"));
             ConsumerRecords<string, string> records =
                 await consumer.Poll(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
             return $"records={records.Count()}, value={records.First().Value()}";

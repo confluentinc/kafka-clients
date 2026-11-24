@@ -47,7 +47,7 @@ public sealed class RecordDeserializationTests
     {
         RecordingDeserializer keys = new RecordingDeserializer();
         RecordingDeserializer values = new RecordingDeserializer();
-        MockConsumer<string?, string?> consumer = Ready(keys, values, s_tp0);
+        KafkaConsumer<string?, string?> consumer = Ready(keys, values, s_tp0);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, 0, 0, key: null, value: Bytes("v"));
         consumer.AddRecord(Topic, 0, 1, key: Bytes("k"), value: null);
@@ -70,7 +70,7 @@ public sealed class RecordDeserializationTests
     public void AFailingValue_IsReturnedAfterTheRecordsBeforeIt_ThenThrown_ThenSkippedBySeekingPastIt()
     {
         RecordingDeserializer values = new RecordingDeserializer(failOn: "x");
-        MockConsumer<string?, string?> consumer = Ready(new RecordingDeserializer(), values, s_tp0);
+        KafkaConsumer<string?, string?> consumer = Ready(new RecordingDeserializer(), values, s_tp0);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, 0, 0, key: null, value: null);
         consumer.AddRecord(Topic, 0, 1, key: null, value: Bytes("x"));
@@ -109,7 +109,7 @@ public sealed class RecordDeserializationTests
     public void AFailingKey_ThrowsForTheKey_WithBothBuffers_AndLeavesTheValueUnread()
     {
         RecordingDeserializer values = new RecordingDeserializer();
-        MockConsumer<string?, string?> consumer = Ready(new RecordingDeserializer(failOn: "k"), values, s_tp0);
+        KafkaConsumer<string?, string?> consumer = Ready(new RecordingDeserializer(failOn: "k"), values, s_tp0);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, 0, 4, key: Bytes("k"), value: Bytes("v"));
 
@@ -129,7 +129,7 @@ public sealed class RecordDeserializationTests
     [Fact]
     public void AFailureInOnePartition_SeeksEveryPartitionBackToItsFirstRecordNotReturned()
     {
-        MockConsumer<string?, string?> consumer =
+        KafkaConsumer<string?, string?> consumer =
             Ready(new RecordingDeserializer(), new RecordingDeserializer(failOn: "bad"), s_tp0, s_tp1);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, 0, 0, key: null, value: Bytes("a"));
@@ -155,7 +155,7 @@ public sealed class RecordDeserializationTests
     [Fact]
     public void AFailureInTheFirstPartitionRead_SeeksTheLaterPartitionBack_InEitherOrder()
     {
-        MockConsumer<string?, string?> consumer =
+        KafkaConsumer<string?, string?> consumer =
             Ready(new RecordingDeserializer(), new RecordingDeserializer(failOn: "bad"), s_tp0, s_tp1);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, 0, 0, key: null, value: Bytes("bad"));
@@ -171,10 +171,10 @@ public sealed class RecordDeserializationTests
         Assert.Equal(0L, consumer.Position(s_tp1));
     }
 
-    private static MockConsumer<string?, string?> Ready(
+    private static KafkaConsumer<string?, string?> Ready(
         IDeserializer<string?> keys, IDeserializer<string?> values, params TopicPartition[] partitions)
     {
-        MockConsumer<string?, string?> consumer = new MockConsumer<string?, string?>(keys, values);
+        KafkaConsumer<string?, string?> consumer = DecodingConsumers.Create<string?, string?>(keys, values);
         consumer.Assign(partitions);
         foreach (TopicPartition partition in partitions)
         {

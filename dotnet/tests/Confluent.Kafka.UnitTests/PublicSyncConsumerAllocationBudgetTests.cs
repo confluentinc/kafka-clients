@@ -26,7 +26,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// The per-record receive allocation of the sync <see cref="IConsumer{TKey, TValue}.Poll"/> on the
-/// <see cref="MockConsumer{TKey, TValue}"/>: the cost of a large poll minus a small one stays within the owned copies.
+/// <see cref="KafkaConsumer{TKey, TValue}"/>: the cost of a large poll minus a small one stays within the owned copies.
 /// </summary>
 /// <remarks>
 /// The copy-out runs on the calling thread, so the per-thread counter sees only this poll, whatever other tests run.
@@ -73,7 +73,7 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
 
     private static long MeasurePoll(int recordCount, byte[] key, byte[] value)
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        KafkaConsumer<byte[], byte[]> consumer = DecodingConsumers.Create<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
