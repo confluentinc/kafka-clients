@@ -42,7 +42,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
 
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record) => _inner.Send(record);
 
-    public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record, ICallback callback)
+    public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record, ICallback? callback)
     {
         ulong index = ProducerProbe.IndexOf(record.Key());
         _sends++;
@@ -109,14 +109,14 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
         _probe.OnDisposed();
     }
 
-    /// <summary>Counts each delivery-callback invocation, then forwards it unchanged.</summary>
+    /// <summary>Counts each delivery-callback invocation, then forwards it unchanged to the send's callback, if there is one.</summary>
     private sealed class CountingCallback : ICallback
     {
-        private readonly ICallback _target;
+        private readonly ICallback? _target;
         private readonly ulong _index;
         private readonly ProducerProbe _probe;
 
-        internal CountingCallback(ICallback target, ulong index, ProducerProbe probe)
+        internal CountingCallback(ICallback? target, ulong index, ProducerProbe probe)
         {
             _target = target;
             _index = index;
@@ -126,7 +126,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
         public void OnCompletion(RecordMetadata metadata, Exception? exception)
         {
             _probe.OnCallback(_index);
-            _target.OnCompletion(metadata, exception);
+            _target?.OnCompletion(metadata, exception);
         }
     }
 }
