@@ -873,7 +873,8 @@ each goes when the reason it gives goes:
   the mocks refuse it too, as their native mock could match the cut name to another topic's state.
   The mock consumers' `OffsetsForTimes` answers a NUL topic as Java's `MockConsumer` answers every
   map, with `UnsupportedOperationException`, and the mock consumers' constructors answer a NUL
-  strategy as Java's `AutoOffsetResetStrategy.fromString` does. Not refused, as nothing acts on the
+  strategy as Java's `AutoOffsetResetStrategy.fromString` does, a `by_duration` one with the
+  duration's parse failure as its cause. Not refused, as nothing acts on the
   cut string: `Seek`'s metadata, which neither Java nor the core reads; `EnforceRebalance`'s reason,
   which Java's KIP-848 consumer only logs; and the user of a `UserScramCredentialUpsertion`
   constructor, which only makes the random salt there (`AlterUserScramCredentials` refuses it). The mock

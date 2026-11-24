@@ -45,6 +45,8 @@ public sealed class PublicConsumerTopicStringTests
 
     private const string ClosedMessage = "This consumer has already been closed.";
 
+    private const string UnparsableDurationMessage = "Unable to parse duration string in by_duration offset reset strategy.";
+
     private const string GroupIdNotDefined =
         "To use the group management or offset commit APIs, you must provide a valid group.id in the consumer "
         + "configuration.";
@@ -191,20 +193,46 @@ public sealed class PublicConsumerTopicStringTests
         Assert.Equal(expected.Message, actual!.Message);
     }
 
-    // Java's AutoOffsetResetStrategy.fromString names no strategy that holds a NUL.
+    // Java's AutoOffsetResetStrategy.fromString names no strategy that holds a NUL, and gives no cause for a name it does
+    // not know.
     [Theory]
-    [InlineData("earliest\0x", "Unknown auto offset reset strategy: earliest\0x")]
-    [InlineData("by_duration:PT1H\0", "Unable to parse duration string in by_duration offset reset strategy.")]
-    public void TheMockConstructors_AStrategyWithANul_IsJavasIllegalArgumentException(string strategy, string message)
+    [InlineData("earliest\0x")]
+    [InlineData("\0")]
+    [InlineData("by_duration\0")]
+    [InlineData("by_dur\0ation:PT1H")]
+    public void TheMockConstructors_AStrategyWithANul_IsJavasIllegalArgumentException(string strategy)
     {
-        Assert.Equal(
-            message,
-            Assert.Throws<IllegalArgumentException>(
-                () => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), strategy)).Message);
-        Assert.Equal(
-            message,
-            Assert.Throws<IllegalArgumentException>(
-                () => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), strategy)).Message);
+        foreach (IllegalArgumentException refused in MockConstructorRefusals(strategy))
+        {
+            Assert.Equal("Unknown auto offset reset strategy: " + strategy, refused.Message);
+            Assert.Null(refused.InnerException);
+        }
+    }
+
+    // Java's Duration.parse fails on the NUL, before fromString's negative check, and fromString wraps that failure as
+    // its cause; the binding's answer is the one the core gives for a duration it cannot parse, cause included.
+    [Theory]
+    [InlineData("by_duration:PT1H\0")]
+    [InlineData("by_duration:\0PT1H")]
+    [InlineData("by_duration:-PT1H\0")]
+    [InlineData("by_duration:\0")]
+    public void TheMockConstructors_ADurationWithANul_CarriesTheParseFailure(string strategy)
+    {
+        IllegalArgumentException[] fromTheCore = MockConstructorRefusals("by_duration:1H").ToArray();
+        IllegalArgumentException[] refusals = MockConstructorRefusals(strategy).ToArray();
+        Assert.Equal(2, refusals.Length);
+        for (int i = 0; i < refusals.Length; i++)
+        {
+            Assert.Equal(UnparsableDurationMessage, refusals[i].Message);
+            IllegalArgumentException cause = Assert.IsType<IllegalArgumentException>(refusals[i].InnerException);
+            Assert.Equal("Text cannot be parsed to a Duration", cause.Message);
+            Assert.Null(cause.InnerException);
+
+            Assert.Equal(fromTheCore[i].Message, refusals[i].Message);
+            Assert.Equal(fromTheCore[i].InnerException?.GetType(), cause.GetType());
+            Assert.Equal(fromTheCore[i].InnerException?.Message, cause.Message);
+            Assert.Null(fromTheCore[i].InnerException?.InnerException);
+        }
     }
 
     [Theory]
@@ -358,6 +386,15 @@ public sealed class PublicConsumerTopicStringTests
         ArgumentException refused = (ArgumentException)error!;
         Assert.Equal(param, refused.ParamName);
         Assert.Equal(new ArgumentException(message, param).Message, refused.Message);
+    }
+
+    // The refusal of each mock constructor, MockConsumer's then AsyncMockConsumer's, for the strategy.
+    private static IEnumerable<IllegalArgumentException> MockConstructorRefusals(string strategy)
+    {
+        yield return Assert.Throws<IllegalArgumentException>(
+            () => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), strategy));
+        yield return Assert.Throws<IllegalArgumentException>(
+            () => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), strategy));
     }
 
     private static void AssertGroupIdNotDefined(Exception? error) =>

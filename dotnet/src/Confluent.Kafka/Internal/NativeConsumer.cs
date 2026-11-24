@@ -49,6 +49,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     private const string ByDurationStrategyPrefix = "by_duration:";
 
+    private const string UnparsableDurationMessage = "Unable to parse duration string in by_duration offset reset strategy.";
+
+    // The cause Java's fromString wraps when Duration.parse fails, as the core gives it.
+    private const string DurationParseFailureMessage = "Text cannot be parsed to a Duration";
+
     private const int LocalConcurrentModification = -2;
 
     private const int WakeupCode = -18;
@@ -367,15 +372,17 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     // A null strategy crosses as NULL, which the core refuses with Java's IllegalArgumentException
     // ("Auto offset reset strategy is null"), as Java's AutoOffsetResetStrategy.fromString does. A strategy holding a
-    // NUL names no strategy, so the binding gives fromString's answer for it, which needs no native call.
+    // NUL names no strategy, so the binding gives fromString's answer for it, which needs no native call: for a
+    // by_duration one, Duration.parse fails on the NUL, so the answer carries that failure as its cause, as the core's
+    // answer for any duration it cannot parse does.
     internal static NativeConsumer CreateMock(string? autoOffsetReset = DefaultOffsetResetStrategy, bool withPump = true)
     {
         if (NativeStrings.ContainsNul(autoOffsetReset))
         {
-            throw new IllegalArgumentException(
-                autoOffsetReset!.StartsWith(ByDurationStrategyPrefix, StringComparison.Ordinal)
-                    ? "Unable to parse duration string in by_duration offset reset strategy."
-                    : "Unknown auto offset reset strategy: " + autoOffsetReset);
+            throw autoOffsetReset!.StartsWith(ByDurationStrategyPrefix, StringComparison.Ordinal)
+                ? new IllegalArgumentException(
+                    UnparsableDurationMessage, new IllegalArgumentException(DurationParseFailureMessage))
+                : new IllegalArgumentException("Unknown auto offset reset strategy: " + autoOffsetReset);
         }
 
         IntPtr outErr = IntPtr.Zero;
