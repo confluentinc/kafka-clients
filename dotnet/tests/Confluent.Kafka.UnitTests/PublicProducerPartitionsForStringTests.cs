@@ -14,6 +14,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
@@ -26,8 +27,9 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// A topic holding a NUL character makes <c>PartitionsFor</c> throw <see cref="ArgumentException"/> at the call on
 /// <c>KafkaProducer</c> and <c>AsyncKafkaProducer</c>, as <c>Send</c> refuses such a topic: the C ABI would cut it at
-/// the NUL and answer for another topic. The mocks answer as Java's <c>MockProducer</c>: an empty list, or the
-/// injected exception.
+/// the NUL and answer for another topic. The check comes after the closed check and, on the asynchronous producer,
+/// before the token's, as Python's. The mocks answer as Java's <c>MockProducer</c>: an empty list, or the injected
+/// exception.
 /// </summary>
 public sealed class PublicProducerPartitionsForStringTests
 {
@@ -35,6 +37,8 @@ public sealed class PublicProducerPartitionsForStringTests
         "A topic must not contain a NUL character: such a string cannot be passed to the native client unchanged.";
 
     private const string NulTopic = "t\0u";
+
+    private const string ClosedMessage = "Cannot perform operation after producer has been closed";
 
     [Fact]
     public void KafkaProducer_PartitionsFor_ATopicWithANul_ThrowsArgumentException()
@@ -53,6 +57,42 @@ public sealed class PublicProducerPartitionsForStringTests
                 Unreachable(), new AsyncStringSerializer(), new AsyncStringSerializer());
 
         AssertRejected(Assert.Throws<ArgumentException>(() => { _ = producer.PartitionsFor(NulTopic); }));
+    }
+
+    [Fact]
+    public void KafkaProducer_PartitionsFor_ATopicWithANulOnAClosedProducer_ThrowsTheClosedError()
+    {
+        KafkaProducer<string, string> producer =
+            KafkaProducer<string, string>.Create(Unreachable(), Serdes.String().Serializer(), Serdes.String().Serializer());
+        producer.Dispose();
+
+        IllegalStateException closed = Assert.Throws<IllegalStateException>(() => producer.PartitionsFor(NulTopic));
+        Assert.Equal(ClosedMessage, closed.Message);
+    }
+
+    [Fact]
+    public async Task AsyncKafkaProducer_PartitionsFor_ATopicWithANulOnAClosedProducer_ThrowsTheClosedErrorAtTheCall()
+    {
+        AsyncKafkaProducer<string, string> producer =
+            await AsyncKafkaProducer<string, string>.Create(
+                Unreachable(), new AsyncStringSerializer(), new AsyncStringSerializer());
+        await producer.DisposeAsync();
+
+        IllegalStateException closed =
+            Assert.Throws<IllegalStateException>(() => { _ = producer.PartitionsFor(NulTopic); });
+        Assert.Equal(ClosedMessage, closed.Message);
+    }
+
+    [Fact]
+    public async Task AsyncKafkaProducer_PartitionsFor_ATopicWithANulAndACancelledToken_ThrowsArgumentException()
+    {
+        await using AsyncKafkaProducer<string, string> producer =
+            await AsyncKafkaProducer<string, string>.Create(
+                Unreachable(), new AsyncStringSerializer(), new AsyncStringSerializer());
+        using CancellationTokenSource cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        AssertRejected(Assert.Throws<ArgumentException>(() => { _ = producer.PartitionsFor(NulTopic, cancelled.Token); }));
     }
 
     [Fact]
