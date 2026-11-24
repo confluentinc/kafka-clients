@@ -27,6 +27,8 @@
 //! The inputs are Javadocs as [`crate::java::clean_javadoc`] leaves them, or
 //! whole `/** .. */` blocks for [`plain_text`].
 
+use std::collections::BTreeSet;
+
 use crate::java::{self, JavaIndex};
 
 /// A Javadoc split into its main description and its block tags.
@@ -122,6 +124,116 @@ pub fn inherit_doc(own: &str, inherited: &str) -> String {
         out.push_str(&format!("\n@{} {} {}", tag.name, tag.arg, tag.text));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Javadocs that point elsewhere (documentation.md §4)
+// ---------------------------------------------------------------------------
+
+/// The references of a Javadoc that only points elsewhere: no text but `@see`
+/// tags (`@see KafkaConsumer#commitSync()`), or a body that is only "See" and
+/// `{@link}`s (`See {@link KafkaProducer#close()}`), with no tags but `@see`
+/// and `@since`. Empty for any other Javadoc.
+pub fn pointer_refs(doc: &str) -> Vec<String> {
+    let parsed = parse(doc);
+    if !parsed.tags.iter().all(|t| t.name == "see" || t.name == "since") {
+        return Vec::new();
+    }
+    let mut refs: Vec<String> = Vec::new();
+    let mut rest = String::new();
+    let mut body = parsed.body.as_str();
+    while let Some(start) = body.find("{@link") {
+        rest.push_str(&body[..start]);
+        let Some(len) = body[start..].find('}') else {
+            return Vec::new();
+        };
+        let inner = &body[start + 1..start + len];
+        let target = inner.split_whitespace().nth(1).unwrap_or_default();
+        refs.push(target.to_string());
+        body = &body[start + len + 1..];
+    }
+    rest.push_str(body);
+    if rest
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| !w.is_empty() && !w.eq_ignore_ascii_case("see"))
+    {
+        return Vec::new();
+    }
+    refs.extend(parsed.tags.iter().filter(|t| t.name == "see").map(|t| {
+        // `@see Foo#bar() label`: the reference is the first word, the
+        // parameter list possibly spaced.
+        let text = t.text.as_str();
+        match text.find(')') {
+            Some(end) if text[..end].contains('(') => text[..=end].to_string(),
+            _ => text.split_whitespace().next().unwrap_or_default().to_string(),
+        }
+    }));
+    refs
+}
+
+/// The raw Javadocs of `marker` ([`JavaIndex::marker_javadocs`]), a Javadoc
+/// that only points elsewhere ([`pointer_refs`]) replaced by the Javadocs it
+/// points to, followed in turn; a marker already in `seen` gives none.
+pub fn followed_javadocs(index: &JavaIndex, marker: &str, seen: &mut BTreeSet<String>) -> Vec<String> {
+    if !seen.insert(marker.to_string()) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for doc in index.marker_javadocs(marker).unwrap_or_default() {
+        out.extend(followed_doc(index, marker, doc, seen));
+    }
+    out
+}
+
+/// `doc`, the Javadoc of what `marker` names, or, when it only points
+/// elsewhere ([`pointer_refs`]), the Javadocs it points to
+/// ([`followed_javadocs`]); `doc` itself when none of them is found.
+pub fn followed_doc(index: &JavaIndex, marker: &str, doc: String, seen: &mut BTreeSet<String>) -> Vec<String> {
+    let followed: Vec<String> = pointer_refs(&doc)
+        .iter()
+        .filter_map(|r| see_marker(index, marker, r))
+        .flat_map(|target| followed_javadocs(index, &target, seen))
+        .collect();
+    if followed.is_empty() {
+        vec![doc]
+    } else {
+        followed
+    }
+}
+
+/// The marker a reference in the Javadoc of `from` names, when it names a
+/// known class or one of its members: `KafkaConsumer`,
+/// `KafkaConsumer#commitSync(Duration)`, `#commitSync()` (a member of
+/// `from`'s own class). The class is found by simple name, `from`'s
+/// package first; main-tree classes only.
+pub fn see_marker(index: &JavaIndex, from: &str, reference: &str) -> Option<String> {
+    let reference = reference.split_whitespace().collect::<String>();
+    let (class_name, member) = reference.split_once('#').unwrap_or((&reference, ""));
+    let from_class = index.resolve(from)?;
+    let class = if class_name.is_empty() {
+        from_class
+    } else {
+        let simple = class_name.rsplit('.').next().unwrap_or(class_name);
+        let mut candidates: Vec<&java::JavaClass> = index
+            .classes
+            .iter()
+            .filter(|c| !c.is_test && c.path.last().is_some_and(|n| n == simple))
+            .collect();
+        candidates.sort_by_key(|c| c.package != from_class.package);
+        candidates.first().copied()?
+    };
+    if member.is_empty() {
+        return Some(class.marker());
+    }
+    let name = member.split('(').next().unwrap_or(member);
+    // A signature naming an overload is kept; one that names none (a
+    // fully-qualified parameter type) falls back to every overload.
+    let member = if member.contains('(') && class.overloads.iter().any(|o| o.signature() == member) {
+        member
+    } else {
+        name
+    };
+    Some(format!("{}#{member}", class.marker()))
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +375,12 @@ pub struct Translator<'a> {
     /// Whether `@throws` becomes `# Panics` rather than `# Errors`: the Rust
     /// item keeps Java's throw as a panic (CLAUDE.md §12.5).
     pub panics: bool,
+    /// Whether `<a href="u">t</a>` becomes the Markdown link `[t](u)` and a
+    /// nested list is indented under its parent item, for documentation read
+    /// as Markdown on the web (the Node.js client's config docs, which TypeDoc
+    /// renders). Off, the rustdoc keeps an anchor's text only and every list
+    /// item at the left margin.
+    pub markdown: bool,
 }
 
 /// A Javadoc translated by [`Translator::translate`].
@@ -383,6 +501,8 @@ impl Translator<'_> {
         let mut cur = String::new();
         let mut open = Open::Para;
         let mut lists: Vec<(bool, usize)> = Vec::new();
+        // The `href` of each open `<a>`, `None` for an anchor without one.
+        let mut links: Vec<Option<String>> = Vec::new();
         // The rows of the `<table>` being read, and whether a cell is open.
         let mut table: Option<Vec<Vec<String>>> = None;
         let mut in_cell = false;
@@ -463,12 +583,29 @@ impl Translator<'_> {
                         "li" | "dt" | "dd" => {
                             flush(&mut cur, &mut open, &mut out);
                             if !closing {
+                                // With `markdown`, a nested list is indented under its
+                                // parent item's text.
+                                let depth = if self.markdown {
+                                    lists.len().saturating_sub(1)
+                                } else {
+                                    0
+                                };
+                                let outer: String = lists[..depth]
+                                    .iter()
+                                    .map(|(ordered, n)| {
+                                        if *ordered {
+                                            " ".repeat(format!("{n}. ").len())
+                                        } else {
+                                            "  ".into()
+                                        }
+                                    })
+                                    .collect();
                                 let marker = match lists.last_mut() {
                                     Some((true, n)) => {
                                         *n += 1;
-                                        format!("{n}. ")
+                                        format!("{outer}{n}. ")
                                     },
-                                    _ => "- ".to_string(),
+                                    _ => format!("{outer}- "),
                                 };
                                 open = Open::Item(marker);
                             }
@@ -487,6 +624,20 @@ impl Translator<'_> {
                             let after = &body[close..];
                             i += end + close + after.find('>').map_or(after.len(), |g| g + 1);
                             continue;
+                        },
+                        // With `markdown`, `<a href="u">t</a>` as the Markdown link
+                        // `[t](u)`; an anchor without `href` keeps its text only.
+                        "a" if self.markdown && !closing => {
+                            let href = attribute(&rest[..end], "href");
+                            if href.is_some() {
+                                cur.push('[');
+                            }
+                            links.push(href);
+                        },
+                        "a" if self.markdown => {
+                            if let Some(Some(href)) = links.pop() {
+                                cur.push_str(&format!("]({href})"));
+                            }
                         },
                         "b" | "strong" => cur.push_str("**"),
                         "i" | "em" => cur.push('*'),
@@ -708,6 +859,20 @@ fn html_tag(s: &str) -> Option<(String, bool, usize)> {
         .collect::<String>()
         .to_ascii_lowercase();
     Some((name, closing, end + 1))
+}
+
+/// The value of attribute `name` in HTML start tag `tag` (`<a href="u">`).
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let at = lower.find(&format!("{name}="))? + name.len() + 1;
+    let rest = &tag[at..];
+    let quote = rest.chars().next()?;
+    let value = if quote == '"' || quote == '\'' {
+        &rest[1..rest[1..].find(quote)? + 1]
+    } else {
+        rest.split(|c: char| c.is_whitespace() || c == '>').next()?
+    };
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// The HTML entity at the start of `s`, decoded, and its length.
@@ -1050,7 +1215,7 @@ mod tests {
     use super::*;
 
     fn rustdoc(doc: &str) -> String {
-        Translator { index: None, panics: false }.to_rustdoc(doc)
+        Translator { index: None, panics: false, markdown: false }.to_rustdoc(doc)
     }
 
     #[test]
@@ -1084,6 +1249,23 @@ mod tests {
         assert_eq!(rustdoc("<ol><li>first<li>second</ol>"), "1. first\n2. second");
         // An `<li>` outside any list (`ProducerRecord`'s class doc) is a bullet.
         assert_eq!(rustdoc("Cases:\n<li>one</li>\n<li>two</li>"), "Cases:\n\n- one\n- two");
+    }
+
+    #[test]
+    fn test_markdown_keeps_links_and_indents_nested_lists() {
+        let markdown = |doc: &str| Translator { index: None, panics: false, markdown: true }.to_rustdoc(doc);
+        let nested = "<ul><li>a<ol><li>x</li><li>y</li></ol></li><li>b</li></ul>";
+        let links = "See <a href=\"https://kafka.apache.org/x\">the docs</a> and <a name=\"n\">here</a>.";
+        // A nested list is indented under its parent item; a link keeps its target.
+        assert_eq!(markdown(nested), "- a\n  1. x\n  2. y\n- b");
+        assert_eq!(markdown(links), "See [the docs](https://kafka.apache.org/x) and here.");
+        assert_eq!(
+            markdown("Body.\n@see <a href=\"https://kafka.apache.org\">Kafka</a>"),
+            "Body.\n\n# See also\n\n- [Kafka](https://kafka.apache.org)"
+        );
+        // The rustdoc keeps an anchor's text only and every item at the margin.
+        assert_eq!(rustdoc(nested), "- a\n1. x\n2. y\n- b");
+        assert_eq!(rustdoc(links), "See the docs and here.");
     }
 
     #[test]
@@ -1184,8 +1366,8 @@ mod tests {
             rustdoc("Waits.\n@throws org.apache.kafka.common.errors.TimeoutException if it times out\n@exception InterruptException on interrupt"),
             "Waits.\n\n# Errors\n\n- `TimeoutError` if it times out\n- `InterruptError` on interrupt"
         );
-        let panics =
-            Translator { index: None, panics: true }.to_rustdoc("Gets.\n@throws IllegalStateException if closed");
+        let panics = Translator { index: None, panics: true, markdown: false }
+            .to_rustdoc("Gets.\n@throws IllegalStateException if closed");
         assert_eq!(panics, "Gets.\n\n# Panics\n\n- `IllegalStateError` if closed");
     }
 
@@ -1199,7 +1381,7 @@ mod tests {
             &mut classes,
         );
         let index = JavaIndex { classes };
-        let t = Translator { index: Some(&index), panics: false };
+        let t = Translator { index: Some(&index), panics: false, markdown: false };
         assert_eq!(
             t.to_rustdoc("Seeks.\n@throws OffsetOutOfRangeException if out of range\n@throws IllegalArgumentException if bad"),
             "Seeks.\n\n# Errors\n\n- `ConsumerOffsetOutOfRangeError` if out of range\n- `LocalIllegalArgumentError` if bad"
@@ -1294,12 +1476,15 @@ mod tests {
     #[test]
     fn test_translate_splits_the_tags() {
         let doc = "Sends.\n@param maxBlockMs how long\n@return the {@code null} value\n@throws java.util.concurrent.TimeoutException late";
-        let t = Translator { index: None, panics: false }.translate(doc);
+        let t = Translator { index: None, panics: false, markdown: false }.translate(doc);
         assert_eq!(t.params, [("max_block_ms".to_string(), "how long".to_string())]);
         assert_eq!(t.returns.as_deref(), Some("the `None` value"));
         assert_eq!(t.throws[0].java, "TimeoutException");
         assert_eq!(t.throws[0].rust, "TimeoutError");
-        assert_eq!(t.rustdoc, Translator { index: None, panics: false }.to_rustdoc(doc));
+        assert_eq!(
+            t.rustdoc,
+            Translator { index: None, panics: false, markdown: false }.to_rustdoc(doc)
+        );
     }
 
     #[test]
@@ -1312,7 +1497,7 @@ mod tests {
             &mut classes,
         );
         let index = JavaIndex { classes };
-        let t = Translator { index: Some(&index), panics: false };
+        let t = Translator { index: Some(&index), panics: false, markdown: false };
         assert_eq!(t.error_names("TimeoutException"), ["TimeoutError"]);
         assert_eq!(
             t.error_names("org.apache.kafka.common.errors.TimeoutException"),
