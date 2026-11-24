@@ -1273,9 +1273,11 @@ producer:** `Metrics` (**shipped M11/P8** — `IReadOnlyDictionary<MetricName, I
 Java `metrics()`, on **both** `IProducer` and `IAsyncProducer`; it maps **no**
 concurrent-access null — the producer ABI documents none, it takes the core `Mutex` and blocks —
 so its defensive null guard carries a producer-accurate message, decision D-5; it holds the core's
-producer metrics only, none of Java's network-client metrics: no connection, request, I/O or
-authentication metrics, no per-node metrics and no `app-info` *(recorded gap; Python's binding
-returns the same set. Why: the core registers none of them. Goes when: the core does)*).
+producer metrics only, none of Java's network and app-info metrics: not the connection,
+authentication, request and I/O metrics Java's `Selector` adds to `producer-metrics`
+(`connection-count`, `request-total`, ...), not the per-node `producer-node-metrics` group and not
+the `app-info` group *(recorded gap; Python's binding returns the same set. Why: the core registers
+none of them. Goes when: the core does)*).
 `BeginTransaction` is not on this list: it waits while the core drains
 the queued sends, so it is a `Task` on `IAsyncProducer` (§4 **Producer transactions**).
 Everything else is async. Java's three KIP-714 members, `clientInstanceId(Duration)`,

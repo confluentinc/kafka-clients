@@ -464,9 +464,11 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// empty snapshot.
     /// </summary>
     /// <remarks>
-    /// The snapshot holds the producer's own metrics. Java's network-client metrics are not in it: there are no
-    /// connection, request, I/O or authentication metrics, no per-node metrics and no <c>app-info</c>, so a
-    /// dashboard or alert built on those Java names finds nothing.
+    /// The snapshot holds the producer's own metrics. It lacks Java's network and app-info metrics, which the native
+    /// core does not register yet: the connection, authentication, request and I/O metrics Java's <c>Selector</c>
+    /// adds to <c>producer-metrics</c> (<c>connection-count</c>, <c>request-total</c>, ...), the per-node
+    /// <c>producer-node-metrics</c> group, and the <c>app-info</c> group (<c>version</c>, <c>commit-id</c>,
+    /// <c>start-time-ms</c>), so a dashboard or alert built on those Java names finds nothing.
     /// </remarks>
     /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
     /// <exception cref="IllegalStateException">The producer is closed.</exception>
