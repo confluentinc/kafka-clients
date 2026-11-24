@@ -473,11 +473,17 @@ awaits it (decision 9).
    its owned `kafka_Iterator_t` (`kafka_common_metrics_MetricsView_iterator_err`) of
    `kafka_Map_Entry_t *`, each with a `MetricName_t *` key and a `KafkaMetric_t *` value owned by
    the iterator until its next `kafka_Iterator_next_err` or its `kafka_Iterator_destroy_err`;
-   the binding destroys the iterator, then the view (`kafka_common_metrics_MetricsView_destroy_err`);
+   while an entry is current the binding keeps its metric through
+   `kafka_common_metrics_MetricsView_get_err(view, key)`, which returns an owned
+   `KafkaMetric_t` independent of the view, and copies the name out of that metric; it then
+   destroys the iterator, then the view (`kafka_common_metrics_MetricsView_destroy_err`);
    `PartitionsFor`'s owned `kafka_List_t` of
    owned `PartitionInfo_t *` (BH:3824-3826, BH:38316-38340), freed with `kafka_List_destroy_err`,
    which frees the owned elements too (BH:40160-40171), copied through the common
    `PartitionInfo` marshal (ledger 79 4d).
+
+A metric a `Metrics()` value keeps (an owned `KafkaMetric_t` in a `SafeKafkaMetricHandle`) is none
+of these: it outlives the call and its client, and is released by the GC (§B2 Category 6, ledger 626).
 
 | Handle | Category | Created by | Freed by |
 |---|---|---|---|
@@ -491,6 +497,7 @@ awaits it (decision 9).
 | `KafkaFuture_t` from a send | 2 | the blocking send's return; the handover `cb` | the binding, at once, unread |
 | an owned `kafka_common_Error_t` | 2 | an `out_err` slot; a `_cb` completion | the error-table read, then `Error_destroy_err` |
 | `kafka_common_metrics_MetricsView_t` and its `kafka_Iterator_t` (metrics), `kafka_List_t` (partitions) | 3 | `Metrics`; `PartitionsFor`'s `_cb` completion | the reader, after copying out, in a `finally` |
+| `kafka_common_metrics_KafkaMetric_t`, one per `Metrics()` value | kept (§B2 Category 6) | `MetricsView_get_err`, per iterator entry | `SafeKafkaMetricHandle.ReleaseHandle` → `KafkaMetric_destroy_err`, when the GC releases its `KafkaMetric`; the metric stays registered |
 
 **Note — classify by the accessor, not the type.** A non-`const` return, an `out_err` slot or a
 `_cb` argument the header calls owned is **owned**: free it once. A `const *` return, an
@@ -546,8 +553,9 @@ one `PartitionsFor` delivers is the reader's). Read the signature, not the prefi
     `_destroy_err` is null-safe.
   - **Owned results** are copied out completely before the root's destroy; nothing borrowed
     from them survives it. Never destroy an element of an owned container on its own (the root's
-    destroy frees it: a double free). Copy-out is the only mode: these are small metadata
-    snapshots (`dotnet/CLAUDE.md` §6.4).
+    destroy frees it: a double free). Copy-out is the mode for these small metadata snapshots;
+    the one value kept past the root is a `Metrics()` value's own `KafkaMetric_t`, taken with the
+    view's `_get` (`dotnet/CLAUDE.md` §6.4, ledger 626).
 
 **Why:** a `SafeHandle` is the robust form of "destroy exactly once", even through exceptions.
 Every operation takes the view, so the view is the handle; the class pointer is needed only by
@@ -583,7 +591,8 @@ released on the drain thread, which could then run the destroy inside `__execute
   - A producer finalized without `Dispose` is leaked with one `Trace.TraceWarning` and no
     destroy.
   - `Metrics` and `PartitionsFor` free their root exactly once, on the throwing path too, and
-    the copied values stay valid after it.
+    the copied values stay valid after it; a kept metric stays readable after its root and its
+    client are gone, and its finalizer frees it once.
 
 ---
 
@@ -1565,10 +1574,13 @@ is the core's, so the binding adds none there.
    copies the registration during the call (BH:29284-29287, BH:33743-33744 at
    `3f8a5bc6`); only the user object (`self_`) lives on, under §B6's rules.
 6. **Caller-owned, independently destroyed, weak to its parent**
-   (`ConsumerHandle_t`) → the binding owns it for a lifetime of its choosing. The
+   (`ConsumerHandle_t`; on every client, a kept `kafka_common_metrics_KafkaMetric_t`)
+   → the binding owns it for a lifetime of its choosing. The
    core's handle holds the consumer weakly: after the consumer's destroy a handle op
    fails with -4, and the handle is still safe to destroy (BH:30638-30641 at
-   `3f8a5bc6`). It does not keep the consumer alive (ledger 34 (i)).
+   `3f8a5bc6`). It does not keep the consumer alive (ledger 34 (i)). A kept metric
+   holds no reference on its client either, and stays readable after the client's
+   destroy (ledger 626).
 
 | Handle | Category | Freed by |
 |---|---|---|
@@ -1581,6 +1593,7 @@ is the core's, so the binding adds none there.
 | `ConsumerRebalanceListener_t` | 5 — registration copied by the callee | the **binding**, right after the `subscribe_*` call returns (success or error), or when no call was made (`ConsumerRebalanceListener_destroy_err`); `self_` follows §B6 (decision 23) |
 | `OffsetCommitCallback_t` (including the no-op one a `ConsumerHandle` commit passes, ledger 104) | 5 — registration copied by the callee | the **binding**, right after the `commit_async*` call that took it returns, or when no call was made (`OffsetCommitCallback_destroy_err`); `self_` follows §B6 |
 | `ConsumerHandle_t` | 6 — caller-owned, weak to its parent | the **binding**, whenever it chooses: `ReleaseHandle` → `ConsumerHandle_destroy_err`, never during one of its own ops (BH:31940-31945 at `3f8a5bc6`). No reference on the consumer (ledger 34 (i)) |
+| `kafka_common_metrics_KafkaMetric_t`, one per `Metrics()` value (`MetricsView_get_err`) | 6 — caller-owned, independent of the view and the client | the **GC**: `SafeKafkaMetricHandle.ReleaseHandle` → `KafkaMetric_destroy_err` when its `KafkaMetric` is collected; the metric stays registered. No reference on the client (ledger 626) |
 
 ⚠ **What a listener or `onComplete` receives is borrowed for the call** (M19/P1).
 The partitions handed to a listener method (BH:3668-3678 at `3f8a5bc6`) and the
@@ -1756,6 +1769,21 @@ const-ness and its header text decide, not the type name:
     destroy (BH:30638-30641, BH:30974-30975 at `3f8a5bc6`). This replaces M9/P8's
     P8-D1 reference and the deferred destroy it caused: a live handle no longer
     defers the consumer's destroy.
+  - **Category 6 — a kept metric** (`kafka_common_metrics_KafkaMetric_t`, on every
+    client, ledger 626). Each `Metrics()` value is a `KafkaMetric` over an owned metric
+    that `kafka_common_metrics_MetricsView_get_err` returns, taken while the view's
+    iterator entry is current (the iterator owns the entry's own `KafkaMetric_t` only
+    until its next step). The metric is independent of the view and the client, so its
+    `SafeKafkaMetricHandle` takes **no** reference on the client's handle, the client's
+    teardown frees none, and a read after the client's destroy measures it. The public
+    class is not `IDisposable`: the GC releases the handle, whose `ReleaseHandle` calls
+    `KafkaMetric_destroy_err` once ("the metric stays registered"). A read takes a
+    call-scoped reference on the metric's handle (CKRDA0006) around the borrowed
+    `kafka_common_metrics_KafkaMetric__as_Metric_err` view, valid only as long as the
+    handle, and the value or name it reads through it (`kafka_common_Metric_metric_value_err`
+    returns an owned value, freed at once; `kafka_common_Metric_metric_name_err` a borrowed
+    name, copied out). A `kafka_common_metrics_MetricsView_t` may be kept under the same
+    rule: it reads the registry at each call and stays valid after its client's destroy.
 
 **Why:** `SafeHandle` is the robust form of "call `_destroy` exactly once," even
 through exceptions; `IsInvalid == zero` matches our null-safe destroy (this is
@@ -1819,7 +1847,10 @@ in flight, one of which may be waiting on that very callback.
     call that ran, the callback still fires with its `self_` alive.
   - **Category 6:** a handle op after the consumer's destroy throws
     `IllegalStateException` (-4); destroying the handle after the consumer is
-    safe; the consumer's `Dispose` destroys at once with a handle outstanding.
+    safe; the consumer's `Dispose` destroys at once with a handle outstanding. A
+    kept metric is measured again on each read, stays readable after its client is
+    disposed, and is freed once, by its finalizer, after it is dropped; the client's
+    `Dispose` frees no kept metric.
   - **The path list:** a `Dispose` from another thread during a blocking `Poll`, and
     during an async `Poll`, returns and does not throw; an explicit cross-thread
     `Close` throws `ConcurrentModificationException` and leaves the consumer usable; a

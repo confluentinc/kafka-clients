@@ -492,7 +492,8 @@ internal static class Translate
             proto.Tags.Add(tag.Key, tag.Value);
         }
 
-        switch (metric.MetricValue())
+        object value = metric.MetricValue();
+        switch (value)
         {
             case double doubleValue:
                 proto.DoubleValue = doubleValue;
@@ -508,7 +509,7 @@ internal static class Translate
                 break;
             default:
                 throw new InvalidOperationException(
-                    $"unexpected metric value type '{metric.MetricValue()?.GetType().FullName ?? "null"}' for metric '{name.Name()}'");
+                    $"unexpected metric value type '{value?.GetType().FullName ?? "null"}' for metric '{name.Name()}'");
         }
 
         return proto;

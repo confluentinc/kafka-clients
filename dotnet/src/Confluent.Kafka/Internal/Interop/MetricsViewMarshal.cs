@@ -15,16 +15,20 @@
 using System;
 using System.Collections.Generic;
 using Confluent.Kafka.Common;
+using Confluent.Kafka.Common.Metrics;
 
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies an owned <c>kafka_common_metrics_MetricsView_t</c> of <c>kafka_common_MetricName_t</c> keys and
-/// <c>kafka_common_metrics_KafkaMetric_t</c> values into managed metrics, through an iterator over it, then frees the
-/// iterator, which frees its entries, and the view.
+/// Reads an owned <c>kafka_common_metrics_MetricsView_t</c> of <c>kafka_common_MetricName_t</c> keys and
+/// <c>kafka_common_metrics_KafkaMetric_t</c> values, through an iterator over it, into a dictionary of
+/// <see cref="KafkaMetric"/>s, each over its own owned metric handle, then frees the iterator and the view; and reads the
+/// name, the value and the text of such a handle.
 /// </summary>
 internal static class MetricsViewMarshal
 {
+    // The iterator owns each entry's value until its next step, so each metric is kept through the view's own get, taken
+    // while the entry is current. A metric removed since the iterator was taken is left out.
     internal static IReadOnlyDictionary<MetricName, IMetric> CopyOutAndDestroy(IntPtr view)
     {
         IntPtr iterator = IntPtr.Zero;
@@ -47,10 +51,13 @@ internal static class MetricsViewMarshal
                 KafkaException.ThrowIfFfiFailed(ref outErr);
                 IntPtr key = NativeMethods.MapEntryKey(entry, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
-                IntPtr value = NativeMethods.MapEntryValue(entry, ref outErr);
+                IntPtr metric = NativeMethods.MetricsViewGet(view, key, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
-                MetricName name = CopyOutName(key);
-                result[name] = new Metric(name, CopyOutValue(value));
+                if (metric != IntPtr.Zero)
+                {
+                    KafkaMetric kept = Keep(metric);
+                    result[kept.MetricName()] = kept;
+                }
             }
         }
         finally
@@ -67,6 +74,59 @@ internal static class MetricsViewMarshal
                 NativeMethods.MetricsViewDestroy(view, ref viewErr);
                 KafkaException.ThrowIfFfiFailed(ref viewErr);
             }
+        }
+    }
+
+    internal static KafkaMetric Keep(IntPtr metric)
+    {
+        SafeKafkaMetricHandle handle = new SafeKafkaMetricHandle(metric);
+        try
+        {
+            return new KafkaMetric(ReadName(handle), handle);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    internal static object Measure(SafeKafkaMetricHandle metric)
+    {
+        bool added = false;
+        try
+        {
+            metric.DangerousAddRef(ref added);
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr view = NativeMethods.KafkaMetricAsMetric(metric, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr value = NativeMethods.MetricMetricValue(view, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return CopyOutValueAndDestroy(value);
+        }
+        finally
+        {
+            if (added)
+            {
+                metric.DangerousRelease();
+            }
+        }
+    }
+
+    internal static string ToText(SafeKafkaMetricHandle metric)
+    {
+        IntPtr outErr = IntPtr.Zero;
+        IntPtr text = NativeMethods.KafkaMetricToString(metric, ref outErr);
+        KafkaException.ThrowIfFfiFailed(ref outErr);
+        try
+        {
+            return Utf8Marshal.PtrToString(text) ?? string.Empty;
+        }
+        finally
+        {
+            IntPtr destroyErr = IntPtr.Zero;
+            NativeMethods.StringDestroy(text, ref destroyErr);
+            KafkaException.ThrowIfFfiFailed(ref destroyErr);
         }
     }
 
@@ -105,15 +165,33 @@ internal static class MetricsViewMarshal
         }
     }
 
-    private static object CopyOutValue(IntPtr kafkaMetric)
+    private static MetricName ReadName(SafeKafkaMetricHandle metric)
     {
-        IntPtr outErr = IntPtr.Zero;
-        IntPtr metric = NativeMethods.KafkaMetricAsMetric(kafkaMetric, ref outErr);
-        KafkaException.ThrowIfFfiFailed(ref outErr);
-        IntPtr value = NativeMethods.MetricMetricValue(metric, ref outErr);
-        KafkaException.ThrowIfFfiFailed(ref outErr);
+        bool added = false;
         try
         {
+            metric.DangerousAddRef(ref added);
+            IntPtr outErr = IntPtr.Zero;
+            IntPtr view = NativeMethods.KafkaMetricAsMetric(metric, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr name = NativeMethods.MetricMetricName(view, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            return CopyOutName(name);
+        }
+        finally
+        {
+            if (added)
+            {
+                metric.DangerousRelease();
+            }
+        }
+    }
+
+    private static object CopyOutValueAndDestroy(IntPtr value)
+    {
+        try
+        {
+            IntPtr outErr = IntPtr.Zero;
             int kind = NativeMethods.MetricValueEnum(value, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
             object read;
