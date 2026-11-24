@@ -283,7 +283,7 @@ internal static unsafe class ProducerSendMarshal
 
     // Headers_add_with_key_value copies the key and the value, so both are pinned for the call only. An empty value
     // crosses as a non-null pointer: fixed over an empty array yields NULL, which the ABI reads as a null value.
-    private static void AddHeader(IntPtr view, IHeader header, ref IntPtr outErr)
+    internal static void AddHeader(IntPtr view, IHeader header, ref IntPtr outErr)
     {
         string key = HeaderKey(header);
         byte[]? value = header.Value();
