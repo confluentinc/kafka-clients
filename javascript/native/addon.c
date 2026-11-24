@@ -143,6 +143,45 @@ static napi_value js_preview_notice_due(napi_env env, napi_callback_info info) {
     return result;
 }
 
+atomic_int fault_armed = FAULT_NONE;
+
+// The names faultNext() takes, by FaultStep.
+static const char* const FAULT_NAMES[] = {NULL, "notify", "metadata", "error", "slot", "partitions", "close"};
+
+int fault_take(FaultStep step) {
+    int armed = (int)step;
+    return atomic_compare_exchange_strong(&fault_armed, &armed, FAULT_NONE) ? 1 : 0;
+}
+
+// faultNext(step): arms `step` (notify, metadata, error, slot, partitions or
+// close) to fail once, the next time its site runs; null disarms. Returns the
+// step armed before, or null, so a test sees that an armed step ran. A
+// process-wide switch. Test-only.
+static napi_value js_fault_next(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    napi_valuetype type = napi_undefined;
+    if (argc == 1) NAPI_CHECK(env, napi_typeof(env, argv[0], &type), NULL);
+    int step = type == napi_null ? FAULT_NONE : -1;
+    if (type == napi_string) {
+        char name[16];
+        size_t len = 0;
+        NAPI_CHECK(env, napi_get_value_string_utf8(env, argv[0], name, sizeof(name), &len), NULL);
+        for (int i = 1; i < (int)(sizeof(FAULT_NAMES) / sizeof(FAULT_NAMES[0])); i++)
+            if (strcmp(name, FAULT_NAMES[i]) == 0) step = i;
+    }
+    if (argc != 1 || step < 0) {
+        napi_throw_type_error(env, NULL, "faultNext(step): null, or notify, metadata, error, slot, partitions or close");
+        return NULL;
+    }
+    int before = atomic_exchange(&fault_armed, step);
+    napi_value result;
+    if (before == FAULT_NONE) NAPI_CHECK(env, napi_get_null(env, &result), NULL);
+    else NAPI_CHECK(env, napi_create_string_utf8(env, FAULT_NAMES[before], NAPI_AUTO_LENGTH, &result), NULL);
+    return result;
+}
+
 // Keeps the addon loaded until the process ends. Node unloads (dlclose) an
 // addon once the last environment that loaded it ends, a worker that loaded it
 // first included; the core's process-wide state (its runtime, its threads) and
@@ -174,6 +213,7 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"setFactories", NULL, js_set_factories, NULL, NULL, NULL, napi_default, NULL},
         {"errorStats", NULL, js_error_stats, NULL, NULL, NULL, napi_default, NULL},
         {"previewNoticeDue", NULL, js_preview_notice_due, NULL, NULL, NULL, napi_default, NULL},
+        {"faultNext", NULL, js_fault_next, NULL, NULL, NULL, napi_default, NULL},
         // producer.c
         {"producerCreate", NULL, js_producer_create, NULL, NULL, NULL, napi_default, NULL},
         {"producerSend", NULL, js_producer_send, NULL, NULL, NULL, napi_default, NULL},

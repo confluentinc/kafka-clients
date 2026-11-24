@@ -85,6 +85,22 @@ void error_warn(napi_env env, int js, kafka_common_Error_t* e) {
     if (kept != NULL) napi_throw(env, kept);
 }
 
+napi_value js_take_failure(napi_env env, const char* what) {
+    bool pending = false;
+    napi_value failure = NULL;
+    if (napi_is_exception_pending(env, &pending) != napi_ok) return NULL;
+    if (pending) {
+        if (napi_get_and_clear_last_exception(env, &failure) != napi_ok) return NULL;
+        napi_valuetype type = napi_undefined;
+        if (napi_typeof(env, failure, &type) != napi_ok || type != napi_null) return failure;
+    }
+    js_throw_last_napi_error(env, what);
+    if (napi_is_exception_pending(env, &pending) != napi_ok || !pending
+        || napi_get_and_clear_last_exception(env, &failure) != napi_ok)
+        return NULL;
+    return failure;
+}
+
 static int set_named(napi_env env, napi_value obj, const char* name, napi_value value) {
     return napi_set_named_property(env, obj, name, value) == napi_ok ? 0 : -1;
 }
@@ -494,7 +510,8 @@ napi_value error_to_js(napi_env env, const kafka_common_Error_t* e) {
         NAPI_CHECK(env, napi_get_null(env, &result), NULL);
         return result;
     }
-    napi_value obj = error_object(env, e, 0);
+    // faultNext('error'): the conversion fails.
+    napi_value obj = fault_due(FAULT_ERROR) ? NULL : error_object(env, e, 0);
     if (obj == NULL) {
         js_throw_last_napi_error(env, "converting a kafka_common_Error_t");
         return NULL;

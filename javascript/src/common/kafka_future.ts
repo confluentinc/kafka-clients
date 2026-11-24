@@ -935,9 +935,11 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
     return new Promise<T>((resolve, reject) => {
       if (this.#waiters === null) this.#waiters = [];
       this.#waiters.push(resolve, reject);
-      native.recordFutureGet(handle, slot, millis, (metadata, error, timedOut) => {
+      native.recordFutureGet(handle, slot, millis, (metadata, error, timedOut, failed) => {
         if (!timedOut) {
-          this.#completeNative(metadata, error);
+          // An answer the addon could not build completes nothing: the
+          // delivery completes the future.
+          if (!failed) this.#completeNative(metadata, error);
           return;
         }
         const waiters = this.#waiters;
@@ -945,7 +947,7 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
         const i = waiters.indexOf(resolve);
         if (i < 0) return;
         waiters.splice(i, 2);
-        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the core's TimeoutError, as Java's get(timeout) throws it
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the core's TimeoutError, as Java's get(timeout) throws it, or with the failure to build it
         reject(error);
       });
     });
@@ -957,9 +959,11 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
     const handle = this.#native;
     if (handle === null || this.#nativeWaiting) return;
     this.#nativeWaiting = true;
-    native.recordFutureGet(handle, this.#slot, null, (metadata, error) => {
+    native.recordFutureGet(handle, this.#slot, null, (metadata, error, timedOut, failed) => {
       this.#nativeWaiting = false;
-      this.#completeNative(metadata, error);
+      // An answer the addon could not build completes nothing: the delivery
+      // completes the future, and a later wait may read it again.
+      if (!failed) this.#completeNative(metadata, error);
     });
   }
 

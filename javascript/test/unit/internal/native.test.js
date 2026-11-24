@@ -45,3 +45,15 @@ test('producerCreate takes the configuration as bytes, and refuses a string', ()
     message: 'config keys must be strings',
   });
 });
+
+test('faultNext arms one step of the addon, answers the step armed before, and refuses an unknown one', () => {
+  // Test-only: each step, armed, fails once the next time it runs (native/addon.c).
+  assert.equal(native.faultNext('slot'), null);
+  assert.equal(native.faultNext('close'), 'slot');
+  assert.equal(native.faultNext(null), 'close');
+  assert.equal(native.faultNext(null), null);
+  assert.throws(() => native.faultNext('nothing'), {
+    name: 'TypeError',
+    message: 'faultNext(step): null, or notify, metadata, error, slot, partitions or close',
+  });
+});

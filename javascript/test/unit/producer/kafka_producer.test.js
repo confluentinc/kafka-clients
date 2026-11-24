@@ -3344,3 +3344,157 @@ test("librdkafka and 1.x keys are inert: listed as unused, and linger.ms keeps J
     assert.ok(!output.includes(String(NUMBER_PASSWORD)), 'the store password reached the output');
   });
 }
+
+// A call whose answer the addon can't build still settles (native/producer.c,
+// js_take_failure in native/error.c): flush(), partitionsFor() and close()
+// reject with the failure, and send() rejects for a refused record and
+// resolves for an accepted one. The test-only faultNext() (native/addon.c)
+// makes one step of the addon fail once, as its Node-API call failing would.
+const native = require('../../../dist/internal/native');
+// What a failed conversion of a core error throws (native/error.c,
+// error_to_js), and what js_take_failure makes, naming the step, when no
+// exception is pending.
+const ERROR_FAILED = /^Node-API call failed: converting a kafka_common_Error_t \(/;
+const CLOSE_FAILED = /^Node-API call failed: converting a close's answer \(/;
+
+/**
+ * The producer's record-future slots and waits still held (native/producer.c, producerStats()).
+ *
+ * @returns {{ slots: number, waits: number }} the slots taken and not given back, and the waits not completed
+ */
+function nativeHeld() {
+  const s = native.producerStats();
+  return { slots: s.slotsTaken - s.slotsReturned, waits: s.waitsStarted - s.waitsCompleted };
+}
+
+describe("a call whose answer the addon can't build", () => {
+  // A step left armed by a test that failed before it ran would fail the next test's.
+  afterEach(() => {
+    native.faultNext(null);
+  }, 10000);
+
+  test("a construction whose notify registration fails throws the FFI's error", () => {
+    native.faultNext('notify');
+    assert.throws(() => new KafkaProducer({ configs: UNREACHABLE }), { name: 'TypeError', message: 'self_ must not be null' });
+    assert.equal(native.faultNext(null), null);
+  }, 10000);
+
+  test("flush() rejects with the failure when its error can't be built", async () => {
+    const p = new KafkaProducer({ configs: UNREACHABLE });
+    // A flush made from a send callback is refused by the core with an error.
+    /** @type {(value: { flush: Promise<void> }) => void} */
+    let started = () => {};
+    /** @type {Promise<{ flush: Promise<void> }>} */
+    const flushed = new Promise((resolve) => {
+      started = resolve;
+    });
+    const future = await p.send({
+      record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
+      callback: () => {
+        native.faultNext('error');
+        started({ flush: p.flush() });
+      },
+    });
+    await assert.rejects((await flushed).flush, { name: 'Error', message: ERROR_FAILED });
+    assert.equal(native.faultNext(null), null);
+    await assert.rejects(future.get(), ExecutionError);
+    await p.close();
+  }, 10000);
+
+  test("partitionsFor() and send() reject with the failure when their error can't be built", async () => {
+    const p = new KafkaProducer({ configs: UNREACHABLE });
+    await p.close();
+    native.faultNext('error');
+    await assert.rejects(p.partitionsFor('t'), { name: 'Error', message: ERROR_FAILED });
+    native.faultNext('error');
+    await assert.rejects(p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })), {
+      name: 'Error',
+      message: ERROR_FAILED,
+    });
+    assert.equal(native.faultNext(null), null);
+    // The next calls have the core's answers.
+    await assert.rejects(p.partitionsFor('t'), { name: 'KafkaError', message: 'Requested metadata update after close' });
+    await assert.rejects(p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })), {
+      name: 'IllegalStateError',
+      message: CLOSED_MESSAGE,
+    });
+  }, 10000);
+
+  test('close() rejects with the failure, closing the producer and its serializers', async () => {
+    /** @type {string[]} */
+    const closed = [];
+    const p = new KafkaProducer({
+      configs: UNREACHABLE,
+      keySerializer: { serialize: () => null, close: () => void closed.push('key') },
+      valueSerializer: { serialize: () => null, close: () => void closed.push('value') },
+    });
+    native.faultNext('close');
+    await assert.rejects(p.close(), { name: 'Error', message: CLOSE_FAILED });
+    assert.equal(native.faultNext(null), null);
+    assert.deepEqual(closed, ['key', 'value']);
+    await p.close();
+    assert.deepEqual(closed, ['key', 'value']);
+    await assert.rejects(p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })), {
+      name: 'IllegalStateError',
+      message: CLOSED_MESSAGE,
+    });
+  }, 10000);
+
+  test("send() resolves for an accepted record whose slot can't be made, its callback run once", async () => {
+    const p = new KafkaProducer({ configs: UNREACHABLE });
+    const base = nativeHeld();
+    /** @type {string[]} */
+    const calls = [];
+    native.faultNext('slot');
+    const future = await p.send({
+      record: new ProducerRecord({ topic: 't', value: Buffer.from('v') }),
+      callback: ({ exception }) => {
+        calls.push(String(exception?.name));
+      },
+    });
+    assert.equal(native.faultNext(null), null);
+    await assert.rejects(future.get(), (/** @type {unknown} */ e) => {
+      assert.ok(e instanceof ExecutionError);
+      assert.ok(e.cause instanceof Error);
+      assert.equal(e.cause.name, 'TimeoutError');
+      assert.equal(e.cause.message, TIMEOUT_MESSAGE('t'));
+      return true;
+    });
+    assert.deepEqual(calls, ['TimeoutError']);
+    // The slot taken for the record went back once its future was destroyed.
+    assert.deepEqual(nativeHeld(), base);
+    await p.close();
+  }, 10000);
+});
+
+// A call made on a closed producer holds Node until it settles, and so does
+// the close that closes it, when its answer can't be built too: each child
+// has nothing else holding Node and prints a line once the call settled.
+// Without the settle it would exit with 0 in the middle of the await.
+const FAULT_AFTER_CLOSE = [
+  { closed: true, step: 'error', call: "p.partitionsFor('t')" },
+  { closed: true, step: 'error', call: "p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') }))" },
+  { closed: true, step: 'close', call: 'p.close()' },
+  { closed: false, step: 'close', call: 'p.close()' },
+];
+
+for (const { closed, step, call } of FAULT_AFTER_CLOSE) {
+  test(`${call} ${closed ? 'after close()' : 'closing the producer'} settles while nothing else holds Node when its answer can't be built`, () => {
+    const r = runNode(`
+      const native = require('./dist/internal/native');
+      const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
+      const p = new KafkaProducer({ configs: { 'bootstrap.servers': '127.0.0.1:1' } });
+      (async () => {
+        if (${String(closed)}) await p.close();
+        native.faultNext('${step}');
+        const outcome = await ${call}.then(
+          () => 'resolved',
+          (e) => e.constructor.name + ': ' + e.message,
+        );
+        console.log('after the call: ' + outcome);
+      })();
+    `);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^after the call: Error: Node-API call failed: converting (a kafka_common_Error_t|a close's answer) \(/);
+  }, 40000);
+}
