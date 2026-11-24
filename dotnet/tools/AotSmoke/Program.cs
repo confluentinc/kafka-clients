@@ -46,8 +46,6 @@ internal static class Program
 
     private static readonly IAsyncSerializer<string> s_asyncSerializer = new AsyncStringSerializer();
 
-    private static readonly IAsyncDeserializer<string> s_asyncDeserializer = new AsyncStringDeserializer();
-
     private static int s_failures;
 
     private static async Task<int> Main()

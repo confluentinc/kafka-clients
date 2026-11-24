@@ -39,7 +39,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> dispose each one that is <see cref="IDisposable"/> once, key then
 /// value, after the destroy and on the thread that destroyed, or, while a <c>Poll</c> is still deserializing, by that
 /// <c>Poll</c> after it ends, and when the core fails to build the consumer with Java's wrapped error; a close that is
-/// refused disposes nothing, and the mocks never dispose them. Translates Python's deserializer-close tests of
+/// refused disposes nothing. The mock consumers hold no deserializer. Translates Python's deserializer-close tests of
 /// <c>test_kafka_consumer.py</c>.
 /// </summary>
 public sealed class PublicDeserializerDisposalTests

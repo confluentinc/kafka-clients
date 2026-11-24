@@ -35,8 +35,9 @@ namespace Confluent.Kafka.UnitTests;
 /// producer refuses a serializer with a public headers form of <c>Serialize</c> without
 /// <see cref="IAsyncSerializerWithHeaders{T}"/>, and a consumer a deserializer with a public headers form of
 /// <c>Deserialize</c> without <see cref="IAsyncDeserializerWithHeaders{T}"/>, which they would never call. The
-/// asynchronous consumers and producers
-/// make the check when they are built: the real ones dispose their serdes, the mocks do not.
+/// asynchronous real consumer and producer and the asynchronous mock producer
+/// make the check when they are built: the real ones dispose their serdes, the mock producer does not; the mock
+/// consumer takes no deserializer.
 /// </summary>
 public sealed class AsyncSerdeGuardTests
 {

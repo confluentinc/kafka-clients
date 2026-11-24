@@ -46,7 +46,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     internal const string ConstructionFailedMessage = "Failed to construct kafka consumer";
 
-    // The strategy the mock consumers' two-argument constructors pass.
+    // The strategy CreateMock uses when none is given: the tests' consumers over the C mock.
     internal const string DefaultOffsetResetStrategy = "latest";
 
     private const int LocalConcurrentModification = -2;
