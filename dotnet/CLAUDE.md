@@ -292,10 +292,10 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable { 
     // producer interfaces, no shared base). Fires on the producer's completion thread, before the record's future completes (§4);
     // AsyncKafkaProducer runs it for a serializer's ApiException: inside Send, on the caller's thread, or, behind an
     // awaited serializer, on the thread that ended the serialization (§3).
-    ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, ICallback callback,
+    ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, ICallback? callback,
         CancellationToken cancellationToken = default);
     // Java has no async callback; Python's async producer takes an `async def` one (M19/P1).
-    ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, IAsyncCallback callback,
+    ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<TKey, TValue> record, IAsyncCallback? callback,
         CancellationToken cancellationToken = default);
     Task Flush(CancellationToken cancellationToken = default);
     Task Close(CancellationToken cancellationToken = default);
@@ -318,7 +318,7 @@ public readonly struct AsyncKafkaFuture<T> {   // Java java.util.concurrent.Futu
 // The sync `IProducer<TKey,TValue>` (sync mirror) is **shipped** (M11/P4), generic-only (M11/P5):
 // KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>) returns once the record is registered (the blocking `send_with_callback`; it blocks only while
 // the core waits for metadata or for buffer.memory, ≤ max.block.ms); future.Get() = Java send(record).get() (M11/P4.2);
-// KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>, ICallback) — Java's second send
+// KafkaFuture<RecordMetadata> Send(ProducerRecord<TKey,TValue>, ICallback?) — Java's second send
 // signature, the callback fired on the producer's completion thread (`confluent-kafka-producer-completion`) before Get() returns
 // (KafkaProducer: inside Send, on the caller's thread, for a serializer's ApiException, §3); void Flush() /
 // Close(); void Close(TimeSpan) (M19/P1); IReadOnlyList<PartitionInfo> PartitionsFor(string);
@@ -1441,12 +1441,6 @@ decision 10). The parts, each decided against the Java source:
   (the core logs it and leaves the record's outcome unchanged) and written once to
   `System.Diagnostics.Trace` (decision 20). It never faults the record's future or another
   record.
-- **Null callback rejected** (`ArgumentNullException`) although Java accepts
-  `send(record, null)` (`KafkaProducer.java:1058` guards `if (callback != null)`).
-  Exactly the `CommitAsync(callback)` sub-divergence above, and here it points only
-  one way: the plain `Send(record)` overload already spells "no callback", so — unlike
-  `commitAsync(Map, null)` — there is no second parameter that would make a
-  null-accepting form non-redundant.
 
 **The async form (M19/P1, ledger 47).** `IAsyncProducer` also takes `IAsyncCallback`,
 whose `OnCompletion` returns `Task`, as Python's async producer accepts an `async def`
