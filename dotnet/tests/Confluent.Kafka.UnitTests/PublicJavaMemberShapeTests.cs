@@ -195,6 +195,8 @@ public class PublicJavaMemberShapeTests
         "Confluent.Kafka.Common.Config.SslClientAuthMethods.VALUES",
         "Confluent.Kafka.Common.Errors.CoordinatorNotAvailableException.INSTANCE",
         "Confluent.Kafka.Common.Errors.DisconnectException.INSTANCE",
+        "Confluent.Kafka.Common.Metrics.MetricConfig.DEFAULT_NUM_SAMPLES",
+        "Confluent.Kafka.Common.Metrics.RecordingLevelMethods.MAX_RECORDING_LEVEL_KEY",
         "Confluent.Kafka.Common.Quota.ClientQuotaEntity.CLIENT_ID",
         "Confluent.Kafka.Common.Quota.ClientQuotaEntity.IP",
         "Confluent.Kafka.Common.Quota.ClientQuotaEntity.USER",

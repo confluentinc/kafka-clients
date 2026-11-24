@@ -79,6 +79,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     private readonly HandleUses _uses = new HandleUses();
     private readonly FutureFailure.PendingCallbacks _failureCallbacks = new FutureFailure.PendingCallbacks();
     private readonly SerdeDisposal? _serdes;
+    private SafeMetricsViewHandle? _metricsView;
     private Task _serializersDisposed = Task.CompletedTask;
     private int _closed;
 
@@ -471,25 +472,9 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
         }
     }
 
-    internal IReadOnlyDictionary<MetricName, IMetric> Metrics()
-    {
-        IntPtr outErr = IntPtr.Zero;
-        IntPtr view;
-        EnterUse();
-        try
-        {
-            view = NativeMethods.ProducerMetrics(_handle, ref outErr);
-        }
-        finally
-        {
-            ExitUse();
-        }
-
-        KafkaException.ThrowIfFfiFailed(ref outErr);
-        return view == IntPtr.Zero
-            ? new Dictionary<MetricName, IMetric>()
-            : MetricsViewMarshal.CopyOutAndDestroy(view);
-    }
+    // The view taken at construction outlives the producer, so Metrics() answers after close, as Java's live view does,
+    // on the mock too, as Java's MockProducer.metrics() makes no closed check.
+    internal IReadOnlyDictionary<MetricName, IMetric> Metrics() => new MetricsMap(_metricsView!);
 
     internal bool MockCompleteNext() =>
         CallMock((IntPtr mock, ref IntPtr outErr) => NativeMethods.MockProducerCompleteNext(mock, ref outErr)) != 0;
@@ -681,6 +666,9 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
             NativeMethods.ProducerSetCallbacksNotify(
                 handle, CompletionThread.NotifyHook, producer._completion.NotifyOpaque, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr metricsView = NativeMethods.ProducerMetrics(handle, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            producer._metricsView = new SafeMetricsViewHandle(metricsView);
         }
         catch
         {

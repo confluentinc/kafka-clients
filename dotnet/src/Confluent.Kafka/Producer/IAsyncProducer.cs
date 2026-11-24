@@ -459,18 +459,20 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Returns a snapshot of the producer's metrics (Java <c>metrics()</c>). It does not block, so it is
-    /// synchronous on both producer interfaces. An <see cref="AsyncMockProducer{TKey, TValue}"/> returns an
-    /// empty snapshot.
+    /// Get the full set of internal metrics maintained by the producer (Java <c>metrics()</c>). It does not block, so
+    /// it is synchronous on both producer interfaces.
     /// </summary>
     /// <remarks>
-    /// The snapshot holds the producer's own metrics. It lacks Java's network and app-info metrics, which the native
+    /// The returned map is an unmodifiable live view of the metrics. Changes to the underlying metrics will be
+    /// reflected in the returned map. Each value is a <see cref="Common.Metrics.KafkaMetric"/>, which measures the
+    /// metric again on each <see cref="IMetric.MetricValue()"/>, and a lookup returns a new one each time. The map
+    /// answers after the producer is closed, as Java's does. An <see cref="AsyncMockProducer{TKey, TValue}"/>'s map holds no metric.
+    /// The map holds the producer's own metrics. It lacks Java's network and app-info metrics, which the native
     /// core does not register yet: the connection, authentication, request and I/O metrics Java's <c>Selector</c>
     /// adds to <c>producer-metrics</c> (<c>connection-count</c>, <c>request-total</c>, ...), the per-node
     /// <c>producer-node-metrics</c> group, and the <c>app-info</c> group (<c>version</c>, <c>commit-id</c>,
     /// <c>start-time-ms</c>), so a dashboard or alert built on those Java names finds nothing.
     /// </remarks>
-    /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
-    /// <exception cref="IllegalStateException">The producer is closed.</exception>
+    /// <returns>An unmodifiable live view of the map of metrics currently maintained by the producer.</returns>
     IReadOnlyDictionary<MetricName, IMetric> Metrics();
 }
