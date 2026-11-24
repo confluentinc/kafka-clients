@@ -2211,3 +2211,182 @@ test('mock_unregister_controller_with_raft_controller_succeeds', async () => {
   assert.equal(result.all().isDone(), true);
   await mock.close();
 });
+
+// ---- an answer the addon can't build ----------------------------------------
+//
+// The test-only fault switch (native/addon.c, faultNext) fails a step of the
+// addon as its Node-API call failing would: each call still settles, with
+// the failure (native/admin.c). An admin future has no delivery, so its
+// untimed wait is what fails it.
+
+const native = require('../../../dist/internal/native');
+
+// What a failed conversion of a core error throws (native/error.c,
+// error_to_js), and what js_take_failure makes, naming the step, when no
+// exception is pending.
+const ERROR_FAILED = /^Node-API call failed: converting a kafka_common_Error_t \(/;
+const VALUE_FAILED = /^Node-API call failed: converting an admin future's answer \(/;
+const CLOSE_FAILED = /^Node-API call failed: converting a close's answer \(/;
+
+/**
+ * Turns the event loop until the future is done.
+ *
+ * @param {KafkaFuture<unknown>} future
+ */
+async function untilDone(future) {
+  for (let i = 0; i < 1000 && !future.isDone(); i++) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(future.isDone(), 'the future never completed');
+}
+
+/**
+ * Turns the event loop until the addon took every failure armed for `step`:
+ * each check disarms them and arms those left again, on the JS thread, where
+ * the addon takes them.
+ *
+ * @param {'error'} step
+ */
+async function untilTaken(step) {
+  for (let i = 0; i < 1000; i++) {
+    const left = native.faultNext(null).length;
+    if (left === 0) return;
+    native.faultNext(step, left);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`the ${step} failures armed were never taken`);
+}
+
+/**
+ * The warnings process.emitWarning hands out while `body` runs.
+ *
+ * @param {() => Promise<void>} body
+ * @returns {Promise<Error[]>}
+ */
+async function warnedDuring(body) {
+  /** @type {Error[]} */
+  const warned = [];
+  /** @type {(warning: Error) => void} */
+  const listener = (warning) => void warned.push(warning);
+  process.on('warning', listener);
+  try {
+    await body();
+    // process.emitWarning emits on the next tick.
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    process.off('warning', listener);
+  }
+  return warned.filter((w) => w.name !== 'ExperimentalWarning');
+}
+
+/**
+ * How `promise` settled, or that it did not within `ms`.
+ *
+ * @param {Promise<unknown>} promise
+ * @param {number} ms
+ * @returns {Promise<string>}
+ */
+async function settledWithin(promise, ms) {
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = setTimeout(() => resolve('not settled'), ms);
+  });
+  try {
+    return String(
+      await Promise.race([
+        promise.then(
+          () => 'resolved',
+          (/** @type {unknown} */ e) => `rejected ${e instanceof Error ? e.message : String(e)}`,
+        ),
+        late,
+      ]),
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+describe("an admin call whose answer the addon can't build", () => {
+  // A step left armed by a test that failed before it ran would fail the next test's.
+  afterEach(() => {
+    native.faultNext(null);
+  }, 10000);
+
+  test("a future whose value can't be built fails with the failure; the next call's has its value", async () => {
+    const mock = track(new MockAdminClient());
+    native.faultNext('value');
+    const listings = mock.listTopics().namesToListings();
+    await untilDone(listings);
+    const cause = await failure(listings);
+    assert.ok(cause instanceof Error);
+    assert.match(cause.message, VALUE_FAILED);
+    assert.deepEqual(native.faultNext(null), []);
+    assert.deepEqual([...(await mock.listTopics().names().get())], []);
+  }, 10000);
+
+  test("a future whose core error can't be built fails with the failure instead", async () => {
+    const mock = track(new MockAdminClient());
+    native.faultNext('error');
+    const deleted = mock.deleteTopics(['absent']).all();
+    await untilDone(deleted);
+    const cause = await failure(deleted);
+    assert.ok(cause instanceof Error && !(cause instanceof UnknownTopicOrPartitionError), String(cause));
+    assert.match(cause.message, ERROR_FAILED);
+    assert.deepEqual(native.faultNext(null), []);
+    // The next call's future has the core's error.
+    assert.ok((await failure(mock.deleteTopics(['absent']).all())) instanceof UnknownTopicOrPartitionError);
+  }, 10000);
+
+  test("a cancelled future warns of a failure it can't build, and stays cancelled", async () => {
+    const mock = track(new MockAdminClient());
+    native.faultNext('error');
+    const values = /** @type {Map<string, KafkaFuture<void>>} */ (mock.deleteTopics(['absent']).topicNameValues());
+    const future = /** @type {KafkaFuture<void>} */ (values.get('absent'));
+    const warned = await warnedDuring(async () => {
+      assert.equal(future.cancel(true), true);
+      await untilTaken('error');
+    });
+    assert.deepEqual(native.faultNext(null), []);
+    assert.equal(warned.length, 1);
+    assert.match(warned[0].message, ERROR_FAILED);
+    assert.equal(future.isCancelled(), true);
+  }, 10000);
+
+  test('a timed get() that does not time out leaves the future to its untimed wait, and warns of its own failure', async () => {
+    const mock = track(new MockAdminClient());
+    // Both waits' errors fail: the untimed wait's first, which fails the
+    // future, then the timed one's, a warning.
+    native.faultNext('error', 2);
+    const values = /** @type {Map<string, KafkaFuture<void>>} */ (mock.deleteTopics(['absent']).topicNameValues());
+    const future = /** @type {KafkaFuture<void>} */ (values.get('absent'));
+    /** @type {unknown} */
+    let cause = null;
+    const warned = await warnedDuring(async () => {
+      try {
+        await future.get({ timeout: 60000 });
+      } catch (e) {
+        assert.ok(e instanceof ExecutionError, String(e));
+        cause = e.cause;
+      }
+      // The timed wait's completion, after the untimed one's.
+      await untilTaken('error');
+    });
+    assert.ok(cause instanceof Error);
+    assert.match(cause.message, ERROR_FAILED);
+    assert.deepEqual(native.faultNext(null), []);
+    assert.equal(warned.length, 1);
+    assert.match(warned[0].message, ERROR_FAILED);
+    assert.notEqual(warned[0], cause);
+  }, 10000);
+
+  test("close() rejects with the failure when its answer can't be built; the mock closed, and still answers as Java's", async () => {
+    const mock = new MockAdminClient();
+    native.faultNext('close');
+    const outcome = await settledWithin(mock.close(), 5000);
+    assert.match(outcome, /^rejected /);
+    assert.match(outcome.slice('rejected '.length), CLOSE_FAILED);
+    assert.deepEqual(native.faultNext(null), []);
+    // The next close resolves; Java's mock's close does nothing.
+    await mock.close();
+    assert.equal(await mock.describeCluster().clusterId().get(), MockAdminClient.DEFAULT_CLUSTER_ID);
+  }, 10000);
+});

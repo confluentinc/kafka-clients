@@ -284,8 +284,9 @@ interface Native {
   // encodeLikeJava's bytes of each.
   adminCreate(entries: Array<[Uint8Array, Uint8Array]>): AdminHandle;
   // Admin.close() for a timeoutMs of null, else close(Duration), through the
-  // `_cb` twins; closedNow: this close closed the client.
-  adminClose(handle: AdminHandle, timeoutMs: number | bigint | null, onComplete: (closedNow: boolean) => void): void;
+  // `_cb` twins; closedNow: this close closed the client. The error is the
+  // failure to build the answer (native/admin.c, close_on_complete), else null.
+  adminClose(handle: AdminHandle, timeoutMs: number | bigint | null, onComplete: (error: unknown, closedNow: boolean) => void): void;
   // The future accessor `name` of a result hands out (its key null, or a
   // string), as its slot in the client's table.
   adminResultFuture(handle: AdminHandle, box: AdminResultBox, name: string, key: unknown): number;
@@ -293,12 +294,20 @@ interface Native {
   // addon reads it.
   adminResultFutures(handle: AdminHandle, box: AdminResultBox, name: string): Array<[unknown, number]> | null;
   // The untimed wait on a future, through get_cb, once: `done` gets its
-  // value, converted to plain values, or its error.
-  adminFutureWait(handle: AdminHandle, slot: number, done: (value: unknown, error: Error | null) => void): void;
+  // value, converted to plain values, or its error; `failed`: the answer
+  // could not be built, the error is the failure (native/admin.c,
+  // future_on_wait).
+  adminFutureWait(handle: AdminHandle, slot: number, done: (value: unknown, error: unknown, failed: boolean) => void): void;
   // A timed wait through get_with_timeout_cb: timedOut when the wait timed
   // out, the error the core's TimeoutError; the outcome comes from the
-  // untimed wait.
-  adminFutureGet(handle: AdminHandle, slot: number, timeoutMs: number, done: (error: Error | null, timedOut: boolean) => void): void;
+  // untimed wait. `failed`: the error could not be built, the error is the
+  // failure.
+  adminFutureGet(
+    handle: AdminHandle,
+    slot: number,
+    timeoutMs: number,
+    done: (error: unknown, timedOut: boolean, failed: boolean) => void,
+  ): void;
   // The RPCs: each returns its result's box at once; a null options is
   // Java's null, which the FFI reports.
   adminDescribeCluster(handle: AdminHandle, options: AdminOptionsSetters): AdminResultBox;
@@ -506,7 +515,10 @@ interface Native {
   // Arms `times` (1 when left out) more failures of `step` of the addon, each
   // failing the next run of its site as its Node-API call failing would.
   // Test-only.
-  faultNext(step: 'notify' | 'metadata' | 'error' | 'slot' | 'partitions' | 'close' | 'enqueue' | 'failure', times?: number): undefined;
+  faultNext(
+    step: 'notify' | 'metadata' | 'error' | 'slot' | 'partitions' | 'close' | 'enqueue' | 'value' | 'failure',
+    times?: number,
+  ): undefined;
   // Disarms every step, and returns the failures still armed, a name each. Test-only.
   faultNext(step: null): string[];
   // The records the sends built since the last call; arms the capture again for `arm`. Test-only.
