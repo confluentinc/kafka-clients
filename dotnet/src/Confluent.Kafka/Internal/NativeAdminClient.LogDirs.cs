@@ -188,14 +188,14 @@ internal sealed partial class NativeAdminClient
                         nameof(replicaAssignment), "replicaAssignment must not contain null");
                 }
 
-                AdminStrings.Validate(entry.Key.Topic(), nameof(replicaAssignment));
+                NativeStrings.Validate(entry.Key.Topic(), NativeStrings.InvalidAdminStringMessage, nameof(replicaAssignment));
                 if (entry.Value is null)
                 {
                     throw new ArgumentNullException(
                         nameof(replicaAssignment), "replicaAssignment must not contain null");
                 }
 
-                AdminStrings.Validate(entry.Value, nameof(replicaAssignment));
+                NativeStrings.Validate(entry.Value, NativeStrings.InvalidAdminStringMessage, nameof(replicaAssignment));
                 if (seen.Add(entry.Key))
                 {
                     keys.Add(entry.Key);
@@ -297,7 +297,7 @@ internal sealed partial class NativeAdminClient
                     throw new ArgumentNullException(nameof(replicas), "replicas must not contain null");
                 }
 
-                AdminStrings.Validate(replica.Topic(), nameof(replicas));
+                NativeStrings.Validate(replica.Topic(), NativeStrings.InvalidAdminStringMessage, nameof(replicas));
                 if (seen.Add(replica))
                 {
                     keys.Add(replica);

@@ -761,7 +761,7 @@ Newest first.
   - **Critic observations, recorded rather than acted on:**
     - **O5.** The B5-ordering witness (`handle.IsClosed` after `Dispose`) catches a leaked `DangerousAddRef`. It cannot see a leak of only the `GCHandle`. None is reachable today, because every guard sits before both, but plan R2 overstated what the witness covers.
     - **Rule suggestion S1** (for the persona or the ffi-marshalling preamble; agents don't edit rule files): when a fix corrects a public doc sentence, grep the same cite and phrase across `src/**` internal comments and `tests/**` in the same commit. 87.1 was exactly that miss.
-  - **Supersession notes on older lines:** P13.3's `AdminKeyStrings` residual is now `AdminStrings`. P1's "timing independence is not preserved" deviation below has been superseded since P9 (G1-5).
+  - **Supersession notes on older lines:** P13.3's `AdminKeyStrings` residual is now `AdminStrings` (since renamed `NativeStrings`). P1's "timing independence is not preserved" deviation below has been superseded since P9 (G1-5).
   - **Out of scope, carried:**
     - the Python halves of every finding;
     - G1-2, a Rust-core dependency;
@@ -848,7 +848,7 @@ Newest first.
     - New internal types with no Java counterpart (DoD §7):
       - `ListTransactionsAdminOperation`, which owns both of F5's stages;
       - `AclEnumCodes`;
-      - `AdminKeyStrings` (renamed `AdminStrings` in M15/P13.4, D2).
+      - `AdminKeyStrings` (renamed `AdminStrings` in M15/P13.4, D2, then `NativeStrings`).
     - Flakes the user deferred, not fixed here:
       - the net8.0 `ProducerSubmitHandleRefTests` heap-budget test failed twice at CP0 and once in the fix cycle, and passed on re-run or in isolation;
       - the `DisposeAsync` completion race hit once at CP1 on net8.0, and passed on re-run.

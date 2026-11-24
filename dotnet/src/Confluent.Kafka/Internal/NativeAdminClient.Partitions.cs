@@ -90,7 +90,7 @@ internal sealed partial class NativeAdminClient
                     throw new ArgumentNullException(nameof(newPartitions), "newPartitions must not contain null");
                 }
 
-                AdminStrings.Validate(entry.Key, nameof(newPartitions));
+                NativeStrings.Validate(entry.Key, NativeStrings.InvalidAdminStringMessage, nameof(newPartitions));
                 if (entry.Value is null)
                 {
                     throw new ArgumentNullException(nameof(newPartitions), "newPartitions must not contain null");
@@ -206,7 +206,7 @@ internal sealed partial class NativeAdminClient
                         nameof(recordsToDelete), "recordsToDelete must not contain a TopicPartition with a null topic");
                 }
 
-                AdminStrings.Validate(entry.Key.Topic(), nameof(recordsToDelete));
+                NativeStrings.Validate(entry.Key.Topic(), NativeStrings.InvalidAdminStringMessage, nameof(recordsToDelete));
                 if (entry.Value is null)
                 {
                     throw new ArgumentNullException(nameof(recordsToDelete), "recordsToDelete must not contain null");
@@ -330,7 +330,7 @@ internal sealed partial class NativeAdminClient
                         "topicPartitionOffsets must not contain a TopicPartition with a null topic");
                 }
 
-                AdminStrings.Validate(entry.Key.Topic(), nameof(topicPartitionOffsets));
+                NativeStrings.Validate(entry.Key.Topic(), NativeStrings.InvalidAdminStringMessage, nameof(topicPartitionOffsets));
                 if (seen.Add(entry.Key))
                 {
                     keys.Add(entry.Key);

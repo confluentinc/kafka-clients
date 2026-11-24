@@ -980,7 +980,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     // and the core refuses an empty one with Java's text. Java's MockConsumer refuses a null or empty pattern before
     // ensureNotClosed(), with its own messages; the binding answers them before the use, because Close tears the
     // native mock down. A null pattern text is Java's NullPointerException, at the same point. A NUL in the text, which
-    // the C string would cut, is refused next (AdminStrings), still after the group.id check.
+    // the C string would cut, is refused next (NativeStrings), still after the group.id check.
     private string SnapshotPattern(SubscriptionPattern pattern)
     {
         if (!IsMock)
@@ -1002,7 +1002,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                     throw GroupIdNotDefined();
                 }
 
-                AdminStrings.Validate(text, AdminStrings.InvalidSubscriptionPatternMessage, nameof(pattern));
+                NativeStrings.Validate(text, NativeStrings.InvalidSubscriptionPatternMessage, nameof(pattern));
                 return text;
             });
         }
@@ -1013,7 +1013,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         string patternText = pattern.Pattern() ?? throw new ArgumentNullException(nameof(pattern), NullPatternTextMessage);
-        AdminStrings.Validate(patternText, AdminStrings.InvalidSubscriptionPatternMessage, nameof(pattern));
+        NativeStrings.Validate(patternText, NativeStrings.InvalidSubscriptionPatternMessage, nameof(pattern));
         if (patternText.Length == 0)
         {
             throw new IllegalArgumentException(EmptyMockPatternMessage);

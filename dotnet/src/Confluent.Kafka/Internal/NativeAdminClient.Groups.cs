@@ -102,7 +102,7 @@ internal sealed partial class NativeAdminClient
             {
                 foreach (string protocolType in options.ProtocolTypes())
                 {
-                    AdminStrings.Validate(protocolType, nameof(options));
+                    NativeStrings.Validate(protocolType, NativeStrings.InvalidAdminStringMessage, nameof(options));
                 }
 
                 RequireDefinedFilter(

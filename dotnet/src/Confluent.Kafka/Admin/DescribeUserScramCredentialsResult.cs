@@ -73,7 +73,7 @@ public sealed class DescribeUserScramCredentialsResult
     /// </exception>
     public KafkaFuture<UserScramCredentialsDescription> Description(string? userName)
     {
-        AdminStrings.Validate(userName, nameof(userName));
+        NativeStrings.Validate(userName, NativeStrings.InvalidAdminStringMessage, nameof(userName));
 
         return new KafkaFuture<UserScramCredentialsDescription>(
             NativeAdminClient.DescribeUserScramCredentialsDescription(_native, userName));

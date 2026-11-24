@@ -467,7 +467,7 @@ internal sealed partial class NativeProducer : IDisposable, IAsyncDisposable
     {
         if (!IsMock)
         {
-            AdminStrings.Validate(topic, AdminStrings.InvalidTopicMessage, nameof(topic));
+            NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
         }
     }
 

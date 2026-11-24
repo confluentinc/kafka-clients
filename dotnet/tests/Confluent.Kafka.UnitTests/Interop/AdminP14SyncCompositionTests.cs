@@ -1554,7 +1554,7 @@ public sealed class AdminP14SyncCompositionTests
 
             case "description-invalid-user":
                 {
-                    string expected = new ArgumentException(AdminStrings.InvalidStringMessage, "userName").Message;
+                    string expected = new ArgumentException(NativeStrings.InvalidAdminStringMessage, "userName").Message;
                     AssertArgument(Thrown(() => harness.Description("al\0ice")), "userName", expected);
                     break;
                 }

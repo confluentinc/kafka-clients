@@ -226,7 +226,7 @@ public sealed class ProducerSendPinLifetimeTests
             ArgumentException rejected = Assert.Throws<ArgumentException>(
                 () => { _ = producer.Send(MemoryRecord("bad\0topic", key, value)); });
 
-            Assert.StartsWith(AdminStrings.InvalidTopicMessage, rejected.Message);
+            Assert.StartsWith(NativeStrings.InvalidTopicMessage, rejected.Message);
             Assert.Equal(0, key.PinCount);
             Assert.Equal(0, key.UnpinCount);
             Assert.Equal(0, value.PinCount);
@@ -287,7 +287,7 @@ public sealed class ProducerSendPinLifetimeTests
             ArgumentException rejected = Assert.Throws<ArgumentException>(
                 () => { _ = producer.Send(MemoryRecord("bad\0topic", key, value)); });
 
-            Assert.StartsWith(AdminStrings.InvalidTopicMessage, rejected.Message);
+            Assert.StartsWith(NativeStrings.InvalidTopicMessage, rejected.Message);
             Assert.Equal(0, key.PinCount);
             Assert.Equal(0, value.PinCount);
             Assert.Equal(0, producer.HistoryCount());

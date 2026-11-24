@@ -149,9 +149,9 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(filter));
             }
 
-            AdminStrings.Validate(filter.PatternFilter().Name(), nameof(filter));
-            AdminStrings.Validate(filter.EntryFilter().Principal(), nameof(filter));
-            AdminStrings.Validate(filter.EntryFilter().Host(), nameof(filter));
+            NativeStrings.Validate(filter.PatternFilter().Name(), NativeStrings.InvalidAdminStringMessage, nameof(filter));
+            NativeStrings.Validate(filter.EntryFilter().Principal(), NativeStrings.InvalidAdminStringMessage, nameof(filter));
+            NativeStrings.Validate(filter.EntryFilter().Host(), NativeStrings.InvalidAdminStringMessage, nameof(filter));
 
             IntPtr native = IntPtr.Zero;
             SafeAdminResultHandle result;
@@ -282,9 +282,9 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
             }
 
-            AdminStrings.Validate(acl.Pattern().Name(), parameterName);
-            AdminStrings.Validate(acl.Entry().Principal(), parameterName);
-            AdminStrings.Validate(acl.Entry().Host(), parameterName);
+            NativeStrings.Validate(acl.Pattern().Name(), NativeStrings.InvalidAdminStringMessage, parameterName);
+            NativeStrings.Validate(acl.Entry().Principal(), NativeStrings.InvalidAdminStringMessage, parameterName);
+            NativeStrings.Validate(acl.Entry().Host(), NativeStrings.InvalidAdminStringMessage, parameterName);
             if (seen.Add(acl))
             {
                 keys.Add(acl);
@@ -305,9 +305,9 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
             }
 
-            AdminStrings.Validate(filter.PatternFilter().Name(), parameterName);
-            AdminStrings.Validate(filter.EntryFilter().Principal(), parameterName);
-            AdminStrings.Validate(filter.EntryFilter().Host(), parameterName);
+            NativeStrings.Validate(filter.PatternFilter().Name(), NativeStrings.InvalidAdminStringMessage, parameterName);
+            NativeStrings.Validate(filter.EntryFilter().Principal(), NativeStrings.InvalidAdminStringMessage, parameterName);
+            NativeStrings.Validate(filter.EntryFilter().Host(), NativeStrings.InvalidAdminStringMessage, parameterName);
             if (seen.Add(filter))
             {
                 keys.Add(filter);

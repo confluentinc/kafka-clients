@@ -132,7 +132,7 @@ internal static unsafe class ProducerSendMarshal
     // Python's mocks, pure Python, accept such a record; the mocks here build it through the C ABI and reject it too.
     private static void RejectAlteredStrings(in SerializedProducerRecord record)
     {
-        AdminStrings.Validate(record.Topic, AdminStrings.InvalidTopicMessage, RecordParameter);
+        NativeStrings.Validate(record.Topic, NativeStrings.InvalidTopicMessage, RecordParameter);
         List<IHeader>? entries = record.Headers?.Entries;
         if (entries is null)
         {
@@ -155,7 +155,7 @@ internal static unsafe class ProducerSendMarshal
             throw new IllegalArgumentException(NullHeaderKeyMessage);
         }
 
-        AdminStrings.Validate(key, AdminStrings.InvalidHeaderKeyMessage, RecordParameter);
+        NativeStrings.Validate(key, NativeStrings.InvalidHeaderKeyMessage, RecordParameter);
         return key;
     }
 

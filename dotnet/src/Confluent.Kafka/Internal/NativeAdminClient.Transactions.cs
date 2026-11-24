@@ -332,7 +332,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(spec), "spec must not have a TopicPartition with a null topic");
             }
 
-            AdminStrings.Validate(spec.TopicPartition().Topic(), nameof(spec));
+            NativeStrings.Validate(spec.TopicPartition().Topic(), NativeStrings.InvalidAdminStringMessage, nameof(spec));
             IntPtr nativeSpec = NewAbortTransactionSpec(spec);
             try
             {
@@ -532,7 +532,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(transactionalId));
             }
 
-            AdminStrings.Validate(transactionalId, nameof(transactionalId));
+            NativeStrings.Validate(transactionalId, NativeStrings.InvalidAdminStringMessage, nameof(transactionalId));
             using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(transactionalId);
             SafeAdminResultHandle result = CallWithOptions(
                 NewTerminateTransactionOptions(options),
@@ -579,7 +579,7 @@ internal sealed partial class NativeAdminClient
         EnterUse();
         try
         {
-            AdminStrings.Validate(options?.FilteredTransactionalIdPattern(), nameof(options));
+            NativeStrings.Validate(options?.FilteredTransactionalIdPattern(), NativeStrings.InvalidAdminStringMessage, nameof(options));
             if (options is not null)
             {
                 RequireDefinedFilter(

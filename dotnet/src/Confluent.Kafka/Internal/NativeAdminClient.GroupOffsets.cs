@@ -122,7 +122,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(groupId));
             }
 
-            AdminStrings.Validate(groupId, nameof(groupId));
+            NativeStrings.Validate(groupId, NativeStrings.InvalidAdminStringMessage, nameof(groupId));
             SafeAdminResultHandle result;
             using (Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(groupId))
             {
@@ -241,7 +241,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(groupSpecs), "groupSpecs must not contain null");
             }
 
-            AdminStrings.Validate(entry.Key, nameof(groupSpecs));
+            NativeStrings.Validate(entry.Key, NativeStrings.InvalidAdminStringMessage, nameof(groupSpecs));
             if (!seen.Add(entry.Key))
             {
                 throw new ArgumentException(
@@ -269,7 +269,7 @@ internal sealed partial class NativeAdminClient
                             nameof(groupSpecs), "groupSpecs must not contain a TopicPartition with a null topic");
                     }
 
-                    AdminStrings.Validate(partition.Topic(), nameof(groupSpecs));
+                    NativeStrings.Validate(partition.Topic(), NativeStrings.InvalidAdminStringMessage, nameof(groupSpecs));
                 }
             }
 
@@ -376,7 +376,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(groupId));
             }
 
-            AdminStrings.Validate(groupId, nameof(groupId));
+            NativeStrings.Validate(groupId, NativeStrings.InvalidAdminStringMessage, nameof(groupId));
             if (offsets is null)
             {
                 throw new ArgumentNullException(nameof(offsets));
@@ -402,8 +402,8 @@ internal sealed partial class NativeAdminClient
                     throw new ArgumentNullException(nameof(offsets), "offsets must not contain null");
                 }
 
-                AdminStrings.Validate(entry.Key.Topic(), nameof(offsets));
-                AdminStrings.Validate(entry.Value.Metadata(), nameof(offsets));
+                NativeStrings.Validate(entry.Key.Topic(), NativeStrings.InvalidAdminStringMessage, nameof(offsets));
+                NativeStrings.Validate(entry.Value.Metadata(), NativeStrings.InvalidAdminStringMessage, nameof(offsets));
                 entries.Add(entry);
             }
 
@@ -541,7 +541,7 @@ internal sealed partial class NativeAdminClient
             throw new ArgumentNullException(nameof(partition), "partition must not have a null topic");
         }
 
-        AdminStrings.Validate(partition.Topic(), nameof(partition));
+        NativeStrings.Validate(partition.Topic(), NativeStrings.InvalidAdminStringMessage, nameof(partition));
         return NewNativeTopicPartition(partition);
     }
 
@@ -556,7 +556,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(groupId));
             }
 
-            AdminStrings.Validate(groupId, nameof(groupId));
+            NativeStrings.Validate(groupId, NativeStrings.InvalidAdminStringMessage, nameof(groupId));
             if (partitions is null)
             {
                 throw new ArgumentNullException(nameof(partitions));
@@ -577,7 +577,7 @@ internal sealed partial class NativeAdminClient
                         nameof(partitions), "partitions must not contain a TopicPartition with a null topic");
                 }
 
-                AdminStrings.Validate(partition.Topic(), nameof(partitions));
+                NativeStrings.Validate(partition.Topic(), NativeStrings.InvalidAdminStringMessage, nameof(partitions));
                 if (seen.Add(partition))
                 {
                     requested.Add(partition);
@@ -743,11 +743,11 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(options));
             }
 
-            AdminStrings.Validate(groupId, nameof(groupId));
-            AdminStrings.Validate(options.Reason(), nameof(options));
+            NativeStrings.Validate(groupId, NativeStrings.InvalidAdminStringMessage, nameof(groupId));
+            NativeStrings.Validate(options.Reason(), NativeStrings.InvalidAdminStringMessage, nameof(options));
             foreach (MemberToRemove member in options.Members())
             {
-                AdminStrings.Validate(member.GroupInstanceId(), nameof(options));
+                NativeStrings.Validate(member.GroupInstanceId(), NativeStrings.InvalidAdminStringMessage, nameof(options));
             }
 
             using Utf8Marshal.PinnedUtf8String pinned = Utf8Marshal.Pin(groupId);
@@ -784,7 +784,7 @@ internal sealed partial class NativeAdminClient
     internal static KafkaFutureImpl<object?> RemoveMembersFromConsumerGroupMemberResult(
         SafeAdminResultHandle result, MemberToRemove member)
     {
-        AdminStrings.Validate(member.GroupInstanceId(), nameof(member));
+        NativeStrings.Validate(member.GroupInstanceId(), NativeStrings.InvalidAdminStringMessage, nameof(member));
         IntPtr native = NewNativeMemberToRemove(member);
         try
         {
