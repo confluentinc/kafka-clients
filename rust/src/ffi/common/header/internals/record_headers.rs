@@ -300,10 +300,12 @@ pub extern "C" fn kafka_common_header_internals_RecordHeaders_new() -> *mut kafk
 pub unsafe extern "C" fn kafka_common_header_internals_RecordHeaders_with_header_slice(
     headers: *const kafka_List_t,
 ) -> *mut kafka_common_header_internals_RecordHeaders_t {
+    // `list_record_headers` already copies each header out of its handle, so the list is moved
+    // in: `RecordHeaders::with_header_slice`, which borrows its headers, would copy each again.
     // SAFETY: Per this function's `# Safety`, `headers` is null or a valid list of record-header
     // handles, as `list_record_headers` requires; the headers are cloned into owned values, so
     // nothing borrows the list after this call.
-    box_record_headers(RecordHeaders::with_header_slice(&unsafe {
+    box_record_headers(RecordHeaders::with_header_iter(unsafe {
         if headers.is_null() {
             Default::default()
         } else {

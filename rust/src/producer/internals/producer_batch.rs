@@ -29,7 +29,6 @@ use log::{debug, error, trace};
 
 use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::header::Header;
 use crate::common::header::RecordHeader;
 use crate::common::record::TimestampType;
 use crate::common::record::internal::AbstractRecords;
@@ -576,33 +575,28 @@ impl ProducerBatch {
         for record in memory_records.records() {
             let key = record.key();
             let value = record.value();
-            let headers: Vec<RecordHeader> = record
-                .headers()
-                .iter()
-                .map(|h| RecordHeader::new(h.key().to_string(), h.value().map(|v: &[u8]| v.to_vec())))
-                .collect();
+            let headers = record.headers();
             let timestamp = record.timestamp();
 
             let thunk = thunk_iter.next().expect("thunk iterator exhausted before records");
 
             if current_batch.is_none() {
                 current_batch =
-                    Some(self.create_batch_off_accumulator_for_record(key, value, &headers, split_batch_size));
+                    Some(self.create_batch_off_accumulator_for_record(key, value, headers, split_batch_size));
             }
 
             let b = current_batch.as_mut().unwrap();
-            if let Err(returned_thunk) = b.try_append_for_split(timestamp, key, value, &headers, thunk) {
+            if let Err(returned_thunk) = b.try_append_for_split(timestamp, key, value, headers, thunk) {
                 // Current batch is full, close it and start a new one
                 let mut completed_batch = current_batch.take().unwrap();
                 completed_batch.close_for_record_appends();
                 batches.push_back(completed_batch);
 
-                let mut new_batch =
-                    self.create_batch_off_accumulator_for_record(key, value, &headers, split_batch_size);
+                let mut new_batch = self.create_batch_off_accumulator_for_record(key, value, headers, split_batch_size);
                 // The first record in a new batch always fits because has_room_for
                 // returns true when num_records == 0.
                 if new_batch
-                    .try_append_for_split(timestamp, key, value, &headers, returned_thunk)
+                    .try_append_for_split(timestamp, key, value, headers, returned_thunk)
                     .is_err()
                 {
                     panic!("first record in a new batch always fits");
@@ -1047,6 +1041,7 @@ impl std::fmt::Debug for ProducerBatch {
 mod tests {
     use super::*;
     use crate::common::compress::Compression;
+    use crate::common::header::Header;
     use crate::common::protocol::Errors;
 
     const NOW: i64 = 1488748346917;

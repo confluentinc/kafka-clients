@@ -48,6 +48,50 @@ impl Utils {
         state.write_u64(sum);
     }
 
+    /// Turn the given UTF8 byte array into a string.
+    ///
+    /// Malformed input is replaced with U+FFFD as Java's
+    /// `new String(bytes, StandardCharsets.UTF_8)` replaces it. That is
+    /// `String::from_utf8_lossy`'s rule, with one difference: Java reads
+    /// `ED` followed by a byte in `A0..=BF`, the start of a surrogate code
+    /// point written in three bytes, as one malformed sequence together with
+    /// the continuation byte that follows it, if any, where Rust replaces
+    /// each of those bytes on its own.
+    ///
+    /// Valid bytes are returned borrowed, so only malformed input is copied,
+    /// where Java always builds a `String`.
+    ///
+    /// # Arguments
+    ///
+    /// - `bytes` - The byte array
+    ///
+    /// # Returns
+    ///
+    /// The string
+    #[doc(alias = "org.apache.kafka.common.utils.Utils#utf8(byte[])")]
+    pub(crate) fn utf8(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+        if let Ok(valid) = std::str::from_utf8(bytes) {
+            return std::borrow::Cow::Borrowed(valid);
+        }
+        let mut decoded = String::with_capacity(bytes.len());
+        let mut rest = bytes;
+        while let Some(chunk) = rest.utf8_chunks().next() {
+            decoded.push_str(chunk.valid());
+            let malformed = &rest[chunk.valid().len()..];
+            if malformed.is_empty() {
+                break;
+            }
+            decoded.push(char::REPLACEMENT_CHARACTER);
+            let malformed_length = match malformed {
+                [0xED, 0xA0..=0xBF, 0x80..=0xBF, ..] => 3,
+                [0xED, 0xA0..=0xBF, ..] => 2,
+                _ => chunk.invalid().len(),
+            };
+            rest = &malformed[malformed_length..];
+        }
+        std::borrow::Cow::Owned(decoded)
+    }
+
     /// Converts a signed i32 to a non-negative value by clearing the sign bit.
     ///
     /// Translated from `org.apache.kafka.common.utils.Utils.toPositive`.
@@ -193,6 +237,81 @@ impl Utils {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Translated from `UtilsTest.utf8ByteArraySerde`, the `utf8(byte[])` part:
+    /// the other `utf8` overloads and `utf8Length` are not translated.
+    #[test]
+    #[doc(alias = "org.apache.kafka.common.utils.UtilsTest#utf8ByteArraySerde")]
+    fn utf8_byte_array_serde() {
+        let utf8_string = "A\u{ea}\u{f1}\u{fc}C";
+        let utf8_bytes = utf8_string.as_bytes();
+
+        let decoded = Utils::utf8(utf8_bytes);
+
+        assert_eq!(utf8_string, decoded);
+        assert!(matches!(decoded, std::borrow::Cow::Borrowed(_)), "valid bytes are not copied");
+    }
+
+    /// Malformed bytes decode to what Java's `new String(bytes, UTF_8)` gives
+    /// for them. The expected strings are the output of that Java call on
+    /// these bytes (JDK 25). The surrogate rows are the ones
+    /// `String::from_utf8_lossy` decodes differently.
+    #[test]
+    fn utf8_replaces_malformed_input_as_java_does() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"\xFF", "\u{FFFD}"),
+            (b"A\xFFB", "A\u{FFFD}B"),
+            (b"\xC0\x80", "\u{FFFD}\u{FFFD}"),
+            (b"\xE1\x80", "\u{FFFD}"),
+            (b"\xED\x9F\xBF", "\u{D7FF}"),
+            (b"\xED\x80", "\u{FFFD}"),
+            (b"\xEE\x80\x80", "\u{E000}"),
+            (b"\xF0\x9F\x98\x80", "\u{1F600}"),
+            (b"\xF4\x90\x80\x80", "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"),
+            (b"\xF0\x80\x80\x80", "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"),
+            (b"\xE0\x80\x80", "\u{FFFD}\u{FFFD}\u{FFFD}"),
+            (b"\xF8\x88\x80\x80\x80", "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}"),
+            // A surrogate code point written in three bytes: one U+FFFD.
+            (b"\xED\xA0\x80", "\u{FFFD}"),
+            (b"\xED\xB0\x80", "\u{FFFD}"),
+            (b"\xED\xBF\xBF", "\u{FFFD}"),
+            (b"\xED\xA0\xBD\xED\xB8\x80", "\u{FFFD}\u{FFFD}"),
+            (b"A\xED\xA0\x80B", "A\u{FFFD}B"),
+            // Cut short, at the end or by another byte: still one U+FFFD.
+            (b"\xED\xA0", "\u{FFFD}"),
+            (b"\xED\xA0A", "\u{FFFD}A"),
+            (b"\xED\xA0\xED\xA0\x80", "\u{FFFD}\u{FFFD}"),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(*expected, Utils::utf8(bytes), "decoding {bytes:02X?}");
+        }
+    }
+
+    /// Outside the surrogate range the rule is `String::from_utf8_lossy`'s:
+    /// every sequence of up to three bytes that has no `ED` followed by
+    /// `A0..=BF` decodes the same way.
+    #[test]
+    fn utf8_is_from_utf8_lossy_outside_encoded_surrogates() {
+        let is_surrogate_start = |window: &[u8]| matches!(window, [0xED, 0xA0..=0xBF]);
+        let check = |bytes: &[u8]| {
+            if !bytes.windows(2).any(is_surrogate_start) {
+                assert_eq!(String::from_utf8_lossy(bytes), Utils::utf8(bytes), "decoding {bytes:02X?}");
+            }
+        };
+        for first in 0..=u8::MAX {
+            check(&[first]);
+            for second in 0..=u8::MAX {
+                check(&[first, second]);
+                // Every byte class as the third byte: ASCII, the continuation
+                // ranges, and each kind of lead byte.
+                for third in [
+                    0x41, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC2, 0xE0, 0xED, 0xF0, 0xF4, 0xFF,
+                ] {
+                    check(&[first, second, third]);
+                }
+            }
+        }
+    }
 
     /// Translated from `UtilsTest.testIsBlank`, plus the characters Java's `trim`
     /// strips that Rust's Unicode-whitespace `trim` treats differently.

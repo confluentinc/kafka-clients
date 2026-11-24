@@ -664,16 +664,46 @@ A single `Arc<str>` instance per topic-partition is held in
 `SubscriptionState` and cloned cheaply for each emitted `ConsumerRecord`.
 Do NOT allocate a fresh `String` per record.
 
-**Headers handling — owned for Milestone 8:**
+**Headers handling — read on demand:**
 
-`ConsumerRecord` holds owned headers (`Headers` = `Vec<RecordHeader>` with
-owned `Arc<str>` key and `Vec<u8>` value), matching Java's allocation
-behavior. Do NOT add a lifetime parameter to `ConsumerRecord<K, V>` for
-borrowed headers in this milestone — it would propagate through
-`ConsumerRecords<K, V>` and every user-facing iterator type. Most users do
-not read headers; allocating eagerly is acceptable. Revisit (option:
-borrowed `Headers<'a>` or `Arc<Vec<RecordHeader>>` shared across records
-in a batch) only if profiling shows header allocation is hot.
+A fetched `ConsumerRecord` does not build its headers. It keeps one `Bytes`
+slice of the record's still-encoded header section, with the header count
+(`RecordHeaders::from_wire`), and the list is read the first time something
+asks for it: the application, or a deserializer that uses the
+`&mut RecordHeaders` it is given. In an uncompressed batch a record whose
+headers are never read costs no allocation and no copy for them. In a
+compressed batch the slice keeps the buffer the record was decompressed into,
+read or not, so the next record is read into a new one: a buffer per record
+with headers, as Java's `DefaultRecord.readFrom` allocates one per record,
+where a record without headers reuses the previous record's buffer. Nothing is
+built or copied per header in either case.
+
+When the list is read, each `RecordHeader` holds slices of that same buffer
+(`RecordHeader::with_key_buffer_value_buffer`, Java's
+`RecordHeader(ByteBuffer, ByteBuffer)`, built by `DefaultRecord::read_headers`,
+Java's `DefaultRecord.readHeaders`), so `key()` and `value()` are views of the
+fetched data. The one copy left is the key of a header whose bytes are not
+valid UTF-8: it is decoded once, on first access, with U+FFFD for the
+malformed bytes, as Java's `RecordHeader.key()` decodes it. `poll()` does not
+fail on such a key.
+
+`DefaultRecord`'s parser validates the whole header section when it parses the
+record, so the later read cannot fail.
+
+A record with headers holds its buffer alive for as long as the record, or a
+clone of its headers, lives: the fetched data (the whole fetch response the
+record came in), or, for a compressed batch, the buffer the record was
+decompressed into. A `Bytes` value from `BytesDeserializer` does the same.
+
+Do NOT add a lifetime parameter to `ConsumerRecord<K, V>` for borrowed
+headers: it would propagate through `ConsumerRecords<K, V>` and every
+user-facing iterator type, and the shared `Bytes` already avoids the copy.
+
+The C FFI keeps this. `kafka_consumer_ConsumerRecord_headers` shares the
+record's headers, and `kafka_common_header_Header_value` and
+`kafka_common_header_Header__key_bytes` are views of the same bytes. The
+NUL-terminated key of `kafka_common_header_Header_key` is the one copy, made by
+its first call.
 
 **Anti-patterns to flag in review:**
 
@@ -682,6 +712,11 @@ in a batch) only if profiling shows header allocation is hot.
   - `#[async_trait]` on `Deserializer` — it boxes a future per record; the
     trait's own `async fn` / `impl Future` (and `InlineFuture` for `dyn`) does not.
   - `Bytes::copy_from_slice(...)` where `Bytes::slice(...)` would do.
+  - Building a record's headers while it is fetched (a `Vec<RecordHeader>`,
+    or a `String` / `Vec<u8>` per header) instead of
+    `RecordHeaders::from_wire`.
+  - A `CString` per header key made when the C `Header` view is created,
+    rather than by the first `kafka_common_header_Header_key` call.
   - `CompletedFetch { records: Vec<ConsumerRecord<K, V>> }` — pre-decoded
     records in a vec require a second pass that copies all bytes. Hold the
     buffer + a parsing cursor instead, decode lazily.
@@ -695,7 +730,12 @@ Per-record allocation-budget test on the receive path, following the
 existing producer hot-path allocation test precedent (Phase 6). Assert
 the per-record allocation count matches the user-deserializer budget;
 specifically, no allocations attributable to topic name, key/value bytes
-on the buffer, or batch traversal.
+on the buffer, batch traversal, or headers that are never read. A compressed
+batch has its own budget, stated and tested apart: the buffer each record is
+read into, and for a record with headers that buffer's reference count, with
+nothing per header. Tests also assert that the key and value of a header that
+is read point into the fetch buffer (the record's own buffer for a compressed
+batch).
 
 ## 28. Event variants: mirror Java's `CompletableApplicationEvent<T>` hierarchy
 
