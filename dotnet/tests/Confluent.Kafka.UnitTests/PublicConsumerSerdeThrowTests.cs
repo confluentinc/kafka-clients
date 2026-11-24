@@ -41,7 +41,7 @@ public sealed class PublicConsumerSerdeThrowTests
     public void SyncPoll_ValueDeserializerThrows_ThrowsRecordDeserializationException()
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
-        MockConsumer<byte[], int> consumer = ReadyToPollSync(Serdes.ByteArray().Deserializer(), valueDeserializer);
+        KafkaConsumer<byte[], int> consumer = ReadyToPollSync(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 99, key: new byte[] { 1 }, value: new byte[] { 2, 3 });
 
@@ -61,7 +61,7 @@ public sealed class PublicConsumerSerdeThrowTests
     public void SyncPoll_KeyDeserializerThrows_ThrowsRecordDeserializationException_ForTheKey()
     {
         ThrowingDeserializer<int> keyDeserializer = new ThrowingDeserializer<int>();
-        MockConsumer<int, byte[]> consumer = ReadyToPollSync(keyDeserializer, Serdes.ByteArray().Deserializer());
+        KafkaConsumer<int, byte[]> consumer = ReadyToPollSync(keyDeserializer, Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.AddRecord(Topic, Partition, offset: 5, key: new byte[] { 1 }, value: new byte[] { 2 });
 
@@ -79,8 +79,8 @@ public sealed class PublicConsumerSerdeThrowTests
     public async Task AsyncPoll_ValueDeserializerThrows_FaultsTaskWithRecordDeserializationException()
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
-        AsyncMockConsumer<byte[], int> consumer =
-            new AsyncMockConsumer<byte[], int>(new AsyncByteArrayDeserializer(), valueDeserializer.AsAsync());
+        AsyncKafkaConsumer<byte[], int> consumer =
+            DecodingConsumers.CreateAsync<byte[], int>(new AsyncByteArrayDeserializer(), valueDeserializer.AsAsync());
         try
         {
             await TestTimeout.Run(
@@ -109,8 +109,8 @@ public sealed class PublicConsumerSerdeThrowTests
     public async Task AsyncPoll_ThrowingDeserializer_Churned_DoesNotUnwindIntoNative()
     {
         ThrowingDeserializer<int> valueDeserializer = new ThrowingDeserializer<int>();
-        AsyncMockConsumer<byte[], int> consumer =
-            new AsyncMockConsumer<byte[], int>(new AsyncByteArrayDeserializer(), valueDeserializer.AsAsync());
+        AsyncKafkaConsumer<byte[], int> consumer =
+            DecodingConsumers.CreateAsync<byte[], int>(new AsyncByteArrayDeserializer(), valueDeserializer.AsAsync());
         try
         {
             await TestTimeout.Run(
@@ -130,10 +130,10 @@ public sealed class PublicConsumerSerdeThrowTests
         }
     }
 
-    private static MockConsumer<TKey, TValue> ReadyToPollSync<TKey, TValue>(
+    private static KafkaConsumer<TKey, TValue> ReadyToPollSync<TKey, TValue>(
         IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer)
     {
-        MockConsumer<TKey, TValue> consumer = new MockConsumer<TKey, TValue>(keyDeserializer, valueDeserializer);
+        KafkaConsumer<TKey, TValue> consumer = DecodingConsumers.Create<TKey, TValue>(keyDeserializer, valueDeserializer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         return consumer;

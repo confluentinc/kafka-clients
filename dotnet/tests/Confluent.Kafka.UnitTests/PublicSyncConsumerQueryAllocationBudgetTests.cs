@@ -25,7 +25,7 @@ namespace Confluent.Kafka.UnitTests;
 #if NET8_0_OR_GREATER
 
 /// <summary>
-/// The per-call allocation of the sync BeginningOffsets and PartitionsFor on <see cref="MockConsumer{TKey, TValue}"/>:
+/// The per-call allocation of the sync BeginningOffsets and PartitionsFor on <see cref="KafkaConsumer{TKey, TValue}"/>:
 /// the marginal cost of a call stays under a ceiling for a one-entry result.
 /// </summary>
 /// <remarks>
@@ -41,7 +41,7 @@ public sealed class PublicSyncConsumerQueryAllocationBudgetTests
     [Fact]
     public void BeginningOffsets_PerOpAllocation_IsBounded()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        KafkaConsumer<byte[], byte[]> consumer = DecodingConsumers.Create<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset(Topic, 0, 1);
         TopicPartition[] request = { new TopicPartition(Topic, 0) };
@@ -66,7 +66,7 @@ public sealed class PublicSyncConsumerQueryAllocationBudgetTests
     [Fact]
     public void PartitionsFor_PerOpAllocation_IsBounded()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        KafkaConsumer<byte[], byte[]> consumer = DecodingConsumers.Create<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
 

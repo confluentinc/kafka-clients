@@ -36,7 +36,7 @@ using Origin = Confluent.Kafka.Common.Errors.RecordDeserializationException.Dese
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The async <c>Poll</c>'s deserialization on <see cref="AsyncMockConsumer{TKey, TValue}"/>: a deserializer that is
+/// The async <c>Poll</c>'s deserialization on <see cref="AsyncKafkaConsumer{TKey, TValue}"/>: a deserializer that is
 /// not a built-in is awaited one record at a time, over a memory revoked when its call completes unless it implements
 /// <see cref="IAsyncDeserializerWithRetention{T}"/>, and a failure or a cancellation mid-batch seeks back.
 /// </summary>
@@ -55,8 +55,8 @@ public sealed class AsyncConsumerDeserializationTests
     public async Task ACallScopedMemory_IsRevokedOnceTheCallCompletes_AndAPinTakenDuringItStaysValid(bool awaits)
     {
         KeepingDeserializer values = new KeepingDeserializer(awaits);
-        AsyncMockConsumer<string, string> consumer =
-            new AsyncMockConsumer<string, string>(new AsyncStringDeserializer(), values);
+        AsyncKafkaConsumer<string, string> consumer =
+            DecodingConsumers.CreateAsync<string, string>(new AsyncStringDeserializer(), values);
         ReadOnlyMemory<byte> kept;
         await using (TestTimeout.AsyncDisposal(consumer))
         {
@@ -95,8 +95,8 @@ public sealed class AsyncConsumerDeserializationTests
     public async Task ARetainedMemory_StaysReadable_AfterPollReturns_AfterTheNextPoll_AndAfterTheConsumerIsDisposed(
         bool awaits)
     {
-        AsyncMockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new AsyncMockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+        AsyncKafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
+            DecodingConsumers.CreateAsync<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
                 new RetainingDeserializer(awaits), new RetainingDeserializer(awaits));
         ReadOnlyMemory<byte> key;
         ReadOnlyMemory<byte> value;
@@ -135,8 +135,8 @@ public sealed class AsyncConsumerDeserializationTests
     {
         RetainingDeserializer keys = new RetainingDeserializer(awaits: false);
         RetainingDeserializer values = new RetainingDeserializer(awaits: false);
-        AsyncMockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new AsyncMockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(keys, values);
+        AsyncKafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
+            DecodingConsumers.CreateAsync<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(keys, values);
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await Ready(consumer);
         consumer.AddRecord(Topic, 0, 0, Array.Empty<byte>(), Array.Empty<byte>());
@@ -162,7 +162,7 @@ public sealed class AsyncConsumerDeserializationTests
     public async Task AnAwaitingDeserializer_YieldsTheRecordsInOrder_TheKeyBeforeTheValue()
     {
         List<string> calls = new List<string>();
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(
+        AsyncKafkaConsumer<string, string> consumer = DecodingConsumers.CreateAsync<string, string>(
             new OrderedDeserializer("key", calls), new OrderedDeserializer("value", calls));
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await Ready(consumer);
@@ -190,8 +190,8 @@ public sealed class AsyncConsumerDeserializationTests
     public async Task ADeserializerCompletedLater_HoldsThePollUntilThen_AndTheNextRecordIsNotStartedBefore()
     {
         GatedDeserializer values = new GatedDeserializer(gateOn: "v0");
-        AsyncMockConsumer<string, string> consumer =
-            new AsyncMockConsumer<string, string>(new AsyncStringDeserializer(), values);
+        AsyncKafkaConsumer<string, string> consumer =
+            DecodingConsumers.CreateAsync<string, string>(new AsyncStringDeserializer(), values);
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await Ready(consumer);
         consumer.AddRecord(Topic, 0, 0, Bytes("k0"), Bytes("v0"));
@@ -219,8 +219,8 @@ public sealed class AsyncConsumerDeserializationTests
         Failure failure)
     {
         FailingDeserializer values = new FailingDeserializer(failure, failOn: "x");
-        AsyncMockConsumer<string, string> consumer =
-            new AsyncMockConsumer<string, string>(new AsyncStringDeserializer(), values);
+        AsyncKafkaConsumer<string, string> consumer =
+            DecodingConsumers.CreateAsync<string, string>(new AsyncStringDeserializer(), values);
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await Ready(consumer);
         consumer.AddRecord(Topic, 0, 0, Bytes("k0"), Bytes("before"));
@@ -268,7 +268,7 @@ public sealed class AsyncConsumerDeserializationTests
     {
         FailingDeserializer keys = new FailingDeserializer(failure, failOn: "x");
         FailingDeserializer values = new FailingDeserializer(failure, failOn: "never");
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(keys, values);
+        AsyncKafkaConsumer<string, string> consumer = DecodingConsumers.CreateAsync<string, string>(keys, values);
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await Ready(consumer);
         consumer.AddRecord(Topic, 0, 0, Bytes("x"), Bytes("unread"));
@@ -297,8 +297,8 @@ public sealed class AsyncConsumerDeserializationTests
     {
         using CancellationTokenSource cancellation = new CancellationTokenSource();
         CancelledDeserializer values = new CancelledDeserializer(cancellation, cancelOn: "v1", observed);
-        AsyncMockConsumer<string, string> consumer =
-            new AsyncMockConsumer<string, string>(new AsyncStringDeserializer(), values);
+        AsyncKafkaConsumer<string, string> consumer =
+            DecodingConsumers.CreateAsync<string, string>(new AsyncStringDeserializer(), values);
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await Ready(consumer);
         for (int i = 0; i < 3; i++)
@@ -334,8 +334,8 @@ public sealed class AsyncConsumerDeserializationTests
         bool closes)
     {
         ConsumerDisposingDeserializer values = new ConsumerDisposingDeserializer(closes);
-        AsyncMockConsumer<string, string> consumer =
-            new AsyncMockConsumer<string, string>(new AsyncStringDeserializer(), values);
+        AsyncKafkaConsumer<string, string> consumer =
+            DecodingConsumers.CreateAsync<string, string>(new AsyncStringDeserializer(), values);
         values.Target = consumer;
         try
         {
@@ -394,8 +394,8 @@ public sealed class AsyncConsumerDeserializationTests
     private static async Task PollsBothSides<TKey, TValue>(Side<TKey> keys, Side<TValue> values)
     {
         string sides = keys.Name + " key, " + values.Name + " value";
-        AsyncMockConsumer<TKey, TValue> consumer =
-            new AsyncMockConsumer<TKey, TValue>(keys.Deserializer, values.Deserializer);
+        AsyncKafkaConsumer<TKey, TValue> consumer =
+            DecodingConsumers.CreateAsync<TKey, TValue>(keys.Deserializer, values.Deserializer);
         ReadOnlyMemory<byte> key;
         ReadOnlyMemory<byte> value;
         await using (TestTimeout.AsyncDisposal(consumer))
@@ -468,16 +468,16 @@ public sealed class AsyncConsumerDeserializationTests
     private static bool IsNative(ReadOnlyMemory<byte> memory) =>
         MemoryMarshal.TryGetMemoryManager<byte, BytesMemoryManager>(memory, out _);
 
-    private static async Task Ready<TKey, TValue>(AsyncMockConsumer<TKey, TValue> consumer)
+    private static async Task Ready<TKey, TValue>(AsyncKafkaConsumer<TKey, TValue> consumer)
     {
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(s_tp0, 0), s_deadline);
     }
 
-    private static Task<ConsumerRecords<TKey, TValue>> Poll<TKey, TValue>(AsyncMockConsumer<TKey, TValue> consumer) =>
+    private static Task<ConsumerRecords<TKey, TValue>> Poll<TKey, TValue>(AsyncKafkaConsumer<TKey, TValue> consumer) =>
         TestTimeout.Run(() => consumer.Poll(s_pollTimeout), s_deadline);
 
-    private static Task<long> Position<TKey, TValue>(AsyncMockConsumer<TKey, TValue> consumer) =>
+    private static Task<long> Position<TKey, TValue>(AsyncKafkaConsumer<TKey, TValue> consumer) =>
         TestTimeout.Run(() => consumer.Position(s_tp0), s_deadline);
 
     private static void Collect()
@@ -506,8 +506,8 @@ public sealed class AsyncConsumerDeserializationTests
     [InlineData(true)]
     public async Task ARetainedBatch_ReportsTheBytesOfItsKeysAndValues_AsMemoryPressure(bool awaits)
     {
-        AsyncMockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new AsyncMockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+        AsyncKafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
+            DecodingConsumers.CreateAsync<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
                 new RetainingDeserializer(awaits), new RetainingDeserializer(awaits));
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await Ready(consumer);
@@ -532,8 +532,8 @@ public sealed class AsyncConsumerDeserializationTests
     public async Task ACallScopedBatch_ReportsNoMemoryPressure_AndIsReleasedOnceItsLastPinIs(bool awaits)
     {
         KeepingDeserializer values = new KeepingDeserializer(awaits);
-        AsyncMockConsumer<string, string> consumer =
-            new AsyncMockConsumer<string, string>(new AsyncStringDeserializer(), values);
+        AsyncKafkaConsumer<string, string> consumer =
+            DecodingConsumers.CreateAsync<string, string>(new AsyncStringDeserializer(), values);
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await Ready(consumer);
         consumer.AddRecord(Topic, 0, 0, Bytes("key"), Bytes("kept"));
@@ -795,7 +795,7 @@ public sealed class AsyncConsumerDeserializationTests
             _closes = closes;
         }
 
-        internal AsyncMockConsumer<string, string>? Target { get; set; }
+        internal AsyncKafkaConsumer<string, string>? Target { get; set; }
 
         internal int Calls { get; private set; }
 

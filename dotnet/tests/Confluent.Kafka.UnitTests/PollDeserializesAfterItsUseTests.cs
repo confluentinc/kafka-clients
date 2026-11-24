@@ -60,7 +60,7 @@ public sealed class PollDeserializesAfterItsUseTests
     public void SyncPoll_ADeserializerThatDisposesTheConsumer_ReturnsTheRecords_AndTheConsumerIsClosed()
     {
         DisposingDeserializer values = new DisposingDeserializer();
-        MockConsumer<string?, string?> consumer = new MockConsumer<string?, string?>(new DisposingDeserializer(), values);
+        KafkaConsumer<string?, string?> consumer = DecodingConsumers.Create<string?, string?>(new DisposingDeserializer(), values);
         values.Target = consumer;
         try
         {
@@ -87,8 +87,8 @@ public sealed class PollDeserializesAfterItsUseTests
     public async Task AsyncPoll_ADeserializerThatDisposesTheConsumer_ReturnsTheRecords_AndTheConsumerIsClosed()
     {
         DisposingDeserializer values = new DisposingDeserializer();
-        AsyncMockConsumer<string?, string?> consumer =
-            new AsyncMockConsumer<string?, string?>(new DisposingDeserializer().AsAsync(), values.AsAsync());
+        AsyncKafkaConsumer<string?, string?> consumer =
+            DecodingConsumers.CreateAsync<string?, string?>(new DisposingDeserializer().AsAsync(), values.AsAsync());
         values.Target = consumer;
         try
         {
@@ -114,8 +114,8 @@ public sealed class PollDeserializesAfterItsUseTests
     [Fact]
     public void SyncPoll_ADeserializerThatThrows_LeavesThePositionUnchanged()
     {
-        MockConsumer<string?, string?> consumer =
-            new MockConsumer<string?, string?>(new FailingDeserializer(), new FailingDeserializer());
+        KafkaConsumer<string?, string?> consumer =
+            DecodingConsumers.Create<string?, string?>(new FailingDeserializer(), new FailingDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_tp0 });
         consumer.Seek(s_tp0, 3);
@@ -131,8 +131,8 @@ public sealed class PollDeserializesAfterItsUseTests
     [Fact]
     public async Task AsyncPoll_ADeserializerThatThrows_LeavesThePositionUnchanged()
     {
-        AsyncMockConsumer<string?, string?> consumer =
-            new AsyncMockConsumer<string?, string?>(new FailingDeserializer().AsAsync(), new FailingDeserializer().AsAsync());
+        AsyncKafkaConsumer<string?, string?> consumer =
+            DecodingConsumers.CreateAsync<string?, string?>(new FailingDeserializer().AsAsync(), new FailingDeserializer().AsAsync());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
@@ -157,7 +157,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        MockConsumer<byte[], int> consumer = new MockConsumer<byte[], int>(Serdes.ByteArray().Deserializer(), values);
+        KafkaConsumer<byte[], int> consumer = DecodingConsumers.Create<byte[], int>(Serdes.ByteArray().Deserializer(), values);
         values.Reassign = consumer.Assign;
         try
         {
@@ -193,7 +193,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        MockConsumer<byte[], int> consumer = new MockConsumer<byte[], int>(Serdes.ByteArray().Deserializer(), values);
+        KafkaConsumer<byte[], int> consumer = DecodingConsumers.Create<byte[], int>(Serdes.ByteArray().Deserializer(), values);
         values.Reassign = consumer.Assign;
         try
         {
@@ -224,7 +224,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(new AsyncByteArrayDeserializer(), values.AsAsync());
+        AsyncKafkaConsumer<byte[], int> consumer = DecodingConsumers.CreateAsync<byte[], int>(new AsyncByteArrayDeserializer(), values.AsAsync());
         values.Reassign = partitions => Block(() => consumer.Assign(partitions));
         try
         {
@@ -265,7 +265,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(new AsyncByteArrayDeserializer(), values.AsAsync());
+        AsyncKafkaConsumer<byte[], int> consumer = DecodingConsumers.CreateAsync<byte[], int>(new AsyncByteArrayDeserializer(), values.AsAsync());
         values.Reassign = partitions => Block(() => consumer.Assign(partitions));
         try
         {
@@ -296,7 +296,7 @@ public sealed class PollDeserializesAfterItsUseTests
     {
         string topic = UniqueTopic();
         PartitionDeserializer values = new PartitionDeserializer();
-        AsyncMockConsumer<byte[], int> consumer = new AsyncMockConsumer<byte[], int>(new AsyncByteArrayDeserializer(), values.AsAsync());
+        AsyncKafkaConsumer<byte[], int> consumer = DecodingConsumers.CreateAsync<byte[], int>(new AsyncByteArrayDeserializer(), values.AsAsync());
         values.Reassign = partitions => Block(() => consumer.Assign(partitions));
         using ManualResetEventSlim closing = new ManualResetEventSlim();
         using ManualResetEventSlim finish = new ManualResetEventSlim();

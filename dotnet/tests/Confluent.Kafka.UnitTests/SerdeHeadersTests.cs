@@ -255,12 +255,12 @@ public sealed class SerdeHeadersTests
     }
 
     [Fact]
-    public void MockConsumer_CallsTheHeadersForm_WithTheHeadersTheRecordCarries()
+    public void KafkaConsumer_CallsTheHeadersForm_WithTheHeadersTheRecordCarries()
     {
         PlainDeserializer key = new PlainDeserializer();
         HeaderReadingDeserializer value = new HeaderReadingDeserializer();
         using RecordBlocks blocks = new RecordBlocks();
-        MockConsumer<string, string> consumer = new MockConsumer<string, string>(key, value);
+        KafkaConsumer<string, string> consumer = DecodingConsumers.Create<string, string>(key, value);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TestTimeout.Run(() => consumer.Assign(new[] { s_partition }), s_deadline);
         TestTimeout.Run(() => consumer.Seek(s_partition, 0), s_deadline);
@@ -272,12 +272,12 @@ public sealed class SerdeHeadersTests
     }
 
     [Fact]
-    public async Task AsyncMockConsumer_CallsTheHeadersForm_WithTheHeadersTheRecordCarries()
+    public async Task AsyncKafkaConsumer_CallsTheHeadersForm_WithTheHeadersTheRecordCarries()
     {
         PlainDeserializer key = new PlainDeserializer();
         HeaderReadingDeserializer value = new HeaderReadingDeserializer();
         await using RecordBlocks blocks = new RecordBlocks();
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(key.AsAsync(), value.AsAsync());
+        AsyncKafkaConsumer<string, string> consumer = DecodingConsumers.CreateAsync<string, string>(key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await TestTimeout.Run(() => consumer.Assign(new[] { s_partition }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(s_partition, 0), s_deadline);
@@ -289,12 +289,12 @@ public sealed class SerdeHeadersTests
     }
 
     [Fact]
-    public void MockConsumer_CallsTheKeysHeadersForm_WithTheHeadersTheRecordCarries()
+    public void KafkaConsumer_CallsTheKeysHeadersForm_WithTheHeadersTheRecordCarries()
     {
         HeaderReadingDeserializer key = new HeaderReadingDeserializer();
         HeaderReadingDeserializer value = new HeaderReadingDeserializer();
         using RecordBlocks blocks = new RecordBlocks();
-        MockConsumer<string, string> consumer = new MockConsumer<string, string>(key, value);
+        KafkaConsumer<string, string> consumer = DecodingConsumers.Create<string, string>(key, value);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TestTimeout.Run(() => consumer.Assign(new[] { s_partition }), s_deadline);
         TestTimeout.Run(() => consumer.Seek(s_partition, 0), s_deadline);
@@ -306,12 +306,12 @@ public sealed class SerdeHeadersTests
     }
 
     [Fact]
-    public async Task AsyncMockConsumer_CallsTheKeysHeadersForm_WithTheHeadersTheRecordCarries()
+    public async Task AsyncKafkaConsumer_CallsTheKeysHeadersForm_WithTheHeadersTheRecordCarries()
     {
         HeaderReadingDeserializer key = new HeaderReadingDeserializer();
         HeaderReadingDeserializer value = new HeaderReadingDeserializer();
         await using RecordBlocks blocks = new RecordBlocks();
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(key.AsAsync(), value.AsAsync());
+        AsyncKafkaConsumer<string, string> consumer = DecodingConsumers.CreateAsync<string, string>(key.AsAsync(), value.AsAsync());
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await TestTimeout.Run(() => consumer.Assign(new[] { s_partition }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(s_partition, 0), s_deadline);
@@ -323,11 +323,11 @@ public sealed class SerdeHeadersTests
     }
 
     [Fact]
-    public void MockConsumer_AHeadersFormThatThrows_GivesTheExceptionTheHeadersItWasGiven()
+    public void KafkaConsumer_AHeadersFormThatThrows_GivesTheExceptionTheHeadersItWasGiven()
     {
         HeaderReadingDeserializer value = new HeaderReadingDeserializer(fail: true);
         using RecordBlocks blocks = new RecordBlocks();
-        MockConsumer<string, string> consumer = new MockConsumer<string, string>(new PlainDeserializer(), value);
+        KafkaConsumer<string, string> consumer = DecodingConsumers.Create<string, string>(new PlainDeserializer(), value);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TestTimeout.Run(() => consumer.Assign(new[] { s_partition }), s_deadline);
         TestTimeout.Run(() => consumer.Seek(s_partition, 0), s_deadline);
@@ -339,11 +339,11 @@ public sealed class SerdeHeadersTests
     }
 
     [Fact]
-    public async Task AsyncMockConsumer_AHeadersFormThatThrows_GivesTheExceptionTheHeadersItWasGiven()
+    public async Task AsyncKafkaConsumer_AHeadersFormThatThrows_GivesTheExceptionTheHeadersItWasGiven()
     {
         HeaderReadingDeserializer value = new HeaderReadingDeserializer(fail: true);
         await using RecordBlocks blocks = new RecordBlocks();
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(new PlainDeserializer().AsAsync(), value.AsAsync());
+        AsyncKafkaConsumer<string, string> consumer = DecodingConsumers.CreateAsync<string, string>(new PlainDeserializer().AsAsync(), value.AsAsync());
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await TestTimeout.Run(() => consumer.Assign(new[] { s_partition }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(s_partition, 0), s_deadline);
