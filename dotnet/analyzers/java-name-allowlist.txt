@@ -31,7 +31,7 @@ kind T:Confluent.Kafka.Common.KafkaFuture.BiConsumer`2
 # as a static class, which nothing constructs or derives from.
 kind T:Confluent.Kafka.Common.Serialization.Serdes
 
-# M23/P9 (ledger 596): HeaderExtensions.ValueMemory(IHeader), the value as a view of the polled batch; Java's Header
+# M23/P9 (ledger 633): HeaderExtensions.ValueMemory(IHeader), the value as a view of the polled batch; Java's Header
 # has only value().
 unmatched M:Confluent.Kafka.Common.Header.HeaderExtensions.ValueMemory(Confluent.Kafka.Common.Header.IHeader)
 

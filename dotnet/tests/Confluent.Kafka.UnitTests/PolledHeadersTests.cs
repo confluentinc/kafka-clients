@@ -149,7 +149,7 @@ public sealed class PolledHeadersTests
     }
 
     [Theory]
-    [InlineData("Add(Header)")]
+    [InlineData("Add(IHeader)")]
     [InlineData("Add(string, byte[])")]
     [InlineData("Remove")]
     [InlineData("Headers(string)")]
@@ -179,7 +179,7 @@ public sealed class PolledHeadersTests
 
             switch (member)
             {
-                case "Add(Header)":
+                case "Add(IHeader)":
                     IHeader added = new RecordHeader("d", new byte[] { 4 });
                     Assert.Same(polled, polled.Add(added));
                     built.Add(added);
