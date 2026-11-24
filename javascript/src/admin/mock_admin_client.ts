@@ -1461,13 +1461,29 @@ export namespace MockAdminClient {
        * @defaultValue `'I4ZmrWqfT2e-upky_4fdPA'`
        */
       clusterId?: string;
-      /** The brokers, any iterable of Node (`numBrokers(1)`'s one broker by default). */
+      /**
+       * The brokers, any iterable of Node.
+       *
+       * @defaultValue one broker, `new Node({ id: 0, host: 'localhost', port: 1000 })` (Java's `numBrokers(1)`)
+       */
       brokers?: Iterable<Node>;
-      /** The index of the controller among the brokers (the first broker by default). */
+      /**
+       * The index of the controller among the brokers.
+       *
+       * @defaultValue none: `build()` makes the first broker the controller
+       */
       controller?: number;
-      /** The log dirs of each broker (the default log dir of each by default). */
-      brokerLogDirs?: ReadonlyArray<ReadonlyArray<string>>;
-      /** The default partition count, a Java `short` (1 by default). */
+      /**
+       * The log dirs of each broker, any iterable of iterables.
+       *
+       * @defaultValue `MockAdminClient.DEFAULT_LOG_DIRS` for each broker
+       */
+      brokerLogDirs?: Iterable<Iterable<string>>;
+      /**
+       * The default partition count, a Java `short`.
+       *
+       * @defaultValue none: `build()` reads it as `1`
+       */
       defaultPartitions?: number;
       /**
        * Whether the mock uses a KRaft controller.
@@ -1475,15 +1491,35 @@ export namespace MockAdminClient {
        * @defaultValue `false`
        */
       usingRaftController?: boolean;
-      /** The default replication factor (`min(brokers, 3)` by default). */
+      /**
+       * The default replication factor.
+       *
+       * @defaultValue none: `build()` reads it as the broker count, at most 3
+       */
       defaultReplicationFactor?: number;
-      /** The finalized feature levels, by feature name (none by default). */
+      /**
+       * The finalized feature levels, by feature name.
+       *
+       * @defaultValue the empty map
+       */
       featureLevels?: ReadonlyMap<string, number> | Readonly<Record<string, number>>;
-      /** The minimum supported feature levels (none by default). */
+      /**
+       * The minimum supported feature levels.
+       *
+       * @defaultValue the empty map
+       */
       minSupportedFeatureLevels?: ReadonlyMap<string, number> | Readonly<Record<string, number>>;
-      /** The maximum supported feature levels (none by default). */
+      /**
+       * The maximum supported feature levels.
+       *
+       * @defaultValue the empty map
+       */
       maxSupportedFeatureLevels?: ReadonlyMap<string, number> | Readonly<Record<string, number>>;
-      /** The group configs overlaid onto every group's (none by default). */
+      /**
+       * The group configs overlaid onto every group's.
+       *
+       * @defaultValue the empty map
+       */
       defaultGroupConfigs?: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
     }) {
       applyOptionKeys('Builder', options, arguments.length, [
@@ -1492,7 +1528,7 @@ export namespace MockAdminClient {
         ['clusterId', (v) => this.clusterId({ clusterId: v as string })],
         ['brokers', (v) => this.brokers({ brokers: v as Iterable<Node> })],
         ['controller', (v) => this.controller({ index: v as number })],
-        ['brokerLogDirs', (v) => this.brokerLogDirs({ brokerLogDirs: v as string[][] })],
+        ['brokerLogDirs', (v) => this.brokerLogDirs({ brokerLogDirs: v as Iterable<Iterable<string>> })],
         ['defaultPartitions', (v) => this.defaultPartitions({ numPartitions: v as number })],
         ['usingRaftController', (v) => this.usingRaftController({ usingRaftController: v as boolean })],
         ['defaultReplicationFactor', (v) => this.defaultReplicationFactor({ defaultReplicationFactor: v as number })],
