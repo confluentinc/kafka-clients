@@ -475,7 +475,7 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     const valueSerializer = this.#valueSerializer;
     if (keySerializer === null && valueSerializer === null) return this.#handOver(record, userCallback, undefined, undefined);
     // Java's doSend serializes the key, then the value, with the record's
-    // topic and headers (which a serializer may change: they are sealed only
+    // topic and headers (which a serializer may change: they become read-only
     // at the hand-over). A serializer that returns a plain value costs no
     // microtask; one that returns a thenable is awaited.
     // A serializer's throw is answered as Java's doSend answers it

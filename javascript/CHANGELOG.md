@@ -23,8 +23,8 @@ its own for a one-parameter one), `send({ record, callback })`, a callback of
 `({ metadata, exception })`, `close(timeout)` with a `Duration`, exactly
 Java's `ProducerRecord` constructors, `undefined` refused (`close(undefined)`
 included), a bare value of no overload's type refused with
-`IllegalArgumentError`, `Header` / `Headers` classes (`header.key()`,
-`header.value()`, no `[key, value]` pairs), `readonly` data fields, each
+`IllegalArgumentError`, `Header` / `RecordHeader` / `Headers` (`header.key()`,
+`header.value()`, `[key, value]` pairs where headers are taken), `readonly` data fields, each
 package imported from its own path (the root's namespaces are gone), `ExecutionError` from a failed
 `get()`, errors without `code` / `errorName` / `retriable` / `apiError`,
 Java's `long` as a `bigint` (`metadata.offset`, `metadata.timestamp`,
@@ -147,38 +147,35 @@ newer.
   Java's does. A method that
   only reads throws `TypeError` when it is given an argument.
   `RecordMetadata` and the enums have private constructors.
-- `ProducerRecord`, `Header` and `Headers` have Java's `equals` and
+- `ProducerRecord`, `RecordHeader` and `Headers` have Java's `equals` and
   `hashCode`, with Java's hash codes. A `Uint8Array` key or value is Java's
   `byte[]`: a record equals another only when it holds the same `Uint8Array`,
   and the bytes add nothing to its hash code; a string key or value compares
   as a string. A header's value is compared by its bytes, as Java's
   `RecordHeader` does.
-- `Header` and `Headers`, in `common/header`, with Java's members: `Header`
-  with Java's methods (`new Header({ key, value })`, `header.key()`,
-  `header.value()`, a `Buffer`) and a `toJSON()`, `Headers` with `add`,
-  `remove`, `lastHeader`, `headers(key)`, `toArray`, iteration and Java's
-  `toString()`. A record's `headers` is its own `Headers`, built from a
-  `Headers` or an iterable of `Header`s. `send()` makes the record's headers read-only, as
-  Java's does: a later `add` or `remove` throws `IllegalStateError`
-  "RecordHeaders has been closed.".
-- `Header` and `Headers` wrap the client core's `RecordHeader` and
-  `RecordHeaders`: the core holds the headers and refuses a change once they
-  are read-only, and `send()` hands the record's own headers to the core
-  instead of rebuilding them. A `Header` copies its key and value when it is
-  made, and `value()` is a `Buffer` over its own bytes; `add(header)` and
-  `new Headers([...])` store copies. A header read back from a `Headers` that
-  can still change, such as your own before `send()`, is a copy, which stays
-  as it is when the `Headers` changes; one read from a read-only `Headers` is
-  a view, with no copy, which keeps it alive, and stays valid after a refused
-  `add` or `remove`. A header key holding a NUL now throws `TypeError` when
-  the header is made, not at `send()`, and so does one given to `add`,
-  `remove`, `lastHeader` or an iterated `headers(key)`, where Java takes the
-  key; `key()` reads a lone surrogate back as `?`. On read-only headers
-  `remove(null)` throws the client core's `IllegalArgumentError` "key cannot
-  be null.", where Java checks the read-only state first. Iterating a
-  `Headers` or `headers(key)` reads the headers when the iterator is made, so
-  a change during an iteration is not seen and throws nothing, where Java's
-  iterators throw `ConcurrentModificationException`.
+- `Header`, `RecordHeader` and `Headers`, in `common/header`, with Java's
+  members: `Header` is Java's interface, with `key()` and `value()` (a
+  `Buffer`), `RecordHeader` the class that builds one
+  (`new RecordHeader({ key, value })`), with a `toJSON()`, and `Headers` has
+  `add`, `remove`, `lastHeader`, `headers(key)`, `toArray`, iteration and
+  Java's `toString()`. A record's `headers` is its own `Headers`, built from a
+  `Headers` or an iterable of `Header` objects and `[key, value]` pairs, in any
+  order, a pair becoming a new `RecordHeader`, and so is `new Headers(...)`.
+  `send()` makes the record's headers read-only, as Java's does: a later
+  `add` or `remove` throws `IllegalStateError` "RecordHeaders has been
+  closed.".
+- `Headers` and `RecordHeader` are plain classes holding their own data, as
+  Java's and Python's are, where development builds wrapped the client core's
+  `RecordHeaders` and `RecordHeader`: a `RecordHeader` keeps the key and the
+  value it is given, with no copy, a `Headers` the very `Header` objects
+  added, so a header read back is the object added, and the client copies the
+  headers for the core only at `send()`. A header key holding a NUL makes
+  `send()` reject with `TypeError`, where the header used to refuse it when
+  made, and `key()` returns the key as given, a lone surrogate included,
+  which is sent as `?`. On read-only headers `remove(null)` throws
+  `IllegalStateError`, Java's read-only check coming first. An iterator over a
+  `Headers` sees a change made during the iteration, as a JavaScript array's
+  iterator does, where Java's throws `ConcurrentModificationException`.
 - A header value is bytes (`Uint8Array` or `null`), as in Java and Python: a
   string header value throws `TypeError` (encode it first,
   `Buffer.from(value, 'utf8')`), where development builds took a string.

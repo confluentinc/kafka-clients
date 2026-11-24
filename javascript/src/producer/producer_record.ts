@@ -16,7 +16,7 @@
 // serializers take. A producer without a serializer takes a Buffer, a
 // Uint8Array or null, checked at send: a string needs stringSerializer()
 // (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
-// The headers are a Headers (common/header), sealed by send().
+// The headers are a Headers (common/header), made read-only by send().
 
 import { JavaForms } from '../internal/args';
 import { bytesToString } from '../internal/bytes';
@@ -188,8 +188,8 @@ export class ProducerRecord<out K = never, out V = never> {
     value: null;
     /**
      * The headers that will be included in the record: a `Headers` or an
-     * iterable of `Header`, copied into the record's own `Headers` (the
-     * core copies each header), or null.
+     * iterable of `Header` objects and `[key, value]` pairs, held by the
+     * record's own `Headers`, or null.
      */
     headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
@@ -217,8 +217,8 @@ export class ProducerRecord<out K = never, out V = never> {
     value: V | null;
     /**
      * The headers that will be included in the record: a `Headers` or an
-     * iterable of `Header`, copied into the record's own `Headers` (the
-     * core copies each header), or null.
+     * iterable of `Header` objects and `[key, value]` pairs, held by the
+     * record's own `Headers`, or null.
      */
     headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
@@ -246,8 +246,8 @@ export class ProducerRecord<out K = never, out V = never> {
     value: null;
     /**
      * The headers that will be included in the record: a `Headers` or an
-     * iterable of `Header`, copied into the record's own `Headers` (the
-     * core copies each header), or null.
+     * iterable of `Header` objects and `[key, value]` pairs, held by the
+     * record's own `Headers`, or null.
      */
     headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
@@ -290,8 +290,8 @@ export class ProducerRecord<out K = never, out V = never> {
     value: V | null;
     /**
      * The headers that will be included in the record: a `Headers` or an
-     * iterable of `Header`, copied into the record's own `Headers` (the
-     * core copies each header), or null.
+     * iterable of `Header` objects and `[key, value]` pairs, held by the
+     * record's own `Headers`, or null.
      */
     headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
@@ -408,8 +408,8 @@ export class ProducerRecord<out K = never, out V = never> {
     value: null;
     /**
      * The headers that will be included in the record: a `Headers` or an
-     * iterable of `Header`, copied into the record's own `Headers` (the
-     * core copies each header), or null.
+     * iterable of `Header` objects and `[key, value]` pairs, held by the
+     * record's own `Headers`, or null.
      */
     headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
@@ -431,8 +431,8 @@ export class ProducerRecord<out K = never, out V = never> {
     value: V | null;
     /**
      * The headers that will be included in the record: a `Headers` or an
-     * iterable of `Header`, copied into the record's own `Headers` (the
-     * core copies each header), or null.
+     * iterable of `Header` objects and `[key, value]` pairs, held by the
+     * record's own `Headers`, or null.
      */
     headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
@@ -454,8 +454,8 @@ export class ProducerRecord<out K = never, out V = never> {
     value: null;
     /**
      * The headers that will be included in the record: a `Headers` or an
-     * iterable of `Header`, copied into the record's own `Headers` (the
-     * core copies each header), or null.
+     * iterable of `Header` objects and `[key, value]` pairs, held by the
+     * record's own `Headers`, or null.
      */
     headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
@@ -477,8 +477,8 @@ export class ProducerRecord<out K = never, out V = never> {
     value: V | null;
     /**
      * The headers that will be included in the record: a `Headers` or an
-     * iterable of `Header`, copied into the record's own `Headers` (the
-     * core copies each header), or null.
+     * iterable of `Header` objects and `[key, value]` pairs, held by the
+     * record's own `Headers`, or null.
      */
     headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
   });
@@ -782,11 +782,11 @@ export class ProducerRecord<out K = never, out V = never> {
 
   /**
    * The arguments of the native send: topic, partition (-1 for null) and
-   * timestamp (-1n for null), key and value bytes, and the record's native
-   * `RecordHeaders`, which the core copies into the record, or null for none.
-   * The record's headers are made read-only first, as Java's `doSend` seals
-   * them (`setReadOnly`) once the serializers have run, before handing the
-   * record over. Called by `KafkaProducer`. The record is frozen, so its
+   * timestamp (-1n for null), key and value bytes, and the record's headers,
+   * each key's bytes then its value, which the addon copies into a native
+   * `RecordHeaders`, or null for none. The record's headers are made
+   * read-only first, as Java's `doSend` makes them (`setReadOnly`) once the
+   * serializers have run, before handing the record over. Called by `KafkaProducer`. The record is frozen, so its
    * fields are what the constructor checked: nothing is checked again. A
    * record with no headers allocates nothing for them.
    *
