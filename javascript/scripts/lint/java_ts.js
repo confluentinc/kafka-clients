@@ -205,8 +205,8 @@ const MAPPING_FILE = 'lint-mapping.json';
 /**
  * The mapping lists of `ctx`'s client, read once from `lint-mapping.json`
  * (all empty when the file is missing): `{invented, javaTargets,
- * nativeCallers}`, each a `Map` from a key to its text, the order of the file
- * kept.
+ * javaTargetReasons, nativeCallers}`, each a `Map` from a key to its text, the
+ * order of the file kept.
  *   - `invented`: the names JavaScript invents (javascript/CLAUDE.md, JavaScript
  *     Binding Conventions, Scope and "Layout and modules": every addition
  *     Java lacks is *(js-only)* and on the list of invented names, which is
@@ -214,7 +214,9 @@ const MAPPING_FILE = 'lint-mapping.json';
  *     lint reads, each with the reason it has no Java counterpart. An
  *     invented options type is named `...Args` (check-invented-names).
  *   - `javaTargets`: the Java class, or member, of an item the convention
- *     does not find, `<fqn>` or `<fqn>#<member>`;
+ *     does not find, `<fqn>` or `<fqn>#<member>`; an entry that places a class
+ *     outside its Java package's folder is `{ java, reason }`, its reason in
+ *     `javaTargetReasons` (check-invented-names);
  *   - `nativeCallers`: the classes (exported or not) and exported functions
  *     outside the wrappers the JS conventions name that call the addon, each
  *     with the reason the rules give (check-native-wrappers).
@@ -227,13 +229,26 @@ function mappingLists(ctx) {
     try {
       text = ctx.read(MAPPING_FILE);
     } catch (e) {
-      if (e.code === 'ENOENT') return { invented: new Map(), javaTargets: new Map(), nativeCallers: new Map() };
+      if (e.code === 'ENOENT') {
+        return { invented: new Map(), javaTargets: new Map(), javaTargetReasons: new Map(), nativeCallers: new Map() };
+      }
       throw e;
     }
     const json = JSON.parse(text);
+    const javaTargets = new Map();
+    const javaTargetReasons = new Map();
+    for (const [key, value] of Object.entries(json.javaTargets || {})) {
+      if (value !== null && typeof value === 'object') {
+        javaTargets.set(key, String(value.java));
+        javaTargetReasons.set(key, value.reason === undefined ? null : value.reason);
+      } else {
+        javaTargets.set(key, value);
+      }
+    }
     return {
       invented: new Map(Object.entries(json.invented || {})),
-      javaTargets: new Map(Object.entries(json.javaTargets || {})),
+      javaTargets,
+      javaTargetReasons,
       nativeCallers: new Map(Object.entries(json.nativeCallers || {})),
     };
   });
@@ -242,13 +257,14 @@ function mappingLists(ctx) {
 /**
  * The mapping of the item or member keyed `key` (declared at `node`):
  * `{jsOnly, java}`, each `{text, node}` or null, `text` the reason or the
- * Java name, from the lists of `mappingLists`.
+ * Java name, from the lists of `mappingLists`; `java.reason` is the reason of
+ * a `{ java, reason }` entry, null for one that is the Java name alone.
  */
 function mappingOf(ctx, key, node) {
-  const { invented, javaTargets } = mappingLists(ctx);
+  const { invented, javaTargets, javaTargetReasons } = mappingLists(ctx);
   return {
     jsOnly: invented.has(key) ? { text: invented.get(key), node } : null,
-    java: javaTargets.has(key) ? { text: javaTargets.get(key), node } : null,
+    java: javaTargets.has(key) ? { text: javaTargets.get(key), reason: javaTargetReasons.get(key) ?? null, node } : null,
   };
 }
 

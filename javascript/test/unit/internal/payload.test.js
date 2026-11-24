@@ -325,10 +325,7 @@ test("RecordDeserializationError: Java's constructor, its getters and its nested
     timestampType: TimestampType.NO_TIMESTAMP_TYPE,
     keyBuffer: null,
     valueBuffer: null,
-    // The generated type names Header elements only; the run time takes pairs too.
-    headers: /** @type {Iterable<import('@confluentinc/kafka-javascript/common/header').Header>} */ (
-      /** @type {unknown} */ ([given, ['p', Buffer.from('v')]])
-    ),
+    headers: [given, ['p', Buffer.from('v')]],
     message: null,
     cause: null,
   });

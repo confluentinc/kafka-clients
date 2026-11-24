@@ -15,8 +15,12 @@
 /**
  * The package of Java's `org.apache.kafka.common.header`: the `Header`
  * interface, `Headers`, which joins Java's interface with its internal class
- * `RecordHeaders`, and `RecordHeader`, the internal class of a header, which
- * builds one.
+ * `RecordHeaders`, and `RecordHeader`, the class an app builds a header with
+ * *(deviation, as in Python: Java's `RecordHeader` is in
+ * `common.header.internals`, and "one import path per Java package" would
+ * make the class apps build headers with public under an "internals" path.
+ * Why: it belongs beside `Header` and `Headers`, as Python's header class
+ * sits in `confluent_kafka.common.header`)*.
  *
  * Not translated: `RecordHeader`'s `(ByteBuffer, ByteBuffer)` constructor, as
  * JavaScript has no `ByteBuffer` (a `Buffer` is a `Uint8Array`, the `byte[]`

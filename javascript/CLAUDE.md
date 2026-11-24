@@ -707,14 +707,20 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `RecordHeader` is the class an app builds a header with, Java's
   `(String key, byte[] value)` constructor taking `{ key, value }`; `Headers`
   joins Java's `Headers` interface and its class `RecordHeaders`. All three
-  are in `common/header` and are plain TypeScript, translated from the Java
-  source, holding their own data, and none calls the addon. A `RecordHeader`
-  keeps the key as given, a lone surrogate or a NUL included, as Java keeps
-  the `String`, and the value it is given without copying, and `value()`
-  returns that value as a `Buffer` over the same memory, the same `Buffer` on
-  every call, or `null`. Its `equals`, `hashCode` and `toString` are Java's,
-  read through its `key()` and `value()`. `Headers` holds its own list of the
-  very `Header` objects added (`add(header)` stores that object, `add({ key,
+  are in `common/header`, `RecordHeader` too *(deviation, as in Python:
+  Java's `RecordHeader` is in `common.header.internals`, and "one import path
+  per Java package" would make the class apps build headers with public
+  under an "internals" path. Why: it belongs beside `Header` and `Headers`,
+  as Python's header class sits in `confluent_kafka.common.header`)*, its
+  `lint-mapping.json` `javaTargets` entry giving that reason. They are plain
+  TypeScript, translated from the Java source, holding their own data, and
+  none calls the addon. A `RecordHeader` keeps the key as given, a lone
+  surrogate or a NUL included, as Java keeps the `String`, and the value it
+  is given without copying, and `value()` returns that value as a `Buffer`
+  over the same memory, the same `Buffer` on every call, or `null`. Its
+  `equals`, `hashCode` and `toString` are Java's, read through its `key()` and
+  `value()`. `Headers` holds its own list of the very `Header` objects added
+  (`add(header)` stores that object, `add({ key,
   value })` a new `RecordHeader`), so a `Header` read from it stays valid
   however it changes later, as in Java; it keeps Java's methods in Java's
   order, `RecordHeaders`' three constructors as one `headers` parameter
@@ -1405,9 +1411,10 @@ The layout is the JS conventions' (Layout and modules).
   type).
 - `src/`: TypeScript sources only (`.ts`; no `.js`, no `.d.ts`), one folder
   per Java package (`clients` dropped), one public Java type per file,
-  snake_case names. The package's own helpers are in `src/internal/` (never
-  exported, never declared; `dist/internal/` is not in `exports`). Every other
-  folder is a package with one import path
+  snake_case names; `RecordHeader`, of Java's `common.header.internals`, is
+  in `src/common/header/` (Headers, above). The package's own helpers are in
+  `src/internal/` (never exported, never declared; `dist/internal/` is not in
+  `exports`). Every other folder is a package with one import path
   (`@confluentinc/kafka-javascript/producer`,
   `@confluentinc/kafka-javascript/common/header`): its `index.ts` re-exports
   only the modules of its own folder, by name, `export { A } from './a'`
@@ -1692,7 +1699,9 @@ names for the exported items and public members (JS conventions, Layout and
 modules), a member named by a well-known symbol keyed
 `<Class>.[Symbol.<name>]` (`KafkaProducer.[Symbol.asyncDispose]`,
 `Headers.[Symbol.iterator]`), each with its reason, `javaTargets`, the Java class or member of
-an item the naming convention does not find, and `nativeCallers`, the classes,
+an item the naming convention does not find (`{ java, reason }` for a class
+it places outside its Java package's folder, with that deviation's reason),
+and `nativeCallers`, the classes,
 exports and modules outside the wrappers the JS conventions name that call
 the addon, each with the reason the rules give (`check-native-wrappers`; a
 module's top-level code keyed `src/<module>.ts`); the other invented names are
@@ -1854,7 +1863,11 @@ The rules, each named in its finding:
   it), an access by a computed name (`native[name]`), and a destructuring of
   the handle in a parameter or an assignment.
 - `check-invented-names`: every entry of `lint-mapping.json` is needed and
-  resolves, and an invented options type is named `...Args`.
+  resolves, and an invented options type is named `...Args`. A `javaTargets`
+  entry that places a class outside the folder of its Java package
+  (`RecordHeader`) is `{ java, reason }`, its reason the deviation's
+  (`java-no-reason` without it); every other entry is the Java name alone
+  (`java-reason-unneeded`).
 - `check-module-exports`: each package has one import path; an index
   re-exports only its own folder's modules, with no namespace, and the root
   exports only Java's built-in errors and `Duration`.

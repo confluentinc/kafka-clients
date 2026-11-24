@@ -303,9 +303,10 @@ const LIB = {
 };
 
 /**
- * The text of a lint-mapping.json holding `lists` (`invented`, `javaTargets`: key to text).
+ * The text of a lint-mapping.json holding `lists` (`invented`, `javaTargets`:
+ * key to text, a `javaTargets` entry also as `{ java, reason }`).
  *
- * @param {{ invented?: Record<string, string>, javaTargets?: Record<string, string> }} lists
+ * @param {{ invented?: Record<string, string>, javaTargets?: Record<string, string | { java: string, reason?: string }> }} lists
  * @returns {string}
  */
 function mapping(lists) {
