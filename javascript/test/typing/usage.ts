@@ -594,6 +594,27 @@ expectTypeOf(deserialization.origin()).toEqualTypeOf<RecordDeserializationError.
 expectTypeOf(deserialization.timestampType()).toEqualTypeOf<TimestampType>();
 expectTypeOf(deserialization.keyBuffer()).toEqualTypeOf<Buffer | null>();
 expectTypeOf(deserialization.offset()).toEqualTypeOf<bigint>();
+expectTypeOf(deserialization.headers()).toEqualTypeOf<Headers>();
+// Its headers, where Java takes Headers: a Headers, kept as it is, or Header
+// objects and [key, value] pairs, mixed.
+const deserializationArgs = {
+  origin: RecordDeserializationError.DeserializationExceptionOrigin.KEY,
+  partition: new TopicPartition({ topic: 't', partition: 0 }),
+  offset: 1n,
+  timestamp: -1,
+  timestampType: TimestampType.CREATE_TIME,
+  keyBuffer: Buffer.from('k'),
+  valueBuffer: null,
+  message: 'failed',
+  cause: null,
+};
+void new RecordDeserializationError({ ...deserializationArgs, headers: built });
+void new RecordDeserializationError({
+  ...deserializationArgs,
+  headers: [['k', null], new RecordHeader({ key: 'h', value: null }), ['v', Buffer.from('1')]],
+});
+// @ts-expect-error a pair's value is bytes or null: encode a string first
+void new RecordDeserializationError({ ...deserializationArgs, headers: [['k', 'v']] });
 expectTypeOf(TimestampType.forName('CreateTime')).toEqualTypeOf<TimestampType>();
 const nullPartition = new TopicPartitionSet([null]);
 expectTypeOf(nullPartition.has(null)).toEqualTypeOf<boolean>();

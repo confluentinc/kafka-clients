@@ -99,7 +99,9 @@ enum Kind {
     /// Java's `ByteBuffer`: a `Uint8Array` taken, a `Buffer` over the same
     /// memory kept and returned.
     Bytes,
-    /// Java's `Headers`: a `Headers`, kept, or an iterable of `Header`.
+    /// Java's `Headers`: a `Headers`, kept, or an iterable of `Header` objects
+    /// and `[key, value]` pairs (javascript/CLAUDE.md, JavaScript Binding
+    /// Conventions, Serialization).
     Headers,
     /// An enum class: its TypeScript name (a nested one qualified).
     Enum(&'static str),
@@ -175,7 +177,7 @@ impl Kind {
             Kind::TopicPartitionLongMap => "TopicPartitionMap<bigint | number>",
             Kind::KafkaMetric => "KafkaMetric",
             Kind::Bytes => "Uint8Array",
-            Kind::Headers => "Headers | Iterable<Header>",
+            Kind::Headers => "Headers | Iterable<Header | readonly [string, Uint8Array | null]>",
             Kind::Enum(name) => name,
             Kind::OffsetMap => "TopicPartitionMap<OffsetAndMetadata>",
         }

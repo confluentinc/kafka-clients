@@ -1381,7 +1381,7 @@ export class RecordDeserializationError extends SerializationError {
         timestampType: TimestampType; /** Java's `ByteBuffer keyBuffer`. */
         keyBuffer: Uint8Array | null; /** Java's `ByteBuffer valueBuffer`. */
         valueBuffer: Uint8Array | null; /** Java's `Headers headers`. */
-        headers: Headers_2 | Iterable<Header>; /** The message; `null` reads as `''`. */
+        headers: Headers_2 | Iterable<Header | readonly [string, Uint8Array | null]>; /** The message; `null` reads as `''`. */
         message: string | null; /** The cause (`Error`'s `cause`). */
         cause: unknown;
         name?: never;

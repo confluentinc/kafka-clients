@@ -42,7 +42,8 @@ test('needed entries that resolve pass, an invented options type named ...Args t
           'src/producer/types.ts:RecConfigs': 'The configuration map.',
         },
         javaTargets: {
-          'src/producer/types.ts:RecordHeader': 'org.apache.kafka.common.header.Header',
+          // A class outside its Java package's folder, with its reason.
+          'src/producer/types.ts:RecordHeader': { java: 'org.apache.kafka.common.header.Header', reason: 'Kept beside Rec.' },
           'Rec.conceal': 'org.apache.kafka.clients.producer.Rec#hidden',
         },
       }),
@@ -62,7 +63,11 @@ test('each finding kind, with its exact text', () => {
         '/** No reason. */\nexport type NoReason = { a: number };\n' +
         '/** Lost. */\nexport type Lost = { a: number };\n' +
         '/** Both. */\nexport type Both = { a: number };\n' +
-        '/** An options type. */\nexport interface CloseOptions { timeoutMs?: number }\n',
+        '/** An options type. */\nexport interface CloseOptions { timeoutMs?: number }\n' +
+        '/** Elsewhere. */\nexport type Elsewhere = { a: number };\n' +
+        '/** Empty. */\nexport type Empty = { a: number };\n' +
+        '/** Named. */\nexport type Named = { a: number };\n',
+      'src/producer/rec.ts': LIB['src/producer/rec.ts'].replace('extra(): void {}', 'extra(): void {}\n  conceal(): void {}'),
       'src/common/future.ts': '/** A future. */\nexport class Future {}\n',
       'lint-mapping.json': mapping({
         invented: {
@@ -79,6 +84,12 @@ test('each finding kind, with its exact text', () => {
           'src/producer/types.ts:Both': 'org.apache.kafka.common.header.Header',
           'src/producer/callback.ts:Callback': 'org.apache.kafka.clients.producer.Callback',
           'src/common/future.ts:Future': 'org.apache.kafka.clients.producer.Rec',
+          // Outside the folder of common.header, with no reason or an empty one.
+          'src/producer/types.ts:Elsewhere': 'org.apache.kafka.common.header.Header',
+          'src/producer/types.ts:Empty': { java: 'org.apache.kafka.common.header.Header', reason: ' ' },
+          // In the folder of clients.producer, and a member: no reason.
+          'src/producer/types.ts:Named': { java: 'org.apache.kafka.clients.producer.Rec', reason: 'Not needed.' },
+          'Rec.conceal': { java: 'org.apache.kafka.clients.producer.Rec#hidden', reason: 'Not needed.' },
           'Rec.close': 'org.apache.kafka.clients.producer.Rec#close',
           'Rec.extra': 'org.apache.kafka.clients.producer.Rec#hidden',
           'Rec.flush': 'org.apache.kafka.clients.producer.Rec#vanish',
@@ -98,14 +109,18 @@ test('each finding kind, with its exact text', () => {
     'src/producer/types.ts:Lost: javaTargets org.apache.kafka.clients.producer.Nowhere names no class of the Java index',
     'src/producer/types.ts:Both: is both in invented and in javaTargets',
     'src/producer/types.ts:CloseOptions: is an invented options type: name it CloseArgs',
+    'src/producer/types.ts:Elsewhere: javaTargets org.apache.kafka.common.header.Header places common.header.Header outside src/common/header/, the folder of its Java package: give the entry its reason, { "java": <fqn>, "reason": <why> }',
+    'src/producer/types.ts:Empty: javaTargets org.apache.kafka.common.header.Header places common.header.Header outside src/common/header/, the folder of its Java package: give the entry its reason, { "java": <fqn>, "reason": <why> }',
+    'src/producer/types.ts:Named: javaTargets org.apache.kafka.clients.producer.Rec gives a reason, but the class is in the folder of its Java package: drop the reason',
     'Rec.topic: is listed as invented, but it translates clients.producer.Rec#topic: drop the entry',
     'Rec.close: javaTargets org.apache.kafka.clients.producer.Rec#close names what the convention finds: drop the entry',
     'Rec.flush: javaTargets org.apache.kafka.clients.producer.Rec#vanish: clients.producer.Rec declares no member vanish',
     'Rec.extra: javaTargets org.apache.kafka.clients.producer.Rec#hidden re-maps what the convention maps to clients.producer.Base#extra: rename the item, or drop the entry',
+    "Rec.conceal: javaTargets org.apache.kafka.clients.producer.Rec#hidden gives a reason, but a member's entry is its Java name alone: drop the reason",
     'Rec.gone: invented lists it, but no exported item or public member is keyed so: drop the entry',
     'Rec.nowhere: javaTargets lists it, but no exported item or public member is keyed so: drop the entry',
   ]);
-  assert.ok(r.err.includes('❌ check-invented-names: 14 finding(s).'), r.text);
+  assert.ok(r.err.includes('❌ check-invented-names: 18 finding(s).'), r.text);
 });
 
 test("without lint-mapping.json both lists are empty: an invented export is then check-java-name's finding, not this rule's", () => {

@@ -28,6 +28,11 @@
 //     does not find: it resolves in the Java index, the member is declared by
 //     that class, and it neither names what the convention already finds nor
 //     re-maps an item the convention maps elsewhere;
+//   - a `javaTargets` entry that places a class outside the folder of its Java
+//     package, against the one import path of each Java package
+//     (javascript/CLAUDE.md, JavaScript Binding Conventions, Layout and
+//     modules), is `{ "java": <fqn>, "reason": <why> }`, the deviation's
+//     reason; every other entry is the Java name alone;
 //   - an item is in one list, not both;
 //   - an invented options type, an exported object type or interface of
 //     named properties on the list, is named `...Args` (Layout and modules:
@@ -60,13 +65,16 @@ module.exports = {
     'java-no-member',
     'java-unused',
     'java-remap',
+    'java-no-reason',
+    'java-reason-unneeded',
     'java-target-unused',
     'listed-twice',
   ],
   needs: ['program', 'java'],
   hint:
     `Give each \`invented\` entry of ${MAPPING_FILE} its reason, point each \`javaTargets\` entry at a Java class ` +
-    '(and member) of the index, drop an entry the convention makes unnecessary or that matches nothing, and ' +
+    '(and member) of the index, with its reason as { "java", "reason" } when it places a class outside its Java ' +
+    "package's folder, drop an entry the convention makes unnecessary or that matches nothing, and " +
     'name an invented options type `...Args` (javascript/CLAUDE.md, JavaScript Binding Conventions, Layout and modules).',
   check(ctx) {
     const { ts } = ctx.program();
@@ -89,9 +97,10 @@ module.exports = {
 
     /**
      * The findings of the mapping `tags` of `subject` (keyed `key`, declared
-     * at `at`), whose convention mapping is `found` (a Java name, or null).
+     * at `at`), whose convention mapping is `found` (a Java name, or null):
+     * an exported item of src/ folder `dir`, or a member (`dir` null).
      */
-    const judge = (key, subject, at, tags, found) => {
+    const judge = (key, subject, at, tags, found, dir) => {
       if (tags.jsOnly || tags.java) used.add(key);
       if (tags.jsOnly && tags.java) {
         findings.push({ kind: 'listed-twice', subject, at, message: 'is both in invented and in javaTargets' });
@@ -139,12 +148,42 @@ module.exports = {
           at,
           message: `javaTargets ${target} names what the convention finds: drop the entry`,
         });
-      } else if (found !== null) {
+        return;
+      }
+      if (found !== null) {
         findings.push({
           kind: 'java-remap',
           subject,
           at,
           message: `javaTargets ${target} re-maps what the convention maps to ${found}: rename the item, or drop the entry`,
+        });
+        return;
+      }
+      // The deviation's reason, for a class outside its Java package's folder.
+      const reason = tags.java.reason;
+      const elsewhere = name === undefined && dir !== null && index.packageOf(dir) !== cls.package;
+      if (elsewhere && (typeof reason !== 'string' || reason.trim() === '')) {
+        const folder = cls.package
+          .replace(/^clients\./, '')
+          .split('.')
+          .join('/');
+        findings.push({
+          kind: 'java-no-reason',
+          subject,
+          at,
+          message:
+            `javaTargets ${target} places ${shortName(cls)} outside src/${folder}/, the folder of its Java package: ` +
+            'give the entry its reason, { "java": <fqn>, "reason": <why> }',
+        });
+      } else if (!elsewhere && reason !== null) {
+        findings.push({
+          kind: 'java-reason-unneeded',
+          subject,
+          at,
+          message:
+            name === undefined
+              ? `javaTargets ${target} gives a reason, but the class is in the folder of its Java package: drop the reason`
+              : `javaTargets ${target} gives a reason, but a member's entry is its Java name alone: drop the reason`,
         });
       }
     };
@@ -154,7 +193,7 @@ module.exports = {
       const convention = conventionClass(ctx, index, item);
       const found = convention && convention.cls ? shortName(convention.cls) : convention ? convention.fqn : null;
       const key = itemKey(item);
-      judge(key, key, atNode(ctx, item.node), item.tags, found);
+      judge(key, key, atNode(ctx, item.node), item.tags, found, item.dir);
       if (
         item.tags.jsOnly &&
         !item.tags.java &&
@@ -178,7 +217,7 @@ module.exports = {
         const jm = java && java.cls ? javaMember(index, java.cls, m) : null;
         const found = jm ? `${shortName(jm.owner)}#${jm.name}` : null;
         const key = memberKey(item, m);
-        judge(key, key, atNode(ctx, m.node), tags, found);
+        judge(key, key, atNode(ctx, m.node), tags, found, null);
       }
     }
     for (const [list, entries, kind] of [
