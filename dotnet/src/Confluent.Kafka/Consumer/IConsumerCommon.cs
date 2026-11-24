@@ -121,7 +121,8 @@ public interface IConsumerCommon
     /// metrics()</c>), keyed by <see cref="MetricName"/>.
     /// </summary>
     /// <remarks>
-    /// Each <see cref="IMetric.MetricValue()"/> was measured once, by this call; the entries do not measure again. Keys
+    /// Each value is a <see cref="Common.Metrics.KafkaMetric"/>, which measures the metric again on each
+    /// <see cref="IMetric.MetricValue()"/>; the map holds the metrics registered at this call. Keys
     /// compare by name, group and tags, not description, so per-partition metrics that share a name are distinct
     /// keys. As Java's <c>KafkaConsumer.metrics()</c> takes no <c>acquire()</c>, another thread's call does not
     /// refuse it on <see cref="KafkaConsumer{TKey, TValue}"/> and <see cref="AsyncKafkaConsumer{TKey, TValue}"/>; the

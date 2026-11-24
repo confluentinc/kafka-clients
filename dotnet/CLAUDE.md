@@ -103,7 +103,7 @@ where practical), and `Internal/Interop/` is the only place `unsafe` appears.
 Wanting a type under `Internal/` to be `public` is the signal it belongs in the public tree.
 `Common/Header/Internals/` is Java's package `common.header.internals`: its two classes, `RecordHeader` and
 `RecordHeaders`, are `internal`, as Java's package is not public API, and sit beside the public interfaces they
-implement, as `Metric` sits beside `IMetric` (ledger 608, §3 Java names).
+implement (ledger 608, §3 Java names).
 **Every public type lives in the namespace of its Java package, and its file in the folder that
 mirrors that namespace** (M20/P1, ledger 253): drop `org.apache.kafka.`, then `clients.`, PascalCase
 each remaining segment, and prefix `Confluent.Kafka.`, as the Rust core names its modules (root
@@ -1838,7 +1838,7 @@ managed array, then `ConsumerRecords_destroy`. It matches Java's owned
 thread-safe, no memory amplification), and costs one gen-0 array per raw record —
 Java's own allocation behavior. **This is the default.**
 
-**Keep-alive (zero-copy), through `BytesMemoryManager` only (M23/P7, ledger 535–537).** A deserializer that
+**Keep-alive (zero-copy) of record bytes, through `BytesMemoryManager` only (M23/P7, ledger 535–537).** A deserializer that
 takes the memory form (`IDeserializerWithReadOnlyMemory<T>`, `IAsyncDeserializerWithRetention<T>`) receives a
 `ReadOnlyMemory<byte>` over the batch that it may keep or return. The memory's `BytesMemoryManager` references
 a `SafeConsumerRecordsHandle`, so the batch lives as long as any such memory is reachable, and a `Pin` defers
@@ -1847,6 +1847,16 @@ does not keep the batch alive: hold `using MemoryHandle pin = memory.Pin();` whi
 keeps its whole batch. Copy-out stays the default: a span deserializer and `ByteArrayDeserializer` are
 unchanged, and a client with only span deserializers creates no handle and no manager. No other code may store
 a `ReadOnlyMemory<byte>` over native batch memory.
+
+**Keep-alive of a metric (ledger 626).** The second sanctioned keep-alive form, on every client. Each value of
+`Metrics()` is a `KafkaMetric` over its own owned `kafka_common_metrics_KafkaMetric_t`, taken with
+`kafka_common_metrics_MetricsView_get_err` while the view's iterator entry is current. The handle is independent of
+the view and of the client and stays valid after both are destroyed, so `MetricValue()` measures the metric on each
+call, as Java's does, also after the client is closed. A `SafeKafkaMetricHandle` holds it, takes no reference on the
+client's handle, and is released by the GC; `KafkaMetric` is not `IDisposable`, and the client's teardown frees no
+metric. A metrics view (`kafka_common_metrics_MetricsView_t`) may be kept under the same rule: it reads the registry
+at each call and stays valid after its client is destroyed. A metric a `QuotaViolationException` names holds a name
+and a value, as the error's payload carries no metric handle. ffi §A2 and §B2 Category 6 give the mechanics.
 
 ---
 

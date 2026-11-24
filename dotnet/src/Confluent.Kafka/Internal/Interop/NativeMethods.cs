@@ -133,9 +133,6 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_Map_Entry_key_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MapEntryKey(IntPtr self, ref IntPtr outErr);
 
-    [DllImport(DllName, EntryPoint = "kafka_Map_Entry_value_err", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr MapEntryValue(IntPtr self, ref IntPtr outErr);
-
     [DllImport(DllName, EntryPoint = "kafka_Iterator_has_next_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern sbyte IteratorHasNext(IntPtr self, ref IntPtr outErr);
 
@@ -150,6 +147,9 @@ internal static partial class NativeMethods
 
     [DllImport(DllName, EntryPoint = "kafka_common_metrics_MetricsView_destroy_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void MetricsViewDestroy(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_metrics_MetricsView_get_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MetricsViewGet(IntPtr self, IntPtr name, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_List_new_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ListNew(ref IntPtr outErr);
@@ -179,7 +179,16 @@ internal static partial class NativeMethods
     internal static extern IntPtr MetricNameTags(IntPtr self, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_common_metrics_KafkaMetric__as_Metric_err", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr KafkaMetricAsMetric(IntPtr self, ref IntPtr outErr);
+    internal static extern IntPtr KafkaMetricAsMetric(SafeKafkaMetricHandle self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_metrics_KafkaMetric_to_string_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr KafkaMetricToString(SafeKafkaMetricHandle self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_metrics_KafkaMetric_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void KafkaMetricDestroy(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_Metric_metric_name_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MetricMetricName(IntPtr self, ref IntPtr outErr);
 
     [DllImport(DllName, EntryPoint = "kafka_common_Metric_metric_value_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MetricMetricValue(IntPtr self, ref IntPtr outErr);
