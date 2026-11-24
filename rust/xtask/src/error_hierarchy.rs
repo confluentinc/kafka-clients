@@ -49,6 +49,7 @@ use std::path::{Path, PathBuf};
 use crate::java_parse::{self, CallKind, Ctor, Expr, Factory, GetterBody, JavaClass, Param, Visibility};
 
 mod csharp;
+pub(crate) mod js;
 
 /// Root of the Java source tree (Apache Kafka 4.4.0), relative to the repo root.
 const JAVA_ROOT: &str = "kafka/clients/src/main/java";
@@ -786,7 +787,7 @@ impl ClassInfo {
 
 /// `CamelCase` -> `snake_case` (`TopicAuthorizationError` ->
 /// `topic_authorization_error`, `throttleTimeMs` -> `throttle_time_ms`).
-fn snake(name: &str) -> String {
+pub(crate) fn snake(name: &str) -> String {
     let chars: Vec<char> = name.chars().collect();
     let mut out = String::new();
     for (i, &c) in chars.iter().enumerate() {

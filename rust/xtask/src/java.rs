@@ -150,6 +150,22 @@ pub struct JavaClass {
     pub javadoc: Option<String>,
     /// The Javadoc of each of `fields` that has one.
     pub field_docs: BTreeMap<String, String>,
+    /// The declaration of each of `fields`: its type as written and its
+    /// `static` / `final` modifiers, implicit ones included.
+    pub field_decls: BTreeMap<String, FieldDecl>,
+}
+
+/// How a field or enum constant is declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDecl {
+    /// Its type as written, annotations dropped, rendered by [`render_type`]
+    /// (`Map<String, Object>`, `byte[]`); an enum constant's is its enum.
+    pub ty: String,
+    /// Whether it is `static`: declared so, a field of an interface, or an
+    /// enum constant.
+    pub is_static: bool,
+    /// Whether it is `final`, with the same implicit cases as `is_static`.
+    pub is_final: bool,
 }
 
 /// What a Java type is declared as.
@@ -178,10 +194,22 @@ pub struct Overload {
     pub is_static: bool,
     /// Whether it is a `default` method of an interface.
     pub is_default: bool,
+    /// Whether it is declared `abstract` (an interface's methods, abstract
+    /// without the keyword, are not).
+    pub is_abstract: bool,
     /// The names of its parameters, in order.
     pub param_names: Vec<String>,
+    /// Its parameter types as written, annotations and `final` dropped,
+    /// rendered by [`render_type`] with a varargs `...` as `[]`
+    /// (`BiConsumer<? super T, ? super Throwable>`, `KafkaFuture<?>[]`); empty
+    /// for an implicit member.
+    pub param_types: Vec<String>,
     /// Whether it returns its own class: a static one is a factory.
     pub returns_class: bool,
+    /// Its return type as written, annotations dropped, rendered by
+    /// [`render_type`] (`Future<RecordMetadata>`, `void`, `int[]`); `None`
+    /// for a constructor.
+    pub return_type: Option<String>,
     /// Its own Javadoc, as [`clean_javadoc`] leaves it; see
     /// [`JavaIndex::overload_doc`] for the inherited one.
     pub javadoc: Option<String>,
@@ -1051,6 +1079,7 @@ pub(crate) fn push_classes(package: &[String], source: &str, is_test: bool, out:
             supertypes: class.supertypes,
             javadoc: class.javadoc,
             field_docs: class.field_docs,
+            field_decls: class.field_decls,
         });
     }
 }
@@ -1202,6 +1231,7 @@ struct Scanned {
     supertypes: Vec<String>,
     javadoc: Option<String>,
     field_docs: BTreeMap<String, String>,
+    field_decls: BTreeMap<String, FieldDecl>,
 }
 
 /// A class declaration seen, waiting for its `{`.
@@ -1228,18 +1258,18 @@ impl Scanned {
         let class = self.path.last().cloned().unwrap_or_default();
         let mut implicit = Vec::new();
         if self.is_enum {
-            for (name, params) in [
-                ("values", &[][..]),
-                ("valueOf", &["String"][..]),
-                ("name", &[]),
-                ("ordinal", &[]),
+            for (name, params, returns) in [
+                ("values", &[][..], format!("{class}[]")),
+                ("valueOf", &["String"][..], class.clone()),
+                ("name", &[], "String".to_string()),
+                ("ordinal", &[], "int".to_string()),
             ] {
-                implicit.push((name.to_string(), params, Visibility::Public));
+                implicit.push((name.to_string(), params, Visibility::Public, Some(returns)));
             }
         } else if !self.is_interface {
-            implicit.push((class, &[][..], self.visibility));
+            implicit.push((class, &[][..], self.visibility, None));
         }
-        for (name, params, visibility) in implicit {
+        for (name, params, visibility, return_type) in implicit {
             let declared = self.overloads.iter().any(|o| {
                 o.name == name && (!self.is_enum || o.params.iter().map(String::as_str).eq(params.iter().copied()))
             });
@@ -1252,8 +1282,11 @@ impl Scanned {
                     visibility,
                     is_static,
                     is_default: false,
+                    is_abstract: false,
                     param_names: Vec::new(),
+                    param_types: Vec::new(),
                     returns_class: false,
+                    return_type,
                     javadoc: None,
                 });
             }
@@ -1298,6 +1331,8 @@ fn scan(src: &str) -> Vec<Scanned> {
     let mut is_static = false;
     // A `default` seen, waiting for the interface method it applies to.
     let mut is_default = false;
+    // A `final` seen, waiting for the declaration it applies to.
+    let mut is_final = false;
     // An `abstract` seen, waiting for the declaration it applies to.
     let mut is_abstract = false;
     // A `@FunctionalInterface` seen, waiting for the declaration it annotates.
@@ -1367,6 +1402,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                         supertypes,
                         javadoc,
                         field_docs: BTreeMap::new(),
+                        field_decls: BTreeMap::new(),
                     });
                     depth += 1;
                     let is_enum = keyword == "enum";
@@ -1379,6 +1415,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                     visibility = None;
                     is_static = false;
                     is_default = false;
+                    is_final = false;
                     is_abstract = false;
                     functional = false;
                     doc = None;
@@ -1394,6 +1431,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                 visibility = None;
                 is_static = false;
                 is_default = false;
+                is_final = false;
                 is_abstract = false;
                 functional = false;
                 doc = None;
@@ -1403,6 +1441,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                 visibility = None;
                 is_static = false;
                 is_default = false;
+                is_final = false;
                 is_abstract = false;
                 functional = false;
                 doc = None;
@@ -1433,12 +1472,14 @@ fn scan(src: &str) -> Vec<Scanned> {
                         javadoc: doc.take(),
                     });
                     is_static = false;
+                    is_final = false;
                     i += 2;
                     continue;
                 }
             },
             Tok::Ident(m) if member_level && m == "static" => is_static = true,
             Tok::Ident(m) if member_level && m == "default" => is_default = true,
+            Tok::Ident(m) if member_level && m == "final" => is_final = true,
             Tok::Ident(m) if member_level && m == "abstract" => is_abstract = true,
             Tok::Ident(m) if member_level && matches!(m.as_str(), "public" | "protected" | "private") => {
                 visibility = Some(match m.as_str() {
@@ -1464,11 +1505,16 @@ fn scan(src: &str) -> Vec<Scanned> {
                     }
                     out[idx].fields.insert(name.clone(), std::mem::take(&mut deprecated));
                     out[idx].field_visibility.insert(name.clone(), Visibility::Public);
+                    let ty = out[idx].path.last().cloned().unwrap_or_default();
+                    out[idx]
+                        .field_decls
+                        .insert(name.clone(), FieldDecl { ty, is_static: true, is_final: true });
                     out[idx].enum_constants.push(name.clone());
                 } else if next == Some(&Tok::Punct('(')) {
                     if is_method_decl(&toks, i, &out[idx].path) {
-                        let (params, param_names) = params(&toks, i + 1);
+                        let (params, param_names, param_types) = params(&toks, i + 1);
                         let returns_class = returns_class(&toks, i, &out[idx].path);
+                        let return_type = return_type(&toks, i);
                         let implicit = if out[idx].is_interface {
                             Visibility::Public
                         } else if is_enum && out[idx].path.last() == Some(name) {
@@ -1483,8 +1529,11 @@ fn scan(src: &str) -> Vec<Scanned> {
                             visibility: visibility.take().unwrap_or(implicit),
                             is_static: std::mem::take(&mut is_static),
                             is_default: std::mem::take(&mut is_default),
+                            is_abstract: std::mem::take(&mut is_abstract),
                             param_names,
+                            param_types,
                             returns_class,
+                            return_type,
                             javadoc: doc.take(),
                         });
                     }
@@ -1497,13 +1546,17 @@ fn scan(src: &str) -> Vec<Scanned> {
                     // field of that name with the implicit one.
                     && matches!(toks.get(i.wrapping_sub(1)), Some(Tok::Ident(_) | Tok::Punct('>' | ']')))
                     // Nor does the exception a body-less method declares
-                    // (`Headers add(Header header) throws IllegalStateException;`).
+                    // (`Headers add(Header header) throws IllegalStateException;`),
+                    // or the body of a lambda initializer (`= s -> true;`).
                     && !matches!(toks.get(i.wrapping_sub(1)), Some(Tok::Ident(t)) if t == "throws")
+                    && !(toks.get(i.wrapping_sub(1)) == Some(&Tok::Punct('>'))
+                        && toks.get(i.wrapping_sub(2)) == Some(&Tok::Punct('-')))
                     && name != "\"\""
                     && name != "0"
                     && !KEYWORDS.contains(&name.as_str())
                 {
-                    let implicit = if out[idx].is_interface {
+                    let in_interface = out[idx].is_interface;
+                    let implicit = if in_interface {
                         Visibility::Public
                     } else {
                         Visibility::Package
@@ -1511,6 +1564,13 @@ fn scan(src: &str) -> Vec<Scanned> {
                     if let Some(d) = doc.take() {
                         out[idx].field_docs.insert(name.clone(), d);
                     }
+                    let ty = type_before(&toks, i)
+                        .map(|start| render_type(&toks[start..i]))
+                        .unwrap_or_default();
+                    out[idx].field_decls.insert(
+                        name.clone(),
+                        FieldDecl { ty, is_static: is_static || in_interface, is_final: is_final || in_interface },
+                    );
                     out[idx].fields.insert(name.clone(), std::mem::take(&mut deprecated));
                     out[idx]
                         .field_visibility
@@ -1609,11 +1669,14 @@ fn past_parens(toks: &[Tok], open: usize) -> usize {
 /// The parameter types of the declaration whose `(` is at `open`, as simple
 /// names (annotations, `final`, generic arguments and parameter names are
 /// dropped, and arrays and varargs become `[]`), and the parameter names.
-fn params(toks: &[Tok], open: usize) -> (Vec<String>, Vec<String>) {
+fn params(toks: &[Tok], open: usize) -> (Vec<String>, Vec<String>, Vec<String>) {
     let close = past_parens(toks, open) - 1;
     let mut out = Vec::new();
     let mut names = Vec::new();
+    let mut types = Vec::new();
     let mut current: Vec<Tok> = Vec::new();
+    // The parameter's tokens, type arguments included.
+    let mut full: Vec<Tok> = Vec::new();
     let mut angle = 0usize;
     let mut j = open + 1;
     while j < close {
@@ -1622,24 +1685,43 @@ fn params(toks: &[Tok], open: usize) -> (Vec<String>, Vec<String>) {
                 j = annotation(toks, j).1;
                 continue;
             },
-            Tok::Punct('<') => angle += 1,
-            Tok::Punct('>') => angle = angle.saturating_sub(1),
             Tok::Punct(',') if angle == 0 => {
                 let param = std::mem::take(&mut current);
                 out.push(param_type(&param));
                 names.push(param_name(&param));
+                types.push(full_param_type(&std::mem::take(&mut full)));
             },
-            Tok::Ident(f) if f == "final" => {},
-            t if angle == 0 => current.push(t.clone()),
-            _ => {},
+            Tok::Ident(f) if f == "final" && angle == 0 => {},
+            t => {
+                match t {
+                    Tok::Punct('<') => angle += 1,
+                    Tok::Punct('>') => angle = angle.saturating_sub(1),
+                    _ => {},
+                }
+                if angle == 0 && !matches!(t, Tok::Punct('>')) {
+                    current.push(t.clone());
+                }
+                full.push(t.clone());
+            },
         }
         j += 1;
     }
     if !current.is_empty() {
         out.push(param_type(&current));
         names.push(param_name(&current));
+        types.push(full_param_type(&full));
     }
-    (out, names)
+    (out, names, types)
+}
+
+/// The type of one parameter as written, from its tokens (type arguments
+/// included): the tokens before its name, a varargs `...` as `[]`.
+fn full_param_type(toks: &[Tok]) -> String {
+    let name = toks.iter().rposition(|t| matches!(t, Tok::Ident(_))).unwrap_or(toks.len());
+    let ty = &toks[..name];
+    let dots = ty.windows(3).filter(|w| w.iter().all(|t| *t == Tok::Punct('.'))).count();
+    let end = ty.len() - 3 * dots;
+    format!("{}{}", render_type(&ty[..end]), "[]".repeat(dots))
 }
 
 /// The name of one parameter from its tokens: the last identifier.
@@ -1675,6 +1757,101 @@ fn returns_class(toks: &[Tok], i: usize, class: &[String]) -> bool {
         }
     }
     matches!(j.checked_sub(1).map(|p| &toks[p]), Some(Tok::Ident(t)) if class.last() == Some(t))
+}
+
+/// The return type of the method declared by the identifier at `i`, as
+/// written ([`render_type`]); `None` for a constructor, which has none.
+fn return_type(toks: &[Tok], i: usize) -> Option<String> {
+    type_before(toks, i).map(|start| render_type(&toks[start..i]))
+}
+
+/// The index where the type ending just before index `name` starts, reading
+/// back over array brackets, type arguments and a qualified name
+/// (`java.util.Map<K, V>[]`, `Outer<K>.Inner`). `None` when no type precedes
+/// it: a modifier, a punctuation mark, a keyword or an annotation comes
+/// first (a constructor).
+fn type_before(toks: &[Tok], name: usize) -> Option<usize> {
+    let mut j = name.checked_sub(1)?;
+    while toks.get(j) == Some(&Tok::Punct(']')) && j >= 1 && toks[j - 1] == Tok::Punct('[') {
+        j = j.checked_sub(2)?;
+    }
+    loop {
+        if toks[j] == Tok::Punct('>') {
+            let mut depth = 0usize;
+            loop {
+                match toks[j] {
+                    Tok::Punct('>') => depth += 1,
+                    Tok::Punct('<') => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    },
+                    _ => {},
+                }
+                j = j.checked_sub(1)?;
+            }
+            j = j.checked_sub(1)?;
+        }
+        let Tok::Ident(id) = &toks[j] else { return None };
+        if MODIFIERS.contains(&id.as_str()) || KEYWORDS.contains(&id.as_str()) || id == "\"\"" || id == "0" {
+            return None;
+        }
+        if j >= 2 && toks[j - 1] == Tok::Punct('.') && matches!(toks[j - 2], Tok::Ident(_) | Tok::Punct('>')) {
+            j -= 2;
+            continue;
+        }
+        // An annotation's name (`@Deprecated Foo(`, `@java.lang.Deprecated Foo(`)
+        // is no type: the declaration is a constructor.
+        if j >= 1 && toks[j - 1] == Tok::Punct('@') {
+            return None;
+        }
+        return Some(j);
+    }
+}
+
+/// A type's tokens as written, annotations dropped and spacing normalised:
+/// `Map<String, ? extends List<Integer>>`, `byte[]`, `java.util.Optional<T>`.
+fn render_type(toks: &[Tok]) -> String {
+    let mut out = String::new();
+    let mut prev_word = false;
+    let mut j = 0;
+    while j < toks.len() {
+        match &toks[j] {
+            Tok::Punct('@') => {
+                j = annotation(toks, j).1;
+                continue;
+            },
+            Tok::Ident(word) => {
+                if prev_word {
+                    out.push(' ');
+                }
+                out.push_str(word);
+                prev_word = true;
+            },
+            Tok::Punct('?') => {
+                if prev_word {
+                    out.push(' ');
+                }
+                out.push('?');
+                prev_word = true;
+            },
+            Tok::Punct(',') => {
+                out.push_str(", ");
+                prev_word = false;
+            },
+            Tok::Punct('&') => {
+                out.push_str(" & ");
+                prev_word = false;
+            },
+            Tok::Punct(c) => {
+                out.push(*c);
+                prev_word = false;
+            },
+        }
+        j += 1;
+    }
+    out
 }
 
 /// The simple type of one parameter's tokens (`java.util.Map m` → `Map`,
@@ -2305,6 +2482,7 @@ mod tests {
             supertypes: Vec::new(),
             javadoc: None,
             field_docs: BTreeMap::new(),
+            field_decls: BTreeMap::new(),
         };
         assert!(class.is_rust_name_of("send", "send", true));
         assert!(class.is_rust_name_of("send", "send_with_callback", true));
@@ -2340,6 +2518,7 @@ mod tests {
             supertypes: Vec::new(),
             javadoc: None,
             field_docs: BTreeMap::new(),
+            field_decls: BTreeMap::new(),
         };
         let oor = class(&["consumer"], "clients.consumer", "OffsetOutOfRangeException");
         assert_eq!(oor.rust_name(), "ConsumerOffsetOutOfRangeError");

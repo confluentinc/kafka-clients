@@ -1,0 +1,824 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Java's ProducerRecord<K, V>: the key and the value are what the producer's
+// serializers take. A producer without a serializer takes a Buffer, a
+// Uint8Array or null, checked at send: a string needs stringSerializer()
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
+// The headers are a Headers (common/header), sealed by send().
+
+import { JavaForms } from '../internal/args';
+import { bytesToString } from '../internal/bytes';
+import { illegalArgument } from '../internal/errors';
+import { objectHashCode, objectsEquals } from '../internal/java_object';
+import type { Header } from '../common/header/header';
+import { Headers } from '../common/header/headers';
+
+// Java's constructors, in Java declaration order (src/internal/args.ts).
+const FORMS = new JavaForms(
+  'ProducerRecord',
+  [
+    ['topic', 'partition', 'timestamp', 'key', 'value', 'headers'],
+    ['topic', 'partition', 'timestamp', 'key', 'value'],
+    ['topic', 'partition', 'key', 'value', 'headers'],
+    ['topic', 'partition', 'key', 'value'],
+    ['topic', 'key', 'value'],
+    ['topic', 'value'],
+  ],
+  { undefinedMessages: { value: "value must not be undefined. Pass null for Java's null, which sends a tombstone." } },
+);
+const EQUALS_FORMS = new JavaForms('equals', [['o']]);
+const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
+
+/**
+ * The record arguments of the native send (`internal/native.ts`
+ * `producerSend`): topic, partition, timestamp, key, value, and the
+ * headers' native `RecordHeaders` or null.
+ */
+type NativeRecord = [string, number, bigint, Uint8Array | null, Uint8Array | null, object | null];
+
+const INT32_MIN = -(2 ** 31);
+const INT32_MAX = 2 ** 31 - 1;
+const INT64_MIN = -(2n ** 63n);
+const INT64_MAX = 2n ** 63n - 1n;
+
+function isBytes(value: unknown): value is Uint8Array {
+  return value instanceof Uint8Array;
+}
+
+// The bytes of a key or value a producer without a serializer sends: bytes as
+// they are. The run-time type TypeScript cannot enforce on a
+// ProducerRecord<K, V> (javascript/CLAUDE.md); a string can't reach the FFI
+// as bytes, so it points to stringSerializer() (javascript/CLAUDE.md, JavaScript
+// Binding Conventions, Class family).
+function rawBytes(value: unknown, what: 'key' | 'value'): Uint8Array | null {
+  if (value === null) return null;
+  if (isBytes(value)) return value;
+  if (typeof value === 'string') {
+    throw new TypeError(
+      `${what} is a string, and the producer has no ${what} serializer: give the producer ` +
+        `${what}Serializer: stringSerializer() (or '${what}.serializer': stringSerializer in its configuration), ` +
+        'from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
+    );
+  }
+  throw new TypeError(`${what} must be a Buffer, a Uint8Array or null when the producer has no ${what} serializer`);
+}
+
+// Java's `new RecordHeaders(headers)`: new headers holding the given ones.
+function checkHeaders(headers: unknown): Headers {
+  return Headers.internalTaken(headers === undefined ? null : headers);
+}
+
+// Java's Integer argument: null, or a whole number in Java's int range.
+function checkOptionalInt(value: unknown, what: string): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError(`${what} must be an integer or null`);
+  if (value < INT32_MIN || value > INT32_MAX) throw new RangeError(`${what} must be from ${INT32_MIN} to ${INT32_MAX}`);
+  return value;
+}
+
+// Java's Long argument: null, a bigint in Java's long range, or a whole
+// number a JavaScript number holds exactly, read as a bigint (javascript/CLAUDE.md,
+// JavaScript Binding Conventions, Types).
+function checkOptionalLong(value: unknown, what: string): bigint | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'bigint') {
+    if (value < INT64_MIN || value > INT64_MAX) throw new RangeError(`${what} must be from ${INT64_MIN} to ${INT64_MAX}`);
+    return value;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError(`${what} must be a bigint, an integer or null`);
+  if (Math.abs(value) > Number.MAX_SAFE_INTEGER) {
+    throw new RangeError(`${what} must be a bigint beyond 2^53 - 1: a number holds no larger integer exactly`);
+  }
+  return BigInt(value);
+}
+
+// The constructor's checks of one argument: Java's, and the run-time types
+// TypeScript cannot enforce.
+
+function checkTopic(topic: unknown): string {
+  if (topic === undefined || topic === null) throw illegalArgument('Topic cannot be null.');
+  if (typeof topic !== 'string') throw new TypeError('topic must be a string');
+  return topic;
+}
+
+function checkTimestamp(timestamp: unknown): bigint | null {
+  const checked = checkOptionalLong(timestamp, 'timestamp');
+  if (checked !== null && checked < 0n) {
+    throw illegalArgument(`Invalid timestamp: ${checked}. Timestamp should always be non-negative or null.`);
+  }
+  return checked;
+}
+
+function checkPartition(partition: unknown): number | null {
+  const checked = checkOptionalInt(partition, 'partition');
+  if (checked !== null && checked < 0) {
+    throw illegalArgument(`Invalid partition: ${checked}. Partition number should always be non-negative or null.`);
+  }
+  return checked;
+}
+
+/**
+ * A key/value pair to be sent to Kafka. This consists of a topic name to which
+ * the record is being sent, an optional partition number, and an optional key
+ * and value.
+ *
+ * If a valid partition number is specified that partition will be used when
+ * sending the record. If no partition is specified but a key is present a
+ * partition will be chosen using a hash of the key. If neither key nor
+ * partition is present a partition will be assigned in a round-robin fashion.
+ *
+ * The record also has an associated timestamp. If the user did not provide a
+ * timestamp, the producer will stamp the record with its current time.
+ */
+export class ProducerRecord<out K = never, out V = never> {
+  /** The topic this record is being sent to */
+  readonly topic: string;
+
+  /** The partition to which the record will be sent (or null if no partition was specified) */
+  readonly partition: number | null;
+
+  /** The timestamp, which is in milliseconds since epoch. */
+  readonly timestamp: bigint | null;
+
+  /** The key (or null if no key is specified) */
+  readonly key: K | null;
+
+  /** The value */
+  readonly value: V | null;
+
+  /** The headers */
+  readonly headers: Headers;
+
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value, headers)`, with a null key and a null value, which binds `never`,
+   * as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** A null key. */
+    key: null;
+    /** A null value (a tombstone). */
+    value: null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * core copies each header), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value, headers)`, with a null key, which binds `never`, as an omitted one
+   * does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** A null key. */
+    key: null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * core copies each header), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value, headers)`, with a null value, which binds `never`, as an omitted
+   * one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** A null value (a tombstone). */
+    value: null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * core copies each header), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record with a specified timestamp to be sent to a specified
+   * topic and partition.
+   *
+   * @param options - the record's topic, partition, timestamp, key, value
+   *   and headers
+   * @throws `IllegalArgumentError` when the given parameters are not one of
+   *   Java's constructors, or the topic is null, or the timestamp or the
+   *   partition is negative, as Java's IllegalArgumentException
+   * @throws `TypeError` when an argument has the wrong type or is `undefined`
+   * @throws `RangeError` when the partition is beyond Java's `Integer`, the
+   *   timestamp a bigint beyond Java's `Long`, or a number beyond 2^53 - 1,
+   *   the integers a JS number holds exactly
+   *
+   * @remarks A field one leaves out is what it passes (`null`, no headers).
+   * `null` is Java's `null`; a key set to `undefined` is refused (leave the key
+   * out). The record is frozen, so `send()` reads what this constructor
+   * checked; its `headers` stay writable until it is sent. An omitted or
+   * `null` key or value binds `never`, through a signature per null
+   * combination, so a producer takes the `ProducerRecord<K, V>` of its
+   * serializers.
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * core copies each header), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value)`, with a null key and a null value, which binds `never`, as an
+   * omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** A null key. */
+    key: null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value)`, with a null key, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** A null key. */
+    key: null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, timestamp, key,
+   * value)`, with a null value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
+   * Creates a record with the specified timestamp to be sent to a specified
+   * topic and partition, Java's `ProducerRecord(topic, partition, timestamp,
+   * key, value)`: no headers.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    /**
+     * The timestamp of the record, in milliseconds since epoch: a bigint, or
+     * a whole number up to 2^53 - 1. If null, the producer will assign the
+     * timestamp using System.currentTimeMillis().
+     */
+    timestamp: bigint | number | null;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value,
+   * headers)`, with a null key and a null value, which binds `never`, as an
+   * omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** A null value (a tombstone). */
+    value: null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * core copies each header), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value,
+   * headers)`, with a null key, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * core copies each header), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value,
+   * headers)`, with a null value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** A null value (a tombstone). */
+    value: null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * core copies each header), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record to be sent to a specified topic and partition, Java's
+   * `ProducerRecord(topic, partition, key, value, headers)`: no timestamp.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    /**
+     * The headers that will be included in the record: a `Headers` or an
+     * iterable of `Header`, copied into the record's own `Headers` (the
+     * core copies each header), or null.
+     */
+    headers: Iterable<Header> | null;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value)`,
+   * with a null key and a null value, which binds `never`, as an omitted one
+   * does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value)`,
+   * with a null key, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, partition, key, value)`,
+   * with a null value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
+   * Creates a record to be sent to a specified topic and partition, Java's
+   * `ProducerRecord(topic, partition, key, value)`: no timestamp, no headers.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    /** The partition to which the record should be sent, or null. */
+    partition: number | null;
+    timestamp?: never;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, key, value)`, with a null
+   * key and a null value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    partition?: never;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, key, value)`, with a null
+   * key, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    partition?: never;
+    timestamp?: never;
+    /** A null key. */
+    key: null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    headers?: never;
+  });
+  /**
+   * Creates a record, Java's `ProducerRecord(topic, key, value)`, with a null
+   * value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    partition?: never;
+    timestamp?: never;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
+   * Create a record to be sent to Kafka, Java's `ProducerRecord(topic, key,
+   * value)`: no partition, timestamp or headers.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    partition?: never;
+    timestamp?: never;
+    /** The key that will be included in the record, or null. */
+    key: K | null;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    headers?: never;
+  });
+  /**
+   * Create a record with no key, Java's `ProducerRecord(topic, value)`, with a
+   * null value, which binds `never`, as an omitted one does.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    partition?: never;
+    timestamp?: never;
+    key?: never;
+    /** A null value (a tombstone). */
+    value: null;
+    headers?: never;
+  });
+  /**
+   * Create a record with no key, Java's `ProducerRecord(topic, value)`.
+   *
+   * @param options - the record's fields
+   */
+  constructor(options: {
+    /** The topic the record will be appended to. */
+    topic: string;
+    partition?: never;
+    timestamp?: never;
+    key?: never;
+    /** The record contents, or null (a tombstone). */
+    value: V | null;
+    headers?: never;
+  });
+  constructor(options: unknown) {
+    FORMS.match(options, arguments.length);
+    const topic = FORMS.value(options, 'topic');
+    const partition = FORMS.value(options, 'partition');
+    const timestamp = FORMS.value(options, 'timestamp');
+    const key = FORMS.value(options, 'key');
+    const value = FORMS.value(options, 'value');
+    const headers = FORMS.value(options, 'headers');
+    const checkedTopic = checkTopic(topic);
+    const checkedTimestamp = checkTimestamp(timestamp);
+    const checkedPartition = checkPartition(partition);
+    this.topic = checkedTopic;
+    this.partition = checkedPartition;
+    this.timestamp = checkedTimestamp;
+    this.key = (key === undefined ? null : key) as K | null;
+    this.value = (value === undefined ? null : value) as V | null;
+    this.headers = checkHeaders(headers);
+    Object.freeze(this);
+  }
+
+  /**
+   * Whether `o` is a `ProducerRecord` with equal fields, Java's
+   * `ProducerRecord.equals`: `Objects.equals` on the key, the partition, the
+   * topic, the headers, the value and the timestamp.
+   *
+   * @param options - the object to compare with
+   * @returns true when `o` is an equal record
+   * @throws `IllegalArgumentError` when the given parameters are not `{o}`
+   *
+   * @remarks A `Uint8Array` key or value is equal only to itself, as Java's
+   * `byte[]` is; a string key or value is equal to an equal string.
+   */
+  equals(options: {
+    /** The object to compare with. */
+    o: unknown;
+  }): boolean;
+  /**
+   * The same as `equals({o})`, with the object on its own; a plain object is
+   * read as the options object.
+   *
+   * @param o - the object to compare with
+   * @returns true when `o` is an equal record
+   */
+  equals(o: unknown): boolean;
+  equals(options: unknown): boolean {
+    EQUALS_FORMS.match(options, arguments.length);
+    const o = EQUALS_FORMS.value(options, 'o');
+    if (this === o) return true;
+    else if (!(o instanceof ProducerRecord)) return false;
+    const that = o;
+    return (
+      objectsEquals(this.key, that.key) &&
+      objectsEquals(this.partition, that.partition) &&
+      objectsEquals(this.topic, that.topic) &&
+      objectsEquals(this.headers, that.headers) &&
+      objectsEquals(this.value, that.value) &&
+      objectsEquals(this.timestamp, that.timestamp)
+    );
+  }
+
+  /**
+   * The record's hash code, Java's `ProducerRecord.hashCode`: the topic's,
+   * then `31 * result` plus the partition's, the headers', the key's, the
+   * value's and the timestamp's, each 0 when null.
+   *
+   * @returns the hash code, a 32-bit integer
+   * @throws `TypeError` when it is given an argument
+   *
+   * @remarks A `Uint8Array` key or value adds the same hash code, 0, whatever
+   * its bytes: it is Java's `byte[]`, equal only to itself, whose identity hash
+   * code Java leaves unspecified, so the record's hash code stays the same if
+   * the Buffer is changed after `send()` settled.
+   */
+  hashCode(): number {
+    HASH_CODE_FORMS.match(undefined, arguments.length);
+    let result = objectHashCode(this.topic);
+    result = (Math.imul(31, result) + objectHashCode(this.partition)) | 0;
+    result = (Math.imul(31, result) + objectHashCode(this.headers)) | 0;
+    result = (Math.imul(31, result) + objectHashCode(this.key)) | 0;
+    result = (Math.imul(31, result) + objectHashCode(this.value)) | 0;
+    result = (Math.imul(31, result) + objectHashCode(this.timestamp)) | 0;
+    return result;
+  }
+
+  /**
+   * The record as Java's `ProducerRecord.toString()` writes it.
+   *
+   * @returns `ProducerRecord(topic=..., partition=..., headers=..., key=...,
+   *   value=..., timestamp=...)`
+   */
+  toString(): string {
+    return (
+      `ProducerRecord(topic=${this.topic}, partition=${this.partition}, ` +
+      `headers=${String(this.headers)}, key=${show(this.key)}, ` +
+      `value=${show(this.value)}, timestamp=${this.timestamp})`
+    );
+  }
+
+  /**
+   * The record as `JSON.stringify` writes it: its fields in their order, the
+   * timestamp a decimal string (or null), which `BigInt()` reads back exactly.
+   * It ignores the key `JSON.stringify` passes.
+   *
+   * @returns the record's fields
+   *
+   * @remarks *(js-only)* JavaScript's JSON protocol: `JSON.stringify` throws
+   * on a `bigint`, and a `number` loses digits above 2^53.
+   */
+  toJSON(): {
+    topic: string;
+    partition: number | null;
+    timestamp: string | null;
+    key: K | null;
+    value: V | null;
+    headers: Headers;
+  } {
+    return {
+      topic: this.topic,
+      partition: this.partition,
+      timestamp: this.timestamp === null ? null : this.timestamp.toString(),
+      key: this.key,
+      value: this.value,
+      headers: this.headers,
+    };
+  }
+
+  /**
+   * The arguments of the native send: topic, partition (-1 for null) and
+   * timestamp (-1n for null), key and value bytes, and the record's native
+   * `RecordHeaders`, which the core copies into the record, or null for none.
+   * The record's headers are made read-only first, as Java's `doSend` seals
+   * them (`setReadOnly`) once the serializers have run, before handing the
+   * record over. Called by `KafkaProducer`. The record is frozen, so its
+   * fields are what the constructor checked: nothing is checked again. A
+   * record with no headers allocates nothing for them.
+   *
+   * `key` and `value` are what a serializer returned; one left out is the
+   * record's own field, sent without a serializer: bytes as they are,
+   * anything else a `TypeError`, a string's pointing to `stringSerializer()`
+   * (the headers are then left writable).
+   *
+   * @param key - the serialized key, or null; the record's key when left out
+   * @param value - the serialized value, or null; the record's value when left out
+   * @returns the native send's arguments
+   *
+   * @internal
+   */
+  internalToNative(key?: Uint8Array | null, value?: Uint8Array | null): NativeRecord {
+    const { topic, partition, timestamp, headers } = this;
+    const keyBytes = key === undefined ? rawBytes(this.key, 'key') : key;
+    const valueBytes = value === undefined ? rawBytes(this.value, 'value') : value;
+    headers.internalSetReadOnly();
+    return [
+      topic,
+      partition === null ? -1 : partition,
+      timestamp === null ? -1n : timestamp,
+      keyBytes,
+      valueBytes,
+      headers.internalNative(),
+    ];
+  }
+}
+
+// Java's `key.toString()`: bytes as Arrays.toString writes them, anything
+// else as JavaScript writes it.
+function show(value: unknown): string {
+  if (value === null) return 'null';
+  if (isBytes(value)) return bytesToString(value);
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string -- Java's toString() of a key or value of the caller's type: an object without its own toString() prints as JavaScript prints it, as Java's prints Object.toString()
+  return String(value);
+}
