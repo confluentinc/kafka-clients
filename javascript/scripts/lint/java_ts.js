@@ -111,10 +111,16 @@ const NOT_PUBLIC_TYPES = new Set(['Time']);
 
 /**
  * The Java functional interfaces translated as a function type
- * (javascript/CLAUDE.md "Java shape, JS idiom": `Callback` is a function):
- * mapped, but their members are not.
+ * (javascript/CLAUDE.md "Java shape, JS idiom": `Callback` is a function;
+ * `KafkaFuture`'s nested `BaseFunction` and `BiConsumer` are type aliases on
+ * the class's namespace, as Python's are `Callable` aliases): mapped, but their
+ * members are not.
  */
-const FUNCTION_TYPES = new Set(['org.apache.kafka.clients.producer.Callback']);
+const FUNCTION_TYPES = new Set([
+  'org.apache.kafka.clients.producer.Callback',
+  'org.apache.kafka.common.KafkaFuture$BaseFunction',
+  'org.apache.kafka.common.KafkaFuture$BiConsumer',
+]);
 
 /** The members `java.lang.Enum` gives every Java enum. */
 const ENUM_IMPLICIT = new Set(['values', 'valueOf', 'name', 'ordinal']);
@@ -658,26 +664,75 @@ function conventionClass(ctx, index, item) {
 }
 
 /**
- * The Java class of every exported class, interface and type alias, as the
- * J rules see it: `{item, java, isError, jsOnly}`, `java` the convention's
- * class or `javaTargets`' (`{fqn, cls, via: 'tag'}`), null when neither
- * finds one.
+ * The types nested in item `item`, of Java class `cls`: each class, interface
+ * or type alias the namespace merged with it exports that Java's nested class
+ * of its name translates (`<fqn>$<Name>`; javascript/CLAUDE.md, JavaScript
+ * Binding Conventions, Names: a nested type is a member of the namespace of
+ * its outer class's name), recursively, as items `{..., name: 'Outer.Inner',
+ * outer}` of the outer's module, each with its Java class.
+ */
+function nestedItems(ctx, index, item, cls) {
+  const { ts, checker } = ctx.program();
+  const out = [];
+  const symbol = item.node.name ? checker.getSymbolAtLocation(item.node.name) : undefined;
+  for (const ns of ((symbol && symbol.declarations) || []).filter((d) => ts.isModuleDeclaration(d))) {
+    if (!ns.body || !ts.isModuleBlock(ns.body)) continue;
+    for (const st of ns.body.statements) {
+      const isType = ts.isClassDeclaration(st) || ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st);
+      if (!isType || !st.name || !(ts.getCombinedModifierFlags(st) & ts.ModifierFlags.Export)) continue;
+      const nested = index.byFqn.get(`${cls.fqn}$${st.name.text}`);
+      if (!nested) continue;
+      const name = `${item.name}.${st.name.text}`;
+      const kind = ts.isClassDeclaration(st) ? 'class' : ts.isInterfaceDeclaration(st) ? 'interface' : 'type';
+      const inner = {
+        rel: item.rel,
+        dir: item.dir,
+        sf: item.sf,
+        name,
+        node: st,
+        kind,
+        tags: mappingOf(ctx, `${item.rel}:${name}`, st),
+        outer: item,
+      };
+      out.push({ item: inner, cls: nested }, ...nestedItems(ctx, index, inner, nested));
+    }
+  }
+  return out;
+}
+
+/**
+ * The Java class of every exported class, interface and type alias, and of
+ * each type nested in one (`nestedItems`, after its outer), as the J rules see
+ * it: `{item, java, isError, jsOnly}`, `java` the convention's class or
+ * `javaTargets`' (`{fqn, cls, via: 'tag'}`), a nested type's its Java nested
+ * class (`via: 'nested'`), null when none finds one. A nested item has
+ * `outer`, the item it is nested in.
  */
 function mappedItems(ctx) {
   return ctx.once('mappedItems', () => {
     const index = javaIndexOf(ctx);
-    return exportedItems(ctx)
-      .filter((item) => item.kind === 'class' || item.kind === 'interface' || item.kind === 'type')
-      .map((item) => {
-        const convention = conventionClass(ctx, index, item);
-        let java = convention;
-        if (item.tags.java) {
-          const target = item.tags.java.text.split('#')[0];
-          const cls = index.resolve(target);
-          java = cls ? { fqn: cls.fqn, cls, via: 'tag' } : convention;
+    const out = [];
+    for (const item of exportedItems(ctx)) {
+      if (item.kind !== 'class' && item.kind !== 'interface' && item.kind !== 'type') continue;
+      const convention = conventionClass(ctx, index, item);
+      let java = convention;
+      if (item.tags.java) {
+        const target = item.tags.java.text.split('#')[0];
+        const cls = index.resolve(target);
+        java = cls ? { fqn: cls.fqn, cls, via: 'tag' } : convention;
+      }
+      out.push({ item, java, convention, isError: convention !== null && convention.via === 'registry' });
+      if (java === null || !java.cls) continue;
+      for (const { item: inner, cls } of nestedItems(ctx, index, item, java.cls)) {
+        let nested = { fqn: cls.fqn, cls, via: 'nested' };
+        if (inner.tags.java) {
+          const target = index.resolve(inner.tags.java.text.split('#')[0]);
+          if (target) nested = { fqn: target.fqn, cls: target, via: 'tag' };
         }
-        return { item, java, convention, isError: convention !== null && convention.via === 'registry' };
-      });
+        out.push({ item: inner, java: nested, convention: nested, isError: false });
+      }
+    }
+    return out;
   });
 }
 

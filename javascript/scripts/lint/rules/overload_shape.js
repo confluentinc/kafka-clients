@@ -219,7 +219,9 @@ module.exports = {
     for (const { item, java, m, jm } of mappedMembers(ctx)) {
       if (jm === null || constantsOnly(java.cls)) continue;
       checked += 1;
-      const key = `${jm.owner.fqn}#${jm.name}#${m.isStatic}`;
+      // Per translating class: two classes may each translate a member they
+      // inherit from one Java class (java.lang.Enum#toString).
+      const key = `${java.cls.fqn}>${jm.owner.fqn}#${jm.name}#${m.isStatic}`;
       const subject = `${item.name}.${m.name}`;
       const at = atNode(ctx, m.node);
       if (translations.has(key)) {

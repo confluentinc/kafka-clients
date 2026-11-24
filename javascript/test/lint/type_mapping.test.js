@@ -458,3 +458,28 @@ test('a Java array or collection taken is any iterable; one returned is an array
     assert.deepEqual(findings(r), [finding], member);
   }
 });
+
+test("a nested class's members are typed as its Java nested class's, and the nested class by its own name", () => {
+  const outerClasses = [
+    ...classes,
+    javaClass('clients.producer.Outer'),
+    javaClass('clients.producer.Outer$Inner', {
+      overloads: [method('name', [], { return_type: 'String' }), method('self', [], { return_type: 'Inner' })],
+    }),
+  ];
+  const outer = (/** @type {string} */ name) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex(outerClasses),
+      ...FILES,
+      ...LIB,
+      'src/producer/typed.ts': TYPED_TS,
+      'src/common/kafka_future.ts': FUTURE_TS,
+      'src/producer/outer.ts':
+        'export class Outer {}\nexport declare namespace Outer {\n  export class Inner {\n' +
+        `    name(): ${name};\n    self(): Inner;\n  }\n}\n`,
+    });
+  const r = lint(outer('string'), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  assert.deepEqual(findings(lint(outer('number'), [RULE])), ['Outer.Inner.name: return: Java String is not TypeScript number']);
+});

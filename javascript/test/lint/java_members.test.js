@@ -171,3 +171,23 @@ test("an interface's runtime object maps its members to the Java interface's sta
   );
   assert.equal(listed.status, 0, listed.text);
 });
+
+test("a nested class's members map to its Java nested class's: Outer.Inner as Java's Outer$Inner", () => {
+  const classes = [
+    ...CLASSES,
+    javaClass('clients.producer.Outer'),
+    javaClass('clients.producer.Outer$Inner', { overloads: [method('name', [], { return_type: 'String' })] }),
+  ];
+  const outer = (/** @type {string} */ members) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex(classes),
+      ...LIB,
+      'src/producer/outer.ts': `export class Outer {}\nexport declare namespace Outer {\n  export class Inner {\n${members}  }\n}\n`,
+    });
+  const r = lint(outer('    name(): string;\n'), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  assert.deepEqual(findings(lint(outer('    name(): string;\n    bogus(): void;\n'), [RULE])), [
+    'Outer.Inner.bogus: no Java member of clients.producer.Outer$Inner',
+  ]);
+});

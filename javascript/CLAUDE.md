@@ -1778,7 +1778,11 @@ The rules, each named in its finding:
   every public member a Java member (the members of an interface's runtime
   object, `Admin.create`, its static methods), and every public Java member is
   translated (an enum's `java.lang.Enum` members and `toJSON()` included, a
-  public mutable field as its setter `set<Field>`, plan §5 item 2).
+  public mutable field as its setter `set<Field>`, plan §5 item 2). A nested
+  class, a class, interface or type alias of the namespace merged with an
+  export that Java's nested class of its name translates (`Outer.Inner` as
+  `Outer$Inner`, `scripts/lint/java_ts.js` `mappedItems`), is read as an
+  export is, its members included; its file and name are its outer class's.
 - `check-java-kind`: each export translating a Java type (the mapping of
   `check-java-name`, `javaTargets` included) takes the form of its Java kind
   (JS conventions, Class family, Q12, Q16, Q28): a Java interface is a
@@ -1793,8 +1797,9 @@ The rules, each named in its finding:
   (Serialization), `Callback` a function type ("a callback is a function"),
   and a type not translated the placeholder `type X = unknown` (Scope). Not
   checked: an export whose Java class the index does not hold (the root's
-  built-in errors), a nested type, and an abstract Java method with a
-  concrete overload.
+  built-in errors), and an abstract Java method with a concrete overload. A
+  nested class is checked as an export is (`KafkaFuture.BaseFunction` and
+  `BiConsumer`, function types, are in the table with `Callback`).
 - `check-java-supertypes`: each exported class or interface translating a
   Java type has as its direct supertypes (a class's `extends` and
   `implements`, an interface's `extends`) the translations of its Java type's
@@ -1876,11 +1881,15 @@ The rules, each named in its finding:
 - `check-overload-shape`: one Java overload set is one method taking one
   options object of Java's parameter names, with one TypeScript overload
   signature per Java form, the signatures of its null combinations (a `null`
-  key or value, above) and the bare value of a one-parameter form.
+  key or value, above) and the bare value of a one-parameter form; a nested
+  class's sets too (`mappedItems`), and a member two classes inherit from
+  one Java class (`java.lang.Enum#toString`) translated once per class.
 - `check-type-mapping`: each member's type is the one the Types table gives
   (a `byte[]` taken as a `Uint8Array`, returned as a `Buffer`; a `long`
-  returned as a `bigint`, taken as a `bigint` or a whole `number`); a Java
-  type the rule's table lacks is `unmapped`.
+  returned as a `bigint`, taken as a `bigint` or a whole `number`), a nested
+  class's members' too, a nested class named by its own name
+  (`DeserializationExceptionOrigin`); a Java type the rule's table lacks is
+  `unmapped`.
 - `check-waiting-call-promise`: a method returns a Promise if and only if its
   native path reaches a `_cb` twin.
 - `check-native-registry`: the addon's registrations and the native handle's

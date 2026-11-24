@@ -30,9 +30,9 @@
 //   - no export is a TypeScript `enum` ("There's no TypeScript `enum`").
 // The types the JS conventions give another form are the table below. The
 // mapping is check-java-name's (scripts/lint/java_ts.js `mappedItems`,
-// `javaTargets` included). Not checked: an export whose Java class the index
-// does not hold (the root's built-in errors), a nested type (a namespace's
-// member), and an abstract Java method that has a concrete overload.
+// `javaTargets` and the nested classes included). Not checked: an export
+// whose Java class the index does not hold (the root's built-in errors), and
+// an abstract Java method that has a concrete overload.
 
 const { atNode } = require('../location');
 const {

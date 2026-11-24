@@ -443,3 +443,32 @@ test('each LEFT_OUT form names a public form of the shipped Java index (no stale
     assert.ok(found, `${key}: ${fqn} has no form ${form}`);
   }
 });
+
+test("a nested class's overload set is checked as an export's: one options object, its bare value", () => {
+  const { javaClass } = require('./_java_fixture');
+  const classes = [
+    ...CLASSES,
+    javaClass('clients.producer.Outer'),
+    javaClass('clients.producer.Outer$Inner', {
+      overloads: [
+        method('seek', ['String'], { param_names: ['topic'] }),
+        method('seek', ['String', 'int'], { param_names: ['topic', 'partition'] }),
+      ],
+    }),
+  ];
+  const outer = (/** @type {string} */ signatures) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex(classes),
+      ...LIB,
+      'src/producer/outer.ts': `export class Outer {}\nexport declare namespace Outer {\n  export class Inner {\n${signatures}  }\n}\n`,
+    });
+  const good =
+    '    seek(options: { topic: string; partition?: never }): void;\n' +
+    '    seek(options: { topic: string; partition: number }): void;\n' +
+    '    seek(topic: string): void;\n';
+  assert.deepEqual(shapeFindings(lint(outer(good), [RULE])), []);
+  assert.deepEqual(shapeFindings(lint(outer('    seek(topic: string, partition?: number): void;\n'), [RULE])), [
+    'Outer.Inner.seek: translates 2 Java forms of clients.producer.Outer$Inner#seek (seek(String topic); seek(String topic, int partition)) but takes (topic: string, partition?: number), not one options object',
+  ]);
+});

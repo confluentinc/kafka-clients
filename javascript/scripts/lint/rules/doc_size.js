@@ -297,7 +297,7 @@ module.exports = {
         message: `${best.words} words, more than 150% of the Javadoc's ${best.java} (at most ${Math.floor((best.java * 3) / 2)}) of ${javaRef}`,
       });
     };
-    /** Measures item `item` (an export or a nested type) translating Java class `cls`, its members, and its nested types. */
+    /** Measures item `item` (an export or a nested type) translating Java class `cls`, and its members. */
     const measureItem = (item, cls, isError) => {
       let classSizes = cls.javadoc;
       const isFunction = ts.isTypeAliasDeclaration(item.node) && ts.isFunctionTypeNode(item.node.type);
@@ -306,7 +306,7 @@ module.exports = {
         const methods = cls.overloads.filter((o) => !o.static && !o.default && o.name !== cls.path[cls.path.length - 1]);
         if (methods.length === 1) classSizes = joined(classSizes, methods[0].javadoc);
       }
-      measure(item.subject || `${item.rel}:${item.name}`, item.node, docText(ts, item.node), classSizes, shortName(cls));
+      measure(`${item.rel}:${item.name}`, item.node, docText(ts, item.node), classSizes, shortName(cls));
       const members = isError ? publicMembers(ts, item.node) : itemMembers(ts, item);
       for (const m of members) {
         const tags = memberTags(ctx, item, m);
@@ -329,22 +329,8 @@ module.exports = {
           measure(subject, sig, docText(ts, sig), sizesOfMember(jm, forms), at, optionsParams(ts, checker, sig));
         });
       }
-      // The nested types: each type of the namespace merged with the item
-      // that Java's nested class of its name translates.
-      const symbol = item.node.name ? checker.getSymbolAtLocation(item.node.name) : undefined;
-      for (const ns of ((symbol && symbol.declarations) || []).filter((d) => ts.isModuleDeclaration(d))) {
-        if (!ns.body || !ts.isModuleBlock(ns.body)) continue;
-        for (const st of ns.body.statements) {
-          const isType = ts.isClassDeclaration(st) || ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st);
-          if (!isType || !st.name || !(ts.getCombinedModifierFlags(st) & ts.ModifierFlags.Export)) continue;
-          const nestedCls = index.byFqn.get(`${cls.fqn}$${st.name.text}`);
-          if (!nestedCls) continue;
-          const name = `${item.name}.${st.name.text}`;
-          const kind = ts.isClassDeclaration(st) ? 'class' : ts.isInterfaceDeclaration(st) ? 'interface' : 'type';
-          measureItem({ rel: item.rel, name, subject: `${item.rel}:${name}`, node: st, kind }, nestedCls, false);
-        }
-      }
     };
+    // Every export, and every type nested in one (scripts/lint/java_ts.js `mappedItems`).
     for (const { item, java, isError } of mappedItems(ctx)) {
       if (item.tags.jsOnly || java === null || !java.cls) continue;
       measureItem(item, java.cls, isError);

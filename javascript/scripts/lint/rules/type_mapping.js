@@ -149,10 +149,15 @@ module.exports = {
   parseJava,
   check(ctx) {
     const { ts, checker } = ctx.program();
-    // The TypeScript name of each Java class src/ translates, by Java simple name.
+    // The TypeScript name of each Java class src/ translates, by Java simple
+    // name: a nested type's own, as its type's symbol names it, an export's
+    // kept where the two share one.
     const tsNames = new Map();
     for (const { item, java } of mappedItems(ctx)) {
-      if (java && java.cls) tsNames.set(java.cls.path[java.cls.path.length - 1], item.name);
+      if (!java || !java.cls) continue;
+      const simple = java.cls.path[java.cls.path.length - 1];
+      if (!item.outer) tsNames.set(simple, item.name);
+      else if (!tsNames.has(simple)) tsNames.set(simple, item.node.name.text);
     }
     // A bare value's type as Java's: KafkaFuture's `Bare<T>`, the values of T
     // the bare form of a one-parameter member takes (`Extract<T, BareValue>`),
