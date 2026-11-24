@@ -543,7 +543,7 @@ public sealed class PublicProducerDeliveryCallbackTests
     [Theory]
     [InlineData(Sync)]
     [InlineData(Async)]
-    public void NullRecord_IsReportedBeforeANullCallback(string flavor)
+    public void NullRecord_WithANullCallback_ThrowsArgumentNullExceptionForTheRecord(string flavor)
     {
         Flavor producer = Flavor.Create(flavor);
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
@@ -556,9 +556,9 @@ public sealed class PublicProducerDeliveryCallbackTests
     [Theory]
     [InlineData(Sync)]
     [InlineData(Async)]
-    public void NullCallback_OnClosedProducer_ReportsTheClosedProducerFirst(string flavor)
+    public void ClosedProducer_SendWithANullCallback_ThrowsTheClosedError(string flavor)
     {
-        // As Java's MockProducer.send, the closed check precedes the argument guards.
+        // As Java's MockProducer.send, the closed check comes first.
         Flavor producer = Flavor.Create(flavor);
         TestTimeout.Dispose(producer);
 
