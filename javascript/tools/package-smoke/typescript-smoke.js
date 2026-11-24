@@ -52,7 +52,7 @@ async function run(): Promise<void> {
     partition: null,
     key: 'k',
     value: 'v',
-    headers: [new Header({ key: 'h', value: Buffer.from('1') })],
+    headers: [new RecordHeader({ key: 'h', value: Buffer.from('1') }), ['n', null]],
   });
   const future: KafkaFuture<RecordMetadata> = await producer.send({ record, callback: ({ metadata, exception }) => void [metadata, exception] });
   try {
@@ -80,7 +80,7 @@ void run;
 const ESM_IMPORTS = `import { ExecutionError } from '@confluentinc/kafka-javascript';
 import { KafkaFuture } from '@confluentinc/kafka-javascript/common';
 import { RetriableError } from '@confluentinc/kafka-javascript/common/errors';
-import { Header } from '@confluentinc/kafka-javascript/common/header';
+import { RecordHeader } from '@confluentinc/kafka-javascript/common/header';
 import { stringSerializer } from '@confluentinc/kafka-javascript/common/serialization';
 import { KafkaProducer, ProducerRecord, RecordMetadata } from '@confluentinc/kafka-javascript/producer';
 `;
@@ -94,7 +94,7 @@ import producerPackage = require('@confluentinc/kafka-javascript/producer');
 const { ExecutionError } = kafka;
 type KafkaFuture<T> = common.KafkaFuture<T>;
 const { RetriableError } = errors;
-const { Header } = header;
+const { RecordHeader } = header;
 const { stringSerializer } = serialization;
 const { KafkaProducer, ProducerRecord } = producerPackage;
 type RecordMetadata = producerPackage.RecordMetadata;

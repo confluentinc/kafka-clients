@@ -32,7 +32,6 @@ const { UNKNOWN_SERVER_ERROR, errorFfiId } = require('../dist/internal/errors');
 const { ExecutionError } = require('../dist');
 const { KafkaError } = require('../dist/common');
 const { ApiError, GroupAuthorizationError, InvalidTopicError, TopicAuthorizationError } = require('../dist/common/errors');
-const { Header } = require('../dist/common/header');
 const { ProducerRecord } = require('../dist/producer');
 
 // The FFI error codes (kafka_common_Error_e in confluent_kafka_bindings.h,
@@ -195,7 +194,7 @@ function protoToProducerRecord(proto) {
   };
   const headers = record.headers || [];
   if (headers.length > 0) {
-    options.headers = headers.map((h) => new Header({ key: h.key === undefined ? '' : h.key, value: h.value || Buffer.alloc(0) }));
+    options.headers = headers.map((h) => [h.key === undefined ? '' : h.key, h.value || Buffer.alloc(0)]);
   }
   return new ProducerRecord(options);
 }

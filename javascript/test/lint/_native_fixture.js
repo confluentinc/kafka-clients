@@ -127,9 +127,8 @@ const FILES = {
   'src/internal/native.ts': NATIVE_TS,
   'src/producer/producer.ts': PRODUCER_TS,
   'test/unit/internal/native.test.js': "const native = require('../../../dist/internal/native');\nnative.probe();\n",
-  'test/unit/common/header/headers.test.js': "const native = require('../../../../dist/internal/native');\nnative.headerStats();\n",
   'test/memory/native_counts.test.js':
-    "const native = require('../../dist/internal/native');\nnative.producerStats();\nnative.errorStats();\n",
+    "const native = require('../../dist/internal/native');\nnative.producerStats();\nnative.errorStats();\nnative.headerStats();\n",
   'test/memory/record_read_back.test.js': "const native = require('../../dist/internal/native');\nnative.recordSpy(false);\n",
   'test/unit/producer/kafka_producer.test.js': "const native = require('../../../dist/internal/native');\nnative.faultNext(null);\n",
 };

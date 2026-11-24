@@ -54,9 +54,8 @@ const TEST_ONLY = new Map([
   [
     'headerStats',
     {
-      test: 'test/unit/common/header/headers.test.js',
-      reason:
-        "a test-only registration: the counts of native/headers.c, which prove option 1's copies and views and the handles' lifetimes",
+      test: 'test/memory/native_counts.test.js',
+      reason: "a test-only registration: the counts of native/headers.c, which prove each send's native RecordHeaders is destroyed once",
     },
   ],
   [

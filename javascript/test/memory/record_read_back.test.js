@@ -15,7 +15,7 @@
 'use strict';
 
 // The record a send built, read back from the native record through the
-// test-only recordSpy() (native/headers.c): no copy of a key or a value,
+// test-only recordSpy() (native/record_spy.c): no copy of a key or a value,
 // proved by address rather than by reading the source as the linter's
 // check-zero-copy does (javascript/CLAUDE.md, rule 8), and every field the
 // record holds, the headers in order.
@@ -26,7 +26,7 @@ const { NO_LEAKS, CRASH_TEXT, runProbe, lastJson } = require('./_probe');
 
 test('a send hands the core the caller’s own key and value memory, and the record holds every field as given', () => {
   const r = runProbe(`
-    const { Header } = require(D + '/common/header');
+    const { RecordHeader } = require(D + '/common/header');
     const { stringSerializer } = require(D + '/common/serialization');
     const { KafkaProducer, ProducerRecord } = require(D + '/producer');
     const hex = (b) => (b === null ? null : Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('hex'));
@@ -48,7 +48,9 @@ test('a send hands the core the caller’s own key and value memory, and the rec
       await (async () => {
         const configs = { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 200 };
         const p = new KafkaProducer({ configs });
-        // A Buffer key and value, every field given, headers with a null and an empty value.
+        // A Buffer key and value, every field given, headers with a null and
+        // an empty value: RecordHeader objects, [key, value] pairs and a
+        // Header the app implements, mixed.
         const key = Buffer.from('key-1');
         const value = Buffer.from('value-1');
         native.recordSpy(true);
@@ -60,10 +62,10 @@ test('a send hands the core the caller’s own key and value memory, and the rec
             key,
             value,
             headers: [
-              new Header({ key: 'trace', value: null }),
-              new Header({ key: 'empty', value: Buffer.alloc(0) }),
-              new Header({ key: 'trace', value: Buffer.from('t2') }),
-              new Header({ key: 'z', value: Buffer.from([0, 255]) }),
+              new RecordHeader({ key: 'trace', value: null }),
+              ['empty', Buffer.alloc(0)],
+              { key: () => 'trace', value: () => Buffer.from('t2') },
+              ['z', new Uint8Array([0, 255])],
             ],
           }),
           callback: () => {},

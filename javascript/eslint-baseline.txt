@@ -73,6 +73,6 @@ missing common.serialization.Serializer#configure
 # Java's (Properties, Serializer, Serializer) form is the (Map, Serializer,
 # Serializer) one.
 overload-missing KafkaProducer.constructor/KafkaProducer(Properties,Serializer,Serializer)
-# Header's constructor takes Java's (String, byte[]) form: JavaScript has no
-# ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
-overload-missing Header.constructor/RecordHeader(ByteBuffer,ByteBuffer)
+# RecordHeader's constructor takes Java's (String, byte[]) form: JavaScript has
+# no ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
+overload-missing RecordHeader.constructor/RecordHeader(ByteBuffer,ByteBuffer)

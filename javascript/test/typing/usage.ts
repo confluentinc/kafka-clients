@@ -70,7 +70,7 @@ import { TimestampType } from '@confluentinc/kafka-javascript/common/record';
 import { QuotaViolationError } from '@confluentinc/kafka-javascript/common/metrics';
 import { ConfigError, SaslConfigs, SslClientAuth, SslConfigs } from '@confluentinc/kafka-javascript/common/config';
 import { SecurityProtocol } from '@confluentinc/kafka-javascript/common/security/auth';
-import { Header, Headers } from '@confluentinc/kafka-javascript/common/header';
+import { type Header, Headers, RecordHeader } from '@confluentinc/kafka-javascript/common/header';
 import { type Serializer, stringSerializer } from '@confluentinc/kafka-javascript/common/serialization';
 
 void producer;
@@ -107,7 +107,7 @@ void asyncFactory;
 const lingerFunction: ProducerConfigs = { 'linger.ms': () => ({ serialize: () => null }) };
 void lingerFunction;
 
-const headers: Header[] = [new Header({ key: 'h', value: Buffer.from('v') }), new Header({ key: 'n', value: null })];
+const headers: Header[] = [new RecordHeader({ key: 'h', value: Buffer.from('v') }), new RecordHeader({ key: 'n', value: null })];
 // A producer without serializers is a KafkaProducer<Uint8Array, Uint8Array>:
 // its records hold bytes.
 const key = Buffer.from('k');
@@ -129,14 +129,33 @@ const recordHeaders = record.headers;
 expectTypeOf(recordHeaders).toEqualTypeOf<Headers>();
 void [topic, partition, recordHeaders];
 // Headers: Java's members, the headers given in any of the three forms.
-const built = new Headers([new Header({ key: 'a', value: Buffer.from('1') })])
-  .add(new Header({ key: 'b', value: null }))
+const built = new Headers([new RecordHeader({ key: 'a', value: Buffer.from('1') })])
+  .add(new RecordHeader({ key: 'b', value: null }))
   .add({ key: 'c', value: null });
 expectTypeOf(built).toEqualTypeOf<Headers>();
 new Headers({ headers: built });
 new Headers({ headers: null });
 new Headers();
 new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: built });
+// Where Java takes headers, a [key, value] pair is a header too, mixed with
+// Header objects, a value bytes or null; a frozen pair included.
+new Headers([['k', null], new RecordHeader({ key: 'h', value: null }), ['v', Buffer.from('1')], ['u', new Uint8Array(1)]]);
+new Headers({ headers: [['k', null]] as const });
+new ProducerRecord({
+  topic: 't',
+  partition: null,
+  key: null,
+  value: 'v',
+  headers: [
+    ['k', Buffer.from('1')],
+    ['n', null],
+  ],
+});
+new ProducerRecord({ topic: 't', partition: null, key: null, value: 'v', headers: new Set([['k', null] as const]) });
+// A Header the app implements is a Header, given by name to add(): a plain
+// object given bare is the { key, value } options object.
+const ownHeader: Header = { key: () => 'own', value: () => null };
+new Headers([ownHeader]).add({ header: ownHeader });
 const last = built.lastHeader('a');
 expectTypeOf(last).toEqualTypeOf<Header | null>();
 const byKey = built.headers({ key: 'a' });
@@ -153,7 +172,11 @@ for (const h of built.remove('a')) void h.key();
 expectTypeOf(record.equals(record)).toEqualTypeOf<boolean>();
 expectTypeOf(record.equals({ o: null })).toEqualTypeOf<boolean>();
 expectTypeOf(record.hashCode()).toEqualTypeOf<number>();
-expectTypeOf(asArray[0].equals(asArray[1])).toEqualTypeOf<boolean>();
+const recordHeader = new RecordHeader({ key: 'h', value: null });
+expectTypeOf(recordHeader.equals(recordHeader)).toEqualTypeOf<boolean>();
+expectTypeOf(recordHeader.hashCode()).toEqualTypeOf<number>();
+expectTypeOf(recordHeader.value()).toEqualTypeOf<Buffer | null>();
+expectTypeOf(recordHeader).toExtend<Header>();
 expectTypeOf(built.hashCode()).toEqualTypeOf<number>();
 // @ts-expect-error hashCode() only reads: it takes no argument
 built.hashCode(1);
@@ -164,11 +187,19 @@ const notAKeyField: string = asArray[0].key;
 void notAKeyField;
 void [last, byKey, headerValue, headerKey];
 // @ts-expect-error a header value is bytes: encode a string first
-new Header({ key: 'k', value: 'v' });
+new RecordHeader({ key: 'k', value: 'v' });
 // @ts-expect-error a header key is a string
-new Header({ key: 1, value: null });
-// @ts-expect-error a [key, value] pair is no Header
-new Headers([['k', null]]);
+new RecordHeader({ key: 1, value: null });
+// @ts-expect-error Header is an interface: RecordHeader builds a header
+new Header({ key: 'k', value: null });
+// @ts-expect-error a pair's value is bytes or null: encode a string first
+new Headers([['k', 'v']]);
+// @ts-expect-error a pair's key is a string
+new Headers([[1, null]]);
+// @ts-expect-error a pair has two elements
+new Headers([['k', null, 'extra']]);
+// @ts-expect-error add takes one Header, or the key and value by name, not a pair
+built.add(['k', null]);
 // @ts-expect-error a {key, value} object is not a Header
 built.add({ header: { key: 'k', value: null } });
 // A data object: its fields spread into a plain object of the same types.
@@ -662,6 +693,12 @@ KafkaFuture.internalCreate(true);
 (null as unknown as KafkaFuture<string>).internalComplete('v', null);
 // @ts-expect-error ProducerRecord's internalToNative is the library's own, not declared
 record.internalToNative();
+// @ts-expect-error Headers' setReadOnly is the library's own, not declared
+built.setReadOnly();
+// @ts-expect-error Headers' isReadOnly is the library's own, not declared
+built.isReadOnly();
+// @ts-expect-error Headers' internalToNative is the library's own, not declared
+built.internalToNative();
 // @ts-expect-error no underscore member is left either
 record._toNative();
 

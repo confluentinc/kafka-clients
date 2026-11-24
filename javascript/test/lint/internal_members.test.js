@@ -142,6 +142,31 @@ export function ffiIdOf(): number {
   ]);
 });
 
+test("Headers' setReadOnly() and isReadOnly(), which the JS conventions name by Java's names, are @internal members; an entry must be one", () => {
+  const headers = (/** @type {string} */ members) => ({
+    'tsconfig.json': TSCONFIG,
+    'src/common/header/headers.ts': `export class Headers {\n${members}}\n`,
+  });
+  const both = '  /** @internal */\n  setReadOnly(): void {}\n  /** @internal */\n  isReadOnly(): boolean { return false; }\n';
+  let r = lint(project(headers(both)), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  // The two members and the two entries.
+  assert.ok(r.out.includes('✅ check-internal-members: 4 item(s) checked'), r.text);
+  // Another @internal member of Java's name is still a finding; a listed member that is not @internal is not one of them.
+  r = lint(
+    project(
+      headers(
+        '  /** @internal */\n  setReadOnly(): void {}\n  isReadOnly(): boolean { return false; }\n  /** @internal */\n  size(): number { return 0; }\n',
+      ),
+    ),
+    [RULE],
+  );
+  assert.deepEqual(findings(r), [
+    'src/common/header/headers.ts:Headers.size: `size` is `@internal` but not named `internal...` (line 6)',
+    "src/common/header/headers.ts:Headers.isReadOnly: is listed as a library-only member named by Java (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization: Headers' read-only state, whose isReadOnly() is @internal), but is no `@internal` member of its class: delete the entry",
+  ]);
+});
+
 test('other string keys and non-literal keys are not member accesses to check', () => {
   const root = project({
     'tsconfig.json': TSCONFIG,

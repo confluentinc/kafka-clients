@@ -247,7 +247,7 @@ export class ProducerRecord<out K = never, out V = never> {
         timestamp: bigint | number | null;
         key: null;
         value: null;
-        headers: Iterable<Header> | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
     });
     constructor(options: {
         topic: string;
@@ -255,7 +255,7 @@ export class ProducerRecord<out K = never, out V = never> {
         timestamp: bigint | number | null;
         key: null;
         value: V | null;
-        headers: Iterable<Header> | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
     });
     constructor(options: {
         topic: string;
@@ -263,7 +263,7 @@ export class ProducerRecord<out K = never, out V = never> {
         timestamp: bigint | number | null;
         key: K | null;
         value: null;
-        headers: Iterable<Header> | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
     });
     constructor(options: {
         topic: string;
@@ -271,7 +271,7 @@ export class ProducerRecord<out K = never, out V = never> {
         timestamp: bigint | number | null;
         key: K | null;
         value: V | null;
-        headers: Iterable<Header> | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
     });
     constructor(options: {
         topic: string;
@@ -311,7 +311,7 @@ export class ProducerRecord<out K = never, out V = never> {
         timestamp?: never;
         key: null;
         value: null;
-        headers: Iterable<Header> | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
     });
     constructor(options: {
         topic: string;
@@ -319,7 +319,7 @@ export class ProducerRecord<out K = never, out V = never> {
         timestamp?: never;
         key: null;
         value: V | null;
-        headers: Iterable<Header> | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
     });
     constructor(options: {
         topic: string;
@@ -327,7 +327,7 @@ export class ProducerRecord<out K = never, out V = never> {
         timestamp?: never;
         key: K | null;
         value: null;
-        headers: Iterable<Header> | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
     });
     constructor(options: {
         topic: string;
@@ -335,7 +335,7 @@ export class ProducerRecord<out K = never, out V = never> {
         timestamp?: never;
         key: K | null;
         value: V | null;
-        headers: Iterable<Header> | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]> | null;
     });
     constructor(options: {
         topic: string;

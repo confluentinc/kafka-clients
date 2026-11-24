@@ -46,7 +46,7 @@ const {
   OffsetAndMetadata,
   OffsetOutOfRangeError,
 } = require('@confluentinc/kafka-javascript/consumer');
-const { Header, Headers } = require('@confluentinc/kafka-javascript/common/header');
+const { Headers, RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const { TimestampType } = require('@confluentinc/kafka-javascript/common/record');
 const { fromNative } = require('../../../dist/internal/errors');
 
@@ -314,7 +314,9 @@ test("RecordDeserializationError: Java's constructor, its getters and its nested
   assert.equal(e.keyBuffer()?.[0], 9);
   assert.equal(e.valueBuffer(), null);
   assert.equal(e.headers(), headers);
-  // An iterable of Header is a new Headers.
+  // An iterable of Header objects and [key, value] pairs is a new Headers,
+  // holding the very Header objects given.
+  const given = new RecordHeader({ key: 'h', value: null });
   const listed = new RecordDeserializationError({
     origin: Origin.VALUE,
     partition: tp('t', 1),
@@ -323,11 +325,15 @@ test("RecordDeserializationError: Java's constructor, its getters and its nested
     timestampType: TimestampType.NO_TIMESTAMP_TYPE,
     keyBuffer: null,
     valueBuffer: null,
-    headers: [new Header({ key: 'h', value: null })],
+    // The generated type names Header elements only; the run time takes pairs too.
+    headers: /** @type {Iterable<import('@confluentinc/kafka-javascript/common/header').Header>} */ (
+      /** @type {unknown} */ ([given, ['p', Buffer.from('v')]])
+    ),
     message: null,
     cause: null,
   });
-  assert.equal(listed.headers().lastHeader('h')?.key(), 'h');
+  assert.equal(listed.headers().lastHeader('h'), given);
+  assert.equal(listed.headers().lastHeader('p')?.value()?.toString(), 'v');
   assert.equal(listed.message, '');
   assert.throws(
     () =>
@@ -373,7 +379,11 @@ test("RecordDeserializationError: Java's constructor, its getters and its nested
   assert.equal(core.topicPartition().toString(), 't-0');
   assert.equal(core.offset(), 3n);
   assert.equal(core.valueBuffer().toString(), 'v');
-  assert.equal(core.headers().toArray()[0].value().toString(), 'b');
+  // A RecordHeader of the copy the native layer read.
+  const [fromCore] = core.headers().toArray();
+  assert.ok(fromCore instanceof RecordHeader);
+  assert.equal(fromCore.key(), 'a');
+  assert.equal(fromCore.value()?.toString(), 'b');
 });
 
 test('the String payloads: groupId, resource; GroupAuthorizationError.forGroupId', () => {

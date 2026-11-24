@@ -30,7 +30,7 @@
 
 const assert = require('node:assert/strict');
 
-const { Header } = require('@confluentinc/kafka-javascript/common/header');
+const { RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 const { createTopic, fetchRecords, waitForBroker } = require('../integration/_fetch_records');
 
@@ -114,7 +114,7 @@ function recordOf(topics, i) {
     partition: null,
     key: index,
     value: Buffer.alloc(100, i % 256),
-    headers: [new Header({ key: 'i', value: index })],
+    headers: [new RecordHeader({ key: 'i', value: index })],
   });
 }
 

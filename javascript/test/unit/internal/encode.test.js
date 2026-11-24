@@ -23,9 +23,8 @@
 const assert = require('node:assert/strict');
 
 const { encodeLikeJava } = require('../../../dist/internal/encode');
-const native = require('../../../dist/internal/native');
 const { configEntries: untypedEntries } = require('../../../dist/internal/config');
-const { Header } = require('@confluentinc/kafka-javascript/common/header');
+const { RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 const { internalRecord } = require('../../_internal');
@@ -63,7 +62,7 @@ test('a key and a value through stringSerializer(), and a header key, are encode
       partition: null,
       key: s,
       value: s,
-      headers: [new Header({ key: s, value: null })],
+      headers: [new RecordHeader({ key: s, value: null }), [s, null]],
     });
     const key = serializer.serialize({ topic: 't', headers: record.headers, data: record.key });
     const value = serializer.serialize({ topic: 't', headers: record.headers, data: record.value });
@@ -71,10 +70,11 @@ test('a key and a value through stringSerializer(), and a header key, are encode
     const [, , , , , headers] = internalRecord(record).internalToNative(key, value);
     assert.equal(Buffer.from(key).toString('hex'), hex, `${what}: key`);
     assert.equal(Buffer.from(value).toString('hex'), hex, `${what}: value`);
-    // The header key crosses as its bytes, encodeLikeJava's: the native
-    // RecordHeaders that crosses holds them.
-    const [crossed] = native.headersToArray(headers);
-    assert.equal(Buffer.from(native.headerKey(crossed), 'utf8').toString('hex'), hex, `${what}: header key`);
+    // The header keys cross as their bytes, encodeLikeJava's, at send(): the
+    // headers keep the key as given, as Java's RecordHeader keeps the String.
+    assert.ok(headers);
+    for (const i of [0, 2]) assert.equal(Buffer.from(/** @type {Uint8Array} */ (headers[i])).toString('hex'), hex, `${what}: header key`);
+    assert.equal(record.headers.toArray()[0].key(), s, what);
   }
 });
 

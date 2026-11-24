@@ -82,8 +82,8 @@ const CONSTANTS_ONLY = new Set([
  * The list is javascript/CLAUDE.md's (JavaScript Binding Conventions, Class
  * family: the records, `TopicPartition`, `OffsetAndMetadata`,
  * `RecordMetadata`, `Node` and the admin description classes), limited to the
- * classes the client translates: `Header` is not on it, so it keeps Java's
- * `key()` and `value()`.
+ * classes the client translates: `RecordHeader` is not on it, so it keeps
+ * Java's `key()` and `value()`.
  */
 const DATA_CLASSES = new Set([
   'org.apache.kafka.clients.producer.ProducerRecord',

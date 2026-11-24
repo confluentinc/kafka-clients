@@ -19,10 +19,10 @@
 // their own memory: no key or value is copied, the app's or a serializer's
 // Buffer included. The core reads those bytes until the send's hand-over
 // completion, and producer.c holds a reference to each Buffer until then
-// (javascript/CLAUDE.md, rule 8). The headers are the record's own
-// RecordHeaders handle (native/headers.c), which the core copies into the
-// record during the call. The producer was built
-// with NULL serializers, so the record's `void *` key and value are
+// (javascript/CLAUDE.md, rule 8). The headers are copied into a native
+// RecordHeaders made for the call (native/headers.c), which the record's
+// options builder copies, and which is destroyed right after. The producer
+// was built with NULL serializers, so the record's `void *` key and value are
 // `kafka_Bytes_t *`.
 
 #include <stdio.h>
@@ -132,16 +132,18 @@ char* js_bytes_cstring(napi_env env, napi_value value, const char* what) {
 }
 
 // The record with headers: ProducerRecord(topic, partition, timestamp, key,
-// value, headers) through its options builder, `record_headers` the record's
-// own RecordHeaders (src/common/header/headers.ts), which the builder copies.
+// value, headers) through its options builder, `headers` the record's
+// headers as native/headers.c's headers_build reads them. The builder copies
+// the native RecordHeaders made for it, so it is destroyed right after
+// set_headers. NULL with a JS exception pending on failure.
 static kafka_producer_ProducerRecord_t* record_with_headers(napi_env env, const char* topic, int32_t partition,
                                                             int64_t timestamp, const JsBytes* key,
-                                                            const JsBytes* value,
-                                                            const kafka_common_header_internals_RecordHeaders_t* record_headers) {
+                                                            const JsBytes* value, napi_value headers) {
     kafka_common_Error_t* ffi_err = NULL;
     kafka_producer_ProducerRecordOptionsBuilder_t* builder = NULL;
     kafka_producer_ProducerRecordOptions_t* options = NULL;
     kafka_producer_ProducerRecord_t* record = NULL;
+    int thrown = 0;
 
     kafka_common_Error_t* err = FFI_SET(builder, kafka_producer_ProducerRecordOptionsBuilder_new_err(&ffi_err));
     if (err == NULL)
@@ -156,11 +158,18 @@ static kafka_producer_ProducerRecord_t* record_with_headers(napi_env env, const 
     if (err == NULL)
         err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_value_err(
             builder, value->is_null ? NULL : (const void*)&value->bytes, &ffi_err));
-    if (err == NULL)
-        err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_headers_err(builder, record_headers, &ffi_err));
+    if (err == NULL) {
+        kafka_common_header_internals_RecordHeaders_t* record_headers = headers_build(env, headers);
+        if (record_headers == NULL) {
+            thrown = 1;
+        } else {
+            err = FFI_ERR(kafka_producer_ProducerRecordOptionsBuilder_set_headers_err(builder, record_headers, &ffi_err));
+            headers_destroy(env, record_headers);
+        }
+    }
     // _build and ProducerRecord_with_options take an out_err of their own.
-    if (err == NULL) err = FFI_SET(options, kafka_producer_ProducerRecordOptionsBuilder_build(builder, &ffi_err));
-    if (err == NULL) err = FFI_SET(record, kafka_producer_ProducerRecord_with_options(options, &ffi_err));
+    if (err == NULL && !thrown) err = FFI_SET(options, kafka_producer_ProducerRecordOptionsBuilder_build(builder, &ffi_err));
+    if (err == NULL && !thrown) err = FFI_SET(record, kafka_producer_ProducerRecord_with_options(options, &ffi_err));
 
     if (options != NULL) error_warn(env, 1, FFI_ERR(kafka_producer_ProducerRecordOptions_destroy_err(options, &ffi_err)));
     if (builder != NULL)
@@ -169,7 +178,7 @@ static kafka_producer_ProducerRecord_t* record_with_headers(napi_env env, const 
         error_throw_owned(env, err);
         return NULL;
     }
-    return record;
+    return thrown ? NULL : record;
 }
 
 kafka_producer_ProducerRecord_t* record_build(napi_env env, const char* topic, int32_t partition,
@@ -177,11 +186,8 @@ kafka_producer_ProducerRecord_t* record_build(napi_env env, const char* topic, i
                                               napi_value headers) {
     napi_valuetype type;
     NAPI_CHECK(env, napi_typeof(env, headers, &type), NULL);
-    if (type != napi_null && type != napi_undefined) {
-        const kafka_common_header_internals_RecordHeaders_t* record_headers = headers_handle(env, headers);
-        if (record_headers == NULL) return NULL;
-        return record_with_headers(env, topic, partition, timestamp, key, value, record_headers);
-    }
+    if (type != napi_null && type != napi_undefined)
+        return record_with_headers(env, topic, partition, timestamp, key, value, headers);
     kafka_common_Error_t* ffi_err = NULL;
     kafka_producer_ProducerRecord_t* record = NULL;
     kafka_common_Error_t* err = FFI_SET(record, kafka_producer_ProducerRecord_with_partition_timestamp_key(

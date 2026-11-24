@@ -26,7 +26,7 @@ const path = require('node:path');
 const { ExecutionError } = require('@confluentinc/kafka-javascript');
 const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 const { AuthenticationError } = require('@confluentinc/kafka-javascript/common/errors');
-const { Header } = require('@confluentinc/kafka-javascript/common/header');
+const { RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { fetchRecords } = require('./_fetch_records');
 
@@ -82,7 +82,7 @@ async function produceOneRecord(configs, plaintextBootstrap, what) {
         partition: null,
         key: Buffer.from('k1'),
         value: Buffer.from(`hello-over-${what}`),
-        headers: [new Header({ key: 'h1', value: Buffer.from('v1') }), new Header({ key: 'h2', value: null })],
+        headers: [new RecordHeader({ key: 'h1', value: Buffer.from('v1') }), ['h2', null]],
       }),
       callback: ({ metadata, exception }) => {
         callbacks++;

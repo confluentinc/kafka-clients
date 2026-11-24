@@ -97,7 +97,7 @@ test('a data class whose constructor does not freeze the instance is a finding',
   }
 });
 
-test("the shipped list names the data classes the client translates, not Header (the JS conventions' list does not)", () => {
+test("the shipped list names the data classes the client translates, not RecordHeader (the JS conventions' list does not)", () => {
   assert.deepEqual([...rule.DATA_CLASSES].sort(), [
     'org.apache.kafka.clients.consumer.OffsetAndMetadata',
     'org.apache.kafka.clients.producer.ProducerRecord',

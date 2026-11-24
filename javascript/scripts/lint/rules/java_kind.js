@@ -55,14 +55,7 @@ const OTHER_FORMS = new Map([
     {
       form: 'class',
       reason:
-        "javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization: Headers wraps the FFI's RecordHeaders, a TypeScript class over a native handle",
-    },
-  ],
-  [
-    'org.apache.kafka.common.header.Header',
-    {
-      form: 'class',
-      reason: 'javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization: Header wraps the C RecordHeader too',
+        "javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization: Headers joins Java's Headers interface and its class RecordHeaders, a plain TypeScript class",
     },
   ],
 ]);

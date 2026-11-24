@@ -67,6 +67,7 @@ async function settle(rounds = 10) {
 function leaks() {
   const s = native.producerStats();
   const e = native.errorStats();
+  const h = native.headerStats();
   return {
     producers: s.producersMade - s.producersFreed,
     ownerUnits: s.ownerUnitsTaken - s.ownerUnitsReleased,
@@ -80,6 +81,7 @@ function leaks() {
     mockRecords: s.mockRecordsMade - s.mockRecordsFreed,
     injectedErrors: s.injectedMade - s.injectedFreed,
     errors: e.owned + e.made - e.freed - e.given,
+    recordHeaders: h.made - h.freed,
   };
 }
 `;
@@ -98,6 +100,7 @@ const NO_LEAKS = {
   mockRecords: 0,
   injectedErrors: 0,
   errors: 0,
+  recordHeaders: 0,
 };
 
 /**

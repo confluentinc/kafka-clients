@@ -908,8 +908,8 @@ MUTATIONS.push(
       edit(
         root,
         'src/common/header/headers.ts',
-        "  if (typeof key !== 'string') throw new TypeError('key must be a string');\n  return encodeLikeJava(key);",
-        "  if (typeof key !== 'string') throw new TypeError('key must be a string');\n  return new TextEncoder().encode(key);",
+        '      out[2 * i] = encodeLikeJava(key);',
+        '      out[2 * i] = new TextEncoder().encode(key);',
       ),
   },
   {

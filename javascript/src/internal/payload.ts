@@ -36,13 +36,13 @@
 // | KafkaMetric              | a KafkaMetric                 | the same KafkaMetric      |
 //   (from the core: built from the metric's name and the error's value)
 // | ByteBuffer               | a Uint8Array, or null         | a Buffer over its memory  |
-// | Headers                  | a Headers (kept), or an iterable of Header | the same Headers |
+// | Headers                  | a Headers (kept), or an iterable of Header objects and [key, value] pairs | the same Headers |
 // | an enum                  | a constant, or null           | the constant              |
 // | Map<TopicPartition, OffsetAndMetadata> | a TopicPartitionMap | a new TopicPartitionMap |
 
 import { kind as kindOf } from './args';
 import { checkInt, checkLong } from './java_number';
-import { Header } from '../common/header/header';
+import type { Header } from '../common/header/header';
 import { Headers } from '../common/header/headers';
 import { KafkaMetric } from '../common/metrics/kafka_metric';
 import { MetricName } from '../common/metric_name';
@@ -356,21 +356,19 @@ export const bytes: Kind = {
 
 /**
  * Java's `Headers`: a `Headers`, kept as it is, as Java keeps the object it
- * is given; any other iterable of `Header` as a new `Headers`; null stays
- * null.
+ * is given; any other iterable of `Header` objects and `[key, value]` pairs
+ * as a new `Headers`, which checks each element; null stays null. From the
+ * core, a new `Headers` of the `[key, value]` copies the native layer read.
  */
 export const headers: Kind = {
   take(value, name) {
     if (value === null || value instanceof Headers) return value;
     if (typeof value !== 'object' || typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] !== 'function') {
-      throw new TypeError(`${name} must be a Headers or an iterable of Header`);
+      throw new TypeError(`${name} must be a Headers, or an iterable of Header objects and [key, value] pairs`);
     }
-    return new Headers({ headers: value as Iterable<Header> });
+    return new Headers({ headers: value as Iterable<Header | readonly [string, Uint8Array | null]> });
   },
-  core: (raw) =>
-    raw === null
-      ? null
-      : new Headers({ headers: (raw as Array<[string, Buffer | null]>).map(([key, value]) => new Header({ key, value })) }),
+  core: (raw) => (raw === null ? null : new Headers({ headers: raw as Array<[string, Buffer | null]> })),
   copy: same,
 };
 

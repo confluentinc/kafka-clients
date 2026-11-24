@@ -74,33 +74,10 @@ interface RecordMetadataFields {
 /** A native producer handle (native/producer.c), opaque to JavaScript. */
 type ProducerHandle = object;
 
-/**
- * A native RecordHeaders handle (native/headers.c), opaque to JavaScript: the
- * object src/common/header/headers.ts holds, whose finalizer drops its
- * reference on the native headers.
- */
-type HeadersHandle = object;
-
-/**
- * A native RecordHeader handle (native/headers.c), opaque to JavaScript: an
- * owned header, or a view of one inside a read-only RecordHeaders, which it
- * keeps alive.
- */
-type HeaderHandle = object;
-
-/** The counts of native/headers.c, for the lifetime tests. */
+/** The counts of native/headers.c, for the memory tests: the native RecordHeaders the sends made, and destroyed. */
 interface HeaderStats {
-  headersMade: number;
-  headersFreed: number;
-  headerMade: number;
-  headerFreed: number;
-  // The binding's copies of the headers a changeable Headers hands out (option 1).
-  headerCopies: number;
-  // The views a read-only Headers hands out, with no copy.
-  headerViews: number;
-  // Value Buffers over native bytes, and copied ones (a runtime refusing external buffers).
-  valueExternal: number;
-  valueCopied: number;
+  made: number;
+  freed: number;
 }
 
 /** The counts of native/producer.c, for the memory tests: each object or unit made, and freed or given back. */
@@ -138,7 +115,7 @@ interface ErrorStats {
   given: number;
 }
 
-/** What a send built, read back from the native record (native/headers.c `record_spy_capture`), for the tests. */
+/** What a send built, read back from the native record (native/record_spy.c `record_spy_capture`), for the tests. */
 interface SpiedRecord {
   topic: string;
   partition: number;
@@ -176,9 +153,10 @@ interface Native {
     // Borrowed, not copied: the addon holds a reference on each until the
     // hand-over (javascript/CLAUDE.md, rule 8).
     value: Uint8Array | null,
-    // The record's RecordHeaders, which the core copies into the record, or
+    // The record's headers, each key's encodeLikeJava bytes then its value,
+    // which the addon copies into a native RecordHeaders for the call, or
     // null for none.
-    headers: HeadersHandle | null,
+    headers: (Uint8Array | null)[] | null,
     // The slot of the record's native future in the producer's table, which
     // a wait started before the delivery takes, null when the hand-over
     // failed (native/producer.c, the record's future).
@@ -258,35 +236,6 @@ interface Native {
     timeoutMs: number | null,
     done: (metadata: RecordMetadata | null, error: unknown, timedOut: boolean, failed: boolean) => void,
   ): void;
-  // Java's RecordHeaders() (form 0, headers null), RecordHeaders(Header[])
-  // (form 1) and RecordHeaders(Iterable<Header>) (form 2); the core copies
-  // the given headers, and a null one is the core's error.
-  headersNew(headers: (HeaderHandle | null)[] | null, form: 0 | 1 | 2): HeadersHandle;
-  // Java's new RecordHeaders(headers) of a RecordHeaders: a writable copy.
-  headersCopy(headers: HeadersHandle): HeadersHandle;
-  // Java's add(Header): the core stores a copy; null is the core's error.
-  headersAdd(headers: HeadersHandle, header: HeaderHandle | null): void;
-  // Java's add(String, byte[]): the key encodeLikeJava's bytes, or null (the core's error).
-  headersAddKeyValue(headers: HeadersHandle, key: Uint8Array | null, value: Uint8Array | null): void;
-  // Java's remove(String).
-  headersRemove(headers: HeadersHandle, key: Uint8Array | null): void;
-  // Java's lastHeader(String), headers(String), toArray() and iterator():
-  // the binding's own copies while the headers can still change, views once
-  // they are read-only (option 1).
-  headersLastHeader(headers: HeadersHandle, key: Uint8Array | null): HeaderHandle | null;
-  headersHeaders(headers: HeadersHandle, key: Uint8Array | null): HeaderHandle[];
-  headersToArray(headers: HeadersHandle): HeaderHandle[];
-  headersIterator(headers: HeadersHandle): HeaderHandle[];
-  // Java's setReadOnly() and isReadOnly().
-  headersSetReadOnly(headers: HeadersHandle): void;
-  headersIsReadOnly(headers: HeadersHandle): boolean;
-  // Java's new RecordHeader(String, byte[]): the key encodeLikeJava's bytes,
-  // or null (the core's error); the core copies both.
-  headerNew(key: Uint8Array | null, value: Uint8Array | null): HeaderHandle;
-  // Java's key(), and value(): a Buffer over the header's native bytes,
-  // which keeps the header alive, or null.
-  headerKey(header: HeaderHandle): string;
-  headerValue(header: HeaderHandle): Buffer | null;
   // The counts of native/headers.c. Test-only.
   headerStats(): HeaderStats;
   // The counts of native/producer.c. Test-only.

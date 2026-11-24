@@ -13,9 +13,10 @@
 // limitations under the License.
 
 /**
- * The package of Java's `org.apache.kafka.common.header`, `Header` and
- * `Headers` (with the constructors of their internal classes `RecordHeader`
- * and `RecordHeaders`).
+ * The package of Java's `org.apache.kafka.common.header`: the `Header`
+ * interface, `Headers`, which joins Java's interface with its internal class
+ * `RecordHeaders`, and `RecordHeader`, the internal class of a header, which
+ * builds one.
  *
  * Not translated: `RecordHeader`'s `(ByteBuffer, ByteBuffer)` constructor, as
  * JavaScript has no `ByteBuffer` (a `Buffer` is a `Uint8Array`, the `byte[]`
@@ -24,8 +25,9 @@
  * @packageDocumentation
  */
 
-export { Header } from './header';
+export type { Header } from './header';
 export { Headers } from './headers';
+export { RecordHeader } from './record_header';
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import
 // under `esModuleInterop` is a compile error rather than `undefined` (import by

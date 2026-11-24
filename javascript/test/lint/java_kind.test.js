@@ -31,7 +31,7 @@ const INDEX = javaIndex([
   javaClass('clients.producer.Point', { kind: 'record' }),
   javaClass('clients.producer.Callback', { kind: 'interface', overloads: [method('onCompletion', ['RecordMetadata'])] }),
   javaClass('clients.producer.Partitioner', { kind: 'interface' }),
-  javaClass('common.header.Header', { kind: 'interface', overloads: [method('key')] }),
+  javaClass('common.header.Headers', { kind: 'interface', overloads: [method('add')] }),
   javaClass('common.Fut', {
     abstract: true,
     overloads: [method('get', [], { abstract: true }), method('join'), method('Fut')],
@@ -50,7 +50,7 @@ const LIB = {
   'src/producer/point.ts': '/** A point. */\nexport class Point {}\n',
   'src/producer/callback.ts': '/** A callback. */\nexport type Callback = (options: { metadata: unknown }) => void;\n',
   'src/producer/partitioner.ts': '/** A placeholder. */\nexport type Partitioner = unknown;\n',
-  'src/common/header/header.ts': '/** A header. */\nexport class Header {\n  key(): string { return ""; }\n}\n',
+  'src/common/header/headers.ts': '/** Headers. */\nexport class Headers {\n  add(): void {}\n}\n',
   'src/common/fut.ts': `/** A future. */
 export abstract class Fut<T> {
   constructor() {
@@ -82,7 +82,7 @@ test('each finding kind, with its exact text', () => {
       'src/producer/point.ts': '/** A point. */\nexport abstract class Point {}\n',
       'src/producer/callback.ts': '/** A callback. */\nexport interface Callback {\n  onCompletion(): void;\n}\n',
       'src/producer/partitioner.ts': '/** A placeholder. */\nexport type Partitioner = { x: number };\n',
-      'src/common/header/header.ts': '/** A header. */\nexport interface Header {\n  key(): string;\n}\n',
+      'src/common/header/headers.ts': '/** Headers. */\nexport interface Headers {\n  add(): void;\n}\n',
       'src/common/fut.ts': `/** A future. */
 export abstract class Fut<T> {
   constructor() {
@@ -101,7 +101,7 @@ export abstract class Fut<T> {
     `src/producer/acks.ts:Acks: exports Acks as a TypeScript enum, which no Java type translates to: an enum is a class with frozen instances (${shape}, Class family)`,
     `src/common/fut.ts:Fut: translates the Java abstract class common.Fut, but no constructor statement throws TypeError when new.target is Fut itself: plain JavaScript can construct it (${shape}, Class family)`,
     `Fut.get: translates common.Fut#get, which is abstract: make it abstract, as Java's abstract methods stay abstract (${shape}, Class family)`,
-    `src/common/header/header.ts:Header: translates the Java interface common.header.Header as an interface: ${shape}, Serialization: Header wraps the C RecordHeader too`,
+    `src/common/header/headers.ts:Headers: translates the Java interface common.header.Headers as an interface: ${shape}, Serialization: Headers joins Java's Headers interface and its class RecordHeaders, a plain TypeScript class`,
     `src/producer/base.ts:Base: translates the Java interface clients.producer.Base as a class: a Java interface is a TypeScript interface (${shape}, Class family)`,
     `src/producer/callback.ts:Callback: translates the Java interface clients.producer.Callback as an interface: a callback is a function type (${shape}, Class family)`,
     `src/producer/partitioner.ts:Partitioner: translates the Java interface clients.producer.Partitioner as a type alias: a type that is not translated is a placeholder, \`type X = unknown\` (${shape}, Scope)`,
