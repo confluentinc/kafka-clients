@@ -48,6 +48,7 @@ import { MetricNameMap } from '../common/metric_name_map';
 import { KafkaMetric } from '../common/metrics/kafka_metric';
 import { Node } from '../common/node';
 import { PartitionInfo } from '../common/partition_info';
+import { TopicPartition } from '../common/topic_partition';
 import { Headers } from '../common/header/headers';
 import type { Serializer } from '../common/serialization/serializer';
 import type { Duration } from '../duration';
@@ -56,7 +57,7 @@ import type { CloseArgs } from './kafka_producer';
 import type { Partitioner } from './partitioner';
 import type { Producer } from './producer';
 import { ProducerRecord } from './producer_record';
-import type { RecordMetadata } from './record_metadata';
+import { RecordMetadata } from './record_metadata';
 
 /** The native producer handle (`internal/native.ts`). */
 type ProducerHandle = ReturnType<typeof native.mockProducerCreate>;
@@ -143,6 +144,25 @@ function completeRecord(
 ): string | undefined {
   future.internalSetDelivery(metadata, error);
   return failure;
+}
+
+/**
+ * Java's mock's metadata of a failed record, `RecordMetadata(topicPartition,
+ * -1, -1, NO_TIMESTAMP, -1, -1)`, as the core's mock gives it: its cluster is
+ * empty, so the partition is 0 whatever the record says.
+ *
+ * @param topic - the record's topic
+ * @returns the metadata
+ */
+function failedMetadata(topic: string): RecordMetadata {
+  return new RecordMetadata({
+    topicPartition: new TopicPartition({ topic, partition: 0 }),
+    baseOffset: -1,
+    batchIndex: -1,
+    timestamp: -1,
+    serializedKeySize: -1,
+    serializedValueSize: -1,
+  });
 }
 
 /**
@@ -379,9 +399,13 @@ export class MockProducer<K, V> implements Producer<K, V> {
     const started: Array<Promise<{ readonly error: unknown } | null>> = [];
     // The record's delivery callback, run inside the native drain: the user
     // callback first, then the delivery recorded on the future, which
-    // completes it (javascript/CLAUDE.md, rules 5 and 6).
-    const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined | Promise<string | undefined> => {
+    // completes it (javascript/CLAUDE.md, rules 5 and 6). Metadata the addon
+    // could not build is null, its error the failure; only the record's topic
+    // is kept for it, not the record.
+    const { topic, timestamp } = record;
+    const onComplete = (built: RecordMetadata | null, error: Error | null): string | undefined | Promise<string | undefined> => {
       this.#pending.delete(onComplete);
+      const metadata = built ?? failedMetadata(topic);
       try {
         let returned: unknown;
         if (userCallback !== null) {
@@ -409,7 +433,6 @@ export class MockProducer<K, V> implements Producer<K, V> {
     // Java's mock with its empty cluster sends to partition 0 whatever the
     // record says: the core's mock gets no partition, so it reports 0, and
     // Java's offsets. history() returns the app's own record.
-    const { topic, timestamp } = record;
     try {
       native.mockProducerSend(this.#handle, topic, -1, timestamp ?? -1n, record, onHandover, onComplete);
     } catch (thrown) {

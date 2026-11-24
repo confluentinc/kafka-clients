@@ -143,43 +143,68 @@ static napi_value js_preview_notice_due(napi_env env, napi_callback_info info) {
     return result;
 }
 
-atomic_int fault_armed = FAULT_NONE;
+atomic_int fault_armed = 0;
 
-// The names faultNext() takes, by FaultStep.
-static const char* const FAULT_NAMES[] = {NULL, "notify", "metadata", "error", "slot", "partitions", "close"};
+// The failures armed for each step, and the names faultNext() takes, by FaultStep.
+static atomic_int fault_left[FAULT_STEPS];
+static const char* const FAULT_NAMES[FAULT_STEPS] = {NULL, "notify", "metadata", "error", "slot", "partitions", "close", "failure"};
 
 int fault_take(FaultStep step) {
-    int armed = (int)step;
-    return atomic_compare_exchange_strong(&fault_armed, &armed, FAULT_NONE) ? 1 : 0;
+    int left = atomic_load(&fault_left[step]);
+    while (left > 0) {
+        if (atomic_compare_exchange_weak(&fault_left[step], &left, left - 1)) {
+            atomic_fetch_sub(&fault_armed, 1);
+            return 1;
+        }
+    }
+    return 0;
 }
 
-// faultNext(step): arms `step` (notify, metadata, error, slot, partitions or
-// close) to fail once, the next time its site runs; null disarms. Returns the
-// step armed before, or null, so a test sees that an armed step ran. A
-// process-wide switch. Test-only.
+// faultNext(step, times): arms `times` (1 when left out) more failures of
+// `step` (notify, metadata, error, slot, partitions, close or failure), each
+// failing the next run of its site. faultNext(null) disarms every step and
+// returns the failures still armed, a name each, so a test sees that the
+// steps it armed ran. A process-wide switch. Test-only.
 static napi_value js_fault_next(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value argv[1];
+    size_t argc = 2;
+    napi_value argv[2];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
     napi_valuetype type = napi_undefined;
-    if (argc == 1) NAPI_CHECK(env, napi_typeof(env, argv[0], &type), NULL);
-    int step = type == napi_null ? FAULT_NONE : -1;
-    if (type == napi_string) {
+    if (argc >= 1) NAPI_CHECK(env, napi_typeof(env, argv[0], &type), NULL);
+    int step = type == napi_null && argc == 1 ? FAULT_NONE : -1;
+    int32_t times = 1;
+    if (type == napi_string && argc <= 2) {
         char name[16];
         size_t len = 0;
         NAPI_CHECK(env, napi_get_value_string_utf8(env, argv[0], name, sizeof(name), &len), NULL);
-        for (int i = 1; i < (int)(sizeof(FAULT_NAMES) / sizeof(FAULT_NAMES[0])); i++)
+        for (int i = 1; i < FAULT_STEPS; i++)
             if (strcmp(name, FAULT_NAMES[i]) == 0) step = i;
+        if (argc == 2 && (napi_get_value_int32(env, argv[1], &times) != napi_ok || times < 1)) step = -1;
     }
-    if (argc != 1 || step < 0) {
-        napi_throw_type_error(env, NULL, "faultNext(step): null, or notify, metadata, error, slot, partitions or close");
+    if (step < 0) {
+        napi_throw_type_error(env, NULL,
+                              "faultNext(step, times): step null, or notify, metadata, error, slot, partitions, close "
+                              "or failure; times a positive count");
         return NULL;
     }
-    int before = atomic_exchange(&fault_armed, step);
-    napi_value result;
-    if (before == FAULT_NONE) NAPI_CHECK(env, napi_get_null(env, &result), NULL);
-    else NAPI_CHECK(env, napi_create_string_utf8(env, FAULT_NAMES[before], NAPI_AUTO_LENGTH, &result), NULL);
-    return result;
+    if (step != FAULT_NONE) {
+        atomic_fetch_add(&fault_left[step], times);
+        atomic_fetch_add(&fault_armed, times);
+        return NULL;
+    }
+    napi_value left;
+    NAPI_CHECK(env, napi_create_array(env, &left), NULL);
+    uint32_t n = 0;
+    for (int i = 1; i < FAULT_STEPS; i++) {
+        int armed = atomic_exchange(&fault_left[i], 0);
+        atomic_fetch_sub(&fault_armed, armed);
+        for (; armed > 0; armed--) {
+            napi_value name;
+            NAPI_CHECK(env, napi_create_string_utf8(env, FAULT_NAMES[i], NAPI_AUTO_LENGTH, &name), NULL);
+            NAPI_CHECK(env, napi_set_element(env, left, n++, name), NULL);
+        }
+    }
+    return left;
 }
 
 // Keeps the addon loaded until the process ends. Node unloads (dlclose) an

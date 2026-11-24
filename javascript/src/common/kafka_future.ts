@@ -39,6 +39,7 @@ import native = require('../internal/native');
 import { JavaForms } from '../internal/args';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { create } from '../internal/throwable';
+import { warn } from '../internal/warn';
 import { CancellationError } from '../cancellation_error';
 import type { Duration } from '../duration';
 import { ExecutionError } from '../execution_error';
@@ -937,9 +938,8 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
       this.#waiters.push(resolve, reject);
       native.recordFutureGet(handle, slot, millis, (metadata, error, timedOut, failed) => {
         if (!timedOut) {
-          // An answer the addon could not build completes nothing: the
-          // delivery completes the future.
-          if (!failed) this.#completeNative(metadata, error);
+          if (failed) this.#failedWait(error);
+          else this.#completeNative(metadata, error);
           return;
         }
         const waiters = this.#waiters;
@@ -961,9 +961,8 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
     this.#nativeWaiting = true;
     native.recordFutureGet(handle, this.#slot, null, (metadata, error, timedOut, failed) => {
       this.#nativeWaiting = false;
-      // An answer the addon could not build completes nothing: the delivery
-      // completes the future, and a later wait may read it again.
-      if (!failed) this.#completeNative(metadata, error);
+      if (failed) this.#failedWait(error);
+      else this.#completeNative(metadata, error);
     });
   }
 
@@ -972,6 +971,16 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
   #completeNative(metadata: unknown, error: unknown): void {
     if (error === null) this.#settle(SUCCEEDED, metadata, false);
     else this.#settle(FAILED, error, false);
+  }
+
+  // A native wait, not timed out, whose answer the addon could not build. The
+  // core completes a record's native future only once its callback reported,
+  // so a future still pending is one whose delivery reached no JavaScript,
+  // and nothing else will complete it: it fails with the failure. Otherwise
+  // the failure has nowhere else to go.
+  #failedWait(failure: unknown): void {
+    if (this.#state === PENDING) this.#settle(FAILED, failure, false);
+    else warn(failure);
   }
 
   // Runs `listener` at completion, or now when already done.

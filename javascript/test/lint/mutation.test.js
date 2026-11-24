@@ -746,7 +746,7 @@ MUTATIONS.push(
       const file = path.join(root, 'src/producer/kafka_producer.ts');
       const text = fs.readFileSync(file, 'utf8');
       const body =
-        /    const onComplete = \(metadata: RecordMetadata, error: Error \| null\): string \| undefined \| Promise<string \| undefined> => \{\n[^]*?\n    \};\n/.exec(
+        /    const onComplete = \(built: RecordMetadata \| null, error: Error \| null\): string \| undefined \| Promise<string \| undefined> => \{\n[^]*?\n    \};\n/.exec(
           text,
         );
       assert.ok(body, 'kafka_producer.ts has no onComplete');
@@ -754,7 +754,7 @@ MUTATIONS.push(
         file,
         text.replace(
           body[0],
-          '    const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined =>\n      deliver(future, userCallback, metadata, error);\n',
+          '    const onComplete = (built: RecordMetadata | null, error: Error | null): string | undefined =>\n      deliver(future, userCallback, built ?? failedMetadata(topic, partition), error);\n',
         ) +
           '\nfunction deliver(future: KafkaFuture<RecordMetadata>, userCallback: Callback | null, metadata: RecordMetadata, error: Error | null): string | undefined {\n' +
           '  future.internalSetDelivery(metadata, error);\n  if (userCallback !== null) userCallback({ metadata, exception: error });\n  return undefined;\n}\n',

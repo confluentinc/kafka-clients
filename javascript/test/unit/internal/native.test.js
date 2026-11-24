@@ -46,14 +46,17 @@ test('producerCreate takes the configuration as bytes, and refuses a string', ()
   });
 });
 
-test('faultNext arms one step of the addon, answers the step armed before, and refuses an unknown one', () => {
-  // Test-only: each step, armed, fails once the next time it runs (native/addon.c).
-  assert.equal(native.faultNext('slot'), null);
-  assert.equal(native.faultNext('close'), 'slot');
-  assert.equal(native.faultNext(null), 'close');
-  assert.equal(native.faultNext(null), null);
-  assert.throws(() => native.faultNext('nothing'), {
+test("faultNext arms failures of the addon's steps, and answers and disarms the ones still armed", () => {
+  // Test-only: each failure armed fails the next run of its step's site (native/addon.c).
+  assert.equal(native.faultNext('close', 2), undefined);
+  assert.equal(native.faultNext('slot'), undefined);
+  assert.deepEqual(native.faultNext(null), ['slot', 'close', 'close']);
+  assert.deepEqual(native.faultNext(null), []);
+  const refused = {
     name: 'TypeError',
-    message: 'faultNext(step): null, or notify, metadata, error, slot, partitions or close',
-  });
+    message: 'faultNext(step, times): step null, or notify, metadata, error, slot, partitions, close or failure; times a positive count',
+  };
+  assert.throws(() => native.faultNext('nothing'), refused);
+  assert.throws(() => native.faultNext('slot', 0), refused);
+  assert.deepEqual(native.faultNext(null), []);
 });

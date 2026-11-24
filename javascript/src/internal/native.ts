@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { debug } from './debug';
 import { fromNative } from './errors';
 import { loadAddon, platformKey } from './native_loader';
+import { warn } from './warn';
 import { RecordMetadata } from '../producer/record_metadata';
 
 /** A metric's fields and its value read when metrics() ran (native/producer.c, metric_to_js). */
@@ -184,8 +185,10 @@ interface Native {
     onHandover: (error: unknown, future: number | null) => void,
     // Returns undefined (the callback returned), the text of what it threw,
     // or a Promise of either, settling once the callback's own Promise did:
-    // the report waits for it (native/producer.c, send_defer).
-    onComplete: (metadata: RecordMetadata, error: Error | null) => string | undefined | Promise<string | undefined>,
+    // the report waits for it (native/producer.c, send_defer). The metadata
+    // is null when the addon could not build it; the error is then the
+    // failure, as it is when the delivery's error could not be built.
+    onComplete: (metadata: RecordMetadata | null, error: Error | null) => string | undefined | Promise<string | undefined>,
   ): void;
   producerFlush(handle: ProducerHandle, onComplete: (error: unknown) => void): void;
   // Java's metrics() through kafka_producer_Producer_metrics (no _cb twin):
@@ -224,7 +227,7 @@ interface Native {
     timestamp: bigint,
     record: object,
     onHandover: (error: unknown, future: number | null) => void,
-    onComplete: (metadata: RecordMetadata, error: Error | null) => string | undefined | Promise<string | undefined>,
+    onComplete: (metadata: RecordMetadata | null, error: Error | null) => string | undefined | Promise<string | undefined>,
   ): void;
   // The records the mock holds, the app's own, in send order.
   mockProducerHistory(handle: ProducerHandle): object[];
@@ -281,10 +284,12 @@ interface Native {
   producerStats(): ProducerStats;
   // The counts of native/error.c. Test-only.
   errorStats(): ErrorStats;
-  // Arms `step` of the addon to fail once, the next time it runs, as its
-  // Node-API call failing would make it; null disarms. Returns the step armed
-  // before, or null. Test-only.
-  faultNext(step: 'notify' | 'metadata' | 'error' | 'slot' | 'partitions' | 'close' | null): string | null;
+  // Arms `times` (1 when left out) more failures of `step` of the addon, each
+  // failing the next run of its site as its Node-API call failing would.
+  // Test-only.
+  faultNext(step: 'notify' | 'metadata' | 'error' | 'slot' | 'partitions' | 'close' | 'failure', times?: number): undefined;
+  // Disarms every step, and returns the failures still armed, a name each. Test-only.
+  faultNext(step: null): string[];
   // The records the sends built since the last call; arms the capture again for `arm`. Test-only.
   recordSpy(arm: boolean): SpiedRecord[];
 }
@@ -311,17 +316,8 @@ debug('addon loaded from %s', loaded.path);
 
 // An error the addon has nowhere else to report (a failed report to the core,
 // an error freeing a handle, a throw from the binding's own JS while a
-// callback queue drains) goes to process.emitWarning (javascript/CLAUDE.md,
-// JavaScript Binding Conventions, Errors). It never throws.
-function warn(error: unknown): void {
-  try {
-    process.emitWarning(error instanceof Error ? error : String(error));
-  } catch {
-    // Nothing is left to report it to.
-  }
-}
-
-// The native layer builds RecordMetadata through its library-only factory.
+// callback queue drains) goes to process.emitWarning (`warn`). The native
+// layer builds RecordMetadata through its library-only factory.
 native.setFactories(
   (fields) => fromNative(fields),
   (fields) => RecordMetadata.internalCreate(fields),

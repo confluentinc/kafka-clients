@@ -3347,9 +3347,10 @@ test("librdkafka and 1.x keys are inert: listed as unused, and linger.ms keeps J
 
 // A call whose answer the addon can't build still settles (native/producer.c,
 // js_take_failure in native/error.c): flush(), partitionsFor() and close()
-// reject with the failure, and send() rejects for a refused record and
-// resolves for an accepted one. The test-only faultNext() (native/addon.c)
-// makes one step of the addon fail once, as its Node-API call failing would.
+// reject with the failure, send() rejects for a refused record and resolves
+// for an accepted one, and a delivery's callback runs once with the failure.
+// The test-only faultNext() (native/addon.c) makes steps of the addon fail,
+// as their Node-API calls failing would.
 const native = require('../../../dist/internal/native');
 // What a failed conversion of a core error throws (native/error.c,
 // error_to_js), and what js_take_failure makes, naming the step, when no
@@ -3376,7 +3377,7 @@ describe("a call whose answer the addon can't build", () => {
   test("a construction whose notify registration fails throws the FFI's error", () => {
     native.faultNext('notify');
     assert.throws(() => new KafkaProducer({ configs: UNREACHABLE }), { name: 'TypeError', message: 'self_ must not be null' });
-    assert.equal(native.faultNext(null), null);
+    assert.deepEqual(native.faultNext(null), []);
   }, 10000);
 
   test("flush() rejects with the failure when its error can't be built", async () => {
@@ -3396,7 +3397,7 @@ describe("a call whose answer the addon can't build", () => {
       },
     });
     await assert.rejects((await flushed).flush, { name: 'Error', message: ERROR_FAILED });
-    assert.equal(native.faultNext(null), null);
+    assert.deepEqual(native.faultNext(null), []);
     await assert.rejects(future.get(), ExecutionError);
     await p.close();
   }, 10000);
@@ -3411,7 +3412,7 @@ describe("a call whose answer the addon can't build", () => {
       name: 'Error',
       message: ERROR_FAILED,
     });
-    assert.equal(native.faultNext(null), null);
+    assert.deepEqual(native.faultNext(null), []);
     // The next calls have the core's answers.
     await assert.rejects(p.partitionsFor('t'), { name: 'KafkaError', message: 'Requested metadata update after close' });
     await assert.rejects(p.send(new ProducerRecord({ topic: 't', value: Buffer.from('v') })), {
@@ -3430,7 +3431,7 @@ describe("a call whose answer the addon can't build", () => {
     });
     native.faultNext('close');
     await assert.rejects(p.close(), { name: 'Error', message: CLOSE_FAILED });
-    assert.equal(native.faultNext(null), null);
+    assert.deepEqual(native.faultNext(null), []);
     assert.deepEqual(closed, ['key', 'value']);
     await p.close();
     assert.deepEqual(closed, ['key', 'value']);
@@ -3452,7 +3453,7 @@ describe("a call whose answer the addon can't build", () => {
         calls.push(String(exception?.name));
       },
     });
-    assert.equal(native.faultNext(null), null);
+    assert.deepEqual(native.faultNext(null), []);
     await assert.rejects(future.get(), (/** @type {unknown} */ e) => {
       assert.ok(e instanceof ExecutionError);
       assert.ok(e.cause instanceof Error);
@@ -3465,6 +3466,61 @@ describe("a call whose answer the addon can't build", () => {
     assert.deepEqual(nativeHeld(), base);
     await p.close();
   }, 10000);
+
+  test("the callback runs once with the failure and the core's metadata, and flush() finds the future done, when the delivery's error can't be built", async () => {
+    const p = new KafkaProducer({ configs: UNREACHABLE });
+    /** @type {Array<{ metadata: unknown, exception: Error | null }>} */
+    const calls = [];
+    native.faultNext('error');
+    const future = await p.send({
+      record: new ProducerRecord({ topic: 't', partition: 2, key: null, value: Buffer.from('v') }),
+      callback: ({ metadata, exception }) => void calls.push({ metadata: metadata.toJSON(), exception }),
+    });
+    await p.flush();
+    assert.deepEqual(native.faultNext(null), []);
+    assert.equal(future.isDone(), true);
+    assert.equal(calls.length, 1);
+    const [{ metadata, exception }] = calls;
+    assert.deepEqual(metadata, {
+      topic: 't',
+      partition: 2,
+      offset: '-1',
+      hasOffset: false,
+      timestamp: '-1',
+      hasTimestamp: false,
+      serializedKeySize: -1,
+      serializedValueSize: -1,
+    });
+    assert.ok(exception instanceof Error);
+    assert.match(exception.message, ERROR_FAILED);
+    await assert.rejects(future.get(), (/** @type {unknown} */ e) => e instanceof ExecutionError && e.cause === exception);
+    await p.close();
+  }, 10000);
+
+  for (const partition of [null, 2]) {
+    test(`the callback gets Java's metadata of a failed record, as the core gives it, when the delivery's metadata can't be built (partition ${String(partition)})`, async () => {
+      const p = new KafkaProducer({ configs: UNREACHABLE });
+      /** @type {Array<{ metadata: unknown, exception: Error | null }>} */
+      const calls = [];
+      /** @type {import('@confluentinc/kafka-javascript/producer').Callback} */
+      const callback = ({ metadata, exception }) => void calls.push({ metadata: metadata.toJSON(), exception });
+      // A record the core fails on its own, for the metadata it gives.
+      await p.send({ record: new ProducerRecord({ topic: 't', partition, key: null, value: Buffer.from('v') }), callback });
+      native.faultNext('metadata');
+      const future = await p.send({ record: new ProducerRecord({ topic: 't', partition, key: null, value: Buffer.from('v') }), callback });
+      await p.flush();
+      assert.deepEqual(native.faultNext(null), []);
+      assert.equal(future.isDone(), true);
+      assert.equal(calls.length, 2);
+      assert.deepEqual(calls[1].metadata, calls[0].metadata);
+      assert.equal(/** @type {{ partition: number }} */ (calls[1].metadata).partition, partition ?? -1);
+      const { exception } = calls[1];
+      assert.ok(exception instanceof Error);
+      assert.match(exception.message, /^Node-API call failed: converting a record's delivery \(/);
+      await assert.rejects(future.get(), (/** @type {unknown} */ e) => e instanceof ExecutionError && e.cause === exception);
+      await p.close();
+    }, 10000);
+  }
 });
 
 // A call made on a closed producer holds Node until it settles, and so does

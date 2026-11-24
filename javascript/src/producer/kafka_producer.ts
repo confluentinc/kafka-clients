@@ -217,6 +217,26 @@ function thrownMessage(thrown: unknown): string {
 }
 
 /**
+ * Java's metadata of a failed record, `RecordMetadata(topicPartition, -1, -1,
+ * NO_TIMESTAMP, -1, -1)`, as the core gives it for a record not partitioned
+ * yet: the record's topic, and its partition or -1.
+ *
+ * @param topic - the record's topic
+ * @param partition - the record's partition, or null
+ * @returns the metadata
+ */
+function failedMetadata(topic: string, partition: number | null): RecordMetadata {
+  return new RecordMetadata({
+    topicPartition: new TopicPartition({ topic, partition: partition ?? RecordMetadata.UNKNOWN_PARTITION }),
+    baseOffset: -1,
+    batchIndex: -1,
+    timestamp: -1,
+    serializedKeySize: -1,
+    serializedValueSize: -1,
+  });
+}
+
+/**
  * `KafkaProducer#doSend`'s answer to a serializer's throw, once
  * `serializerFailure` made it: an `ApiError` (Java's `catch (ApiException
  * e)`) runs the callback once, on the calling thread, with Java's failure
@@ -246,14 +266,7 @@ function serializerFailed(
     return future;
   };
   if (userCallback === null) return Promise.resolve(failed());
-  const metadata = new RecordMetadata({
-    topicPartition: new TopicPartition({ topic: record.topic, partition: record.partition ?? RecordMetadata.UNKNOWN_PARTITION }),
-    baseOffset: -1,
-    batchIndex: -1,
-    timestamp: -1,
-    serializedKeySize: -1,
-    serializedValueSize: -1,
-  });
+  const metadata = failedMetadata(record.topic, record.partition);
   let returned: unknown;
   try {
     returned = userCallback({ metadata, exception: error });
@@ -607,7 +620,13 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     // (native/producer.c, send_defer). A callback returning nothing allocates
     // no Promise. The addon calls this in the callback's turn: one callback at
     // a time, in completion order (native/producer.c, send_on_completion).
-    const onComplete = (metadata: RecordMetadata, error: Error | null): string | undefined | Promise<string | undefined> => {
+    // Metadata the addon could not build is null, its error the failure: the
+    // callback gets Java's metadata of a failed record. Only the topic and
+    // partition are kept for it: the record, and its Buffers, go at the
+    // hand-over.
+    const { topic, partition } = record;
+    const onComplete = (built: RecordMetadata | null, error: Error | null): string | undefined | Promise<string | undefined> => {
+      const metadata = built ?? failedMetadata(topic, partition);
       let failure: string | undefined;
       let returned: unknown;
       if (userCallback !== null) {
