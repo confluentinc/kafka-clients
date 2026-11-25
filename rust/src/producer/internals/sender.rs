@@ -1478,10 +1478,7 @@ impl<C: KafkaClient> Sender<C> {
 
         // `if (maybeSendAndPollTransactionalRequest()) return;` in
         // `org.apache.kafka.clients.producer.internals.Sender#runOnce`.
-        if self.maybe_send_and_poll_transactional_request().await? {
-            return Ok(true);
-        }
-        Ok(false)
+        self.maybe_send_and_poll_transactional_request().await
     }
 
     /// The side-effecting half of `Sender#shouldHandleAuthorizationError`; the `instanceof`
