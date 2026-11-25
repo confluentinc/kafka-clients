@@ -94,16 +94,16 @@ The JavaScript client, npm package `@confluentinc/kafka-javascript` in `javascri
   | `String` | `string`, turned into bytes by the rule below (Q24). |
   | `Object` | `unknown`, never `any` (Q26). |
   | `byte[]` | `Uint8Array` when the caller passes it, and `Buffer` when the client returns it (Q21, Q27). |
-  | `Optional<T>` | `T \| null` (Q26). |
+  | `Optional<T>`, `OptionalInt`, `OptionalLong` | `T \| null`, `number \| null` and `bigint \| null`, as `int` is a `number` and `long` a `bigint` (Q26). |
   | `Duration` | `Duration` when the caller passes it, and a `number` of milliseconds when the client returns it (Q22). |
   | `Map<TopicPartition, V>` | `TopicPartitionMap<V>` (Q25). |
   | `Map<MetricName, V>` returned | `MetricNameMap<V>` (Q25). |
-  | Other collections taken | Any iterable where Java takes a `Collection`, `List` or `Set`, and a `Map` or a plain object for a map keyed by strings (Q25). |
+  | Other collections taken | Any iterable where Java takes a `Collection`, `List` or `Set`, a `Map` or a plain object for a map keyed by strings, and only a `Map` for a map keyed by numbers, because a plain object turns its keys into strings (Q25). |
   | A `List` or a Java array returned | An array (Q25). |
   | A `Set` of strings or numbers returned | A `Set` (Q25). |
   | `Set<TopicPartition>` returned | `TopicPartitionSet` (Q25). |
   | A `Collection` returned | A `Set` only where the Java implementation builds a `Set`, and an array otherwise, as in Python (Q25). |
-  | A map keyed by strings returned | A `Map` (Q25). |
+  | A map keyed by strings or numbers returned | A `Map`, so a broker ID stays a `number` (Q25). |
   | A wildcard, `? extends T` or `? super T` | `T` (Q26). |
   | `Iterable<T>` | `[Symbol.iterator]` (Q6). |
   | `Headers` or `Iterable<Header>` taken | An iterable of `Header` objects and `[key, value]` pairs, as Serialization says (Q31). |
