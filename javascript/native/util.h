@@ -334,6 +334,24 @@ kafka_producer_ProducerRecord_t* record_build(napi_env env, const char* topic, i
                                               int64_t timestamp, const JsBytes* key,
                                               const JsBytes* value, napi_value headers);
 
+// ---- values.c ---------------------------------------------------------------
+
+// A client's configuration as a kafka_Map_t: the map borrows the C strings,
+// which config_map_free frees after it.
+typedef struct {
+    kafka_Map_t* map;
+    char** strings;
+    uint32_t count;
+} ConfigMap;
+
+// Builds `out` from `entries`, an array of [key, value] pairs, the bytes of
+// each string (encodeLikeJava's, src/internal/config.ts). Returns 0, or -1
+// with a JS exception pending and nothing left to free.
+int config_map_build(napi_env env, napi_value entries, ConfigMap* out);
+
+// Destroys the map, then frees its strings: after the client's config is built.
+void config_map_free(napi_env env, ConfigMap* map);
+
 // ---- headers.c -------------------------------------------------------------
 
 // A new native RecordHeaders holding a copy of a record's headers: `pairs` is
@@ -346,6 +364,16 @@ kafka_common_header_internals_RecordHeaders_t* headers_build(napi_env env, napi_
 
 // Destroys a RecordHeaders headers_build made.
 void headers_destroy(napi_env env, kafka_common_header_internals_RecordHeaders_t* headers);
+
+// The headers a RecordHeaders the core lends out holds, copied into JS: an
+// array of [key, value] pairs, each key a string (null for a NULL key) and
+// each value a Buffer of its own or null. NULL with a JS exception pending on
+// failure.
+napi_value headers_to_js(napi_env env, const kafka_common_header_internals_RecordHeaders_t* headers);
+
+// The number of headers a RecordHeaders the core lends out holds, 0 when it
+// can't be read.
+int32_t headers_count(const kafka_common_header_internals_RecordHeaders_t* headers);
 
 // ---- metrics.c --------------------------------------------------------------
 

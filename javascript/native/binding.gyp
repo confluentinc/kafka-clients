@@ -51,7 +51,8 @@
         "metrics.c",
         "producer.c",
         "record.c",
-        "record_spy.c"
+        "record_spy.c",
+        "values.c"
       ],
       "include_dirs": [
         "<(ck_include_dir)",

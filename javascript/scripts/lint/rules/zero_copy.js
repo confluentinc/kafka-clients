@@ -150,7 +150,6 @@ const ALLOWED = [
   { key: 'native/producer.c:slot_take:realloc#2', reason: 'the free list of that table, grown with it' },
   { key: 'native/producer.c:js_record_future_get:calloc#1', reason: "one wait's context on a record's future" },
   { key: 'native/producer.c:js_producer_close:calloc#1', reason: "the close's context" },
-  { key: 'native/producer.c:new_kafka_producer:calloc#1', reason: "the configuration's string array" },
   { key: 'native/producer.c:producer_handle_new:calloc#1', reason: 'the producer struct' },
   { key: 'native/producer.c:js_mock_producer_send:calloc#1', reason: "a mock's send's context" },
   {

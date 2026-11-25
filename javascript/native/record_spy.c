@@ -58,36 +58,10 @@ static int spy_set(napi_env env, napi_value obj, const char* name, napi_value v)
 static napi_value spy_headers(napi_env env, const kafka_producer_ProducerRecord_t* record) {
     kafka_common_Error_t* ffi_err = NULL;
     const kafka_common_header_internals_RecordHeaders_t* headers = NULL;
-    kafka_common_header_Headers_t* view = NULL;
-    kafka_List_t* list = NULL;
     error_discard(FFI_SET(headers, kafka_producer_ProducerRecord_headers_err(record, &ffi_err)));
-    if (headers != NULL)
-        error_discard(FFI_SET(view, kafka_common_header_internals_RecordHeaders__as_Headers_err(headers, &ffi_err)));
-    if (view != NULL) error_discard(FFI_SET(list, kafka_common_header_Headers_to_array_err(view, &ffi_err)));
     napi_value arr = NULL;
-    int32_t size = 0;
-    if (list != NULL) error_discard(FFI_SET(size, kafka_List_size_err(list, &ffi_err)));
-    if (napi_create_array_with_length(env, (size_t)size, &arr) != napi_ok) arr = NULL;
-    for (int32_t i = 0; i < size && arr != NULL; i++) {
-        const kafka_common_header_internals_RecordHeader_t* rh = NULL;
-        const kafka_common_header_Header_t* h = NULL;
-        const char* key = NULL;
-        kafka_Bytes_t value = {NULL, 0};
-        error_discard(FFI_SET(rh, (const kafka_common_header_internals_RecordHeader_t*)kafka_List_get_err(list, i, &ffi_err)));
-        if (rh != NULL) error_discard(FFI_SET(h, kafka_common_header_internals_RecordHeader__as_Header_err(rh, &ffi_err)));
-        if (h != NULL) {
-            error_discard(FFI_SET(key, kafka_common_header_Header_key_err(h, &ffi_err)));
-            error_discard(FFI_SET(value, kafka_common_header_Header_value_err(h, &ffi_err)));
-        }
-        napi_value pair, k, v = spy_bytes(env, &value);
-        if (v == NULL || napi_create_array_with_length(env, 2, &pair) != napi_ok
-            || napi_create_string_utf8(env, key != NULL ? key : "", NAPI_AUTO_LENGTH, &k) != napi_ok
-            || napi_set_element(env, pair, 0, k) != napi_ok || napi_set_element(env, pair, 1, v) != napi_ok
-            || napi_set_element(env, arr, (uint32_t)i, pair) != napi_ok)
-            arr = NULL;
-    }
-    if (list != NULL) error_discard(FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
-    return arr;
+    if (headers == NULL) return napi_create_array(env, &arr) == napi_ok ? arr : NULL;
+    return headers_to_js(env, headers);
 }
 
 void record_spy_capture(napi_env env, const kafka_producer_ProducerRecord_t* record, napi_value key, napi_value value) {

@@ -667,9 +667,9 @@ MUTATIONS.push(
     apply: (root) =>
       edit(
         root,
-        'native/producer.c',
-        '        err = FFI_ERR(kafka_Map_put_err(props, strings[2 * i], strings[2 * i + 1], &ffi_err));',
-        '        kafka_Map_put_err(props, strings[2 * i], strings[2 * i + 1], &ffi_err);',
+        'native/values.c',
+        '        err = FFI_ERR(kafka_Map_put_err(out->map, out->strings[2 * i], out->strings[2 * i + 1], &ffi_err));',
+        '        kafka_Map_put_err(out->map, out->strings[2 * i], out->strings[2 * i + 1], &ffi_err);',
       ),
   },
   {
@@ -688,9 +688,9 @@ MUTATIONS.push(
     apply: (root) =>
       edit(
         root,
-        'native/producer.c',
-        '    if (props != NULL) error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(props, &ffi_err)));',
-        '    kafka_common_Error_t* map_err = NULL;\n    if (props != NULL) error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(props, &map_err)));',
+        'native/values.c',
+        '    if (map->map != NULL) error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(map->map, &ffi_err)));',
+        '    kafka_common_Error_t* map_err = NULL;\n    if (map->map != NULL) error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(map->map, &map_err)));',
       ),
   },
   {

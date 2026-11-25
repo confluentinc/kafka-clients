@@ -1745,51 +1745,22 @@ static void producer_finalize(napi_env env, void* data, void* hint) {
 // bytes of each string (encodeLikeJava's).
 // Returns NULL with a JS exception pending on failure.
 static kafka_producer_KafkaProducer_t* new_kafka_producer(napi_env env, napi_value entries) {
-    uint32_t count = 0;
-    NAPI_CHECK(env, napi_get_array_length(env, entries, &count), NULL);
-    char** strings = (char**)calloc((size_t)count * 2 + 1, sizeof(char*));
-    if (strings == NULL) {
-        napi_throw_error(env, NULL, "out of memory");
-        return NULL;
-    }
+    ConfigMap props;
+    if (config_map_build(env, entries, &props) != 0) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
-    kafka_Map_t* props = NULL;
     kafka_producer_ProducerConfig_t* config = NULL;
     kafka_producer_KafkaProducer_t* kp = NULL;
-    int thrown = 0;
-    // A C-built kafka_Map_t borrows its char * keys and values: they are freed
-    // after the map.
-    kafka_common_Error_t* err = FFI_SET(props, kafka_Map_new_err(&ffi_err));
-    for (uint32_t i = 0; err == NULL && !thrown && i < count; i++) {
-        napi_value entry, k, v;
-        if (napi_get_element(env, entries, i, &entry) != napi_ok || napi_get_element(env, entry, 0, &k) != napi_ok
-            || napi_get_element(env, entry, 1, &v) != napi_ok) {
-            js_throw_last_napi_error(env, "reading a config entry");
-            thrown = 1;
-            break;
-        }
-        // Bytes encoded by encodeLikeJava (src/internal/config.ts).
-        strings[2 * i] = js_bytes_cstring(env, k, "config keys must be strings");
-        strings[2 * i + 1] = strings[2 * i] != NULL ? js_bytes_cstring(env, v, "config values must be strings") : NULL;
-        if (strings[2 * i + 1] == NULL) {
-            thrown = 1;
-            break;
-        }
-        err = FFI_ERR(kafka_Map_put_err(props, strings[2 * i], strings[2 * i + 1], &ffi_err));
-    }
     // kafka_producer_ProducerConfig_new and _KafkaProducer_new take an out_err
     // of their own (no `_err` twin).
-    if (err == NULL && !thrown) err = FFI_SET(config, kafka_producer_ProducerConfig_new(props, &ffi_err));
-    if (props != NULL) error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(props, &ffi_err)));
-    for (uint32_t i = 0; i < count * 2; i++) free(strings[i]);
-    free(strings);
-    if (err == NULL && !thrown) err = FFI_SET(kp, kafka_producer_KafkaProducer_new(config, NULL, NULL, &ffi_err));
+    kafka_common_Error_t* err = FFI_SET(config, kafka_producer_ProducerConfig_new(props.map, &ffi_err));
+    config_map_free(env, &props);
+    if (err == NULL) err = FFI_SET(kp, kafka_producer_KafkaProducer_new(config, NULL, NULL, &ffi_err));
     if (config != NULL) error_warn(env, 1, FFI_ERR(kafka_producer_ProducerConfig_destroy_err(config, &ffi_err)));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
     }
-    return thrown ? NULL : kp;
+    return kp;
 }
 
 // Destroys a class handle on a construction's failure path, before a handle

@@ -407,43 +407,8 @@ int payload_headers(napi_env env, napi_value obj, const char* name, const kafka_
     if (accessor_failed(failed)) return 0;
     napi_value arr;
     if (value == NULL) return napi_get_null(env, &arr) == napi_ok ? set_named(env, obj, name, arr) : -1;
-    kafka_common_Error_t* ffi_err = NULL;
-    kafka_common_header_Headers_t* view = NULL;
-    kafka_List_t* list = NULL;
-    kafka_common_Error_t* err = FFI_SET(view, kafka_common_header_internals_RecordHeaders__as_Headers_err(value, &ffi_err));
-    if (err != NULL || view == NULL) {
-        error_discard(err);
-        return 0;
-    }
-    err = FFI_SET(list, kafka_common_header_Headers_to_array_err(view, &ffi_err));
-    if (err != NULL || list == NULL) {
-        error_discard(err);
-        return 0;
-    }
-    int32_t size = 0;
-    error_discard(FFI_SET(size, kafka_List_size_err(list, &ffi_err)));
-    int rc = napi_create_array_with_length(env, (size_t)size, &arr) == napi_ok ? 0 : -1;
-    for (int32_t i = 0; i < size && rc == 0; i++) {
-        const kafka_common_header_internals_RecordHeader_t* rh = NULL;
-        const kafka_common_header_Header_t* h = NULL;
-        const char* key = NULL;
-        kafka_Bytes_t bytes = { NULL, 0 };
-        error_discard(FFI_SET(rh, (const kafka_common_header_internals_RecordHeader_t*)kafka_List_get_err(list, i, &ffi_err)));
-        if (rh != NULL) error_discard(FFI_SET(h, kafka_common_header_internals_RecordHeader__as_Header_err(rh, &ffi_err)));
-        if (h != NULL) {
-            error_discard(FFI_SET(key, kafka_common_header_Header_key_err(h, &ffi_err)));
-            error_discard(FFI_SET(bytes, kafka_common_header_Header_value_err(h, &ffi_err)));
-        }
-        napi_value pair, k, v;
-        if (napi_create_array_with_length(env, 2, &pair) != napi_ok || (k = string_or_null(env, key)) == NULL
-            || (v = bytes_copy(env, bytes)) == NULL || napi_set_element(env, pair, 0, k) != napi_ok
-            || napi_set_element(env, pair, 1, v) != napi_ok || napi_set_element(env, arr, (uint32_t)i, pair) != napi_ok) {
-            rc = -1;
-        }
-    }
-    error_discard(FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
-    if (rc == 0) rc = set_named(env, obj, name, arr);
-    return rc;
+    arr = headers_to_js(env, value);
+    return arr == NULL ? -1 : set_named(env, obj, name, arr);
 }
 
 // A map of kafka_common_TopicPartition_t * to kafka_consumer_OffsetAndMetadata_t
