@@ -79,8 +79,10 @@
     "A javascript/native/error.c",
     "A javascript/native/error_payload.c",
     "A javascript/native/headers.c",
+    "A javascript/native/metrics.c",
     "A javascript/native/producer.c",
     "A javascript/native/record.c",
+    "A javascript/native/record_spy.c",
     "A javascript/native/util.h",
     "A javascript/npm/README.md",
     "A javascript/npm/about.hbs",
@@ -323,6 +325,7 @@
     "A javascript/src/common/header/header.ts",
     "A javascript/src/common/header/headers.ts",
     "A javascript/src/common/header/index.ts",
+    "A javascript/src/common/header/record_header.ts",
     "A javascript/src/common/index.ts",
     "A javascript/src/common/invalid_record_error.ts",
     "A javascript/src/common/kafka_error.ts",
@@ -383,6 +386,7 @@
     "A javascript/src/internal/java_object.ts",
     "A javascript/src/internal/java_string.ts",
     "A javascript/src/internal/lifecycle.ts",
+    "A javascript/src/internal/live_metrics.ts",
     "A javascript/src/internal/native.ts",
     "A javascript/src/internal/native_loader.ts",
     "A javascript/src/internal/payload.ts",
@@ -391,6 +395,7 @@
     "A javascript/src/internal/serde.ts",
     "A javascript/src/internal/serializer_defaults.ts",
     "A javascript/src/internal/throwable.ts",
+    "A javascript/src/internal/warn.ts",
     "A javascript/src/no_such_element_error.ts",
     "A javascript/src/producer/buffer_exhausted_error.ts",
     "A javascript/src/producer/callback.ts",
@@ -473,9 +478,11 @@
     "A javascript/test/lint/zero_copy.test.js",
     "A javascript/test/memory/_probe.js",
     "A javascript/test/memory/_workloads.js",
+    "A javascript/test/memory/failed_construction.test.js",
     "A javascript/test/memory/gc_stress.test.js",
     "A javascript/test/memory/headers_model.test.js",
     "A javascript/test/memory/lifecycle.test.js",
+    "A javascript/test/memory/metrics.test.js",
     "A javascript/test/memory/native_counts.test.js",
     "A javascript/test/memory/record_read_back.test.js",
     "A javascript/test/memory_mutation/probe_mutants.test.js",
@@ -497,8 +504,8 @@
     "A javascript/test/typing/usage.ts",
     "A javascript/test/unit/common/config/ssl_client_auth.test.js",
     "A javascript/test/unit/common/config/ssl_configs.test.js",
-    "A javascript/test/unit/common/header/header.test.js",
     "A javascript/test/unit/common/header/headers.test.js",
+    "A javascript/test/unit/common/header/record_header.test.js",
     "A javascript/test/unit/common/kafka_error.test.js",
     "A javascript/test/unit/common/kafka_future.test.js",
     "A javascript/test/unit/common/metric_name.test.js",
@@ -578,24 +585,24 @@
     "M rust/xtask/src/main.rs",
     "M service.yml"
   ],
-  "created": 1795478495,
+  "created": 1795621229,
   "dotnet": {
     "grpc": []
   },
-  "head": "b21023ca102bdfe9f507af17006dd6f588a458db",
-  "merge_base": "6602c93b39a07e0f5875d326540f46db7286df26",
+  "head": "ded578c38dad600739d3fdfea157bbe74e639cce",
+  "merge_base": "a9a422bc9d028b547572b45906ead96dc1d68415",
   "python": {
     "grpc": []
   },
   "reasons": {
-    "c.integration": "The __grpc_c arms run the changed shared harness (backend pool, factory, macro) and the refactored producer test bodies.",
-    "dotnet.grpc": "The __grpc_dotnet arms run the changed shared harness and the refactored producer test bodies.",
-    "python.grpc": "The __grpc_python arms run the changed shared harness and the refactored producer test bodies.",
-    "rust.chaos": "The chaos config.rs and workload.rs gained the JavaScript backend, and the chaos unit includes the changed shared tests/common support.",
-    "rust.integration": "The shared test support (backend_pool, backend_factory, multilanguage_test_macro, callback_log) and producer_test.rs changed: the send-to-partition and partition-expansion bodies were refactored and new tests were added.",
-    "rust.integrity": "rust/tests/integrity/main.rs includes the changed shared tests/common support.",
-    "rust.performance": "rust/tests/performance/main.rs includes the changed shared tests/common support.",
-    "rust.xtask": "Many xtask sources changed (java.rs, javadoc.rs, bump_version.rs, config_types, error_hierarchy, lint_custom, main.rs, new generator and index modules), along with their tests."
+    "c.integration": "The __grpc_c arms run through the changed backend_pool, backend_factory and multilanguage_test! macro, and through the reworked producer test bodies.",
+    "dotnet.grpc": "The __grpc_dotnet arms run through the changed shared gRPC harness and the reworked producer test bodies.",
+    "python.grpc": "The __grpc_python arms run through the changed shared gRPC harness and the reworked producer test bodies.",
+    "rust.chaos": "The chaos config and workload gain a javascript backend and a new unit test, and the unit also loads the changed rust/tests/common.",
+    "rust.integration": "The shared harness in rust/tests/common (backend_pool, backend_factory, multilanguage_test!) and producer_test.rs changed, and this unit compiles both.",
+    "rust.integrity": "It loads the changed shared test support in rust/tests/common through #[path].",
+    "rust.performance": "It loads the changed shared test support in rust/tests/common through #[path].",
+    "rust.xtask": "The xtask sources and their tests changed: the bump_version, java, javadoc and lint_custom changes and the new JavaScript generators."
   },
   "rust": {
     "chaos": [],
@@ -604,6 +611,6 @@
     "performance": [],
     "xtask": []
   },
-  "tree": "b98820307cab0ba346ee9343ed965a25b6e316bc",
+  "tree": "80a2ed157871868a7b161afce0918adbb59c1dcf",
   "version": 2
 }
