@@ -316,6 +316,9 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// </exception>
     public void UpdateBeginningOffset(string topic, int partition, long offset) =>
         _native.UpdateBeginningOffset(topic, partition, offset);
 
@@ -329,6 +332,9 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// </exception>
     public void UpdateEndOffset(string topic, int partition, long offset) =>
         _native.UpdateEndOffset(topic, partition, offset);
 
@@ -346,6 +352,10 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> or <paramref name="leaderHost"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partitionCount"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> or <paramref name="leaderHost"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     public void UpdatePartitions(string topic, int partitionCount, int leaderId, string leaderHost, int leaderPort) =>
         _native.UpdatePartitions(topic, partitionCount, leaderId, leaderHost, leaderPort);
 
@@ -363,7 +373,8 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <exception cref="IllegalArgumentException">A header key is null.</exception>
     /// <exception cref="ArgumentException">A header key contains a NUL character, which the native client cannot
     /// receive unchanged.</exception>
-    /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
+    /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned; one whose
+    /// topic holds a NUL never is.</exception>
     /// <remarks>Java's <c>addRecord</c> refuses none of these headers; the binding refuses them as a producer
     /// does, since the record crosses the native client. A refused record is not queued. A negative
     /// <c>LeaderEpoch</c> or <c>DeliveryCount</c> polls back as null, which the native record stores as absent;
@@ -395,6 +406,10 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <paramref name="newOffsets"/> or a partition in it is null, or a partition in it has a null topic.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ArgumentException">
+    /// A topic in <paramref name="newOffsets"/> contains a NUL character, which the native client cannot receive
+    /// unchanged.
+    /// </exception>
     public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
         _native.UpdateDurationOffsets(newOffsets);
 
@@ -437,7 +452,11 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// </param>
     /// <returns>A <see cref="Task"/> that completes when the rebalance is done.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="newAssignment"/> is null.</exception>
-    /// <exception cref="ArgumentException">An element or an element topic is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// An element or an element topic is null.
+    /// The topic of a partition in <paramref name="newAssignment"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     public Task Rebalance(
@@ -464,7 +483,11 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// </param>
     /// <returns>A <see cref="Task"/> that completes when the partitions are lost.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="partitionsLost"/> is null.</exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// An element topic is null.
+    /// The topic of a partition in <paramref name="partitionsLost"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     public Task LosePartitions(

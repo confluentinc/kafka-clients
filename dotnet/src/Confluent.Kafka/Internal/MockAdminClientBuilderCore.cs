@@ -82,7 +82,7 @@ internal sealed class MockAdminClientBuilderCore
             throw new ArgumentNullException(nameof(clusterId));
         }
 
-        AdminStrings.Validate(clusterId, nameof(clusterId));
+        NativeStrings.Validate(clusterId, NativeStrings.InvalidAdminStringMessage, nameof(clusterId));
         Call(arguments =>
         {
             IntPtr outErr = IntPtr.Zero;
@@ -135,7 +135,7 @@ internal sealed class MockAdminClientBuilderCore
             {
                 copy[j] = logDirs[j]
                     ?? throw new ArgumentNullException(nameof(brokerLogDirs), "brokerLogDirs must not contain null");
-                AdminStrings.Validate(copy[j], nameof(brokerLogDirs));
+                NativeStrings.Validate(copy[j], NativeStrings.InvalidAdminStringMessage, nameof(brokerLogDirs));
             }
 
             snapshot[i] = copy;
@@ -228,7 +228,7 @@ internal sealed class MockAdminClientBuilderCore
                     nameof(defaultGroupConfigs), "defaultGroupConfigs must not contain null");
             }
 
-            AdminStrings.Validate(entry.Value, nameof(defaultGroupConfigs));
+            NativeStrings.Validate(entry.Value, NativeStrings.InvalidAdminStringMessage, nameof(defaultGroupConfigs));
             snapshot.Add(entry);
         }
 
@@ -277,8 +277,8 @@ internal sealed class MockAdminClientBuilderCore
             throw new ArgumentNullException(parameterName);
         }
 
-        AdminStrings.Validate(node.Host(), parameterName);
-        AdminStrings.Validate(node.Rack(), parameterName);
+        NativeStrings.Validate(node.Host(), NativeStrings.InvalidAdminStringMessage, parameterName);
+        NativeStrings.Validate(node.Rack(), NativeStrings.InvalidAdminStringMessage, parameterName);
     }
 
     private static void ValidateKey(string key, string parameterName)
@@ -288,7 +288,7 @@ internal sealed class MockAdminClientBuilderCore
             throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
         }
 
-        AdminStrings.Validate(key, parameterName);
+        NativeStrings.Validate(key, NativeStrings.InvalidAdminStringMessage, parameterName);
     }
 
     private static KeyValuePair<string, short>[] SnapshotLevels(

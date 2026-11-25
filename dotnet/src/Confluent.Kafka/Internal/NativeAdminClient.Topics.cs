@@ -199,19 +199,19 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(newTopics), "newTopics must not contain null");
             }
 
-            AdminStrings.Validate(topic.Name(), nameof(newTopics));
+            NativeStrings.Validate(topic.Name(), NativeStrings.InvalidAdminStringMessage, nameof(newTopics));
             if (topic.Configs() is { } configs)
             {
                 foreach (KeyValuePair<string, string> config in configs)
                 {
-                    AdminStrings.Validate(config.Key, nameof(newTopics));
+                    NativeStrings.Validate(config.Key, NativeStrings.InvalidAdminStringMessage, nameof(newTopics));
                     if (config.Value is null)
                     {
                         throw new ArgumentNullException(
                             nameof(newTopics), "newTopics must not contain a NewTopic with a null config value");
                     }
 
-                    AdminStrings.Validate(config.Value, nameof(newTopics));
+                    NativeStrings.Validate(config.Value, NativeStrings.InvalidAdminStringMessage, nameof(newTopics));
                 }
             }
 

@@ -191,7 +191,7 @@ internal sealed partial class NativeAdminClient : IDisposable
                     parameterName, parameterName + " must not contain a TopicPartition with a null topic");
             }
 
-            AdminStrings.Validate(partition.Topic(), parameterName);
+            NativeStrings.Validate(partition.Topic(), NativeStrings.InvalidAdminStringMessage, parameterName);
 
             if (seen.Add(partition))
             {
@@ -438,7 +438,7 @@ internal sealed partial class NativeAdminClient : IDisposable
                 throw new ArgumentNullException(parameterName, parameterName + " must not contain null");
             }
 
-            AdminStrings.Validate(name, parameterName);
+            NativeStrings.Validate(name, NativeStrings.InvalidAdminStringMessage, parameterName);
             if (seen.Add(name))
             {
                 keys.Add(name);
@@ -482,7 +482,7 @@ internal sealed partial class NativeAdminClient : IDisposable
             throw new ArgumentNullException(nameof(partitions));
         }
 
-        AdminStrings.Validate(name, nameof(name));
+        NativeStrings.Validate(name, NativeStrings.InvalidAdminStringMessage, nameof(name));
         TopicPartitionInfo[] partitionSnapshot = new TopicPartitionInfo[partitions.Count];
         for (int i = 0; i < partitionSnapshot.Length; i++)
         {
@@ -511,8 +511,8 @@ internal sealed partial class NativeAdminClient : IDisposable
                     throw new ArgumentNullException(nameof(configs), "configs must not contain null");
                 }
 
-                AdminStrings.Validate(entry.Key, nameof(configs));
-                AdminStrings.Validate(entry.Value, nameof(configs));
+                NativeStrings.Validate(entry.Key, NativeStrings.InvalidAdminStringMessage, nameof(configs));
+                NativeStrings.Validate(entry.Value, NativeStrings.InvalidAdminStringMessage, nameof(configs));
                 configSnapshot.Add(entry);
             }
         }
@@ -545,7 +545,7 @@ internal sealed partial class NativeAdminClient : IDisposable
             throw new ArgumentNullException(nameof(name));
         }
 
-        AdminStrings.Validate(name, nameof(name));
+        NativeStrings.Validate(name, NativeStrings.InvalidAdminStringMessage, nameof(name));
         CallMock((mock, arguments) =>
         {
             IntPtr outErr = IntPtr.Zero;
@@ -579,7 +579,7 @@ internal sealed partial class NativeAdminClient : IDisposable
             throw new ArgumentNullException(nameof(topicName));
         }
 
-        AdminStrings.Validate(topicName, nameof(topicName));
+        NativeStrings.Validate(topicName, NativeStrings.InvalidAdminStringMessage, nameof(topicName));
         CallMock((mock, arguments) =>
         {
             IntPtr outErr = IntPtr.Zero;
@@ -593,8 +593,8 @@ internal sealed partial class NativeAdminClient : IDisposable
 
     private static void ValidateNode(Node node, string parameterName)
     {
-        AdminStrings.Validate(node.Host(), parameterName);
-        AdminStrings.Validate(node.Rack(), parameterName);
+        NativeStrings.Validate(node.Host(), NativeStrings.InvalidAdminStringMessage, parameterName);
+        NativeStrings.Validate(node.Rack(), NativeStrings.InvalidAdminStringMessage, parameterName);
     }
 
     private static void ValidateNodes(IReadOnlyList<Node>? nodes, string parameterName)
@@ -642,7 +642,7 @@ internal sealed partial class NativeAdminClient : IDisposable
                     nameof(newOffsets), "newOffsets must not contain a TopicPartition with a null topic");
             }
 
-            AdminStrings.Validate(entry.Key.Topic(), nameof(newOffsets));
+            NativeStrings.Validate(entry.Key.Topic(), NativeStrings.InvalidAdminStringMessage, nameof(newOffsets));
             topics[index] = entry.Key.Topic();
             partitions[index] = entry.Key.Partition();
             values[index] = entry.Value;

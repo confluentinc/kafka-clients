@@ -82,12 +82,15 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalArgumentException">
     /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null or holds a null or empty
     /// topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, a topic name is null.
+    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged,
+    /// and, on a <see cref="KafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     void Subscribe(IReadOnlyCollection<string> topics);
@@ -116,6 +119,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="callback"/> is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
     /// <c>void OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
     /// but does not implement <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
@@ -125,6 +129,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, a topic name is null.
+    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged,
+    /// and, on a <see cref="KafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a subscribe failure.</exception>
@@ -233,12 +239,15 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalArgumentException">
     /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null or holds a null partition
     /// or a partition with a null or empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, an element or an element topic is null.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged, and, on a <see cref="KafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported an assignment failure.</exception>
@@ -253,6 +262,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or a partition is null or not assigned to the consumer.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="KafkaException">The core reported a pause failure.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -269,6 +279,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or a partition is null or not assigned to the consumer.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="KafkaException">The core reported a resume failure.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -289,9 +300,12 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentNullException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
     /// </exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// An element topic is null.
+    /// </exception>
     /// <exception cref="IllegalStateException">
-    /// The consumer is closed, or an element is null (Java's answer for a partition that is not assigned).
+    /// The consumer is closed, or an element is null or its topic holds a NUL, which is never assigned (Java's answer
+    /// for a partition that is not assigned).
     /// </exception>
     /// <exception cref="KafkaException">The core reported a seek failure.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -312,9 +326,12 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentNullException">
     /// On a <see cref="MockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
     /// </exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// An element topic is null.
+    /// </exception>
     /// <exception cref="IllegalStateException">
-    /// The consumer is closed, or an element is null (Java's answer for a partition that is not assigned).
+    /// The consumer is closed, or an element is null or its topic holds a NUL, which is never assigned (Java's answer
+    /// for a partition that is not assigned).
     /// </exception>
     /// <exception cref="KafkaException">The core reported a seek failure.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -331,6 +348,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or <paramref name="partition"/> is null or not assigned to a
     /// <see cref="KafkaConsumer{TKey, TValue}"/>.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="partition"/> is null or not assigned to a <see cref="MockConsumer{TKey, TValue}"/>, as Java's
@@ -356,6 +374,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or <paramref name="partition"/> is null or not assigned to a
     /// <see cref="KafkaConsumer{TKey, TValue}"/>.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="KafkaException">
     /// The position could not be determined within <paramref name="timeout"/> (a
@@ -405,6 +424,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// The core reported a commit failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c> reports
     /// an <see cref="InvalidGroupIdException"/> for a null key, before that check.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets);
 
     /// <summary>
@@ -425,6 +448,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// or the core reported another commit failure. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c>
     /// reports an <see cref="InvalidGroupIdException"/> for a negative <paramref name="timeout"/> or a null key, before
     /// those checks.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     void Commit(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, TimeSpan timeout);
 
@@ -476,6 +503,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// The core could not start the commit. A <see cref="KafkaConsumer{TKey, TValue}"/> without <c>group.id</c>
     /// reports an <see cref="InvalidGroupIdException"/> for a null key, before that check.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     void CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         IOffsetCommitCallback? callback);
@@ -491,6 +522,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or the partition is null or not assigned.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -509,6 +541,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or the partition is null or not assigned; a null partition with a leader epoch on a
     /// <see cref="KafkaConsumer{TKey, TValue}"/> is a <see cref="KafkaException"/> instead.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="KafkaException">
     /// On a <see cref="KafkaConsumer{TKey, TValue}"/>, <paramref name="partition"/> is null and
@@ -529,6 +562,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or <paramref name="topicPartition"/> is null or not assigned to a
     /// <see cref="KafkaConsumer{TKey, TValue}"/>.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="ConcurrentModificationException">Another thread is using the consumer.</exception>
     long? CurrentLag(TopicPartition topicPartition);
@@ -544,6 +578,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">
@@ -566,6 +602,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
@@ -600,6 +638,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="UnsupportedOperationException">
     /// The consumer is a <see cref="MockConsumer{TKey, TValue}"/>, which does not implement it.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic in <paramref name="timestampsToSearch"/> contains a NUL character, which the native client cannot
+    /// receive unchanged.
+    /// </exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch);
 
@@ -627,6 +669,10 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="UnsupportedOperationException">
     /// The consumer is a <see cref="MockConsumer{TKey, TValue}"/>, which does not implement it.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic in <paramref name="timestampsToSearch"/> contains a NUL character, which the native client cannot
+    /// receive unchanged.
+    /// </exception>
     IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, TimeSpan timeout);
 
@@ -639,6 +685,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or, on a <see cref="MockConsumer{TKey, TValue}"/>, an element is null (Java's mock
@@ -661,6 +709,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null, even with a
     /// zero <paramref name="timeout"/>.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">
@@ -685,6 +735,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or, on a <see cref="MockConsumer{TKey, TValue}"/>, an element is null (Java's mock
@@ -707,6 +759,8 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on a <see cref="KafkaConsumer{TKey, TValue}"/>, an element is null, even with a
     /// zero <paramref name="timeout"/>.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">
@@ -738,6 +792,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// </exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
 
     /// <summary>
@@ -761,6 +818,9 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// </exception>
     /// <exception cref="UnsupportedOperationException">
     /// Called inside a callback of a <see cref="MockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
     /// </exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic, TimeSpan timeout);
 

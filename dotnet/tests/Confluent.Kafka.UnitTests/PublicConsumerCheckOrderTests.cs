@@ -133,6 +133,43 @@ public sealed class PublicConsumerCheckOrderTests
         }
     }
 
+    // A NUL in a topic is answered where a null element of the same argument is: Java reaches it after acquire().
+    [Theory]
+    [MemberData(nameof(RealConsumers))]
+    public async Task WhileAnotherThreadIsInside_ANulTopic_IsReportedAfterTheConcurrentAccess(string kind)
+    {
+        TopicPartition nul = new TopicPartition("t\0u", 0);
+        TopicPartition[] nuls = { nul };
+        Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata> { [nul] = new OffsetAndMetadata(1) };
+        Dictionary<TopicPartition, long> timestamps = new Dictionary<TopicPartition, long> { [nul] = 0 };
+        IReadOnlyDictionary<string, Exception?> seen = await WhileAnotherThreadIsInside(await Create(kind, groupId: true), consumer =>
+            Calls(consumer, new Dictionary<string, (Action<IConsumer<byte[], byte[]>>, Func<IAsyncConsumer<byte[], byte[]>, Task>)>
+            {
+                ["Subscribe"] = (c => c.Subscribe(new[] { "t\0u" }), c => c.Subscribe(new[] { "t\0u" })),
+                ["Assign"] = (c => c.Assign(nuls), c => c.Assign(nuls)),
+                ["Pause"] = (c => c.Pause(nuls), c => c.Pause(nuls)),
+                ["Resume"] = (c => c.Resume(nuls), c => c.Resume(nuls)),
+                ["SeekToBeginning"] = (c => c.SeekToBeginning(nuls), c => c.SeekToBeginning(nuls)),
+                ["SeekToEnd"] = (c => c.SeekToEnd(nuls), c => c.SeekToEnd(nuls)),
+                ["Seek"] = (c => c.Seek(nul, 1L), c => c.Seek(nul, 1L)),
+                ["Position"] = (c => c.Position(nul), c => c.Position(nul)),
+                ["CurrentLag"] = (c => c.CurrentLag(nul), c => c.CurrentLag(nul)),
+                ["Commit"] = (c => c.Commit(offsets), c => c.Commit(offsets)),
+                ["CommitAsync"] = (c => c.CommitAsync(offsets, null), c => c.CommitAsync(offsets, (IOffsetCommitCallback?)null)),
+                ["Committed"] = (c => c.Committed(nuls), c => c.Committed(nuls)),
+                ["BeginningOffsets"] = (c => c.BeginningOffsets(nuls), c => c.BeginningOffsets(nuls)),
+                ["EndOffsets"] = (c => c.EndOffsets(nuls), c => c.EndOffsets(nuls)),
+                ["OffsetsForTimes"] = (c => c.OffsetsForTimes(timestamps), c => c.OffsetsForTimes(timestamps)),
+                ["PartitionsFor"] = (c => c.PartitionsFor("t\0u"), c => c.PartitionsFor("t\0u")),
+            }));
+
+        Assert.Equal(16, seen.Count);
+        foreach (KeyValuePair<string, Exception?> call in seen)
+        {
+            AssertConcurrent(call.Key, call.Value);
+        }
+    }
+
     [Theory]
     [MemberData(nameof(RealConsumers))]
     public async Task WhileAnotherThreadIsInside_ANullArgument_IsReportedAfterTheConcurrentAccess_UnlessJavaChecksItBeforeAcquire(string kind)

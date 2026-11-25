@@ -423,6 +423,8 @@ internal sealed partial class NativeConsumer
     {
         if (CheckInAUse(() => LagOfAnUnknownPartition(partition), UseKind.UnownedOnMock))
         {
+            // The mock's 0 needs no native call, but the token is checked as Submit and RouteAsync check it.
+            cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult<long?>(0);
         }
 
@@ -504,7 +506,7 @@ internal sealed partial class NativeConsumer
         OffsetsSnapshot snapshot = CheckInAUse(() =>
         {
             RequireCallback(callback);
-            return search ?? throw NullCommitKey();
+            return CommitOffsetsError(search) is { } error ? throw error : search.GetValueOrDefault();
         });
 
         if (RoutesToTheHandle)

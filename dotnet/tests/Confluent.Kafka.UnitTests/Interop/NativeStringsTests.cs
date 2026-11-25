@@ -33,23 +33,23 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The shared admin-string precondition, <see cref="AdminStrings"/>: its exact accept/reject boundary, and that a
-/// rejection happens before the native call and leaves the client usable.
+/// The C-string precondition, <see cref="NativeStrings"/>: its exact accept/reject boundary, and that a rejection
+/// happens before the native call and leaves the client usable.
 /// </summary>
 /// <remarks>
-/// The ordering tests cover one site per shape of guarded string, since each shape places its guard differently: a
-/// per-key key inline (<c>createTopics</c>) and in a de-dup helper (<c>deleteTopics</c>); a direct request field (an
-/// IAC config value); an <c>*Options</c> string (the ListTransactions pattern); a marshaller-fed row (a quota
-/// filter's match name); a principal row (a delegation-token owner); a result lookup
-/// (<c>DescribeUserScramCredentialsResult.Description</c>); and a mock seeding method.
+/// The ordering tests cover one admin client site per shape of guarded string, since each shape places its guard
+/// differently: a per-key key inline (<c>createTopics</c>) and in a de-dup helper (<c>deleteTopics</c>); a direct
+/// request field (an IAC config value); an <c>*Options</c> string (the ListTransactions pattern); a marshaller-fed row
+/// (a quota filter's match name); a principal row (a delegation-token owner); and a result lookup
+/// (<c>DescribeUserScramCredentialsResult.Description</c>). One more covers a mock consumer's seeding method.
 /// </remarks>
-public sealed class AdminStringsTests
+public sealed class NativeStringsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private static readonly TimeSpan s_releaseBound = TimeSpan.FromSeconds(5);
 
-    private const string InvalidStringMessage =
+    private const string InvalidAdminStringMessage =
         "An admin request string must not contain a NUL character: such a string cannot be passed to the native " +
         "client unchanged.";
 
@@ -106,7 +106,7 @@ public sealed class AdminStringsTests
     [MemberData(nameof(AcceptedLabels))]
     public void Validate_AcceptsAStringThatCrossesUnchanged(string label)
     {
-        AdminStrings.Validate(s_accepted[label], "p");
+        NativeStrings.Validate(s_accepted[label], NativeStrings.InvalidAdminStringMessage, "p");
     }
 
     [Theory]
@@ -114,10 +114,10 @@ public sealed class AdminStringsTests
     public void Validate_RejectsAStringTheAbiWouldChange(string label)
     {
         ArgumentException rejected =
-            Assert.Throws<ArgumentException>(() => AdminStrings.Validate(s_rejected[label], "keys"));
+            Assert.Throws<ArgumentException>(() => NativeStrings.Validate(s_rejected[label], NativeStrings.InvalidAdminStringMessage, "keys"));
 
         Assert.Equal("keys", rejected.ParamName);
-        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -131,7 +131,7 @@ public sealed class AdminStringsTests
                 new CreateTopicsOptions()));
 
             Assert.Equal("newTopics", rejected.ParamName);
-            Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+            Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
             await TestTimeout.Run(
                 () => AsyncCreateTopicsResult.OfClient(admin.CreateTopics(new[] { new NewTopic("ok", 1, 1) }, new CreateTopicsOptions())).All().Get(),
                 s_deadline);
@@ -157,7 +157,7 @@ public sealed class AdminStringsTests
                 options: new DeleteTopicsOptions()));
 
             Assert.Equal("topics", rejected.ParamName);
-            Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+            Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
             await TestTimeout.Run(
                 () => AsyncDeleteTopicsResult.OfClient(
                     admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "fine" }), options: new DeleteTopicsOptions())).All().Get(),
@@ -185,7 +185,7 @@ public sealed class AdminStringsTests
                 options: new AlterConfigsOptions()));
 
             Assert.Equal("configs", rejected.ParamName);
-            Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+            Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
             Config before = await TestTimeout.Run(
                 () => AsyncDescribeConfigsResult.OfClient(admin.DescribeConfigs(new[] { topic }, new DescribeConfigsOptions())).Values()[topic].Get(),
                 s_deadline);
@@ -215,7 +215,7 @@ public sealed class AdminStringsTests
                 () => admin.ListTransactions(new ListTransactionsOptions().FilterOnTransactionalIdPattern("txn-\0")));
 
             Assert.Equal("options", rejected.ParamName);
-            Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+            Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
 
             AsyncListTransactionsResult result = AsyncListTransactionsResult.OfClient(
                 admin.ListTransactions(new ListTransactionsOptions().FilterOnTransactionalIdPattern("txn-.*")));
@@ -239,7 +239,7 @@ public sealed class AdminStringsTests
                 () => admin.DescribeClientQuotas(UserFilter("ali\u0000ce"), options: new DescribeClientQuotasOptions()));
 
             Assert.Equal("filter", rejected.ParamName);
-            Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+            Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
 
             AsyncDescribeClientQuotasResult result =
                 AsyncDescribeClientQuotasResult.OfClient(admin.DescribeClientQuotas(UserFilter("alice"), options: new DescribeClientQuotasOptions()));
@@ -263,7 +263,7 @@ public sealed class AdminStringsTests
                 new DescribeDelegationTokenOptions().Owners(new[] { new KafkaPrincipal("User", "alice\0") })));
 
             Assert.Equal("options", rejected.ParamName);
-            Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+            Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
 
             AsyncDescribeDelegationTokenResult result = AsyncDescribeDelegationTokenResult.OfClient(
                 admin.DescribeDelegationToken(
@@ -290,7 +290,7 @@ public sealed class AdminStringsTests
             ArgumentException rejected = Assert.Throws<ArgumentException>(() => { _ = result.Description("ali\0ce"); });
 
             Assert.Equal("userName", rejected.ParamName);
-            Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+            Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
 
             UnsupportedOperationException failure = await FutureAssert.ThrowsAsync<UnsupportedOperationException>(
                 () => TestTimeout.Run(() => result.Description("alice").Get(), s_deadline));
@@ -313,7 +313,7 @@ public sealed class AdminStringsTests
             new Dictionary<TopicPartition, long> { [kept] = 42, [new TopicPartition("b5-\u0000seed", 0)] = 7 }));
 
         Assert.Equal("newOffsets", rejected.ParamName);
-        Assert.StartsWith(InvalidStringMessage, rejected.Message, StringComparison.Ordinal);
+        Assert.StartsWith(InvalidAdminStringMessage, rejected.Message, StringComparison.Ordinal);
         Assert.Equal(-1, await EarliestOffset(admin, kept));
 
         admin.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [kept] = 42 });
