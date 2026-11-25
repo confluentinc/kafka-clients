@@ -42,16 +42,8 @@ const OPERATION_FORMS = new JavaForms('groupMembershipOperation', [[]], { reader
  * operation when a consumer is being shut down.
  */
 export class CloseOptions {
-  /**
-   * Specifies the group membership operation upon shutdown.
-   * By default, `GroupMembershipOperation.DEFAULT` will be applied, which follows the consumer's default behavior.
-   */
   #operation: CloseOptions.GroupMembershipOperation = CloseOptions.GroupMembershipOperation.DEFAULT;
 
-  /**
-   * Specifies the maximum amount of time to wait for the close process to complete, in milliseconds, or null:
-   * if no value is set, the default timeout will be applied.
-   */
   #timeout: number | bigint | null = null;
 
   /**
@@ -241,8 +233,6 @@ const VALUES_FORMS = new JavaForms('values', [[]], { reader: true });
 const NAME_FORMS = new JavaForms('name', [[]], { reader: true });
 const ORDINAL_FORMS = new JavaForms('ordinal', [[]], { reader: true });
 
-// Java's nested enum, a static member of the class (javascript/CLAUDE.md,
-// JavaScript Binding Conventions, Names).
 // eslint-disable-next-line @typescript-eslint/no-namespace -- Java's nested enum CloseOptions.GroupMembershipOperation, reached through the class name as in Java
 export namespace CloseOptions {
   /**

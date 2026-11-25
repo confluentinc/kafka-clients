@@ -244,7 +244,6 @@ export class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> {
     return ConsumerRecords.EMPTY;
   }
 
-  // The records, which Java dereferences.
   #map(): TopicPartitionMap<ConsumerRecord<K, V>[]> {
     if (this.#records === null) throw new TypeError('records must not be null');
     return this.#records;

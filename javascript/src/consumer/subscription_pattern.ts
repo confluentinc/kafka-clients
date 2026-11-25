@@ -33,7 +33,6 @@ const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
  * to the broker.
  */
 export class SubscriptionPattern {
-  /** String representation the regular expression, compatible with RE2/J. */
   readonly #pattern: string | null;
 
   /**
