@@ -29,9 +29,10 @@ namespace Confluent.Kafka.UnitTests;
 /// <see cref="ConsumerRecord{TKey, TValue}.SerializedValueSize()"/> accessors, through both mock consumers.
 /// </summary>
 /// <remarks>
-/// A mock-added record has both serialized sizes -1, whatever its key and value, and no leader epoch, so the sizes
-/// Java reports for a present key or value, and a present epoch, are reachable only against a broker. A polled record
-/// never has a delivery count.
+/// Each record here is built with Java's five-argument constructor <c>ConsumerRecord(topic, partition, offset, key,
+/// value)</c>, which sets both serialized sizes to -1, no leader epoch and no delivery count; the polled record keeps
+/// what that constructor gives. A record built with every field is polled with every field, as
+/// <c>PublicMockConsumerTypedRecordTests.EveryFieldOfTheRecordAdded_IsPolled</c> pins.
 /// </remarks>
 public sealed class PublicConsumerRecordAccessorTests
 {
@@ -44,7 +45,7 @@ public sealed class PublicConsumerRecordAccessorTests
     private static MockConsumer<byte[], byte[]> ReadyToPoll()
     {
         MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+            new MockConsumer<byte[], byte[]>("latest");
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         return consumer;
@@ -55,7 +56,7 @@ public sealed class PublicConsumerRecordAccessorTests
     {
         MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.AddRecord(Topic, Partition, offset: 0, key: null, value: null);
+        consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, Partition, offset: 0, key: null, value: null));
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
 
@@ -64,11 +65,11 @@ public sealed class PublicConsumerRecordAccessorTests
     }
 
     [Fact]
-    public void SyncPoll_PresentKeyAndValue_MockReportsMinusOne_PositiveSizeIsIntegrationOnly()
+    public void SyncPoll_PresentKeyAndValue_FiveArgumentConstructor_SerializedSizesAreMinusOne()
     {
         MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.AddRecord(Topic, Partition, offset: 0, key: new byte[] { 1, 2, 3 }, value: new byte[] { 9, 8, 7, 6, 5 });
+        consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, Partition, offset: 0, key: new byte[] { 1, 2, 3 }, value: new byte[] { 9, 8, 7, 6, 5 }));
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
 
@@ -77,11 +78,11 @@ public sealed class PublicConsumerRecordAccessorTests
     }
 
     [Fact]
-    public void SyncPoll_LeaderEpoch_MockAbsent_IsNull()
+    public void SyncPoll_LeaderEpoch_FiveArgumentConstructor_IsNull()
     {
         MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.AddRecord(Topic, Partition, offset: 0, key: new byte[] { 7 }, value: new byte[] { 8 });
+        consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, Partition, offset: 0, key: new byte[] { 7 }, value: new byte[] { 8 }));
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
 
@@ -93,7 +94,7 @@ public sealed class PublicConsumerRecordAccessorTests
     {
         MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.AddRecord(Topic, Partition, offset: 0, key: new byte[] { 7 }, value: new byte[] { 8 });
+        consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, Partition, offset: 0, key: new byte[] { 7 }, value: new byte[] { 8 }));
 
         ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
 
@@ -105,13 +106,13 @@ public sealed class PublicConsumerRecordAccessorTests
     public async Task AsyncPoll_Accessors_MockReachableContract()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
             await TestTimeout.Run(
                 () => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
             await TestTimeout.Run(() => consumer.Seek(new TopicPartition(Topic, Partition), offset: 0), s_deadline);
-            consumer.AddRecord(Topic, Partition, offset: 0, key: new byte[] { 1, 2, 3 }, value: null);
+            consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, Partition, offset: 0, key: new byte[] { 1, 2, 3 }, value: null));
 
             ConsumerRecords<byte[], byte[]> records = default!;
             await TestTimeout.Run(async () => records = await consumer.Poll(s_pollTimeout), s_deadline);

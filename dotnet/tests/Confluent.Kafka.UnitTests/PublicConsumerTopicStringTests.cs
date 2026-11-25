@@ -370,8 +370,7 @@ public sealed class PublicConsumerTopicStringTests
     [Fact]
     public async Task OnTheAsyncMock_ACancelledCurrentLag_IsCancelledForAPartitionItAnswersWithZero()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(
-            new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable disposal = TestTimeout.Disposal(consumer);
         using CancellationTokenSource cancelled = new CancellationTokenSource();
         cancelled.Cancel();
@@ -677,7 +676,7 @@ public sealed class PublicConsumerTopicStringTests
         Dictionary<TopicPartition, long> durations = new Dictionary<TopicPartition, long> { [s_nulPartition] = 1 };
         if (consumer is MockConsumer<byte[], byte[]> sync)
         {
-            AssertAddRecordNotAssigned(Record.Exception(() => sync.AddRecord(NulTopic, 0, 0, null, null)), Record.Exception(() => sync.AddRecord("x", 0, 0, null, null)));
+            AssertAddRecordNotAssigned(Record.Exception(() => sync.AddRecord(new ConsumerRecord<byte[], byte[]>(NulTopic, 0, 0L, key: null, value: null))), Record.Exception(() => sync.AddRecord(new ConsumerRecord<byte[], byte[]>("x", 0, 0L, key: null, value: null))));
             AssertNul(Record.Exception(() => sync.UpdateBeginningOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateBeginningOffset");
             AssertNul(Record.Exception(() => sync.UpdateEndOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateEndOffset");
             AssertNul(Record.Exception(() => sync.UpdatePartitions(NulTopic, 1, 0, "h", 1)), NulTopicMessage, "topic", "UpdatePartitions");
@@ -689,7 +688,7 @@ public sealed class PublicConsumerTopicStringTests
         else
         {
             AsyncMockConsumer<byte[], byte[]> async = (AsyncMockConsumer<byte[], byte[]>)consumer;
-            AssertAddRecordNotAssigned(Record.Exception(() => async.AddRecord(NulTopic, 0, 0, null, null)), Record.Exception(() => async.AddRecord("x", 0, 0, null, null)));
+            AssertAddRecordNotAssigned(Record.Exception(() => async.AddRecord(new ConsumerRecord<byte[], byte[]>(NulTopic, 0, 0L, key: null, value: null))), Record.Exception(() => async.AddRecord(new ConsumerRecord<byte[], byte[]>("x", 0, 0L, key: null, value: null))));
             AssertNul(Record.Exception(() => async.UpdateBeginningOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateBeginningOffset");
             AssertNul(Record.Exception(() => async.UpdateEndOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateEndOffset");
             AssertNul(Record.Exception(() => async.UpdatePartitions(NulTopic, 1, 0, "h", 1)), NulTopicMessage, "topic", "UpdatePartitions");
@@ -721,14 +720,14 @@ public sealed class PublicConsumerTopicStringTests
         List<Exception?> errors = new List<Exception?>();
         if (consumer is MockConsumer<byte[], byte[]> sync)
         {
-            errors.Add(Record.Exception(() => sync.AddRecord(NulTopic, 0, 0, null, null)));
+            errors.Add(Record.Exception(() => sync.AddRecord(new ConsumerRecord<byte[], byte[]>(NulTopic, 0, 0L, key: null, value: null))));
             errors.Add(Record.Exception(() => sync.UpdatePartitions(NulTopic, 1, 0, "h", 1)));
             errors.Add(Record.Exception(() => sync.UpdatePartitions("ok", 1, 0, "h\0x", 1)));
         }
         else
         {
             AsyncMockConsumer<byte[], byte[]> async = (AsyncMockConsumer<byte[], byte[]>)consumer;
-            errors.Add(Record.Exception(() => async.AddRecord(NulTopic, 0, 0, null, null)));
+            errors.Add(Record.Exception(() => async.AddRecord(new ConsumerRecord<byte[], byte[]>(NulTopic, 0, 0L, key: null, value: null))));
             errors.Add(Record.Exception(() => async.UpdatePartitions(NulTopic, 1, 0, "h", 1)));
             errors.Add(Record.Exception(() => async.UpdatePartitions("ok", 1, 0, "h\0x", 1)));
         }
@@ -771,9 +770,9 @@ public sealed class PublicConsumerTopicStringTests
     private static IEnumerable<IllegalArgumentException> MockConstructorRefusals(string strategy)
     {
         yield return Assert.Throws<IllegalArgumentException>(
-            () => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), strategy));
+            () => new MockConsumer<byte[], byte[]>(strategy));
         yield return Assert.Throws<IllegalArgumentException>(
-            () => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), strategy));
+            () => new AsyncMockConsumer<byte[], byte[]>(strategy));
     }
 
     // The calls a listener makes with a NUL topic, each giving what it throws; CurrentLag hands its lag to lag.
@@ -861,8 +860,8 @@ public sealed class PublicConsumerTopicStringTests
     {
         "KafkaConsumer" => KafkaConsumer<byte[], byte[]>.Create(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
         "AsyncKafkaConsumer" => await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(groupId), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
-        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
-        _ => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
+        "MockConsumer" => new MockConsumer<byte[], byte[]>("latest"),
+        _ => new AsyncMockConsumer<byte[], byte[]>("latest"),
     };
 
     private static Dictionary<string, object?> Config(bool groupId)

@@ -88,7 +88,7 @@ internal sealed class ConsumerPumpStall : IDisposable
 
     private static CompletionThread PumpOf(object consumer)
     {
-        object native = consumer.GetType()
+        object native = consumer as NativeConsumer ?? consumer.GetType()
             .GetField("_native", BindingFlags.NonPublic | BindingFlags.Instance)!
             .GetValue(consumer)!;
         return (CompletionThread)typeof(NativeConsumer)

@@ -35,8 +35,9 @@ namespace Confluent.Kafka.UnitTests;
 /// producer refuses a serializer with a public headers form of <c>Serialize</c> without
 /// <see cref="IAsyncSerializerWithHeaders{T}"/>, and a consumer a deserializer with a public headers form of
 /// <c>Deserialize</c> without <see cref="IAsyncDeserializerWithHeaders{T}"/>, which they would never call. The
-/// asynchronous consumers and producers
-/// make the check when they are built: the real ones dispose their serdes, the mocks do not.
+/// asynchronous real consumer and producer and the asynchronous mock producer
+/// make the check when they are built: the real ones dispose their serdes, the mock producer does not; the mock
+/// consumer takes no deserializer.
 /// </summary>
 public sealed class AsyncSerdeGuardTests
 {
@@ -137,20 +138,6 @@ public sealed class AsyncSerdeGuardTests
             Assert.Equal(0, serde.Disposals);
             Assert.Equal(0, other.Disposals);
         }
-    }
-
-    [Theory]
-    [MemberData(nameof(Refused))]
-    public async Task AnAsyncMockConsumer_TakesEveryShape_SinceItDisposesNothing(Type shape, string what)
-    {
-        Assert.NotEmpty(what);
-        Serde serde = (Serde)Activator.CreateInstance(shape)!;
-        Disposable other = new Disposable();
-
-        await TestTimeout.DisposeAsync(new AsyncMockConsumer<string, string>(serde, other));
-
-        Assert.Equal(0, serde.Disposals);
-        Assert.Equal(0, other.Disposals);
     }
 
     [Theory]
@@ -260,10 +247,8 @@ public sealed class AsyncSerdeGuardTests
         SerdeGuard.Check((IAsyncSerializer<string>)serde, DefaultMethodGuard.Producer, disposes: true);
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task AnAsyncConsumer_RefusesAHeadersFormItWouldNeverCall(bool mock)
+    [Fact]
+    public async Task AnAsyncConsumer_RefusesAHeadersFormItWouldNeverCall()
     {
         foreach (bool asKey in new[] { true, false })
         {
@@ -274,9 +259,7 @@ public sealed class AsyncSerdeGuardTests
 
             IllegalArgumentException e = await Assert.ThrowsAsync<IllegalArgumentException>(async () =>
             {
-                IAsyncDisposable consumer = mock
-                    ? new AsyncMockConsumer<string, string>(key, value)
-                    : await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), key, value);
+                IAsyncDisposable consumer = await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), key, value);
                 await TestTimeout.DisposeAsync(consumer);
             });
 
@@ -288,16 +271,12 @@ public sealed class AsyncSerdeGuardTests
         }
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task AnAsyncConsumer_TakesAHeadersFormThroughIAsyncDeserializerWithHeaders(bool mock)
+    [Fact]
+    public async Task AnAsyncConsumer_TakesAHeadersFormThroughIAsyncDeserializerWithHeaders()
     {
         HeadersDeserialize serde = new HeadersDeserialize();
 
-        IAsyncDisposable consumer = mock
-            ? new AsyncMockConsumer<string, string>(serde, serde)
-            : await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), serde, serde);
+        IAsyncDisposable consumer = await AsyncKafkaConsumer<string, string>.Create(ConsumerConfigs(), serde, serde);
         await TestTimeout.DisposeAsync(consumer);
 
         SerdeGuard.Check((IAsyncDeserializer<string>)serde, DefaultMethodGuard.Consumer, disposes: true);

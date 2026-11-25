@@ -72,6 +72,17 @@ retry() {
     return 1
 }
 
+# Prints the tag of image $1 with the ca-certificates package added where the image has none (the
+# debian and ubuntu images): the package's library, built without Mozilla's root bundle, trusts
+# the OS store when no truststore is set, so the SSL client of the smoke test needs one, as a
+# user's image does.
+with_ca_certificates() {
+    _tag="test-nupkg-$(printf '%s' "$1" | tr ':/' '--')"
+    printf 'FROM %s\nRUN if command -v apt-get >/dev/null 2>&1; then apt-get update -qq \\\n    && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ca-certificates >/dev/null \\\n    && rm -rf /var/lib/apt/lists/*; fi\n' "$1" \
+        | docker build -q -t "$_tag" - >/dev/null || return 1
+    echo "$_tag"
+}
+
 # Without a pipeline, so that a failing hash fails the caller's assignment.
 sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -220,6 +231,7 @@ if [ "$(uname -s)" = "Linux" ] && [ "$mode" != smoke ]; then
     : "${DISTRO_IMAGES:=almalinux:8 almalinux:9 ubuntu:22.04 debian:12 ubuntu:24.04}"
     for img in $DISTRO_IMAGES; do
         retry docker pull -q "$img"
+        run_img=$(retry with_ca_certificates "$img")
         for tfm in $SMOKE_TFMS; do
             echo "== smoke test, $tfm, on $img =="
             # The images have no ICU, which the package does not need; a user's image that has
@@ -228,7 +240,7 @@ if [ "$(uname -s)" = "Linux" ] && [ "$mode" != smoke ]; then
                 -e HOME=/tmp -e DOTNET_ROOT=/opt/dotnet -e DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
                 -e DOTNET_NOLOGO=1 -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
                 -v "$DOTNET_ROOT":/opt/dotnet:ro -v "$work/smoke":/smoke:ro -w /smoke \
-                "$img" /opt/dotnet/dotnet "bin/Release/$tfm/PackageSmoke.dll" "$VERSION"
+                "$run_img" /opt/dotnet/dotnet "bin/Release/$tfm/PackageSmoke.dll" "$VERSION"
         done
     done
 fi

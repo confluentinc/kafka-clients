@@ -129,10 +129,11 @@ built, as it disposes the given ones.
 
 ### Synchronous and asynchronous clients
 
-The synchronous clients (`KafkaProducer`, `KafkaConsumer` and their mocks) take `ISerializer<T>` and
-`IDeserializer<T>`. The asynchronous clients (`AsyncKafkaProducer`, `AsyncKafkaConsumer` and their
-mocks) take only `IAsyncSerializer<T>` and `IAsyncDeserializer<T>`, whose method returns a
-`ValueTask` and receives the `CancellationToken` of the `Send` or `Poll` it serves. As with the
+The synchronous clients (`KafkaProducer`, `MockProducer` and `KafkaConsumer`) take `ISerializer<T>` and
+`IDeserializer<T>`. The asynchronous clients (`AsyncKafkaProducer`, `AsyncMockProducer` and
+`AsyncKafkaConsumer`) take only `IAsyncSerializer<T>` and `IAsyncDeserializer<T>`, whose method returns a
+`ValueTask` and receives the `CancellationToken` of the `Send` or `Poll` it serves. The mock consumers
+take no deserializer: `AddRecord` takes a typed `ConsumerRecord`, and `Poll` hands back its key and value. As with the
 synchronous interfaces, a serializer or deserializer that reads the record's headers implements
 `IAsyncSerializerWithHeaders<T>` or `IAsyncDeserializerWithHeaders<T>`, and the client then calls
 its headers form; a class that declares a headers form without that interface is refused when the
@@ -270,7 +271,12 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
 - `KafkaProducer`, `KafkaConsumer`, `AsyncKafkaProducer` and `AsyncKafkaConsumer` have no public
   constructor: write `KafkaProducer<K, V>.Create(config, key, value)` where you wrote
   `new KafkaProducer<K, V>(config, key, value)`, and `await AsyncKafkaProducer<K, V>.Create(...)` for
-  an asynchronous client. The mocks keep their constructors.
+  an asynchronous client. The mock producers keep their constructors.
+- `MockConsumer` and `AsyncMockConsumer` take no deserializers: write `new MockConsumer<K, V>("latest")`
+  where you wrote `new MockConsumer<K, V>(keyDeserializer, valueDeserializer)`, and
+  `AddRecord(new ConsumerRecord<K, V>(topic, partition, offset, key, value))`, with the typed key and
+  value, where you wrote `AddRecord(topic, partition, offset, keyBytes, valueBytes)`. The offset reset
+  strategy is the constructor's one parameter and is required, as in Java's `MockConsumer(String)`.
 - The asynchronous clients take `IAsyncSerializer<T>` and `IAsyncDeserializer<T>` where they took
   `ISerializer<T>` and `IDeserializer<T>`: pass the `Async` class of a built-in, or an asynchronous
   class of your own. Its plain method is `Serialize(topic, data, cancellationToken)` /

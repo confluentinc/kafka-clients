@@ -2,12 +2,14 @@ REPO_ROOT ?= $(realpath ..)
 RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 # The cargo profile directory of the Rust library every target links:
 # $(RUST_PROJECT_ROOT)/target/$(PROFILE). The tests use the debug all-features
-# build; the root's `build` passes release, and the benchmarks always link
-# release.
+# build; the root's `build` passes release-cdylib, the library as it ships in
+# the wheel (rust/Makefile `build-cdylib`: the platform verifier, no Mozilla
+# bundle), and the benchmarks always link it.
 PROFILE ?= debug
-# The rust/Makefile target that builds that library: the release or the debug
+# The rust/Makefile target that builds that library: the shipped build
+# (release-cdylib), the release all-features build (release) or the debug
 # all-features build.
-RUST_BUILD_TARGET = $(if $(filter release,$(PROFILE)),build-all-features,devel-build-all-features)
+RUST_BUILD_TARGET = $(if $(filter release-cdylib,$(PROFILE)),build-cdylib,$(if $(filter release,$(PROFILE)),build-all-features,devel-build-all-features))
 # The tag of the gRPC images; rust/tests/common/backend_pool.rs reads the same
 # variable. Override it per worktree so concurrent sessions do not share images.
 MULTILANG_IMAGE_TAG ?= dev
@@ -248,9 +250,9 @@ test-performance: build
 # baseline). Set ASYNC=True to drive the asyncio-native consumer of the
 # selected backend (AsyncKafkaConsumer / confluent_kafka.aio.AIOConsumer)
 # instead of the sync one. CLIENT_VERSION=2 runs in the librdkafka venv; the
-# Rust run uses it only for CREATE_TOPIC. The benchmarks link the release
-# library and need the librdkafka venv.
-consumer-perf-test producer-perf-test transactional-producer-perf-test: PROFILE = release
+# Rust run uses it only for CREATE_TOPIC. The benchmarks link the library as it
+# ships (release-cdylib) and need the librdkafka venv.
+consumer-perf-test producer-perf-test transactional-producer-perf-test: PROFILE = release-cdylib
 consumer-perf-test: build venv-librdkafka
 	@(if [ "$${CLIENT_VERSION:-3}" = "2" ]; then py=$(LIBRDKAFKA_PYTHON); else py=python; fi; \
 	  LIBRDKAFKA_PYTHON=$(LIBRDKAFKA_PYTHON) $$py test/performance/consumer_performance_test.py)

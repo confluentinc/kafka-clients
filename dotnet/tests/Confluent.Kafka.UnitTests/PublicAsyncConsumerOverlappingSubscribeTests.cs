@@ -354,7 +354,7 @@ public sealed class PublicAsyncConsumerOverlappingSubscribeTests
     {
         if (kind == Kind.AsyncMockConsumer)
         {
-            return new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            return new AsyncMockConsumer<byte[], byte[]>("latest");
         }
 
         Dictionary<string, object?> config = new Dictionary<string, object?>

@@ -164,6 +164,27 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
         return new KafkaConsumer<TKey, TValue>(native, deserializers.Key, deserializers.Value);
     }
 
+    /// <summary>
+    /// The consumer over the C mock instead of a client, for the binding's decode tests: the deserializers are
+    /// checked, built and owned as <see cref="Create(IReadOnlyDictionary{string, object}, IDeserializer{TKey}, IDeserializer{TValue})"/>
+    /// does, and the records the test adds through <see cref="Native"/> are decoded by <see cref="Poll"/> as fetched
+    /// ones are.
+    /// </summary>
+    internal static KafkaConsumer<TKey, TValue> CreateOverMock(
+        IReadOnlyDictionary<string, object?> configs,
+        IDeserializer<TKey>? keyDeserializer,
+        IDeserializer<TValue>? valueDeserializer,
+        string? autoOffsetReset)
+    {
+        ConfiguredSerdes<IDeserializer<TKey>, IDeserializer<TValue>> deserializers =
+            ConfiguredSerdes.Deserializers(configs, keyDeserializer, valueDeserializer);
+        NativeConsumer native = NativeConsumer.CreateMock(autoOffsetReset, withPump: false, deserializers);
+        return new KafkaConsumer<TKey, TValue>(native, deserializers.Key, deserializers.Value);
+    }
+
+    /// <summary>The consumer's core, which a test built by <see cref="CreateOverMock"/> adds records through.</summary>
+    internal NativeConsumer Native => _native;
+
     /// <inheritdoc/>
     public ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout) =>
         _native.PollTyped(

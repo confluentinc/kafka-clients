@@ -25,7 +25,7 @@ namespace Confluent.Kafka.UnitTests;
 #if NET8_0_OR_GREATER
 
 /// <summary>
-/// The memory form's per-record receive allocation on <see cref="MockConsumer{TKey, TValue}"/>: a key or value kept
+/// The memory form's per-record receive allocation on <see cref="KafkaConsumer{TKey, TValue}"/>: a key or value kept
 /// as memory is never copied, and costs one small manager when it has bytes and nothing when it is empty.
 /// </summary>
 /// <remarks>
@@ -98,8 +98,8 @@ public sealed class PublicConsumerMemoryAllocationBudgetTests
         byte[] key = new byte[size];
         byte[] value = new byte[size];
 
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
+            DecodingConsumers.Create<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
                 Serdes.ReadOnlyMemory().Deserializer(), Serdes.ReadOnlyMemory().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });

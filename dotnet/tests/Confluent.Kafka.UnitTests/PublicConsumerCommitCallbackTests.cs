@@ -144,7 +144,7 @@ public sealed class PublicConsumerCommitCallbackTests
         TopicPartition partition = new TopicPartition(Topic, 0);
         consumer.Assign(new[] { partition });
         consumer.Seek(partition, 0);
-        consumer.AddRecord(Topic, 0, offset: 0, new[] { (byte)'k' }, new[] { (byte)'v' });
+        consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, 0, offset: 0, new[] { (byte)'k' }, new[] { (byte)'v' }));
         Assert.Single(consumer.Poll(TimeSpan.Zero));
         RecordingCommitCallback callback = new RecordingCommitCallback();
 
@@ -161,7 +161,7 @@ public sealed class PublicConsumerCommitCallbackTests
         TopicPartition partition = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { partition }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(partition, 0), s_deadline);
-        consumer.AddRecord(Topic, 0, offset: 0, new[] { (byte)'k' }, new[] { (byte)'v' });
+        consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, 0, offset: 0, new[] { (byte)'k' }, new[] { (byte)'v' }));
         Assert.Single(await TestTimeout.Run(() => consumer.Poll(TimeSpan.Zero), s_deadline));
         RecordingCommitCallback callback = new RecordingCommitCallback();
 
@@ -411,10 +411,10 @@ public sealed class PublicConsumerCommitCallbackTests
             m => m.Name == "CommitAsync" && m.GetParameters().Select(p => p.ParameterType).SequenceEqual(parameters));
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        new MockConsumer<byte[], byte[]>("latest");
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        new AsyncMockConsumer<byte[], byte[]>("latest");
 
     private static void AssertTheConsumedPosition(TopicPartition partition, Completion completion)
     {

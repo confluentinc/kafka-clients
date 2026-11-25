@@ -294,10 +294,10 @@ public sealed class PublicConsumerCallbackScopeTests
         new Dictionary<TopicPartition, OffsetAndMetadata>();
 
     private static MockConsumer<byte[], byte[]> NewMock() =>
-        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        new MockConsumer<byte[], byte[]>("latest");
 
     private static AsyncMockConsumer<byte[], byte[]> NewAsyncMock() =>
-        new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        new AsyncMockConsumer<byte[], byte[]>("latest");
 
     private static Dictionary<string, object?> Config() => new Dictionary<string, object?>
     {

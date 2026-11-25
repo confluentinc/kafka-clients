@@ -74,6 +74,33 @@ internal static class ConsumerRecordsMarshal
         out RecordDeserializationException? error,
         out IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind)
     {
+        DeserializingCopy<TKey, TValue> copy = new DeserializingCopy<TKey, TValue>(
+            keyDeserializer, keyWithHeaders, keyWithMemory, valueDeserializer, valueWithHeaders, valueWithMemory);
+        return CopyOut<TKey, TValue, DeserializingCopy<TKey, TValue>>(records, ref copy, ref batch, out error, out rewind);
+    }
+
+    // The mock consumer's copy-out: each record's key and value are taken from the mock's slots by the ids its C
+    // record carries, never read as bytes. No deserializer runs, so it gives no error and no rewind, and no batch is
+    // kept: `records` stays the caller's.
+    internal static ConsumerRecords<TKey, TValue> CopyOut<TKey, TValue>(
+        IntPtr records,
+        MockRecordSlots<TKey, TValue> slots)
+    {
+        ResolvingCopy<TKey, TValue> copy = new ResolvingCopy<TKey, TValue>(slots);
+        SafeConsumerRecordsHandle? batch = null;
+        return CopyOut<TKey, TValue, ResolvingCopy<TKey, TValue>>(records, ref copy, ref batch, out _, out _);
+    }
+
+    // The one batch walk of both copy-outs. TCopy is a struct, so the JIT makes one body per source and calls its
+    // Copy directly: the decode path pays no interface call and no allocation for the choice.
+    private static ConsumerRecords<TKey, TValue> CopyOut<TKey, TValue, TCopy>(
+        IntPtr records,
+        ref TCopy copy,
+        ref SafeConsumerRecordsHandle? batch,
+        out RecordDeserializationException? error,
+        out IReadOnlyList<KeyValuePair<TopicPartition, long>> rewind)
+        where TCopy : struct, IRecordCopy<TKey, TValue>
+    {
         error = null;
         rewind = s_noRewind;
         if (records == IntPtr.Zero)
@@ -95,7 +122,7 @@ internal static class ConsumerRecordsMarshal
                     nextOffsets);
         }
 
-        if (keyWithMemory is not null || valueWithMemory is not null)
+        if (copy.KeepsBatch)
         {
             batch = new SafeConsumerRecordsHandle(records);
         }
@@ -125,9 +152,7 @@ internal static class ConsumerRecordsMarshal
                     for (int i = 0; i < size; i++)
                     {
                         IntPtr record = Get(partitionRecords, i);
-                        error = reader.Copy(
-                            record, topic, partitionId, keyDeserializer, keyWithHeaders, keyWithMemory,
-                            valueDeserializer, valueWithHeaders, valueWithMemory, batch, list);
+                        error = copy.Copy(ref reader, record, topic, partitionId, batch, list);
                         if (error is not null)
                         {
                             rewind = Rewind(records, partitions, p, error);
@@ -770,6 +795,43 @@ internal static class ConsumerRecordsMarshal
             return null;
         }
 
+        // The mock consumer's record: every field read as Copy reads it, the key and value taken from the mock's slots
+        // by the ids in the C record's key and value slots, which are never dereferenced. The delivery count, which a
+        // record the broker sends never carries here, is the one given to the mock's AddRecord.
+        internal void Resolve<TKey, TValue>(
+            IntPtr record,
+            string topic,
+            int partition,
+            MockRecordSlots<TKey, TValue> slots,
+            List<ConsumerRecord<TKey, TValue>> records)
+        {
+            IntPtr outErr = IntPtr.Zero;
+            long offset = NativeMethods.ConsumerRecordOffset(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            long timestamp = NativeMethods.ConsumerRecordTimestamp(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            TimestampType timestampType = TimestampTypeOf(record);
+            IntPtr key = NativeMethods.ConsumerRecordKey(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            IntPtr value = NativeMethods.ConsumerRecordValue(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            RecordHeaders headers = CopyHeaders(record);
+            int serializedKeySize = NativeMethods.ConsumerRecordSerializedKeySize(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            int serializedValueSize = NativeMethods.ConsumerRecordSerializedValueSize(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            int leaderEpoch = NativeMethods.ConsumerRecordLeaderEpoch(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+            short deliveryCount = NativeMethods.ConsumerRecordDeliveryCount(record, ref outErr);
+            KafkaException.ThrowIfFfiFailed(ref outErr);
+
+            slots.Take(key, value, topic, partition, out TKey? resolvedKey, out TValue? resolvedValue);
+            records.Add(new ConsumerRecord<TKey, TValue>(
+                topic, partition, offset, timestamp, timestampType, serializedKeySize, serializedValueSize,
+                resolvedKey, resolvedValue, headers, leaderEpoch < 0 ? null : leaderEpoch,
+                deliveryCount < 0 ? null : deliveryCount));
+        }
+
         internal RecordFields Fields(IntPtr record)
         {
             IntPtr outErr = IntPtr.Zero;
@@ -832,6 +894,88 @@ internal static class ConsumerRecordsMarshal
             }
 
             return false;
+        }
+    }
+    // One record's typed key and value, from its C record, added to `records`; an error stops the copy-out at that
+    // record. Implemented by structs only, so the walk calls it without an interface dispatch (see CopyOut).
+    private interface IRecordCopy<TKey, TValue>
+    {
+        // Whether the batch outlives the copy-out, owned by a SafeConsumerRecordsHandle.
+        bool KeepsBatch { get; }
+
+        RecordDeserializationException? Copy(
+            ref RecordReader reader,
+            IntPtr record,
+            string topic,
+            int partition,
+            SafeConsumerRecordsHandle? batch,
+            List<ConsumerRecord<TKey, TValue>> records);
+    }
+
+    // The real consumers' source: the slots hold the key and value bytes, read through the deserializers.
+    private readonly struct DeserializingCopy<TKey, TValue> : IRecordCopy<TKey, TValue>
+    {
+        private readonly IDeserializer<TKey> _keyDeserializer;
+        private readonly IDeserializerWithHeaders<TKey>? _keyWithHeaders;
+        private readonly IDeserializerWithReadOnlyMemory<TKey>? _keyWithMemory;
+        private readonly IDeserializer<TValue> _valueDeserializer;
+        private readonly IDeserializerWithHeaders<TValue>? _valueWithHeaders;
+        private readonly IDeserializerWithReadOnlyMemory<TValue>? _valueWithMemory;
+
+        internal DeserializingCopy(
+            IDeserializer<TKey> keyDeserializer,
+            IDeserializerWithHeaders<TKey>? keyWithHeaders,
+            IDeserializerWithReadOnlyMemory<TKey>? keyWithMemory,
+            IDeserializer<TValue> valueDeserializer,
+            IDeserializerWithHeaders<TValue>? valueWithHeaders,
+            IDeserializerWithReadOnlyMemory<TValue>? valueWithMemory)
+        {
+            _keyDeserializer = keyDeserializer;
+            _keyWithHeaders = keyWithHeaders;
+            _keyWithMemory = keyWithMemory;
+            _valueDeserializer = valueDeserializer;
+            _valueWithHeaders = valueWithHeaders;
+            _valueWithMemory = valueWithMemory;
+        }
+
+        // A memory form keeps the batch alive behind the memories it is given.
+        public bool KeepsBatch => _keyWithMemory is not null || _valueWithMemory is not null;
+
+        public RecordDeserializationException? Copy(
+            ref RecordReader reader,
+            IntPtr record,
+            string topic,
+            int partition,
+            SafeConsumerRecordsHandle? batch,
+            List<ConsumerRecord<TKey, TValue>> records) =>
+            reader.Copy(
+                record, topic, partition, _keyDeserializer, _keyWithHeaders, _keyWithMemory, _valueDeserializer,
+                _valueWithHeaders, _valueWithMemory, batch, records);
+    }
+
+    // The mock consumer's source: the slots hold ids, never dereferenced; the key and value are taken from the
+    // mock's table.
+    private readonly struct ResolvingCopy<TKey, TValue> : IRecordCopy<TKey, TValue>
+    {
+        private readonly MockRecordSlots<TKey, TValue> _slots;
+
+        internal ResolvingCopy(MockRecordSlots<TKey, TValue> slots)
+        {
+            _slots = slots;
+        }
+
+        public bool KeepsBatch => false;
+
+        public RecordDeserializationException? Copy(
+            ref RecordReader reader,
+            IntPtr record,
+            string topic,
+            int partition,
+            SafeConsumerRecordsHandle? batch,
+            List<ConsumerRecord<TKey, TValue>> records)
+        {
+            reader.Resolve(record, topic, partition, _slots, records);
+            return null;
         }
     }
 }

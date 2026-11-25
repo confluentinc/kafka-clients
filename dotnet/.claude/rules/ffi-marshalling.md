@@ -49,7 +49,7 @@ pointed at our fixed-width, handle-error ABI.
 
 **Note — support matrix.** We target **net462 · netstandard2.0 · net10.0**: ckd
 2.15.0's reach (**net462 · netstandard2.0 · net8.0 · net10.0**) without `net8.0`, which
-ledger 641 dropped because .NET 8 left Microsoft support; a .NET 8 application gets the
+ledger 648 dropped because .NET 8 left Microsoft support; a .NET 8 application gets the
 `netstandard2.0` asset (`dotnet/CLAUDE.md` §4 **Target frameworks**). The `net462` asset is
 the `netstandard2.0` code plus the .NET Framework native-library preload
 (`Internal/Interop/NativeMethods.NetFramework.cs`), its one Framework-specific code: one
@@ -73,6 +73,7 @@ DllNames) — the machinery §0.2 says **not** to port.
 | `T **` out-param / array | `ref IntPtr` set to `IntPtr.Zero` / `IntPtr[]` | e.g. `out_err`; `get_all` arrays. |
 | `kafka_Bytes_t` (`const uint8_t *data`, `int32_t len`) | `[StructLayout(LayoutKind.Sequential)] struct` (`KafkaBytes`) | Fixed-width ⇒ identical layout. A record (`ProducerRecord_t`) and its builder are opaque `*_t *` handles, not mirrored (§A2). |
 | `void (*cb)(...)` / `void *` | Cdecl delegate, kept alive (§A6/§B6) / `IntPtr` (`GCHandle`) | |
+| generic `void *` slot the core never reads | `IntPtr` carrying an integer id that the binding resolves | Never dereferenced, on either side; needs no `GCHandle`. First use: the mock consumers' key and value (ledger 627). |
 
 **Rule:**
 

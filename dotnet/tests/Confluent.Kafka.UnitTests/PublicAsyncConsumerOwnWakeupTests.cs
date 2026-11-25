@@ -19,7 +19,6 @@ using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Errors;
-using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
@@ -60,7 +59,8 @@ public sealed class PublicAsyncConsumerOwnWakeupTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.AddRecord(Topic, Partition, offset: 0, key: null, value: Encoding.UTF8.GetBytes("v"));
+        consumer.AddRecord(
+            new ConsumerRecord<byte[], byte[]>(Topic, Partition, offset: 0, key: null, value: Encoding.UTF8.GetBytes("v")));
         LeaveTheConsumersOwnWakeup(consumer, armTheCore: true);
 
         ConsumerRecords<byte[], byte[]> records =
@@ -72,7 +72,7 @@ public sealed class PublicAsyncConsumerOwnWakeupTests
     private static async Task<AsyncMockConsumer<byte[], byte[]>> ReadyToPoll()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            new AsyncMockConsumer<byte[], byte[]>("latest");
         await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
         await TestTimeout.Run(() => consumer.Seek(new TopicPartition(Topic, Partition), offset: 0), s_deadline);
         return consumer;
