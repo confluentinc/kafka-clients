@@ -90,7 +90,7 @@ GRPC_IMAGE_TAG ?= confluent-kafka-rust/javascript-grpc-server:$(MULTILANG_IMAGE_
 PACK_DIR ?= $(CURDIR)/build/pack
 HOST_PLATFORM = $(shell $(NODE) -p "process.platform + '-' + process.arch + (process.platform === 'linux' ? '-gnu' : '')")
 
-.PHONY: build build-addon build-ts test test-static test-unit test-typing test-integration \
+.PHONY: build build-addon build-ts test test-except-grpc-arm test-static test-unit test-typing test-integration \
 	test-integration-ssl test-integration-sasl security-certs test-memory test-memory-mutation test-asan \
 	grpc-image grpc-native test-integration-grpc pack pack-check clean lint-rules test-lint \
 	test-verifiable-clients test-grpc-server test-stress soak check-api update-api docs format format-check \
@@ -120,16 +120,23 @@ build-ts:
 	find dist/internal \( -name '*.d.ts' -o -name '*.d.ts.map' \) -delete
 	$(NODE) scripts/dist_headers.js src dist
 
-# Then the short stress (test-stress) and the container gRPC arm of the Rust
-# multilanguage suite, as python/'s and c/'s `test` end with theirs: recipe
-# lines, so they run after the broker-backed test and no two of them hold a
-# broker at once. The gRPC arm self-skips off Linux (see
-# test-integration-grpc); the root `verify-javascript-macos-docker` runs the
-# native arm there instead.
-test: test-static test-unit test-memory test-typing check-api typecheck-tests test-verifiable-clients test-grpc-server \
+# The tests that need no broker and the broker-backed test, then the short
+# stress (test-stress) and the container gRPC arm of the Rust multilanguage
+# suite, as python/'s and c/'s `test` end with theirs: recipe lines, so they
+# run after the broker-backed test and no two of them hold a broker at once.
+# The gRPC arm self-skips off Linux (see test-integration-grpc); the root
+# `verify-javascript-macos-docker` runs the native arm there instead.
+test: test-except-grpc-arm
+	$(MAKE) test-integration-grpc
+
+# Everything `test` runs except the gRPC multilanguage arm
+# (test-integration-grpc), as python/'s `test-except-grpc-arm`: the CI job
+# "verify-javascript (Linux amd64) — plaintext" runs it, through the root
+# `test-javascript-except-grpc-arm`, and "verify-javascript (Linux amd64) —
+# plaintext gRPC arm" runs the arm.
+test-except-grpc-arm: test-static test-unit test-memory test-typing check-api typecheck-tests test-verifiable-clients test-grpc-server \
 	test-integration
 	$(MAKE) test-stress
-	$(MAKE) test-integration-grpc
 
 # Header conformance and the package layout: no build needed.
 test-static:

@@ -24,7 +24,7 @@ export MULTILANG_IMAGE_TAG
 .PHONY: build build-all devel-build build-grpc-images clean-grpc-images submodules init init-hooks \
 	test test-integration-perf verify verify-commit verify-commit-checks bump-version \
 	select-tests pre-push-test-selection clean-test-selection clean \
-	build-javascript test-javascript test-javascript-unit lint-javascript verify-javascript \
+	build-javascript test-javascript test-javascript-except-grpc-arm test-javascript-unit lint-javascript verify-javascript \
 	test-javascript-macos-docker verify-javascript-macos-docker \
 	build-grpc-images-javascript test-integration-javascript \
 	test-integration-javascript-ssl test-integration-javascript-sasl-ssl \
@@ -151,7 +151,8 @@ verify-commit-checks: submodules
 # unit tests (test-javascript-unit, through `test`, and lint-javascript), so it
 # needs Node.js 22.14 or newer and `npm ci` in
 # javascript/ first (typescript and eslint are devDependencies); its
-# broker-backed and gRPC arms run in CI's own jobs (verify-javascript and
+# broker-backed tests and gRPC arms run in CI's own jobs
+# (test-javascript-except-grpc-arm, test-integration-javascript and
 # verify-javascript-macos-docker, in .semaphore/semaphore.yml). Its build is the
 # addon and the TypeScript library. javascript/Makefile expects the Rust library
 # already built, so these targets build it first.
@@ -175,6 +176,15 @@ build-grpc-images-javascript:
 # the library (javascript/src/**/*.ts -> javascript/dist/).
 test-javascript: build-javascript
 	$(MAKE) -C javascript test
+
+# test-javascript without the gRPC multilanguage arm, as c/'s and python/'s
+# `verify-except-grpc-arm` are: the CI job "verify-javascript (Linux amd64) —
+# plaintext". CI runs the arm in "verify-javascript (Linux amd64) — plaintext
+# gRPC arm" (test-integration-javascript) and the rule linter in
+# "lint-javascript (Linux amd64)" (lint-javascript): in one job, the three took
+# longer than its 30 minutes.
+test-javascript-except-grpc-arm: build-javascript
+	$(MAKE) -C javascript test-except-grpc-arm
 
 # The Node.js client's tests that need no broker, the part of `test` (and so
 # of `verify`): the static tests (header conformance, the package layout, the
@@ -206,6 +216,8 @@ lint-javascript:
 	$(MAKE) -C rust build-all-features
 	$(MAKE) -C javascript lint-rules test-lint format-check
 
+# Every Node.js check on one machine: the tests with the gRPC arm, and the rule
+# linter. CI runs them in three jobs (see test-javascript-except-grpc-arm).
 verify-javascript: test-javascript lint-javascript
 
 # macOS verify-javascript: the unit tests, then the gRPC multilanguage arm with
@@ -216,7 +228,8 @@ verify-javascript-macos-docker: test-javascript-macos-docker
 # The producer-only `__grpc_js` arm. Self-skips off Linux, like the Python and C
 # arms (the image copies the host-built Linux libconfluent_kafka.so); use
 # `test-integration-javascript-native` there. Part of `verify-javascript`
-# (through javascript/'s `test`), not of `verify`.
+# (through javascript/'s `test`), not of `verify`. CI runs it in
+# "verify-javascript (Linux amd64) — plaintext gRPC arm".
 test-integration-javascript:
 	$(MAKE) -C rust build-all-features
 	$(MAKE) -C javascript test-integration-grpc
