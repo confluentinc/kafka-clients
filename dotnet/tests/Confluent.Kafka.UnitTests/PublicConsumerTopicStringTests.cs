@@ -47,6 +47,14 @@ public sealed class PublicConsumerTopicStringTests
 
     private const string ClosedMessage = "This consumer has already been closed.";
 
+    private const string NulArgumentMessage =
+        "A string argument must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
+
+    private const string PositionNotAssigned = "You can only check the position for partitions assigned to this consumer.";
+
+    private const string NulNotAssigned = "No current assignment for partition t\0u-0";
+
     private const string BlankSubscribeTopicMessage = "Topic collection to subscribe to cannot contain null or empty topic";
 
     private const string BlankAssignTopicMessage = "Topic partitions to assign to cannot have null or empty topic";
@@ -71,6 +79,16 @@ public sealed class PublicConsumerTopicStringTests
     private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_nulMetadataOffsets =
         new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("ok", 0)] = new OffsetAndMetadata(5, "m\0x") };
 
+    private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_nulTopicThenNullKey =
+        new EntryMap<TopicPartition, OffsetAndMetadata>(
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(s_nulPartition, new OffsetAndMetadata(5)),
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(null!, new OffsetAndMetadata(6)));
+
+    private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_nulMetadataThenNullKey =
+        new EntryMap<TopicPartition, OffsetAndMetadata>(
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(new TopicPartition("ok", 0), new OffsetAndMetadata(5, "m\0x")),
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(null!, new OffsetAndMetadata(6)));
+
     private static readonly IReadOnlyDictionary<TopicPartition, long> s_nulTimestamps =
         new Dictionary<TopicPartition, long> { [s_nulPartition] = 1 };
 
@@ -87,6 +105,12 @@ public sealed class PublicConsumerTopicStringTests
     };
 
     public static IEnumerable<object[]> AllConsumers() => Mocks().Concat(RealConsumers());
+
+    public static IEnumerable<object[]> AsyncConsumers() => new[]
+    {
+        new object[] { "AsyncMockConsumer" },
+        new object[] { "AsyncKafkaConsumer" },
+    };
 
     /// <summary>
     /// One consumer call per method and overload that takes a topic and does not look it up in the assignment, with the
@@ -174,6 +198,55 @@ public sealed class PublicConsumerTopicStringTests
             NulMetadataMessage,
             "offsets",
             "CommitAsync");
+    }
+
+    // The async CommitAsync with an async callback has its own check; TopicCalls and CommitMetadata_WithANul hold the forms
+    // both flavours share. The closed check and, on AsyncKafkaConsumer, the group check come first, as for the others.
+    [Theory]
+    [MemberData(nameof(AsyncConsumers))]
+    public async Task CommitAsyncWithAnAsyncCallback_ANulTopicOrMetadata_ThrowsArgumentException(string kind)
+    {
+        IAsyncConsumer<byte[], byte[]> consumer = (IAsyncConsumer<byte[], byte[]>)await Create(kind, groupId: true);
+        using (TestTimeout.Disposal((IDisposable)consumer))
+        {
+            AssertNul(await AsyncCallbackCommit(consumer, s_nulTopicOffsets), NulTopicMessage, "offsets", "topic");
+            AssertNul(await AsyncCallbackCommit(consumer, s_nulMetadataOffsets), NulMetadataMessage, "offsets", "metadata");
+            await TestTimeout.Run(() => consumer.Close(), s_deadline);
+            Assert.Equal(ClosedMessage, Assert.IsType<IllegalStateException>(await AsyncCallbackCommit(consumer, s_nulTopicOffsets)).Message);
+        }
+
+        if (kind == "AsyncKafkaConsumer")
+        {
+            IAsyncConsumer<byte[], byte[]> noGroup = (IAsyncConsumer<byte[], byte[]>)await Create(kind, groupId: false);
+            using IDisposable disposal = TestTimeout.Disposal((IDisposable)noGroup);
+            AssertGroupIdNotDefined(await AsyncCallbackCommit(noGroup, s_nulTopicOffsets));
+            AssertGroupIdNotDefined(await AsyncCallbackCommit(noGroup, s_nulMetadataOffsets));
+        }
+    }
+
+    // A NUL is answered where a null key is, so a null key after it gets the null-key answer, as for the producer's
+    // SendOffsetsToTransaction.
+    [Theory]
+    [MemberData(nameof(AllConsumers))]
+    public async Task ANullKeyAfterTheNul_GetsTheNullKeyAnswer(string kind)
+    {
+        object consumer = await Create(kind, groupId: true);
+        using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
+        foreach (IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets in new[] { s_nulTopicThenNullKey, s_nulMetadataThenNullKey })
+        {
+            AssertNullKey(await Outcome(consumer, c => c.Commit(offsets), c => c.Commit(offsets)), "Commit");
+            AssertNullKey(await Outcome(consumer, c => c.Commit(offsets, s_timeout), c => c.Commit(offsets, s_timeout)), "Commit+timeout");
+            AssertNullKey(
+                await Outcome(
+                    consumer,
+                    c => c.CommitAsync(offsets, (IOffsetCommitCallback?)null),
+                    c => c.CommitAsync(offsets, (IOffsetCommitCallback?)null)),
+                "CommitAsync");
+            if (consumer is IAsyncConsumer<byte[], byte[]> async)
+            {
+                AssertNullKey(await AsyncCallbackCommit(async, offsets), "CommitAsync+async callback");
+            }
+        }
     }
 
     // Neither Java's seek nor the core reads the metadata: a NUL in it changes nothing.
@@ -268,6 +341,12 @@ public sealed class PublicConsumerTopicStringTests
         foreach ((string name, Action<IConsumer<byte[], byte[]>, TopicPartition> sync, Func<IAsyncConsumer<byte[], byte[]>, TopicPartition, Task> async) in AssignmentCalls())
         {
             Exception? nul = await Outcome(consumer, c => sync(c, s_nulPartition), c => async(c, s_nulPartition));
+            if (name == "Pause")
+            {
+                // As for a null, the refused call pauses none of the partitions before the NUL topic.
+                Assert.Empty(((IConsumerCommon)consumer).Paused());
+            }
+
             if (name == "CurrentLag" && kind.Contains("Mock"))
             {
                 Assert.True(nul is null, $"{name}: {nul}");
@@ -285,7 +364,8 @@ public sealed class PublicConsumerTopicStringTests
         Assert.Equal(ok, ((IConsumerCommon)consumer).Assignment());
     }
 
-    // Java finds the first partition that is not assigned in the collection's order, a null one or one with a NUL topic.
+    // Java finds the first partition that is not assigned in the collection's order, a null one or one with a NUL topic;
+    // a partition with a null topic after the NUL topic is not reached.
     [Theory]
     [MemberData(nameof(AllConsumers))]
     public async Task ACollectionWithANulTopicAndANull_ReportsTheFirstInOrder(string kind)
@@ -294,6 +374,7 @@ public sealed class PublicConsumerTopicStringTests
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
         TopicPartition[] nulFirst = { s_nulPartition, null! };
         TopicPartition[] nullFirst = { null!, s_nulPartition };
+        TopicPartition[] nulThenNullTopic = { s_nulPartition, new TopicPartition(null!, 0) };
         foreach ((string name, Action<IConsumer<byte[], byte[]>, IReadOnlyCollection<TopicPartition>> sync, Func<IAsyncConsumer<byte[], byte[]>, IReadOnlyCollection<TopicPartition>, Task> async) in new (string, Action<IConsumer<byte[], byte[]>, IReadOnlyCollection<TopicPartition>>, Func<IAsyncConsumer<byte[], byte[]>, IReadOnlyCollection<TopicPartition>, Task>)[]
         {
             ("Pause", (c, p) => c.Pause(p), (c, p) => c.Pause(p)),
@@ -308,6 +389,9 @@ public sealed class PublicConsumerTopicStringTests
             Exception? second = await Outcome(consumer, c => sync(c, nullFirst), c => async(c, nullFirst));
             Assert.True(second is IllegalStateException, $"{name}: {second}");
             Assert.Equal("No current assignment for partition null", second!.Message);
+            Exception? third = await Outcome(consumer, c => sync(c, nulThenNullTopic), c => async(c, nulThenNullTopic));
+            Assert.True(third is IllegalStateException, $"{name}: {third}");
+            Assert.Equal(NulNotAssigned, third!.Message);
         }
     }
 
@@ -501,11 +585,12 @@ public sealed class PublicConsumerTopicStringTests
     // A call from a listener goes to the core's handle; the NUL is answered before it, as outside a callback.
     [Theory]
     [MemberData(nameof(Mocks))]
-    public async Task FromARebalanceListener_ANulTopic_ThrowsArgumentException(string kind)
+    public async Task FromARebalanceListener_ANulTopic_IsAnsweredAsOutsideTheCallback(string kind)
     {
         object consumer = await Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
-        CallingListener listener = new CallingListener((IConsumerCommon)consumer);
+        long? lag = -1;
+        CallingListener listener = new CallingListener((IConsumerCommon)consumer, NulCalls(consumer, value => lag = value));
         TopicPartition assigned = new TopicPartition("ok", 0);
         if (consumer is MockConsumer<byte[], byte[]> sync)
         {
@@ -519,16 +604,32 @@ public sealed class PublicConsumerTopicStringTests
             await TestTimeout.Run(() => async.Rebalance(new[] { assigned }), s_deadline);
         }
 
-        Assert.Equal(new[] { "Seek", "Commit", "CommitAsync" }, listener.Errors.Select(e => e.Name));
-        foreach ((string name, Exception? error) in listener.Errors)
+        string[] names =
         {
-            if (name == "Seek")
-            {
-                Assert.Equal("No current assignment for partition t\0u-0", Assert.IsType<IllegalStateException>(error).Message);
-                continue;
-            }
+            "Seek", "Commit", "CommitAsync", "Position", "Pause", "Resume", "CurrentLag", "Committed", "PartitionsFor",
+            "BeginningOffsets", "EndOffsets",
+        };
+        Assert.Equal(names, listener.Errors.Select(e => e.Name));
+        Dictionary<string, Exception?> inListener = listener.Errors.ToDictionary(e => e.Name, e => e.Error);
+        Assert.Equal(NulNotAssigned, Assert.IsType<IllegalStateException>(inListener["Seek"]).Message);
+        AssertNul(inListener["Commit"], NulTopicMessage, "offsets", "Commit");
+        AssertNul(inListener["CommitAsync"], NulTopicMessage, "offsets", "CommitAsync");
+        Assert.Equal(PositionNotAssigned, Assert.IsType<IllegalArgumentException>(inListener["Position"]).Message);
+        Assert.Equal(NulNotAssigned, Assert.IsType<IllegalStateException>(inListener["Pause"]).Message);
+        Assert.Equal(NulNotAssigned, Assert.IsType<IllegalStateException>(inListener["Resume"]).Message);
+        Assert.Null(inListener["CurrentLag"]);
+        Assert.Equal(0, lag);
+        AssertNul(inListener["Committed"], NulTopicMessage, "partitions", "Committed");
+        AssertNul(inListener["PartitionsFor"], NulTopicMessage, "topic", "PartitionsFor");
+        AssertNul(inListener["BeginningOffsets"], NulTopicMessage, "partitions", "BeginningOffsets");
+        AssertNul(inListener["EndOffsets"], NulTopicMessage, "partitions", "EndOffsets");
 
-            AssertNul(error, NulTopicMessage, "offsets", name);
+        // Outside the callback each call gives the same answer.
+        foreach ((string name, Func<Exception?> call) in NulCalls(consumer, _ => { }))
+        {
+            Exception? outside = call();
+            Assert.True(outside?.GetType() == inListener[name]?.GetType(), $"{name}: {inListener[name]} / {outside}");
+            Assert.Equal(inListener[name]?.Message, outside?.Message);
         }
 
         // The seek's metadata, which neither Java nor the core reads, is answered as plain metadata from a listener too.
@@ -559,6 +660,7 @@ public sealed class PublicConsumerTopicStringTests
             AssertNul(Record.Exception(() => sync.UpdateBeginningOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateBeginningOffset");
             AssertNul(Record.Exception(() => sync.UpdateEndOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateEndOffset");
             AssertNul(Record.Exception(() => sync.UpdatePartitions(NulTopic, 1, 0, "h", 1)), NulTopicMessage, "topic", "UpdatePartitions");
+            AssertNul(Record.Exception(() => sync.UpdatePartitions("ok", 1, 0, "h\0x", 1)), NulArgumentMessage, "leaderHost", "UpdatePartitions");
             AssertNul(Record.Exception(() => sync.UpdateDurationOffsets(durations)), NulTopicMessage, "newOffsets", "UpdateDurationOffsets");
             AssertNul(Record.Exception(() => sync.Rebalance(s_nulPartitions)), NulTopicMessage, "newAssignment", "Rebalance");
             AssertNul(Record.Exception(() => sync.LosePartitions(s_nulPartitions)), NulTopicMessage, "partitionsLost", "LosePartitions");
@@ -570,6 +672,7 @@ public sealed class PublicConsumerTopicStringTests
             AssertNul(Record.Exception(() => async.UpdateBeginningOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateBeginningOffset");
             AssertNul(Record.Exception(() => async.UpdateEndOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateEndOffset");
             AssertNul(Record.Exception(() => async.UpdatePartitions(NulTopic, 1, 0, "h", 1)), NulTopicMessage, "topic", "UpdatePartitions");
+            AssertNul(Record.Exception(() => async.UpdatePartitions("ok", 1, 0, "h\0x", 1)), NulArgumentMessage, "leaderHost", "UpdatePartitions");
             AssertNul(Record.Exception(() => async.UpdateDurationOffsets(durations)), NulTopicMessage, "newOffsets", "UpdateDurationOffsets");
             AssertNul(
                 await Record.ExceptionAsync(() => TestTimeout.Run(() => async.Rebalance(s_nulPartitions), s_deadline)),
@@ -652,6 +755,58 @@ public sealed class PublicConsumerTopicStringTests
             () => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), strategy));
     }
 
+    // The calls a listener makes with a NUL topic, each giving what it throws; CurrentLag hands its lag to lag.
+    private static List<(string Name, Func<Exception?> Call)> NulCalls(object consumer, Action<long?> lag)
+    {
+        TopicPartition[] nul = { s_nulPartition };
+        if (consumer is IConsumer<byte[], byte[]> c)
+        {
+            return new List<(string, Func<Exception?>)>
+            {
+                ("Seek", () => Record.Exception(() => c.Seek(s_nulPartition, 1))),
+                ("Commit", () => Record.Exception(() => c.Commit(s_nulTopicOffsets))),
+                ("CommitAsync", () => Record.Exception(() => c.CommitAsync(s_nulTopicOffsets, (IOffsetCommitCallback?)null))),
+                ("Position", () => Record.Exception(() => c.Position(s_nulPartition))),
+                ("Pause", () => Record.Exception(() => c.Pause(nul))),
+                ("Resume", () => Record.Exception(() => c.Resume(nul))),
+                ("CurrentLag", () => Record.Exception(() => lag(c.CurrentLag(s_nulPartition)))),
+                ("Committed", () => Record.Exception(() => c.Committed(nul))),
+                ("PartitionsFor", () => Record.Exception(() => c.PartitionsFor(NulTopic))),
+                ("BeginningOffsets", () => Record.Exception(() => c.BeginningOffsets(nul))),
+                ("EndOffsets", () => Record.Exception(() => c.EndOffsets(nul))),
+            };
+        }
+
+        IAsyncConsumer<byte[], byte[]> a = (IAsyncConsumer<byte[], byte[]>)consumer;
+        Func<Exception?> Run(Func<Task> call) => () => Record.ExceptionAsync(call).GetAwaiter().GetResult();
+        return new List<(string, Func<Exception?>)>
+        {
+            ("Seek", Run(() => a.Seek(s_nulPartition, 1))),
+            ("Commit", Run(() => a.Commit(s_nulTopicOffsets))),
+            ("CommitAsync", Run(() => a.CommitAsync(s_nulTopicOffsets, (IOffsetCommitCallback?)null))),
+            ("Position", Run(() => a.Position(s_nulPartition))),
+            ("Pause", Run(() => a.Pause(nul))),
+            ("Resume", Run(() => a.Resume(nul))),
+            ("CurrentLag", Run(async () => lag(await a.CurrentLag(s_nulPartition)))),
+            ("Committed", Run(() => a.Committed(nul))),
+            ("PartitionsFor", Run(() => a.PartitionsFor(NulTopic))),
+            ("BeginningOffsets", Run(() => a.BeginningOffsets(nul))),
+            ("EndOffsets", Run(() => a.EndOffsets(nul))),
+        };
+    }
+
+    // CommitAsync(offsets, IAsyncOffsetCommitCallback), thrown at the call or faulting the returned Task.
+    private static Task<Exception?> AsyncCallbackCommit(
+        IAsyncConsumer<byte[], byte[]> consumer, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
+        Record.ExceptionAsync(() => TestTimeout.Run(() => consumer.CommitAsync(offsets, new NoAsyncCommitCallback()), s_deadline));
+
+    private static void AssertNullKey(Exception? error, string name)
+    {
+        Assert.True(error is not null && error.GetType() == typeof(ArgumentNullException), $"{name}: {error}");
+        Assert.Equal("offsets", ((ArgumentNullException)error!).ParamName);
+        Assert.Equal(new ArgumentNullException("offsets", "offsets must not contain null").Message, error.Message);
+    }
+
     private static void AssertGroupIdNotDefined(Exception? error) =>
         Assert.Equal(GroupIdNotDefined, Assert.IsType<InvalidGroupIdException>(error).Message);
 
@@ -722,7 +877,13 @@ public sealed class PublicConsumerTopicStringTests
     {
         private readonly IConsumerCommon _consumer;
 
-        internal CallingListener(IConsumerCommon consumer) => _consumer = consumer;
+        private readonly IReadOnlyList<(string Name, Func<Exception?> Call)> _calls;
+
+        internal CallingListener(IConsumerCommon consumer, IReadOnlyList<(string Name, Func<Exception?> Call)> calls)
+        {
+            _consumer = consumer;
+            _calls = calls;
+        }
 
         internal List<(string Name, Exception? Error)> Errors { get; } = new List<(string Name, Exception? Error)>();
 
@@ -736,26 +897,30 @@ public sealed class PublicConsumerTopicStringTests
 
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions)
         {
+            foreach ((string name, Func<Exception?> call) in _calls)
+            {
+                Errors.Add((name, call()));
+            }
+
             if (_consumer is IConsumer<byte[], byte[]> sync)
             {
-                Errors.Add(("Seek", Record.Exception(() => sync.Seek(s_nulPartition, 1))));
-                Errors.Add(("Commit", Record.Exception(() => sync.Commit(s_nulTopicOffsets))));
-                Errors.Add(("CommitAsync", Record.Exception(() => sync.CommitAsync(s_nulTopicOffsets, (IOffsetCommitCallback?)null))));
                 PlainMetadataSeek = Record.Exception(() => sync.Seek(partitions.First(), new OffsetAndMetadata(1, "m")));
                 NulMetadataSeek = Record.Exception(() => sync.Seek(partitions.First(), new OffsetAndMetadata(1, "m\0x")));
                 return;
             }
 
             IAsyncConsumer<byte[], byte[]> async = (IAsyncConsumer<byte[], byte[]>)_consumer;
-            Errors.Add(("Seek", Record.ExceptionAsync(() => async.Seek(s_nulPartition, 1)).GetAwaiter().GetResult()));
-            Errors.Add(("Commit", Record.ExceptionAsync(() => async.Commit(s_nulTopicOffsets)).GetAwaiter().GetResult()));
-            Errors.Add((
-                "CommitAsync",
-                Record.ExceptionAsync(() => async.CommitAsync(s_nulTopicOffsets, (IOffsetCommitCallback?)null)).GetAwaiter().GetResult()));
             PlainMetadataSeek = Record.ExceptionAsync(
                 () => async.Seek(partitions.First(), new OffsetAndMetadata(1, "m"))).GetAwaiter().GetResult();
             NulMetadataSeek = Record.ExceptionAsync(
                 () => async.Seek(partitions.First(), new OffsetAndMetadata(1, "m\0x"))).GetAwaiter().GetResult();
         }
+    }
+
+    /// <summary>An async commit callback that does nothing.</summary>
+    private sealed class NoAsyncCommitCallback : IAsyncOffsetCommitCallback
+    {
+        public Task OnComplete(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets, Exception? exception) =>
+            Task.CompletedTask;
     }
 }
