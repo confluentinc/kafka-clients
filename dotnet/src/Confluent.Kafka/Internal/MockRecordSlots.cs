@@ -21,7 +21,9 @@ namespace Confluent.Kafka.Internal;
 /// The typed keys and values of the records a mock consumer holds, by the ids that stand for them in the C record's
 /// <c>void *</c> key and value slots. The C mock stores a slot value and never reads, frees or compares it, so a
 /// key or value crosses the C ABI as an id, not as bytes: <c>AddRecord</c> adds the entries, <c>Poll</c> takes them
-/// when it delivers the record, and <c>Close</c> clears what the core dropped without delivering.
+/// when it delivers the record, <c>Rebalance</c> and <c>LosePartitions</c> discard those of the records the core
+/// discards, as Java's mock drops its record objects with <c>records.clear()</c> and <c>records.remove(tp)</c>, and
+/// the native teardown clears the rest.
 /// </summary>
 /// <remarks>
 /// Java's <c>MockConsumer</c> keeps the record objects themselves; the C ABI carries no managed object, so this
@@ -29,12 +31,22 @@ namespace Confluent.Kafka.Internal;
 /// slot of a null key or value, which stays <c>NULL</c>. Two dictionaries keep value-type keys and values unboxed.
 /// One re-entrant lock guards both and the counter (Java's mock is <c>synchronized</c>, and a poll task may add a
 /// record inside <c>Poll</c>); it is never held across an await or a native wait.
+/// <para>
+/// A record is "in the core" from when the core's add has returned: only then can a later discarding call have
+/// discarded it. Its entries exist before the add, so a poll on another thread that delivers it finds them, and a
+/// discarding call between the two steps never removes them. A discarding call snapshots the records in the core
+/// before the native call and discards the snapshot once the core has discarded their records, so a record a
+/// listener adds during the call keeps its entries, as Java keeps a record added after its <c>records.clear()</c>.
+/// </para>
 /// </remarks>
 internal sealed class MockRecordSlots<TKey, TValue>
 {
     private readonly object _lock = new object();
     private readonly Dictionary<nint, TKey> _keys = new Dictionary<nint, TKey>();
     private readonly Dictionary<nint, TValue> _values = new Dictionary<nint, TValue>();
+
+    // The records in the core, by their first non-zero slot: the key slot, else the value slot.
+    private readonly Dictionary<nint, InCore> _inCore = new Dictionary<nint, InCore>();
     private nint _next;
 
     /// <summary>The number of keys held, for tests.</summary>
@@ -87,8 +99,51 @@ internal sealed class MockRecordSlots<TKey, TValue>
     {
         lock (_lock)
         {
-            _keys.Remove(keySlot);
-            _values.Remove(valueSlot);
+            RemoveLocked(keySlot, valueSlot);
+        }
+    }
+
+    /// <summary>
+    /// Marks a record the core has taken as in the core. A record a poll has already delivered, or one with a null
+    /// key and value, has no entry left to mark.
+    /// </summary>
+    internal void MarkInCore(nint keySlot, nint valueSlot, string topic, int partition)
+    {
+        lock (_lock)
+        {
+            if ((keySlot != 0 && _keys.ContainsKey(keySlot)) || (valueSlot != 0 && _values.ContainsKey(valueSlot)))
+            {
+                _inCore[RecordId(keySlot, valueSlot)] = new InCore(keySlot, valueSlot, topic, partition);
+            }
+        }
+    }
+
+    /// <summary>The records in the core now, for a discarding call to discard once the core has discarded them.</summary>
+    internal InCore[] SnapshotInCore()
+    {
+        lock (_lock)
+        {
+            InCore[] snapshot = new InCore[_inCore.Count];
+            _inCore.Values.CopyTo(snapshot, 0);
+            return snapshot;
+        }
+    }
+
+    /// <summary>
+    /// Removes the entries of the snapshot's records, only those of <paramref name="partitions"/> when it is given.
+    /// A record a poll has delivered since the snapshot has none left; ids are never reused, so nothing else goes.
+    /// </summary>
+    internal void Discard(InCore[] snapshot, ICollection<(string Topic, int Partition)>? partitions = null)
+    {
+        lock (_lock)
+        {
+            foreach (InCore record in snapshot)
+            {
+                if (partitions is null || partitions.Contains((record.Topic, record.Partition)))
+                {
+                    RemoveLocked(record.KeySlot, record.ValueSlot);
+                }
+            }
         }
     }
 
@@ -123,8 +178,7 @@ internal sealed class MockRecordSlots<TKey, TValue>
             }
 
             // Removed together, once both are found, so a failed take leaves the record's entries in place.
-            _keys.Remove(keySlot);
-            _values.Remove(valueSlot);
+            RemoveLocked(keySlot, valueSlot);
         }
     }
 
@@ -135,11 +189,41 @@ internal sealed class MockRecordSlots<TKey, TValue>
         {
             _keys.Clear();
             _values.Clear();
+            _inCore.Clear();
         }
+    }
+
+    private static nint RecordId(nint keySlot, nint valueSlot) => keySlot != 0 ? keySlot : valueSlot;
+
+    private void RemoveLocked(nint keySlot, nint valueSlot)
+    {
+        _keys.Remove(keySlot);
+        _values.Remove(valueSlot);
+        _inCore.Remove(RecordId(keySlot, valueSlot));
     }
 
     private static IllegalStateException Missing(string slot, nint id, string topic, int partition) =>
         new IllegalStateException(
             "The mock consumer holds no " + slot + " for id " + ((long)id).ToString(CultureInfo.InvariantCulture)
             + " of a record polled from " + topic + "-" + partition.ToString(CultureInfo.InvariantCulture));
+
+    /// <summary>A record in the core: its slots and its partition.</summary>
+    internal readonly struct InCore
+    {
+        internal InCore(nint keySlot, nint valueSlot, string topic, int partition)
+        {
+            KeySlot = keySlot;
+            ValueSlot = valueSlot;
+            Topic = topic;
+            Partition = partition;
+        }
+
+        internal nint KeySlot { get; }
+
+        internal nint ValueSlot { get; }
+
+        internal string Topic { get; }
+
+        internal int Partition { get; }
+    }
 }

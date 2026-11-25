@@ -226,7 +226,7 @@ One commit per step, each passing the gates. The stacked branch's fixups are fol
 | # | Source | Topic | Decision | Status |
 |---|---|---|---|---|
 | 641 | Design, public surface | Mock constructors | `MockConsumer` and `AsyncMockConsumer` have Java's one constructor, `(string offsetResetStrategy)`, and take no deserializer. Supersedes the deserializer-taking constructors of ledger 48 and of the "Consumer deserializers" paragraph. Breaking; the client is in preview | Agreed |
-| 642 | Design, public surface; ids | `AddRecord` | `AddRecord(ConsumerRecord<TKey, TValue> record)`, Java's form; the bytes form goes. The key and the value cross the C mock as ids in the record's `void *` slots (`MockRecordSlots`), resolved by `Poll` through two typed dictionaries; a null key or value stays `NULL` and takes no entry; an entry goes at delivery, the rest once a `Close`, `Close(CloseOptions)`, `Dispose` or `DisposeAsync` closes the consumer (one that throws, is canceled or is refused and leaves it open keeps them, so the next `Poll` still returns those records); a record the core refuses leaves no entry. *(Deviation: the polled record is a new instance copied out of the native batch, with the same key and value objects; Java returns the instance added.)* | Agreed |
+| 642 | Design, public surface; ids | `AddRecord` | `AddRecord(ConsumerRecord<TKey, TValue> record)`, Java's form; the bytes form goes. The key and the value cross the C mock as ids in the record's `void *` slots (`MockRecordSlots`), resolved by `Poll` through two typed dictionaries; a null key or value stays `NULL` and takes no entry; an entry goes at delivery, at a `Rebalance` (every record it clears) or a `LosePartitions` (the lost partitions' records) once the core has discarded the record (revised 2026-11-25, see "Revision"), the rest once a `Close`, `Close(CloseOptions)`, `Dispose` or `DisposeAsync` closes the consumer (one that throws, is canceled or is refused and leaves it open keeps them, so the next `Poll` still returns those records); a record the core refuses leaves no entry. *(Deviation: the polled record is a new instance copied out of the native batch, with the same key and value objects; Java returns the instance added.)* | Agreed |
 | 643 | Design, ids | Fields copied at `AddRecord` | timestamp, timestamp type, sizes, headers, leader epoch and delivery count are copied into the C record at `AddRecord`. *(Deviation: a change made to the record's `Headers` after `AddRecord` does not reach the polled record; Java shares the object.)* | Agreed |
 | 644 | Design, decode tests | Decode tests | the binding's decode tests run the real consumers over the C mock through the internal factories `KafkaConsumer.CreateOverMock` / `AsyncKafkaConsumer.CreateOverMock` (the preferred form; no fallback, "Revision" stays empty), shared through one fixture per test project; the public mocks no longer decode | Agreed |
 | 645 | Design, poll | Mock batch pressure | a mock poll keeps no native batch: its records are copied out and the batch destroyed by the poll, so it reports no memory pressure, and its slots, being ids, are never read as bytes | Agreed |
@@ -326,7 +326,32 @@ cite 626–634 for the futures):
 
 ## Revision
 
-(none: the preferred factory form was built in S2.)
+The decode-test helper needed no revision: the preferred factory form was built in S2.
+
+**2026-11-25, the slots of discarded records** (Copilot review comment on PR #364: the typed `MockRecordSlots`
+entries of the records the C mock discards in `rebalance` (`records.clear()`) and `lose_partitions`
+(`records.remove(tp)`) stayed in the table until the native teardown, where Java frees them at once). Now:
+
+- `MockRecordSlots` marks a record "in the core" once the native `add_record` has returned success, with its
+  topic and partition; a poll's `Take` and every removal unmark it.
+- `Rebalance` and `LosePartitions` (both mocks, sync and `_cb`) snapshot the marked records before the native
+  call, outside any lock held across it, and remove the snapshot's entries once the core has reached its discard:
+  all of them for `Rebalance`, those of the lost partitions for `LosePartitions`. A record a poll took since the
+  snapshot is skipped; one added after the snapshot is not in it and stays.
+- The core reached its discard when the call succeeded, when its error carries a listener's exception (the
+  listeners run after the clear), or when its error is the core's `IllegalArgumentException` (the
+  `assignFromSubscribed` that follows the clear, as on a manually assigned consumer). Any other error keeps the
+  entries for the teardown: the core's "Cannot lose partitions that are not currently assigned" refusal, the
+  `acquire` refusal, a panic caught at the boundary, an unreadable error. Keeping an entry too long is harmless;
+  removing one whose record the core still holds would fail the next `Poll`.
+- On the async mock the removal runs in the completion's settle callback, where the native outcome is known, so
+  a cancelled `Rebalance` or `LosePartitions` still removes them.
+- Ledger row 642 is reworded to say so; its decision is otherwise unchanged. Neither `dotnet/CLAUDE.md` nor
+  `ffi-marshalling.md` states when the entries go, so no rule draft is needed.
+- `PublicMockConsumerSlotsAtRebalanceTests` (both mocks) and three `MockRecordSlotsTests` pin it. A record a
+  listener adds during `Rebalance` cannot be tested through the public API: the C mock refuses the listener's
+  `AddRecord` with `ConcurrentModificationException`, where Java's synchronized mock accepts it (see "Tests not
+  written"); the table-level test covers an entry marked after the snapshot.
 
 ## Outcome (S1–S4)
 
@@ -346,9 +371,10 @@ stacked branch's fixups for Critic 137's issues 1–4 are folded into the steps 
   M9), not `java-name-baseline.txt` lines. They went in S3, because an allowlist line that matches nothing fails
   the build (CKRDA0014). The baseline is unchanged; `analyzers/java-api.txt` is generated from Java and is
   unchanged.
-- **When the slots go.** The table is emptied when the native consumer is torn down (`NativeConsumer.OnTornDown`,
-  set by both mocks), so only by a close or a dispose that closes the consumer, and after every use of it has
-  ended. A close or a dispose that throws, is canceled or is refused leaves the consumer open and the slots in
+- **When the slots go.** A poll takes the entries of the records it delivers; `Rebalance` and `LosePartitions`
+  remove those of the records the core discards (revised 2026-11-25, see "Revision"). The table is emptied when
+  the native consumer is torn down (`NativeConsumer.OnTornDown`, set by both mocks), so by a close or a dispose
+  that closes the consumer, and after every use of it has ended. A close or a dispose that throws, is canceled or is refused leaves the consumer open and the slots in
   place, so its next `Poll` returns the records, as Java's `MockConsumer`, whose close never touches its records.
   A dispose inside an async consumer's callback schedules the teardown, which empties the table when it runs.
 - **Poll and a concurrent close.** The mock poll resolves its batch's ids while it still holds its use of the
@@ -372,7 +398,8 @@ stacked branch's fixups for Critic 137's issues 1–4 are folded into the steps 
   inside `Rebalance`, is refused by the C mock with `ConcurrentModificationException` ("KafkaConsumer is not
   safe for multi-threaded access."), as the bytes `AddRecord` was before.
 - **Retention.** A record the mock never delivers (below the position, a partition that left the assignment)
-  keeps its entries until the consumer is closed; the XML docs of `AddRecord` say so.
+  keeps its entries until a `Rebalance`, or a `LosePartitions` of its partition, discards it, or the consumer is
+  closed; the XML docs of `AddRecord` say so.
 - **Tests removed or narrowed** (S3; their subject was a deserializer given to a mock): the mock rows of
   `PublicSyncConsumerPreconditionTests.Constructor_NullDeserializer_ThrowsJavasConfigException`, of the
   `SerdeGuardTests` consumer theories and `AMockConsumer_TakesADeserializerWithAClose_SinceItDisposesNothing`,

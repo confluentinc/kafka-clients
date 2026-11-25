@@ -890,27 +890,75 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         });
     }
 
-    internal void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment)
+    internal void Rebalance<TKey, TValue>(
+        IReadOnlyCollection<TopicPartition> newAssignment,
+        MockRecordSlots<TKey, TValue> slots)
     {
         (string Topic, int Partition)[] snapshot = SnapshotPartitions(newAssignment, paramName: nameof(newAssignment));
         CallMock((mock, arguments) =>
         {
+            IntPtr list = arguments.TopicPartitionList(snapshot);
+            MockRecordSlots<TKey, TValue>.InCore[] inCore = slots.SnapshotInCore();
             IntPtr outErr = IntPtr.Zero;
-            NativeMethods.MockConsumerRebalance(mock, arguments.TopicPartitionList(snapshot), ref outErr);
+            NativeMethods.MockConsumerRebalance(mock, list, ref outErr);
+            DiscardIfTheCoreDid(outErr, slots, inCore, partitions: null);
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
     }
 
-    internal void LosePartitions(IReadOnlyCollection<TopicPartition> partitionsLost)
+    internal void LosePartitions<TKey, TValue>(
+        IReadOnlyCollection<TopicPartition> partitionsLost,
+        MockRecordSlots<TKey, TValue> slots)
     {
         (string Topic, int Partition)[] snapshot = TrySnapshotPartitions(partitionsLost, nameof(partitionsLost))
             ?? throw NotAssignedToLose(partitionsLost);
         CallMock((mock, arguments) =>
         {
+            IntPtr list = arguments.TopicPartitionList(snapshot);
+            MockRecordSlots<TKey, TValue>.InCore[] inCore = slots.SnapshotInCore();
             IntPtr outErr = IntPtr.Zero;
-            NativeMethods.MockConsumerLosePartitions(mock, arguments.TopicPartitionList(snapshot), ref outErr);
+            NativeMethods.MockConsumerLosePartitions(mock, list, ref outErr);
+            DiscardIfTheCoreDid(outErr, slots, inCore, new HashSet<(string Topic, int Partition)>(snapshot));
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
+    }
+
+    // Java's MockConsumer drops the record objects of the records rebalance clears and losePartitions removes; the
+    // binding drops their entries once the C mock has discarded the records, which it has when the call succeeded or
+    // failed after the discard: a listener's exception (carried by the core's error) or the IllegalArgumentException
+    // of assignFromSubscribed. Every other failure comes before it: the core's refusal of concurrent use, the
+    // not-assigned IllegalStateException of lose_partitions, or a caught panic, whose point is unknown. Those keep
+    // the entries, which the native teardown clears. Bookkeeping only: a failure to read the error keeps them too.
+    internal static void DiscardIfTheCoreDid<TKey, TValue>(
+        IntPtr error,
+        MockRecordSlots<TKey, TValue> slots,
+        MockRecordSlots<TKey, TValue>.InCore[] inCore,
+        ICollection<(string Topic, int Partition)>? partitions)
+    {
+        if (inCore.Length == 0 || !CoreDiscarded(error))
+        {
+            return;
+        }
+
+        slots.Discard(inCore, partitions);
+    }
+
+    private static bool CoreDiscarded(IntPtr error)
+    {
+        if (error == IntPtr.Zero)
+        {
+            return true;
+        }
+
+        try
+        {
+            return ManagedExceptionCarrier.Carried(error) is not null
+                || NativeMethods.Code(error) == ErrorClasses.Ids[typeof(IllegalArgumentException)];
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     // A null partition is never assigned and cannot cross the C ABI, so the binding gives Java's MockConsumer answer
@@ -2118,7 +2166,8 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
     // Java's MockConsumer.addRecord for the typed mocks: every field of the record crosses into a C record, its key
     // and value as ids into `slots` (see MockRecordSlots). The entries are added before the core takes the record,
-    // so a poll on another thread that delivers it finds them, and removed when the core refuses it.
+    // so a poll on another thread that delivers it finds them, removed when the core refuses it, and marked in the
+    // core once it has taken it, so a later Rebalance or LosePartitions can discard them.
     internal void AddRecord<TKey, TValue>(ConsumerRecord<TKey, TValue> record, MockRecordSlots<TKey, TValue> slots)
     {
         if (record is null)
@@ -2139,6 +2188,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                     NativeMethods.MockConsumerAddRecord(mock, nativeRecord, ref outErr);
                     KafkaException.ThrowIfFfiFailed(ref outErr);
                     added = true;
+                    slots.MarkInCore(keySlot, valueSlot, record.Topic(), record.Partition());
                 }
                 finally
                 {

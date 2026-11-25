@@ -296,4 +296,65 @@ public sealed class MockRecordSlotsTests
         Assert.Equal((nint)3, nextKey);
         Assert.Equal((nint)0, nullValue);
     }
+
+    [Fact]
+    public void Discard_RemovesTheSnapshotsEntries_AndKeepsTheOnesMarkedAfterIt()
+    {
+        MockRecordSlots<string, string> slots = new MockRecordSlots<string, string>();
+        slots.Add("k0", "v0", out nint key0, out nint value0);
+        slots.MarkInCore(key0, value0, Topic, 0);
+        slots.Add(null, "v1", out nint key1, out nint value1);
+        slots.MarkInCore(key1, value1, Topic, 1);
+        // Added but never marked: the core did not take it, so no discard removes it.
+        slots.Add("k2", "v2", out _, out _);
+        MockRecordSlots<string, string>.InCore[] snapshot = slots.SnapshotInCore();
+        Assert.Equal(2, snapshot.Length);
+        // Marked after the snapshot, as a record added while the call runs would be.
+        slots.Add("k3", "v3", out nint key3, out nint value3);
+        slots.MarkInCore(key3, value3, Topic, 0);
+
+        slots.Discard(snapshot);
+
+        Assert.Equal(2, slots.KeyCount);
+        Assert.Equal(2, slots.ValueCount);
+        slots.Take(key3, value3, Topic, 0, out string? key, out string? value);
+        Assert.Equal("k3", key);
+        Assert.Equal("v3", value);
+        Assert.Empty(slots.SnapshotInCore());
+    }
+
+    [Fact]
+    public void Discard_WithPartitions_RemovesOnlyThoseEntries_AndToleratesTakenOnes()
+    {
+        MockRecordSlots<string, string> slots = new MockRecordSlots<string, string>();
+        slots.Add("k0", "v0", out nint key0, out nint value0);
+        slots.MarkInCore(key0, value0, Topic, 0);
+        slots.Add("k1", "v1", out nint key1, out nint value1);
+        slots.MarkInCore(key1, value1, Topic, 1);
+        slots.Add("k2", "v2", out nint key2, out nint value2);
+        slots.MarkInCore(key2, value2, Topic, 0);
+        MockRecordSlots<string, string>.InCore[] snapshot = slots.SnapshotInCore();
+        // A poll on another thread took this one after the snapshot.
+        slots.Take(key2, value2, Topic, 0, out _, out _);
+
+        slots.Discard(snapshot, new HashSet<(string Topic, int Partition)> { (Topic, 0) });
+
+        Assert.Equal(1, slots.KeyCount);
+        Assert.Equal(1, slots.ValueCount);
+        slots.Take(key1, value1, Topic, 1, out string? key, out _);
+        Assert.Equal("k1", key);
+    }
+
+    [Fact]
+    public void MarkInCore_AfterTheEntriesAreGone_MarksNothing()
+    {
+        MockRecordSlots<string, string> slots = new MockRecordSlots<string, string>();
+        slots.Add("k", "v", out nint keySlot, out nint valueSlot);
+        slots.Clear();
+
+        slots.MarkInCore(keySlot, valueSlot, Topic, 0);
+        slots.MarkInCore(0, 0, Topic, 0);
+
+        Assert.Empty(slots.SnapshotInCore());
+    }
 }

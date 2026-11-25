@@ -179,17 +179,21 @@ internal sealed partial class NativeConsumer
             pattern, () => ListenerRegistration.Root(listener, _reporter), cancellationToken);
     }
 
-    internal Task RebalanceWithCallback(
+    internal Task RebalanceWithCallback<TKey, TValue>(
         IReadOnlyCollection<TopicPartition> newAssignment,
+        MockRecordSlots<TKey, TValue> slots,
         CancellationToken cancellationToken = default) =>
         RunMockPartitions(
             SnapshotPartitions(newAssignment, paramName: nameof(newAssignment)),
             NativeMethods.MockConsumerRebalanceCb,
             AsyncOperation.Rebalance,
+            slots,
+            lost: null,
             cancellationToken);
 
-    internal Task LosePartitionsWithCallback(
+    internal Task LosePartitionsWithCallback<TKey, TValue>(
         IReadOnlyCollection<TopicPartition> partitionsLost,
+        MockRecordSlots<TKey, TValue> slots,
         CancellationToken cancellationToken = default)
     {
         (string Topic, int Partition)[]? snapshot = TrySnapshotPartitions(partitionsLost, nameof(partitionsLost));
@@ -199,6 +203,8 @@ internal sealed partial class NativeConsumer
                 snapshot,
                 NativeMethods.MockConsumerLosePartitionsCb,
                 AsyncOperation.LosePartitions,
+                slots,
+                new HashSet<(string Topic, int Partition)>(snapshot),
                 cancellationToken);
     }
 
@@ -274,34 +280,43 @@ internal sealed partial class NativeConsumer
         return Finish(completion, AsyncOperation.Subscribe, cancellationToken);
     }
 
-    private Task RunMockPartitions(
+    // The records the core discards lose their entries in the completion's settle, where the native outcome is
+    // known, so a cancelled call, which ends in OperationCanceledException whatever the core did, still drops them.
+    private Task RunMockPartitions<TKey, TValue>(
         (string Topic, int Partition)[] snapshot,
         NativeMockPartitionsCb call,
         AsyncOperation operation,
-        CancellationToken cancellationToken) =>
-        Finish(
-            Submit(cancellationToken, s_void, (arguments, opaque) =>
-            {
-                bool added = false;
-                try
+        MockRecordSlots<TKey, TValue> slots,
+        HashSet<(string Topic, int Partition)>? lost,
+        CancellationToken cancellationToken)
+    {
+        MockRecordSlots<TKey, TValue>.InCore[] inCore = Array.Empty<MockRecordSlots<TKey, TValue>.InCore>();
+        return Finish(
+            Submit(
+                cancellationToken,
+                s_void,
+                (arguments, opaque) =>
                 {
-                    call(
-                        _handle.DangerousAddRefClass(ref added),
-                        arguments.TopicPartitionList(snapshot),
-                        ConsumerCompletion.Void,
-                        opaque);
-                }
-                finally
-                {
-                    if (added)
+                    IntPtr list = arguments.TopicPartitionList(snapshot);
+                    inCore = slots.SnapshotInCore();
+                    bool added = false;
+                    try
                     {
-                        _handle.DangerousRelease();
+                        call(_handle.DangerousAddRefClass(ref added), list, ConsumerCompletion.Void, opaque);
                     }
-                }
-            },
-            refusesOtherThreads: true),
+                    finally
+                    {
+                        if (added)
+                        {
+                            _handle.DangerousRelease();
+                        }
+                    }
+                },
+                error => DiscardIfTheCoreDid(error, slots, inCore, lost),
+                refusesOtherThreads: true),
             operation,
             cancellationToken);
+    }
 
     internal Task UnsubscribeWithCallback(CancellationToken cancellationToken = default)
     {

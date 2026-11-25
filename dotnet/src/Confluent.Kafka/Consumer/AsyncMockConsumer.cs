@@ -353,8 +353,9 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// Queues <paramref name="record"/> for the next <see cref="Poll"/> (Java <c>MockConsumer.addRecord</c>). The
     /// record's partition must be assigned; <see cref="Poll"/> returns its key and value as the same objects.
     /// A record that is never returned (below the position, or for a partition no longer assigned) is held until
-    /// the consumer is closed. A cancelled <see cref="Poll"/> drops no record: it returns the records it delivered,
-    /// or leaves them for the next <see cref="Poll"/>.
+    /// <c>Rebalance</c>, or <c>LosePartitions</c> of its partition, discards it, or the consumer is closed. A
+    /// cancelled <see cref="Poll"/> drops no record: it returns the records it delivered, or leaves them for the
+    /// next <see cref="Poll"/>.
     /// </summary>
     /// <param name="record">The record to queue.</param>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null, or its headers hold a null
@@ -440,7 +441,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     public Task Rebalance(
         IReadOnlyCollection<TopicPartition> newAssignment,
         CancellationToken cancellationToken = default) =>
-        _native.RebalanceWithCallback(newAssignment, cancellationToken);
+        _native.RebalanceWithCallback(newAssignment, _slots, cancellationToken);
 
     /// <summary>
     /// Simulates losing <paramref name="partitionsLost"/> without a clean revocation (Java
@@ -467,7 +468,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     public Task LosePartitions(
         IReadOnlyCollection<TopicPartition> partitionsLost,
         CancellationToken cancellationToken = default) =>
-        _native.LosePartitionsWithCallback(partitionsLost, cancellationToken);
+        _native.LosePartitionsWithCallback(partitionsLost, _slots, cancellationToken);
 
     /// <inheritdoc/>
     public void Dispose()
