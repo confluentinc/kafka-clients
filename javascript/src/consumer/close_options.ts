@@ -90,8 +90,11 @@ export class CloseOptions {
    *
    * @param options - The maximum time to wait for the consumer to close.
    * @returns A new `CloseOptions` instance with the specified timeout.
-   * @throws `RangeError` when the timeout is not a whole count of milliseconds
-   *   a number holds
+   * @throws `RangeError` when the timeout is `NaN`, `-Infinity`, beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds, or a `Temporal.Duration` with
+   *   years, months or weeks
+   * @throws `TypeError` when the timeout is neither a number nor a
+   *   `Temporal.Duration`, or is `undefined`
    */
   static timeout(options: {
     /** The maximum time to wait for the consumer to close, or null for the default. */
@@ -144,8 +147,11 @@ export class CloseOptions {
    * @param options - The maximum time to wait for the consumer to close. If
    *   null, the default timeout will be used.
    * @returns This `CloseOptions` instance.
-   * @throws `RangeError` when the timeout is not a whole count of milliseconds
-   *   a number holds
+   * @throws `RangeError` when the timeout is `NaN`, `-Infinity`, beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds, or a `Temporal.Duration` with
+   *   years, months or weeks
+   * @throws `TypeError` when the timeout is neither a number nor a
+   *   `Temporal.Duration`, or is `undefined`
    */
   withTimeout(options: {
     /** The maximum time to wait for the consumer to close, or null for the default. */
