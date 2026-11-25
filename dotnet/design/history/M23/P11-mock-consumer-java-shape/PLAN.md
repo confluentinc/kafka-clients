@@ -227,7 +227,7 @@ One commit per step, each passing the gates. The stacked branch's fixups are fol
 |---|---|---|---|---|
 | 641 | Design, public surface | Mock constructors | `MockConsumer` and `AsyncMockConsumer` have Java's one constructor, `(string offsetResetStrategy)`, and take no deserializer. Supersedes the deserializer-taking constructors of ledger 48 and of the "Consumer deserializers" paragraph. Breaking; the client is in preview | Agreed |
 | 642 | Design, public surface; ids | `AddRecord` | `AddRecord(ConsumerRecord<TKey, TValue> record)`, Java's form; the bytes form goes. The key and the value cross the C mock as ids in the record's `void *` slots (`MockRecordSlots`), resolved by `Poll` through two typed dictionaries; a null key or value stays `NULL` and takes no entry; an entry goes at delivery, at a `Rebalance` (every record it clears) or a `LosePartitions` (the lost partitions' records) once the core has discarded the record (revised 2026-11-25, see "Revision"), the rest once a `Close`, `Close(CloseOptions)`, `Dispose` or `DisposeAsync` closes the consumer (one that throws, is canceled or is refused and leaves it open keeps them, so the next `Poll` still returns those records); a record the core refuses leaves no entry. *(Deviation: the polled record is a new instance copied out of the native batch, with the same key and value objects; Java returns the instance added.)* | Agreed |
-| 643 | Design, ids | Fields copied at `AddRecord` | timestamp, timestamp type, sizes, headers, leader epoch and delivery count are copied into the C record at `AddRecord`. *(Deviation: a change made to the record's `Headers` after `AddRecord` does not reach the polled record; Java shares the object.)* | Agreed |
+| 643 | Design, ids | Fields copied at `AddRecord` | timestamp, timestamp type, sizes, headers, leader epoch and delivery count are copied into the C record at `AddRecord`. *(Deviation: a change made to the record's `Headers` after `AddRecord` does not reach the polled record; Java shares the object. A negative leader epoch or delivery count polls back as null, since the C setters store a negative value as absent; Java's mock returns the instance added, keeping `Optional.of(-1)`. `NextOffsets` does not differ.)* | Agreed |
 | 644 | Design, decode tests | Decode tests | the binding's decode tests run the real consumers over the C mock through the internal factories `KafkaConsumer.CreateOverMock` / `AsyncKafkaConsumer.CreateOverMock` (the preferred form; no fallback, "Revision" stays empty), shared through one fixture per test project; the public mocks no longer decode | Agreed |
 | 645 | Design, poll | Mock batch pressure | a mock poll keeps no native batch: its records are copied out and the batch destroyed by the poll, so it reports no memory pressure, and its slots, being ids, are never read as bytes | Agreed |
 | 646 | Rule drafts | Rule text M1–M4 | drafts below, checked against what was built (S4); on master (S5, 2026-11-24) M1 and M2 applied verbatim to `dotnet/CLAUDE.md` and M4 to `dotnet/.claude/rules/ffi-marshalling.md` (as a row of the type table); M3 applied with master's wording on the owner's go-ahead (2026-11-24, see below) | Agreed |
@@ -352,6 +352,11 @@ entries of the records the C mock discards in `rebalance` (`records.clear()`) an
   listener adds during `Rebalance` cannot be tested through the public API: the C mock refuses the listener's
   `AddRecord` with `ConcurrentModificationException`, where Java's synchronized mock accepts it (see "Tests not
   written"); the table-level test covers an entry marked after the snapshot.
+
+**2026-11-25, negative leader epoch and delivery count** (coordinator review): row 643 now records that a
+record added with a negative `LeaderEpoch` or `DeliveryCount` polls back with null there, because
+`ConsumerRecordMarshal.SetFields` passes the value to C setters that store any negative value as absent; Java's
+mock keeps `Optional.of(-1)`. Documented in both mocks' `AddRecord` remarks; no code change.
 
 ## Outcome (S1–S4)
 

@@ -277,7 +277,9 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// receive unchanged.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
     /// <remarks>Java's <c>addRecord</c> refuses none of these headers; the binding refuses them as a producer
-    /// does, since the record crosses the native client. A refused record is not queued.</remarks>
+    /// does, since the record crosses the native client. A refused record is not queued. A negative
+    /// <c>LeaderEpoch</c> or <c>DeliveryCount</c> polls back as null, which the native record stores as absent;
+    /// Java's mock returns the instance added, keeping the value.</remarks>
     public void AddRecord(ConsumerRecord<TKey, TValue> record) => _native.AddRecord(record, _slots);
 
     /// <summary>
