@@ -37,12 +37,14 @@
  */
 
 export { CloseOptions } from './close_options';
+export type { Consumer } from './consumer';
 export type { ConsumerConfigs } from './consumer_configs';
 export { ConsumerGroupMetadata } from './consumer_group_metadata';
 export type { ConsumerRebalanceListener } from './consumer_rebalance_listener';
 export { ConsumerRecord } from './consumer_record';
 export { ConsumerRecords } from './consumer_records';
 export { GroupProtocol } from './group_protocol';
+export { KafkaConsumer } from './kafka_consumer';
 export { OffsetAndMetadata } from './offset_and_metadata';
 export { OffsetAndTimestamp } from './offset_and_timestamp';
 export type { OffsetCommitCallback } from './offset_commit_callback';

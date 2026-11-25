@@ -45,6 +45,20 @@ const SETUP = new Set(['setFactories']);
  */
 const TEST_ONLY = new Map([
   [
+    'consumerStats',
+    {
+      test: 'test/memory/consumer_batch.test.js',
+      reason: "a test-only registration: the counts of native/consumer.c, which prove every consumer's and batch's lifetime",
+    },
+  ],
+  [
+    'consumerRefuseExternalBuffers',
+    {
+      test: 'test/memory/consumer_batch.test.js',
+      reason: 'a test-only registration: the switch that makes the addon act as if Node-API refused external buffers, as Electron does',
+    },
+  ],
+  [
     'probe',
     {
       test: 'test/unit/internal/native.test.js',

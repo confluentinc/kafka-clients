@@ -131,6 +131,14 @@ static inline int fault_due(FaultStep step) {
 
 // ---- error.c ----------------------------------------------------------------
 
+// A borrowed TopicPartition as [topic, partition], NULL when Node-API failed.
+napi_value topic_partition_to_js(napi_env env, const kafka_common_TopicPartition_t* tp);
+
+// A borrowed map of TopicPartition to OffsetAndMetadata as an array of
+// [topic, partition, offset (a bigint), leaderEpoch (-1 for none), metadata],
+// NULL when Node-API failed.
+napi_value offset_map_to_js(napi_env env, const kafka_Map_t* map);
+
 // A KafkaError for a BORROWED error (never destroyed here), or `null` for
 // NULL. Returns NULL only when Node-API itself failed.
 napi_value error_to_js(napi_env env, const kafka_common_Error_t* e);
@@ -352,6 +360,31 @@ int config_map_build(napi_env env, napi_value entries, ConfigMap* out);
 // Destroys the map, then frees its strings: after the client's config is built.
 void config_map_free(napi_env env, ConfigMap* map);
 
+// A TopicPartitions list's destroy function, for list_free.
+void tp_item_destroy(void* item, kafka_common_Error_t** out_err);
+
+// A JS [topic, partition] as an owned TopicPartition (a null topic crosses as
+// NULL, which the FFI reports), or NULL with a JS exception pending.
+kafka_common_TopicPartition_t* tp_from_js(napi_env env, napi_value pair);
+
+// An array of [topic, partition] as a list from kafka_List_new, which only
+// borrows its TopicPartitions: the caller destroys them after the call
+// (list_free with tp_item_destroy). A null element crosses as NULL. NULL with
+// a JS exception pending on failure.
+kafka_List_t* tp_list_from_js(napi_env env, napi_value array);
+
+// Destroys `list`, after each element through `destroy` (NULL: the elements
+// are not the list's to free). A NULL list is a no-op.
+void list_free(napi_env env, kafka_List_t* list, void (*destroy)(void*, kafka_common_Error_t**));
+
+// An owned list of owned TopicPartitions as an array of [topic, partition];
+// the list destroyed. NULL with a JS exception pending on failure.
+napi_value tp_list_take_to_js(napi_env env, kafka_List_t* list);
+
+// A number, or a bigint for a value a number does not hold exactly, as an
+// int64_t: 0, or -1 with a TypeError or RangeError naming `what` pending.
+int js_int64(napi_env env, napi_value value, const char* what, int64_t* out);
+
 // ---- headers.c -------------------------------------------------------------
 
 // A new native RecordHeaders holding a copy of a record's headers: `pairs` is
@@ -426,6 +459,25 @@ napi_value js_metrics_view_entries(napi_env env, napi_callback_info info);
 napi_value js_metric_value(napi_env env, napi_callback_info info);
 napi_value js_metric_is_measurable(napi_env env, napi_callback_info info);
 napi_value js_metrics_stats(napi_env env, napi_callback_info info);
+
+// consumer.c: the KafkaConsumer handle.
+napi_value js_consumer_create(napi_env env, napi_callback_info info);
+napi_value js_consumer_poll(napi_env env, napi_callback_info info);
+napi_value js_consumer_subscribe_topics(napi_env env, napi_callback_info info);
+napi_value js_consumer_subscribe_pattern(napi_env env, napi_callback_info info);
+napi_value js_consumer_assign(napi_env env, napi_callback_info info);
+napi_value js_consumer_pause(napi_env env, napi_callback_info info);
+napi_value js_consumer_resume(napi_env env, napi_callback_info info);
+napi_value js_consumer_unsubscribe(napi_env env, napi_callback_info info);
+napi_value js_consumer_assignment(napi_env env, napi_callback_info info);
+napi_value js_consumer_subscription(napi_env env, napi_callback_info info);
+napi_value js_consumer_paused(napi_env env, napi_callback_info info);
+napi_value js_consumer_wakeup(napi_env env, napi_callback_info info);
+napi_value js_consumer_metrics(napi_env env, napi_callback_info info);
+napi_value js_consumer_close(napi_env env, napi_callback_info info);
+napi_value js_consumer_record_headers(napi_env env, napi_callback_info info);
+napi_value js_consumer_stats(napi_env env, napi_callback_info info);
+napi_value js_consumer_refuse_external_buffers(napi_env env, napi_callback_info info);
 
 // headers.c: the counts of the RecordHeaders the sends made.
 napi_value js_header_stats(napi_env env, napi_callback_info info);

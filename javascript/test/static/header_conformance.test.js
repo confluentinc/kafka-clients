@@ -86,6 +86,63 @@ test('no blocking close: every close is a _cb twin, and no finalizer closes a pr
   }
 });
 
+test('the consumer uses the functions of the plan', () => {
+  const called = new Set(sources.flatMap((s) => [...calledFunctions(path.join(NATIVE, s))]));
+  for (const name of [
+    'kafka_consumer_ConsumerConfig_new',
+    'kafka_consumer_KafkaConsumer_new',
+    'kafka_consumer_KafkaConsumer__as_Consumer_err',
+    'kafka_consumer_KafkaConsumer_destroy_err',
+    'kafka_consumer_Consumer__set_callbacks_notify_err',
+    'kafka_consumer_Consumer__execute_callbacks_err',
+    'kafka_consumer_Consumer_poll_cb',
+    'kafka_consumer_ConsumerRecords_partitions_err',
+    'kafka_consumer_ConsumerRecords_records_with_partition_err',
+    'kafka_consumer_ConsumerRecords_next_offsets_err',
+    'kafka_consumer_ConsumerRecords_destroy_err',
+    'kafka_consumer_ConsumerRecord_headers_err',
+    'kafka_consumer_Consumer_subscribe_with_topics_cb',
+    'kafka_consumer_Consumer_subscribe_with_pattern_cb',
+    'kafka_consumer_SubscriptionPattern_new_err',
+    'kafka_consumer_Consumer_assign_cb',
+    'kafka_consumer_Consumer_unsubscribe_cb',
+    'kafka_consumer_Consumer_assignment',
+    'kafka_consumer_Consumer_subscription',
+    'kafka_consumer_Consumer_paused',
+    'kafka_consumer_Consumer_pause_cb',
+    'kafka_consumer_Consumer_resume_cb',
+    'kafka_consumer_Consumer_wakeup_err',
+    'kafka_consumer_Consumer_metrics_err',
+    'kafka_consumer_Consumer_close_cb',
+    'kafka_consumer_Consumer_close_with_options_cb',
+    'kafka_consumer_CloseOptions_new_with_timeout_err',
+    'kafka_consumer_CloseOptions_with_operation_err',
+    'kafka_consumer_CloseOptions_with_group_membership_operation_err',
+  ]) {
+    assert.ok(called.has(name), `${name} is not called`);
+  }
+});
+
+test('no blocking consumer call: every waiting call is a _cb twin (rule 4)', () => {
+  for (const name of [
+    'kafka_consumer_Consumer_poll',
+    'kafka_consumer_Consumer_close',
+    'kafka_consumer_Consumer_close_with_options',
+    'kafka_consumer_Consumer_subscribe_with_topics',
+    'kafka_consumer_Consumer_subscribe_with_pattern',
+    'kafka_consumer_Consumer_assign',
+    'kafka_consumer_Consumer_unsubscribe',
+    'kafka_consumer_Consumer_pause',
+    'kafka_consumer_Consumer_resume',
+  ]) {
+    for (const source of sources) {
+      const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));
+      const calls = [...code.matchAll(new RegExp(`\\b${name}(_err)?\\s*\\(`, 'g'))];
+      assert.equal(calls.length, 0, `${source} calls ${name}, the blocking form`);
+    }
+  }
+});
+
 test("the generated FFI_NAMES table is the header's kafka_common_Error_e, both ways", () => {
   // src/internal/error_registry.ts is generated from rust/src/ffi/common.rs;
   // the addon is built against the header cbindgen generates from it. Read from the

@@ -144,6 +144,49 @@ interface SpiedRecord {
   headers: [string, Buffer | null][];
 }
 
+/** A native consumer handle (native/consumer.c), opaque to JavaScript. */
+type ConsumerHandle = object;
+
+/** A partition's records of a poll, as the addon builds them: its topic and partition, then its records. */
+type NativePartitionRecords = [string, number, unknown[]];
+
+/** A next offset of a poll, as the addon reads it: topic, partition, offset, leader epoch (-1 for none), metadata. */
+type NativeNextOffset = [string, number, bigint, number, string];
+
+/** What the addon builds each record of a poll with (src/consumer/consumer_record.ts `internalCreate`). */
+type RecordFactory = (
+  topic: string,
+  partition: number,
+  offset: bigint,
+  timestamp: bigint,
+  timestampTypeId: number,
+  serializedKeySize: number,
+  serializedValueSize: number,
+  // The record's headers, until its Headers copies them out, or null for none.
+  headers: object | null,
+  // A Buffer over the batch's memory, or a copy where external buffers are refused.
+  key: Buffer | null,
+  value: Buffer | null,
+  leaderEpoch: number,
+  deliveryCount: number,
+) => unknown;
+
+/** The counts of native/consumer.c, for the memory tests: each object made, and freed. */
+interface ConsumerStats {
+  consumersMade: number;
+  consumersFreed: number;
+  batchesMade: number;
+  batchesDestroyed: number;
+  // The external buffers over a batch's memory, made and collected.
+  buffersMade: number;
+  buffersFreed: number;
+  // The handles of a record's headers, made and collected.
+  sourcesMade: number;
+  sourcesFreed: number;
+  // The keys and values copied, where external buffers are refused.
+  copies: number;
+}
+
 /** The functions the addon registers (native/addon.c). */
 interface Native {
   probe(): boolean;
@@ -264,6 +307,53 @@ interface Native {
     timeoutMs: number | null,
     done: (metadata: RecordMetadata | null, error: unknown, timedOut: boolean, failed: boolean) => void,
   ): void;
+  // The configuration's [key, value] pairs, encodeLikeJava's bytes of each:
+  // KafkaConsumer(configs) with NULL deserializers.
+  consumerCreate(entries: Array<[Uint8Array, Uint8Array]>): ConsumerHandle;
+  // Java's poll(Duration) through poll_cb; each record built by `factory`.
+  // timeoutMs as it was given, a negative one included.
+  consumerPoll(
+    handle: ConsumerHandle,
+    timeoutMs: number | bigint,
+    factory: RecordFactory,
+    done: (error: unknown, partitions: NativePartitionRecords[] | null, nextOffsets: NativeNextOffset[] | null) => void,
+  ): void;
+  // Java's subscribe(Collection) through subscribe_with_topics_cb; null goes to the FFI as NULL.
+  consumerSubscribeTopics(handle: ConsumerHandle, topics: string[] | null, done: (error: unknown) => void): void;
+  // Java's subscribe(SubscriptionPattern) through subscribe_with_pattern_cb:
+  // `given` false for a null pattern, else the pattern's string.
+  consumerSubscribePattern(handle: ConsumerHandle, given: boolean, pattern: string | null, done: (error: unknown) => void): void;
+  // Java's assign, pause and resume of a Collection<TopicPartition>, as
+  // [topic, partition] pairs; a null collection or element goes to the FFI as NULL.
+  consumerAssign(handle: ConsumerHandle, partitions: Array<[string | null, number] | null> | null, done: (error: unknown) => void): void;
+  consumerPause(handle: ConsumerHandle, partitions: Array<[string | null, number] | null> | null, done: (error: unknown) => void): void;
+  consumerResume(handle: ConsumerHandle, partitions: Array<[string | null, number] | null> | null, done: (error: unknown) => void): void;
+  consumerUnsubscribe(handle: ConsumerHandle, done: (error: unknown) => void): void;
+  // Java's assignment(), subscription() and paused(), through their fallible forms.
+  consumerAssignment(handle: ConsumerHandle): Array<[string, number]>;
+  consumerSubscription(handle: ConsumerHandle): string[];
+  consumerPaused(handle: ConsumerHandle): Array<[string, number]>;
+  consumerWakeup(handle: ConsumerHandle): void;
+  // Java's metrics(): the live view, valid after the consumer is destroyed.
+  consumerMetrics(handle: ConsumerHandle): MetricsViewHandle;
+  // Java's close() (withOptions false), or close(CloseOptions) from its
+  // timeout (null: not set) and its operation's name, a null operation for
+  // a null option. closedNow: this close closed the consumer.
+  consumerClose(
+    handle: ConsumerHandle,
+    withOptions: boolean,
+    timeoutMs: number | bigint | null,
+    operation: string | null,
+    done: (error: unknown, closedNow: boolean) => void,
+  ): void;
+  // A consumed record's headers, copied out of the native record: each key a
+  // string, each value a Buffer of its own or null.
+  consumerRecordHeaders(source: object): Array<[string, Buffer | null]>;
+  // The counts of native/consumer.c. Test-only.
+  consumerStats(): ConsumerStats;
+  // Makes the addon act as if Node-API refused external buffers, as Electron
+  // does, for the polls completed from now on. Test-only.
+  consumerRefuseExternalBuffers(on: boolean): void;
   // The counts of native/metrics.c. Test-only.
   metricsStats(): MetricsStats;
   // The counts of native/headers.c. Test-only.

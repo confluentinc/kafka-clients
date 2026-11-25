@@ -64,6 +64,50 @@ export class CommitFailedError extends KafkaError {
 }
 
 // @public
+export interface Consumer<K = Buffer, V = Buffer> {
+    [Symbol.asyncDispose](): Promise<void>;
+    assign(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    assign(partitions: Iterable<TopicPartition>): Promise<void>;
+    assignment(): TopicPartitionSet;
+    close(): Promise<void>;
+    close(options: {
+        option: CloseOptions;
+    }): Promise<void>;
+    close(option: CloseOptions): Promise<void>;
+    metrics(): MetricNameMap<Metric>;
+    pause(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    pause(partitions: Iterable<TopicPartition>): Promise<void>;
+    paused(): TopicPartitionSet;
+    poll(options: {
+        timeout: Duration;
+    }): Promise<ConsumerRecords<K, V>>;
+    poll(timeout: Duration): Promise<ConsumerRecords<K, V>>;
+    resume(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    resume(partitions: Iterable<TopicPartition>): Promise<void>;
+    subscribe(options: {
+        topics: Iterable<string>;
+        pattern?: never;
+        callback?: never;
+    }): Promise<void>;
+    subscribe(topics: Iterable<string>): Promise<void>;
+    subscribe(options: {
+        pattern: SubscriptionPattern;
+        topics?: never;
+        callback?: never;
+    }): Promise<void>;
+    subscribe(pattern: SubscriptionPattern): Promise<void>;
+    subscription(): Set<string>;
+    unsubscribe(): Promise<void>;
+    wakeup(): void;
+}
+
+// @public
 export class ConsumerConfig {
     static readonly ALLOW_AUTO_CREATE_TOPICS_CONFIG: string;
     static readonly ASSIGN_FROM_SUBSCRIBED_ASSIGNORS: ReadonlyArray<string>;
@@ -430,6 +474,76 @@ export abstract class InvalidOffsetError extends KafkaError {
     });
     constructor(message: string | null);
     abstract partitions(): TopicPartitionSet;
+}
+
+// @public
+export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
+    // (undocumented)
+    [Symbol.asyncDispose](): Promise<void>;
+    constructor(options: {
+        configs: ConsumerConfigs;
+    });
+    constructor(configs: ConsumerConfigs);
+    // (undocumented)
+    assign(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    // (undocumented)
+    assign(partitions: Iterable<TopicPartition>): Promise<void>;
+    // (undocumented)
+    assignment(): TopicPartitionSet;
+    // (undocumented)
+    close(): Promise<void>;
+    // (undocumented)
+    close(options: {
+        option: CloseOptions;
+    }): Promise<void>;
+    // (undocumented)
+    close(option: CloseOptions): Promise<void>;
+    // (undocumented)
+    metrics(): MetricNameMap<Metric>;
+    // (undocumented)
+    pause(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    // (undocumented)
+    pause(partitions: Iterable<TopicPartition>): Promise<void>;
+    // (undocumented)
+    paused(): TopicPartitionSet;
+    // (undocumented)
+    poll(options: {
+        timeout: Duration;
+    }): Promise<ConsumerRecords<K, V>>;
+    // (undocumented)
+    poll(timeout: Duration): Promise<ConsumerRecords<K, V>>;
+    // (undocumented)
+    resume(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    // (undocumented)
+    resume(partitions: Iterable<TopicPartition>): Promise<void>;
+    // (undocumented)
+    subscribe(options: {
+        topics: Iterable<string>;
+        pattern?: never;
+        callback?: never;
+    }): Promise<void>;
+    // (undocumented)
+    subscribe(topics: Iterable<string>): Promise<void>;
+    // (undocumented)
+    subscribe(options: {
+        pattern: SubscriptionPattern;
+        topics?: never;
+        callback?: never;
+    }): Promise<void>;
+    // (undocumented)
+    subscribe(pattern: SubscriptionPattern): Promise<void>;
+    // (undocumented)
+    subscription(): Set<string>;
+    // (undocumented)
+    unsubscribe(): Promise<void>;
+    // (undocumented)
+    wakeup(): void;
 }
 
 // @public

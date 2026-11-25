@@ -167,8 +167,7 @@ static napi_value string_or_null(napi_env env, const char* s) {
     return napi_create_string_utf8(env, s, NAPI_AUTO_LENGTH, &v) == napi_ok ? v : NULL;
 }
 
-// A kafka_common_TopicPartition_t as [topic, partition].
-static napi_value topic_partition_pair(napi_env env, const kafka_common_TopicPartition_t* tp) {
+napi_value topic_partition_to_js(napi_env env, const kafka_common_TopicPartition_t* tp) {
     kafka_common_Error_t* ffi_err = NULL;
     const char* topic = NULL;
     int32_t partition = -1;
@@ -207,7 +206,7 @@ static napi_value list_string(napi_env env, const void* item) {
 }
 
 static napi_value list_topic_partition(napi_env env, const void* item) {
-    return topic_partition_pair(env, (const kafka_common_TopicPartition_t*)item);
+    return topic_partition_to_js(env, (const kafka_common_TopicPartition_t*)item);
 }
 
 int payload_string_list(napi_env env, napi_value obj, const char* name, kafka_List_t* list, kafka_common_Error_t* failed) {
@@ -255,7 +254,7 @@ int payload_topic_partition_long_map(napi_env env, napi_value obj, const char* n
         const int64_t* offset = NULL;
         error_discard(FFI_SET(tp, (const kafka_common_TopicPartition_t*)kafka_Map_key_err(map, i, &ffi_err)));
         error_discard(FFI_SET(offset, (const int64_t*)kafka_Map_value_err(map, i, &ffi_err)));
-        napi_value entry = tp == NULL ? NULL : topic_partition_pair(env, tp);
+        napi_value entry = tp == NULL ? NULL : topic_partition_to_js(env, tp);
         napi_value value;
         if (entry == NULL
             || (offset == NULL ? napi_get_null(env, &value) : napi_create_bigint_int64(env, *offset, &value)) != napi_ok
@@ -344,7 +343,7 @@ int payload_topic_partition(napi_env env, napi_value obj, const char* name, cons
     if (accessor_failed(failed)) return 0;
     napi_value v;
     if (value == NULL) return napi_get_null(env, &v) == napi_ok ? set_named(env, obj, name, v) : -1;
-    v = topic_partition_pair(env, value);
+    v = topic_partition_to_js(env, value);
     return v == NULL ? -1 : set_named(env, obj, name, v);
 }
 
@@ -425,6 +424,14 @@ int payload_topic_partition_offset_map(napi_env env, napi_value obj, const char*
     }
     napi_value arr;
     if (map == NULL) return napi_get_null(env, &arr) == napi_ok ? set_named(env, obj, name, arr) : -1;
+    arr = offset_map_to_js(env, map);
+    kafka_common_Error_t* ffi_err = NULL;
+    error_discard(FFI_ERR(kafka_Map_destroy_err(map, &ffi_err)));
+    return arr == NULL ? -1 : set_named(env, obj, name, arr);
+}
+
+napi_value offset_map_to_js(napi_env env, const kafka_Map_t* map) {
+    napi_value arr;
     kafka_common_Error_t* ffi_err = NULL;
     int32_t size = 0;
     error_discard(FFI_SET(size, kafka_Map_size_err(map, &ffi_err)));
@@ -442,7 +449,7 @@ int payload_topic_partition_offset_map(napi_env env, napi_value obj, const char*
             error_discard(FFI_SET(epoch, kafka_consumer_OffsetAndMetadata_leader_epoch_err(om, &ffi_err)));
             error_discard(FFI_SET(metadata, kafka_consumer_OffsetAndMetadata_metadata_err(om, &ffi_err)));
         }
-        napi_value entry = tp == NULL ? NULL : topic_partition_pair(env, tp);
+        napi_value entry = tp == NULL ? NULL : topic_partition_to_js(env, tp);
         napi_value o, e, m;
         if (entry == NULL || om == NULL || napi_create_bigint_int64(env, offset, &o) != napi_ok
             || napi_create_int32(env, epoch, &e) != napi_ok || (m = string_or_null(env, metadata != NULL ? metadata : "")) == NULL
@@ -451,9 +458,7 @@ int payload_topic_partition_offset_map(napi_env env, napi_value obj, const char*
             rc = -1;
         }
     }
-    error_discard(FFI_ERR(kafka_Map_destroy_err(map, &ffi_err)));
-    if (rc == 0) rc = set_named(env, obj, name, arr);
-    return rc;
+    return rc == 0 ? arr : NULL;
 }
 
 // Wraps a plain error object through the registered factory, which also turns

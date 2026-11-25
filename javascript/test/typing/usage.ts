@@ -68,7 +68,9 @@ import {
   type ConsumerRebalanceListener,
   ConsumerRecord,
   ConsumerRecords,
+  type Consumer,
   GroupProtocol,
+  KafkaConsumer,
   LogTruncationError,
   NoOffsetForPartitionError,
   OffsetAndMetadata,
@@ -1078,3 +1080,57 @@ new ConsumerGroupMetadata('g', 1, 'm', null);
 new GroupProtocol(0, 'CLASSIC');
 // @ts-expect-error ConsumerGroupMetadata.internalCreate is the library's own, not declared
 ConsumerGroupMetadata.internalCreate('g', 1, 'm', null);
+
+// The consumer: its two constructor forms, the types it returns, Buffers
+// without deserializers.
+async function consumerUsage(): Promise<void> {
+  const configs: ConsumerConfigs = { 'bootstrap.servers': 'localhost:9092', 'group.id': 'g', 'group.protocol': 'consumer' };
+  const consumer = new KafkaConsumer({ configs });
+  expectTypeOf(consumer).toEqualTypeOf<KafkaConsumer<Buffer, Buffer>>();
+  expectTypeOf(new KafkaConsumer(configs)).toEqualTypeOf<KafkaConsumer<Buffer, Buffer>>();
+  const asInterface: Consumer = consumer;
+  expectTypeOf(asInterface).toEqualTypeOf<Consumer<Buffer, Buffer>>();
+  // @ts-expect-error the deserializer forms are not in this release
+  void new KafkaConsumer({ configs, keyDeserializer: null, valueDeserializer: null });
+  await consumer.subscribe({ topics: ['t'] });
+  await consumer.subscribe(['t']);
+  await consumer.subscribe({ pattern: new SubscriptionPattern({ pattern: 't.*' }) });
+  await consumer.subscribe(new SubscriptionPattern({ pattern: 't.*' }));
+  // @ts-expect-error a RegExp is no pattern
+  await consumer.subscribe({ pattern: /t.*/ });
+  // @ts-expect-error the listener forms come with the listeners
+  await consumer.subscribe({ topics: ['t'], callback: listener });
+  // @ts-expect-error topics and pattern are two forms
+  await consumer.subscribe({ topics: ['t'], pattern: new SubscriptionPattern({ pattern: 't.*' }) });
+  const tp = new TopicPartition({ topic: 't', partition: 0 });
+  await consumer.assign({ partitions: [tp] });
+  await consumer.assign(new Set([tp]));
+  await consumer.pause({ partitions: [tp] });
+  await consumer.resume([tp]);
+  expectTypeOf(consumer.assignment()).toEqualTypeOf<TopicPartitionSet>();
+  expectTypeOf(consumer.paused()).toEqualTypeOf<TopicPartitionSet>();
+  expectTypeOf(consumer.subscription()).toEqualTypeOf<Set<string>>();
+  const records = await consumer.poll({ timeout: 100 });
+  expectTypeOf(records).toEqualTypeOf<ConsumerRecords<Buffer, Buffer>>();
+  expectTypeOf(await consumer.poll(100)).toEqualTypeOf<ConsumerRecords<Buffer, Buffer>>();
+  for (const record of records) {
+    expectTypeOf(record.key).toEqualTypeOf<Buffer | null>();
+    expectTypeOf(record.value).toEqualTypeOf<Buffer | null>();
+    expectTypeOf(record.offset).toEqualTypeOf<bigint>();
+  }
+  // @ts-expect-error poll's timeout is required
+  await consumer.poll();
+  expectTypeOf(consumer.metrics()).toEqualTypeOf<MetricNameMap<Metric>>();
+  expectTypeOf(consumer.wakeup()).toEqualTypeOf<void>();
+  await consumer.unsubscribe();
+  await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+  await consumer.close(CloseOptions.timeout({ timeout: 0 }));
+  await consumer.close();
+  // `await using` closes it: KafkaConsumer is AsyncDisposable.
+  expectTypeOf(consumer[Symbol.asyncDispose]()).toEqualTypeOf<Promise<void>>();
+  {
+    await using disposable = new KafkaConsumer({ configs });
+    await disposable.subscribe(['t']);
+  }
+}
+void consumerUsage;

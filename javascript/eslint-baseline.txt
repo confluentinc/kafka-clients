@@ -66,6 +66,46 @@ missing common.serialization.Serializer#configure
 # interfaces) translate Java's Iterable iterator() as [Symbol.iterator](),
 # which this rule doesn't count as iterator().
 missing clients.consumer.ConsumerRecords#iterator
+# Consumer and KafkaConsumer: clientInstanceId and the metric-subscription
+# calls have no FFI entry point (the consumer package's documentation).
+missing clients.consumer.Consumer#clientInstanceId
+missing clients.consumer.Consumer#registerMetricForSubscription
+missing clients.consumer.Consumer#unregisterMetricFromSubscription
+missing clients.consumer.KafkaConsumer#clientInstanceId
+missing clients.consumer.KafkaConsumer#registerMetricForSubscription
+missing clients.consumer.KafkaConsumer#unregisterMetricFromSubscription
+# Consumer and KafkaConsumer: the offset, commit and metadata calls, which
+# the next change of the consumer adds, removing these lines.
+missing clients.consumer.Consumer#beginningOffsets
+missing clients.consumer.Consumer#commitAsync
+missing clients.consumer.Consumer#commitSync
+missing clients.consumer.Consumer#committed
+missing clients.consumer.Consumer#currentLag
+missing clients.consumer.Consumer#endOffsets
+missing clients.consumer.Consumer#enforceRebalance
+missing clients.consumer.Consumer#groupMetadata
+missing clients.consumer.Consumer#listTopics
+missing clients.consumer.Consumer#offsetsForTimes
+missing clients.consumer.Consumer#partitionsFor
+missing clients.consumer.Consumer#position
+missing clients.consumer.Consumer#seek
+missing clients.consumer.Consumer#seekToBeginning
+missing clients.consumer.Consumer#seekToEnd
+missing clients.consumer.KafkaConsumer#beginningOffsets
+missing clients.consumer.KafkaConsumer#commitAsync
+missing clients.consumer.KafkaConsumer#commitSync
+missing clients.consumer.KafkaConsumer#committed
+missing clients.consumer.KafkaConsumer#currentLag
+missing clients.consumer.KafkaConsumer#endOffsets
+missing clients.consumer.KafkaConsumer#enforceRebalance
+missing clients.consumer.KafkaConsumer#groupMetadata
+missing clients.consumer.KafkaConsumer#listTopics
+missing clients.consumer.KafkaConsumer#offsetsForTimes
+missing clients.consumer.KafkaConsumer#partitionsFor
+missing clients.consumer.KafkaConsumer#position
+missing clients.consumer.KafkaConsumer#seek
+missing clients.consumer.KafkaConsumer#seekToBeginning
+missing clients.consumer.KafkaConsumer#seekToEnd
 
 
 # check-overload-shape: gaps the user kept (PLAN.md §8 decision 11).
@@ -77,6 +117,16 @@ missing clients.consumer.ConsumerRecords#iterator
 # RecordHeader's constructor takes Java's (String, byte[]) form: JavaScript has
 # no ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
 overload-missing RecordHeader.constructor/RecordHeader(ByteBuffer,ByteBuffer)
+# Consumer and KafkaConsumer: subscribe's forms with a rebalance listener,
+# which come with the listeners.
+overload-missing Consumer.subscribe/subscribe(Collection,ConsumerRebalanceListener)
+overload-missing Consumer.subscribe/subscribe(SubscriptionPattern,ConsumerRebalanceListener)
+overload-missing KafkaConsumer.subscribe/subscribe(Collection,ConsumerRebalanceListener)
+overload-missing KafkaConsumer.subscribe/subscribe(SubscriptionPattern,ConsumerRebalanceListener)
+# KafkaConsumer's constructor: the forms with deserializers, which come with
+# the deserializers.
+overload-missing KafkaConsumer.constructor/KafkaConsumer(Map,Deserializer,Deserializer)
+overload-missing KafkaConsumer.constructor/KafkaConsumer(Properties,Deserializer,Deserializer)
 
 
 # check-public-audience: members the JS conventions make public although

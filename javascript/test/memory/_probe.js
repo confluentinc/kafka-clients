@@ -69,6 +69,7 @@ function leaks() {
   const e = native.errorStats();
   const h = native.headerStats();
   const m = native.metricsStats();
+  const c = native.consumerStats();
   return {
     producers: s.producersMade - s.producersFreed,
     ownerUnits: s.ownerUnitsTaken - s.ownerUnitsReleased,
@@ -85,6 +86,10 @@ function leaks() {
     recordHeaders: h.made - h.freed,
     metricsViews: m.viewsMade - m.viewsFreed,
     metrics: m.metricsMade - m.metricsFreed,
+    consumers: c.consumersMade - c.consumersFreed,
+    batches: c.batchesMade - c.batchesDestroyed,
+    consumerBuffers: c.buffersMade - c.buffersFreed,
+    headerSources: c.sourcesMade - c.sourcesFreed,
   };
 }
 `;
@@ -106,6 +111,10 @@ const NO_LEAKS = {
   recordHeaders: 0,
   metricsViews: 0,
   metrics: 0,
+  consumers: 0,
+  batches: 0,
+  consumerBuffers: 0,
+  headerSources: 0,
 };
 
 /**

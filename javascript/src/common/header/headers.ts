@@ -18,7 +18,14 @@
 // plain class holding its own list of headers, translated from the Java
 // source, with the interface's methods, RecordHeaders' constructors, equals,
 // hashCode and toString, and its read-only state. The core gets a copy of the
-// headers only at send() (`internalToNative`).
+// headers only at send() (`internalToNative`). A consumed record's Headers
+// copies its list out of the native record on its first read or change
+// (`internalOfConsumedRecord`), the one call into the addon outside the
+// clients (javascript/CLAUDE.md, JavaScript Binding Conventions, Implementation
+// over the FFI).
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
+import native = require('../../internal/native');
 
 import { JavaForms } from '../../internal/args';
 import { encodeLikeJava } from '../../internal/encode';
@@ -150,6 +157,10 @@ const EQUALS_FORMS = new JavaForms('equals', [['o']]);
 const HASH_CODE_FORMS = new JavaForms('hashCode', [[]], { reader: true });
 const IS_READ_ONLY_FORMS = new JavaForms('isReadOnly', [[]], { reader: true });
 
+// The mark of the library's own construction (internalOfConsumedRecord), which
+// no caller can give.
+const INTERNAL: unique symbol = Symbol('Headers.internalOfConsumedRecord');
+
 /**
  * A mutable ordered collection of {@link Header} objects. Note that multiple
  * headers may have the same {@link Header.key | key}.
@@ -161,7 +172,10 @@ const IS_READ_ONLY_FORMS = new JavaForms('isReadOnly', [[]], { reader: true });
  */
 export class Headers implements Iterable<Header> {
   // Java's `List<Header> headers`: the Header objects given, in order.
-  readonly #headers: Header[];
+  #headers: Header[];
+  // A consumed record's native headers, until the list is copied out of them
+  // (`#list`): it keeps the record's batch in memory until then.
+  #source: object | null = null;
   // Java's `isReadOnly`.
   #isReadOnly = false;
 
@@ -213,9 +227,40 @@ export class Headers implements Iterable<Header> {
    * @param headers - The headers: a `Headers` or an iterable of `Header` objects and `[key, value]` pairs, or null
    */
   constructor(headers: Iterable<Header | readonly [string, Uint8Array | null]> | null);
-  constructor(options?: unknown) {
+  constructor(options?: unknown, internal?: typeof INTERNAL) {
+    if (internal === INTERNAL) {
+      this.#headers = [];
+      this.#source = options as object;
+      return;
+    }
     const given = CONSTRUCTOR_FORMS.match(options, arguments.length) === 0 ? null : CONSTRUCTOR_FORMS.value(options, 'headers');
     this.#headers = Headers.#taken(given);
+  }
+
+  /**
+   * The headers of a consumed record, which copy their list out of the native
+   * record on their first read or change, so a record whose headers are
+   * never read copies none. Called by `ConsumerRecord.internalCreate`.
+   *
+   * @param source - the addon's handle of the record's headers
+   * @returns the record's headers
+   *
+   * @internal
+   */
+  static internalOfConsumedRecord(source: object): Headers {
+    return new (Headers as unknown as new (source: object, internal: typeof INTERNAL) => Headers)(source, INTERNAL);
+  }
+
+  // The list, copied first out of a consumed record's native headers: each
+  // key a string, each value a Buffer of its own or null. The source is
+  // dropped then, and with it the batch it kept.
+  #list(): Header[] {
+    const source = this.#source;
+    if (source !== null) {
+      this.#source = null;
+      this.#headers = native.consumerRecordHeaders(source).map(([key, value]) => new RecordHeader({ key, value }));
+    }
+    return this.#headers;
   }
 
   /**
@@ -229,7 +274,7 @@ export class Headers implements Iterable<Header> {
    */
   static #taken(headers: unknown): Header[] {
     if (headers === null) return [];
-    if (headers instanceof Headers) return [...headers.#headers];
+    if (headers instanceof Headers) return [...headers.#list()];
     if (!isIterableObject(headers)) {
       throw new TypeError('headers must be a Headers, or an iterable of Header objects and [key, value] pairs');
     }
@@ -308,7 +353,7 @@ export class Headers implements Iterable<Header> {
       });
     }
     this.#canWrite();
-    this.#headers.push(header);
+    this.#list().push(header);
     return this;
   }
 
@@ -341,7 +386,7 @@ export class Headers implements Iterable<Header> {
     // Java's canWrite() comes before checkKey(key).
     this.#canWrite();
     const key = checkKey(given);
-    const list = this.#headers;
+    const list = this.#list();
     let kept = 0;
     for (const header of list) if (header.key() !== key) list[kept++] = header;
     list.length = kept;
@@ -374,7 +419,7 @@ export class Headers implements Iterable<Header> {
   lastHeader(options: unknown): Header | null {
     LAST_HEADER_FORMS.match(options, arguments.length);
     const key = checkKey(keyArg(LAST_HEADER_FORMS.value(options, 'key')));
-    const list = this.#headers;
+    const list = this.#list();
     for (let i = list.length - 1; i >= 0; i--) if (list[i].key() === key) return list[i];
     return null;
   }
@@ -405,7 +450,7 @@ export class Headers implements Iterable<Header> {
   headers(options: unknown): Iterable<Header> {
     HEADERS_FORMS.match(options, arguments.length);
     const key = checkKey(keyArg(HEADERS_FORMS.value(options, 'key')));
-    const list = this.#headers;
+    const list = this.#list();
     // Java's FilterByKeyIterator over the list's own iterator, made each time
     // the iterable is iterated.
     return {
@@ -424,7 +469,7 @@ export class Headers implements Iterable<Header> {
    */
   toArray(): Header[] {
     TO_ARRAY_FORMS.match(undefined, arguments.length);
-    return [...this.#headers];
+    return [...this.#list()];
   }
 
   /**
@@ -438,7 +483,7 @@ export class Headers implements Iterable<Header> {
    * Why: the headers are a JavaScript array, as Python's are a Python list.
    */
   [Symbol.iterator](): Iterator<Header> {
-    return this.#headers[Symbol.iterator]();
+    return this.#list()[Symbol.iterator]();
   }
 
   /**
@@ -468,8 +513,8 @@ export class Headers implements Iterable<Header> {
     const o = EQUALS_FORMS.value(options, 'o');
     if (this === o) return true;
     if (!sameClass(this, o)) return false;
-    const mine = this.#headers;
-    const theirs = (o as Headers).#headers;
+    const mine = this.#list();
+    const theirs = (o as Headers).#list();
     if (mine.length !== theirs.length) return false;
     for (let i = 0; i < mine.length; i++) if (!objectsEquals(mine[i], theirs[i])) return false;
     return true;
@@ -485,7 +530,7 @@ export class Headers implements Iterable<Header> {
   hashCode(): number {
     HASH_CODE_FORMS.match(undefined, arguments.length);
     let h = 1;
-    for (const header of this.#headers) h = (Math.imul(31, h) + objectHashCode(header)) | 0;
+    for (const header of this.#list()) h = (Math.imul(31, h) + objectHashCode(header)) | 0;
     return h;
   }
 
@@ -497,8 +542,9 @@ export class Headers implements Iterable<Header> {
    * @returns the headers' text
    */
   toString(): string {
+    const list = this.#list();
     // eslint-disable-next-line @typescript-eslint/no-base-to-string -- Java's List.toString(): each header's own toString(), which a Header the app implements may leave as JavaScript's, as Java's Object.toString()
-    const headers = this.#headers.map((h) => String(h)).join(', ');
+    const headers = list.map((h) => String(h)).join(', ');
     return `RecordHeaders(headers = [${headers}], isReadOnly = ${this.#isReadOnly})`;
   }
 
@@ -512,7 +558,7 @@ export class Headers implements Iterable<Header> {
    * whose list is a private field, would be written as `{}`.
    */
   toJSON(): Header[] {
-    return [...this.#headers];
+    return [...this.#list()];
   }
 
   /**
@@ -523,6 +569,7 @@ export class Headers implements Iterable<Header> {
    * @internal
    */
   setReadOnly(): void {
+    this.#list();
     this.#isReadOnly = true;
   }
 
@@ -535,6 +582,7 @@ export class Headers implements Iterable<Header> {
    */
   isReadOnly(): boolean {
     IS_READ_ONLY_FORMS.match(undefined, arguments.length);
+    this.#list();
     return this.#isReadOnly;
   }
 
@@ -553,7 +601,7 @@ export class Headers implements Iterable<Header> {
    * @internal
    */
   internalToNative(): (Uint8Array | null)[] | null {
-    const list = this.#headers;
+    const list = this.#list();
     if (list.length === 0) return null;
     const out = new Array<Uint8Array | null>(list.length * 2);
     for (let i = 0; i < list.length; i++) {

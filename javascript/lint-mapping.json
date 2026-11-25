@@ -6,6 +6,7 @@
     "src/producer/kafka_producer.ts:CloseArgs": "the options object of Java's close(Duration), the timed form of the close() overload set",
     "KafkaProducer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the producer",
     "MockProducer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the mock",
+    "KafkaConsumer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the consumer",
     "Headers.[Symbol.iterator]": "[Symbol.iterator] where Java has Iterable, JavaScript's iteration protocol",
     "SslClientAuth.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "SecurityProtocol.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
@@ -43,6 +44,7 @@
     "Headers.hashCode": "org.apache.kafka.common.header.internals.RecordHeaders#hashCode"
   },
   "nativeCallers": {
+    "src/common/header/headers.ts:Headers": "a consumed record's Headers copies its headers out of the native record, once, on its first read or change (javascript/CLAUDE.md, JavaScript Binding Conventions, Implementation over the FFI and Serialization, Q31)",
     "src/common/kafka_future.ts:KafkaFutureImpl": "the record's future (Java's FutureRecordMetadata) over the native future of its hand-over: on a future over a native handle, get() calls kafka_common_KafkaFuture_get_cb and get({ timeout }) kafka_common_KafkaFuture_get_with_timeout_cb (javascript/CLAUDE.md, JavaScript Binding Conventions, Futures and waiting)"
   }
 }

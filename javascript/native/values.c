@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // The values every client takes from JS the same way: its configuration as a
-// kafka_Map_t of C strings, and lists of TopicPartitions.
+// kafka_Map_t of C strings, lists of TopicPartitions, and 64-bit integers.
 
 #include <stdlib.h>
 
@@ -68,4 +68,135 @@ void config_map_free(napi_env env, ConfigMap* map) {
     free(map->strings);
     map->strings = NULL;
     map->count = 0;
+}
+
+void tp_item_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_TopicPartition_destroy_err((kafka_common_TopicPartition_t*)item, out_err);
+}
+
+kafka_common_TopicPartition_t* tp_from_js(napi_env env, napi_value pair) {
+    napi_value t, p;
+    if (napi_get_element(env, pair, 0, &t) != napi_ok || napi_get_element(env, pair, 1, &p) != napi_ok) {
+        js_throw_last_napi_error(env, "napi_get_element");
+        return NULL;
+    }
+    int32_t partition = 0;
+    if (napi_get_value_int32(env, p, &partition) != napi_ok) {
+        napi_throw_type_error(env, NULL, "a partition's index must be a number");
+        return NULL;
+    }
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, t, &type), NULL);
+    // A null topic crosses as NULL, which the FFI reports.
+    char* topic = type == napi_null ? NULL : js_string_dup(env, t, "a partition's topic must be a string");
+    if (type != napi_null && topic == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_TopicPartition_t* tp = NULL;
+    kafka_common_Error_t* err = FFI_SET(tp, kafka_common_TopicPartition_new_err(topic, partition, &ffi_err));
+    free(topic);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return tp;
+}
+
+void list_free(napi_env env, kafka_List_t* list, void (*destroy)(void*, kafka_common_Error_t**)) {
+    if (list == NULL) return;
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t n = 0;
+    kafka_common_Error_t* err = FFI_SET(n, kafka_List_size_err(list, &ffi_err));
+    for (int32_t i = 0; err == NULL && destroy != NULL && i < n; i++) {
+        void* item = NULL;
+        err = FFI_SET(item, kafka_List_get_err(list, i, &ffi_err));
+        if (err == NULL && item != NULL) err = FFI_ERR(destroy(item, &ffi_err));
+    }
+    error_warn(env, 1, err);
+    error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
+}
+
+kafka_List_t* tp_list_from_js(napi_env env, napi_value array) {
+    uint32_t n = 0;
+    if (napi_get_array_length(env, array, &n) != napi_ok) {
+        napi_throw_type_error(env, NULL, "partitions must be an array");
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_List_t* list = NULL;
+    kafka_common_Error_t* err = FFI_SET(list, kafka_List_new_err(&ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        napi_value v;
+        napi_valuetype type = napi_undefined;
+        if (napi_get_element(env, array, i, &v) != napi_ok || napi_typeof(env, v, &type) != napi_ok) {
+            js_throw_last_napi_error(env, "napi_get_element");
+            list_free(env, list, tp_item_destroy);
+            return NULL;
+        }
+        // A null element crosses as NULL, which the FFI reports.
+        kafka_common_TopicPartition_t* tp = NULL;
+        if (type != napi_null && (tp = tp_from_js(env, v)) == NULL) {
+            list_free(env, list, tp_item_destroy);
+            return NULL;
+        }
+        err = FFI_ERR(kafka_List_add_err(list, tp, &ffi_err));
+        if (err != NULL) {
+            if (tp != NULL) FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+            list_free(env, list, tp_item_destroy);
+            error_throw_owned(env, err);
+            return NULL;
+        }
+    }
+    return list;
+}
+
+napi_value tp_list_take_to_js(napi_env env, kafka_List_t* list) {
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t n = 0;
+    kafka_common_Error_t* err = FFI_SET(n, kafka_List_size_err(list, &ffi_err));
+    napi_value arr = NULL;
+    if (err == NULL && napi_create_array_with_length(env, (size_t)n, &arr) != napi_ok) {
+        js_throw_last_napi_error(env, "napi_create_array_with_length");
+        arr = NULL;
+    }
+    for (int32_t i = 0; err == NULL && arr != NULL && i < n; i++) {
+        const kafka_common_TopicPartition_t* tp = NULL;
+        err = FFI_SET(tp, (const kafka_common_TopicPartition_t*)kafka_List_get_err(list, i, &ffi_err));
+        if (err != NULL) break;
+        napi_value pair = topic_partition_to_js(env, tp);
+        if (pair == NULL || napi_set_element(env, arr, (uint32_t)i, pair) != napi_ok) {
+            js_throw_last_napi_error(env, "napi_set_element");
+            arr = NULL;
+        }
+    }
+    // The list owns its elements: destroying it frees them.
+    error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return arr;
+}
+
+int js_int64(napi_env env, napi_value value, const char* what, int64_t* out) {
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, value, &type), -1);
+    if (type == napi_bigint) {
+        bool lossless = false;
+        NAPI_CHECK(env, napi_get_value_bigint_int64(env, value, out, &lossless), -1);
+        if (!lossless) {
+            napi_throw_range_error(env, NULL, what);
+            return -1;
+        }
+        return 0;
+    }
+    if (type != napi_number) {
+        napi_throw_type_error(env, NULL, what);
+        return -1;
+    }
+    NAPI_CHECK(env, napi_get_value_int64(env, value, out), -1);
+    return 0;
 }

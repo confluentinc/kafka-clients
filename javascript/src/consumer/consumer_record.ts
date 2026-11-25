@@ -556,6 +556,63 @@ export class ConsumerRecord<out K = never, out V = never> {
   }
 
   /**
+   * A record the consumer fetched, from the fields the addon read: built
+   * without the constructor's checks, which the core's values need not pass
+   * again, in the constructor's field order, and frozen. Called by the addon
+   * for each record of a poll.
+   *
+   * @param topic - the partition's topic, one string per partition
+   * @param partition - the partition
+   * @param offset - the offset
+   * @param timestamp - the timestamp
+   * @param timestampTypeId - the timestamp type's Java `id`
+   * @param serializedKeySize - the key's size, -1 for a null key
+   * @param serializedValueSize - the value's size, -1 for a null value
+   * @param headers - the addon's handle of the record's headers, or null for none
+   * @param key - the key's bytes, or null
+   * @param value - the value's bytes, or null
+   * @param leaderEpoch - the leader epoch, -1 for none
+   * @param deliveryCount - the delivery count, -1 for none
+   * @returns the record
+   *
+   * @internal
+   */
+  static internalCreate(
+    topic: string,
+    partition: number,
+    offset: bigint,
+    timestamp: bigint,
+    timestampTypeId: number,
+    serializedKeySize: number,
+    serializedValueSize: number,
+    headers: object | null,
+    key: Buffer | null,
+    value: Buffer | null,
+    leaderEpoch: number,
+    deliveryCount: number,
+  ): ConsumerRecord<Buffer, Buffer> {
+    const record = Object.create(ConsumerRecord.prototype) as Record<string, unknown>;
+    record.topic = topic;
+    record.partition = partition;
+    record.offset = offset;
+    record.timestamp = timestamp;
+    record.timestampType =
+      timestampTypeId === 0
+        ? TimestampType.CREATE_TIME
+        : timestampTypeId === 1
+          ? TimestampType.LOG_APPEND_TIME
+          : TimestampType.NO_TIMESTAMP_TYPE;
+    record.serializedKeySize = serializedKeySize;
+    record.serializedValueSize = serializedValueSize;
+    record.headers = headers === null ? new Headers() : Headers.internalOfConsumedRecord(headers);
+    record.key = key;
+    record.value = value;
+    record.leaderEpoch = leaderEpoch < 0 ? null : leaderEpoch;
+    record.deliveryCount = deliveryCount < 0 ? null : deliveryCount;
+    return Object.freeze(record) as unknown as ConsumerRecord<Buffer, Buffer>;
+  }
+
+  /**
    * The record as Java's `ConsumerRecord.toString()` writes it.
    *
    * @returns `ConsumerRecord(topic = ..., partition = ..., leaderEpoch = ...,
