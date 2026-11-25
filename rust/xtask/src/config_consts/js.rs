@@ -13,8 +13,8 @@
 // limitations under the License.
 
 //! The Node.js client's config classes: the constants of the Python ones
-//! ([`super::SPECS`]) that a producer reaches, each a class of static
-//! properties in the src/ folder of its Java package.
+//! ([`super::SPECS`]) that a producer or a consumer reaches, each a class of
+//! static properties in the src/ folder of its Java package.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,11 +28,15 @@ type Res<T> = anyhow::Result<T>;
 /// The producer's Java config class, whose `ConfigDef` documents its keys.
 const PRODUCER_CONFIG: &str = "org.apache.kafka.clients.producer.ProducerConfig";
 
+/// The consumer's Java config class, whose `ConfigDef` documents its keys.
+const CONSUMER_CONFIG: &str = "org.apache.kafka.clients.consumer.ConsumerConfig";
+
 /// The config classes of the Node.js client: Java class and src/ folder. The
-/// others the Python client generates (`ConsumerConfig`, `AdminClientConfig`,
-/// `TopicConfig`, `LogLevelConfig`) wait for a consumer and an admin client.
+/// others the Python client generates (`AdminClientConfig`, `TopicConfig`,
+/// `LogLevelConfig`) wait for an admin client.
 const JS_SPECS: &[(&str, &str)] = &[
     (PRODUCER_CONFIG, "producer"),
+    (CONSUMER_CONFIG, "consumer"),
     ("org.apache.kafka.common.config.SaslConfigs", "common/config"),
     ("org.apache.kafka.common.config.SslConfigs", "common/config"),
     ("org.apache.kafka.common.config.SecurityConfig", "common/config"),
@@ -61,7 +65,8 @@ const NOTES: &[(&str, &str, &str)] = &[
 /// 1. the constant's own Javadoc (`javadoc`), when Java documents it, so the
 ///    TSDoc stays within 150% of it, as Rust's constants do (check-doc-size);
 /// 2. else, for a configuration key, the documentation argument of the
-///    `define` call of `ProducerConfig`'s `ConfigDef` for that key (`docs`),
+///    `define` call of the client's `ConfigDef` for that key (`docs`: the
+///    consumer's for `ConsumerConfig`, the producer's for every other class),
 ///    which may be another class's `_DOC`
 ///    (`CommonClientConfigs.BOOTSTRAP_SERVERS_DOC`);
 /// 3. else the sibling `<NAME>_DOC` or, for an `X_CONFIG`, `X_DOC` (any
@@ -203,12 +208,19 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         .map(|l| l.trim().to_string())
         .collect();
     let mut reader = Reader::new(repo_root);
-    // The documentation of every key a producer's configuration takes.
-    let docs = crate::config_types::define_docs(repo_root, PRODUCER_CONFIG)?;
+    // The documentation of every key a producer's configuration takes, and
+    // a consumer's.
+    let producer_docs = crate::config_types::define_docs(repo_root, PRODUCER_CONFIG)?;
+    let consumer_docs = crate::config_types::define_docs(repo_root, CONSUMER_CONFIG)?;
     // The Javadoc of each constant Java documents, by the class declaring it.
     let mut field_docs: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut out = Vec::new();
     for (java, dir) in JS_SPECS {
+        let docs = if *java == CONSUMER_CONFIG {
+            &consumer_docs
+        } else {
+            &producer_docs
+        };
         let spec = SPECS
             .iter()
             .find(|s| s.java == *java)
@@ -267,9 +279,20 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
         }
         about.push_str(&format!("\n\nJava: `{}`.", spec.java));
         if let Some(doc) = javadoc {
+            // The deviation's remark, where it keeps the TSDoc within 150% of
+            // Java's words (check-doc-size); a shorter Javadoc
+            // (`ConsumerConfig`'s four words) goes without it, the
+            // constructor's TSDoc and the package's documentation saying it.
+            let remark = "*(deviation)* Constants only: `new` throws `TypeError`.";
+            let words = |t: &str| {
+                t.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '`')
+                    .filter(|w| !w.is_empty())
+                    .count()
+            };
+            let fits = 2 * (words(&doc) + words(remark)) <= 3 * words(&doc);
             about = doc;
-            if spec.kind == Kind::ConstantsOnly {
-                about.push_str("\n\n@remarks *(deviation)* Constants only: `new` throws `TypeError`.");
+            if spec.kind == Kind::ConstantsOnly && fits {
+                about.push_str(&format!("\n\n@remarks {remark}"));
             }
         }
         let mut text = header(&format!("Java's `{}`", spec.java));
@@ -288,13 +311,19 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
                 .fields
                 .iter()
                 .any(|f| f.name == *n && matches!(f.ty.as_str(), "long" | "Long"));
-            let (val, ty) = js_value(v, long)?;
+            let (val, mut ty) = js_value(v, long)?;
+            // A `String` constant Java sets to null (`DEFAULT_GROUP_REMOTE_ASSIGNOR`):
+            // Java's type, nullable.
+            let string = reader.class(owner)?.fields.iter().any(|f| f.name == *n && f.ty == "String");
+            if matches!(v, Value::Null) && string {
+                ty = "string | null".into();
+            }
             if !field_docs.contains_key(*owner) {
                 let documented = scanned_class(repo_root, owner)?.map(|c| c.field_docs).unwrap_or_default();
                 field_docs.insert(owner.to_string(), documented);
             }
             let javadoc = field_docs.get(*owner).and_then(|d| d.get(n)).map(String::as_str);
-            let mut doc = constant_doc(&mut reader, &docs, owner, n, v, javadoc)?;
+            let mut doc = constant_doc(&mut reader, docs, owner, n, v, javadoc)?;
             if let Some((_, _, t)) = NOTES.iter().find(|(c, k, _)| c == java && k == n) {
                 doc.push_str("\n\n");
                 doc.push_str(t);
@@ -385,6 +414,28 @@ mod tests {
         assert!(producer.content.contains("  private constructor(...args: unknown[]) {\n"));
         assert!(!producer.content.contains("  constructor() {}\n"));
         assert!(ssl.content.contains("  constructor() {}\n"));
+        let consumer = modules.iter().find(|m| m.name == "ConsumerConfig").unwrap();
+        assert_eq!((consumer.dir.as_str(), consumer.stem.as_str()), ("consumer", "consumer_config"));
+        assert!(consumer
+            .content
+            .contains("  static readonly GROUP_PROTOCOL_CONFIG: string = 'group.protocol';\n"));
+        assert!(consumer
+            .content
+            .contains("  static readonly BOOTSTRAP_SERVERS_CONFIG: string = 'bootstrap.servers';\n"));
+        assert!(consumer
+            .content
+            .contains("throw new TypeError('ConsumerConfig is not instantiable"));
+        assert!(consumer.content.contains("  private constructor(...args: unknown[]) {\n"));
+        // A String constant Java sets to null keeps Java's type.
+        assert!(consumer
+            .content
+            .contains("  static readonly DEFAULT_GROUP_REMOTE_ASSIGNOR: string | null = null;\n"));
+        // A Javadoc too short for the deviation's remark goes without it; a
+        // longer one keeps it.
+        assert!(!consumer.content.contains("@remarks *(deviation)* Constants only"));
+        assert!(producer
+            .content
+            .contains("@remarks *(deviation)* Constants only: `new` throws `TypeError`."));
         let sasl = modules.iter().find(|m| m.name == "SaslConfigs").unwrap();
         assert!(sasl
             .content

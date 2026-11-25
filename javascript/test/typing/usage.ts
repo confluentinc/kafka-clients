@@ -62,6 +62,8 @@ import {
 } from '@confluentinc/kafka-javascript/common/errors';
 import {
   CloseOptions,
+  ConsumerConfig,
+  type ConsumerConfigs,
   ConsumerGroupMetadata,
   ConsumerRecord,
   ConsumerRecords,
@@ -1053,6 +1055,11 @@ expectTypeOf(closeOptions.groupMembershipOperation()).toEqualTypeOf<CloseOptions
 expectTypeOf(GroupProtocol.of({ name: 'consumer' })).toEqualTypeOf<GroupProtocol>();
 expectTypeOf(new SubscriptionPattern({ pattern: 't.*' }).pattern()).toEqualTypeOf<string>();
 expectTypeOf(new OffsetAndTimestamp({ offset: 1, timestamp: 2 }).leaderEpoch()).toEqualTypeOf<number | null>();
+const consumerConfigs: ConsumerConfigs = { 'group.id': 'g', 'group.protocol': 'consumer', 'any.other.key': 1 };
+expectTypeOf(ConsumerConfig.GROUP_ID_CONFIG).toEqualTypeOf<string>();
+void consumerConfigs;
+// @ts-expect-error ConsumerConfig holds Java's constants only: its constructor is private
+new ConsumerConfig();
 // @ts-expect-error ConsumerGroupMetadata's constructor is private: instances come from the consumer's groupMetadata()
 new ConsumerGroupMetadata('g', 1, 'm', null);
 // @ts-expect-error GroupProtocol's constructor is private

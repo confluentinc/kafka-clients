@@ -21,6 +21,13 @@
 //! with no run-time part. The producer's serde keys, `key.serializer` and
 //! `value.serializer`, take a synchronous function `({ configs, isKey }) =>
 //! serializer` instead (Serialization, Q53), and so may an unknown key.
+//!
+//! It also writes `src/consumer/consumer_configs.ts`, the type of a
+//! consumer's configuration: every key Java's `ConsumerConfig` defines, the
+//! same way, and `src/internal/consumer_config_keys.ts`, the consumer's key
+//! list. The consumer's serde keys, `key.deserializer` and
+//! `value.deserializer`, are typed as the other keys are until the client has
+//! its `Deserializer` interface.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,28 +38,41 @@ use crate::javascript_gen::{header, js_str, JS_SRC};
 type Res<T> = anyhow::Result<T>;
 
 const PRODUCER_CONFIG: &str = "org.apache.kafka.clients.producer.ProducerConfig";
+const CONSUMER_CONFIG: &str = "org.apache.kafka.clients.consumer.ConsumerConfig";
 
-/// `src/producer/producer_configs.ts` and `src/internal/producer_config_keys.ts`,
+/// `src/producer/producer_configs.ts`, `src/internal/producer_config_keys.ts`,
+/// `src/consumer/consumer_configs.ts` and `src/internal/consumer_config_keys.ts`,
 /// with their content.
 pub(crate) fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
     let keys: Vec<String> = client_types(&mut reader, PRODUCER_CONFIG)?.into_keys().collect();
-    let core_only = core_only_keys(repo_root, &keys)?;
-    Ok(vec![configs_type(repo_root, &keys), known_keys(repo_root, &keys, &core_only)])
+    let core_only = core_only_keys(repo_root, CORE_PRODUCER_CONFIG, &keys)?;
+    let consumer_keys: Vec<String> = client_types(&mut reader, CONSUMER_CONFIG)?.into_keys().collect();
+    let consumer_core_only = core_only_keys(repo_root, CORE_CONSUMER_CONFIG, &consumer_keys)?;
+    Ok(vec![
+        configs_type(repo_root, &keys),
+        known_keys(repo_root, &keys, &core_only),
+        consumer_configs_type(repo_root, &consumer_keys),
+        consumer_known_keys(repo_root, &consumer_keys, &consumer_core_only),
+    ])
 }
 
 /// The core's producer configuration: `rust/src/producer/producer_config.rs`,
 /// whose `CONFIG` `ConfigDef` names each key by a `ProducerConfig` or
 /// `CommonClientConfigs` constant.
 const CORE_PRODUCER_CONFIG: &str = "rust/src/producer/producer_config.rs";
+/// The core's consumer configuration, built the same way from
+/// `ConsumerConfig` and `CommonClientConfigs` constants.
+const CORE_CONSUMER_CONFIG: &str = "rust/src/consumer/consumer_config.rs";
 const CORE_COMMON_CLIENT_CONFIGS: &str = "rust/src/common_client_configs.rs";
 
-/// The producer keys the Rust core's `ProducerConfig` defines beyond Java's
-/// (`partitioner.type`, which names a built-in partitioner in place of Java's
-/// class-valued `partitioner.class`), sorted: the keys of the `define...`
-/// calls of its `CONFIG`, resolved through their constants, minus `java`.
-/// The SSL and SASL keys its `with_client_..._support()` adds are Java's.
-fn core_only_keys(repo_root: &Path, java: &[String]) -> Res<Vec<String>> {
+/// The keys the Rust core's client configuration `core` (`ProducerConfig`'s
+/// or `ConsumerConfig`'s) defines beyond Java's (`partitioner.type`, which
+/// names a built-in partitioner in place of Java's class-valued
+/// `partitioner.class`), sorted: the keys of the `define...` calls of its
+/// `CONFIG`, resolved through their constants, minus `java`. The SSL and
+/// SASL keys its `with_client_..._support()` adds are Java's.
+fn core_only_keys(repo_root: &Path, core: &str, java: &[String]) -> Res<Vec<String>> {
     use syn::visit::Visit;
 
     let parse = |rel: &str| -> Res<syn::File> {
@@ -61,7 +81,7 @@ fn core_only_keys(repo_root: &Path, java: &[String]) -> Res<Vec<String>> {
             std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("config types: {}: {e}", path.display()))?;
         syn::parse_file(&text).map_err(|e| anyhow::anyhow!("config types: {rel}: {e}"))
     };
-    let producer = parse(CORE_PRODUCER_CONFIG)?;
+    let client = parse(core)?;
     let common = parse(CORE_COMMON_CLIENT_CONFIGS)?;
 
     // `(type, constant)` -> its string value, from the inherent impls; a
@@ -69,7 +89,7 @@ fn core_only_keys(repo_root: &Path, java: &[String]) -> Res<Vec<String>> {
     // `CommonClientConfigs::CLIENT_RACK_CONFIG`) is resolved below.
     let mut consts: BTreeMap<(String, String), String> = BTreeMap::new();
     let mut aliases: Vec<((String, String), (String, String))> = Vec::new();
-    for file in [&producer, &common] {
+    for file in [&client, &common] {
         for item in &file.items {
             let syn::Item::Impl(imp) = item else { continue };
             if imp.trait_.is_some() {
@@ -84,8 +104,14 @@ fn core_only_keys(repo_root: &Path, java: &[String]) -> Res<Vec<String>> {
                     syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(v), .. }) => {
                         consts.insert(at, v.value());
                     },
-                    syn::Expr::Path(p) if p.path.segments.len() == 2 => {
-                        let to = (p.path.segments[0].ident.to_string(), p.path.segments[1].ident.to_string());
+                    // `Type::NAME`, or a longer path ending in it
+                    // (`crate::CommonClientConfigs::CLIENT_RACK_CONFIG`).
+                    syn::Expr::Path(p) if p.path.segments.len() >= 2 => {
+                        let n = p.path.segments.len();
+                        let to = (
+                            p.path.segments[n - 2].ident.to_string(),
+                            p.path.segments[n - 1].ident.to_string(),
+                        );
                         aliases.push((at, to));
                     },
                     _ => {},
@@ -108,14 +134,14 @@ fn core_only_keys(repo_root: &Path, java: &[String]) -> Res<Vec<String>> {
         }
     }
 
-    let init = producer
+    let init = client
         .items
         .iter()
         .find_map(|item| match item {
             syn::Item::Static(s) if s.ident == "CONFIG" => Some(&*s.expr),
             _ => None,
         })
-        .ok_or_else(|| anyhow::anyhow!("config types: {CORE_PRODUCER_CONFIG} has no `CONFIG`"))?;
+        .ok_or_else(|| anyhow::anyhow!("config types: {core} has no `CONFIG`"))?;
 
     struct Defines<'a> {
         consts: &'a BTreeMap<(String, String), String>,
@@ -145,12 +171,12 @@ fn core_only_keys(repo_root: &Path, java: &[String]) -> Res<Vec<String>> {
     defines.visit_expr(init);
     if !defines.unresolved.is_empty() {
         anyhow::bail!(
-            "config types: {CORE_PRODUCER_CONFIG}: cannot resolve the keys of {}",
+            "config types: {core}: cannot resolve the keys of {}",
             defines.unresolved.join(", ")
         );
     }
     if defines.keys.is_empty() {
-        anyhow::bail!("config types: {CORE_PRODUCER_CONFIG} `CONFIG` defines no keys");
+        anyhow::bail!("config types: {core} `CONFIG` defines no keys");
     }
     let mut out: Vec<String> = defines.keys.into_iter().filter(|k| !java.contains(k)).collect();
     out.sort();
@@ -254,6 +280,82 @@ fn configs_type(repo_root: &Path, keys: &[String]) -> (PathBuf, String) {
     (repo_root.join(JS_SRC).join("producer").join("producer_configs.ts"), text)
 }
 
+/// `src/internal/consumer_config_keys.ts`: the consumer's keys at run time,
+/// Java's then the core's, as `known_keys` writes the producer's.
+fn consumer_known_keys(repo_root: &Path, keys: &[String], core_only: &[String]) -> (PathBuf, String) {
+    let mut text = header(
+        "Java's `ConsumerConfig` (with `SslConfigs` / `SaslConfigs`) and the\n// core's `rust/src/consumer/consumer_config.rs`",
+    );
+    text.push_str(
+        "\n// The consumer config keys (private): those Java's `ConsumerConfig` defines,\n\
+         // then those only the Rust core defines. A key a serde config function\n\
+         // reads still reaches the core when it is one of them.\n\
+         \n\
+         const KEYS: ReadonlySet<string> = new Set([\n",
+    );
+    for k in keys {
+        text.push_str(&format!("  {},\n", js_str(k)));
+    }
+    if !core_only.is_empty() {
+        text.push_str("  // Defined by the Rust core only.\n");
+    }
+    for k in core_only {
+        text.push_str(&format!("  {},\n", js_str(k)));
+    }
+    text.push_str(
+        "]);\n\
+         \n\
+         /**\n \
+         * Whether `key` is a consumer config key, Java's or the core's.\n \
+         *\n \
+         * @param key - the config key\n \
+         * @returns true for a key of Java's consumer configuration or the core's\n \
+         */\n\
+         export function isConsumerConfigKey(key: string): boolean {\n  \
+         return KEYS.has(key);\n\
+         }\n",
+    );
+    (repo_root.join(JS_SRC).join("internal").join("consumer_config_keys.ts"), text)
+}
+
+/// `src/consumer/consumer_configs.ts` and its content: the consumer's keys, as
+/// `configs_type` writes the producer's. `key.deserializer` and
+/// `value.deserializer` are plain keys until the client has its
+/// `Deserializer` interface.
+fn consumer_configs_type(repo_root: &Path, keys: &[String]) -> (PathBuf, String) {
+    let mut text = header("Java's `ConsumerConfig` (with `SslConfigs` / `SaslConfigs`)");
+    text.push_str(
+        "\n/**\n \
+         * A consumer's configuration: Java's `ConsumerConfig` keys, as a plain object\n \
+         * (a `Map` is refused). Each value is written as the string the core parses\n \
+         * (`true` as `\"true\"`, numbers and bigints in decimal, arrays joined with\n \
+         * `,`, anything else by `String()`); `null` and `undefined` leave the key\n \
+         * out. The core checks every key and value, with Java's messages.\n \
+         *\n \
+         * @remarks *(js-only)* The type of the configuration the consumer takes,\n \
+         * Java's `Map<String, Object>` and `Properties` as one. It lists the keys\n \
+         * Java's `ConsumerConfig` defines, for autocompletion, and takes any other\n \
+         * string too, through `(string & {})`, since an unknown key goes to the\n \
+         * core.\n \
+         */\n\
+         export type ConsumerConfigs = {\n  \
+         [key in\n",
+    );
+    for k in keys {
+        text.push_str(&format!("    | {}\n", js_str(k)));
+    }
+    text.push_str(
+        "    // Any other key, keeping the known keys' autocompletion: the core\n    \
+         // lists the keys it does not use.\n    \
+         | (string & {})]?: ConfigValue;\n\
+         };\n\
+         \n\
+         // A value the core parses.\n\
+         type ConfigValue = string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;\n",
+    );
+    (repo_root.join(JS_SRC).join("consumer").join("consumer_configs.ts"), text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,11 +368,19 @@ mod tests {
             .to_path_buf()
     }
 
+    /// The content of the output whose path ends with `path`.
+    fn output<'a>(outputs: &'a [(PathBuf, String)], path: &str) -> &'a str {
+        outputs
+            .iter()
+            .find(|(p, _)| p.ends_with(path))
+            .map(|(_, text)| text.as_str())
+            .unwrap_or_else(|| panic!("no output {path}"))
+    }
+
     #[test]
     fn test_producer_keys() {
         let outputs = outputs(&repo_root()).unwrap();
-        let (path, text) = &outputs[0];
-        assert!(path.ends_with("javascript/src/producer/producer_configs.ts"));
+        let text = output(&outputs, "javascript/src/producer/producer_configs.ts");
         assert!(text.contains("export type ProducerConfigs = {\n  [key in\n"));
         for line in [
             "    | 'bootstrap.servers'\n",
@@ -287,8 +397,7 @@ mod tests {
         // No ConfigDef table: the type names keys only.
         assert!(!text.contains("'LIST'"));
         assert!(!text.contains("max.poll.records"));
-        let (path, text) = &outputs[1];
-        assert!(path.ends_with("javascript/src/internal/producer_config_keys.ts"));
+        let text = output(&outputs, "javascript/src/internal/producer_config_keys.ts");
         assert!(text.contains("  'bootstrap.servers',\n"));
         assert!(text.contains("export function isProducerConfigKey(key: string): boolean {"));
         // The keys only the core defines follow Java's.
@@ -298,9 +407,40 @@ mod tests {
     }
 
     #[test]
+    fn test_consumer_keys() {
+        let outputs = outputs(&repo_root()).unwrap();
+        let text = output(&outputs, "javascript/src/consumer/consumer_configs.ts");
+        assert!(text.contains("export type ConsumerConfigs = {\n  [key in\n"));
+        for line in [
+            "    | 'bootstrap.servers'\n",
+            "    | 'group.id'\n",
+            "    | 'group.protocol'\n",
+            "    | 'key.deserializer'\n",
+            "    | 'ssl.keystore.password'\n",
+            "    | 'sasl.jaas.config'\n",
+            "    | (string & {})]?: ConfigValue;\n",
+        ] {
+            assert!(text.contains(line), "missing {line}");
+        }
+        // The producer's keys are not the consumer's, and no serde key takes a function yet.
+        assert!(!text.contains("'linger.ms'"));
+        assert!(!text.contains("Serializer"));
+        let text = output(&outputs, "javascript/src/internal/consumer_config_keys.ts");
+        assert!(text.contains("  'group.id',\n"));
+        assert!(text.contains("export function isConsumerConfigKey(key: string): boolean {"));
+        // Every key of the core's consumer configuration resolves, one named
+        // through a longer path (`crate::CommonClientConfigs::CLIENT_RACK_CONFIG`)
+        // included.
+        let core = core_only_keys(&repo_root(), CORE_CONSUMER_CONFIG, &[]).unwrap();
+        assert!(core.contains(&"group.protocol".to_string()));
+        assert!(core.contains(&"client.rack".to_string()));
+        assert!(core.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
     fn test_core_only_keys() {
         let java = vec!["bootstrap.servers".to_string(), "acks".to_string()];
-        let keys = core_only_keys(&repo_root(), &java).unwrap();
+        let keys = core_only_keys(&repo_root(), CORE_PRODUCER_CONFIG, &java).unwrap();
         assert!(keys.contains(&"partitioner.type".to_string()));
         assert!(keys.contains(&"linger.ms".to_string()));
         assert!(!keys.contains(&"bootstrap.servers".to_string()));

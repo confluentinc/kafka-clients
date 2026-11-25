@@ -29,7 +29,8 @@
     "SubscriptionPattern.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "ConsumerGroupMetadata.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "GroupProtocol.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
-    "CloseOptions.GroupMembershipOperation.toJSON": "toJSON() on value classes, JavaScript's JSON protocol"
+    "CloseOptions.GroupMembershipOperation.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
+    "src/consumer/consumer_configs.ts:ConsumerConfigs": "the type of the configuration map the consumer takes, Java's Map and Properties as one, its known keys generated from Java's ConsumerConfig"
   },
   "javaTargets": {
     "src/common/header/record_header.ts:RecordHeader": {
