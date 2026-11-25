@@ -14,13 +14,35 @@
 
 /**
  * The public classes of Java's `org.apache.kafka.clients.consumer` this
- * client has: the consumer's value types (`ConsumerRecord`,
- * `ConsumerRecords`, `OffsetAndMetadata`, `OffsetAndTimestamp`,
- * `SubscriptionPattern`, `ConsumerGroupMetadata`, `CloseOptions` and the
- * `GroupProtocol` enum), the interfaces its user implements
- * (`ConsumerRebalanceListener` and `OffsetCommitCallback`), `ConsumerConfig`
- * and the type of a consumer's configuration, and the consumer's error
- * classes, generated from the Java sources.
+ * client has: the `Consumer` interface and `KafkaConsumer`, the consumer's
+ * value types (`ConsumerRecord`, `ConsumerRecords`, `OffsetAndMetadata`,
+ * `OffsetAndTimestamp`, `SubscriptionPattern`, `ConsumerGroupMetadata`,
+ * `CloseOptions` and the `GroupProtocol` enum), the interfaces its user
+ * implements (`ConsumerRebalanceListener` and `OffsetCommitCallback`),
+ * `ConsumerConfig` and the type of a consumer's configuration, and the
+ * consumer's error classes, generated from the Java sources.
+ *
+ * `KafkaConsumer` returns keys and values as Buffers over the memory it
+ * fetched: a key or value you keep holds that whole fetch in memory, so copy
+ * one you keep for long with `Buffer.from(value)`. Electron doesn't allow
+ * external buffers, so on Electron the client copies each consumed key and
+ * value. Every consumer needs `group.protocol: 'consumer'`: the classic
+ * protocol is not supported.
+ *
+ * Not in this release yet: `Consumer` and `KafkaConsumer`'s offset, commit and
+ * metadata calls (`commitSync`, `commitAsync`, `seek`, `seekToBeginning`,
+ * `seekToEnd`, `position`, `committed`, `partitionsFor`, `listTopics`,
+ * `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `currentLag`,
+ * `groupMetadata` and `enforceRebalance`), `subscribe`'s forms with a
+ * `ConsumerRebalanceListener`, and `KafkaConsumer`'s constructor forms with
+ * deserializers, which throw `UnsupportedOperationError`.
+ *
+ * Left out for want of an FFI entry point: `clientInstanceId`,
+ * `registerMetricForSubscription` and `unregisterMetricFromSubscription`.
+ * Left out because the JS conventions take only a `SubscriptionPattern` as a
+ * pattern: the `subscribe(Pattern)` and `subscribe(Pattern,
+ * ConsumerRebalanceListener)` forms; a `RegExp` throws a `TypeError` that
+ * points to `SubscriptionPattern`.
  *
  * `ConsumerConfig` holds Java's constants only, as its `ConfigDef` machinery
  * is not translated: `ConsumerConfig(Properties)`, `ConsumerConfig(Map)`,
@@ -29,9 +51,10 @@
  * constants include those Java's class inherits from `AbstractConfig`, such
  * as `CONFIG_PROVIDERS_CONFIG`.
  *
- * Left out because Java deprecates them: `ConsumerRecords(Map)` and
- * `ConsumerGroupMetadata`'s public constructors; a `ConsumerGroupMetadata`
- * comes from the consumer.
+ * Left out because Java deprecates them: `close(Duration)` (use
+ * `close({ option: CloseOptions.timeout({ timeout }) })`),
+ * `ConsumerRecords(Map)` and `ConsumerGroupMetadata`'s public constructors;
+ * a `ConsumerGroupMetadata` comes from the consumer.
  *
  * @packageDocumentation
  */
