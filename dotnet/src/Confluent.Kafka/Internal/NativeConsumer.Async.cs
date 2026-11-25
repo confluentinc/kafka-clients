@@ -408,6 +408,8 @@ internal sealed partial class NativeConsumer
     {
         if (CheckInAUse(() => LagOfAnUnknownPartition(partition), UseKind.UnownedOnMock))
         {
+            // The mock's 0 needs no native call, but the token is checked as Submit and RouteAsync check it.
+            cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult<long?>(0);
         }
 

@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
@@ -362,6 +363,26 @@ public sealed class PublicConsumerTopicStringTests
         }
 
         Assert.Equal(ok, ((IConsumerCommon)consumer).Assignment());
+    }
+
+    // AsyncMockConsumer answers 0 for a partition it can know nothing of (a null one, a null topic, a NUL topic) without a
+    // native call, but an already cancelled token still ends the call first, as it does for any other partition.
+    [Fact]
+    public async Task OnTheAsyncMock_ACancelledCurrentLag_IsCancelledForAPartitionItAnswersWithZero()
+    {
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(
+            new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        using IDisposable disposal = TestTimeout.Disposal(consumer);
+        using CancellationTokenSource cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        Exception? plain = await Record.ExceptionAsync(() => consumer.CurrentLag(new TopicPartition("x", 0), cancelled.Token));
+        Assert.IsAssignableFrom<OperationCanceledException>(plain);
+        foreach (TopicPartition? partition in new[] { s_nulPartition, new TopicPartition(null!, 0), null })
+        {
+            Assert.Equal(0, await consumer.CurrentLag(partition!, CancellationToken.None));
+            Exception? error = await Record.ExceptionAsync(() => consumer.CurrentLag(partition!, cancelled.Token));
+            Assert.True(error?.GetType() == plain!.GetType(), $"{partition}: {error}");
+        }
     }
 
     // Java finds the first partition that is not assigned in the collection's order, a null one or one with a NUL topic;
