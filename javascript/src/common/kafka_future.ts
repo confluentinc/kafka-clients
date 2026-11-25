@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Java's KafkaFuture, with two value sources behind one class, as the Python
-// client's (python/confluent_kafka/common/kafka_future.py):
+// Java's KafkaFuture, with three value sources behind one class, as the
+// Python client's (python/confluent_kafka/common/kafka_future.py):
 //
 // - a record's future, the one `KafkaProducer.send` resolves to: Java's
 //   FutureRecordMetadata, completed with the record's delivery once its
@@ -22,6 +22,18 @@
 //   record's hand-over (javascript/CLAUDE.md, rule 5), created on first use.
 //   It is never cancelled (`cancel()` answers false), and a timed `get` that
 //   times out rejects with the core's TimeoutError;
+// - an admin RPC's future, a `*Result`'s: Java's KafkaFutureImpl over the
+//   native future the result handed out (native/admin.c). Its untimed wait
+//   (`get_cb`) starts when the Result is made, so the outcome is in JS when
+//   the core completes it, as Java's admin thread completes it: `getNow()`
+//   and `isDone()` are synchronous, and the binding calls no blocking C
+//   function. A future the core completed inside the call (every
+//   MockAdminClient future) shows its outcome on a later turn of the event
+//   loop, not when the call returns: isDone(), isCompletedExceptionally() and
+//   getNow() don't show it yet, and a thenApply or whenComplete registered
+//   then runs later, not inside the call (a deviation, stated on them).
+//   A timed `get` is `get_with_timeout_cb`; `cancel()` cancels the JS future
+//   and its dependants, never the request;
 // - Java's KafkaFutureImpl: `completedFuture`, `allOf` and the dependants of
 //   `thenApply` / `whenComplete`, which can be cancelled; cancelling one
 //   cancels it and its own dependants, never its source.
@@ -63,8 +75,12 @@ const CANCELLED_AS_DEPENDANT = 4;
 // no native handle waits in steps of at most this, rechecking its deadline.
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
-/** The native producer handle a record's future waits through (native/producer.c), opaque to JavaScript. */
-type ProducerHandle = object;
+/**
+ * The native handle a future waits through, opaque to JavaScript: the
+ * producer's for a record's future (native/producer.c), the admin client's
+ * for an admin RPC's (native/admin.c).
+ */
+type NativeHandle = object;
 
 /** What runs when a future completes: its state and outcome (the value, or the failure). */
 type Listener = (state: number, outcome: unknown) => void;
@@ -388,6 +404,10 @@ export abstract class KafkaFuture<T> {
    *   `{function}`
    * @throws `TypeError` when `function` is `null`, `undefined` or not a
    *   function
+   *
+   * @remarks *(deviation)* A function registered right after a
+   * `MockAdminClient` call runs on a later turn, not inside the call (see
+   * `isDone()`).
    */
   abstract thenApply<R>(options: {
     /** The function, called as `function(value)`. */
@@ -429,6 +449,10 @@ export abstract class KafkaFuture<T> {
    *   `{action}`
    * @throws `TypeError` when `action` is `null`, `undefined` or not a
    *   function
+   *
+   * @remarks *(deviation)* An action registered right after a
+   * `MockAdminClient` call runs on a later turn, not inside the call (see
+   * `isDone()`).
    */
   abstract whenComplete(options: {
     /** The action to perform, called as `action(value, error)`. */
@@ -544,6 +568,8 @@ export abstract class KafkaFuture<T> {
    * @throws `IllegalArgumentError` when the given parameters are not
    *   `{valueIfAbsent}` (a bare plain object included)
    * @throws `TypeError` when `valueIfAbsent` is `undefined`
+   *
+   * @remarks *(deviation)* After a `MockAdminClient` call, see `isDone()`.
    */
   abstract getNow(options: {
     /**
@@ -580,6 +606,8 @@ export abstract class KafkaFuture<T> {
    *
    * @returns whether this future failed or was cancelled
    * @throws `TypeError` when it is given an argument: it only reads
+   *
+   * @remarks *(deviation)* See `isDone()`.
    */
   abstract isCompletedExceptionally(): boolean;
 
@@ -589,6 +617,8 @@ export abstract class KafkaFuture<T> {
    *
    * @returns whether this future is done
    * @throws `TypeError` when it is given an argument: it only reads
+   *
+   * @remarks *(deviation)* For `MockAdminClient`, see that class.
    */
   abstract isDone(): boolean;
 
@@ -606,23 +636,26 @@ export abstract class KafkaFuture<T> {
   abstract internalComplete(value: T, error: unknown): boolean;
 
   /**
-   * Sets a record's future's native source: the producer's handle and the
-   * slot of the record's native future, which a wait started before the
-   * delivery reads. Called by
-   * `KafkaProducer` at the hand-over, before the future is handed out.
+   * Sets a future's native source: the client's handle and the slot of the
+   * native future in its table. A record's future is read by a wait started
+   * before the delivery; an admin future's untimed wait is started by its
+   * maker, so only a timed `get` reads the slot. Called by `KafkaProducer` at
+   * the hand-over and by the admin client's Results, before the future is
+   * handed out.
    *
-   * @param producer - the producer's native handle
-   * @param slot - the slot of the record's native future in the producer's table
+   * @param producer - the client's native handle
+   * @param slot - the slot of the native future in the client's table
    * @internal
    */
-  abstract internalSetNative(producer: ProducerHandle, slot: number): void;
+  abstract internalSetNative(producer: NativeHandle, slot: number): void;
 
   /**
    * Records a record's delivery, as its callback saw it, once the callback
    * ran, and completes the future with it, as Java completes the future once
    * onCompletion returned: from then on `get()`, `getNow()` and `isDone()`
    * answer from it, and the native future is read no more. Called by
-   * `KafkaProducer`.
+   * `KafkaProducer`, and by the admin client's Results with the outcome an
+   * admin future's untimed wait read.
    *
    * @param value - the delivery's metadata, when `error` is null
    * @param error - the delivery's error, or null for none
@@ -664,9 +697,10 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
   readonly #record: boolean;
 
   // A record's future: the native future of its hand-over, set at the
-  // hand-over (null for every other future, and for a record's future the
-  // tests build).
-  #native: ProducerHandle | null = null;
+  // hand-over; an admin future: the native future of its Result, until its
+  // untimed wait completed (null for every other future, and for a record's
+  // future the tests build).
+  #native: NativeHandle | null = null;
   // Its slot number in that producer's table of record futures.
   #slot = -1;
 
@@ -929,19 +963,16 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
     return this.#record ? new TimeoutError(`Timeout after waiting for ${millis} ms.`) : new TimeoutError();
   }
 
-  // A timed wait of a record's future, through the FFI's get_with_timeout_cb,
-  // which keeps the time (a negative or zero timeout does not wait): the
-  // core's TimeoutError when the wait timed out, FutureRecordMetadata's.
-  #nativeTimedGet(handle: ProducerHandle, slot: number, millis: number): Promise<T> {
+  // A timed wait of a future over a native one, through the FFI's
+  // get_with_timeout_cb, which keeps the time (a negative or zero timeout
+  // does not wait): the core's TimeoutError when the wait timed out, for a
+  // record's future FutureRecordMetadata's. An admin future's outcome comes
+  // from its untimed wait, which the waiters registered here wait for.
+  #nativeTimedGet(handle: NativeHandle, slot: number, millis: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       if (this.#waiters === null) this.#waiters = [];
       this.#waiters.push(resolve, reject);
-      native.recordFutureGet(handle, slot, millis, (metadata, error, timedOut, failed) => {
-        if (!timedOut) {
-          if (failed) this.#failedWait(error);
-          else this.#completeNative(metadata, error);
-          return;
-        }
+      const onTimeout = (error: unknown, failed: boolean): void => {
         const waiters = this.#waiters;
         const i = waiters?.indexOf(resolve) ?? -1;
         if (waiters === null || i < 0) {
@@ -952,15 +983,32 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
         waiters.splice(i, 2);
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the core's TimeoutError, as Java's get(timeout) throws it, or with the failure to build it
         reject(error);
+      };
+      if (!this.#record) {
+        native.adminFutureGet(handle, slot, millis, (error, timedOut, failed) => {
+          if (timedOut) onTimeout(error, failed);
+          // The outcome comes from the untimed wait: this one's failure only warns.
+          else if (failed) warn(error);
+        });
+        return;
+      }
+      native.recordFutureGet(handle, slot, millis, (metadata, error, timedOut, failed) => {
+        if (!timedOut) {
+          if (failed) this.#failedWait(error);
+          else this.#completeNative(metadata, error);
+          return;
+        }
+        onTimeout(error, failed);
       });
     });
   }
 
   // Starts the untimed native wait of a record's future, once: its
-  // completion completes the future (`#completeNative`).
+  // completion completes the future (`#completeNative`). An admin future's
+  // started when its Result was made.
   #waitNative(): void {
     const handle = this.#native;
-    if (handle === null || this.#nativeWaiting) return;
+    if (handle === null || this.#nativeWaiting || !this.#record) return;
     this.#nativeWaiting = true;
     native.recordFutureGet(handle, this.#slot, null, (metadata, error, timedOut, failed) => {
       this.#nativeWaiting = false;
@@ -1089,23 +1137,24 @@ class KafkaFutureImpl<T> extends KafkaFuture<T> {
     return this.#completeWithError(error, false);
   }
 
-  // The record's native future.
+  // The record's, or the admin RPC's, native future.
   /**
-   * @param producer - the native producer that owns the record's future
-   * @param slot - the record's slot in that producer's table
+   * @param producer - the native client that owns the future
+   * @param slot - the future's slot in that client's table
    *
    * @internal
    */
-  override internalSetNative(producer: ProducerHandle, slot: number): void {
+  override internalSetNative(producer: NativeHandle, slot: number): void {
     // A delivery recorded first: nothing will wait natively.
     if (this.#state !== PENDING) return;
     this.#native = producer;
     this.#slot = slot;
   }
 
-  // The record's delivery, as its callback saw it.
+  // The record's delivery, as its callback saw it, or an admin future's
+  // outcome, as its untimed wait read it.
   /**
-   * @param value - the record's metadata
+   * @param value - the record's metadata, or the admin future's value
    * @param error - the delivery's error, or null for none
    *
    * @internal

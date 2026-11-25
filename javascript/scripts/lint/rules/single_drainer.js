@@ -42,7 +42,10 @@ const { cModel, bodyKey, applyAllowlist } = require('../c_model');
 const { scan, matching } = require('../c_source');
 
 /** The functions allowed to call `__execute_callbacks_err`: the queue's executors. */
-const EXECUTORS = [{ key: 'producer_execute', reason: "the producer's cbq_execute_fn, which cbq_drain alone calls (q->execute)" }];
+const EXECUTORS = [
+  { key: 'producer_execute', reason: "the producer's cbq_execute_fn, which cbq_drain alone calls (q->execute)" },
+  { key: 'admin_execute', reason: "the admin client's cbq_execute_fn, which cbq_drain alone calls (q->execute)" },
+];
 
 /** The functions allowed to call `cbq_drain`. */
 const DRAIN_CALLERS = [
@@ -59,6 +62,21 @@ const DESTROY_CALLERS = [
   {
     key: 'js_mock_producer_create',
     reason: "the mock's constructor's failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists",
+  },
+  {
+    key: 'js_admin_create',
+    reason:
+      "the admin client's constructor's failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists",
+  },
+  {
+    key: 'js_mock_admin_create',
+    reason:
+      "the admin mock's constructors' failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists",
+  },
+  {
+    key: 'js_mock_admin_builder_build',
+    reason:
+      "the admin mock Builder's build's failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists",
   },
 ];
 

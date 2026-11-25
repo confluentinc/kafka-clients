@@ -309,3 +309,23 @@ test("nested types are measured against Java's nested classes, and an interface'
     ["Maker.create: 17 words, more than 150% of the Javadoc's 8 (at most 12) of clients.producer.Maker#create(String)"],
   );
 });
+
+test("an interface's runtime object declared with an object type is measured by that type's signatures", () => {
+  const maker = (/** @type {string} */ text) =>
+    doc('', ['A maker.']) +
+    'export interface Maker {}\n' +
+    doc('', ['Its statics.']) +
+    'export const Maker: {\n' +
+    doc('  ', ['Creates a maker of the name.', '', '@param options - the name']) +
+    '  create(options: { name: string }): Maker;\n' +
+    doc('  ', [text, '', '@param name - the name']) +
+    '  create(name: string): Maker;\n' +
+    '} = {\n  create(options: unknown): Maker { void options; return {}; },\n};\n';
+  assert.equal(lint(fixture({ 'src/producer/maker.ts': maker('The same, the name on its own.') }), [RULE]).status, 0);
+  assert.deepEqual(
+    findings(
+      lint(fixture({ 'src/producer/maker.ts': maker('The same, the name on its own, with many words more than Java has.') }), [RULE]),
+    ),
+    ["Maker.create/2: 17 words, more than 150% of the Javadoc's 8 (at most 12) of clients.producer.Maker#create(String)"],
+  );
+});

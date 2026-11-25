@@ -18,10 +18,15 @@
 // Comments, point 4): no comment of the files the Comments rule covers
 // (scripts/lint/comment_sources.js) cites a Java source line; it names the
 // Java member instead. The forms are the Rust lint's (scripts/lint/java_line.js).
-// One finding per file, as the Rust lint reports it, keyed by the file.
+// One finding per file, as the Rust lint reports it, keyed by the file. It
+// also reads the examples (examples/), which the Comments rule leaves out as
+// user code: no comment there cites a Java source line either.
 
-const { scopeFiles, commentsOf } = require('../comment_sources');
+const { scopeFiles, commentsOf, partOf } = require('../comment_sources');
 const { javaLineRefsOfComments } = require('../java_line');
+
+/** The examples, read beside the Comments rule's files. */
+const EXAMPLES = ['examples'];
 
 module.exports = {
   name: 'check-java-line',
@@ -40,7 +45,12 @@ module.exports = {
     'not by a line of its file: lines move with every Kafka release (.claude/rules/documentation.md §7).',
   check(ctx) {
     const findings = [];
-    const files = scopeFiles(ctx, this.PART);
+    const part = this.PART;
+    const examples = ctx.files(EXAMPLES).filter((rel) => {
+      const p = partOf(rel);
+      return p !== null && (part === 'all' || p === part);
+    });
+    const files = [...scopeFiles(ctx, part), ...examples];
     for (const rel of files) {
       const refs = javaLineRefsOfComments(commentsOf(ctx, rel));
       if (refs.length === 0) continue;

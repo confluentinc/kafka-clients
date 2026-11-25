@@ -38,7 +38,7 @@
 // | String                                       | string                                  |
 // | void, Void                                   | void                                    |
 // | Object                                       | unknown                                 |
-// | Optional<T>, OptionalInt                     | T (or number) | null                    |
+// | Optional<T>, OptionalInt, OptionalLong       | T (or number, bigint) | null            |
 // | Duration; long x, TimeUnit unit (one Duration) | number (milliseconds) or a Temporal.Duration |
 // | byte[], taken                                | Uint8Array (a Buffer is one), never a string |
 // | byte[], returned (a return, a field)         | Buffer                                  |
@@ -58,17 +58,46 @@
 // | Iterable<T>, returned                        | Iterable<T>, or an array of T           |
 // | Set<T>, returned (a constant: read-only)     | Set<T> or ReadonlySet<T>                |
 // | Set<TopicPartition>, returned                | TopicPartitionSet                       |
+// | Set<MemberToRemove>, returned                | MemberToRemoveSet                       |
+// | Set<Uuid>, returned                          | UuidSet                                 |
 // | Map<TopicPartition, V>                       | TopicPartitionMap<V>                    |
 // | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
-// | Map<String, String>, returned                | Map<string, string>                     |
-// | Map<String, String>, taken                   | a Map or ReadonlyMap, or a plain object (Record) of string to string |
+// | Map<Uuid, V>                                 | UuidMap<V>                              |
+// | Map<ConfigResource, V>                       | ConfigResourceMap<V>                    |
+// | Map<TopicPartitionReplica, V>                | TopicPartitionReplicaMap<V>             |
+// | Map<AclBinding, V>                           | AclBindingMap<V>                        |
+// | Map<AclBindingFilter, V>                     | AclBindingFilterMap<V>                  |
+// | Map<ClientQuotaEntity, V>                    | ClientQuotaEntityMap<V>                 |
+// | Map<Integer, V> (broker ids, partitions)     | Map<number, V>, or a ReadonlyMap (taken, or an unmodifiable view returned) |
+// | Map<String, V>, returned                     | Map<string, V>                          |
+// | Map<String, V>, taken                        | a Map or ReadonlyMap, or a plain object (Record) of string to V |
 // | Map, Properties (a client's configuration)   | the `...Configs` configuration type (& its serde keys) |
 // | a type variable                              | a type parameter                        |
 // | a Java class translated in src/              | its TypeScript type                     |
+// | a nested Java class (MockAdminClient.Builder) | the TypeScript class of its name       |
 //
 // Any other Java type is `unmapped`, naming both types.
 
 const { atNode } = require('../location');
+
+/**
+ * The maps keyed by a value class other than TopicPartition and MetricName,
+ * one class per key type (javascript/design/current/producer/DECISIONS.md, entry 38): the
+ * Java key class, and the TypeScript class of its map.
+ */
+const VALUE_KEYED_MAPS = new Map([
+  ['Uuid', 'UuidMap'],
+  ['ConfigResource', 'ConfigResourceMap'],
+  ['TopicPartitionReplica', 'TopicPartitionReplicaMap'],
+  ['AclBinding', 'AclBindingMap'],
+  ['AclBindingFilter', 'AclBindingFilterMap'],
+  ['ClientQuotaEntity', 'ClientQuotaEntityMap'],
+]);
+/** The sets of a value class returned (DECISIONS.md entry 38): the Java member class, and the TypeScript class of its set. */
+const VALUE_KEYED_SETS = new Map([
+  ['MemberToRemove', 'MemberToRemoveSet'],
+  ['Uuid', 'UuidSet'],
+]);
 const { mappedMembers } = require('./java_members');
 const { liveForms, optionName, formOptionNames, signaturesOf } = require('./overload_shape');
 const { waitingMembers } = require('./waiting_call_promise');
@@ -314,6 +343,7 @@ module.exports = {
       // Conventions, Types): null is stripped, T compared.
       if (j.name === 'Optional') return j.args.length === 0 ? true : matches(j.args[0], t);
       if (j.name === 'OptionalInt') return (t.flags & ts.TypeFlags.NumberLike) !== 0;
+      if (j.name === 'OptionalLong') return (t.flags & ts.TypeFlags.BigIntLike) !== 0;
       if (j.name === 'Future' || j.name === 'KafkaFuture') {
         return symbolName(t) === 'KafkaFuture' && (j.args.length === 0 || matches(j.args[0], checker.getTypeArguments(t)[0]) === true);
       }
@@ -322,6 +352,11 @@ module.exports = {
         // members compare by value (javascript/CLAUDE.md, JavaScript Binding
         // Conventions, Types).
         return symbolName(t) === 'TopicPartitionSet';
+      }
+      if (j.name === 'Set' && outward && j.args[0] !== undefined && VALUE_KEYED_SETS.has(j.args[0].name)) {
+        // A set of another value class returned, one class per member type
+        // (javascript/design/current/producer/DECISIONS.md, entry 38).
+        return symbolName(t) === VALUE_KEYED_SETS.get(j.args[0].name);
       }
       if (j.name === 'Set' && outward && ['ReadonlySet', 'Set'].includes(symbolName(t))) {
         // A Set returned is a Set; a constant one a read-only set
@@ -333,10 +368,10 @@ module.exports = {
       if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'TopicPartition') {
         return symbolName(t) === 'TopicPartitionMap' && matches(j.args[1], typeArgs(t)[0]) === true;
       }
-      if (j.name === 'Map' && j.args.length === 2 && j.args.every((a) => a.name === 'String' && a.dims === 0)) {
+      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'String' && j.args[0].dims === 0 && j.args[1].name !== 'Object') {
         // A map keyed by strings: a Map returned; taken, a Map, a ReadonlyMap
-        // or a plain object of string to string (javascript/CLAUDE.md, JavaScript
-        // Binding Conventions, Types, "Other collections taken").
+        // or a plain object of string to its values (javascript/CLAUDE.md,
+        // JavaScript Binding Conventions, Types, "Other collections taken").
         if ((t0.aliasSymbol && t0.aliasSymbol.name.endsWith('Configs')) || symbolName(t).endsWith('Configs')) return true;
         const part = (p) => {
           const n = symbolName(p);
@@ -349,6 +384,22 @@ module.exports = {
           return index !== undefined && matches(j.args[1], index.type) === true;
         };
         return parts(t).every(part);
+      }
+      if (j.name === 'Map' && j.args.length === 2 && VALUE_KEYED_MAPS.has(j.args[0].name)) {
+        // A map keyed by another value class, one class per key type
+        // (javascript/design/current/producer/DECISIONS.md, entry 38).
+        return symbolName(t) === VALUE_KEYED_MAPS.get(j.args[0].name) && matches(j.args[1], typeArgs(t)[0]) === true;
+      }
+      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'Integer' && j.args[0].dims === 0) {
+        // Integer keys (broker ids, partitions) are the number keys of a Map;
+        // a ReadonlyMap is taken, or returned for Java's unmodifiable view
+        // (NewTopic#replicasAssignments).
+        return parts(t).every((p) => {
+          const n = symbolName(p);
+          if (n !== 'Map' && n !== 'ReadonlyMap') return false;
+          const [k, v] = typeArgs(p);
+          return matches(j.args[0], k) === true && matches(j.args[1], v) === true;
+        });
       }
       if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'MetricName') {
         return symbolName(t) === 'MetricNameMap' && matches(j.args[1], typeArgs(t)[0]) === true;
@@ -381,6 +432,9 @@ module.exports = {
           return e !== undefined && matchesElement(header, e) === true;
         });
       }
+      // A nested class is a class of the namespace merged with its outer
+      // class's, exported with it (Names): its TypeScript name is Java's.
+      if (!tsNames.has(j.name) && t.symbol && t.symbol.flags & ts.SymbolFlags.Class && t.symbol.name === j.name) return true;
       if (tsNames.has(j.name)) {
         const want = tsNames.get(j.name);
         return symbolName(t) === want || parts(t).every((p) => symbolName(p) === want || checker.typeToString(p) === want);
@@ -470,12 +524,11 @@ module.exports = {
         continue;
       }
       if (jm.kind === 'field') continue;
-      const forms = liveForms(jm.overloads);
+      const forms = liveForms(jm.overloads, `${jm.owner.fqn}#${jm.name}`);
       const names = formOptionNames(forms);
-      // The bare value's name: the one parameter of the one-parameter forms
-      // (one name only; src/internal/args.ts gives no bare value otherwise).
+      // The bare values' names: the one parameter of each one-parameter form
+      // (several names told apart by type, src/internal/args.ts `bareTypes`).
       const bareNames = [...new Set(forms.filter((f) => f.params.length === 1).map((f) => names[forms.indexOf(f)][0]))];
-      const bareName = bareNames.length === 1 ? bareNames[0] : null;
       // Every signature: the overload signatures, else the implementation.
       signaturesOf(ts, m.node).forEach((node, n) => {
         const where = n === 0 ? subject : `${subject}#${n + 1}`;
@@ -495,7 +548,8 @@ module.exports = {
           if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking, awaited });
         }
         const p0 = params.length === 1 ? params[0] : null;
-        if (p0 !== null && bareName !== null && ts.isIdentifier(p0.name) && p0.name.text === bareName) {
+        const bareName = p0 !== null && ts.isIdentifier(p0.name) && bareNames.includes(p0.name.text) ? p0.name.text : null;
+        if (bareName !== null) {
           // The bare value of the one-parameter forms: against their Java types.
           const types = forms.filter((f, k) => f.params.length === 1 && names[k][0] === bareName).map((f) => f.types[0]);
           const bare = unwrapBare(checker.getTypeAtLocation(p0));
@@ -506,9 +560,18 @@ module.exports = {
           return;
         }
         const options = p0 === null ? null : strip(checker.getTypeAtLocation(p0));
+        // An object whose keys are all the forms' parameter names is the
+        // options object too, as the admin clients' `{ options }` form of an
+        // RPC Java's class declares in one form (the interface's default
+        // declares the other).
+        const formNames = new Set(names.flat());
+        const keyedByParams =
+          options !== null &&
+          checker.getPropertiesOfType(options).length > 0 &&
+          checker.getPropertiesOfType(options).every((prop) => formNames.has(prop.name));
         const isOptions =
           options !== null &&
-          (forms.length > 1 || (ts.isIdentifier(p0.name) && p0.name.text === 'options')) &&
+          (forms.length > 1 || (ts.isIdentifier(p0.name) && p0.name.text === 'options') || keyedByParams) &&
           (options.flags & ts.TypeFlags.Object) !== 0 &&
           !options.isUnion() &&
           !checker.isArrayType(options) &&
@@ -518,11 +581,25 @@ module.exports = {
           // An options object (check-overload-shape checks its names): each
           // option against the union of the Java types the forms naming it
           // give; a name closed with `never` is no option of this signature.
+          // When the signature's keys are exactly some forms' parameter
+          // names, only those forms count, so a signature for one Java form
+          // takes only that form's types (UserScramCredentialUpsertion's salt
+          // form: a byte[] password, not the String form's).
+          const isNever = (prop) =>
+            (checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(prop, p0)).flags & ts.TypeFlags.Never) !== 0;
+          const keys = checker
+            .getPropertiesOfType(options)
+            .filter((prop) => !isNever(prop))
+            .map((prop) => prop.name);
+          const exact = forms
+            .map((f, k) => k)
+            .filter((k) => names[k].length === keys.length && keys.every((key) => names[k].includes(key)));
+          const counted = exact.length > 0 ? exact : forms.map((f, k) => k);
           for (const prop of checker.getPropertiesOfType(options)) {
+            if (isNever(prop)) continue;
             const type = checker.getTypeOfSymbolAtLocation(prop, p0);
-            if (checker.getNonNullableType(type).flags & ts.TypeFlags.Never) continue;
             const types = [];
-            forms.forEach((f, k) => names[k].forEach((x, i) => x === prop.name && types.push(f.types[i])));
+            counted.forEach((k) => names[k].forEach((x, i) => x === prop.name && types.push(forms[k].types[i])));
             if (types.length > 0) check(where, `option ${prop.name}`, types, type);
           }
         } else if (sameArity) {

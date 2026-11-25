@@ -51,6 +51,10 @@ static napi_value js_fault_next(napi_env env, napi_callback_info info) {
     return NULL;
 }
 
+static napi_value js_admin_stats(napi_env env, napi_callback_info info) {
+    return NULL;
+}
+
 napi_value addon_init(napi_env env, napi_value exports) {
     napi_property_descriptor props[] = {
         {"probe", NULL, js_probe, NULL, NULL, NULL, napi_default, NULL},
@@ -59,6 +63,7 @@ napi_value addon_init(napi_env env, napi_value exports) {
         {"errorStats", NULL, js_error_stats, NULL, NULL, NULL, napi_default, NULL},
         {"recordSpy", NULL, js_record_spy, NULL, NULL, NULL, napi_default, NULL},
         {"faultNext", NULL, js_fault_next, NULL, NULL, NULL, napi_default, NULL},
+        {"adminStats", NULL, js_admin_stats, NULL, NULL, NULL, napi_default, NULL},
         {"flush", NULL, js_flush, NULL, NULL, NULL, napi_default, NULL},
         {"pump", NULL, js_pump, NULL, NULL, NULL, napi_default, NULL},
         {"setFactories", NULL, js_setup, NULL, NULL, NULL, napi_default, NULL},
@@ -95,6 +100,7 @@ const NATIVE_TS = `interface Native {
   errorStats(): object;
   recordSpy(arm: boolean): object[];
   faultNext(step: string | null): string | null;
+  adminStats(): object;
   flush(done: () => void): void;
   pump(): void;
   setFactories(): void;
@@ -131,6 +137,7 @@ const FILES = {
     "const native = require('../../dist/internal/native');\nnative.producerStats();\nnative.errorStats();\nnative.headerStats();\n",
   'test/memory/record_read_back.test.js': "const native = require('../../dist/internal/native');\nnative.recordSpy(false);\n",
   'test/unit/producer/kafka_producer.test.js': "const native = require('../../../dist/internal/native');\nnative.faultNext(null);\n",
+  'test/unit/admin/kafka_admin_client.test.js': "const native = require('../../../dist/internal/native');\nnative.adminStats();\n",
 };
 
 module.exports = { FILES, ADDON, PRODUCER_C, NATIVE_TS, PRODUCER_TS };
