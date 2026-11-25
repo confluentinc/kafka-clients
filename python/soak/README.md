@@ -315,10 +315,11 @@ Notes on specific metrics:
   and "we were blocked locally".
 * **The metrics JSONL is not rotated, and the operator must size the disk for
   it.** Roughly 2.5 KB per 10 s window ≈ **22 MB/day/soak ≈ 315 MB over 14
-  days**, so ≈**1.3 GB for the four variants** on one box. The log *is* bounded
-  (50 MB + one `.prev.bz2`); the metrics file is deliberately not, because it is
-  the analysis artifact and losing the early windows would defeat drift
-  detection.
+  days**, so ≈**1.3 GB for the four variants** on one box. The log *is* bounded:
+  50 MB live, plus rotated copies compressed with bzip2 and kept for at most
+  `SOAK_LOG_KEEP_DAYS` (14) and `SOAK_LOG_KEEP_BYTES` (2 GiB by default) in
+  all. The metrics file is deliberately not, because it is the analysis artifact
+  and losing the early windows would defeat drift detection.
 * **`disconnect` / `coordinator_move` are best-effort classifications** of the
   errors `poll()` / `commit()` raise, by protocol error code
   (`NotCoordinator`/`CoordinatorNotAvailable`/`CoordinatorLoadInProgress` vs
@@ -587,15 +588,15 @@ reference and `unity` only backs the C unit tests; neither is a prerequisite of
 `cargo build --features ffi`.
 
 **`run.sh`** supervises one child: restarts it if it exits, rotates the log
-above 50 MB (bzip2, keeping one `.prev.bz2`), and stops it cleanly on
-SIGINT/SIGTERM.
+above 50 MB without stopping it (bzip2, keeping at most 14 days and 2 GiB of
+rotated logs), and stops it cleanly on SIGINT/SIGTERM.
 
 ### Exit codes and the restart policy
 
 The child's exit code is a contract, because the worst failure mode for an
 unattended soak is a *permanently* broken child restarted every few seconds: the
-process table looks healthy, and each restart bzip2s a 2 KB fragment over the
-single `.prev.bz2` and deletes the log, destroying the evidence of why it died.
+process table looks healthy while nothing is being tested, and the reason it
+died is buried under the output of every restart since.
 
 | code | meaning | supervisor |
 |---|---|---|
@@ -623,9 +624,31 @@ On top of that:
   that bypasses `main()`'s handlers) rather than message loss. The pre-flight
   closes the common startup case, not the general one. Read the `SUMMARY` line:
   a genuine loss report always has one, with `missed=` non-zero.
-* **Rotation only happens when the log is actually at the limit**, or when the
-  supervisor itself stopped the child *for* rotation. A crash never rotates, so
-  the evidence survives.
+* **Rotation never stops the child, and only happens when the log is actually
+  at the limit.** `run.sh` copies the log to `<log>.<UTC time>.partial`, then,
+  in one step, appends whatever the child wrote during the copy, renames the
+  copy to `<log>.<UTC time>` and truncates the log, while the child keeps
+  writing. Only a line landing in the instant between the last read and the
+  truncate can be lost. This relies on the child's output being opened with
+  `>>` (`O_APPEND`): with `>`, the child would carry on at its old offset and
+  leave a file of NULs as large as the old log. A `.partial` copy left by a
+  `run.sh` killed mid-rotation is deleted at the next start, because everything
+  in it is still in the log. A crash never rotates, so its output stays in the
+  live log, where an operator looks first.
+* **Rotated logs are compressed one at a time, and their total is bounded.**
+  One background job compresses them with bzip2 at `nice 19`, through a
+  temporary file, so a compression cut short never leaves a truncated `.bz2`:
+  the log is compressed again later. Rotated logs are deleted once they are
+  older than `SOAK_LOG_KEEP_DAYS` (14), or, oldest first, once together they
+  are larger than `SOAK_LOG_KEEP_BYTES` (twice the limit, and at least 2 GiB).
+  The size cap never deletes the newest, which may not be compressed yet.
+  These settings are plain whole numbers (`1073741824`, not `1G`); `run.sh`
+  refuses to start on anything else.
+* **Rotation never fills the disk.** The copy needs as much space again as the
+  log, on a disk the other soaks share, so `run.sh` postpones a rotation that
+  would leave less than `SOAK_LOG_MIN_FREE_BYTES` (1 GiB) free, says so once,
+  and checks again every 60 s; meanwhile the log just grows. If the copy fails
+  anyway, the log is left alone and rotation is retried every 60 s.
 * **Consecutive rapid failures are bounded.** A child that lives less than
   `SOAK_RAPID_FAILURE_SECONDS` (60) counts as a rapid failure; the restart delay
   doubles from `SOAK_RESTART_DELAY` (5 s) up to `SOAK_RESTART_DELAY_MAX` (300 s),
@@ -647,7 +670,8 @@ Two deliberate fixes versus the Python version:
 
 Consequently the child writes straight to a plain log file rather than
 streaming through `tee /dev/tty | bzip2`; compression happens at rotation, and
-the live view is `tail -f` on the log. The metrics JSONL is opened in **append**
+the live view is `tail -f` on the log, which keeps following it across
+rotations because the file is truncated in place rather than replaced. The metrics JSONL is opened in **append**
 mode, so a restart adds to the series instead of truncating it.
 
 ## Tests
