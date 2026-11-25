@@ -31,7 +31,8 @@ name: build-test-release
 #      and SASL_SSL, including the gRPC multilanguage arm (__grpc_c /
 #      __grpc_python / __grpc_dotnet); the PLAINTEXT arm of each binding runs
 #      in a job of its own, and the .NET one again against Native AOT builds of
-#      the .NET gRPC images. The .NET gRPC images are built for
+#      the .NET gRPC images; and the Rust admin examples test against the .NET
+#      admin examples, in a job of its own. The .NET gRPC images are built for
 #      linux/amd64: Grpc.Tools' linux_arm64 protoc SIGSEGVs during C# codegen
 #      inside an arm64 Linux container, so they need an amd64 Linux agent
 #      (which this block uses anyway).
@@ -251,7 +252,8 @@ blocks:
     #     the gRPC arm (ctest; the pytest unit and broker-backed binding tests,
     #     the soak and verifiable-clients tests; the dotnet test unit and
     #     integration tests and the soak tests), and the Python and .NET perf
-    #     suites. Each folder's `verify` is that plus the arm. The Python and
+    #     suites. Each folder's `verify` is that plus the arm (and, for .NET,
+    #     the admin examples). The Python and
     #     .NET checks that are not tests (mypy, the static checks, dotnet
     #     format, the examples' build) run in "Python additional checks" and
     #     ".NET additional checks", in parallel, as Rust's do.
@@ -270,6 +272,11 @@ blocks:
     #     the PLAINTEXT job is enough. The four .NET gRPC arm
     #     jobs install no host .NET: the gRPC images, the Native AOT ones
     #     included, build inside a .NET SDK image, and the harness is Rust.
+    #   - Admin examples, for .NET only: `make -C dotnet
+    #     test-examples-integration-dotnet` — the Rust harness's admin examples
+    #     test (rust/tests/integration/admin_examples_test.rs) run against the
+    #     .NET admin examples, which it starts with the host .NET over the
+    #     PLAINTEXT listener; the verify-rust jobs run it against the Rust ones.
     #
     # The block's 45 minutes is the Rust jobs' limit; each binding job sets its
     # own (a job's limit may not exceed its block's, see the note at the top of
@@ -389,6 +396,15 @@ blocks:
             minutes: 45
           commands:
             - make -C dotnet test-integration-sasl-ssl
+        - name: "verify-dotnet (Linux amd64) — admin examples"
+          execution_time_limit:
+            minutes: 30
+          commands:
+            - ./.semaphore/install-dotnet.sh
+            - export DOTNET_ROOT="$HOME/.dotnet"
+            - export PATH="$HOME/.dotnet:$PATH"
+            - export DOTNET_MULTILEVEL_LOOKUP=0
+            - make -C dotnet test-examples-integration-dotnet
 
   - name: "Verify Rust and language bindings (macOS arm64)"
     # verify-rust runs the native Rust unit, integration and perf tests
