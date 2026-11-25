@@ -29,7 +29,7 @@ namespace Confluent.Kafka.UnitTests;
 #if NET8_0_OR_GREATER
 
 /// <summary>
-/// The async <c>Poll</c>'s per-record receive allocation on <see cref="AsyncMockConsumer{TKey, TValue}"/>: with the
+/// The async <c>Poll</c>'s per-record receive allocation on <see cref="AsyncKafkaConsumer{TKey, TValue}"/>: with the
 /// built-in deserializers it stays within its measured budget, less than one object over the sync <c>Poll</c>'s
 /// cost, and an awaited deserializer adds one small manager per key or value with bytes, and no copy of them.
 /// </summary>
@@ -146,8 +146,8 @@ public sealed class PublicAsyncConsumerAllocationBudgetTests
 
     private static async Task<long> MeasureBuiltInPoll(int recordCount, byte[] key, byte[] value)
     {
-        AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncKafkaConsumer<byte[], byte[]> consumer =
+            DecodingConsumers.CreateAsync<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await Ready(consumer, recordCount, key, value);
 
@@ -165,7 +165,7 @@ public sealed class PublicAsyncConsumerAllocationBudgetTests
     {
         SamplingDeserializer keys = new SamplingDeserializer();
         SamplingDeserializer values = new SamplingDeserializer();
-        AsyncMockConsumer<object, object> consumer = new AsyncMockConsumer<object, object>(keys, values);
+        AsyncKafkaConsumer<object, object> consumer = DecodingConsumers.CreateAsync<object, object>(keys, values);
         await using IAsyncDisposable consumerDisposal = TestTimeout.AsyncDisposal(consumer);
         await Ready(consumer, recordCount, new byte[size], new byte[size]);
 
@@ -181,7 +181,7 @@ public sealed class PublicAsyncConsumerAllocationBudgetTests
     }
 
     private static async Task Ready<TKey, TValue>(
-        AsyncMockConsumer<TKey, TValue> consumer, int recordCount, byte[] key, byte[] value)
+        AsyncKafkaConsumer<TKey, TValue> consumer, int recordCount, byte[] key, byte[] value)
     {
         TopicPartition partition = new TopicPartition(Topic, Partition);
         await TestTimeout.Run(() => consumer.Assign(new[] { partition }), s_deadline);

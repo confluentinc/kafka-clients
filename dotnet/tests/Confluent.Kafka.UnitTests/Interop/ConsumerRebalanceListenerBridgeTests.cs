@@ -61,6 +61,9 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
     private static readonly TimeSpan s_collectPause = TimeSpan.FromMilliseconds(20);
 
+    // These tests add no typed record, so the rebalance's record table is a fresh, empty one.
+    private static MockRecordSlots<byte[], byte[]> NoRecords() => new MockRecordSlots<byte[], byte[]>();
+
     /// <summary>The listener method a theory drives.</summary>
     public enum Method
     {
@@ -245,7 +248,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
 
         for (int i = 0; i < 200; i++)
         {
-            consumer.Rebalance(new[] { new TopicPartition(Topic, i % 4) });
+            consumer.Rebalance(new[] { new TopicPartition(Topic, i % 4) }, NoRecords());
         }
 
         Assert.Equal(200, listener.Assigned.Count);
@@ -265,7 +268,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
-            consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
+            consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }, NoRecords());
         }
 
         Assert.Equal(50, listener.Assigned.Count);
@@ -344,7 +347,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Assert.True(first.IsReleased);
         Assert.False(secondRegistration.IsReleased);
 
-        consumer.Rebalance(new[] { new TopicPartition(Topic, 0) });
+        consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }, NoRecords());
         Assert.Single(second.Assigned);
     }
 
@@ -421,7 +424,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Assert.False(firstRegistration.IsReleased);
         Assert.False(secondRegistration.IsReleased);
 
-        TestTimeout.Run(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }), s_deadline);
+        TestTimeout.Run(() => consumer.Rebalance(new[] { new TopicPartition(Topic, 0) }, NoRecords()), s_deadline);
 
         Assert.Empty(first.Assigned);
         Assert.Equal(new[] { new TopicPartition(Topic, 0) }, Assert.Single(second.Assigned));
@@ -453,7 +456,7 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         Assert.False(secondRegistration.IsReleased);
 
         await TestTimeout.Run(
-            () => consumer.RebalanceWithCallback(new[] { new TopicPartition(Topic, 0) }), s_deadline);
+            () => consumer.RebalanceWithCallback(new[] { new TopicPartition(Topic, 0) }, NoRecords()), s_deadline);
 
         Assert.Empty(first.Assigned);
         Assert.Equal(new[] { new TopicPartition(Topic, 0) }, Assert.Single(second.Assigned));
@@ -851,11 +854,11 @@ public sealed class ConsumerRebalanceListenerBridgeTests
         TopicPartition[] assignment = { new TopicPartition(Topic, 0) };
         if (form == Form.Sync)
         {
-            TestTimeout.Run(() => consumer.Rebalance(assignment), s_deadline);
+            TestTimeout.Run(() => consumer.Rebalance(assignment, NoRecords()), s_deadline);
         }
         else
         {
-            await TestTimeout.Run(() => consumer.RebalanceWithCallback(assignment), s_deadline);
+            await TestTimeout.Run(() => consumer.RebalanceWithCallback(assignment, NoRecords()), s_deadline);
         }
 
         Assert.Empty(AssignedTo(firstListener));

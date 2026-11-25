@@ -46,7 +46,7 @@ namespace Confluent.Kafka.Consumer;
 /// </para>
 /// <para>
 /// A <see cref="KafkaConsumer{TKey, TValue}"/> disposes its deserializers, given or built from its configuration,
-/// when it closes, as its <c>Create</c> says; a <see cref="MockConsumer{TKey, TValue}"/> does not.
+/// when it closes, as its <c>Create</c> says; a <see cref="MockConsumer{TKey, TValue}"/> holds none.
 /// </para>
 /// <para>
 /// Java's <c>clientInstanceId(Duration)</c>, <c>registerMetricForSubscription(KafkaMetric)</c> and

@@ -470,7 +470,9 @@ public sealed class RecordHeadersTests
 
     private static IReadOnlyList<ConsumerRecord<byte[], byte[]>> PollMockRecords(int count)
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        // The real consumer over the C mock: the headers it hands out are the ones it decoded.
+        KafkaConsumer<byte[], byte[]> consumer =
+            DecodingConsumers.Create(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);

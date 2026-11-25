@@ -76,6 +76,7 @@ only if that friction bites — cheap and non-breaking.
 | `T **` out-param / array | `ref IntPtr` set to `IntPtr.Zero` / `IntPtr[]` | e.g. `out_err`; `get_all` arrays. |
 | `kafka_Bytes_t` (`const uint8_t *data`, `int32_t len`) | `[StructLayout(LayoutKind.Sequential)] struct` (`KafkaBytes`) | Fixed-width ⇒ identical layout. A record (`ProducerRecord_t`) and its builder are opaque `*_t *` handles, not mirrored (§A2). |
 | `void (*cb)(...)` / `void *` | Cdecl delegate, kept alive (§A6/§B6) / `IntPtr` (`GCHandle`) | |
+| generic `void *` slot the core never reads | `IntPtr` carrying an integer id that the binding resolves | Never dereferenced, on either side; needs no `GCHandle`. First use: the mock consumers' key and value (ledger 627). |
 
 **Rule:**
 

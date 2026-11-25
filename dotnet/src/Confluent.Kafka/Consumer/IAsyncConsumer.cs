@@ -52,7 +52,9 @@ namespace Confluent.Kafka.Consumer;
 /// interrupts, a cancel sends <c>wakeup()</c> so that the operation ends sooner; on the others it sends none.
 /// Either way, once the token has fired the <see cref="Task"/> ends with
 /// <see cref="OperationCanceledException"/> when the operation has ended. A token already cancelled at the
-/// call throws <see cref="OperationCanceledException"/> before anything is sent.
+/// call throws <see cref="OperationCanceledException"/> before anything is sent. One exception:
+/// <see cref="AsyncMockConsumer{TKey, TValue}"/>'s <c>Poll</c> returns a batch its mock already delivered instead of
+/// ending cancelled, as Java's mock has delivered it.
 /// </para>
 /// <para>
 /// <see cref="IAsyncDisposable.DisposeAsync"/> closes and then frees the consumer;
@@ -60,7 +62,7 @@ namespace Confluent.Kafka.Consumer;
 /// form to prefer. Both swallow a close error and are idempotent.
 /// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> disposes its deserializers, given or built from its
 /// configuration, when it closes, through <see cref="IAsyncDisposable"/> only, as its <c>Create</c> says; an
-/// <see cref="AsyncMockConsumer{TKey, TValue}"/> does not.
+/// <see cref="AsyncMockConsumer{TKey, TValue}"/> holds none.
 /// </para>
 /// <para>
 /// Java's <c>clientInstanceId(Duration)</c>, <c>registerMetricForSubscription(KafkaMetric)</c> and
@@ -83,7 +85,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// Cancels the wait: <c>wakeup()</c> is sent, and the <see cref="Task"/> ends with
     /// <see cref="OperationCanceledException"/> once the operation has ended. An awaited deserializer is given the
     /// token; when it fires while a batch is deserialized, the consumer seeks back to the batch's first records, so
-    /// the next poll returns them.
+    /// the next poll returns them. <see cref="AsyncMockConsumer{TKey, TValue}"/> instead returns a batch its mock
+    /// already delivered, as Java's mock has delivered it.
     /// </param>
     /// <returns>The records polled, as an owned <see cref="ConsumerRecords{TKey, TValue}"/>.</returns>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>

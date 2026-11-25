@@ -534,7 +534,7 @@ public sealed class PublicMockProducerTransactionControlTests
 
     private static ConsumerGroupMetadata GroupMetadata()
     {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         return consumer.GroupMetadata();
     }
 

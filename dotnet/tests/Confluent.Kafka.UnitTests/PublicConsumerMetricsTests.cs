@@ -43,7 +43,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_AsyncMock_IsEmpty()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         IReadOnlyDictionary<MetricName, IMetric> metrics = consumer.Metrics();
         Assert.NotNull(metrics);
@@ -53,7 +53,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_SyncMock_IsEmpty()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         Assert.Empty(consumer.Metrics());
     }
@@ -107,7 +107,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         TestTimeout.Dispose(consumer);
         Assert.Throws<IllegalStateException>(() => consumer.Metrics());
     }
@@ -115,7 +115,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public async Task Metrics_AfterDisposeAsync_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         await TestTimeout.DisposeAsync(consumer);
         Assert.Throws<IllegalStateException>(() => consumer.Metrics());
     }
@@ -123,7 +123,7 @@ public sealed class PublicConsumerMetricsTests
     [Fact]
     public void Metrics_ReachableViaIConsumerCommon()
     {
-        MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         IConsumerCommon consumer = mock;
         Assert.Empty(consumer.Metrics());

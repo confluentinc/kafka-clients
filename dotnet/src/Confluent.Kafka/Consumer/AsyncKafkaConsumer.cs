@@ -189,6 +189,28 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         ConfiguredSerdes<IAsyncDeserializer<TKey>, IAsyncDeserializer<TValue>> deserializers) =>
         new AsyncKafkaConsumer<TKey, TValue>(await native.ConfigureAwait(false), deserializers.Key, deserializers.Value);
 
+    /// <summary>
+    /// The consumer over the C mock instead of a client, for the binding's decode tests: the deserializers are
+    /// checked, built and owned as <see cref="Create(IReadOnlyDictionary{string, object}, IAsyncDeserializer{TKey}, IAsyncDeserializer{TValue}, CancellationToken)"/>
+    /// does, and the records the test adds through <see cref="Native"/> are decoded by <see cref="Poll"/> as fetched
+    /// ones are.
+    /// </summary>
+    internal static Task<AsyncKafkaConsumer<TKey, TValue>> CreateOverMock(
+        IReadOnlyDictionary<string, object?> configs,
+        IAsyncDeserializer<TKey>? keyDeserializer,
+        IAsyncDeserializer<TValue>? valueDeserializer,
+        string? autoOffsetReset,
+        CancellationToken cancellationToken = default)
+    {
+        ConfiguredSerdes<IAsyncDeserializer<TKey>, IAsyncDeserializer<TValue>> deserializers =
+            ConfiguredSerdes.AsyncDeserializers(configs, keyDeserializer, valueDeserializer);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Created(NativeConsumer.CreateMockAwaited(autoOffsetReset, deserializers, cancellationToken), deserializers);
+    }
+
+    /// <summary>The consumer's core, which a test built by <see cref="CreateOverMock"/> adds records through.</summary>
+    internal NativeConsumer Native => _native;
+
     /// <inheritdoc/>
     public Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
         _native.PollWithCallback(

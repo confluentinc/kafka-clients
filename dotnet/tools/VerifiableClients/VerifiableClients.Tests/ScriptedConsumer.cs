@@ -36,7 +36,7 @@ internal sealed class ScriptedConsumer : IConsumer<string, string>
 
     internal ScriptedConsumer(params Exception[] commitErrors)
     {
-        Mock = new MockConsumer<string, string>(new StringDeserializer(), new StringDeserializer(), "earliest");
+        Mock = new MockConsumer<string, string>("earliest");
         _commitErrors = new Queue<Exception>(commitErrors);
     }
 

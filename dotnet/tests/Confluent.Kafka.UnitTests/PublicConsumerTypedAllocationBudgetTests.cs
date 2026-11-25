@@ -25,7 +25,7 @@ namespace Confluent.Kafka.UnitTests;
 #if NET8_0_OR_GREATER
 
 /// <summary>
-/// The typed poll's per-record receive allocation on <see cref="MockConsumer{TKey, TValue}"/>: a value deserialized
+/// The typed poll's per-record receive allocation on <see cref="KafkaConsumer{TKey, TValue}"/>: a value deserialized
 /// to its span length is never copied, so a 64 KiB value costs no more per record than a 16-byte one.
 /// </summary>
 /// <remarks>
@@ -73,8 +73,8 @@ public sealed class PublicConsumerTypedAllocationBudgetTests
         byte[] key = new byte[8];
         byte[] value = new byte[valueSize];
 
-        MockConsumer<byte[], int> consumer =
-            new MockConsumer<byte[], int>(Serdes.ByteArray().Deserializer(), valueDeserializer);
+        KafkaConsumer<byte[], int> consumer =
+            DecodingConsumers.Create<byte[], int>(Serdes.ByteArray().Deserializer(), valueDeserializer);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);

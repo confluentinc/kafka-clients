@@ -19,7 +19,9 @@ using System.Text;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
-using Confluent.Kafka.Common.Serialization;
+using Confluent.Kafka.Common.Header;
+using Confluent.Kafka.Common.Header.Internals;
+using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Consumer;
 
 using Xunit;
@@ -27,9 +29,11 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
-/// The mock consumers' Java helpers: <c>updateDurationOffsets</c>, <c>setMaxPollRecords</c>,
-/// <c>setOffsetsException</c>, <c>scheduleNopPollTask</c>, <c>lastPollTimeout</c> and <c>closed</c>, from Java's
-/// <c>MockConsumerTest</c> where it has a case.
+/// Java's <c>MockConsumerTest</c> case by case, on the typed records Java adds, and the mock consumers' Java helpers
+/// (<c>updateDurationOffsets</c>, <c>setMaxPollRecords</c>, <c>setOffsetsException</c>, <c>scheduleNopPollTask</c>,
+/// <c>lastPollTimeout</c>, <c>closed</c>) where Java has no case. Java's <c>testRebalanceListener</c> and the
+/// <c>losePartitions</c> cases are in <see cref="PublicConsumerRebalanceListenerTests"/>,
+/// <c>testRe2JPatternSubscription</c> in <see cref="PublicConsumerPatternSubscribeTests"/>.
 /// </summary>
 public sealed class PublicMockConsumerJavaHelpersTests
 {
@@ -44,47 +48,155 @@ public sealed class PublicMockConsumerJavaHelpersTests
     private static readonly TopicPartition s_test1 = new TopicPartition("test", 1);
 
     [Fact]
+    public void TestSimpleMock()
+    {
+        MockConsumer<string, string> consumer = new MockConsumer<string, string>(Earliest);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Subscribe(new[] { "test" });
+        Assert.Equal(0, consumer.Poll(TimeSpan.Zero).Count());
+        consumer.Rebalance(new[] { s_test0, s_test1 });
+        // Mock consumers need to seek manually since they cannot automatically reset offsets
+        consumer.UpdateBeginningOffset("test", 0, 0L);
+        consumer.UpdateBeginningOffset("test", 1, 0L);
+        consumer.Seek(s_test0, 0);
+        ConsumerRecord<string, string> rec1 = Record(0, "key1", "value1");
+        ConsumerRecord<string, string> rec2 = Record(1, "key2", "value2");
+        consumer.AddRecord(rec1);
+        consumer.AddRecord(rec2);
+
+        ConsumerRecords<string, string> recs = Poll(consumer);
+
+        AssertSameRecords(new[] { rec1, rec2 }, recs);
+        Assert.Equal(2L, consumer.Position(s_test0));
+        Assert.Single(recs.NextOffsets());
+        Assert.Equal(new OffsetAndMetadata(2, null, ""), recs.NextOffsets()[s_test0]);
+        consumer.Commit();
+        Assert.Equal(2L, consumer.Committed(new[] { s_test0 })[s_test0]!.Offset());
+    }
+
+    [Fact]
+    public async Task TestSimpleMock_Async()
+    {
+        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(Earliest);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        await consumer.Subscribe(new[] { "test" });
+        Assert.Equal(0, (await consumer.Poll(TimeSpan.Zero)).Count());
+        await consumer.Rebalance(new[] { s_test0, s_test1 });
+        consumer.UpdateBeginningOffset("test", 0, 0L);
+        consumer.UpdateBeginningOffset("test", 1, 0L);
+        await consumer.Seek(s_test0, 0);
+        ConsumerRecord<string, string> rec1 = Record(0, "key1", "value1");
+        ConsumerRecord<string, string> rec2 = Record(1, "key2", "value2");
+        consumer.AddRecord(rec1);
+        consumer.AddRecord(rec2);
+
+        ConsumerRecords<string, string> recs = await PollAsync(consumer);
+
+        AssertSameRecords(new[] { rec1, rec2 }, recs);
+        Assert.Equal(2L, await consumer.Position(s_test0));
+        Assert.Equal(new OffsetAndMetadata(2, null, ""), Assert.Single(recs.NextOffsets()).Value);
+        await consumer.Commit();
+        Assert.Equal(2L, (await consumer.Committed(new[] { s_test0 }))[s_test0]!.Offset());
+    }
+
+    [Fact]
+    public void TestConsumerRecordsIsEmptyWhenReturningNoRecords()
+    {
+        MockConsumer<string, string> consumer = new MockConsumer<string, string>(Earliest);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Assign(new[] { s_test0 });
+        consumer.AddRecord(new ConsumerRecord<string, string>("test", 0, 0, null, null));
+        consumer.UpdateEndOffset("test", 0, 1L);
+        consumer.SeekToEnd(new[] { s_test0 });
+
+        ConsumerRecords<string, string> records = Poll(consumer);
+
+        Assert.Equal(0, records.Count());
+        Assert.True(records.IsEmpty());
+    }
+
+    [Fact]
+    public void ShouldNotClearRecordsForPausedPartitions()
+    {
+        MockConsumer<string, string> consumer = new MockConsumer<string, string>(Earliest);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        TopicPartition[] testPartitionList = { s_test0 };
+        consumer.Assign(testPartitionList);
+        consumer.AddRecord(new ConsumerRecord<string, string>("test", 0, 0, null, null));
+        consumer.UpdateBeginningOffset("test", 0, 0L);
+        consumer.SeekToBeginning(testPartitionList);
+
+        consumer.Pause(testPartitionList);
+        _ = Poll(consumer);
+        consumer.Resume(testPartitionList);
+        ConsumerRecords<string, string> recordsSecondPoll = Poll(consumer);
+
+        Assert.Equal(1, recordsSecondPoll.Count());
+        Assert.Single(recordsSecondPoll.NextOffsets());
+        Assert.Equal(new OffsetAndMetadata(1, null, ""), recordsSecondPoll.NextOffsets()[s_test0]);
+    }
+
+    [Fact]
+    public void EndOffsetsShouldBeIdempotent()
+    {
+        MockConsumer<string, string> consumer = new MockConsumer<string, string>(Earliest);
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.UpdateEndOffset("test", 0, 10L);
+        // consumer.EndOffsets should NOT change the value of end offsets
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.Equal(10L, consumer.EndOffsets(new[] { s_test0 })[s_test0]);
+        }
+
+        consumer.UpdateEndOffset("test", 0, 11L);
+        for (int i = 0; i < 3; i++)
+        {
+            Assert.Equal(11L, consumer.EndOffsets(new[] { s_test0 })[s_test0]);
+        }
+    }
+
+    [Fact]
     public void TestDurationBasedOffsetReset()
     {
         MockConsumer<string, string> consumer =
-            new MockConsumer<string, string>(Serdes.String().Deserializer(), Serdes.String().Deserializer(), "by_duration:PT1H");
+            new MockConsumer<string, string>("by_duration:PT1H");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { "test" });
         consumer.Rebalance(new[] { s_test0, s_test1 });
         consumer.UpdateDurationOffsets(new Dictionary<TopicPartition, long> { [s_test0] = 10L, [s_test1] = 11L });
-        consumer.AddRecord("test", 0, 10L, Encoding.UTF8.GetBytes("key1"), Encoding.UTF8.GetBytes("value1"));
-        consumer.AddRecord("test", 0, 11L, Encoding.UTF8.GetBytes("key2"), Encoding.UTF8.GetBytes("value2"));
+        ConsumerRecord<string, string> rec1 = Record(10L, "key1", "value1");
+        ConsumerRecord<string, string> rec2 = Record(11L, "key2", "value2");
+        consumer.AddRecord(rec1);
+        consumer.AddRecord(rec2);
 
-        ConsumerRecords<string, string> records = default!;
-        TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
+        ConsumerRecords<string, string> records = Poll(consumer);
 
-        Assert.Equal(new[] { 10L, 11L }, records.Select(record => record.Offset()).ToArray());
-        Assert.Equal(new[] { "key1", "key2" }, records.Select(record => record.Key()).ToArray());
-        Assert.Equal(new[] { "value1", "value2" }, records.Select(record => record.Value()).ToArray());
+        AssertSameRecords(new[] { rec1, rec2 }, records);
     }
 
     [Fact]
     public async Task TestDurationBasedOffsetReset_Async()
     {
         AsyncMockConsumer<string, string> consumer =
-            new AsyncMockConsumer<string, string>(new AsyncStringDeserializer(), new AsyncStringDeserializer(), "by_duration:PT1H");
+            new AsyncMockConsumer<string, string>("by_duration:PT1H");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await consumer.Subscribe(new[] { "test" });
         await consumer.Rebalance(new[] { s_test0, s_test1 });
         consumer.UpdateDurationOffsets(new Dictionary<TopicPartition, long> { [s_test0] = 10L, [s_test1] = 11L });
-        consumer.AddRecord("test", 0, 10L, Encoding.UTF8.GetBytes("key1"), Encoding.UTF8.GetBytes("value1"));
-        consumer.AddRecord("test", 0, 11L, Encoding.UTF8.GetBytes("key2"), Encoding.UTF8.GetBytes("value2"));
+        ConsumerRecord<string, string> rec1 = Record(10L, "key1", "value1");
+        ConsumerRecord<string, string> rec2 = Record(11L, "key2", "value2");
+        consumer.AddRecord(rec1);
+        consumer.AddRecord(rec2);
 
-        ConsumerRecords<string, string> records = default!;
-        await TestTimeout.Run(async () => records = await consumer.Poll(s_pollTimeout), s_deadline);
+        ConsumerRecords<string, string> records = await PollAsync(consumer);
 
-        Assert.Equal(new[] { 10L, 11L }, records.Select(record => record.Offset()).ToArray());
+        AssertSameRecords(new[] { rec1, rec2 }, records);
     }
 
     [Fact]
     public void ShouldReturnMaxPollRecords()
     {
-        MockConsumer<byte[], byte[]> consumer = Assigned();
+        MockConsumer<string, string> consumer = Assigned();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         consumer.SetMaxPollRecords(2L);
@@ -99,25 +211,27 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public async Task ShouldReturnMaxPollRecords_Async()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), Earliest);
+        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(Earliest);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await consumer.Assign(new[] { s_test0 });
         consumer.UpdateBeginningOffset("test", 0, 0L);
         for (int offset = 0; offset < 10; offset++)
         {
-            consumer.AddRecord("test", 0, offset, null, null);
+            consumer.AddRecord(new ConsumerRecord<string, string>("test", 0, offset, null, null));
         }
 
         consumer.SetMaxPollRecords(2L);
         Assert.Equal(2, (await PollAsync(consumer)).Count());
+        Assert.Equal(2, (await PollAsync(consumer)).Count());
         consumer.SetMaxPollRecords(long.MaxValue);
-        Assert.Equal(8, (await PollAsync(consumer)).Count());
+        Assert.Equal(6, (await PollAsync(consumer)).Count());
+        Assert.True((await PollAsync(consumer)).IsEmpty());
     }
 
     [Fact]
     public void SetMaxPollRecords_BelowOne_ThrowsJavasError()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.Equal(
@@ -129,7 +243,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public void SetOffsetsException_IsThrownOnceByTheNextOffsetQuery_TheSameInstance()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset("test", 0, 5L);
         consumer.UpdateEndOffset("test", 0, 9L);
@@ -151,7 +265,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public async Task SetOffsetsException_IsThrownOnceByTheNextOffsetQuery_Async()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.UpdateBeginningOffset("test", 0, 5L);
         KafkaException injected = new KafkaException("offsets down");
@@ -164,7 +278,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public void ScheduleNopPollTask_LeavesThePollsRecordsAsTheyAre()
     {
-        MockConsumer<byte[], byte[]> consumer = Assigned();
+        MockConsumer<string, string> consumer = Assigned();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         consumer.ScheduleNopPollTask();
@@ -175,7 +289,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public void LastPollTimeout_IsNullBeforeThePoll_ThenThePollsTimeout()
     {
-        MockConsumer<byte[], byte[]> consumer = Assigned();
+        MockConsumer<string, string> consumer = Assigned();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.Null(consumer.LastPollTimeout());
@@ -186,7 +300,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public async Task LastPollTimeout_IsNullBeforeThePoll_ThenThePollsTimeout_Async()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), Earliest);
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Earliest);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await consumer.Assign(new[] { s_test0 });
         consumer.UpdateBeginningOffset("test", 0, 0L);
@@ -199,7 +313,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public void LastPollTimeout_AnswersAnotherThreadWhileARebalanceListenerHoldsTheConsumer()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), Earliest);
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Earliest);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         bool workerAnswered = false;
         consumer.Subscribe(
@@ -215,7 +329,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public void Closed_IsFalseUntilTheConsumerCloses_AndTheOtherHelpersThenThrow()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.False(consumer.Closed());
@@ -233,13 +347,13 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [Fact]
     public async Task Closed_IsTrueOnceClosedOrDisposed_Async()
     {
-        AsyncMockConsumer<byte[], byte[]> closing = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> closing = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable closingDisposal = TestTimeout.Disposal(closing);
         Assert.False(closing.Closed());
         await TestTimeout.Run(() => closing.Close(), s_deadline);
         Assert.True(closing.Closed());
 
-        AsyncMockConsumer<byte[], byte[]> disposed = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> disposed = new AsyncMockConsumer<byte[], byte[]>("latest");
         await TestTimeout.DisposeAsync(disposed);
         Assert.True(disposed.Closed());
     }
@@ -255,21 +369,18 @@ public sealed class PublicMockConsumerJavaHelpersTests
     [InlineData("by_duration:PT", "Unable to parse duration string in by_duration offset reset strategy.")]
     public void Constructor_RejectsAnInvalidStrategy(string? strategy, string message)
     {
-        IDeserializer<byte[]> bytes = Serdes.ByteArray().Deserializer();
-
         Assert.Equal(
             message,
-            Assert.Throws<IllegalArgumentException>(() => new MockConsumer<byte[], byte[]>(bytes, bytes, strategy!)).Message);
+            Assert.Throws<IllegalArgumentException>(() => new MockConsumer<byte[], byte[]>(strategy!)).Message);
         Assert.Equal(
             message,
-            Assert.Throws<IllegalArgumentException>(() => new AsyncMockConsumer<byte[], byte[]>(
-                new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer(), strategy!)).Message);
+            Assert.Throws<IllegalArgumentException>(() => new AsyncMockConsumer<byte[], byte[]>(strategy!)).Message);
     }
 
     [Fact]
     public void UpdateDurationOffsets_RefusesANullMapOrANullTopic()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         Assert.Equal("newOffsets", Assert.Throws<ArgumentNullException>(() => consumer.UpdateDurationOffsets(null!)).ParamName);
@@ -293,30 +404,61 @@ public sealed class PublicMockConsumerJavaHelpersTests
         public void OnPartitionsAssigned(IReadOnlyCollection<TopicPartition> partitions) => _onAssigned();
     }
 
-    private static MockConsumer<byte[], byte[]> Assigned()
+    private static MockConsumer<string, string> Assigned()
     {
-        MockConsumer<byte[], byte[]> consumer =
-            new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer(), Earliest);
+        MockConsumer<string, string> consumer =
+            new MockConsumer<string, string>(Earliest);
         consumer.Assign(new[] { s_test0 });
         consumer.UpdateBeginningOffset("test", 0, 0L);
         for (int offset = 0; offset < 10; offset++)
         {
-            consumer.AddRecord("test", 0, offset, null, null);
+            consumer.AddRecord(new ConsumerRecord<string, string>("test", 0, offset, null, null));
         }
 
         return consumer;
     }
 
-    private static ConsumerRecords<byte[], byte[]> Poll(MockConsumer<byte[], byte[]> consumer)
+    // Java's ConsumerRecord(topic, partition, offset, 0L, CREATE_TIME, 0, 0, key, value, new RecordHeaders(),
+    // Optional.empty()).
+    private static ConsumerRecord<string, string> Record(long offset, string key, string value) =>
+        new ConsumerRecord<string, string>(
+            "test", 0, offset, 0L, TimestampType.CREATE_TIME, 0, 0, key, value, new RecordHeaders(), null);
+
+    // Java asserts assertEquals(rec, iter.next()), the record itself, since its ConsumerRecord has no equals: the C
+    // ABI carries no managed object, so the polled record is a new one holding the same key and value objects and
+    // every field of the record added.
+    private static void AssertSameRecords(
+        IReadOnlyList<ConsumerRecord<string, string>> expected,
+        ConsumerRecords<string, string> actual)
     {
-        ConsumerRecords<byte[], byte[]> records = default!;
+        ConsumerRecord<string, string>[] polled = actual.ToArray();
+        Assert.Equal(expected.Count, polled.Length);
+        for (int i = 0; i < polled.Length; i++)
+        {
+            Assert.Same(expected[i].Key(), polled[i].Key());
+            Assert.Same(expected[i].Value(), polled[i].Value());
+            Assert.Equal(expected[i].Topic(), polled[i].Topic());
+            Assert.Equal(expected[i].Partition(), polled[i].Partition());
+            Assert.Equal(expected[i].Offset(), polled[i].Offset());
+            Assert.Equal(expected[i].Timestamp(), polled[i].Timestamp());
+            Assert.Equal(expected[i].TimestampType(), polled[i].TimestampType());
+            Assert.Equal(expected[i].SerializedKeySize(), polled[i].SerializedKeySize());
+            Assert.Equal(expected[i].SerializedValueSize(), polled[i].SerializedValueSize());
+            Assert.Equal(expected[i].LeaderEpoch(), polled[i].LeaderEpoch());
+            Assert.Empty(polled[i].Headers());
+        }
+    }
+
+    private static ConsumerRecords<string, string> Poll(MockConsumer<string, string> consumer)
+    {
+        ConsumerRecords<string, string> records = default!;
         TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
         return records;
     }
 
-    private static async Task<ConsumerRecords<byte[], byte[]>> PollAsync(AsyncMockConsumer<byte[], byte[]> consumer)
+    private static async Task<ConsumerRecords<string, string>> PollAsync(AsyncMockConsumer<string, string> consumer)
     {
-        ConsumerRecords<byte[], byte[]> records = default!;
+        ConsumerRecords<string, string> records = default!;
         await TestTimeout.Run(async () => records = await consumer.Poll(s_pollTimeout), s_deadline);
         return records;
     }

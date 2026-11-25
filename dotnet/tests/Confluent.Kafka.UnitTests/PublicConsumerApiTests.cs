@@ -58,7 +58,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Subscribe_ReturnsTask_Completes()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await TestTimeout.Run(() => consumer.Subscribe(ProofTopic()), s_deadline);
     }
@@ -66,7 +66,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Unsubscribe_ReturnsTask_Completes()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await consumer.Subscribe(ProofTopic());
         await TestTimeout.Run(() => consumer.Unsubscribe(), s_deadline);
@@ -75,7 +75,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task SubscribeUnsubscribe_Churned_NoLeakOrHang()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         for (int i = 0; i < 50; i++)
         {
@@ -87,7 +87,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Seek_UnassignedPartition_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
@@ -98,7 +98,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public void Wakeup_IsSync_AndSafeWhenIdle()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Wakeup();
     }
@@ -116,7 +116,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Seek_NegativeOffset_OnTheMock_UnassignedPartition_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         IllegalStateException ex = await Assert.ThrowsAsync<IllegalStateException>(
@@ -128,7 +128,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Seek_NegativeOffset_OnAClosedConsumer_ReportsTheClosedConsumerFirst()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         await TestTimeout.DisposeAsync(consumer);
 
         Assert.Throws<IllegalStateException>(() => { _ = consumer.Seek(new TopicPartition("t", 0), offset: -3); });
@@ -160,7 +160,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public void GroupMetadata_MockConsumer_ReturnsMockSentinels()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
@@ -174,7 +174,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public void GroupMetadata_AfterDispose_ThrowsIllegalState()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.GroupMetadata());
@@ -232,8 +232,8 @@ public sealed class PublicConsumerApiTests
     public void GroupMetadata_MockConsumer_WithoutGroupId_ReturnsMockSentinels(bool sync)
     {
         IConsumerCommon consumer = sync
-            ? new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer())
-            : new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            ? new MockConsumer<byte[], byte[]>("latest")
+            : new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
             ConsumerGroupMetadata meta = consumer.GroupMetadata();

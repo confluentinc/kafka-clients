@@ -61,7 +61,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void Partitions_AreThePolledPartitions_InTheOrderTheRecordsAreEnumerated()
     {
-        MockConsumer<string, string> consumer = Ready();
+        KafkaConsumer<string, string> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerRecords<string, string> records = consumer.Poll(s_pollTimeout);
 
@@ -74,7 +74,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void RecordsOfAPartition_AreItsRecords_InTheirOrder()
     {
-        MockConsumer<string, string> consumer = Ready();
+        KafkaConsumer<string, string> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerRecords<string, string> records = consumer.Poll(s_pollTimeout);
 
@@ -90,7 +90,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void RecordsOfAPartitionNotPolled_OfANullTopic_OrOfANullPartition_IsEmpty()
     {
-        MockConsumer<string, string> consumer = Ready();
+        KafkaConsumer<string, string> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerRecords<string, string> records = consumer.Poll(s_pollTimeout);
 
@@ -103,7 +103,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void RecordsOfATopic_AreItsPartitionsRecords_InPartitionsOrder()
     {
-        MockConsumer<string, string> consumer = Ready();
+        KafkaConsumer<string, string> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerRecords<string, string> records = consumer.Poll(s_pollTimeout);
 
@@ -123,7 +123,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void RecordsOfANullTopic_ThrowsIllegalArgumentException_AtTheCall()
     {
-        MockConsumer<string, string> consumer = Ready();
+        KafkaConsumer<string, string> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerRecords<string, string> records = consumer.Poll(s_pollTimeout);
 
@@ -135,7 +135,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void Enumeration_IsPartitionByPartition_InPartitionsOrder_AndCountsEveryRecord()
     {
-        MockConsumer<string, string> consumer = Ready();
+        KafkaConsumer<string, string> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerRecords<string, string> records = consumer.Poll(s_pollTimeout);
 
@@ -148,7 +148,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void NextOffsets_AreEachPolledPartitionsLastOffsetPlusOne_WithNoEpochAndEmptyMetadata()
     {
-        MockConsumer<string, string> consumer = Ready();
+        KafkaConsumer<string, string> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerRecords<string, string> records = consumer.Poll(s_pollTimeout);
 
@@ -165,7 +165,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void AnEmptyPoll_ReturnsEMPTY_TheInstanceEmptyReturns()
     {
-        MockConsumer<string, string> consumer = new MockConsumer<string, string>(Deserializer(), Deserializer());
+        KafkaConsumer<string, string> consumer = DecodingConsumers.Create<string, string>(Deserializer(), Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_a0 });
         consumer.Seek(s_a0, 0);
@@ -198,7 +198,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void TheReturnedCollections_AreReadOnly()
     {
-        MockConsumer<string, string> consumer = Ready();
+        KafkaConsumer<string, string> consumer = Ready();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         ConsumerRecords<string, string> records = consumer.Poll(s_pollTimeout);
         ConsumerRecord<string, string> record = records.First();
@@ -239,8 +239,8 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void AFailingDeserializer_CutsItsPartition_ToTheRecordsReturned()
     {
-        MockConsumer<string, string> consumer =
-            new MockConsumer<string, string>(Deserializer(), new FailingDeserializer("bad"));
+        KafkaConsumer<string, string> consumer =
+            DecodingConsumers.Create<string, string>(Deserializer(), new FailingDeserializer("bad"));
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_a0 });
         consumer.Seek(s_a0, 0);
@@ -260,8 +260,8 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public void AFailingDeserializer_KeepsTheNextOffsetsBeforeIt_CutsItsOwn_AndGivesNoneAfterIt()
     {
-        MockConsumer<string, string> consumer =
-            new MockConsumer<string, string>(Deserializer(), new FailingDeserializer("bad"));
+        KafkaConsumer<string, string> consumer =
+            DecodingConsumers.Create<string, string>(Deserializer(), new FailingDeserializer("bad"));
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition[] partitions = { s_a0, s_a1, s_b0 };
         consumer.Assign(partitions);
@@ -321,7 +321,7 @@ public sealed class PublicConsumerRecordsTests
     [Fact]
     public async Task AsyncPoll_ReadsByPartitionAndTopic_AndAnEmptyPollReturnsEMPTY()
     {
-        AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(Deserializer().AsAsync(), Deserializer().AsAsync());
+        AsyncKafkaConsumer<string, string> consumer = DecodingConsumers.CreateAsync<string, string>(Deserializer().AsAsync(), Deserializer().AsAsync());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(s_all), s_deadline);
@@ -359,9 +359,9 @@ public sealed class PublicConsumerRecordsTests
         }
     }
 
-    private static MockConsumer<string, string> Ready()
+    private static KafkaConsumer<string, string> Ready()
     {
-        MockConsumer<string, string> consumer = new MockConsumer<string, string>(Deserializer(), Deserializer());
+        KafkaConsumer<string, string> consumer = DecodingConsumers.Create<string, string>(Deserializer(), Deserializer());
         try
         {
             consumer.Assign(s_all);
@@ -385,8 +385,8 @@ public sealed class PublicConsumerRecordsTests
     // because the core read records-a-1 first.
     private static ConsumerRecords<string, string>? PollAGoodPartitionAndAFailingOne()
     {
-        MockConsumer<string, string> consumer =
-            new MockConsumer<string, string>(Deserializer(), new FailingDeserializer("bad"));
+        KafkaConsumer<string, string> consumer =
+            DecodingConsumers.Create<string, string>(Deserializer(), new FailingDeserializer("bad"));
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_a0, s_a1 });
         consumer.Seek(s_a0, 0);

@@ -235,7 +235,7 @@ public sealed class PublicConsumerCheckOrderTests
     [Fact]
     public async Task OnTheAsyncMock_WhileARebalanceRefusesOtherThreads_ANullArgument_IsReportedAfterTheRefusal()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
             Dictionary<string, Exception?> seen = new Dictionary<string, Exception?>();
@@ -728,8 +728,8 @@ public sealed class PublicConsumerCheckOrderTests
     {
         "KafkaConsumer" => KafkaConsumer<byte[], byte[]>.Create(Config(groupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
         "AsyncKafkaConsumer" => await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(groupId), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
-        "MockConsumer" => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()),
-        _ => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()),
+        "MockConsumer" => new MockConsumer<byte[], byte[]>("latest"),
+        _ => new AsyncMockConsumer<byte[], byte[]>("latest"),
     };
 
     private static Dictionary<string, object?> Config(bool groupId)
