@@ -23,6 +23,7 @@ import { TopicPartitionMap } from '../common/topic_partition_map';
 import { TopicPartitionSet } from '../common/topic_partition_set';
 import { JavaForms } from '../internal/args';
 import { illegalArgument } from '../internal/errors';
+import { topicPartition } from '../internal/payload';
 import type { ConsumerRecord } from './consumer_record';
 import { OffsetAndMetadata } from './offset_and_metadata';
 
@@ -119,7 +120,8 @@ export class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> {
    *
    * @param partition - The partition to get records for
    * @returns a new array of the partition's records, empty when it has none
-   * @throws `TypeError` when the records are null
+   * @throws `TypeError` when the partition is not a `TopicPartition`, or the
+   *   records are null
    */
   records(partition: TopicPartition): ConsumerRecord<K, V>[];
   /**
@@ -160,7 +162,7 @@ export class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> {
   records(options: unknown): ConsumerRecord<K, V>[] {
     const form = RECORDS_FORMS.match(options, arguments.length);
     if (form === 0) {
-      const partition = RECORDS_FORMS.value(options, 'partition') as TopicPartition | null;
+      const partition = topicPartition.take(RECORDS_FORMS.value(options, 'partition'), 'partition') as TopicPartition | null;
       const list = this.#map().get(partition);
       return list === null ? [] : [...list];
     }

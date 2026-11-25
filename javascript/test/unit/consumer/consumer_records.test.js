@@ -357,6 +357,19 @@ test('records takes its value bare, told apart by type; a partition with no list
   assert.equal(records.isEmpty(), false);
   assert.equal(records.count(), 1);
   assert.deepEqual([...records.partitions()], [tp]);
+  assert.deepEqual(records.records({ partition: null }), []);
+  // @ts-expect-error a wrong argument: the partition is a TopicPartition
+  assert.throws(() => records.records({ partition: 'x' }), { constructor: TypeError, message: 'partition must be a TopicPartition' });
+  // @ts-expect-error a wrong argument: a plain object is no TopicPartition
+  assert.throws(() => records.records({ partition: { topic: 't', partition: 0 } }), {
+    constructor: TypeError,
+    message: 'partition must be a TopicPartition',
+  });
+  // @ts-expect-error a wrong argument: a plain object is no TopicPartition
+  assert.throws(() => records.records({ partition: { key: tp } }), {
+    constructor: TypeError,
+    message: 'partition must be a TopicPartition',
+  });
 });
 
 test('isEmpty() is whether the map is empty, as Java reads it', () => {
