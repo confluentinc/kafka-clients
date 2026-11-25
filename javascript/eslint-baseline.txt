@@ -1,0 +1,78 @@
+# Findings of the Node.js client's rule linter not burnt down yet
+# (ESLint's `kafka/` rules, `npx eslint .`; javascript/design/current/rule-linter/PLAN.md).
+# One `<kind> <subject>` per line, or `prefix:<p>` to waive every finding whose
+# subject starts with `p`. A line matching no finding any more is itself a
+# finding: delete it. See everything with
+# `KAFKA_LINT_NO_BASELINE=1 npx eslint .`.
+
+# check-java-completeness: Java API the client does not translate yet.
+# KafkaProducer, with the reasons of the producer package's documentation
+# (src/producer/index.ts): transactions aren't in the preview; clientInstanceId
+# and the metric-subscription calls have no FFI entry point.
+missing clients.producer.KafkaProducer#abortTransaction
+missing clients.producer.KafkaProducer#beginTransaction
+missing clients.producer.KafkaProducer#clientInstanceId
+missing clients.producer.KafkaProducer#commitTransaction
+missing clients.producer.KafkaProducer#initTransactions
+missing clients.producer.KafkaProducer#registerMetricForSubscription
+missing clients.producer.KafkaProducer#sendOffsetsToTransaction
+missing clients.producer.KafkaProducer#unregisterMetricFromSubscription
+# Producer, the interface: the same members as KafkaProducer's, left out for
+# the same reasons.
+missing clients.producer.Producer#abortTransaction
+missing clients.producer.Producer#beginTransaction
+missing clients.producer.Producer#clientInstanceId
+missing clients.producer.Producer#commitTransaction
+missing clients.producer.Producer#initTransactions
+missing clients.producer.Producer#registerMetricForSubscription
+missing clients.producer.Producer#sendOffsetsToTransaction
+missing clients.producer.Producer#unregisterMetricFromSubscription
+# MockProducer, with the reasons of the producer package's documentation
+# (src/producer/index.ts): transactions are left out by request (the calls,
+# their state and their error fields); clientInstanceId, the telemetry and
+# metric-subscription calls have no FFI entry point; setMockMetrics needs a
+# native KafkaMetric the binding cannot build.
+missing clients.producer.MockProducer#abortTransaction
+missing clients.producer.MockProducer#abortTransactionException
+missing clients.producer.MockProducer#addedMetrics
+missing clients.producer.MockProducer#beginTransaction
+missing clients.producer.MockProducer#beginTransactionException
+missing clients.producer.MockProducer#clientInstanceId
+missing clients.producer.MockProducer#commitCount
+missing clients.producer.MockProducer#commitTransaction
+missing clients.producer.MockProducer#commitTransactionException
+missing clients.producer.MockProducer#consumerGroupOffsetsHistory
+missing clients.producer.MockProducer#disableTelemetry
+missing clients.producer.MockProducer#fenceProducer
+missing clients.producer.MockProducer#initTransactionException
+missing clients.producer.MockProducer#initTransactions
+missing clients.producer.MockProducer#injectTimeoutException
+missing clients.producer.MockProducer#registerMetricForSubscription
+missing clients.producer.MockProducer#sendOffsetsToTransaction
+missing clients.producer.MockProducer#sendOffsetsToTransactionException
+missing clients.producer.MockProducer#sentOffsets
+missing clients.producer.MockProducer#setClientInstanceId
+missing clients.producer.MockProducer#setMockMetrics
+missing clients.producer.MockProducer#transactionAborted
+missing clients.producer.MockProducer#transactionCommitted
+missing clients.producer.MockProducer#transactionInFlight
+missing clients.producer.MockProducer#transactionInitialized
+missing clients.producer.MockProducer#uncommittedOffsets
+missing clients.producer.MockProducer#uncommittedRecords
+missing clients.producer.MockProducer#unregisterMetricFromSubscription
+# Serializer: the JS conventions (Serialization) give a serde no
+# configure(): a serializer is given only as a constructor argument, for
+# which Java does not call it either.
+missing common.serialization.Serializer#configure
+
+
+# check-overload-shape: gaps the user kept (PLAN.md §8 decision 11).
+# Each line names one Java form not translated, so a wrong shape of the forms
+# that are translated is still a finding.
+# KafkaProducer's constructor: a Map and Properties are one configs type, so
+# Java's (Properties, Serializer, Serializer) form is the (Map, Serializer,
+# Serializer) one.
+overload-missing KafkaProducer.constructor/KafkaProducer(Properties,Serializer,Serializer)
+# RecordHeader's constructor takes Java's (String, byte[]) form: JavaScript has
+# no ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
+overload-missing RecordHeader.constructor/RecordHeader(ByteBuffer,ByteBuffer)
