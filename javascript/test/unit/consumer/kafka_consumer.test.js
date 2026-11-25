@@ -27,9 +27,9 @@
 //   testGroupIdWithWhitespace,
 //   testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero,
 //   testOperationsBySubscribingConsumerWithDefaultGroupId and
-//   testOperationsByAssigningConsumerWithDefaultGroupId (their subscribe and
-//   assign halves: the commit halves need commitSync, commitAsync and
-//   committed, which this release does not have), testSubscription,
+//   testOperationsByAssigningConsumerWithDefaultGroupId (their constructor,
+//   subscribe and assign halves: the commit halves need commitSync,
+//   commitAsync and committed, which this release does not have), testSubscription,
 //   testSubscriptionOnNullTopicCollection, testSubscriptionOnNullTopic,
 //   testSubscriptionOnEmptyTopic, testSubscriptionOnEmptyPattern (its
 //   SubscriptionPattern form), testAssignOnNullTopicPartition,
@@ -149,7 +149,12 @@ const {
 } = require('@confluentinc/kafka-javascript');
 const { KafkaError, TopicPartition, TopicPartitionSet } = require('@confluentinc/kafka-javascript/common');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
-const { BootstrapResolutionError, InvalidGroupIdError, WakeupError } = require('@confluentinc/kafka-javascript/common/errors');
+const {
+  BootstrapResolutionError,
+  InvalidConfigurationError,
+  InvalidGroupIdError,
+  WakeupError,
+} = require('@confluentinc/kafka-javascript/common/errors');
 const { CloseOptions, ConsumerRecords, KafkaConsumer, SubscriptionPattern } = require('@confluentinc/kafka-javascript/consumer');
 
 /** @typedef {import('@confluentinc/kafka-javascript/consumer').ConsumerConfigs} ConsumerConfigs */
@@ -300,7 +305,12 @@ test('testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhen
 });
 
 test('testOperationsBySubscribingConsumerWithDefaultGroupId', async () => {
-  // Its subscribe half: the commit half needs the commit calls.
+  // Its constructor and subscribe halves: the commit half needs the commit
+  // calls. enable.auto.commit=true needs a group.id: the core's error, unwrapped.
+  assert.throws(() => new KafkaConsumer({ configs: configs(null, { 'enable.auto.commit': true }) }), {
+    constructor: InvalidConfigurationError,
+    message: 'enable.auto.commit cannot be set to true when default group id (null) is used.',
+  });
   await assert.rejects(newConsumer(null).subscribe({ topics: [TOPIC] }), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
   // Java's subscribe() checks the group before the topics.
   // @ts-expect-error a null topic the types forbid: the run time sends it as a blank one
