@@ -11,10 +11,12 @@ missing T:Confluent.Kafka.Common.KafkaFuture org.apache.kafka.common.KafkaFuture
 overload M:Confluent.Kafka.Common.AsyncKafkaFuture.GetNow
 overload M:Confluent.Kafka.Common.KafkaFuture.GetNow
 
-# M1: the implicit conversion of a generic future to its KafkaFuture<Void> form, so AllOf takes mixed types
-# (dotnet/CLAUDE.md §4, Futures).
-unmatched M:Confluent.Kafka.Common.AsyncKafkaFuture`1.op_Implicit(Confluent.Kafka.Common.AsyncKafkaFuture{`0})~Confluent.Kafka.Common.AsyncKafkaFuture
-unmatched M:Confluent.Kafka.Common.KafkaFuture`1.op_Implicit(Confluent.Kafka.Common.KafkaFuture{`0})~Confluent.Kafka.Common.KafkaFuture
+# The futures' constructors are private protected, where Java's abstract class's is protected: only the binding's
+# engines derive from them, as Java's own allOf assumes only KafkaFutureImpl does (ledger 628).
+missing T:Confluent.Kafka.Common.AsyncKafkaFuture org.apache.kafka.common.KafkaFuture#KafkaFuture()
+missing T:Confluent.Kafka.Common.AsyncKafkaFuture`1 org.apache.kafka.common.KafkaFuture#KafkaFuture()
+missing T:Confluent.Kafka.Common.KafkaFuture org.apache.kafka.common.KafkaFuture#KafkaFuture()
+missing T:Confluent.Kafka.Common.KafkaFuture`1 org.apache.kafka.common.KafkaFuture#KafkaFuture()
 
 # AllOf<T>(params KafkaFuture<T>[]): an array of one type (dotnet/CLAUDE.md §4, Futures).
 overload M:Confluent.Kafka.Common.AsyncKafkaFuture.AllOf``1(Confluent.Kafka.Common.AsyncKafkaFuture{``0}[])

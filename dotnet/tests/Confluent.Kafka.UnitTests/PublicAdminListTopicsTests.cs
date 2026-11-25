@@ -516,15 +516,14 @@ public sealed class PublicAdminListTopicsTests
     private static CompletionThread CompletionOf(object admin) =>
         (CompletionThread)typeof(NativeAdminClient).GetField("_completion", Private)!.GetValue(NativeOf(admin))!;
 
-    private static KafkaFutureImpl<T> ImplOf<T>(KafkaFuture<T> future) =>
-        (KafkaFutureImpl<T>)typeof(KafkaFuture<T>).GetField("_impl", Private)!.GetValue(future)!;
+    private static IKafkaFutureImpl<T> ImplOf<T>(KafkaFuture<T> future) => (KafkaFutureImpl<T>)future;
 
-    private static KafkaFutureImpl<T> ImplOf<T>(AsyncKafkaFuture<T> future) =>
-        (KafkaFutureImpl<T>)typeof(AsyncKafkaFuture<T>).GetField("_impl", Private)!.GetValue(future)!;
+    private static IKafkaFutureImpl<T> ImplOf<T>(AsyncKafkaFuture<T> future) => (AsyncKafkaFutureImpl<T>)future;
 
-    private static SafeKafkaFutureHandle HandleOf<T>(KafkaFutureImpl<T> future)
+    private static SafeKafkaFutureHandle HandleOf<T>(IKafkaFutureImpl<T> future)
     {
-        object source = typeof(KafkaFutureImpl<T>).GetField("_source", Private)!.GetValue(future)!;
+        object state = future.GetType().GetField("_state", Private)!.GetValue(future)!;
+        object source = typeof(FutureState<T>).GetField("_source", Private)!.GetValue(state)!;
         return (SafeKafkaFutureHandle)typeof(NativeFutureSource<T>).GetField("_handle", Private)!.GetValue(source)!;
     }
 

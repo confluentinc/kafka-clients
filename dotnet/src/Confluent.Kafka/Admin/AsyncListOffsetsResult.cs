@@ -33,7 +33,7 @@ namespace Confluent.Kafka.Admin;
 public sealed class AsyncListOffsetsResult
 {
     private readonly IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> _futures;
-    private readonly IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>>? _nativeFutures;
+    private readonly IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>>? _nativeFutures;
     private readonly SafeAdminResultHandle? _native;
 
     /// <summary>Creates a result over the given futures, keyed by partition.</summary>
@@ -66,7 +66,7 @@ public sealed class AsyncListOffsetsResult
 
     private AsyncListOffsetsResult(
         IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> futures,
-        IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> nativeFutures,
+        IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> nativeFutures,
         SafeAdminResultHandle native)
     {
         _futures = futures;
@@ -82,12 +82,14 @@ public sealed class AsyncListOffsetsResult
     /// <param name="partition">A partition that was part of the request.</param>
     /// <returns>That partition's future, carrying its own value or its own failure.</returns>
     /// <exception cref="IllegalArgumentException">
-    /// <paramref name="partition"/> was not requested (a <see langword="null"/> one included), with Java's message.
+    /// <paramref name="partition"/> was not requested (a <see langword="null"/> one included), or maps to a
+    /// <see langword="null"/> future, with Java's message.
     /// </exception>
     public AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo> PartitionResult(TopicPartition partition)
     {
         if (partition is null
-            || !_futures.TryGetValue(partition, out AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo> future))
+            || !_futures.TryGetValue(partition, out AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>? future)
+            || future is null)
         {
             throw new IllegalArgumentException(
                 string.Format(
@@ -104,21 +106,24 @@ public sealed class AsyncListOffsetsResult
     /// <c>all()</c>.
     /// </summary>
     /// <returns>A future yielding every partition's offset information.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// A future the Result was constructed with is <see langword="null"/>.
+    /// </exception>
     public AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>> All() =>
         _nativeFutures is not null
-            ? new AsyncKafkaFuture<IReadOnlyDictionary<TopicPartition, ListOffsetsResult.ListOffsetsResultInfo>>(
-                KafkaFutureImpl.GatherAll(_nativeFutures, EqualityComparer<TopicPartition>.Default))
+            ? AsyncAdminFutures.Of(
+                FutureState.GatherAll(new AsyncKafkaFutureImpl<object?>(), _nativeFutures, EqualityComparer<TopicPartition>.Default))
             : AsyncAdminFutures.GatherAll(_futures, EqualityComparer<TopicPartition>.Default);
 
     internal static AsyncListOffsetsResult OfClient(
-        (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> Futures,
+        (IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> Futures,
             SafeAdminResultHandle Result) native)
     {
         Dictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>> futures =
             new Dictionary<TopicPartition, AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>>(native.Futures.Count);
-        foreach (KeyValuePair<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> entry in native.Futures)
+        foreach (KeyValuePair<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> entry in native.Futures)
         {
-            futures.Add(entry.Key, new AsyncKafkaFuture<ListOffsetsResult.ListOffsetsResultInfo>(entry.Value));
+            futures.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
         }
 
         return new AsyncListOffsetsResult(futures, native.Futures, native.Result);

@@ -69,7 +69,7 @@ internal sealed partial class NativeAdminClient
     private static readonly Func<IntPtr, ListOffsetsResult.ListOffsetsResultInfo> s_copyOutListOffsetsResultInfo =
         ListOffsetsResultInfoMarshal.CopyOut;
 
-    internal (IReadOnlyDictionary<string, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) CreatePartitions(
+    internal (IReadOnlyDictionary<string, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) CreatePartitions(
         IReadOnlyDictionary<string, NewPartitions> newPartitions, CreatePartitionsOptions? options)
     {
         EnterUse();
@@ -179,7 +179,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<DeletedRecords>> LowWatermarks, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<DeletedRecords>> LowWatermarks, SafeAdminResultHandle Result)
         DeleteRecords(IReadOnlyDictionary<TopicPartition, RecordsToDelete> recordsToDelete, DeleteRecordsOptions? options)
     {
         EnterUse();
@@ -295,7 +295,7 @@ internal sealed partial class NativeAdminClient
     }
 
     internal (
-        IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> Futures,
+        IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> Futures,
         SafeAdminResultHandle Result) ListOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetSpec> topicPartitionOffsets, ListOffsetsOptions? options)
     {
@@ -436,20 +436,20 @@ internal sealed partial class NativeAdminClient
         return native;
     }
 
-    private static Dictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> StartPartitionResults(
+    private Dictionary<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> StartPartitionResults(
         SafeAdminResultHandle result, List<TopicPartition> keys, IntPtr[] partitions)
     {
         try
         {
-            Dictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> futures =
-                new Dictionary<TopicPartition, KafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>>(keys.Count);
+            Dictionary<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>> futures =
+                new Dictionary<TopicPartition, IKafkaFutureImpl<ListOffsetsResult.ListOffsetsResultInfo>>(keys.Count);
             for (int i = 0; i < keys.Count; i++)
             {
                 IntPtr future = CallAccessor(result, s_listOffsetsPartitionResult, partitions[i]);
                 futures.Add(
                     keys[i],
                     NativeFutureSource<ListOffsetsResult.ListOffsetsResultInfo>.Start(
-                        SafeKafkaFutureHandle.Owned(future), s_copyOutListOffsetsResultInfo));
+                        SafeKafkaFutureHandle.Owned(future), s_copyOutListOffsetsResultInfo, _flavour));
             }
 
             return futures;

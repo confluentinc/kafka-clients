@@ -91,7 +91,7 @@ public sealed class PublicAdminTfmSmokeTests
             AsyncDescribeTopicsResult described =
                 admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { Named, Identified }));
             IReadOnlyDictionary<string, TopicDescription> all =
-                await TestTimeout.Run(() => described.AllTopicNames()!.Value.Get(), s_deadline);
+                await TestTimeout.Run(() => described.AllTopicNames()!.Get(), s_deadline);
             Assert.Equal(2, all.Count);
 
             Uuid topicId = all[Identified].TopicId();

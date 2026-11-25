@@ -68,6 +68,9 @@ public sealed class DescribeConsumerGroupsResult
     /// A future that yields every group's description once all of them succeeded; it fails with the
     /// first failure to complete. Each call builds a new future.
     /// </summary>
+    /// <exception cref="ArgumentNullException">
+    /// A future the Result was constructed with is <see langword="null"/>.
+    /// </exception>
     public KafkaFuture<IReadOnlyDictionary<string, ConsumerGroupDescription>> All()
     {
         IReadOnlyDictionary<string, KafkaFuture<ConsumerGroupDescription>> futures = _futures;
@@ -83,7 +86,7 @@ public sealed class DescribeConsumerGroupsResult
             Dictionary<string, ConsumerGroupDescription> descriptions = new Dictionary<string, ConsumerGroupDescription>(futures.Count, StringComparer.Ordinal);
             foreach (KeyValuePair<string, KafkaFuture<ConsumerGroupDescription>> entry in futures)
             {
-                descriptions.Add(entry.Key, entry.Value.Impl.GetNow(null!));
+                descriptions.Add(entry.Key, ((IKafkaFutureImpl<ConsumerGroupDescription>)entry.Value).GetNowUnwrapped(null!));
             }
 
             return descriptions;
@@ -91,13 +94,13 @@ public sealed class DescribeConsumerGroupsResult
     }
 
     internal static DescribeConsumerGroupsResult OfClient(
-        (IReadOnlyDictionary<string, KafkaFutureImpl<ConsumerGroupDescription>> DescribedGroups, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<string, IKafkaFutureImpl<ConsumerGroupDescription>> DescribedGroups, SafeAdminResultHandle Result) native)
     {
         Dictionary<string, KafkaFuture<ConsumerGroupDescription>> futures =
             new Dictionary<string, KafkaFuture<ConsumerGroupDescription>>(native.DescribedGroups.Count, StringComparer.Ordinal);
-        foreach (KeyValuePair<string, KafkaFutureImpl<ConsumerGroupDescription>> entry in native.DescribedGroups)
+        foreach (KeyValuePair<string, IKafkaFutureImpl<ConsumerGroupDescription>> entry in native.DescribedGroups)
         {
-            futures.Add(entry.Key, new KafkaFuture<ConsumerGroupDescription>(entry.Value));
+            futures.Add(entry.Key, SyncAdminFutures.Of(entry.Value));
         }
 
         return new DescribeConsumerGroupsResult(futures, native.Result);

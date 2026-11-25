@@ -502,34 +502,44 @@ public sealed class PublicConsumerNullPartitionTests
         Assert.True(atTheCall);
     }
 
-    // With a zero timeout Java's KafkaConsumer returns an empty map without waiting for its background thread, which
-    // alone reads a null element. A timeout below a millisecond reaches the core as zero, as for any other partition.
+    // A null element is refused whatever the timeout, as Python's binding fails for a None element; Java's
+    // KafkaConsumer returns an empty map for a zero timeout, without waiting for its background thread, which alone
+    // reads the null. A timeout below a millisecond still reaches the core as zero for the other partitions.
     [Theory]
     [InlineData("KafkaConsumer")]
     [InlineData("AsyncKafkaConsumer")]
-    public async Task BeginningAndEndOffsets_ANullElement_WithAZeroTimeout_IsJavasEmptyMap(string kind)
+    public async Task BeginningAndEndOffsets_ANullElement_WithAZeroTimeout_IsArgumentNullException(string kind)
     {
         object consumer = await Create(kind);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
 
         foreach (bool beginning in new[] { true, false })
         {
-            foreach (TopicPartition[] partitions in new[] { s_nullAfterTp0, new TopicPartition[] { null! } })
+            foreach (TimeSpan timeout in new[] { TimeSpan.Zero, TimeSpan.FromTicks(1) })
             {
-                foreach (TimeSpan timeout in new[] { TimeSpan.Zero, TimeSpan.FromTicks(1) })
+                foreach (TopicPartition[] partitions in new[] { s_nullAfterTp0, new TopicPartition[] { null! } })
                 {
-                    IReadOnlyDictionary<TopicPartition, long> offsets = consumer is IConsumer<byte[], byte[]> sync
-                        ? LookUp(sync, partitions, beginning, timeout)
-                        : await TestTimeout.Run(
-                            () => LookUp((IAsyncConsumer<byte[], byte[]>)consumer, partitions, beginning, timeout), s_deadline);
-                    Assert.Empty(offsets);
+                    (Exception? error, bool atTheCall) = await Outcome(
+                        consumer,
+                        c => _ = LookUp(c, partitions, beginning, timeout),
+                        c => LookUp(c, partitions, beginning, timeout));
+                    AssertMustNotContainNull("partitions", error);
+                    Assert.True(atTheCall);
                 }
+
+                IReadOnlyDictionary<TopicPartition, long> offsets = consumer is IConsumer<byte[], byte[]> sync
+                    ? LookUp(sync, new[] { s_tp0 }, beginning, timeout)
+                    : await TestTimeout.Run(
+                        () => LookUp((IAsyncConsumer<byte[], byte[]>)consumer, new[] { s_tp0 }, beginning, timeout),
+                        s_deadline);
+                Assert.Empty(offsets);
             }
         }
     }
 
-    // Without a timeout Java's KafkaConsumer passes default.api.timeout.ms, so a zero setting, in any form the
-    // configuration accepts, takes the zero path too, as it does for any partition.
+    // The binding does not read default.api.timeout.ms: without a timeout a null element is refused even when the
+    // setting is zero, in any form the configuration accepts, while the core still applies the zero setting to the
+    // other partitions.
     [Theory]
     [InlineData("KafkaConsumer", "0")]
     [InlineData("KafkaConsumer", " +0\t")]
@@ -539,7 +549,7 @@ public sealed class PublicConsumerNullPartitionTests
     [InlineData("AsyncKafkaConsumer", " +0\t")]
     [InlineData("AsyncKafkaConsumer", "-0")]
     [InlineData("AsyncKafkaConsumer", 0)]
-    public async Task BeginningAndEndOffsets_ANullElement_WithoutATimeout_AndAZeroDefaultApiTimeout_IsJavasEmptyMap(
+    public async Task BeginningAndEndOffsets_ANullElement_WithoutATimeout_AndAZeroDefaultApiTimeout_IsArgumentNullException(
         string kind, object defaultApiTimeoutMs)
     {
         object consumer = await Create(kind, defaultApiTimeoutMs: defaultApiTimeoutMs);
@@ -547,14 +557,22 @@ public sealed class PublicConsumerNullPartitionTests
 
         foreach (bool beginning in new[] { true, false })
         {
-            foreach (TopicPartition[] partitions in new[] { s_nullAfterTp0, new TopicPartition[] { null! }, new[] { s_tp0 } })
+            foreach (TopicPartition[] partitions in new[] { s_nullAfterTp0, new TopicPartition[] { null! } })
             {
-                IReadOnlyDictionary<TopicPartition, long> offsets = consumer is IConsumer<byte[], byte[]> sync
-                    ? LookUp(sync, partitions, beginning, timeout: null)
-                    : await TestTimeout.Run(
-                        () => LookUp((IAsyncConsumer<byte[], byte[]>)consumer, partitions, beginning, timeout: null), s_deadline);
-                Assert.Empty(offsets);
+                (Exception? error, bool atTheCall) = await Outcome(
+                    consumer,
+                    c => _ = LookUp(c, partitions, beginning, timeout: null),
+                    c => LookUp(c, partitions, beginning, timeout: null));
+                AssertMustNotContainNull("partitions", error);
+                Assert.True(atTheCall);
             }
+
+            IReadOnlyDictionary<TopicPartition, long> offsets = consumer is IConsumer<byte[], byte[]> sync
+                ? LookUp(sync, new[] { s_tp0 }, beginning, timeout: null)
+                : await TestTimeout.Run(
+                    () => LookUp((IAsyncConsumer<byte[], byte[]>)consumer, new[] { s_tp0 }, beginning, timeout: null),
+                    s_deadline);
+            Assert.Empty(offsets);
         }
     }
 

@@ -27,15 +27,15 @@ namespace Confluent.Kafka.Admin;
 /// </summary>
 public sealed class ListGroupsResult
 {
-    private readonly KafkaFutureImpl<IReadOnlyCollection<GroupListing>> _all;
-    private readonly KafkaFutureImpl<IReadOnlyCollection<GroupListing>> _valid;
-    private readonly KafkaFutureImpl<IReadOnlyCollection<Exception>> _errors;
+    private readonly IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> _all;
+    private readonly IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> _valid;
+    private readonly IKafkaFutureImpl<IReadOnlyCollection<Exception>> _errors;
     private readonly SafeAdminResultHandle _native;
 
     private ListGroupsResult(
-        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
-        KafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
-        KafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> all,
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> valid,
+        IKafkaFutureImpl<IReadOnlyCollection<Exception>> errors,
         SafeAdminResultHandle native)
     {
         _all = all;
@@ -47,26 +47,26 @@ public sealed class ListGroupsResult
     internal SafeAdminResultHandle Native => _native;
 
     internal static ListGroupsResult OfClient(
-        (KafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
-            KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
-            KafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
+        (IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> All,
+            IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid,
+            IKafkaFutureImpl<IReadOnlyCollection<Exception>> Errors,
             SafeAdminResultHandle Result) native) =>
         new ListGroupsResult(native.All, native.Valid, native.Errors, native.Result);
 
     /// <summary>
     /// Every listing; fails with the first error if any broker answered with one.
     /// </summary>
-    public KafkaFuture<IReadOnlyCollection<GroupListing>> All() => new KafkaFuture<IReadOnlyCollection<GroupListing>>(_all);
+    public KafkaFuture<IReadOnlyCollection<GroupListing>> All() => SyncAdminFutures.Of(_all);
 
     /// <summary>
     /// The listings of the brokers that answered without an error.
     /// </summary>
     public KafkaFuture<IReadOnlyCollection<GroupListing>> Valid() =>
-        new KafkaFuture<IReadOnlyCollection<GroupListing>>(_valid);
+        SyncAdminFutures.Of(_valid);
 
     /// <summary>
     /// The errors the brokers answered with.
     /// </summary>
     public KafkaFuture<IReadOnlyCollection<Exception>> Errors() =>
-        new KafkaFuture<IReadOnlyCollection<Exception>>(_errors);
+        SyncAdminFutures.Of(_errors);
 }

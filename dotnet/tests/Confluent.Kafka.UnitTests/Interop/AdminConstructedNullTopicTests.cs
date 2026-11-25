@@ -129,7 +129,7 @@ public sealed class AdminConstructedNullTopicTests
     [Fact]
     public void AbortTransaction_RejectsANullTopic()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         ArgumentNullException rejected = Assert.Throws<ArgumentNullException>(() => AsyncAbortTransactionResult.OfClient(admin.AbortTransaction(
@@ -177,7 +177,7 @@ public sealed class AdminConstructedNullTopicTests
     public void DistinctPartitions_ElectLeaders_ListReassignments_DescribeProducers_RejectANullTopic()
     {
         const string Message = "partitions must not contain a TopicPartition with a null topic";
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
         TopicPartition[] partitions = { NullTopic() };
 

@@ -25,10 +25,10 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="AsyncUnregisterControllerResult"/>
 public sealed class UnregisterControllerResult
 {
-    private readonly KafkaFutureImpl<object?> _future;
+    private readonly IKafkaFutureImpl<object?> _future;
     private readonly SafeAdminResultHandle _native;
 
-    private UnregisterControllerResult(KafkaFutureImpl<object?> future, SafeAdminResultHandle native)
+    private UnregisterControllerResult(IKafkaFutureImpl<object?> future, SafeAdminResultHandle native)
     {
         _future = future;
         _native = native;
@@ -41,9 +41,9 @@ public sealed class UnregisterControllerResult
     /// </summary>
     /// <returns>A future over the call.</returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
-    public KafkaFuture All() => new KafkaFuture(_future);
+    public KafkaFuture All() => SyncAdminFutures.Of(_future);
 
     internal static UnregisterControllerResult OfClient(
-        (KafkaFutureImpl<object?> All, SafeAdminResultHandle Result) native) =>
+        (IKafkaFutureImpl<object?> All, SafeAdminResultHandle Result) native) =>
         new UnregisterControllerResult(native.All, native.Result);
 }

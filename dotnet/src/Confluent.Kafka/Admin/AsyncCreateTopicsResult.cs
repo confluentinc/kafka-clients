@@ -70,9 +70,9 @@ public sealed class AsyncCreateTopicsResult
         {
             Dictionary<string, AsyncKafkaFuture> futures =
                 new Dictionary<string, AsyncKafkaFuture>(_native.Values.Count, StringComparer.Ordinal);
-            foreach (KeyValuePair<string, KafkaFutureImpl<object?>> entry in _native.Values)
+            foreach (KeyValuePair<string, IKafkaFutureImpl<object?>> entry in _native.Values)
             {
-                futures.Add(entry.Key, new AsyncKafkaFuture(entry.Value.ThenApply(static _ => (object?)null)));
+                futures.Add(entry.Key, AsyncAdminFutures.Of(entry.Value.ThenApplyFunc(static _ => (object?)null)));
             }
 
             return futures;
@@ -84,7 +84,7 @@ public sealed class AsyncCreateTopicsResult
             new Dictionary<string, AsyncKafkaFuture>(_values!.Count, StringComparer.Ordinal);
         foreach (KeyValuePair<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> entry in _values)
         {
-            erased.Add(entry.Key, entry.Value.Erase());
+            erased.Add(entry.Key, entry.Value);
         }
 
         return erased;
@@ -98,7 +98,7 @@ public sealed class AsyncCreateTopicsResult
     public AsyncKafkaFuture All() =>
         _native is null
             ? AsyncAdminFutures.AllOf(_values!.Values)
-            : new AsyncKafkaFuture(KafkaFutureImpl.AllOf(new List<KafkaFutureImpl>(_native.Values.Values)));
+            : AsyncAdminFutures.Of(FutureState.AllOf(new AsyncKafkaFutureImpl<object?>(), new List<IKafkaFutureImpl>(_native.Values.Values)));
 
     /// <summary>
     /// The topic's configuration once it is created — Java's <c>config(String)</c>.
@@ -108,7 +108,7 @@ public sealed class AsyncCreateTopicsResult
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
     public AsyncKafkaFuture<Config> Config(string topic) =>
-        _native is null ? Apply(topic, static value => value.Config()) : new AsyncKafkaFuture<Config>(_native.Config(topic));
+        _native is null ? Apply(topic, static value => value.Config()) : AsyncAdminFutures.Of(_native.Config(topic));
 
     /// <summary>
     /// The topic's id once it is created — Java's <c>topicId(String)</c>.
@@ -118,7 +118,7 @@ public sealed class AsyncCreateTopicsResult
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
     public AsyncKafkaFuture<Uuid> TopicId(string topic) =>
-        _native is null ? Apply(topic, static value => value.TopicId()) : new AsyncKafkaFuture<Uuid>(_native.TopicId(topic));
+        _native is null ? Apply(topic, static value => value.TopicId()) : AsyncAdminFutures.Of(_native.TopicId(topic));
 
     /// <summary>
     /// The topic's partition count once it is created — Java's
@@ -129,7 +129,7 @@ public sealed class AsyncCreateTopicsResult
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
     public AsyncKafkaFuture<int> NumPartitions(string topic) =>
-        _native is null ? Apply(topic, static value => value.NumPartitions()) : new AsyncKafkaFuture<int>(_native.NumPartitions(topic));
+        _native is null ? Apply(topic, static value => value.NumPartitions()) : AsyncAdminFutures.Of(_native.NumPartitions(topic));
 
     /// <summary>
     /// The topic's replication factor once it is created — Java's
@@ -140,7 +140,7 @@ public sealed class AsyncCreateTopicsResult
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <remarks>The future fails with <see cref="ArgumentException"/> when <paramref name="topic"/> was not part of this request.</remarks>
     public AsyncKafkaFuture<int> ReplicationFactor(string topic) =>
-        _native is null ? Apply(topic, static value => value.ReplicationFactor()) : new AsyncKafkaFuture<int>(_native.ReplicationFactor(topic));
+        _native is null ? Apply(topic, static value => value.ReplicationFactor()) : AsyncAdminFutures.Of(_native.ReplicationFactor(topic));
 
     private AsyncKafkaFuture<TResult> Apply<TResult>(string topic, Func<CreateTopicsResult.TopicMetadataAndConfig, TResult> map)
     {
@@ -150,7 +150,7 @@ public sealed class AsyncCreateTopicsResult
             throw new ArgumentNullException(nameof(topic));
         }
 
-        if (!_values!.TryGetValue(topic, out AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig> source))
+        if (!_values!.TryGetValue(topic, out AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>? source))
         {
             throw new ArgumentException(
                 string.Format(
@@ -160,6 +160,6 @@ public sealed class AsyncCreateTopicsResult
                 nameof(topic));
         }
 
-        return new AsyncKafkaFuture<TResult>(source.Impl.ThenApply(map));
+        return AsyncAdminFutures.Of(AsyncAdminFutures.Engine(source).ThenApplyFunc(map));
     }
 }

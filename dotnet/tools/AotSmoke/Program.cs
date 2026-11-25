@@ -25,6 +25,7 @@ using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Config;
 using Confluent.Kafka.Common.Errors;
 using Confluent.Kafka.Common.Record;
+using Confluent.Kafka.Common.Security.Auth;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Producer;
@@ -206,6 +207,10 @@ internal static class Program
                 consumer.Close(CloseOptions.GroupMembershipOperation(GroupMembershipOperation.LEAVE_GROUP));
                 return new AlterConfigOp(new ConfigEntry("a", "b"), OpType.SET).ToString();
             });
+        Check(
+            "common: SecurityProtocol names, built from its values",
+            "PLAINTEXT,SSL,SASL_PLAINTEXT,SASL_SSL",
+            () => string.Join(",", SecurityProtocolMethods.Names()));
     }
 
     private static async Task AsyncConsumers()

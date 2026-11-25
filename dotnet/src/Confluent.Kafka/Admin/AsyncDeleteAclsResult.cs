@@ -35,12 +35,12 @@ namespace Confluent.Kafka.Admin;
 public sealed class AsyncDeleteAclsResult
 {
     private readonly IReadOnlyDictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> _futures;
-    private readonly IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> _nativeFutures;
+    private readonly IReadOnlyDictionary<AclBindingFilter, IKafkaFutureImpl<DeleteAclsResult.FilterResults>> _nativeFutures;
     private readonly SafeAdminResultHandle _native;
 
     private AsyncDeleteAclsResult(
         IReadOnlyDictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> futures,
-        IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> nativeFutures,
+        IReadOnlyDictionary<AclBindingFilter, IKafkaFutureImpl<DeleteAclsResult.FilterResults>> nativeFutures,
         SafeAdminResultHandle native)
     {
         _futures = futures;
@@ -66,17 +66,17 @@ public sealed class AsyncDeleteAclsResult
     /// successful empty collection.
     /// </returns>
     public AsyncKafkaFuture<IReadOnlyCollection<AclBinding>> All() =>
-        new AsyncKafkaFuture<IReadOnlyCollection<AclBinding>>(DeleteAclsResult.AllOf(_nativeFutures));
+        AsyncAdminFutures.Of(DeleteAclsResult.AllOf(new AsyncKafkaFutureImpl<object?>(), _nativeFutures));
 
     internal static AsyncDeleteAclsResult OfClient(
-        (IReadOnlyDictionary<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> Values,
+        (IReadOnlyDictionary<AclBindingFilter, IKafkaFutureImpl<DeleteAclsResult.FilterResults>> Values,
         SafeAdminResultHandle Result) native)
     {
         Dictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>> futures =
             new Dictionary<AclBindingFilter, AsyncKafkaFuture<DeleteAclsResult.FilterResults>>(native.Values.Count);
-        foreach (KeyValuePair<AclBindingFilter, KafkaFutureImpl<DeleteAclsResult.FilterResults>> entry in native.Values)
+        foreach (KeyValuePair<AclBindingFilter, IKafkaFutureImpl<DeleteAclsResult.FilterResults>> entry in native.Values)
         {
-            futures.Add(entry.Key, new AsyncKafkaFuture<DeleteAclsResult.FilterResults>(entry.Value));
+            futures.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
         }
 
         return new AsyncDeleteAclsResult(futures, native.Values, native.Result);

@@ -262,7 +262,7 @@ public sealed class PublicProducerSendStringTests
 
         internal override Task<RecordMetadata?> Deliver(ProducerRecord<string, string> record)
         {
-            KafkaFuture<RecordMetadata> future = default;
+            KafkaFuture<RecordMetadata> future = null!;
             TestTimeout.Run(() => future = _producer.Send(record), s_deadline);
             if (IsMock)
             {

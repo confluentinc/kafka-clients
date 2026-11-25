@@ -50,7 +50,7 @@ internal sealed class AsyncDeliveryState : DeliveryState
         string topic,
         int partition,
         CancellationToken cancellationToken)
-        : base(reporter, callback, asyncCallback, topic, partition)
+        : base(reporter, AsyncKafkaFutureImpl<RecordMetadata>.ForSend(), callback, asyncCallback, topic, partition)
     {
         _cancellationToken = cancellationToken;
     }
@@ -94,7 +94,7 @@ internal sealed class AsyncDeliveryState : DeliveryState
 
         Exception? failure = Volatile.Read(ref _failure);
         return failure is null
-            ? new ValueTask<AsyncKafkaFuture<RecordMetadata>>(new AsyncKafkaFuture<RecordMetadata>(Future))
+            ? new ValueTask<AsyncKafkaFuture<RecordMetadata>>((AsyncKafkaFuture<RecordMetadata>)Future)
             : new ValueTask<AsyncKafkaFuture<RecordMetadata>>(
                 Task.FromException<AsyncKafkaFuture<RecordMetadata>>(failure));
     }
@@ -157,7 +157,7 @@ internal sealed class AsyncDeliveryState : DeliveryState
         }
         else
         {
-            firstStage.TrySetResult(new AsyncKafkaFuture<RecordMetadata>(Future));
+            firstStage.TrySetResult((AsyncKafkaFuture<RecordMetadata>)Future);
         }
     }
 }
