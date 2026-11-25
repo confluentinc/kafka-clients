@@ -14,9 +14,24 @@
 
 /**
  * The public classes of Java's `org.apache.kafka.clients.consumer` this
- * client has before the consumer: `OffsetAndMetadata`, which
- * `LogTruncationError`'s payload holds, and the consumer's error classes,
- * generated from the Java sources.
+ * client has: the consumer's value types (`ConsumerRecord`,
+ * `ConsumerRecords`, `OffsetAndMetadata`, `OffsetAndTimestamp`,
+ * `SubscriptionPattern`, `ConsumerGroupMetadata`, `CloseOptions` and the
+ * `GroupProtocol` enum), the interfaces its user implements
+ * (`ConsumerRebalanceListener` and `OffsetCommitCallback`), `ConsumerConfig`
+ * and the type of a consumer's configuration, and the consumer's error
+ * classes, generated from the Java sources.
+ *
+ * `ConsumerConfig` holds Java's constants only, as its `ConfigDef` machinery
+ * is not translated: `ConsumerConfig(Properties)`, `ConsumerConfig(Map)`,
+ * `appendDeserializerToConfig`, `configNames()`, `configDef()` and
+ * `main(String[])` are left out, and constructing it throws `TypeError`. Its
+ * constants include those Java's class inherits from `AbstractConfig`, such
+ * as `CONFIG_PROVIDERS_CONFIG`.
+ *
+ * Left out because Java deprecates them: `ConsumerRecords(Map)` and
+ * `ConsumerGroupMetadata`'s public constructors; a `ConsumerGroupMetadata`
+ * comes from the consumer.
  *
  * @packageDocumentation
  */

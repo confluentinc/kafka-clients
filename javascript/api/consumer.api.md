@@ -4,8 +4,54 @@
 
 ```ts
 
+/// <reference types="node" />
+
 // @public (undocumented)
 export const __esModule: true;
+
+// @public
+export class CloseOptions {
+    constructor(options?: {
+        operation?: CloseOptions.GroupMembershipOperation;
+        timeout?: Duration | null;
+    });
+    static groupMembershipOperation(options: {
+        operation: CloseOptions.GroupMembershipOperation;
+    }): CloseOptions;
+    static groupMembershipOperation(operation: CloseOptions.GroupMembershipOperation): CloseOptions;
+    groupMembershipOperation(): CloseOptions.GroupMembershipOperation;
+    static timeout(options: {
+        timeout: Duration | null;
+    }): CloseOptions;
+    static timeout(timeout: Duration | null): CloseOptions;
+    timeout(): number | null;
+    withGroupMembershipOperation(options: {
+        operation: CloseOptions.GroupMembershipOperation;
+    }): this;
+    withGroupMembershipOperation(operation: CloseOptions.GroupMembershipOperation): this;
+    withTimeout(options: {
+        timeout: Duration | null;
+    }): this;
+    withTimeout(timeout: Duration | null): this;
+}
+
+// @public (undocumented)
+export namespace CloseOptions {
+    export class GroupMembershipOperation {
+        static readonly DEFAULT: GroupMembershipOperation;
+        static readonly LEAVE_GROUP: GroupMembershipOperation;
+        name(): string;
+        ordinal(): number;
+        static readonly REMAIN_IN_GROUP: GroupMembershipOperation;
+        toJSON(key?: string): string;
+        toString(): string;
+        static valueOf(name: string): GroupMembershipOperation;
+        static valueOf(options: {
+            name: string;
+        }): GroupMembershipOperation;
+        static values(): GroupMembershipOperation[];
+    }
+}
 
 // @public
 export class CommitFailedError extends KafkaError {
@@ -15,6 +61,365 @@ export class CommitFailedError extends KafkaError {
     });
     constructor(message: string | null);
     constructor();
+}
+
+// @public
+export class ConsumerConfig {
+    static readonly ALLOW_AUTO_CREATE_TOPICS_CONFIG: string;
+    static readonly ASSIGN_FROM_SUBSCRIBED_ASSIGNORS: ReadonlyArray<string>;
+    static readonly AUTO_COMMIT_INTERVAL_MS_CONFIG: string;
+    static readonly AUTO_OFFSET_RESET_CONFIG: string;
+    static readonly AUTO_OFFSET_RESET_DOC: string;
+    static readonly AUTOMATIC_CONFIG_PROVIDERS_PROPERTY: string;
+    static readonly BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG: string;
+    static readonly BOOTSTRAP_SERVERS_CONFIG: string;
+    static readonly CHECK_CRCS_CONFIG: string;
+    static readonly CLIENT_DNS_LOOKUP_CONFIG: string;
+    static readonly CLIENT_ID_CONFIG: string;
+    static readonly CLIENT_RACK_CONFIG: string;
+    static readonly CONFIG_PROVIDERS_CONFIG: string;
+    static readonly CONFIG_PROVIDERS_DOC: string;
+    static readonly CONNECTIONS_MAX_IDLE_MS_CONFIG: string;
+    static readonly DEFAULT_ALLOW_AUTO_CREATE_TOPICS: boolean;
+    static readonly DEFAULT_API_TIMEOUT_MS_CONFIG: string;
+    static readonly DEFAULT_CLIENT_RACK: string;
+    static readonly DEFAULT_EXCLUDE_INTERNAL_TOPICS: boolean;
+    static readonly DEFAULT_FETCH_MAX_BYTES: number;
+    static readonly DEFAULT_FETCH_MAX_WAIT_MS: number;
+    static readonly DEFAULT_FETCH_MIN_BYTES: number;
+    static readonly DEFAULT_GROUP_PROTOCOL: string;
+    static readonly DEFAULT_GROUP_REMOTE_ASSIGNOR: string | null;
+    static readonly DEFAULT_ISOLATION_LEVEL: string;
+    static readonly DEFAULT_MAX_PARTITION_FETCH_BYTES: number;
+    static readonly DEFAULT_MAX_POLL_RECORDS: number;
+    static readonly DEFAULT_SHARE_ACQUIRE_MODE: string;
+    static readonly ENABLE_AUTO_COMMIT_CONFIG: string;
+    static readonly ENABLE_METRICS_PUSH_CONFIG: string;
+    static readonly ENABLE_METRICS_PUSH_DOC: string;
+    static readonly EXCLUDE_INTERNAL_TOPICS_CONFIG: string;
+    static readonly FETCH_MAX_BYTES_CONFIG: string;
+    static readonly FETCH_MAX_WAIT_MS_CONFIG: string;
+    static readonly FETCH_MIN_BYTES_CONFIG: string;
+    static readonly GROUP_ID_CONFIG: string;
+    static readonly GROUP_INSTANCE_ID_CONFIG: string;
+    static readonly GROUP_PROTOCOL_CONFIG: string;
+    static readonly GROUP_PROTOCOL_DOC: string;
+    static readonly GROUP_REMOTE_ASSIGNOR_CONFIG: string;
+    static readonly GROUP_REMOTE_ASSIGNOR_DOC: string;
+    static readonly HEARTBEAT_INTERVAL_MS_CONFIG: string;
+    static readonly INTERCEPTOR_CLASSES_CONFIG: string;
+    static readonly INTERCEPTOR_CLASSES_DOC: string;
+    static readonly ISOLATION_LEVEL_CONFIG: string;
+    static readonly ISOLATION_LEVEL_DOC: string;
+    static readonly KEY_DESERIALIZER_CLASS_CONFIG: string;
+    static readonly KEY_DESERIALIZER_CLASS_DOC: string;
+    static readonly MAX_PARTITION_FETCH_BYTES_CONFIG: string;
+    static readonly MAX_POLL_INTERVAL_MS_CONFIG: string;
+    static readonly MAX_POLL_RECORDS_CONFIG: string;
+    static readonly METADATA_MAX_AGE_CONFIG: string;
+    static readonly METRIC_REPORTER_CLASSES_CONFIG: string;
+    static readonly METRICS_NUM_SAMPLES_CONFIG: string;
+    static readonly METRICS_RECORDING_LEVEL_CONFIG: string;
+    static readonly METRICS_SAMPLE_WINDOW_MS_CONFIG: string;
+    static readonly PARTITION_ASSIGNMENT_STRATEGY_CONFIG: string;
+    static readonly RECEIVE_BUFFER_CONFIG: string;
+    static readonly RECONNECT_BACKOFF_MAX_MS_CONFIG: string;
+    static readonly RECONNECT_BACKOFF_MS_CONFIG: string;
+    static readonly REQUEST_TIMEOUT_MS_CONFIG: string;
+    static readonly RETRY_BACKOFF_MAX_MS_CONFIG: string;
+    static readonly RETRY_BACKOFF_MS_CONFIG: string;
+    static readonly SECURITY_PROVIDERS_CONFIG: string;
+    static readonly SEND_BUFFER_CONFIG: string;
+    static readonly SESSION_TIMEOUT_MS_CONFIG: string;
+    static readonly SHARE_ACKNOWLEDGEMENT_MODE_CONFIG: string;
+    static readonly SHARE_ACQUIRE_MODE_CONFIG: string;
+    static readonly SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: string;
+    static readonly SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: string;
+    static readonly VALUE_DESERIALIZER_CLASS_CONFIG: string;
+    static readonly VALUE_DESERIALIZER_CLASS_DOC: string;
+}
+
+// @public
+export type ConsumerConfigs = {
+    [key in 'allow.auto.create.topics' | 'auto.commit.interval.ms' | 'auto.offset.reset' | 'bootstrap.resolve.timeout.ms' | 'bootstrap.servers' | 'check.crcs' | 'client.dns.lookup' | 'client.id' | 'client.rack' | 'config.providers' | 'connections.max.idle.ms' | 'default.api.timeout.ms' | 'enable.auto.commit' | 'enable.metrics.push' | 'exclude.internal.topics' | 'fetch.max.bytes' | 'fetch.max.wait.ms' | 'fetch.min.bytes' | 'group.id' | 'group.instance.id' | 'group.protocol' | 'group.remote.assignor' | 'heartbeat.interval.ms' | 'interceptor.classes' | 'internal.throw.on.fetch.stable.offset.unsupported' | 'isolation.level' | 'key.deserializer' | 'max.partition.fetch.bytes' | 'max.poll.interval.ms' | 'max.poll.records' | 'metadata.cluster.check.enable' | 'metadata.max.age.ms' | 'metadata.recovery.rebootstrap.trigger.ms' | 'metadata.recovery.strategy' | 'metric.reporters' | 'metrics.num.samples' | 'metrics.recording.level' | 'metrics.sample.window.ms' | 'partition.assignment.strategy' | 'receive.buffer.bytes' | 'reconnect.backoff.max.ms' | 'reconnect.backoff.ms' | 'request.timeout.ms' | 'retry.backoff.max.ms' | 'retry.backoff.ms' | 'sasl.client.callback.handler.class' | 'sasl.jaas.config' | 'sasl.kerberos.kinit.cmd' | 'sasl.kerberos.min.time.before.relogin' | 'sasl.kerberos.service.name' | 'sasl.kerberos.ticket.renew.jitter' | 'sasl.kerberos.ticket.renew.window.factor' | 'sasl.login.callback.handler.class' | 'sasl.login.class' | 'sasl.login.connect.timeout.ms' | 'sasl.login.read.timeout.ms' | 'sasl.login.refresh.buffer.seconds' | 'sasl.login.refresh.min.period.seconds' | 'sasl.login.refresh.window.factor' | 'sasl.login.refresh.window.jitter' | 'sasl.login.retry.backoff.max.ms' | 'sasl.login.retry.backoff.ms' | 'sasl.mechanism' | 'sasl.oauthbearer.allow.unverified.audience' | 'sasl.oauthbearer.allow.unverified.issuer' | 'sasl.oauthbearer.assertion.algorithm' | 'sasl.oauthbearer.assertion.claim.aud' | 'sasl.oauthbearer.assertion.claim.exp.seconds' | 'sasl.oauthbearer.assertion.claim.iss' | 'sasl.oauthbearer.assertion.claim.jti.include' | 'sasl.oauthbearer.assertion.claim.nbf.seconds' | 'sasl.oauthbearer.assertion.claim.sub' | 'sasl.oauthbearer.assertion.file' | 'sasl.oauthbearer.assertion.private.key.file' | 'sasl.oauthbearer.assertion.private.key.passphrase' | 'sasl.oauthbearer.assertion.template.file' | 'sasl.oauthbearer.client.credentials.client.id' | 'sasl.oauthbearer.client.credentials.client.secret' | 'sasl.oauthbearer.clock.skew.seconds' | 'sasl.oauthbearer.expected.audience' | 'sasl.oauthbearer.expected.issuer' | 'sasl.oauthbearer.header.urlencode' | 'sasl.oauthbearer.jwks.endpoint.refresh.ms' | 'sasl.oauthbearer.jwks.endpoint.retry.backoff.max.ms' | 'sasl.oauthbearer.jwks.endpoint.retry.backoff.ms' | 'sasl.oauthbearer.jwks.endpoint.url' | 'sasl.oauthbearer.jwt.retriever.class' | 'sasl.oauthbearer.jwt.validator.class' | 'sasl.oauthbearer.scope' | 'sasl.oauthbearer.scope.claim.name' | 'sasl.oauthbearer.sub.claim.name' | 'sasl.oauthbearer.token.endpoint.url' | 'security.protocol' | 'security.providers' | 'send.buffer.bytes' | 'session.timeout.ms' | 'share.acknowledgement.mode' | 'share.acquire.mode' | 'socket.connection.setup.timeout.max.ms' | 'socket.connection.setup.timeout.ms' | 'ssl.cipher.suites' | 'ssl.enabled.protocols' | 'ssl.endpoint.identification.algorithm' | 'ssl.engine.factory.class' | 'ssl.key.password' | 'ssl.keymanager.algorithm' | 'ssl.keystore.certificate.chain' | 'ssl.keystore.key' | 'ssl.keystore.location' | 'ssl.keystore.password' | 'ssl.keystore.type' | 'ssl.protocol' | 'ssl.provider' | 'ssl.secure.random.implementation' | 'ssl.trustmanager.algorithm' | 'ssl.truststore.certificates' | 'ssl.truststore.location' | 'ssl.truststore.password' | 'ssl.truststore.type' | 'value.deserializer' | (string & {})]?: ConfigValue;
+};
+
+// @public
+export class ConsumerGroupMetadata {
+    equals(options: {
+        o: unknown;
+    }): boolean;
+    equals(o: unknown): boolean;
+    generationId(): number;
+    groupId(): string;
+    groupInstanceId(): string | null;
+    hashCode(): number;
+    memberId(): string;
+    toJSON(): {
+        groupId: string;
+        generationId: number;
+        memberId: string;
+        groupInstanceId: string | null;
+    };
+    toString(): string;
+}
+
+// @public
+export interface ConsumerRebalanceListener {
+    onPartitionsAssigned(options: {
+        partitions: TopicPartitionSet;
+    }): unknown;
+    onPartitionsLost?(options: {
+        partitions: TopicPartitionSet;
+    }): unknown;
+    onPartitionsRevoked(options: {
+        partitions: TopicPartitionSet;
+    }): unknown;
+}
+
+// @public
+export class ConsumerRecord<out K = never, out V = never> {
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp?: never;
+        timestampType?: never;
+        serializedKeySize?: never;
+        serializedValueSize?: never;
+        key: null;
+        value: null;
+        headers?: never;
+        leaderEpoch?: never;
+        deliveryCount?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp?: never;
+        timestampType?: never;
+        serializedKeySize?: never;
+        serializedValueSize?: never;
+        key: null;
+        value: V | null;
+        headers?: never;
+        leaderEpoch?: never;
+        deliveryCount?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp?: never;
+        timestampType?: never;
+        serializedKeySize?: never;
+        serializedValueSize?: never;
+        key: K | null;
+        value: null;
+        headers?: never;
+        leaderEpoch?: never;
+        deliveryCount?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp?: never;
+        timestampType?: never;
+        serializedKeySize?: never;
+        serializedValueSize?: never;
+        key: K | null;
+        value: V | null;
+        headers?: never;
+        leaderEpoch?: never;
+        deliveryCount?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp: bigint | number;
+        timestampType: TimestampType;
+        serializedKeySize: number;
+        serializedValueSize: number;
+        key: null;
+        value: null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]>;
+        leaderEpoch: number | null;
+        deliveryCount?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp: bigint | number;
+        timestampType: TimestampType;
+        serializedKeySize: number;
+        serializedValueSize: number;
+        key: null;
+        value: V | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]>;
+        leaderEpoch: number | null;
+        deliveryCount?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp: bigint | number;
+        timestampType: TimestampType;
+        serializedKeySize: number;
+        serializedValueSize: number;
+        key: K | null;
+        value: null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]>;
+        leaderEpoch: number | null;
+        deliveryCount?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp: bigint | number;
+        timestampType: TimestampType;
+        serializedKeySize: number;
+        serializedValueSize: number;
+        key: K | null;
+        value: V | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]>;
+        leaderEpoch: number | null;
+        deliveryCount?: never;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp: bigint | number;
+        timestampType: TimestampType;
+        serializedKeySize: number;
+        serializedValueSize: number;
+        key: null;
+        value: null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]>;
+        leaderEpoch: number | null;
+        deliveryCount: number | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp: bigint | number;
+        timestampType: TimestampType;
+        serializedKeySize: number;
+        serializedValueSize: number;
+        key: null;
+        value: V | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]>;
+        leaderEpoch: number | null;
+        deliveryCount: number | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp: bigint | number;
+        timestampType: TimestampType;
+        serializedKeySize: number;
+        serializedValueSize: number;
+        key: K | null;
+        value: null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]>;
+        leaderEpoch: number | null;
+        deliveryCount: number | null;
+    });
+    constructor(options: {
+        topic: string;
+        partition: number;
+        offset: bigint | number;
+        timestamp: bigint | number;
+        timestampType: TimestampType;
+        serializedKeySize: number;
+        serializedValueSize: number;
+        key: K | null;
+        value: V | null;
+        headers: Iterable<Header | readonly [string, Uint8Array | null]>;
+        leaderEpoch: number | null;
+        deliveryCount: number | null;
+    });
+    readonly deliveryCount: number | null;
+    readonly headers: Headers_2;
+    readonly key: K | null;
+    readonly leaderEpoch: number | null;
+    static readonly NO_TIMESTAMP: bigint;
+    static readonly NULL_SIZE: number;
+    readonly offset: bigint;
+    readonly partition: number;
+    readonly serializedKeySize: number;
+    readonly serializedValueSize: number;
+    readonly timestamp: bigint;
+    readonly timestampType: TimestampType;
+    toJSON(): {
+        topic: string;
+        partition: number;
+        offset: string;
+        timestamp: string;
+        timestampType: TimestampType;
+        serializedKeySize: number;
+        serializedValueSize: number;
+        headers: Headers_2;
+        key: K | null;
+        value: V | null;
+        leaderEpoch: number | null;
+        deliveryCount: number | null;
+    };
+    readonly topic: string;
+    toString(): string;
+    readonly value: V | null;
+}
+
+// @public
+export class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> {
+    [Symbol.iterator](): Iterator<ConsumerRecord<K, V>>;
+    constructor(options: {
+        records: TopicPartitionMap<ConsumerRecord<K, V>[]>;
+        nextOffsets: TopicPartitionMap<OffsetAndMetadata>;
+    });
+    count(): number;
+    static readonly EMPTY: ConsumerRecords<never, never>;
+    static empty<K, V>(): ConsumerRecords<K, V>;
+    isEmpty(): boolean;
+    nextOffsets(): TopicPartitionMap<OffsetAndMetadata>;
+    partitions(): TopicPartitionSet;
+    records(partition: TopicPartition): ConsumerRecord<K, V>[];
+    records(options: {
+        partition: TopicPartition | null;
+        topic?: never;
+    }): ConsumerRecord<K, V>[];
+    records(topic: string): ConsumerRecord<K, V>[];
+    records(options: {
+        topic: string;
+        partition?: never;
+    }): ConsumerRecord<K, V>[];
+}
+
+// @public
+export class GroupProtocol {
+    static readonly CLASSIC: GroupProtocol;
+    static readonly CONSUMER: GroupProtocol;
+    name(): string;
+    static of(name: string): GroupProtocol;
+    static of(options: {
+        name: string;
+    }): GroupProtocol;
+    ordinal(): number;
+    toJSON(key?: string): string;
+    toString(): string;
+    static valueOf(name: string): GroupProtocol;
+    static valueOf(options: {
+        name: string;
+    }): GroupProtocol;
+    static values(): GroupProtocol[];
 }
 
 // @public
@@ -86,6 +491,40 @@ export class OffsetAndMetadata {
 }
 
 // @public
+export class OffsetAndTimestamp {
+    constructor(options: {
+        offset: bigint | number;
+        timestamp: bigint | number;
+        leaderEpoch?: never;
+    });
+    constructor(options: {
+        offset: bigint | number;
+        timestamp: bigint | number;
+        leaderEpoch: number | null;
+    });
+    equals(options: {
+        o: unknown;
+    }): boolean;
+    equals(o: unknown): boolean;
+    hashCode(): number;
+    leaderEpoch(): number | null;
+    offset(): bigint;
+    timestamp(): bigint;
+    toJSON(): {
+        offset: string;
+        timestamp: string;
+        leaderEpoch: number | null;
+    };
+    toString(): string;
+}
+
+// @public
+export type OffsetCommitCallback = (options: {
+    offsets: TopicPartitionMap<OffsetAndMetadata> | null;
+    exception: Error | null;
+}) => unknown;
+
+// @public
 export class OffsetOutOfRangeError extends InvalidOffsetError {
     constructor(options: {
         offsetOutOfRangePartitions: TopicPartitionMap<bigint | number>;
@@ -117,6 +556,24 @@ export class RetriableCommitFailedError extends RetriableError {
         cause: unknown;
         name?: never;
     });
+}
+
+// @public
+export class SubscriptionPattern {
+    constructor(options: {
+        pattern: string;
+    });
+    constructor(pattern: string);
+    equals(options: {
+        obj: unknown;
+    }): boolean;
+    equals(obj: unknown): boolean;
+    hashCode(): number;
+    pattern(): string;
+    toJSON(): {
+        pattern: string | null;
+    };
+    toString(): string;
 }
 
 ```
