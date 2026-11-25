@@ -61,6 +61,17 @@ retry() {
     return 1
 }
 
+# Prints the tag of image $1 with the ca-certificates package added where the image has none (the
+# debian and ubuntu images): the package's library, built without Mozilla's root bundle, trusts
+# the OS store when no truststore is set, so the SSL client of the smoke test needs one, as a
+# user's image does.
+with_ca_certificates() {
+    _tag="test-wheels-$(printf '%s' "$1" | tr ':/' '--')"
+    printf 'FROM %s\nRUN if command -v apt-get >/dev/null 2>&1; then apt-get update -qq \\\n    && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends ca-certificates >/dev/null \\\n    && rm -rf /var/lib/apt/lists/*; fi\n' "$1" \
+        | docker build -q -t "$_tag" - >/dev/null || return 1
+    echo "$_tag"
+}
+
 usage() {
     echo "Usage: $0 <wheelhouse-dir> [<checksum-file>]" >&2
     echo "       $0 --index <simple-index-url> <version>" >&2
@@ -214,12 +225,13 @@ else
     for img in $DISTRO_IMAGES; do
         echo "== testing on $img =="
         retry docker pull "$img"
+        run_img=$(retry with_ca_certificates "$img")
         docker run --rm \
             -e IN_DOCKER=1 -e FULL_SUITE="$full" \
             -e WHEELHOUSE -e INDEX_URL -e PACKAGE_VERSION \
             -e UV_HOME -e UV_CACHE_DIR -e UV_PYTHON_INSTALL_DIR \
             -v "$UV_HOME":"$UV_HOME" \
-            -v "$PWD":/io -w /io "$img" \
+            -v "$PWD":/io -w /io "$run_img" \
             sh /io/.semaphore/test-wheels.sh
         # The unit tests run in the first distribution only.
         full=0

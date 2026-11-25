@@ -1801,7 +1801,8 @@ personas; §8.1/§8.2). The `dotnet-actor` **depends on** them and owns **steps
    getter / destroy; canonical: `src/ffi/producer.rs`); `pub mod <area>;`.
 3. **Make the types emit** — add zero-field opaque `*_t` structs to
    `cbindgen.toml` `[export].include`.
-4. **Regenerate** — `cargo build --features ffi`; confirm the symbols land in
+4. **Regenerate** — `make -C rust devel-build-all-features` (the library the
+   tests link, §7.1); confirm the symbols land in
    `target/include/confluent_kafka_bindings.h`.
 5. **Wrap in `NativeMethods`** — `[DllImport]` declarations + `SafeHandle`s.
 6. **Expose the managed API** — the Java-shaped surface in a new class.
@@ -1854,20 +1855,25 @@ The build order, commands, running against a broker, and test conventions.
 The .NET binding cannot run until the Rust side has produced the native library:
 
 ```
-cargo build --features ffi [--release]                    (build-rust)
+make -C rust devel-build-all-features | build-cdylib      (build-rust)
    └─ target/<profile>/{lib}confluent_kafka.{so,dylib,dll}  ← the binding P/Invokes this
                     │  (must exist first)
                     ▼
 dotnet build   (an MSBuild step copies the native into $(OutDir))  (build-dotnet)
 ```
 
-Never build .NET before Rust — the native won't exist.
+Never build .NET before Rust — the native won't exist. `<profile>` is
+`Confluent.Kafka.csproj`'s `CargoProfileDir`: `debug` for the Debug configuration
+(the debug all-features library the tests link), `release-cdylib` for Release (the
+library as the package ships it: the platform's certificate verifier as the
+default trust store, no Mozilla root bundle). `-p:CargoProfileDir=<dir>` overrides
+it, as `dotnet/Makefile` does for every test target.
 
 ### 7.2 Commands (intended)
 
 | Goal | Command |
 |---|---|
-| Build the native | `cargo build --features ffi [--release]` |
+| Build the native | `make -C rust devel-build-all-features` (Debug) / `make -C rust build-cdylib` (Release) |
 | Build the binding | `dotnet build` (copies the native to output) |
 | Unit tests (**no broker**) | `dotnet test` (`MockProducer` / `MockConsumer`) |
 | Unit-test coverage | `make coverage-dotnet` (repository root; report in `dotnet/artifacts/coverage/report`) |

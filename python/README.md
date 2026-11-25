@@ -325,7 +325,9 @@ make -C ../rust devel-build-all-features   # the debug build the tests use
 This produces `../rust/target/debug/libconfluent_kafka.*` and
 `../rust/target/include/confluent_kafka.h`. `setup.py` finds them there;
 set `CONFLUENT_KAFKA_LIB_DIR` to link a library from another directory
-(e.g. `../rust/target/release`, from `make -C ../rust build-all-features`).
+(e.g. `../rust/target/release-cdylib`, the library as the wheel ships it:
+`make -C ../rust build-cdylib`, with the platform verifier and without
+`webpki-roots`).
 
 ## Building
 

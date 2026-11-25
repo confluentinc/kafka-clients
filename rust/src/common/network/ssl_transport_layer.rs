@@ -1441,8 +1441,9 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_handshake_cert_failure_is_authentication_error() {
         // Server uses a self-signed cert; client uses a DIFFERENT truststore
-        // (the default factory, which trusts only the webpki roots), so the
-        // client must reject the server certificate.
+        // (the default factory, which trusts only the Mozilla or platform roots, never the
+        // test's self-signed cert), so the client must reject the server
+        // certificate.
         let (_factory_unused, server_config) = build_paired_factory_and_server_config();
         let client_factory = create_test_factory();
         let (client_stream, server_stream) = make_localhost_pair().await;

@@ -2,12 +2,14 @@ REPO_ROOT ?= $(realpath ..)
 RUST_PROJECT_ROOT ?= $(REPO_ROOT)/rust
 # The cargo profile directory of the Rust library every target links:
 # $(RUST_PROJECT_ROOT)/target/$(RUST_PROFILE). The tests use the debug
-# all-features build; the root's `build` passes release, and producer-perf-test
-# always links release.
+# all-features build; the root's `build` passes release-cdylib, the library as
+# it ships (rust/Makefile `build-cdylib`: the platform verifier, no Mozilla
+# bundle), and producer-perf-test always links it.
 RUST_PROFILE ?= debug
-# The rust/Makefile target that builds that library: the release or the debug
+# The rust/Makefile target that builds that library: the shipped build
+# (release-cdylib), the release all-features build (release) or the debug
 # all-features build.
-RUST_BUILD_TARGET = $(if $(filter release,$(RUST_PROFILE)),build-all-features,devel-build-all-features)
+RUST_BUILD_TARGET = $(if $(filter release-cdylib,$(RUST_PROFILE)),build-cdylib,$(if $(filter release,$(RUST_PROFILE)),build-all-features,devel-build-all-features))
 BUILD_DIR = build
 # The tag of the gRPC image; rust/tests/common/backend_pool.rs reads the same
 # variable. Override it per worktree so concurrent sessions do not share images.
@@ -130,8 +132,8 @@ test-integration-native: grpc-native
 # env-var contract as the Rust `producer-perf-test`; select the backend with
 # CLIENT_VERSION (3 = Rust client C bindings, default; 2 = librdkafka
 # baseline). Built by `build` but intentionally not run under `test`. It links
-# the release library, as a benchmark should.
-producer-perf-test: RUST_PROFILE = release
+# the library as it ships (release-cdylib), as a benchmark should.
+producer-perf-test: RUST_PROFILE = release-cdylib
 producer-perf-test: build
 	./$(BUILD_DIR)/producer_perf_test
 
