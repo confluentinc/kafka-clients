@@ -59,7 +59,7 @@ macro_rules! multilanguage_consumer_test {
         );
     };
     ($(#[$attr:meta])* $name:ident, $body:ident, $cluster_config:expr) => {
-        ::paste::paste! {
+        ::pastey::paste! {
             $(#[$attr])*
             #[expect(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]

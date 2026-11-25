@@ -220,21 +220,34 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
         return Ok(files);
     }
 
+    // The build script's output directories, one per build configuration.
+    // Cargo 1.100 changed the build-dir layout from
+    // `build/confluent-kafka-<hash>/out` to `build/confluent-kafka/<hash>/out`;
+    // both are searched, so a target directory holding either one works.
+    let mut hash_dirs = Vec::new();
+    for entry in fs::read_dir(&target_dir)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name == "confluent-kafka" && path.is_dir() {
+            for hash_entry in fs::read_dir(&path)? {
+                hash_dirs.push(hash_entry?.path());
+            }
+        } else if name.starts_with("confluent-kafka-") {
+            hash_dirs.push(path);
+        }
+    }
+
     // Find the most recently modified generated directory to avoid
     // formatting stale build artifacts (there can be many).
     let mut newest_dir: Option<(PathBuf, std::time::SystemTime)> = None;
-
-    for entry in fs::read_dir(&target_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.is_dir() && path.file_name().unwrap().to_str().unwrap().starts_with("confluent-kafka-") {
-            let generated_dir = path.join("out/generated");
-            if generated_dir.exists() {
-                let modified = entry.metadata()?.modified()?;
-                if newest_dir.as_ref().is_none_or(|(_, t)| modified > *t) {
-                    newest_dir = Some((generated_dir, modified));
-                }
+    for hash_dir in hash_dirs {
+        let generated_dir = hash_dir.join("out/generated");
+        if generated_dir.is_dir() {
+            let modified = fs::metadata(&hash_dir)?.modified()?;
+            if newest_dir.as_ref().is_none_or(|(_, t)| modified > *t) {
+                newest_dir = Some((generated_dir, modified));
             }
         }
     }

@@ -162,7 +162,7 @@ pub async fn poll_until_entry(
 #[macro_export]
 macro_rules! assignment_interval_consumer_test {
     ($name:ident, $body:ident, $cfg:expr) => {
-        ::paste::paste! {
+        ::pastey::paste! {
             async fn [<$body _without_assignment_interval>]<F: $crate::common::backend_factory::ConsumerBackendFactory>(
                 ctx: &mut $crate::common::test_context::TestContext,
                 factory: &F,
