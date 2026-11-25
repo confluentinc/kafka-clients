@@ -19,7 +19,7 @@
 # (Windows ...)" blocks of release.yml. The smoke project (dotnet/tools/PackageSmoke), a copy
 # outside the repository, references the package by its exact version from that one feed
 # (packageSourceMapping), with an empty NuGet cache, so nothing but the package can be used. It is
-# built for the platform and run in a process of it, on net8.0, net10.0 and the agent's .NET
+# built for the platform and run in a process of it, on net10.0 and the agent's .NET
 # Framework (net462), with no RID of its own, as users build it: on .NET Framework the SDK gives an
 # application the RID of its PlatformTarget, and NuGet copies that RID's native library beside it.
 # A second .NET Framework build is AnyCPU. On x64 it sets no platform, as most applications do: the
@@ -28,7 +28,7 @@
 # nothing beside it, and runs as a 32-bit process. Either way it must load the library of its
 # process from runtimes\<rid>\native, where the package's build targets copy both Windows libraries. Each run must load one copy of the library, from where it is expected. A
 # self-contained `dotnet publish` for the platform's RID must carry the native library and run. The
-# binding's unit tests then run against the package, on the same three frameworks, with no RID, as
+# binding's unit tests then run against the package, on the same two frameworks, with no RID, as
 # a test project is built; on .NET Framework they load the library the build targets copy. The
 # unit-test project's
 # -p:ConfluentKafkaPackageVersion swaps its project reference for the package, so the assembly and
@@ -58,7 +58,7 @@ param(
 $rid = $WindowsRids[$Platform]
 $bits = @{ x64 = '64'; x86 = '32' }[$Platform]
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$tfms = 'net462', 'net8.0', 'net10.0'
+$tfms = 'net462', 'net10.0'
 
 $listing = @(Get-ChildItem -Force $PackageDir)
 if ($listing.Count -ne 1 -or $listing[0].Name -notmatch '^Confluent\.Kafka\.(.+)\.nupkg$') {

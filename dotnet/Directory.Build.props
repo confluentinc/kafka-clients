@@ -47,6 +47,15 @@
     <Version>4.4.0-alpha.1</Version>
   </PropertyGroup>
 
+  <!-- The facade packages of the library's net462 and netstandard2.0 builds
+       (src/Confluent.Kafka/Confluent.Kafka.csproj), which tests/Confluent.Kafka.UnitTests.NetStandard
+       references too, as it gets the netstandard2.0 build without its dependencies. The package's
+       nuspec lists them, and .semaphore/check-nupkg.py checks it. -->
+  <PropertyGroup>
+    <SystemMemoryVersion>4.5.5</SystemMemoryVersion>
+    <MicrosoftBclAsyncInterfacesVersion>8.0.0</MicrosoftBclAsyncInterfacesVersion>
+  </PropertyGroup>
+
   <!-- A CI build (Semaphore sets CI=true) maps the source paths in the PDBs to the repository's, so a
        package built there names no build machine path. -->
   <PropertyGroup Condition="'$(CI)' == 'true'">

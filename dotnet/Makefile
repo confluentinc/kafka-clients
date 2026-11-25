@@ -110,11 +110,10 @@ grpc-image-async-aot: rust-lib
 		$(REPO_ROOT)
 
 # Build the .NET gRPC server for the native (host-process) multilanguage arm
-# (M17/P1): the net10.0 leg of grpc-server into rust/target/grpc-native/dotnet,
-# where rust/tests/common/backend_pool.rs runs it with `dotnet`. net10.0 because SDK 10
-# brings the ASP.NET Core 10 runtime but no ASP.NET Core 8 one; the Docker images
-# publish the net8.0 leg instead. rust-lib builds the debug all-features Rust
-# library first.
+# (M17/P1): grpc-server, whose one target framework is net10.0, into
+# rust/target/grpc-native/dotnet, where rust/tests/common/backend_pool.rs runs it with
+# `dotnet` on the ASP.NET Core 10 runtime SDK 10 brings; the Docker images publish it
+# too. rust-lib builds the debug all-features Rust library first.
 #
 # Confluent.Kafka.csproj's native-copy <Content> item copies
 # rust/target/$(CargoProfileDir)/libconfluent_kafka.* into the output, and
@@ -231,12 +230,12 @@ rust-lib:
 # $(RUST_PROJECT_ROOT) (see the header), so it works from any directory.
 #
 # The `dotnet build` compiles the full TFM matrix: the library
-# (net462;netstandard2.0;net8.0;net10.0), the unit-test project (net462;net8.0;net10.0)
-# and the integration-test project (net8.0;net10.0).
+# (net462;netstandard2.0;net10.0), the unit-test project (net462;net10.0), the
+# netstandard2.0 unit-test project (net10.0, against the library's netstandard2.0 build)
+# and the integration-test project (net10.0).
 # The net462 legs are BUILD-VERIFIED here (cross-platform via
 # Microsoft.NETFramework.ReferenceAssemblies, Decision 2a) but never RUN — net462
-# cannot execute on Linux; test execution is net8.0 + net10.0 only (see
-# test-dotnet).
+# cannot execute on Linux; test execution is net10.0 only (see test-dotnet).
 build-dotnet: rust-lib
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(SOLUTION)
 
@@ -247,18 +246,19 @@ build-dotnet: rust-lib
 # `check-dotnet` below; Directory.Build.props already makes analyzer and style
 # violations build errors (TreatWarningsAsErrors, EnforceCodeStyleInBuild).
 #
-# Tests RUN on net8.0 AND net10.0 (Decision 2): SDK 10 runs net10.0 natively; the
-# net8.0 leg needs the .NET 8 base runtime present (provisioned in CI by
-# install-dotnet.sh). net462 is build-verified by build-dotnet, not run here.
+# Tests RUN on net10.0, on the runtime SDK 10 brings (Decision 2 also ran net8.0,
+# which went with the library's net8.0 build: .NET 8 is out of Microsoft support). The solution's
+# Confluent.Kafka.UnitTests.NetStandard runs the unit tests against the library's
+# netstandard2.0 build, the one a .NET 8 application loads. net462 is build-verified
+# by build-dotnet, not run here.
 #
 # DOTNET_TEST_FILTER, empty by default, is a `dotnet test --filter` expression for
-# both test lines. test-dotnet-macos below sets it to leave the
+# the test line. test-dotnet-macos below sets it to leave the
 # integration tests out, as Python's macOS job runs only its unit tests. The
 # test selection's `dotnet.solution` narrows it further. The build always runs.
 DOTNET_TEST_FILTER ?=
 
 test-dotnet: build-dotnet
-	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(SOLUTION) {})
 	$(call selected_run,--section dotnet.solution --dotnet --dotnet-filter '$(DOTNET_TEST_FILTER)' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(SOLUTION) {})
 	$(MAKE) test-soak-dotnet
 
@@ -318,9 +318,9 @@ check-dotnet: build-dotnet
 # fails loudly if cargo has not run. Both steps are incremental, so the re-entry
 # from test-dotnet costs almost nothing.
 #
-# Tests RUN on net8.0 AND net10.0 (the soak exe targets exactly those two; net462
-# is deliberately absent — the client is run by `dotnet <dll>` on a Linux box,
-# never on .NET Framework).
+# Tests RUN on net10.0 (the soak exe targets exactly that; net462 is deliberately
+# absent — the client is run by `dotnet <dll>` on a Linux box, never on .NET
+# Framework).
 # ---------------------------------------------------------------------------
 SOAK_DIR := $(REPO_ROOT)/dotnet/soak
 SOAK_CLIENT := $(SOAK_DIR)/SoakClient/SoakClient.csproj
@@ -328,13 +328,12 @@ SOAK_TESTS := $(SOAK_DIR)/SoakClient.Tests/SoakClient.Tests.csproj
 
 test-soak-dotnet: build-dotnet
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(SOAK_TESTS)
-	$(call selected_run,--section dotnet.soak --dotnet -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(SOAK_TESTS) {})
 	$(call selected_run,--section dotnet.soak --dotnet -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(SOAK_TESTS) {})
 
 # ---------------------------------------------------------------------------
 # The examples (dotnet/examples/README.md). Kept out of the solution, like the soak
-# client: they target net8.0 only, as a user's program would, while test-dotnet runs
-# the solution on net10.0 too. Their own solution holds them; this target builds it
+# client: they target net10.0 only, as a user's program would. Their own solution
+# holds them; this target builds it
 # and checks its format, so the examples cannot rot. They are run by hand, against a
 # broker, as the README shows.
 # ---------------------------------------------------------------------------
@@ -351,8 +350,9 @@ test-examples-dotnet: build-dotnet
 # collector that Microsoft.NET.Test.Sdk already brings, and turns its Cobertura
 # output into a report with ReportGenerator, a local tool pinned in
 # .config/dotnet-tools.json. Only the Confluent.Kafka assembly is counted, not
-# the test assembly. One TFM is enough: net8.0 runs the same code, and net462
-# cannot run outside Windows. -sourcedirs lets the HTML report find the sources
+# the test assembly. One TFM is enough: net462 cannot run outside Windows, and the
+# netstandard2.0 build is the same code but for a few #if branches. -sourcedirs lets
+# the HTML report find the sources
 # in a CI build, whose PDBs name them /_/... (Directory.Build.props).
 #
 # Writes artifacts/coverage/report (Summary.txt, printed at the end, and an HTML
@@ -383,14 +383,13 @@ coverage-dotnet: build-dotnet
 
 # ---------------------------------------------------------------------------
 # The verifiable clients (dotnet/tools/VerifiableClients), the producer and consumer
-# tools Kafka's system tests drive. Their tests alone, on net8.0 and net10.0. The
+# tools Kafka's system tests drive. Their tests alone, on net10.0. The
 # projects are in the solution, so test-dotnet runs these tests too; this target
 # does not need calling from it.
 # ---------------------------------------------------------------------------
 VERIFIABLE_CLIENTS_TESTS := $(REPO_ROOT)/dotnet/tools/VerifiableClients/VerifiableClients.Tests/VerifiableClients.Tests.csproj
 
 test-verifiable-clients-dotnet: build-dotnet
-	$(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(VERIFIABLE_CLIENTS_TESTS)
 	$(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(VERIFIABLE_CLIENTS_TESTS)
 
 # ---------------------------------------------------------------------------
@@ -405,7 +404,7 @@ test-verifiable-clients-dotnet: build-dotnet
 #
 # package-check-dotnet installs that package from a local feed into a project
 # outside the repository, with an empty NuGet cache, and runs the smoke program
-# on net8.0 and net10.0 (.semaphore/test-nupkg.sh --smoke): what the release's
+# on net10.0 (.semaphore/test-nupkg.sh --smoke): what the release's
 # package verification runs, less the unit tests against the package, the Linux
 # distribution containers and the self-contained publish. CI runs it in the
 # macOS verify-dotnet job. The version is <Version> in Directory.Build.props;
@@ -422,17 +421,20 @@ package-check-dotnet: pack-dotnet
 	cd $(REPO_ROOT) && sh .semaphore/test-nupkg.sh --smoke $(PACKAGE_DIR)
 
 # ---------------------------------------------------------------------------
-# Native AOT check of the library (net8.0 and net10.0).
+# Native AOT check of the library (its net10.0 and netstandard2.0 builds).
 #
 # tools/AotSmoke is published with PublishAot for this machine's runtime, with the
 # whole Confluent.Kafka assembly rooted (TrimmerRootAssembly): the AOT compiler
 # analyzes every member of the library, and any trim or AOT warning fails the
 # publish (TreatWarningsAsErrors). It catches what the library's own analyzers
-# (IsAotCompatible) cannot see, such as a warning silenced with #pragma. Each
+# (IsAotCompatible) cannot see, such as a warning silenced with #pragma. It is
+# published twice, against the library's net10.0 build and, with
+# -p:ConfluentKafkaNetStandard=true, against its netstandard2.0 build, the one a .NET 8
+# Native AOT application compiles, which the analyzers do not check. Each
 # published executable then runs, and fails on a check that does not hold.
 #
 # Outside the solution, as a Native AOT publish needs the platform's C toolchain
-# (Xcode's command line tools on macOS; clang, and zlib for net8.0, on Linux), so
+# (Xcode's command line tools on macOS; clang on Linux), so
 # `dotnet format $(SOLUTION)` does not reach it: check-dotnet formats it. Depends
 # on build-dotnet, as the executables P/Invoke the native library it builds
 # (CLAUDE.md §7.1); $(CARGO_PROFILE_PROP) makes the publish copy that library. No
@@ -442,10 +444,10 @@ AOT_SMOKE := $(REPO_ROOT)/dotnet/tools/AotSmoke/AotSmoke.csproj
 AOT_SMOKE_OUT := $(REPO_ROOT)/dotnet/artifacts/aot-smoke
 
 test-aot-dotnet: build-dotnet
-	$(DOTNET) publish -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 --use-current-runtime $(AOT_SMOKE) -o $(AOT_SMOKE_OUT)/net8.0
 	$(DOTNET) publish -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 --use-current-runtime $(AOT_SMOKE) -o $(AOT_SMOKE_OUT)/net10.0
-	$(AOT_SMOKE_OUT)/net8.0/AotSmoke
+	$(DOTNET) publish -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 --use-current-runtime -p:ConfluentKafkaNetStandard=true $(AOT_SMOKE) -o $(AOT_SMOKE_OUT)/netstandard2.0
 	$(AOT_SMOKE_OUT)/net10.0/AotSmoke
+	$(AOT_SMOKE_OUT)/netstandard2.0/AotSmoke
 
 # ---------------------------------------------------------------------------
 # gRPC-server unit tests (M18/P1, PLAN §7.1): the chaos-harness service
@@ -501,7 +503,7 @@ CLIENT_VERSION ?= 3
 # The perf suite's Docker-free automated gate: the CRC-32 self-check
 # (built_in_partitioner.rs golden vectors) plus the engine-level tests (readiness gate,
 # async-producer cancellation, 64-bit message count, PerfEnv's empty-value check). No
-# broker, no Docker, no client — runs on net8.0 AND net10.0. The empty-value check runs
+# broker, no Docker, no client — runs on net10.0. The empty-value check runs
 # the PerfV3 exe as a child process that stops in its configuration, before it makes a
 # client, so this target builds PerfV3 first, as the Docker target does. (The Docker
 # in-suite smoke is the separate test-integration-perf-dotnet target below.)
@@ -520,7 +522,6 @@ CLIENT_VERSION ?= 3
 # instead of silently running nowhere but the Docker target.
 perf-unit-test-dotnet: build-dotnet
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(PERF_V3)/PerfV3.csproj
-	$(call selected_run,--section dotnet.performance --dotnet --dotnet-filter 'FullyQualifiedName!~PerfV3SmokeTests' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net8.0 $(PERF_TESTS) {})
 	$(call selected_run,--section dotnet.performance --dotnet --dotnet-filter 'FullyQualifiedName!~PerfV3SmokeTests' -- $(DOTNET) test -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) -f net10.0 $(PERF_TESTS) {})
 
 # Env-driven producer/consumer benchmarks (manual; need a reachable broker via
@@ -552,12 +553,9 @@ consumer-perf-test-dotnet:
 
 # In-suite v3 perf smoke (xUnit + Testcontainers). v3-ONLY gate (PerfV2 is
 # manual-comparison only, never in this smoke). Two-stage native build first, then
-# build the PerfV3 exe for BOTH TFMs (the smoke subprocess-launches PerfV3 by path,
-# reusing the running test's config+TFM), then run the smoke on net10.0 ONLY. The
-# perf gate is a p99-latency check, not TFM coverage: net8.0 stays covered
-# functionally by test-dotnet (both TFMs); net10.0 is the designated execution gate
-# (PerfV3.csproj still builds for all TFMs). Wired into `verify` (mirroring
-# python/'s perf stage).
+# build the PerfV3 exe (the smoke subprocess-launches PerfV3 by path, reusing the
+# running test's config+TFM), then run the smoke on net10.0, the suite's one TFM.
+# Wired into `verify` (mirroring python/'s perf stage).
 #
 # PERF_REQUIRE_DOCKER=True makes a missing/broken Docker or a
 # broker that will not start a FAILURE here, not a skip: this target is what

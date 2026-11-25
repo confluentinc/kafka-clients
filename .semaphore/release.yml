@@ -794,7 +794,7 @@ blocks:
   # bump-version. The version is <Version> in dotnet/Directory.Build.props.
   #
   # The package is Confluent.Kafka.<version>.nupkg: the managed assembly for
-  # net462, netstandard2.0, net8.0 and net10.0, and the native library of each RID
+  # net462, netstandard2.0 and net10.0, and the native library of each RID
   # under runtimes/<rid>/native/.
   # The blocks run in this order, each on a VM of its own:
   #   1. "Release (.NET): native library (<platform>)" builds the native
@@ -812,7 +812,7 @@ blocks:
   #      package as users receive it, on a VM that built nothing
   #      (.semaphore/test-nupkg.sh, .semaphore/test-nupkg.ps1 on Windows): a
   #      project outside the repository installs it from a local feed and runs
-  #      a smoke program on net8.0 and net10.0, on Windows also on .NET
+  #      a smoke program on net10.0, on Windows also on .NET
   #      Framework, and on Linux also in a container of each supported
   #      distribution; a self-contained publish runs; and the binding's unit
   #      tests run against the package. It records the SHA-256 of the tested

@@ -6,15 +6,16 @@
     a TFM-sentinel smoke test that proves the harness runs and InternalsVisibleTo
     compiles.
 
-    Test TFMs are net462;net8.0;net10.0. net462 is the TFM smoke leg of the library's
+    Test TFMs are net462;net10.0. net462 is the TFM smoke leg of the library's
     net462 assembly (PLAN §5.7): it must BUILD on the floor here (Microsoft.NETFramework.-
     ReferenceAssemblies restores the reference assemblies cross-platform), but its
-    RUN is Windows/CI-only. net8.0 runs are CI-only too (only the .NET 10 runtime is
-    installed locally), so use `dotnet test -f net10.0` locally.
+    RUN is Windows/CI-only, so use `dotnet test -f net10.0` locally.
+    ../Confluent.Kafka.UnitTests.NetStandard runs these tests against the library's
+    netstandard2.0 build, the one a .NET 8 application loads.
   -->
 
   <PropertyGroup>
-    <TargetFrameworks>net462;net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net462;net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.UnitTests</RootNamespace>
     <AssemblyName>Confluent.Kafka.UnitTests</AssemblyName>
     <IsPackable>false</IsPackable>

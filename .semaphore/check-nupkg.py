@@ -72,7 +72,6 @@ TARGET_FRAMEWORKS = {
                ".NETFramework,Version=v4.6.2"),
     "netstandard2.0":(".NETStandard2.0", {"System.Memory": "4.5.5", "Microsoft.Bcl.AsyncInterfaces": "8.0.0"},
                        ".NETStandard,Version=v2.0"),
-    "net8.0": ("net8.0", {}, ".NETCoreApp,Version=v8.0"),
     "net10.0": ("net10.0", {}, ".NETCoreApp,Version=v10.0"),
 }
 # The exclude attribute `dotnet pack` gives a package's dependencies.

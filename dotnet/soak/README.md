@@ -28,7 +28,7 @@ dotnet/soak/
 ├─ bootstrap.sh               one-time host setup, then build.sh
 ├─ build.sh                   cargo build --features ffi, then dotnet build + tests
 ├─ run.sh                     the supervisor: keeps the client alive, rotates its log
-├─ SoakClient/                the client itself (net8.0;net10.0, Exe)
+├─ SoakClient/                the client itself (net10.0, Exe)
 └─ SoakClient.Tests/          its unit tests (xunit, no broker, no Docker)
 ```
 

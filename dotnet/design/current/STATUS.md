@@ -2740,9 +2740,10 @@ dotnet/
 ├─ .editorconfig · .gitignore
 ├─ src/
 │  └─ Confluent.Kafka/
-│     ├─ Confluent.Kafka.csproj                ← TFMs netstandard2.0;net8.0;net10.0
-│     │                                           (net462 via ns2.0), System.Memory on the ns2.0
-│     │                                           leg only, GenerateDocumentationFile,
+│     ├─ Confluent.Kafka.csproj                ← TFMs net462;netstandard2.0;net10.0 (no net8.0
+│     │                                           since ledger 641), System.Memory and
+│     │                                           Microsoft.Bcl.AsyncInterfaces on the net462 and
+│     │                                           ns2.0 legs only, GenerateDocumentationFile,
 │     │                                           IsPackable=false (M0/P1 — holds §4's id gate shut),
 │     │                                           InternalsVisibleTo → UnitTests (public key);
 │     │                                           M1/P1: + <AllowUnsafeBlocks> (library only),
@@ -2802,7 +2803,9 @@ dotnet/
 │                                                  call-scoped pinned buffer) + PtrToString
 │                                                  (NUL-terminated form; null for IntPtr.Zero)
 └─ tests/
-   └─ Confluent.Kafka.UnitTests/               ← TFMs net8.0;net10.0; `unsafe` only in NativeMemoryManager.cs (M23/P1, ledger 408)
+   ├─ Confluent.Kafka.UnitTests.NetStandard/   ← net10.0; compiles Confluent.Kafka.UnitTests' files against the library's
+   │                                            netstandard2.0 build (SetTargetFramework), the one a .NET 8 app loads (ledger 642)
+   └─ Confluent.Kafka.UnitTests/               ← TFMs net462;net10.0; `unsafe` only in NativeMemoryManager.cs (M23/P1, ledger 408)
       ├─ TfmSentinelTests.cs                    ← M0/P0 TFM-sentinel smoke test (root: harness-level)
       ├─ KafkaExceptionTests.cs                 ← M2/P1: public-type test (root): classic -> Code 35
       │                                            + I1 both-false + msg; café msg echo; FromHandle(Zero)

@@ -647,7 +647,7 @@ public sealed class NativeCallbackAnalyzerTests
                 : Array.Empty<DiagnosticResult>());
 
     [Fact]
-    public Task TheForwardedArgumentsTheBindingUses_AreNotReported_OnNet80() =>
+    public Task TheForwardedArgumentsTheBindingUses_AreNotReported_OnNet100() =>
         Verifier.VerifyAsync(Native + ForwardedArgumentsTheBindingUses);
 
     [Fact]

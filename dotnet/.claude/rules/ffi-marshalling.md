@@ -40,26 +40,23 @@ marshals strings and errors as Part A does (§A3, §A5), so it states only its o
 
 **Decision:** One `internal static class NativeMethods` (in `NativeMethods.cs`,
 the name analyzer CA1060 requires) of classic `[DllImport(...,
-Cdecl)]` declarations, uniform across `netstandard2.0` + `net8.0` + `net10.0`.
+Cdecl)]` declarations, uniform across `net462` + `netstandard2.0` + `net10.0`.
 netstandard2.0 is the floor (covers .NET Framework 4.6.2), so the modern interop
 APIs — `[LibraryImport]`, `delegate* unmanaged`, `[UnmanagedCallersOnly]`,
 `UnmanagedType.LPUTF8Str`, `Marshal.PtrToStringUTF8` — are **off-limits** (they
 don't exist on the floor). Same classic toolkit as confluent-kafka-dotnet,
 pointed at our fixed-width, handle-error ABI.
 
-**Note — support matrix (aligned with ckd 2.15.0).** We target the same reach as
-ckd's `Confluent.Kafka` — **net462 · netstandard2.0 · net8.0 · net10.0** — but
-satisfy **net462 through the `netstandard2.0` asset**, not a separate `net462`
-target. We can because we have **no Framework-specific code**: one self-built
-cdylib resolved by default `[DllImport]` probing (no `NativeLibrary` resolver, no
-distro-variant `NativeMethods`, no `#if NET462`), so a net462 build would be
-byte-identical to the ns2.0 one. ckd ships an explicit `net462` target only
-because librdkafka's loader *is* Framework-specific (`LoadNetFrameworkDelegates`,
-Mono support, hardcoded `alpine`/`centos8` DllNames) — the machinery §0.2 says
-**not** to port. The only net462-via-ns2.0 cost is the `System.Memory` facade +
-binding redirects (automatic in SDK-style projects; proven by the net462 TFM
-smoke test — §0.2 tests / CLAUDE.md §7.4). Add an explicit `net462` target later
-only if that friction bites — cheap and non-breaking.
+**Note — support matrix.** We target **net462 · netstandard2.0 · net10.0**: ckd
+2.15.0's reach (**net462 · netstandard2.0 · net8.0 · net10.0**) without `net8.0`, which
+ledger 641 dropped because .NET 8 left Microsoft support; a .NET 8 application gets the
+`netstandard2.0` asset (`dotnet/CLAUDE.md` §4 **Target frameworks**). The `net462` asset is
+the `netstandard2.0` code plus the .NET Framework native-library preload
+(`Internal/Interop/NativeMethods.NetFramework.cs`), its one Framework-specific code: one
+self-built cdylib otherwise resolved by default `[DllImport]` probing (no `NativeLibrary`
+resolver, no distro-variant `NativeMethods`). ckd's loader *is* Framework-specific
+throughout (`LoadNetFrameworkDelegates`, Mono support, hardcoded `alpine`/`centos8`
+DllNames) — the machinery §0.2 says **not** to port.
 
 ### C ABI → C# type map
 
@@ -130,7 +127,8 @@ non-goal — our signatures are already mostly blittable, not worth two sets.
   - A non-ASCII topic round-trips (guards manual UTF-8; catches `LPStr`).
   - Each `int8_t` predicate (`is_done`, `is_api_error`) reads correctly as
     `sbyte`.
-  - `NativeMethods` loads on net462, net8.0, net10.0 (TFM smoke test).
+  - `NativeMethods` loads on net462 and net10.0, and from the netstandard2.0 build on
+    net10.0 (TFM smoke test).
 
 ---
 
@@ -208,8 +206,9 @@ loading code is phase-independent.
 
 **Tests required:**
 
-  - A smoke call (`MockProducer` create → send → close) loads and works on net462,
-    net8.0, net10.0 on Windows + Linux in CI, with the native copied to output.
+  - A smoke call (`MockProducer` create → send → close) loads and works on net462 and
+    net10.0, and from the netstandard2.0 build on net10.0, on Windows + Linux in CI, with
+    the native copied to output.
   - A missing native gives a clear `DllNotFoundException`, not an obscure crash.
   - **At publish:** `dotnet pack` emits `runtimes/{rid}/native/` for every
     supported RID, and a consuming test project resolves the native **from the

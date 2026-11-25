@@ -29,7 +29,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.Soak</RootNamespace>
     <AssemblyName>SoakClient</AssemblyName>
     <!-- Operational tool — never packed, no XML doc file (so no CS1591). -->

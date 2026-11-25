@@ -235,7 +235,7 @@ per client, and follows the Rust and C transactional harnesses (the reference):
 - Full suite:
   - `cargo xtask` lint, format-check and the xtask unit tests;
   - `make verify`-equivalent checks;
-  - the .NET perf test project (net8.0 + net10.0) against Docker;
+  - the .NET perf test project (net10.0) against Docker;
   - `dotnet format`.
 - A critic review of the whole branch, then fix rounds.
 - Outside this repo (the CI pipeline repo): install the .NET SDK in its dependency script, and
