@@ -152,20 +152,26 @@ impl Language {
     }
 }
 
-/// The path of the example binary `admin_<name>`, next to the test binary's
-/// `deps` directory.
+/// The path of the example binary `admin_<name>`, in the `examples` directory
+/// of the profile directory (`target/debug`) the test binary is built under.
+///
+/// The test binary's own directory depends on cargo's build-dir layout:
+/// `target/debug/deps` before Rust 1.100, `target/debug/build/<package>/<hash>/out`
+/// from 1.100, so the profile directory is the nearest ancestor holding the
+/// example rather than a fixed number of levels up.
 fn rust_example_path(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("test binary path");
-    let target = exe.parent().and_then(|deps| deps.parent()).expect("target directory");
-    let path = target
-        .join("examples")
-        .join(format!("admin_{name}{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        path.exists(),
-        "{} not found: run `cargo build --examples` first",
-        path.display()
-    );
-    path
+    let file = format!("admin_{name}{}", std::env::consts::EXE_SUFFIX);
+    exe.ancestors()
+        .skip(1)
+        .map(|dir| dir.join("examples").join(&file))
+        .find(|path| path.exists())
+        .unwrap_or_else(|| {
+            panic!(
+                "examples/{file} not found in any directory above {}: run `cargo build --examples` first",
+                exe.display()
+            )
+        })
 }
 
 /// The path of the .NET examples' `AdminApis.dll`: `ADMIN_EXAMPLES_DOTNET`, or

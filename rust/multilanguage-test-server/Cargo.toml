@@ -20,3 +20,9 @@ protoc-bin-vendored = "3"
 [lints.clippy]
 # See the root Cargo.toml: `#[expect]`, never `#[allow]`.
 allow_attributes = "deny"
+# Every generated service method returns `Result<_, tonic::Status>`, whose
+# error (176 bytes) is over the lint's limit; the signature is tonic's, so the
+# error cannot be boxed. Clippy 1.100 reports it and 1.95 does not, so an
+# `#[expect]` would fail on one of the two: the level is set here instead, which
+# both accept and `allow_attributes` does not cover.
+result_large_err = "allow"

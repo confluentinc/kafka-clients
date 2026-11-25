@@ -1477,11 +1477,9 @@ impl<C: KafkaClient> Sender<C> {
         self.bump_idempotent_epoch_and_reset_id_if_needed()?;
 
         // `if (maybeSendAndPollTransactionalRequest()) return;` in
-        // `org.apache.kafka.clients.producer.internals.Sender#runOnce`.
-        if self.maybe_send_and_poll_transactional_request().await? {
-            return Ok(true);
-        }
-        Ok(false)
+        // `org.apache.kafka.clients.producer.internals.Sender#runOnce`: the last
+        // check, so its answer is this function's.
+        self.maybe_send_and_poll_transactional_request().await
     }
 
     /// The side-effecting half of `Sender#shouldHandleAuthorizationError`; the `instanceof`

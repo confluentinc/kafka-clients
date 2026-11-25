@@ -16,13 +16,16 @@ path = "src/main.rs"
 [dependencies]
 confluent-kafka = { path = ".." }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
-# Cross-platform per-process CPU% and RSS sampling (no /proc on macOS).
-sysinfo = "0.32"
 # Logger backend for the `log` facade the client uses. The client emits rich
 # join/heartbeat/coordinator/fetch logs; without a backend installed they are
 # dropped. Control via RUST_LOG (see README "Debugging the client").
 env_logger = "0.11"
 log = "0.4"
+
+# Per-process CPU% and RSS sampling where there is no /proc (macOS); on Linux
+# the benchmark reads /proc itself, as Java's `JavaE2E` does.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+sysinfo = "0.32"
 
 [lints.clippy]
 # See the root Cargo.toml: `#[expect]`, never `#[allow]`.
