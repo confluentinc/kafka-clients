@@ -19,9 +19,9 @@
 // The headers are a Headers (common/header), made read-only by send().
 
 import { JavaForms } from '../internal/args';
-import { bytesToString } from '../internal/bytes';
 import { illegalArgument } from '../internal/errors';
 import { objectHashCode, objectsEquals } from '../internal/java_object';
+import { show } from '../internal/java_string';
 import type { Header } from '../common/header/header';
 import { Headers } from '../common/header/headers';
 
@@ -815,13 +815,4 @@ export class ProducerRecord<out K = never, out V = never> {
       headers.internalToNative(),
     ];
   }
-}
-
-// Java's `key.toString()`: bytes as Arrays.toString writes them, anything
-// else as JavaScript writes it.
-function show(value: unknown): string {
-  if (value === null) return 'null';
-  if (isBytes(value)) return bytesToString(value);
-  // eslint-disable-next-line @typescript-eslint/no-base-to-string -- Java's toString() of a key or value of the caller's type: an object without its own toString() prints as JavaScript prints it, as Java's prints Object.toString()
-  return String(value);
 }

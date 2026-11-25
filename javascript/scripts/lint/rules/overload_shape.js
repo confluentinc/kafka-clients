@@ -70,7 +70,8 @@ const MERGED_FORMS = new Map([
 ]);
 /**
  * The Java forms the JS conventions leave out (Scope: a form whose
- * only extra parameter has a type that isn't translated), by
+ * only extra parameter has a type that isn't translated; Signatures: a
+ * pattern is only a SubscriptionPattern), by
  * `<class fqn>#<formKey>`, with the reason: such a form is not asked for.
  */
 const LEFT_OUT = new Map([
@@ -81,6 +82,14 @@ const LEFT_OUT = new Map([
   [
     'org.apache.kafka.common.metrics.KafkaMetric#config(MetricConfig)',
     "javascript/CLAUDE.md, JavaScript Binding Conventions, Scope (Q30): the setter's only extra parameter over the getter is config, and Java says it is for the server only",
+  ],
+  [
+    'org.apache.kafka.clients.consumer.Consumer#subscribe(Pattern,ConsumerRebalanceListener)',
+    'javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures (Q15): a pattern is only a SubscriptionPattern, and a RegExp throws an error that points to it',
+  ],
+  [
+    'org.apache.kafka.clients.consumer.Consumer#subscribe(Pattern)',
+    'javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures (Q15): a pattern is only a SubscriptionPattern, and a RegExp throws an error that points to it',
   ],
 ]);
 const { shortName, constantsOnly, signaturesOf, formParameters } = require('../java_ts');
@@ -253,9 +262,9 @@ module.exports = {
       // The one-parameter forms' names: a signature taking that one parameter,
       // by that name, is the bare value (`send(record)`, `close(timeout)`).
       const bareNames = new Set(forms.map((f, k) => (f.params.length === 1 ? allNames[k][0] : null)).filter((n) => n !== null));
-      // One-parameter forms of several names would be told apart by type,
-      // which src/internal/args.ts does not do: none takes a bare value.
-      if (bareNames.size > 1) bareNames.clear();
+      // One-parameter forms of several names are told apart by the value's
+      // type (src/internal/args.ts, `bareTypes`: `describeTopics(topicNames)`
+      // and `describeTopics(topics)`), each taking its bare value.
       const isOptionsParam = (p) => {
         const t = checker.getNonNullableType(checker.getTypeAtLocation(p));
         return (
@@ -359,7 +368,12 @@ module.exports = {
               required.push(prop.name);
             }
           }
-          const k = allNames.findIndex((n) => n.length === required.length && n.every((x) => required.includes(x)));
+          // Forms of the same names (`deleteTopics(Collection<String>, ..)`,
+          // `deleteTopics(TopicCollection, ..)`): each signature stands for
+          // the first of them no other signature stood for.
+          const fits = (n) => n.length === required.length && n.every((x) => required.includes(x));
+          const free = allNames.findIndex((n, i) => fits(n) && !covered.has(i));
+          const k = free >= 0 ? free : allNames.findIndex(fits);
           // The other forms' names closed with `never`, so that a value
           // holding one (a variable, which no excess-property check reads)
           // matches no signature it does not belong to.
@@ -383,6 +397,10 @@ module.exports = {
             covered.add(k);
           }
         }
+        // Forms of the same names are one (`deleteTopics(Collection<String>)`
+        // and `deleteTopics(TopicCollection)`: one key typed as both).
+        const sameNames = (a, b) => allNames[a].length === allNames[b].length && allNames[a].every((x) => allNames[b].includes(x));
+        for (const k of [...covered]) for (const i of forms.keys()) if (sameNames(k, i)) covered.add(i);
         for (const [k, f] of forms.entries()) if (!covered.has(k) && !coveredBy(k)) findings.push(missingForm(f));
         continue;
       }

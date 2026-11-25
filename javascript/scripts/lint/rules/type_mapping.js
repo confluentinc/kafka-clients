@@ -472,10 +472,9 @@ module.exports = {
       if (jm.kind === 'field') continue;
       const forms = liveForms(jm.overloads);
       const names = formOptionNames(forms);
-      // The bare value's name: the one parameter of the one-parameter forms
-      // (one name only; src/internal/args.ts gives no bare value otherwise).
+      // The bare values' names: the one parameter of each one-parameter form
+      // (several names told apart by type, src/internal/args.ts `bareTypes`).
       const bareNames = [...new Set(forms.filter((f) => f.params.length === 1).map((f) => names[forms.indexOf(f)][0]))];
-      const bareName = bareNames.length === 1 ? bareNames[0] : null;
       // Every signature: the overload signatures, else the implementation.
       signaturesOf(ts, m.node).forEach((node, n) => {
         const where = n === 0 ? subject : `${subject}#${n + 1}`;
@@ -495,7 +494,8 @@ module.exports = {
           if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking, awaited });
         }
         const p0 = params.length === 1 ? params[0] : null;
-        if (p0 !== null && bareName !== null && ts.isIdentifier(p0.name) && p0.name.text === bareName) {
+        const bareName = p0 !== null && ts.isIdentifier(p0.name) && bareNames.includes(p0.name.text) ? p0.name.text : null;
+        if (bareName !== null) {
           // The bare value of the one-parameter forms: against their Java types.
           const types = forms.filter((f, k) => f.params.length === 1 && names[k][0] === bareName).map((f) => f.types[0]);
           const bare = unwrapBare(checker.getTypeAtLocation(p0));

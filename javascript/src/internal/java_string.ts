@@ -18,6 +18,8 @@
 // java_str): a value stands for the Java object it translates, as in
 // java_object.ts.
 
+import { bytesToString } from './bytes';
+
 /**
  * Java's `String.valueOf(value)`: `null` for null, a collection (an array or
  * a `Set`) as `AbstractCollection.toString()` writes it, `[a, b]`, a `Map` as
@@ -58,4 +60,18 @@ export function javaDoubleString(d: number): string {
   const [mantissa, exponent] = d.toExponential().split('e');
   const digits = mantissa.includes('.') ? mantissa : `${mantissa}.0`;
   return `${digits}E${exponent.startsWith('+') ? exponent.slice(1) : exponent}`;
+}
+
+/**
+ * Java's `key.toString()` of a record's key or value: bytes as
+ * `Arrays.toString` writes them, anything else as JavaScript writes it.
+ *
+ * @param value - the key or value, or null
+ * @returns its text
+ */
+export function show(value: unknown): string {
+  if (value === null) return 'null';
+  if (value instanceof Uint8Array) return bytesToString(value);
+  // eslint-disable-next-line @typescript-eslint/no-base-to-string -- Java's toString() of a key or value of the caller's type: an object without its own toString() prints as JavaScript prints it, as Java's prints Object.toString()
+  return String(value);
 }
