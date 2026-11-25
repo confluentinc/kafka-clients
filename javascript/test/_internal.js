@@ -136,4 +136,171 @@ function ffiId(cls) {
   return /** @type {{ _ffiId?: unknown }} */ (/** @type {unknown} */ (cls))._ffiId;
 }
 
-module.exports = { createFuture, internalFuture, internalHeaders, internalRecord, createRecordMetadata, ffiId };
+/**
+ * A new topic as the addon takes it (src/admin/new_topic.ts).
+ *
+ * @typedef {{ name: string | null, numPartitions: number, replicationFactor: number, assignments: Array<[number, number[]]> | null, configs: Array<[string, string | null]> | null }} NativeNewTopic
+ */
+
+/**
+ * `topic` with the library's own conversion for the addon.
+ *
+ * @param {import('@confluentinc/kafka-javascript/admin').NewTopic} topic the new topic
+ * @returns {{ internalToNative(): NativeNewTopic }} the same topic
+ */
+function internalNewTopic(topic) {
+  return /** @type {{ internalToNative(): NativeNewTopic }} */ (/** @type {unknown} */ (topic));
+}
+
+/**
+ * Java's package-private factories of a Result keyed by topic id or by name,
+ * `ofTopicIds` / `ofTopicNames`, as the library's `internalOfTopicIds` /
+ * `internalOfTopicNames` (src/admin/delete_topics_result.ts,
+ * src/admin/describe_topics_result.ts).
+ *
+ * @template V, R
+ * @param {{ prototype: R }} cls the Result class
+ * @returns {{ internalOfTopicIds(futures: import('@confluentinc/kafka-javascript/common').UuidMap<V>): R, internalOfTopicNames(futures: Map<string, V>): R }} its factories
+ */
+function topicResultFactories(cls) {
+  return /** @type {{ internalOfTopicIds(futures: import('@confluentinc/kafka-javascript/common').UuidMap<V>): R, internalOfTopicNames(futures: Map<string, V>): R }} */ (
+    /** @type {unknown} */ (cls)
+  );
+}
+
+/**
+ * Java's package-private `DeleteConsumerGroupOffsetsResult(future,
+ * partitions)`, the library's `internalCreate`, the errors null for Java's
+ * `Errors.NONE` (src/admin/delete_consumer_group_offsets_result.ts).
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<import('@confluentinc/kafka-javascript/common').TopicPartitionMap<Error | null>>} future the future of each partition's error
+ * @param {import('@confluentinc/kafka-javascript/common').TopicPartitionSet} partitions the partitions of the request
+ * @returns {import('@confluentinc/kafka-javascript/admin').DeleteConsumerGroupOffsetsResult} the result
+ */
+function deleteConsumerGroupOffsetsResult(future, partitions) {
+  const { DeleteConsumerGroupOffsetsResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory =
+    /** @type {{ internalCreate(f: typeof future, p: typeof partitions): import('@confluentinc/kafka-javascript/admin').DeleteConsumerGroupOffsetsResult }} */ (
+      /** @type {unknown} */ (DeleteConsumerGroupOffsetsResult)
+    );
+  return factory.internalCreate(future, partitions);
+}
+
+/**
+ * Java's package-private `RemoveMembersFromConsumerGroupResult(future,
+ * memberInfos)`, the library's `internalCreate`, the errors keyed by group
+ * instance id and null for Java's `Errors.NONE`
+ * (src/admin/remove_members_from_consumer_group_result.ts).
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<Map<string | null, Error | null>>} future the future of each member's error
+ * @param {import('@confluentinc/kafka-javascript/admin').MemberToRemoveSet} memberInfos the members of the request
+ * @returns {import('@confluentinc/kafka-javascript/admin').RemoveMembersFromConsumerGroupResult} the result
+ */
+function removeMembersResult(future, memberInfos) {
+  const { RemoveMembersFromConsumerGroupResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory =
+    /** @type {{ internalCreate(f: typeof future, m: typeof memberInfos): import('@confluentinc/kafka-javascript/admin').RemoveMembersFromConsumerGroupResult }} */ (
+      /** @type {unknown} */ (RemoveMembersFromConsumerGroupResult)
+    );
+  return factory.internalCreate(future, memberInfos);
+}
+
+/**
+ * Java's package-private `ListGroupsResult(future)`, the library's
+ * `internalCreate` (src/admin/list_groups_result.ts).
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<Iterable<unknown>>} future the listings and errors
+ * @returns {import('@confluentinc/kafka-javascript/admin').ListGroupsResult} the result
+ */
+function listGroupsResult(future) {
+  const { ListGroupsResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory = /** @type {{ internalCreate(f: typeof future): import('@confluentinc/kafka-javascript/admin').ListGroupsResult }} */ (
+    /** @type {unknown} */ (ListGroupsResult)
+  );
+  return factory.internalCreate(future);
+}
+
+/**
+ * Java's package-private `ElectLeadersResult(electionFuture)`, the library's
+ * `internalCreate` (src/admin/elect_leaders_result.ts).
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<import('@confluentinc/kafka-javascript/common').TopicPartitionMap<unknown>>} future the election's outcome by partition
+ * @returns {import('@confluentinc/kafka-javascript/admin').ElectLeadersResult} the result
+ */
+function electLeadersResult(future) {
+  const { ElectLeadersResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory = /** @type {{ internalCreate(f: typeof future): import('@confluentinc/kafka-javascript/admin').ElectLeadersResult }} */ (
+    /** @type {unknown} */ (ElectLeadersResult)
+  );
+  return factory.internalCreate(future);
+}
+
+/**
+ * Java's package-private `DescribeUserScramCredentialsResult(dataFuture)`, the
+ * library's `internalCreate` (src/admin/describe_user_scram_credentials_result.ts):
+ * the future of the response's per-user results, each error null for Java's
+ * `Errors.NONE`.
+ *
+ * @param {import('@confluentinc/kafka-javascript/common').KafkaFuture<ReadonlyArray<{ user: string, error: Error | null, credentialInfos: ReadonlyArray<import('@confluentinc/kafka-javascript/admin').ScramCredentialInfo> }>>} dataFuture the per-user results
+ * @returns {import('@confluentinc/kafka-javascript/admin').DescribeUserScramCredentialsResult} the result
+ */
+function describeUserScramCredentialsResultOfData(dataFuture) {
+  const { DescribeUserScramCredentialsResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory =
+    /** @type {{ internalCreate(f: typeof dataFuture): import('@confluentinc/kafka-javascript/admin').DescribeUserScramCredentialsResult }} */ (
+      /** @type {unknown} */ (DescribeUserScramCredentialsResult)
+    );
+  return factory.internalCreate(dataFuture);
+}
+
+/**
+ * The admin client's `DescribeUserScramCredentialsResult`, over the core's
+ * futures of `all()`, `users()` and `description(userName)`, the library's
+ * `internalOfClient` (src/admin/describe_user_scram_credentials_result.ts).
+ *
+ * @param {() => import('@confluentinc/kafka-javascript/common').KafkaFuture<Map<string, import('@confluentinc/kafka-javascript/admin').UserScramCredentialsDescription>>} all the core's all()
+ * @param {() => import('@confluentinc/kafka-javascript/common').KafkaFuture<string[]>} users the core's users()
+ * @param {(userName: string | null) => import('@confluentinc/kafka-javascript/common').KafkaFuture<import('@confluentinc/kafka-javascript/admin').UserScramCredentialsDescription>} description the core's description(userName)
+ * @returns {import('@confluentinc/kafka-javascript/admin').DescribeUserScramCredentialsResult} the result
+ */
+function describeUserScramCredentialsResult(all, users, description) {
+  const { DescribeUserScramCredentialsResult } = require('@confluentinc/kafka-javascript/admin');
+  const factory =
+    /** @type {{ internalOfClient(a: typeof all, u: typeof users, d: typeof description): import('@confluentinc/kafka-javascript/admin').DescribeUserScramCredentialsResult }} */ (
+      /** @type {unknown} */ (DescribeUserScramCredentialsResult)
+    );
+  return factory.internalOfClient(all, users, description);
+}
+
+/**
+ * Java's package-private constructor of a transaction Result: `cls`'s
+ * `internalCreate` over `arg` (src/admin/list_transactions_result.ts and its
+ * siblings).
+ *
+ * @template R
+ * @param {{ prototype: R }} cls the Result class
+ * @param {unknown} arg Java's constructor's argument
+ * @returns {R} the result
+ */
+function internalResult(cls, arg) {
+  const factory = /** @type {{ internalCreate(a: unknown): R }} */ (/** @type {unknown} */ (cls));
+  return factory.internalCreate(arg);
+}
+
+module.exports = {
+  internalResult,
+  describeUserScramCredentialsResult,
+  electLeadersResult,
+  createFuture,
+  internalFuture,
+  internalHeaders,
+  internalRecord,
+  createRecordMetadata,
+  ffiId,
+  internalNewTopic,
+  topicResultFactories,
+  deleteConsumerGroupOffsetsResult,
+  removeMembersResult,
+  describeUserScramCredentialsResultOfData,
+  listGroupsResult,
+};

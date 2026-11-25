@@ -55,7 +55,7 @@ test("faultNext arms failures of the addon's steps, and answers and disarms the 
   const refused = {
     name: 'TypeError',
     message:
-      'faultNext(step, times): step null, or notify, metadata, error, slot, partitions, close, enqueue or failure; times a positive count',
+      'faultNext(step, times): step null, or notify, metadata, error, slot, partitions, close, enqueue, value or failure; times a positive count',
   };
   assert.throws(() => native.faultNext('nothing'), refused);
   assert.throws(() => native.faultNext('slot', 0), refused);

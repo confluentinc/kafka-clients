@@ -22,7 +22,9 @@
 //! Kafka's [`java::AUDIENCE_REF`] tag, so both need that tag in the `kafka`
 //! submodule (`cargo xtask fetch-java-refs`).
 //!
-//! The file holds the main classes only, sorted by package then nested path,
+//! The file holds the main classes, plus the test-fixture classes the client
+//! translates ([`TEST_FIXTURES`]: Java's `MockAdminClient`, which the client
+//! keeps public as the Rust core does), sorted by package then nested path,
 //! one class per line, and only what the client's readers use (its loader,
 //! `javascript/scripts/lint/java_index.js`, fills in what is left out):
 //!
@@ -89,6 +91,21 @@ use crate::lint_custom::{parse_public_list, PUBLIC_AUDIENCE_LIST};
 
 /// The schema version, raised on any incompatible change to the layout.
 const SCHEMA: usize = 3;
+
+/// The test-fixture classes the index holds besides the main ones, by package
+/// and top-level class (each with its nested classes): those the client
+/// translates although Java ships them in its test fixtures
+/// (`.claude/rules/admin-client.md` §9).
+const TEST_FIXTURES: &[(&str, &str)] = &[("clients.admin", "MockAdminClient")];
+
+/// Whether the index holds `class`: a main class, or a test-fixture class
+/// [`TEST_FIXTURES`] names.
+fn in_index(class: &JavaClass) -> bool {
+    !class.is_test
+        || TEST_FIXTURES
+            .iter()
+            .any(|(package, top)| class.package == *package && class.path.first().is_some_and(|p| p == top))
+}
 
 /// The index, relative to `rust/`.
 pub(crate) const JAVASCRIPT_INDEX: &str = "../javascript/java-index.json";
@@ -172,7 +189,7 @@ fn generate() -> anyhow::Result<(String, usize)> {
             )
         })?;
     let json = to_json(&index, &public, &unsupported, &source_of);
-    let classes = index.classes.iter().filter(|c| !c.is_test).count();
+    let classes = index.classes.iter().filter(|c| in_index(c)).count();
     Ok((json, classes))
 }
 
@@ -257,7 +274,7 @@ pub fn to_json(
     unsupported: &BTreeSet<String>,
     sources: &dyn Fn(&JavaClass) -> Option<String>,
 ) -> String {
-    let mut classes: Vec<&JavaClass> = index.classes.iter().filter(|c| !c.is_test).collect();
+    let mut classes: Vec<&JavaClass> = index.classes.iter().filter(|c| in_index(c)).collect();
     classes.sort_by(|a, b| (&a.package, &a.path).cmp(&(&b.package, &b.path)));
     let mut read: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
     let mut out = String::new();

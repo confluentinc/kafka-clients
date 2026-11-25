@@ -27,7 +27,12 @@
 // exception the FFI enum names, Public or not (javascript/CLAUDE.md "Errors",
 // as the Python client's errors), and so are the classes the JS conventions
 // make public (`PUBLIC_BY_RULE`). Invented items (lint-mapping.json's
-// `invented`) translate nothing.
+// `invented`) translate nothing. A test-fixture class the client keeps public
+// (`TEST_FIXTURES`), with the public classes nested in it, is exempt from the
+// audience, as in the Rust core. A nested class Java does not declare public,
+// or one inside such a class, is not public API, whatever the audience of
+// its outer class (the Java index gives a Public class's nested classes its
+// audience).
 
 const { atNode } = require('../location');
 const { javaIndexOf, mappedItems, shortName } = require('../java_ts');
@@ -41,9 +46,57 @@ const PUBLIC_BY_RULE = new Map([
   ],
 ]);
 
+/**
+ * The Java test-fixture classes the client exports although Java ships them
+ * in its test jar, by fully qualified name, with the reason. A public class
+ * nested in one (`MockAdminClient.Builder`) ships in the same jar, so the
+ * exemption and its reason are its outer class's (`isTestFixture`).
+ */
+const TEST_FIXTURES = new Map([
+  [
+    'org.apache.kafka.clients.admin.MockAdminClient',
+    "Java's MockAdminClient, public in the Rust core, C, Python and .NET (.claude/rules/admin-client.md §9): " +
+      'the client has no separate test artifact',
+  ],
+]);
+
+/**
+ * The first class of `cls` and the classes enclosing it, innermost first,
+ * that Java does not declare public (the index's `visibility`, absent for
+ * public), or null when all are public: a nested class is reachable only
+ * through the classes around it.
+ *
+ * @param {{ byFqn: Map<string, { fqn: string, visibility?: string }> }} index the Java index
+ * @param {{ fqn: string, visibility?: string }} cls the Java class
+ * @returns {{ fqn: string, visibility?: string } | null}
+ */
+function hiddenAt(index, cls) {
+  const parts = cls.fqn.split('$');
+  for (let i = parts.length; i > 1; i--) {
+    const c = i === parts.length ? cls : index.byFqn.get(parts.slice(0, i).join('$'));
+    if (c !== undefined && (c.visibility ?? 'public') !== 'public') return c;
+  }
+  return null;
+}
+
+/**
+ * Whether `cls` is a test-fixture class or a public class nested in one: its
+ * outermost class's name (the fully qualified name to the first `$`) is in
+ * `TEST_FIXTURES`, and no class from it down to `cls` is declared other than
+ * public.
+ *
+ * @param {{ byFqn: Map<string, { fqn: string, visibility?: string }> }} index the Java index
+ * @param {{ fqn: string, visibility?: string }} cls the Java class
+ * @returns {boolean}
+ */
+function isTestFixture(index, cls) {
+  return TEST_FIXTURES.has(cls.fqn.split('$')[0]) && hiddenAt(index, cls) === null;
+}
+
 module.exports = {
   name: 'check-public-audience',
-  kinds: ['not-public-audience', 'internal-package', 'unsupported-package', 'member-not-public'],
+  TEST_FIXTURES,
+  kinds: ['not-public-audience', 'nested-not-public', 'internal-package', 'unsupported-package', 'member-not-public'],
   needs: ['program', 'java'],
   PUBLIC_BY_RULE,
   hint:
@@ -51,7 +104,7 @@ module.exports = {
     'the unsupported packages, and its public members; keep the rest private (root CLAUDE.md §2).',
   check(ctx) {
     const ref = ctx.javaIndex().audience_ref;
-    javaIndexOf(ctx);
+    const index = javaIndexOf(ctx);
     const findings = [];
     let checked = 0;
     for (const { item, java, isError } of mappedItems(ctx)) {
@@ -59,12 +112,24 @@ module.exports = {
       checked += 1;
       const cls = java.cls;
       const subject = `${item.rel}:${item.name}`;
-      if (!cls.public_audience) {
+      if (!cls.public_audience && !isTestFixture(index, cls)) {
         findings.push({
           kind: 'not-public-audience',
           subject,
           at: atNode(ctx, item.node),
           message: `translates ${shortName(cls)}, which is not @InterfaceAudience.Public in Kafka ${ref}`,
+        });
+      }
+      const hidden = hiddenAt(index, cls);
+      if (hidden !== null) {
+        findings.push({
+          kind: 'nested-not-public',
+          subject,
+          at: atNode(ctx, item.node),
+          message:
+            hidden === cls
+              ? `translates ${shortName(cls)}, a ${hidden.visibility} nested class in Java`
+              : `translates ${shortName(cls)}, nested in ${shortName(hidden)}, a ${hidden.visibility} nested class in Java`,
         });
       }
       if (cls.package.split('.').some((s) => s.includes('internal'))) {

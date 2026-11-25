@@ -22,7 +22,8 @@
 //   - no two TypeScript members translate one Java member;
 //   - a Java overload set with more than one public, live form takes one
 //     options object, whose properties are the union of the forms' parameter
-//     names, Java's own (a `Duration timeout` is `timeout`; parameters at one
+//     names, Java's own or the conventions' rename of them (`RENAMED_PARAMS`:
+//     `Admin.create`'s `props` and `conf` are `configs`; a `Duration timeout` is `timeout`; parameters at one
 //     position whose Java types map to one host type are one, named after the
 //     earliest-declared form), each required exactly when every form takes it
 //     (a form is given whole: a parameter Java may take as null is given as
@@ -69,6 +70,27 @@ const MERGED_FORMS = new Map([
   ],
 ]);
 /**
+ * The Java parameters the conventions rename, by `<class fqn>#<member>`:
+ * each Java name to the client's, with the reason. The set is checked as any
+ * other, under the new names.
+ */
+const RENAMED_PARAMS = new Map([
+  [
+    'org.apache.kafka.clients.admin.Admin#create',
+    {
+      names: new Map([
+        ['props', 'configs'],
+        ['conf', 'configs'],
+      ]),
+      reason:
+        "javascript/CLAUDE.md, JavaScript Binding Conventions, Class family: Java's Map and Properties constructors become one form with " +
+        'the key configs, which also takes the bare map, the static factory too (Signatures: a config map may be passed bare; ' +
+        "Configuration); as in Python (root CLAUDE.md, Python Binding Conventions, Configuration: a client's configuration parameter, of " +
+        'a constructor or of a static factory, is configs, a deviation for Admin.create, whose Java parameters are props and conf)',
+    },
+  ],
+]);
+/**
  * The Java forms the JS conventions leave out (Scope: a form whose
  * only extra parameter has a type that isn't translated), by
  * `<class fqn>#<formKey>`, with the reason: such a form is not asked for.
@@ -107,17 +129,23 @@ function mergeTimeUnit(o) {
   };
 }
 
-/** The public, live forms of an overload set, one per parameter list, a `TimeUnit` merged (`mergeTimeUnit`). */
-function liveForms(overloads) {
+/**
+ * The public, live forms of an overload set, one per parameter list, a
+ * `TimeUnit` merged (`mergeTimeUnit`); with the set's `<class fqn>#<member>`
+ * key, its parameters renamed as `RENAMED_PARAMS` lists.
+ */
+function liveForms(overloads, key = null) {
   const seen = new Set();
+  const renamed = key === null ? undefined : RENAMED_PARAMS.get(key);
   return overloads
     .filter((o) => {
-      const key = o.params.join(',');
-      if (o.visibility !== 'public' || o.deprecated || seen.has(key)) return false;
-      seen.add(key);
+      const params = o.params.join(',');
+      if (o.visibility !== 'public' || o.deprecated || seen.has(params)) return false;
+      seen.add(params);
       return true;
     })
-    .map(mergeTimeUnit);
+    .map(mergeTimeUnit)
+    .map((f) => (renamed === undefined ? f : { ...f, param_names: (f.param_names || []).map((n) => renamed.names.get(n) || n) }));
 }
 
 /** The name a Java parameter takes in an options object: its Java name, a `Duration timeout` included. */
@@ -175,7 +203,11 @@ function formOptionNames(forms) {
     out.push(
       f.params.map((t, i) => {
         const earlier = out.findIndex((names, k) => names[i] !== undefined && hostKind(forms[k].params[i]) === hostKind(t));
-        return earlier >= 0 ? out[earlier][i] : optionName(t, f.param_names[i]);
+        // An enum's implicit `valueOf(String name)` has no source, so the
+        // index gives its parameter no name: the JLS names it `name`
+        // (`ElectionType.valueOf(byte value)` beside it).
+        const javaName = f.param_names[i] || (f.name === 'valueOf' && f.static && t === 'String' ? 'name' : '');
+        return earlier >= 0 ? out[earlier][i] : optionName(t, javaName);
       }),
     );
   }
@@ -206,6 +238,7 @@ module.exports = {
     'Conventions, Signatures).',
   LEFT_OUT,
   MERGED_FORMS,
+  RENAMED_PARAMS,
   liveForms,
   optionName,
   formOptionNames,
@@ -235,7 +268,7 @@ module.exports = {
         translations.set(key, subject);
       }
       if (jm.kind === 'field' || (m.kind !== 'method' && m.kind !== 'constructor')) continue;
-      let forms = liveForms(jm.overloads).filter((f) => !LEFT_OUT.has(`${jm.owner.fqn}#${formKey(f)}`));
+      let forms = liveForms(jm.overloads, `${jm.owner.fqn}#${jm.name}`).filter((f) => !LEFT_OUT.has(`${jm.owner.fqn}#${formKey(f)}`));
       if (MERGED_FORMS.has(`${jm.owner.fqn}#${jm.name}`)) forms = [forms.reduce((a, f) => (f.params.length > a.params.length ? f : a))];
       if (forms.length < 2) continue;
       const javaName = `${shortName(jm.owner)}#${jm.name}`;
@@ -253,9 +286,9 @@ module.exports = {
       // The one-parameter forms' names: a signature taking that one parameter,
       // by that name, is the bare value (`send(record)`, `close(timeout)`).
       const bareNames = new Set(forms.map((f, k) => (f.params.length === 1 ? allNames[k][0] : null)).filter((n) => n !== null));
-      // One-parameter forms of several names would be told apart by type,
-      // which src/internal/args.ts does not do: none takes a bare value.
-      if (bareNames.size > 1) bareNames.clear();
+      // One-parameter forms of several names are told apart by the value's
+      // type (src/internal/args.ts, `bareTypes`: `describeTopics(topicNames)`
+      // and `describeTopics(topics)`), each taking its bare value.
       const isOptionsParam = (p) => {
         const t = checker.getNonNullableType(checker.getTypeAtLocation(p));
         return (
@@ -359,7 +392,12 @@ module.exports = {
               required.push(prop.name);
             }
           }
-          const k = allNames.findIndex((n) => n.length === required.length && n.every((x) => required.includes(x)));
+          // Forms of the same names (`deleteTopics(Collection<String>, ..)`,
+          // `deleteTopics(TopicCollection, ..)`): each signature stands for
+          // the first of them no other signature stood for.
+          const fits = (n) => n.length === required.length && n.every((x) => required.includes(x));
+          const free = allNames.findIndex((n, i) => fits(n) && !covered.has(i));
+          const k = free >= 0 ? free : allNames.findIndex(fits);
           // The other forms' names closed with `never`, so that a value
           // holding one (a variable, which no excess-property check reads)
           // matches no signature it does not belong to.
@@ -383,6 +421,10 @@ module.exports = {
             covered.add(k);
           }
         }
+        // Forms of the same names are one (`deleteTopics(Collection<String>)`
+        // and `deleteTopics(TopicCollection)`: one key typed as both).
+        const sameNames = (a, b) => allNames[a].length === allNames[b].length && allNames[a].every((x) => allNames[b].includes(x));
+        for (const k of [...covered]) for (const i of forms.keys()) if (sameNames(k, i)) covered.add(i);
         for (const [k, f] of forms.entries()) if (!covered.has(k) && !coveredBy(k)) findings.push(missingForm(f));
         continue;
       }

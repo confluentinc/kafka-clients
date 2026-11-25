@@ -1,7 +1,7 @@
 # JavaScript producer: decisions log
 
-What was decided while aligning and completing the JavaScript producer (PRs #312 and #333), why, and where each
-decision is recorded. The rules are `javascript/CLAUDE.md` "JavaScript Binding Conventions" from PR #327, checked against
+What was decided while aligning and completing the JavaScript producer (PRs #312 and #333), and while building the
+admin client (its own PR, stacked on #312: entries 35 to 53), why, and where each decision is recorded. The rules are `javascript/CLAUDE.md` "JavaScript Binding Conventions" from PR #327, checked against
 `05abb9564`. The plan is `PLAN-producer-completion.md` in this folder. `javascript/CLAUDE.md` holds the binding's own
 rules and readings. Newest entries are at the end; dates are in IST.
 
@@ -421,3 +421,190 @@ rules and readings. Newest entries are at the end; dates are in IST.
     tests; the preview notice stays. The JS conventions' Lifetime sentence ("…runs until the process exits, with
     a warning") and their "Not decided yet" row on when and how that warning is logged describe a case that can't
     happen: marked **(conventions conflict)** in `javascript/CLAUDE.md` ("Threads and liveness") for the rules' owner.
+
+## An admin future's outcome after the call (decided by the owner, 2026-11-21)
+
+36. **A `MockAdminClient` call's futures show their outcome on a later turn of the event loop, not when the call
+    returns** *(deviation)*. Java's `MockAdminClient` completes every future before it returns, so a test can read
+    `isDone()`, `isCompletedExceptionally()` and `getNow()` right after the call, and a `thenApply` / `whenComplete`
+    registered then runs inside the registering call. Here the core's mock completes its futures inside the call, but
+    `kafka_common_KafkaFuture_get_cb`, through which an admin future learns its outcome (its wait starts when its
+    Result is made), answers even a completed future from a task it spawns on the core's runtime. That
+    answer can reach the client's callback queue after the call returns, so draining the queue at the end of the call
+    (as `MockProducer`'s pump does for its callbacks) races the task. A pump was built and measured: 5 of 20
+    back-to-back `describeCluster()` calls were done at return. The JS rules forbid the blocking
+    `kafka_common_KafkaFuture_get`, which Python uses to read a done future. `await get()` is unaffected; `isDone()`,
+    `isCompletedExceptionally()` and `getNow()` show the outcome, and a `thenApply` / `whenComplete` registered
+    right after the call runs, on a later turn, once the task answers (the binding runs the answer from its queue,
+    never inside the call). The same holds for a `KafkaAdminClient` future
+    the core fails at once (a call after `close()`, an unrepresentable topic name). Marked on `MockAdminClient` and
+    on `KafkaFuture`'s `isDone()`, `isCompletedExceptionally()`, `getNow()`, `thenApply()` and `whenComplete()`. Goes when the core queues a completed future's answer before
+    `get_cb` returns (a separate core PR); the binding then answers its queued callbacks once at the end of each
+    call, as `MockProducer` does.
+
+## The admin client (decided by the owner, 2026-11-20)
+
+37. **The admin client is its own PR, stacked on #312**, on one branch, `dev/javascript-admin-client`. The removal of
+    the producer's never-closed warning went on #312 (entry 35), so the admin PR holds only the admin work. The admin
+    client gets no never-closed warning either (entry 35).
+38. **A map keyed by a value class is a class of its own, one per key type, built as `TopicPartitionMap` is**
+    *(js-only)*: `UuidMap` and `TopicPartitionReplicaMap` (`common`), `ConfigResourceMap` (`common/config`),
+    `AclBindingMap` and `AclBindingFilterMap` (`common/acl`), `ClientQuotaEntityMap` (`common/quota`), and
+    `MemberToRemoveSet` (`admin`), the set form, for `RemoveMembersFromConsumerGroupOptions`' members. JavaScript has
+    no value equality for map keys (JS conventions, Class family, Q25). Each keys its entries by a string made from
+    the fields its Java class's `equals` compares, keeps the original keys, and has `TopicPartitionMap`'s API. Where
+    Java takes such a map, only its class is taken, and a plain `Map` is a `TypeError` with a hint. The seven names
+    are invented names, which the JS conventions ask to list: they go to the rules' owner (entry 52), and a rename he asks
+    for is a mechanical change before release.
+39. **The admin data classes are the seven `*Description` classes**: `TopicDescription`, `ConsumerGroupDescription`,
+    `ClassicGroupDescription`, `MemberDescription`, `TransactionDescription`, `LogDirDescription` and
+    `UserScramCredentialsDescription` (JS conventions, Class family, Q9: the generator keeps the list). Their
+    getters are frozen `readonly` fields, and a collection they hold is read-only. Every other admin class keeps
+    Java's methods, and `PartitionInfo` stays as it is. Fields and methods meet inside one result
+    (`description.partitions[0].leader().host`), so the README and the migration guide say which classes have
+    fields. Naming the seven in the JS conventions' list goes to the rules' owner (entry 52).
+40. **Each class's TSDoc is written with its code, and its wording reviewed once, after the code** (JS conventions,
+    Documentation, Q64). The code reviews read the docs for their contract, not their wording.
+41. **Tests run the way the review does: once per group of phases**, over all of the group's commits together, and
+    the failures are fixed together, each fix a `fixup!` commit on its phase. Between commits the code is only
+    compiled.
+42. **The examples are tested by a JavaScript test**, `test/integration/admin_examples.test.js`, apart from the Rust
+    tests: it runs each example as a user does (`node examples/admin/<rpc>.js …`) against the scratch broker of
+    `make test-integration`. Since 2026-11-22 the examples, the producer's included, are also type-checked against
+    the package's own types (`make typecheck-examples`) and linted with typescript-eslint's type-checked rules, so a
+    wrong API call in an example fails a check (`javascript/CLAUDE.md`, "The rule linter").
+
+## The admin client: settled by the rules or a decided case (2026-11-20)
+
+43. **Values cross the FFI as the Python binding's rows say.** A value class a call takes crosses as a C handle built
+    through its C constructor or builder, as the producer builds a `ProducerRecord`; a value class returned is read
+    through its accessors into plain values, from which TypeScript builds the class, as the producer does for
+    `PartitionInfo` and `Node`. A Result keeps its native result handle while it lives, as Python's `AdminResult`
+    does: the futures it lends out stay valid until the Result and every future over them are gone.
+44. **An admin future's wait starts when its Result is made.** `getNow()`, `isDone()`, `isCancelled()` and
+    `isCompletedExceptionally()` are synchronous, and the binding calls no blocking C function (JS conventions,
+    Futures and waiting), so the outcome must already be in JavaScript when the core completes the future, as
+    Java's admin thread completes it. No Promise is made until a `get()` or `toCompletionStage()`, so a failed
+    future nobody reads raises no unhandled rejection. A record's future keeps its lazy wait (entry 15). The
+    outcome reaches JavaScript on a later turn of the event loop (entry 36).
+45. **`MockAdminClient` stays public** (`.claude/rules/admin-client.md` §9, as in Rust, C, Python and .NET), and it
+    wraps the FFI's mock (JS conventions, Implementation over the FFI, Q62). `AdminClient`, Java's abstract base
+    class, is not translated, as in Python and .NET.
+46. **The admin client's invented names follow decided patterns:** `AdminClientConfigs` (as `ProducerConfigs`), the
+    admin client's `CloseArgs` (the `*Args` options types), `[Symbol.asyncDispose]` on both clients, and `toJSON()`
+    on the value classes. They are listed in `lint-mapping.json`.
+47. **An RPC after `close()` returns its Result, whose futures fail with the core's error.** The binding keeps no
+    closed flag (JS conventions, Q61: "Python's deviations for the admin calls … don't carry over").
+48. **A negative `close` timeout is read as zero by the FFI**, a deviation the JS conventions already list, and a negative
+    `timeoutMs` in the options is sent as `0`, which Java's `calcDeadlineMs` makes of it; `null` is
+    `default.api.timeout.ms` (JS conventions, Signatures, Q22).
+49. **A map keyed by strings that a call takes** (`createPartitions`, `updateFeatures`, the specs of
+    `listConsumerGroupOffsets`) is a `Map` or a plain object. A plain object given alone is the options object, so
+    the map goes under its parameter name (JS conventions, Signatures, Q15).
+50. **An option class's reader with a Java name of its own keeps it**: `validateOnly(true)` sets,
+    `shouldValidateOnly()` reads, and `validateOnly()` with no argument is a `TypeError` (JS conventions, Class
+    family, Q17, the text of 2026-11-13, which decides the inline comment on Q17 of 2026-11-10).
+
+## Core issues found by the admin client (2026-11-22)
+
+51. **Divergences of the core's admin client and its C API from Java's**, found by the ported tests and the reviews.
+    Each is a core change, so a blocker by entry 3, handed to the core team and not fixed in the binding; where the
+    binding's answer differs from Java's because of one, the admin package's documentation (`src/admin/index.ts`)
+    marks it *(deviation)*, with its Goes when, except two marked on `MockAdminClient`'s class doc, which that
+    documentation points to: the futures not done when the call returns (entry 36, also on `KafkaFuture`) and
+    `createDelegationToken` with no renewer.
+    - **The FFI's mock answers through the Result where Java's mock throws from the call.** Java's
+      `MockAdminClient` throws `UnsupportedOperationException` ("Not implemented yet") from the calls it does not
+      implement; the core's mock fails their futures instead: `createPartitions`, a non-empty `deleteRecords`, the
+      group calls (`describeConsumerGroups`, `describeClassicGroups`, `deleteConsumerGroups`,
+      `deleteConsumerGroupOffsets`, `alterConsumerGroupOffsets`, `removeMembersFromConsumerGroup`), `electLeaders`,
+      `listOffsets` with a timestamp spec, `listConsumerGroupOffsets` with other than one group, the ACL, quota and
+      SCRAM calls, and the transaction and producer calls. Given an empty collection, several of them answer where
+      Java throws. An RPC's entry point reports no error at the call but a caught panic, so no binding can follow
+      Java there.
+    - **The core's mock throws other classes, or none, where Java's mock throws:** `createTopics` on
+      `new MockAdminClient()` (Java: `IndexOutOfBoundsException`, from `Node.noNode()`'s id; the core:
+      `IllegalArgumentError`); `Builder.controller(index)` out of range and `numBrokers` shrinking below the log-dir
+      list (Java: `IndexOutOfBoundsException`; the core: `IllegalArgumentError`); `setFetchesRemainingUntilVisible`
+      on an unknown topic (Java: a bare `RuntimeException`; the core: `IllegalArgumentError`);
+      `controller(null)` (Java: `IllegalArgumentException` "The controller node must be in the list of brokers";
+      the FFI: `TypeError`); `addTopic` with a null name (Java adds a topic named null; the FFI: `TypeError`);
+      `alterReplicaLogDirs` with a broker id beyond the log dirs, `listPartitionReassignments` after the topic is
+      deleted or shrinks, and a BROKER resource named `abc` in `describeConfigs` and `incrementalAlterConfigs`
+      (Java's mock throws `IndexOutOfBoundsException`, a bare `RuntimeException` or `NumberFormatException`; the
+      core fails the future); `listOffsets` on a partition never seeded (Java's mock: a `NullPointerException`; the
+      core: offset -1); `listConsumerGroupOffsets(groupId)` with seeded offsets (Java 4.4's default spec has null
+      partitions, which Java's mock dereferences; the core answers every offset);
+      `alterPartitionReassignments` on an unknown partition (Java's mock: `UnknownTopicOrPartitionException` with no
+      message; the core: "This server does not host this topic-partition."); `createDelegationToken` with no renewer
+      (Java's mock: `IndexOutOfBoundsException` from the call; the core: a failed future, `IllegalArgumentError`
+      "createDelegationToken requires at least one renewer: …"; the FFI enum has no id for
+      `IndexOutOfBoundsException` yet); `describeDelegationToken` with null owners, Java's default (Java's mock: a
+      `NullPointerException`; the core lists every token). Where Java's mock returns null, the core's mock returns
+      an empty list or `UNKNOWN`.
+    - **`get_cb` answers a completed future from a task it spawns** (`kafka_common_KafkaFuture_get_cb`), so no
+      binding can have a mock's future done when the RPC returns (entry 36).
+    - **Nulls the C API cannot carry**, which Java reads only later, or never: a null topic name in `deleteTopics` and
+      `describeTopics` (Java fails that topic's future with `InvalidTopicException`), a `NewTopic` with a null name
+      (Java fails its future with "The given topic name 'null' cannot be represented in a request."), a null group id
+      or group instance id, a null transactional id, a null isolation level, election type, spec,
+      `OffsetAndMetadata` or seeded offset, a null HMAC, a null quota entity map or op key, a null filter state or
+      producer id, a null `FeatureUpdate` or upgrade type, a null `AbortTransactionSpec` partition, and null options.
+      The FFI refuses them at the call (`TypeError`), or reads them as another value: a `NaN` quota as null, a null
+      log directory in `alterReplicaLogDirs` as `""` (Java's request carries a null path, which fails it), and a
+      null feature name in `updateFeatures` as `""`, by which the mock keys its Result and words its message.
+    - **`update_features_with_options` reads the options and each update before the core's checks**, so a null
+      option, update or upgrade type is reported before Java's "Feature updates can not be null or empty." and
+      "Provided feature can not be empty.".
+    - **`KafkaAdminClient#nodeFor` with a BROKER or BROKER_LOGGER resource whose name is not a number**: Java throws
+      `NumberFormatException` from `describeConfigs` and `incrementalAlterConfigs`; the core reads it as "any
+      broker", so the call returns, the broker refuses the resource ("Broker id must be an integer, but it is: abc"),
+      and its future fails with `InvalidRequestError`.
+    - **`RemoveMembersFromConsumerGroupResult.memberResult` for a member not in the request**: the core's message is
+      "Member other was not included in the original request", where Java prints the member's `Object.toString()`.
+      A client's Result and one built through Java's constructor give different texts.
+    - **Java's five-parameter `MockAdminClient.addTopic(…, usesTopicId)`** has no entry point, so it is left out.
+
+## Open questions for the owner (2026-11-22)
+
+52. **Open, each waiting for the owner or the rules' owner** (none blocks the admin client; the code records the
+    current choice):
+    - **Q24, strings that skip `encodeLikeJava`.** The rule lists the string serializer, the headers code and the
+      config code, and says topic names skip it; the admin client adds the SCRAM upsertion's password, which Java
+      turns into bytes with `getBytes(UTF_8)`. Every other admin string (ACL resource names, principals, hosts, user
+      names, group ids, transactional ids, feature names) crosses as a C string, which writes a lone surrogate as U+FFFD where
+      Java writes `?`. A Result keyed by such a string is rebuilt from the core's keys, so it no longer finds the
+      caller's own object: `createAcls([b]).values().get(b)` is `null` for a resource name `'a\uD800b'`, where
+      Java's map is keyed by the caller's object. Should these strings go through `encodeLikeJava`, should the
+      Results key by the caller's objects, or is this an accepted limit? The JS conventions' Q24 list would also gain the
+      SCRAM password, or a principle in its place ("wherever Java turns a `String` into bytes with
+      `getBytes(UTF_8)`").
+    - **`ClientQuotaFilterComponent.match()`** has three states in Java (an `Optional` that is itself null for
+      `ofEntityType`, empty for `ofDefaultEntity`, or a name) and two in `T | null`: both of the first two read as
+      `null`, as in Python. The class keeps the three for `equals`, `hashCode`, `toString`, `toJSON` and the wire. Is
+      a Types row wanted, or is the loss accepted?
+    - **`OptionalLong` typed `bigint | null`**, the composition of the JS conventions' `long` and `Optional<T>` rows (Python's
+      table lists `OptionalLong` with `Optional`). The JS conventions have no row; nor for `OptionalInt`, a returned
+      `Set<MemberToRemove>` or `Map<Integer, V>` (a `Map<number, V>`, a `ReadonlyMap` for Java's unmodifiable
+      view).
+    - **`Throwable` typed `unknown`** (`ElectLeadersResult.partitions()`, `ListGroupsResult.errors()`), as the binding
+      types a failure elsewhere (`whenComplete`'s error), although the core only puts `Error`s there. One row of the JS conventions for
+      every `Throwable` in the API is wanted, `unknown` or `Error`.
+    - **The invented names, for the JS conventions' list:** `MemberToRemoveSet` and the other six classes of entry 38, and the
+      seven data classes of entry 39 for the JS conventions' data-class list.
+    - **For the rules' owner, smaller points:** whether an `*Options` class whose Java class has a public constructor
+      with an argument (`ListOffsetsOptions`, `RemoveMembersFromConsumerGroupOptions`) gets the keyed constructor
+      (built: it does not, as Python's rule says); Python's rule-4 sentence for a null the C API cannot carry, which
+      Java reads only later (built: a `TypeError` at the call, marked *(deviation)*); Python's nullability rule (a
+      `| null` only where Java gives null a meaning); and where a Java mock's `UnsupportedOperationException`
+      surfaces when the FFI's mock answers through the Result (entry 51).
+
+## `toJSON()` on `Node` and `PartitionInfo` (decided by the owner, 2026-11-21)
+
+53. **`Node` and `PartitionInfo` get `toJSON()` on #312's branch, not in the admin PR.** Value classes have
+    `toJSON()` (`javascript/CLAUDE.md`, "Java shape, JS idiom"; entry 46), and #312's `Node` and `PartitionInfo`,
+    the producer's `partitionsFor()` value, had none: `JSON.stringify` wrote a `PartitionInfo` as `{}`, while a
+    `Node`, a data object, already wrote its fields. With it, a `Node` writes the same fields a spread of it gives,
+    and a `PartitionInfo` its topic, partition, leader and replica lists, each node in its own JSON form. Both
+    classes are #312's code, so the owner put the change on #312's branch, as its own commit, on 2026-11-21, rather
+    than in the admin PR's diff; the admin branch takes it when it is rebased onto #312.
