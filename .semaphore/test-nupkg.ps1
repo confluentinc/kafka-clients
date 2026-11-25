@@ -19,16 +19,17 @@
 # (Windows ...)" blocks of release.yml. The smoke project (dotnet/tools/PackageSmoke), a copy
 # outside the repository, references the package by its exact version from that one feed
 # (packageSourceMapping), with an empty NuGet cache, so nothing but the package can be used. It is
-# built for the platform and run in a process of it, on net8.0, net10.0 and the agent's .NET
+# built for the platform and run in a process of it, on net10.0 and the agent's .NET
 # Framework (net462), with no RID of its own, as users build it: on .NET Framework the SDK gives an
 # application the RID of its PlatformTarget, and NuGet copies that RID's native library beside it.
 # A second .NET Framework build is AnyCPU. On x64 it sets no platform, as most applications do: the
 # SDK then gives it the win-x86 RID, so NuGet copies the win-x86 library beside it, yet it runs as a
 # 64-bit process, the reported failure. On x86 it sets AnyCPU and Prefer32Bit, so it has no RID and
 # nothing beside it, and runs as a 32-bit process. Either way it must load the library of its
-# process from runtimes\<rid>\native, where the package's build targets copy both Windows libraries. Each run must load one copy of the library, from where it is expected. A
+# process from runtimes\<rid>\native, where the package's build targets copy both Windows libraries. Each run must load one copy of the library, from where it is expected. The
+# platform's .NET Framework build must need no binding redirect, so that an application that writes none can load the package. A
 # self-contained `dotnet publish` for the platform's RID must carry the native library and run. The
-# binding's unit tests then run against the package, on the same three frameworks, with no RID, as
+# binding's unit tests then run against the package, on the same two frameworks, with no RID, as
 # a test project is built; on .NET Framework they load the library the build targets copy. The
 # unit-test project's
 # -p:ConfluentKafkaPackageVersion swaps its project reference for the package, so the assembly and
@@ -58,7 +59,7 @@ param(
 $rid = $WindowsRids[$Platform]
 $bits = @{ x64 = '64'; x86 = '32' }[$Platform]
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$tfms = 'net462', 'net8.0', 'net10.0'
+$tfms = 'net462', 'net10.0'
 
 $listing = @(Get-ChildItem -Force $PackageDir)
 if ($listing.Count -ne 1 -or $listing[0].Name -notmatch '^Confluent\.Kafka\.(.+)\.nupkg$') {
@@ -173,6 +174,16 @@ foreach ($tfm in $tfms) {
         }
         if (-not (Test-Path (Join-Path $exe[0].DirectoryName 'confluent_kafka.dll'))) {
             throw "the net462 smoke program has no confluent_kafka.dll beside it: NuGet did not copy the package's $rid library"
+        }
+        # The package's .NET Framework dependencies must agree on the version of each assembly they
+        # reference: an application whose build writes no binding redirect (a web.config application,
+        # a project that is not SDK-style) cannot load two versions of one. This SDK-style build writes
+        # one for any assembly referenced at two versions, so it must write none (System.Memory and
+        # the System.Threading.Tasks.Extensions that Microsoft.Bcl.AsyncInterfaces brings come from one
+        # maintenance-packages release, dotnet/Directory.Build.props).
+        $config = "$($exe[0].FullName).config"
+        if ((Test-Path $config) -and (Select-String -Path $config -Pattern 'bindingRedirect' -SimpleMatch -Quiet)) {
+            throw "the net462 smoke program needs a binding redirect ($config): the package's dependencies reference two versions of one assembly, which a .NET Framework application that writes no redirects cannot load"
         }
         Invoke-Smoke $exe[0].FullName @($version) 'confluent_kafka.dll'
     } else {

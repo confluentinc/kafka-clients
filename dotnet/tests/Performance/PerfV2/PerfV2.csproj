@@ -15,7 +15,7 @@
     Unlike PerfV3, this exe needs no native cdylib and no Rust build: the package carries its own
     librdkafka native as runtimes/{rid}/native assets.
 
-    The package ships net10.0 and net8.0 assets, so this exe keeps the suite's net8.0;net10.0 matrix.
+    The package ships net10.0 assets, so this exe keeps the suite's net10.0 target.
 
     Directory.Build.props (at dotnet/) auto-applies (#nullable enable, dotnet/runtime code style,
     TreatWarningsAsErrors, strong-name signing). Kept out of Confluent.Kafka.sln, and never in any
@@ -24,7 +24,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.Performance.V2</RootNamespace>
     <AssemblyName>PerfV2</AssemblyName>
     <!-- Perf executable — never packed, no XML doc file (so no CS1591). -->

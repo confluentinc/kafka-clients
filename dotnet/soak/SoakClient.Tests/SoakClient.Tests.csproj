@@ -10,8 +10,8 @@
 
     No broker, no Docker. The topic-setup and delivery-report tests drive the
     native mocks (AsyncMockAdminClient, AsyncMockProducer, AsyncMockConsumer); the
-    other tests make no native call. TFMs net8.0;net10.0 —
-    net462 is deliberately absent: the soak exe itself targets net8.0;net10.0 (it is
+    other tests make no native call. TFM net10.0 —
+    net462 is deliberately absent: the soak exe itself targets net10.0 (it is
     run by `dotnet <dll>` on a Linux box, never on .NET Framework).
 
     Kept OUT of Confluent.Kafka.sln with the exe (PLAN D11); run by
@@ -19,7 +19,7 @@
   -->
 
   <PropertyGroup>
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.Soak.Tests</RootNamespace>
     <AssemblyName>SoakClient.Tests</AssemblyName>
     <IsPackable>false</IsPackable>

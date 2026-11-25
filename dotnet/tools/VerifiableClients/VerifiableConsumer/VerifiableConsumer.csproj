@@ -8,7 +8,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.Tools</RootNamespace>
     <AssemblyName>VerifiableConsumer</AssemblyName>
     <IsPackable>false</IsPackable>

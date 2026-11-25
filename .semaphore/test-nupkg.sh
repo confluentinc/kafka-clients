@@ -19,14 +19,14 @@
 # test-wheels.sh, on Linux and macOS; test-nupkg.ps1 tests it on Windows. The smoke project (dotnet/tools/PackageSmoke), a copy outside the repository,
 # references the package by its exact version from that one feed (packageSourceMapping), with
 # an empty NuGet cache, so nothing but the package can be used. It is built on this machine and
-# run for net8.0 and net10.0: on macOS on the runner, on Linux on the runner and then in a
+# run for net10.0: on macOS on the runner, on Linux on the runner and then in a
 # container of each distribution of DISTRO_IMAGES, which mounts the runner's .NET install and
 # the build. A self-contained `dotnet publish` for this machine's RID must carry the native
 # library and run. With a package directory, the binding's unit tests then run against the
 # package too, on the runner: the unit-test project's -p:ConfluentKafkaPackageVersion swaps its
 # project reference for the package, so the assembly and the native library both come from it.
 # Some of them read the Java sources of the kafka submodule, which must be checked out.
-# Must be POSIX sh. Needs .NET SDK 10 and the .NET 8 runtime (.semaphore/install-dotnet.sh), in
+# Must be POSIX sh. Needs .NET SDK 10 (.semaphore/install-dotnet.sh), in
 # $HOME/.dotnet or on PATH, and Docker on Linux.
 #
 # Usage, from the repository root:
@@ -41,7 +41,7 @@
 
 set -eu
 
-TFMS="net8.0 net10.0"
+TFMS="net10.0"
 
 die() {
     echo "test-nupkg: $*" >&2
@@ -167,10 +167,8 @@ command -v dotnet >/dev/null 2>&1 || die "dotnet is not on PATH; run .semaphore/
 # The directory of the dotnet executable itself, which a distribution's /usr/bin/dotnet links to.
 DOTNET_ROOT="${DOTNET_ROOT:-$(python3 -c 'import os, sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$(command -v dotnet)")}"
 export DOTNET_ROOT DOTNET_MULTILEVEL_LOOKUP=0 DOTNET_NOLOGO=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
-for runtime in 8.0. 10.0.; do
-    dotnet --list-runtimes | grep -q "^Microsoft.NETCore.App $runtime" \
-        || die "the .NET $runtime runtime is not installed in $DOTNET_ROOT; run .semaphore/install-dotnet.sh"
-done
+dotnet --list-runtimes | grep -q "^Microsoft.NETCore.App 10.0." \
+    || die "the .NET 10 runtime is not installed in $DOTNET_ROOT; run .semaphore/install-dotnet.sh"
 
 # Recorded before the tests, and written only if they all pass.
 sum=$(sha256_of "$PACKAGE") || die "could not hash $PACKAGE"

@@ -75,10 +75,10 @@ function Get-VerifiedDownload {
     }
 }
 
-# Installs the .NET 10 SDK and the .NET 8 runtime for $Platform into a directory of their own, and
-# points this process at them, so that dotnet runs in a process of that platform. Returns the path
-# of dotnet.exe. The .NET 10 SDK builds every TFM and runs net10.0; the .NET 8 runtime runs net8.0,
-# which does not roll forward to .NET 10. net462 runs on the agent's .NET Framework.
+# Installs the .NET 10 SDK for $Platform into a directory of its own, and points this process at it,
+# so that dotnet runs in a process of that platform. Returns the path of dotnet.exe. The .NET 10 SDK
+# builds every TFM and runs net10.0; net462 runs on the agent's .NET Framework. No .NET 8 runtime:
+# nothing targets net8.0, as .NET 8 is out of Microsoft support.
 function Install-DotNet {
     param([string] $Platform)
     $root = Join-Path $ToolsDir "dotnet-$Platform"
@@ -86,7 +86,6 @@ function Install-DotNet {
     # The output goes to the host, so that the function returns only the path.
     Invoke-Retry { Invoke-WebRequest -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile $installer -UseBasicParsing } | Out-Host
     Invoke-Retry { Invoke-Native powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer, '-Channel', '10.0', '-Architecture', $Platform, '-InstallDir', $root) } | Out-Host
-    Invoke-Retry { Invoke-Native powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer, '-Channel', '8.0', '-Runtime', 'dotnet', '-Architecture', $Platform, '-InstallDir', $root) } | Out-Host
     $env:DOTNET_ROOT = $root
     $env:PATH = "$root;$env:PATH"
     $env:DOTNET_MULTILEVEL_LOOKUP = '0'

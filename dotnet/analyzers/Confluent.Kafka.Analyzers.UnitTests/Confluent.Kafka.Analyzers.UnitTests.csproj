@@ -2,12 +2,12 @@
 
   <!--
     Unit tests of the binding's own analyzers (Confluent.Kafka.Analyzers), on the Roslyn analyzer
-    testing library. The analyzer compiles each test's source against the .NET 8 reference
+    testing library. The analyzer compiles each test's source against the .NET 10 reference
     assemblies, which the library downloads from NuGet on its first run.
   -->
 
   <PropertyGroup>
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.Analyzers.UnitTests</RootNamespace>
     <AssemblyName>Confluent.Kafka.Analyzers.UnitTests</AssemblyName>
     <IsPackable>false</IsPackable>

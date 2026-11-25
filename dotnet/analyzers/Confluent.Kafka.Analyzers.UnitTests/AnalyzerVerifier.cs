@@ -21,7 +21,7 @@ using Microsoft.CodeAnalysis.Testing;
 namespace Confluent.Kafka.Analyzers.UnitTests;
 
 /// <summary>
-/// Runs one analyzer over a test source, with any additional files a test gives, compiled against the .NET 8
+/// Runs one analyzer over a test source, with any additional files a test gives, compiled against the .NET 10
 /// reference assemblies or others a test names, and compares its diagnostics with the expected ones.
 /// </summary>
 internal static class AnalyzerVerifier<TAnalyzer>
@@ -31,7 +31,7 @@ internal static class AnalyzerVerifier<TAnalyzer>
         CSharpAnalyzerVerifier<TAnalyzer, DefaultVerifier>.Diagnostic(id);
 
     internal static Task VerifyAsync(string source, params DiagnosticResult[] expected) =>
-        VerifyAsync(ReferenceAssemblies.Net.Net80, source, expected);
+        VerifyAsync(ReferenceAssemblies.Net.Net100, source, expected);
 
     internal static Task VerifyAsync(ReferenceAssemblies references, string source, params DiagnosticResult[] expected)
     {
@@ -52,7 +52,7 @@ internal static class AnalyzerVerifier<TAnalyzer>
         CSharpAnalyzerTest<TAnalyzer, DefaultVerifier> test = new CSharpAnalyzerTest<TAnalyzer, DefaultVerifier>
         {
             TestCode = source,
-            ReferenceAssemblies = ReferenceAssemblies.Net.Net80,
+            ReferenceAssemblies = ReferenceAssemblies.Net.Net100,
         };
         foreach ((string name, string content) in additionalFiles)
         {

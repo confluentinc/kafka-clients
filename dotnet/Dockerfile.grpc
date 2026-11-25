@@ -64,22 +64,23 @@ COPY rust/multilanguage-test-server/proto /src/rust/multilanguage-test-server/pr
 # clean, so this is a no-op there.
 RUN find /src/dotnet -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
 
-# Publish the server's net8.0 leg (the project also targets net10.0 for the
-# native build, M17/P1). Grpc.Tools generates the proto stubs during this build;
-# the ProjectReference builds only the net8.0 leg of Confluent.Kafka.
+# Publish the server, whose one target framework is net10.0. Grpc.Tools
+# generates the proto stubs during this build; the ProjectReference builds only the
+# net10.0 leg of Confluent.Kafka.
 RUN dotnet publish /src/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj \
-        -c Release -p:CargoProfileDir=${RUST_PROFILE} -f net8.0 -o /app
+        -c Release -p:CargoProfileDir=${RUST_PROFILE} -f net10.0 -o /app
 
 # ---------------------------------------------------------------------------
-# Stage 2: Minimal runtime — the ASP.NET Core 8.0 runtime (Grpc.AspNetCore) +
+# Stage 2: Minimal runtime — the ASP.NET Core 10.0 runtime (Grpc.AspNetCore) +
 # the published app + the bundled native lib.
 # ---------------------------------------------------------------------------
-# Base is the Ubuntu 24.04 (Noble) tag, NOT the default Debian 12 (bookworm) one:
+# Base is the Ubuntu 24.04 (Noble) tag, .NET 10's default, named so that no other default
+# (Debian 12, bookworm, before .NET 10) can replace it:
 # CI builds libconfluent_kafka.so on the Ubuntu-24.04 host (glibc 2.39), so the
 # runtime image's glibc must be >= that. bookworm (glibc 2.36) can't load the
 # host-built .so ("GLIBC_2.38 not found"); noble (glibc 2.39) matches the host and
 # also loads the locally cross-built (rust:1-bookworm) .so. See M10/P1.
-FROM mcr.microsoft.com/dotnet/aspnet:8.0-noble AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble AS runtime
 
 WORKDIR /app
 

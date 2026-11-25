@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using Confluent.Kafka.Common;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -36,8 +39,6 @@ public sealed class TfmSentinelTests
         string targetFramework =
 #if NET10_0_OR_GREATER
             "net10.0";
-#elif NET8_0
-            "net8.0";
 #elif NET462
             "net462";
 #else
@@ -50,5 +51,28 @@ public sealed class TfmSentinelTests
         Assert.NotEqual("unknown", targetFramework);
 
         Assert.NotEmpty(RuntimeInformation.FrameworkDescription);
+    }
+
+    // Each run tests the library build it is meant to: Confluent.Kafka.UnitTests.NetStandard the
+    // netstandard2.0 build, which a .NET 8 application loads, and Confluent.Kafka.UnitTests the
+    // build of its own target framework, from the project or from the package.
+    [Fact]
+    public void LibraryBuild_IsTheOneThisRunTests()
+    {
+        string expected =
+#if CONFLUENT_KAFKA_NETSTANDARD2_0
+            ".NETStandard,Version=v2.0";
+#elif NET10_0_OR_GREATER
+            ".NETCoreApp,Version=v10.0";
+#elif NET462
+            ".NETFramework,Version=v4.6.2";
+#else
+            "unknown";
+#endif
+
+        string? actual = typeof(KafkaException).Assembly.GetCustomAttribute<TargetFrameworkAttribute>()?.FrameworkName;
+        _output.WriteLine($"Library build: {actual}");
+
+        Assert.Equal(expected, actual);
     }
 }
