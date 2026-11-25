@@ -67,10 +67,10 @@ MIN_MAJOR = 4
 # as the nuspec's dependency groups name them, with the dependencies of each, and as the
 # assembly's TargetFrameworkAttribute names them.
 TARGET_FRAMEWORKS = {
-    "net462": (".NETFramework4.6.2", {"System.Memory": "4.5.5", "Microsoft.Bcl.AsyncInterfaces": "10.0.15",
+    "net462": (".NETFramework4.6.2", {"System.Memory": "4.6.3", "Microsoft.Bcl.AsyncInterfaces": "10.0.15",
                                       "System.ValueTuple": "4.5.0"},
                ".NETFramework,Version=v4.6.2"),
-    "netstandard2.0":(".NETStandard2.0", {"System.Memory": "4.5.5", "Microsoft.Bcl.AsyncInterfaces": "10.0.15"},
+    "netstandard2.0":(".NETStandard2.0", {"System.Memory": "4.6.3", "Microsoft.Bcl.AsyncInterfaces": "10.0.15"},
                        ".NETStandard,Version=v2.0"),
     "net10.0": ("net10.0", {}, ".NETCoreApp,Version=v10.0"),
 }
