@@ -12,20 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for run.sh: HI mode, override precedence and argument handling.
+"""Tests for run.sh: HI mode, override precedence, argument handling and log
+rotation.
 
 These drive the real run.sh with a stub interpreter in place of Python, so what
 is asserted is the arguments and the client config the supervisor *would* hand
 the soak client — no broker, no bindings, no OpenTelemetry. The stub exits 2
 (the "fatal, never restart" code), which makes run.sh stop after exactly one
-child instead of looping.
+child instead of looping. The rotation tests use stubs of their own.
 
-They need only bash, and run on macOS and Linux alike.
+They need only bash (and the perl and bzip2 run.sh itself needs), and run on
+macOS and Linux alike.
 """
 
+import bz2
+import contextlib
 import os
+import re
 import shutil
+import signal
 import subprocess
+import time
 
 import pytest
 
@@ -214,7 +221,7 @@ def test_preflight_refuses_an_interpreter_that_cannot_import_soakclient(tmp_path
     assert "could not be imported" in output
     assert "message loss" not in output.lower()
     # Nothing was rotated, and the operator gets the marker.
-    assert not (tmp_path / "t1-848-normal.log.prev.bz2").exists()
+    assert not list(tmp_path.glob("t1-848-normal.log.*"))
     marker = tmp_path / "t1-848-normal.FAILED"
     assert marker.exists()
     assert "could not be imported" in marker.read_text()
@@ -346,10 +353,9 @@ def test_a_rapid_failure_that_pushes_the_log_past_the_limit_is_not_rotated(
     Reproduces the exact scenario: the log is already near LIMIT, then a
     child that crashes almost immediately (lifetime < RAPID_FAILURE_SECONDS)
     prints enough output to push the log over LIMIT on its way out. Rotating
-    here would bzip2 that crash's own few-KB fragment over the single
-    .prev.bz2 and delete the log -- destroying the one piece of evidence an
-    operator needs, which is exactly what run.sh's own comment on
-    maybe_rotate_log says must never happen.
+    here would move that crash's own few-KB fragment out of the log, the first
+    place an operator looks for why it died, which is exactly what run.sh's
+    own comment on maybe_rotate_log says must never happen.
     """
     stub = tmp_path / "stub-python"
     # Rapid, non-fatal failure (not EXIT_FATAL=2) that itself prints enough to
@@ -399,5 +405,524 @@ def test_a_rapid_failure_that_pushes_the_log_past_the_limit_is_not_rotated(
     assert logfile.exists()
     assert logfile.stat().st_size >= 1000
     # ...but must not have been rotated away.
-    assert not (tmp_path / "t1-848-normal.log.prev.bz2").exists()
+    assert not list(tmp_path.glob("t1-848-normal.log.*"))
     assert "x" * 900 in logfile.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Rotation never stops the client
+# ---------------------------------------------------------------------------
+def write_stub(tmp_path, body):
+    """A stub interpreter that passes run.sh's pre-flight, then runs `body`."""
+    stub = tmp_path / "stub-python"
+    stub.write_text("#!/bin/sh\n"
+                    'if [ "$1" = "-c" ]; then exit 0; fi\n' + body)
+    stub.chmod(0o755)
+    return stub
+
+
+def supervisor_env(tmp_path, stub, extra=None):
+    """The environment for running run.sh against `stub` in `tmp_path`."""
+    (tmp_path / "client.config").write_text("bootstrap.servers=localhost:9092\n")
+    env = dict(os.environ)
+    for key in list(env):
+        if key.startswith("SOAK_") or key == "HI":
+            del env[key]
+    env.update({"TESTID": "t1", "SOAK_PYTHON": str(stub),
+                "SOAK_LOG_DIR": str(tmp_path), "SOAK_POLL_INTERVAL": "0.05",
+                # Rotation waits for free space; these tests should not depend
+                # on how full the disk of the machine running them is.
+                "SOAK_LOG_MIN_FREE_BYTES": "0"})
+    env.update(extra or {})
+    return env
+
+
+@contextlib.contextmanager
+def supervising(tmp_path, env, out_name="supervisor.out"):
+    """Run run.sh in the background for the duration of the block, then stop
+    it with SIGTERM, as an operator would. Yields the path of its output."""
+    out_path = tmp_path / out_name
+    with open(str(out_path), "w") as out:
+        proc = subprocess.Popen(["bash", RUN_SH, "client.config"],
+                                cwd=str(tmp_path), env=env, stdout=out,
+                                stderr=subprocess.STDOUT)
+        try:
+            yield out_path
+        finally:
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=120)
+
+
+def fake_tool(tmp_path, name, body):
+    """Put a stand-in for the command `name` first on run.sh's PATH, and
+    return that PATH."""
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir(exist_ok=True)
+    tool = bin_dir / name
+    tool.write_text("#!/bin/sh\n" + body)
+    tool.chmod(0o755)
+    return str(bin_dir) + os.pathsep + os.environ["PATH"]
+
+
+def wait_for(condition, timeout=30.0):
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+#: A rotated log, compressed or not. Not a copy or a compression in progress.
+ROTATED_PART = re.compile(r"t1-848-normal\.log\.\d{8}T\d{6}Z(\.bz2)?$")
+
+
+def rotated_parts(tmp_path):
+    """Names of rotated logs, ignoring whether each is compressed yet."""
+    names = {p.name[:-len(".bz2")] if p.name.endswith(".bz2") else p.name
+             for p in tmp_path.glob("t1-848-normal.log.[0-9]*")
+             if ROTATED_PART.match(p.name)}
+    return sorted(names)
+
+
+def compression_finished(tmp_path):
+    """Nothing left to compress, and no copy or compression in progress."""
+    return not any(not p.name.endswith(".bz2")
+                   for p in tmp_path.glob("t1-848-normal.log.[0-9]*"))
+
+
+def test_rotation_keeps_the_client_running_and_loses_nothing(tmp_path):
+    """The log is rotated under a client that keeps writing, and the client is
+    never stopped: one start, one PID, and every line it wrote lands, in order,
+    in exactly one rotated part or the live log.
+
+    The child's `>>` redirection is what makes truncating the log under it
+    safe; with `>` the live log would fill with NULs, which this also checks.
+    """
+    stub = write_stub(tmp_path, (
+        "i=0\n"
+        'trap \'echo "pid=$$ last=$i"; exit 0\' TERM\n'
+        "while :; do\n"
+        '  echo "pid=$$ seq=$i padding-padding-padding-padding"\n'
+        "  i=$((i + 1))\n"
+        "  sleep 0.01\n"
+        "done\n"))
+    env = supervisor_env(tmp_path, stub, {"SOAK_LOG_LIMIT_BYTES": "4096"})
+    with supervising(tmp_path, env) as out_path:
+        assert wait_for(lambda: len(rotated_parts(tmp_path)) >= 3), \
+            "the log was never rotated"
+    assert wait_for(lambda: compression_finished(tmp_path), timeout=30)
+    output = out_path.read_text()
+
+    # Never restarted: one start, and every rotation said the client kept
+    # running.
+    assert output.count("Soak client started") == 1, output
+    parts = rotated_parts(tmp_path)
+    assert output.count("kept running") == len(parts), output
+
+    seqs, pids, stopped_cleanly = [], set(), False
+    for name in parts + ["t1-848-normal.log"]:
+        path = tmp_path / name
+        data = (bz2.open(str(path) + ".bz2").read() if name != "t1-848-normal.log"
+                else path.read_bytes())
+        assert b"\0" not in data, "{} has NULs: was it opened with >?".format(name)
+        for line in data.decode().splitlines():
+            m = re.match(r"pid=(\d+) (seq|last)=(\d+)", line)
+            if m:
+                pids.add(m.group(1))
+                if m.group(2) == "seq":
+                    seqs.append(int(m.group(3)))
+                else:
+                    stopped_cleanly = True
+    assert len(pids) == 1, pids
+    assert stopped_cleanly, "the client's own shutdown line is missing"
+    # In order and no duplicates, across every part boundary...
+    assert seqs == sorted(set(seqs))
+    # ...and nothing missing. Copy-then-truncate can only lose a write landing
+    # in the microseconds between rotate_log's last read and its truncate, so
+    # allow at most one line per rotation rather than make this test flaky.
+    missing = set(range(seqs[-1] + 1)) - set(seqs)
+    assert len(missing) <= len(parts), sorted(missing)
+
+
+def test_rotated_logs_older_than_keep_days_are_deleted(tmp_path):
+    """Retention is by age, 14 days by default, and touches nothing but this
+    soak's own logs, including a .prev.bz2 left by the old stop-and-restart
+    rotation."""
+    now = time.time()
+    ages = {
+        "t1-848-normal.log.20250101T000000Z.bz2": 15,   # this soak, too old
+        "t1-848-normal.log.prev.bz2": 15,               # old scheme, too old
+        "t1-848-normal.log.20261101T000000Z.bz2": 13,   # this soak, kept
+        "t2-848-normal.log.20250101T000000Z.bz2": 15,   # another soak's
+        "soak-metrics-848-normal-t1.jsonl": 15,         # never rotated
+    }
+    for name, days in ages.items():
+        path = tmp_path / name
+        path.write_text(name)
+        os.utime(str(path), (now - days * 86400, now - days * 86400))
+
+    result, _argv, _config = run_supervisor(tmp_path, ["client.config"])
+    assert result.returncode == 2, result.stdout + result.stderr
+
+    assert not (tmp_path / "t1-848-normal.log.20250101T000000Z.bz2").exists()
+    assert not (tmp_path / "t1-848-normal.log.prev.bz2").exists()
+    assert (tmp_path / "t1-848-normal.log.20261101T000000Z.bz2").exists()
+    assert (tmp_path / "t2-848-normal.log.20250101T000000Z.bz2").exists()
+    assert (tmp_path / "soak-metrics-848-normal-t1.jsonl").exists()
+
+
+def test_a_rotated_log_left_uncompressed_is_compressed_at_startup(tmp_path):
+    """A run.sh stopped while it was compressing a rotated log leaves that log
+    uncompressed; the next run compresses it."""
+    leftover = tmp_path / "t1-848-normal.log.20261122T000000Z"
+    leftover.write_text("leftover output\n")
+
+    run_supervisor(tmp_path, ["client.config"])
+
+    compressed = tmp_path / "t1-848-normal.log.20261122T000000Z.bz2"
+    assert wait_for(lambda: compressed.exists() and not leftover.exists())
+    assert bz2.open(str(compressed)).read() == b"leftover output\n"
+
+
+def test_a_compression_cut_short_leaves_no_truncated_bz2(tmp_path):
+    """bzip2 killed half-way (run.sh stopped, the box rebooted) must not leave
+    a truncated .bz2 under the name of a complete one. The rotated log stays,
+    uncompressed, for a later attempt."""
+    path = fake_tool(tmp_path, "bzip2", (
+        "# Some output, then death, like a bzip2 killed half-way through.\n"
+        "for arg; do file=$arg; done\n"
+        'case " $* " in\n'
+        '  *" -c "*) printf BZh9 ;;\n'
+        '  *) printf BZh9 > "$file.bz2" ;;\n'
+        "esac\n"
+        "kill -KILL $$\n"))
+    (tmp_path / "t1-848-normal.log").write_text("x" * 5000 + "\n")
+    stub = write_stub(tmp_path, "exec sleep 600\n")
+    env = supervisor_env(tmp_path, stub, {"SOAK_LOG_LIMIT_BYTES": "4096",
+                                          "PATH": path})
+    with supervising(tmp_path, env) as out_path:
+        assert wait_for(lambda: "Could not compress" in out_path.read_text()
+                        or list(tmp_path.glob("t1-848-normal.log.*.bz2"))), \
+            "no compression was attempted"
+
+    parts = rotated_parts(tmp_path)
+    assert len(parts) == 1, parts
+    assert wait_for(lambda: not list(tmp_path.glob("*.tmp*")), timeout=10)
+    assert not list(tmp_path.glob("t1-848-normal.log.*.bz2"))
+    assert (tmp_path / parts[0]).read_text() == "x" * 5000 + "\n"
+
+
+def test_a_truncated_bz2_beside_its_rotated_log_is_redone_at_startup(tmp_path):
+    """What a bzip2 killed half-way left when it compressed in place: the
+    rotated log, and a truncated .bz2 beside it. The next run compresses the
+    log again rather than trust that .bz2."""
+    part = tmp_path / "t1-848-normal.log.20261122T000000Z"
+    content = b"complete output\n" * 1000
+    part.write_bytes(content)
+    compressed = tmp_path / (part.name + ".bz2")
+    compressed.write_bytes(bz2.compress(content)[:40])
+
+    run_supervisor(tmp_path, ["client.config"])
+
+    assert wait_for(lambda: not part.exists())
+    assert bz2.open(str(compressed)).read() == content
+
+
+def test_a_restart_during_a_compression_loses_nothing(tmp_path):
+    """A compression goes on after its run.sh is stopped, and a run.sh started
+    meanwhile deletes its temporary file as left incomplete. The old
+    compression, ending first, must then leave the rotated log alone, not put
+    an empty .bz2 in its place, so that the new run.sh compresses all of it."""
+    path = fake_tool(tmp_path, "bzip2", (
+        "# Each run.sh's compression waits for its own go-ahead.\n"
+        'while [ ! -e "$BZIP2_GO" ]; do sleep 0.05; done\n'
+        "exec '{}' \"$@\"\n").format(shutil.which("bzip2")))
+    part = tmp_path / "t1-848-normal.log.20261122T000000Z"
+    content = b"rotated output\n" * 1000
+    part.write_bytes(content)
+    compressed = tmp_path / (part.name + ".bz2")
+    stub = write_stub(tmp_path, "exec sleep 600\n")
+    go_old, go_new = tmp_path / "go-old", tmp_path / "go-new"
+    env = supervisor_env(tmp_path, stub, {"PATH": path,
+                                          "BZIP2_GO": str(go_old)})
+    try:
+        with supervising(tmp_path, env, "old.out") as old_out:
+            assert wait_for(lambda: list(tmp_path.glob("*.bz2.tmp.*"))), \
+                "the compression never started"
+            # Restart a soak that is running, not one still starting up.
+            assert wait_for(
+                lambda: "Soak client started" in old_out.read_text())
+        # run.sh is stopped, and its compression still waits.
+        with supervising(tmp_path, dict(env, BZIP2_GO=str(go_new)),
+                         "new.out") as new_out:
+            assert wait_for(lambda: "left incomplete" in new_out.read_text())
+            go_old.touch()
+            assert wait_for(lambda: "Could not compress" in old_out.read_text()
+                            or not part.exists()), \
+                "the old compression never ended"
+            go_new.touch()
+            assert wait_for(lambda: compressed.exists() and not part.exists()
+                            and not list(tmp_path.glob("*.bz2.tmp.*"))
+                            or "Could not compress" in new_out.read_text())
+    finally:
+        # Never leave a compression waiting after the test.
+        go_old.touch()
+        go_new.touch()
+
+    assert compressed.exists() and not part.exists(), \
+        sorted(p.name for p in tmp_path.iterdir())
+    assert compressed.stat().st_size > 0, \
+        "the .bz2 is empty, and the rotated log is gone"
+    assert bz2.open(str(compressed)).read() == content
+
+
+def test_a_signal_just_before_the_client_starts_still_stops_it(tmp_path):
+    """A signal that arrives after run.sh's loop checks `run`, but before the
+    client starts, finds no client to stop. run.sh must stop the client it
+    then starts, rather than wait for it to exit by itself."""
+    # run.sh's first `date +%s` is in that window: hold it there while the
+    # signal arrives.
+    held, go = tmp_path / "date-held", tmp_path / "date-go"
+    path = fake_tool(tmp_path, "date", (
+        'if [ "$1" = "+%s" ] && [ ! -e "{held}" ]; then\n'
+        '    : > "{held}"\n'
+        '    while [ ! -e "{go}" ]; do sleep 0.05; done\n'
+        "fi\n"
+        "exec '{date}' \"$@\"\n").format(
+            held=held, go=go, date=shutil.which("date")))
+    client_pid = tmp_path / "client.pid"
+    stub = write_stub(tmp_path,
+                      'echo $$ > "{}"\nexec sleep 600\n'.format(client_pid))
+    env = supervisor_env(tmp_path, stub, {"PATH": path})
+    out_path = tmp_path / "supervisor.out"
+    with open(str(out_path), "w") as out:
+        proc = subprocess.Popen(["bash", RUN_SH, "client.config"],
+                                cwd=str(tmp_path), env=env, stdout=out,
+                                stderr=subprocess.STDOUT)
+        try:
+            assert wait_for(held.exists), "run.sh never got to its loop"
+            proc.send_signal(signal.SIGTERM)
+            go.touch()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pytest.fail("run.sh is still waiting for a soak client it"
+                            " never stopped")
+        finally:
+            go.touch()
+            if proc.poll() is None:
+                # It hung: stop the client it waits for, then run.sh itself.
+                try:
+                    os.kill(int(client_pid.read_text()), signal.SIGKILL)
+                except (OSError, ValueError):
+                    pass
+                proc.kill()
+                proc.wait()
+    output = out_path.read_text()
+    # The signal came first, so the test did hit the window.
+    assert (output.index("Termination signal received")
+            < output.index("Soak client started")), output
+    assert "Stopping soak client" in output, output
+
+
+def test_a_rotation_cut_short_duplicates_nothing(tmp_path):
+    """run.sh killed after copying the log but before truncating it leaves the
+    log as it was, plus a copy of it. The next run must not keep that copy as
+    a rotated log, or every line in it would be kept twice."""
+    copied = tmp_path / "copied"
+    path = fake_tool(tmp_path, "cp", (
+        "'{}' \"$@\" || exit\n"
+        ": > '{}'\n"
+        "exec sleep 600\n").format(shutil.which("cp"), copied))
+    log = tmp_path / "t1-848-normal.log"
+    lines = ["line {}".format(i) for i in range(200)]
+    log.write_text("\n".join(lines) + "\n")
+    stub = write_stub(tmp_path, "exec sleep 600\n")
+    env = supervisor_env(tmp_path, stub, {"SOAK_LOG_LIMIT_BYTES": "1024",
+                                          "PATH": path})
+    # A session of its own, so one SIGKILL stops run.sh, the client and the
+    # copy together, as a reboot would.
+    proc = subprocess.Popen(["bash", RUN_SH, "client.config"],
+                            cwd=str(tmp_path), env=env,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        assert wait_for(copied.exists), "the log was never copied"
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=60)
+
+    # The next run, with the real cp and a limit the log is under.
+    run_supervisor(tmp_path, ["client.config"])
+
+    assert wait_for(lambda: compression_finished(tmp_path))
+    kept = [line for line in log.read_text().splitlines()
+            if line.startswith("line ")]
+    for name in rotated_parts(tmp_path):
+        kept += bz2.open(str(tmp_path / (name + ".bz2"))).read() \
+            .decode().splitlines()
+    assert sorted(kept) == sorted(lines)
+
+
+def test_rotated_logs_beyond_keep_bytes_are_deleted_oldest_first(tmp_path):
+    """Age alone does not bound the disk: a log that compresses badly or grows
+    faster could fill it within SOAK_LOG_KEEP_DAYS. Once the rotated logs add
+    up to SOAK_LOG_KEEP_BYTES, the oldest go first, a .prev.bz2 included."""
+    now = time.time()
+    names = ["t1-848-normal.log.2026112{}T000000Z.bz2".format(day)
+             for day in range(5)]
+    for days_old, name in zip([5, 4, 3, 2, 1], names):
+        path = tmp_path / name
+        path.write_bytes(b"x" * 1000)
+        os.utime(str(path), (now - days_old * 86400, now - days_old * 86400))
+    prev = tmp_path / "t1-848-normal.log.prev.bz2"
+    prev.write_bytes(b"x" * 10)
+    os.utime(str(prev), (now - 6 * 86400, now - 6 * 86400))
+    other_soaks = tmp_path / "t2-848-normal.log.20261120T000000Z.bz2"
+    other_soaks.write_bytes(b"x" * 1000)
+
+    result, _argv, _config = run_supervisor(tmp_path, ["client.config"],
+                                            {"SOAK_LOG_KEEP_BYTES": "2500"})
+    assert result.returncode == 2, result.stdout + result.stderr
+
+    assert [n for n in names if (tmp_path / n).exists()] == names[-2:]
+    assert not prev.exists()
+    assert other_soaks.exists()
+
+
+def test_the_newest_rotated_log_is_kept_whatever_its_size(tmp_path):
+    """The newest rotated log may not be compressed yet, and so be larger than
+    SOAK_LOG_KEEP_BYTES on its own: a log that grew while the disk was full,
+    say, with run.sh restarted before compressing it. It is kept and
+    compressed; older ones are deleted to stay under the cap."""
+    now = time.time()
+    older = ["t1-848-normal.log.2026112{}T000000Z.bz2".format(day)
+             for day in range(3)]
+    for days_old, name in zip([3, 2, 1], older):
+        path = tmp_path / name
+        path.write_bytes(b"x" * 600)
+        os.utime(str(path), (now - days_old * 86400, now - days_old * 86400))
+    newest = tmp_path / "t1-848-normal.log.20261123T000000Z"
+    content = b"the newest output\n" * 300
+    newest.write_bytes(content)
+
+    result, _argv, _config = run_supervisor(tmp_path, ["client.config"],
+                                            {"SOAK_LOG_KEEP_BYTES": "1000"})
+    assert result.returncode == 2, result.stdout + result.stderr
+
+    assert wait_for(lambda: compression_finished(tmp_path))
+    compressed = tmp_path / (newest.name + ".bz2")
+    assert compressed.exists(), sorted(p.name for p in tmp_path.iterdir())
+    assert bz2.open(str(compressed)).read() == content
+    assert not (tmp_path / older[0]).exists()
+    assert not (tmp_path / older[1]).exists()
+
+
+@pytest.mark.parametrize("limit,keep_bytes", [
+    ("52428800", "2147483648"),     # the default limit: the 2 GiB floor
+    ("2147483648", "4294967296"),   # a larger limit: twice it
+])
+def test_keep_bytes_defaults_to_twice_the_limit_and_at_least_2_gib(
+        tmp_path, limit, keep_bytes):
+    result, argv, _config = run_supervisor(tmp_path, ["client.config"],
+                                           {"SOAK_LOG_LIMIT_BYTES": limit})
+    assert argv, result.stdout + result.stderr
+    assert "/{}B ".format(keep_bytes) in result.stdout, result.stdout
+
+
+def test_rotated_logs_are_compressed_one_at_a_time(tmp_path):
+    """One bzip2 per rotation could pile up on a busy box, so one compression
+    runs at a time, and every rotated log is still compressed."""
+    running = tmp_path / "bzip2.running"
+    overlaps = tmp_path / "bzip2.overlaps"
+    path = fake_tool(tmp_path, "bzip2", (
+        "mkdir '{running}' 2>/dev/null || echo overlap >> '{overlaps}'\n"
+        "sleep 0.5\n"
+        "'{bzip2}' \"$@\"\n"
+        "status=$?\n"
+        "rmdir '{running}' 2>/dev/null\n"
+        "exit $status\n").format(running=running, overlaps=overlaps,
+                                 bzip2=shutil.which("bzip2")))
+    stub = write_stub(tmp_path, (
+        "chunk=$(head -c 2000 /dev/zero | tr '\\0' x)\n"
+        'while :; do echo "$chunk"; sleep 0.05; done\n'))
+    env = supervisor_env(tmp_path, stub, {"SOAK_LOG_LIMIT_BYTES": "4096",
+                                          "SOAK_ROTATE_RETRY_SECONDS": "1",
+                                          "PATH": path})
+    with supervising(tmp_path, env):
+        assert wait_for(lambda: len(rotated_parts(tmp_path)) >= 4), \
+            "the log was never rotated"
+
+    assert wait_for(lambda: compression_finished(tmp_path), timeout=60)
+    assert not overlaps.exists(), "two compressions ran at once"
+    for name in rotated_parts(tmp_path):
+        bz2.open(str(tmp_path / (name + ".bz2"))).read()
+
+
+def test_a_rotation_that_would_fill_the_disk_waits_for_room(tmp_path):
+    """The copy needs as much space again as the log, on a disk the other
+    soaks share. Rather than fill it, rotation waits, warning once, until the
+    copy would leave SOAK_LOG_MIN_FREE_BYTES free."""
+    available_kb = tmp_path / "df-available-kb"
+    available_kb.write_text("1\n")
+    df_calls = tmp_path / "df-calls"
+    path = fake_tool(tmp_path, "df", (
+        "echo >> '{calls}'\n"
+        'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
+        'echo "/dev/fake 100000000 99999999 $(cat \'{kb}\') 100% /"\n'
+    ).format(calls=df_calls, kb=available_kb))
+    log = tmp_path / "t1-848-normal.log"
+    log.write_text("x" * 5000 + "\n")
+    stub = write_stub(tmp_path, "exec sleep 600\n")
+    env = supervisor_env(tmp_path, stub, {
+        "SOAK_LOG_LIMIT_BYTES": "4096", "SOAK_LOG_MIN_FREE_BYTES": "1048576",
+        "SOAK_ROTATE_RETRY_SECONDS": "1", "PATH": path})
+
+    with supervising(tmp_path, env) as out_path:
+        assert wait_for(lambda: df_calls.exists()
+                        and len(df_calls.read_text()) >= 3), \
+            "rotation never checked the free space, or never tried again"
+        assert out_path.read_text().count("Log rotation postponed") == 1
+        assert rotated_parts(tmp_path) == []
+        assert log.read_text() == "x" * 5000 + "\n"
+
+        available_kb.write_text("100000000\n")
+        assert wait_for(lambda: rotated_parts(tmp_path)), \
+            "the log was not rotated once there was room"
+
+    output = out_path.read_text()
+    assert output.count("Soak client started") == 1, output
+    assert output.count("kept running") == 1, output
+
+
+def test_a_client_killed_by_sigkill_points_at_the_oom_killer(tmp_path):
+    """A SIGKILLed child cannot log why it died. run.sh never sends SIGKILL
+    while the soak runs, so it names the usual sender."""
+    stub = write_stub(tmp_path, "kill -KILL $$\n")
+    env = supervisor_env(tmp_path, stub, {"SOAK_MAX_RAPID_FAILURES": "1",
+                                          "SOAK_RESTART_DELAY": "0"})
+    result = subprocess.run(["bash", RUN_SH, "client.config"],
+                            cwd=str(tmp_path), env=env, capture_output=True,
+                            text=True, timeout=60)
+    output = result.stdout + result.stderr
+    assert "exited with status 137" in output, output
+    assert "SIGKILL" in output
+    assert "OOM killer" in output
+
+
+@pytest.mark.parametrize("var,value", [
+    ("SOAK_LOG_KEEP_DAYS", "a month"),
+    ("SOAK_LOG_KEEP_DAYS", "08"),        # bash arithmetic fails on it...
+    ("SOAK_LOG_KEEP_DAYS", "010"),       # ...or reads it as octal 8
+    ("SOAK_LOG_LIMIT_BYTES", "1G"),      # the log would never rotate
+    ("SOAK_LOG_LIMIT_BYTES", "0"),       # it would rotate on every poll
+    ("SOAK_LOG_KEEP_BYTES", "-1"),
+    ("SOAK_LOG_MIN_FREE_BYTES", "1.5"),
+])
+def test_log_settings_must_be_plain_whole_numbers(tmp_path, var, value):
+    result, argv, _config = run_supervisor(tmp_path, ["client.config"],
+                                           {var: value})
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert var in result.stderr
+    assert argv == []
