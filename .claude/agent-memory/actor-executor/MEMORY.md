@@ -180,3 +180,4 @@
 - [M14 verifiable-clients](m14_verifiable_clients_notes.md) — tools crate; EventReporter Arc split for listener/callback; Box<dyn Consumer> (dyn-compatible) not generic; StringDeserializer in main crate; JSON stdout is the wire
 - [M17 Password redaction](m17_password_redaction_notes.md) — Vec<u8> Debug teeth; raw maps = key sets; file allow(dead_code) kills dead-code teeth
 - [M17 merge + review](m17_merge_review_followup_notes.md) — rust/ move strands new dirs; Java lint rules via stand-in; unsupported pkg → pub(crate)
+- [JS lint baseline: one line per finding](js_lint_baseline_one_line_per_finding.md) — runner.test.js needs a line per finding; duplicates refused; probe lint-rules misses it

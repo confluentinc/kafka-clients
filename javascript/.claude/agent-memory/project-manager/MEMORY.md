@@ -1,0 +1,4 @@
+- [Git rules](feedback_git_rules.md) — no AI trailer, hooks never bypassed, explicit paths; no stash, rebase or push
+- [Phase plan approval](feedback_phase_plan_approval.md) — short phase plan approved by the user before any agent runs
+- [JS consumer milestone](project_js_consumer_milestone.md) — PLAN.md path, agents 150-157, decisions accepted 2026-11-25
+- [PR #312 moves](project_producer_pr_moves.md) — fetch and check the base first; stop and report if it moved

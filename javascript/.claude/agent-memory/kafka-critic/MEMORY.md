@@ -1,0 +1,1 @@
+- [JS value-class review patterns](review_js_value_class_patterns.md) — raw option value forwarded into another JavaForms method leaks its form error; probe dist/ by absolute path; copy-diff recipe
