@@ -688,6 +688,13 @@ public sealed class ClientConfigsTests
     [InlineData("linger.ms", "Int128", "7", NotALong + "System.Int128")]
     [InlineData("batch.size", "UInt128", "7", NotAnInt + "System.UInt128")]
 #endif
+    // The netstandard2.0 build, which a .NET 8 application loads: .NET Standard 2.0 has no
+    // Half, Int128 or UInt128, so that build refuses them for a DOUBLE key, which the net10.0 build takes.
+#if CONFLUENT_KAFKA_NETSTANDARD2_0
+    [InlineData("sasl.login.refresh.window.factor", "Half", "0.5", NotADouble + "System.Half")]
+    [InlineData("sasl.login.refresh.window.factor", "Int128.MaxValue", "170141183460469231731687303715884105727", NotADouble + "System.Int128")]
+    [InlineData("sasl.login.refresh.window.factor", "UInt128.MaxValue", "340282366920938463463374607431768211455", NotADouble + "System.UInt128")]
+#endif
     public void JavaClasses_AKeyRefusesANumberTypeItsJavaTypeDoesNotTake(
         string key, string label, string valueText, string message)
     {
@@ -729,10 +736,11 @@ public sealed class ClientConfigsTests
     [InlineData("double", "0.10000000000000001")]
     [InlineData("decimal", "0.1")]
     [InlineData("BigInteger2^53+3", "9007199254740995")]
-#if NET5_0_OR_GREATER
+    // Not on the netstandard2.0 build, which refuses them (JavaClasses_AKeyRefusesANumberTypeItsJavaTypeDoesNotTake).
+#if NET5_0_OR_GREATER && !CONFLUENT_KAFKA_NETSTANDARD2_0
     [InlineData("Half", "0.5")]
 #endif
-#if NET7_0_OR_GREATER
+#if NET7_0_OR_GREATER && !CONFLUENT_KAFKA_NETSTANDARD2_0
     [InlineData("Int128.MaxValue", "170141183460469231731687303715884105727")]
     [InlineData("UInt128.MaxValue", "340282366920938463463374607431768211455")]
 #endif

@@ -2,15 +2,19 @@
 
   <!--
     The Native AOT check of the Confluent.Kafka library (make -C dotnet test-aot-dotnet). Published with
-    PublishAot for net8.0 and net10.0 with the whole Confluent.Kafka assembly rooted (TrimmerRootAssembly), so the
+    PublishAot for net10.0 with the whole Confluent.Kafka assembly rooted (TrimmerRootAssembly), so the
     AOT compiler analyzes every member of the library, not only what this program calls, and a trim or AOT warning
     fails the publish (TreatWarningsAsErrors). The published executables then run. Outside the solution: a Native
     AOT publish needs the platform's C toolchain, which the solution's build does not.
+
+    -p:ConfluentKafkaNetStandard=true compiles the library's netstandard2.0 build in place of its
+    net10.0 one: the build a .NET 8 Native AOT application compiles, as the package has no net8.0 build.
+    make test-aot-dotnet publishes both, into separate folders, one after the other.
   -->
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.AotSmoke</RootNamespace>
     <IsPackable>false</IsPackable>
     <PublishAot>true</PublishAot>
@@ -22,8 +26,25 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../../src/Confluent.Kafka/Confluent.Kafka.csproj" />
     <TrimmerRootAssembly Include="Confluent.Kafka" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(ConfluentKafkaNetStandard)' != 'true'">
+    <ProjectReference Include="../../src/Confluent.Kafka/Confluent.Kafka.csproj" />
+  </ItemGroup>
+
+  <!-- The library's netstandard2.0 build. Restore resolves a project reference by this project's own
+       target framework, so it does not bring that build's package dependencies; Microsoft.Bcl.AsyncInterfaces is the
+       one .NET 10 does not have built in. The library itself builds without the property. -->
+  <PropertyGroup Condition="'$(ConfluentKafkaNetStandard)' == 'true'">
+    <DefineConstants>$(DefineConstants);CONFLUENT_KAFKA_NETSTANDARD2_0</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(ConfluentKafkaNetStandard)' == 'true'">
+    <ProjectReference Include="../../src/Confluent.Kafka/Confluent.Kafka.csproj"
+                      SetTargetFramework="TargetFramework=netstandard2.0"
+                      UndefineProperties="ConfluentKafkaNetStandard" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="$(MicrosoftBclAsyncInterfacesVersion)" />
   </ItemGroup>
 
 </Project>

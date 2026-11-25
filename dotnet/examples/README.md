@@ -36,7 +36,7 @@ it is assigned and the ones revoked from it.
 
 `-c Release` matters: the examples reference the client's source, and a Release build loads the
 native library `make -C dotnet build-dotnet` builds, while a Debug build looks for a debug build of
-it. The examples target `net8.0` and run on .NET 8 or any later runtime.
+it. The examples target `net10.0` and run on .NET 10 or any later runtime.
 
 To build an example against the `Confluent.Kafka` NuGet package instead, replace the
 `ProjectReference` in its `.csproj` with the `PackageReference` in the comment beside it.

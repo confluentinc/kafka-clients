@@ -18,7 +18,8 @@
 # Windows platform, the platforms of the Confluent.Kafka package being win-x64 and win-x86, with
 # build-dotnet-native.ps1 (its debug all-features build, the one the Linux and macOS binding tests
 # link; the package's native blocks build the release one), then builds the .NET solution and runs
-# the unit tests, which drive the mock clients, on net462, net8.0 and net10.0, all in that
+# the unit tests, which drive the mock clients, on net462 and net10.0, and on net10.0 against the
+# library's netstandard2.0 build too (Confluent.Kafka.UnitTests.NetStandard), all in that
 # platform's process, and then, on x64, the Native AOT check. The broker-backed tests do not run: they
 # need Linux containers, which the Windows agents do not run.
 #
@@ -84,19 +85,27 @@ Write-Output "== .NET build and unit tests ($Platform)"
 # process; CargoTargetTriple and CargoProfileDir point the library project at the native built above.
 $properties = @('-c', 'Release', "-p:PlatformTarget=$Platform", "-p:CargoTargetTriple=$triple", '-p:CargoProfileDir=debug')
 Invoke-Native $dotnet (@('build', (Join-Path $repo 'dotnet\Confluent.Kafka.sln')) + $properties)
+$unitTests = Join-Path $repo 'dotnet\tests\Confluent.Kafka.UnitTests\Confluent.Kafka.UnitTests.csproj'
+# The same tests against the library's netstandard2.0 build, the one a .NET 8 application loads.
+$netStandardUnitTests = Join-Path $repo 'dotnet\tests\Confluent.Kafka.UnitTests.NetStandard\Confluent.Kafka.UnitTests.NetStandard.csproj'
+$runs = @(
+    @{ Name = 'net462'; Project = $unitTests; Tfm = 'net462' },
+    @{ Name = 'net10.0'; Project = $unitTests; Tfm = 'net10.0' },
+    @{ Name = 'net10.0 against the netstandard2.0 build'; Project = $netStandardUnitTests; Tfm = 'net10.0' }
+)
 $failed = @()
-foreach ($tfm in 'net462', 'net8.0', 'net10.0') {
-    Write-Output "== unit tests, $tfm, $Platform"
+foreach ($run in $runs) {
+    Write-Output "== unit tests, $($run.Name), $Platform"
     # `{}` is where selected-run puts the --filter of the selected tests, or nothing when every test
     # runs; it runs no test when dotnet.solution selects none.
     Push-Location $rust
     try {
         Invoke-Native $selection (@('selected-run', '-C', $repo, '--section', 'dotnet.solution', '--dotnet', '--',
-                $dotnet, 'test', (Join-Path $repo 'dotnet\tests\Confluent.Kafka.UnitTests\Confluent.Kafka.UnitTests.csproj'), '--no-build', '-f', $tfm,
+                $dotnet, 'test', $run.Project, '--no-build', '-f', $run.Tfm,
                 '--blame-hang-timeout', '15m', '--blame-hang-dump-type', 'none') + $properties + @('{}'))
     } catch {
         Write-Output "$_"
-        $failed += $tfm
+        $failed += $run.Name
     } finally {
         Pop-Location
     }
@@ -104,25 +113,29 @@ foreach ($tfm in 'net462', 'net8.0', 'net10.0') {
 if ($failed) {
     throw "The unit tests failed on $($failed -join ', ') ($Platform)"
 }
-Write-Output "The selected unit tests passed on net462, net8.0 and net10.0 ($Platform)"
+Write-Output "The selected unit tests passed on net462, net10.0 and net10.0 against the netstandard2.0 build ($Platform)"
 
 # The Native AOT check, as `make -C dotnet test-aot-dotnet` on Linux and macOS: publishes
 # dotnet/tools/AotSmoke as a Native AOT executable for win-x64, linked by the agent's Visual Studio C++
-# tools, and runs it, whatever the test selection selects. CargoTargetTriple and CargoProfileDir point
-# the library project at the native built above. The x86 job skips it: .NET 10's 32-bit Native AOT
-# runtime links only with Visual Studio 2022's C++ tools (with Visual Studio 2019's, which the agent
-# has, __dtoul3_legacy, __ltof3 and __ultof3 are unresolved), and .NET 8 cannot AOT compile for x86 at
-# all.
+# tools, against the library's net10.0 build and against its netstandard2.0 build, the one a .NET 8
+# application compiles, and runs both, whatever the test selection selects. CargoTargetTriple and
+# CargoProfileDir point the library project at the native built above. The x86 job skips it: .NET 10's
+# 32-bit Native AOT runtime links only with Visual Studio 2022's C++ tools (with Visual Studio 2019's,
+# which the agent has, __dtoul3_legacy, __ltof3 and __ultof3 are unresolved).
 if ($Platform -eq 'x86') {
     Write-Output "The Native AOT check does not run on x86: it needs Visual Studio 2022's C++ tools on the agent"
 } else {
-    foreach ($tfm in 'net8.0', 'net10.0') {
-        Write-Output "== Native AOT check, $tfm, $Platform"
-        $aotOut = Join-Path $ToolsDir "aot-smoke-$Platform-$tfm"
+    $builds = @(
+        @{ Name = 'net10.0'; Properties = @() },
+        @{ Name = 'netstandard2.0'; Properties = @('-p:ConfluentKafkaNetStandard=true') }
+    )
+    foreach ($build in $builds) {
+        Write-Output "== Native AOT check, the library's $($build.Name) build, $Platform"
+        $aotOut = Join-Path $ToolsDir "aot-smoke-$Platform-$($build.Name)"
         Remove-Item -Recurse -Force $aotOut -ErrorAction SilentlyContinue
-        Invoke-Native $dotnet @('publish', (Join-Path $repo 'dotnet\tools\AotSmoke\AotSmoke.csproj'), '-c', 'Release', '-f', $tfm,
-            '--use-current-runtime', "-p:CargoTargetTriple=$triple", '-p:CargoProfileDir=debug', '-o', $aotOut)
+        Invoke-Native $dotnet (@('publish', (Join-Path $repo 'dotnet\tools\AotSmoke\AotSmoke.csproj'), '-c', 'Release', '-f', 'net10.0',
+            '--use-current-runtime', "-p:CargoTargetTriple=$triple", '-p:CargoProfileDir=debug', '-o', $aotOut) + $build.Properties)
         Invoke-Native (Join-Path $aotOut 'AotSmoke.exe') @()
     }
-    Write-Output "The Native AOT check passed on net8.0 and net10.0 ($Platform)"
+    Write-Output "The Native AOT check passed on the library's net10.0 and netstandard2.0 builds ($Platform)"
 }
