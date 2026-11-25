@@ -91,6 +91,14 @@ const DATA_CLASSES = new Set([
   'org.apache.kafka.common.TopicPartition',
   'org.apache.kafka.common.Node',
   'org.apache.kafka.clients.consumer.OffsetAndMetadata',
+  // The admin client's descriptions (the owner's decision of 2026-11-20).
+  'org.apache.kafka.clients.admin.TopicDescription',
+  'org.apache.kafka.clients.admin.LogDirDescription',
+  'org.apache.kafka.clients.admin.ConsumerGroupDescription',
+  'org.apache.kafka.clients.admin.ClassicGroupDescription',
+  'org.apache.kafka.clients.admin.MemberDescription',
+  'org.apache.kafka.clients.admin.UserScramCredentialsDescription',
+  'org.apache.kafka.clients.admin.TransactionDescription',
 ]);
 
 /**
@@ -455,15 +463,46 @@ const ENUM_TO_STRING = {
 function javaMember(index, cls, m, { anyStatic = false } = {}) {
   const chain = index.chain(cls);
   const fits = (isStatic) => anyStatic || isStatic === m.isStatic;
+  // Java's overload set of a name: the class's own methods and those it
+  // inherits (an interface's `default` forms, `Admin#deleteTopics(Collection)`
+  // beside `KafkaAdminClient#deleteTopics(TopicCollection, DeleteTopicsOptions)`),
+  // an override hiding the form it overrides; the owner is the first class
+  // of the chain that declares the name.
   const methods = (name, arity) => {
+    let owner = null;
+    const found = [];
+    const seen = new Set();
+    const at = new Map();
     for (const c of chain) {
-      const found = c.overloads.filter(
-        (o) =>
-          o.name === name && o.name !== c.path[c.path.length - 1] && (arity === undefined || o.params.length === arity) && fits(o.static),
-      );
-      if (found.length > 0) return { kind: 'methods', name, owner: c, overloads: found };
+      for (const o of c.overloads) {
+        if (
+          o.name !== name ||
+          o.name === c.path[c.path.length - 1] ||
+          (arity !== undefined && o.params.length !== arity) ||
+          !fits(o.static)
+        )
+          continue;
+        // A static method is not inherited into another class's overload set
+        // (`Admin.create(Properties)` is not `MockAdminClient.create()`'s).
+        if (owner !== null && owner !== c && o.static) continue;
+        const key = o.params.map((p) => (typeof p === 'string' ? p : JSON.stringify(p))).join(',');
+        if (seen.has(key)) {
+          // A parameter is named by the Java interface declaration when the
+          // method is declared on one (javascript/CLAUDE.md, JavaScript Binding
+          // Conventions, Signatures, as Python's): `Admin#describeConfigs`'
+          // `resources`, not `KafkaAdminClient`'s `configResources`.
+          if (c.kind === 'interface' && o.param_names.some((n) => n !== '')) {
+            found[at.get(key)] = { ...found[at.get(key)], param_names: o.param_names };
+          }
+          continue;
+        }
+        seen.add(key);
+        if (owner === null) owner = c;
+        at.set(key, found.length);
+        found.push(o);
+      }
     }
-    return null;
+    return owner === null ? null : { kind: 'methods', name, owner, overloads: found };
   };
   const field = (name) => {
     for (const c of chain) {
@@ -502,13 +541,14 @@ function javaMember(index, cls, m, { anyStatic = false } = {}) {
 }
 
 /**
- * The members of an exported interface, or of a type alias of an object
- * type, in the shape `publicMembers` gives a class's: property and method
- * signatures (never static). Any other type alias has none.
+ * The members of an exported interface, of a type alias of an object type,
+ * or of an object type, in the shape `publicMembers` gives a class's:
+ * property and method signatures (never static). Any other type alias has
+ * none.
  */
 function shapeMembers(ts, node) {
   let elements = null;
-  if (ts.isInterfaceDeclaration(node)) elements = node.members;
+  if (ts.isInterfaceDeclaration(node) || ts.isTypeLiteralNode(node)) elements = node.members;
   else if (ts.isTypeAliasDeclaration(node) && ts.isTypeLiteralNode(node.type)) elements = node.type.members;
   if (elements === null) return [];
   const out = [];
@@ -532,12 +572,18 @@ function shapeMembers(ts, node) {
  * the const of its name in its module, or null.
  */
 function staticsObject(ts, item) {
+  const d = staticsDeclaration(ts, item);
+  return d === null ? null : d.initializer;
+}
+
+/** The const declaration of `staticsObject`, or null. */
+function staticsDeclaration(ts, item) {
   if (!ts.isInterfaceDeclaration(item.node)) return null;
   for (const st of item.node.getSourceFile().statements) {
     if (!ts.isVariableStatement(st)) continue;
     for (const d of st.declarationList.declarations) {
       if (ts.isIdentifier(d.name) && d.name.text === item.name && d.initializer && ts.isObjectLiteralExpression(d.initializer)) {
-        return d.initializer;
+        return d;
       }
     }
   }
@@ -547,12 +593,16 @@ function staticsObject(ts, item) {
 /**
  * The members of the runtime object beside exported interface `item`
  * (`staticsObject`), in the shape `publicMembers` gives a class's, each
- * static: a method (a method or a function-valued property), an accessor or
- * a property. A spread has none.
+ * static: those of the object type the const is declared with, whose method
+ * signatures are a static's overloads (`create(options)`, `create(configs)`),
+ * else the object literal's: a method (a method or a function-valued
+ * property), an accessor or a property. A spread has none.
  */
 function staticsMembers(ts, item) {
-  const object = staticsObject(ts, item);
-  if (object === null) return [];
+  const d = staticsDeclaration(ts, item);
+  if (d === null) return [];
+  if (d.type && ts.isTypeLiteralNode(d.type)) return shapeMembers(ts, d.type).map((m) => ({ ...m, isStatic: true }));
+  const object = d.initializer;
   const out = [];
   for (const p of object.properties) {
     const name = p.name ? memberName(ts, p.name) : null;

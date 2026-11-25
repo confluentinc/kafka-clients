@@ -203,7 +203,41 @@ module.exports = {
           covered.add(m.name);
         }
       }
+      // A member the TypeScript class inherits from a translated base class
+      // (`timeoutMs` of `AbstractOptions`), which Java's class redeclares.
+      if (item.kind === 'class') {
+        const { checker } = ctx.program();
+        const own = checker.getTypeAtLocation(item.node);
+        const bases = [own, checker.getTypeOfSymbolAtLocation(own.symbol, item.node)];
+        for (const type of bases) {
+          for (const prop of checker.getPropertiesOfType(type)) {
+            const decl = (prop.declarations || [])[0];
+            if (decl && decl.parent !== item.node && ts.isClassLike(decl.parent)) covered.add(prop.name);
+          }
+        }
+      }
+      // An interface's statics are on the runtime object of its name
+      // (javascript/CLAUDE.md, JavaScript Binding Conventions, Names: `Admin.create`).
+      if (item.kind === 'interface') {
+        for (const st of item.node.getSourceFile().statements) {
+          if (!ts.isVariableStatement(st)) continue;
+          for (const d of st.declarationList.declarations) {
+            if (!ts.isIdentifier(d.name) || d.name.text !== item.name || !d.initializer) continue;
+            if (!ts.isObjectLiteralExpression(d.initializer)) continue;
+            for (const prop of d.initializer.properties) if (prop.name && ts.isIdentifier(prop.name)) covered.add(prop.name.text);
+          }
+        }
+      }
       const className = cls.path[cls.path.length - 1];
+      // A method Java deprecates in a supertype is deprecated in an override
+      // that does not repeat the annotation (KafkaAdminClient's
+      // listClientMetricsResources).
+      const supertypes = index.chain(cls).slice(1);
+      const deprecatedAbove = (name) =>
+        supertypes.some((c) => {
+          const os = c.overloads.filter((x) => x.name === name);
+          return os.length > 0 && os.every((x) => x.deprecated);
+        });
       const wanted = [];
       for (const f of cls.fields) {
         if (f.visibility === 'public' && f.static && f.final && !f.deprecated) wanted.push(f.name);
@@ -212,7 +246,7 @@ module.exports = {
       }
       if (!constantsOnly(cls)) {
         for (const o of cls.overloads) {
-          if (o.visibility !== 'public' || o.deprecated) continue;
+          if (o.visibility !== 'public' || o.deprecated || deprecatedAbove(o.name)) continue;
           // A method that takes a `ConfigDef`, whose machinery is not
           // translated (javascript/CLAUDE.md, JavaScript Binding Conventions,
           // Scope: SaslConfigs.addClientSaslSupport, SslConfigs.addClientSslSupport).

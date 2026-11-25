@@ -2,7 +2,7 @@
   "name": "@confluentinc/kafka-javascript",
   "version": "4.4.0-beta.1",
   "private": true,
-  "description": "Node.js client for Apache Kafka over the Confluent Kafka Rust client's C FFI (preview: producer only)",
+  "description": "Node.js client for Apache Kafka over the Confluent Kafka Rust client's C FFI (preview: producer and admin client)",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -17,9 +17,17 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./admin": {
+      "types": "./dist/admin/index.d.ts",
+      "default": "./dist/admin/index.js"
+    },
     "./common": {
       "types": "./dist/common/index.d.ts",
       "default": "./dist/common/index.js"
+    },
+    "./common/acl": {
+      "types": "./dist/common/acl/index.d.ts",
+      "default": "./dist/common/acl/index.js"
     },
     "./common/config": {
       "types": "./dist/common/config/index.d.ts",
@@ -57,6 +65,14 @@
       "types": "./dist/common/requests/index.d.ts",
       "default": "./dist/common/requests/index.js"
     },
+    "./common/quota": {
+      "types": "./dist/common/quota/index.d.ts",
+      "default": "./dist/common/quota/index.js"
+    },
+    "./common/resource": {
+      "types": "./dist/common/resource/index.d.ts",
+      "default": "./dist/common/resource/index.js"
+    },
     "./common/security": {
       "types": "./dist/common/security/index.d.ts",
       "default": "./dist/common/security/index.js"
@@ -64,6 +80,14 @@
     "./common/security/auth": {
       "types": "./dist/common/security/auth/index.d.ts",
       "default": "./dist/common/security/auth/index.js"
+    },
+    "./common/security/token": {
+      "types": "./dist/common/security/token/index.d.ts",
+      "default": "./dist/common/security/token/index.js"
+    },
+    "./common/security/token/delegation": {
+      "types": "./dist/common/security/token/delegation/index.d.ts",
+      "default": "./dist/common/security/token/delegation/index.js"
     },
     "./common/serialization": {
       "types": "./dist/common/serialization/index.d.ts",
@@ -80,8 +104,14 @@
   },
   "typesVersions": {
     "*": {
+      "admin": [
+        "dist/admin/index.d.ts"
+      ],
       "common": [
         "dist/common/index.d.ts"
+      ],
+      "common/acl": [
+        "dist/common/acl/index.d.ts"
       ],
       "common/config": [
         "dist/common/config/index.d.ts"
@@ -110,11 +140,23 @@
       "common/requests": [
         "dist/common/requests/index.d.ts"
       ],
+      "common/quota": [
+        "dist/common/quota/index.d.ts"
+      ],
+      "common/resource": [
+        "dist/common/resource/index.d.ts"
+      ],
       "common/security": [
         "dist/common/security/index.d.ts"
       ],
       "common/security/auth": [
         "dist/common/security/auth/index.d.ts"
+      ],
+      "common/security/token": [
+        "dist/common/security/token/index.d.ts"
+      ],
+      "common/security/token/delegation": [
+        "dist/common/security/token/delegation/index.d.ts"
       ],
       "common/serialization": [
         "dist/common/serialization/index.d.ts"
@@ -141,6 +183,7 @@
   },
   "files": [
     "dist/",
+    "admin/",
     "common/",
     "consumer/",
     "producer/",
