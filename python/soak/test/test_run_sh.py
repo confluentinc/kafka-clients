@@ -650,6 +650,9 @@ def test_a_restart_during_a_compression_loses_nothing(tmp_path):
         with supervising(tmp_path, env, "old.out") as old_out:
             assert wait_for(lambda: list(tmp_path.glob("*.bz2.tmp.*"))), \
                 "the compression never started"
+            # Restart a soak that is running, not one still starting up.
+            assert wait_for(
+                lambda: "Soak client started" in old_out.read_text())
         # run.sh is stopped, and its compression still waits.
         with supervising(tmp_path, dict(env, BZIP2_GO=str(go_new)),
                          "new.out") as new_out:
@@ -672,6 +675,55 @@ def test_a_restart_during_a_compression_loses_nothing(tmp_path):
     assert compressed.stat().st_size > 0, \
         "the .bz2 is empty, and the rotated log is gone"
     assert bz2.open(str(compressed)).read() == content
+
+
+def test_a_signal_just_before_the_client_starts_still_stops_it(tmp_path):
+    """A signal that arrives after run.sh's loop checks `run`, but before the
+    client starts, finds no client to stop. run.sh must stop the client it
+    then starts, rather than wait for it to exit by itself."""
+    # run.sh's first `date +%s` is in that window: hold it there while the
+    # signal arrives.
+    held, go = tmp_path / "date-held", tmp_path / "date-go"
+    path = fake_tool(tmp_path, "date", (
+        'if [ "$1" = "+%s" ] && [ ! -e "{held}" ]; then\n'
+        '    : > "{held}"\n'
+        '    while [ ! -e "{go}" ]; do sleep 0.05; done\n'
+        "fi\n"
+        "exec '{date}' \"$@\"\n").format(
+            held=held, go=go, date=shutil.which("date")))
+    client_pid = tmp_path / "client.pid"
+    stub = write_stub(tmp_path,
+                      'echo $$ > "{}"\nexec sleep 600\n'.format(client_pid))
+    env = supervisor_env(tmp_path, stub, {"PATH": path})
+    out_path = tmp_path / "supervisor.out"
+    with open(str(out_path), "w") as out:
+        proc = subprocess.Popen(["bash", RUN_SH, "client.config"],
+                                cwd=str(tmp_path), env=env, stdout=out,
+                                stderr=subprocess.STDOUT)
+        try:
+            assert wait_for(held.exists), "run.sh never got to its loop"
+            proc.send_signal(signal.SIGTERM)
+            go.touch()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pytest.fail("run.sh is still waiting for a soak client it"
+                            " never stopped")
+        finally:
+            go.touch()
+            if proc.poll() is None:
+                # It hung: stop the client it waits for, then run.sh itself.
+                try:
+                    os.kill(int(client_pid.read_text()), signal.SIGKILL)
+                except (OSError, ValueError):
+                    pass
+                proc.kill()
+                proc.wait()
+    output = out_path.read_text()
+    # The signal came first, so the test did hit the window.
+    assert (output.index("Termination signal received")
+            < output.index("Soak client started")), output
+    assert "Stopping soak client" in output, output
 
 
 def test_a_rotation_cut_short_duplicates_nothing(tmp_path):

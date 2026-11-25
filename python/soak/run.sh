@@ -328,8 +328,6 @@ log_size() {
     fi
 }
 
-# Called only from on_signal, the INT/TERM trap, which shellcheck does not follow.
-# shellcheck disable=SC2329
 stop_child() {
     # Terminate the tracked PID only. Never `ps | grep soakclient.py`: four
     # soaks share one box and that matches siblings.
@@ -651,6 +649,10 @@ while [[ "$run" == true ]]; do
     fi
     CHILD=$!
     log "Soak client started (pid $CHILD); follow it with: tail -f $LOGFILE"
+    # A signal that came after the loop checked `run`, but before CHILD was
+    # set, found no client to stop: stop it now, or the `wait` below would
+    # wait for the client to exit by itself.
+    [[ "$run" == true ]] || stop_child
 
     while [[ "$run" == true ]]; do
         # A foreground `sleep` defers trap handling by at most this interval.
