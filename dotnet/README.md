@@ -17,7 +17,9 @@ and `clients`: `KafkaProducer` is in `Confluent.Kafka.Producer`, `Serdes` in
 ## Platforms
 
 - .NET 10, and .NET Framework 4.6.2 or later on Windows
-- Linux x64 and arm64, with glibc 2.28 or later (RHEL 8, Debian 10, Ubuntu 20.04 and later)
+- Linux x64 and arm64: the native library needs glibc 2.28 or later (RHEL 8, Debian 10, Ubuntu
+  20.04 and later), and .NET 10 has its own
+  [Linux minimum](https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.md)
 - macOS arm64 (Apple silicon): the native library needs macOS 11 or later, and .NET 10 has its
   own [macOS minimum](https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.md)
 - Windows x64 and x86, Windows 10 or Windows Server 2016 or later. The native library links the

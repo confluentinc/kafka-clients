@@ -55,7 +55,7 @@
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <RepositoryUrl>https://github.com/confluentinc/kafka-clients</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <!-- The SDK's own pack-time check that the assets of the four TFMs are compatible
+    <!-- The SDK's own pack-time check that the assets of the three TFMs are compatible
          with each other. -->
     <EnablePackageValidation>true</EnablePackageValidation>
   </PropertyGroup>

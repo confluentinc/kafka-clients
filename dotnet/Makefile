@@ -464,9 +464,8 @@ test-aot-dotnet: build-dotnet
 # $(SOLUTION)` never reaches them; hence the two explicit format passes. The
 # server P/Invokes the same native, hence build-dotnet first (CLAUDE.md §7.1).
 #
-# net10.0 only: the server is a Microsoft.NET.Sdk.Web app, the ASP.NET Core 8
-# runtime is absent locally and in CI (M17/P1 D3), and the test project targets
-# net10.0 alone.
+# net10.0 only: the server's one target framework, which the test project targets
+# alone.
 # ---------------------------------------------------------------------------
 GRPC_SERVER_PROJECT := $(REPO_ROOT)/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj
 GRPC_SERVER_TESTS := $(REPO_ROOT)/dotnet/tests/Confluent.Kafka.GrpcServer.UnitTests/Confluent.Kafka.GrpcServer.UnitTests.csproj
@@ -493,7 +492,7 @@ PERF_DIR := $(REPO_ROOT)/dotnet/tests/Performance
 PERF_TESTS := $(PERF_DIR)/Confluent.Kafka.PerformanceTests/Confluent.Kafka.PerformanceTests.csproj
 PERF_V3 := $(PERF_DIR)/PerfV3
 PERF_V2 := $(PERF_DIR)/PerfV2
-# TFM the manual perf runs execute on (both are built; pick one to run).
+# TFM the manual perf runs execute on (the perf projects' one TFM).
 PERF_TFM ?= net10.0
 # Cross-language client selector: 3 = our binding -> PerfV3 (default); 2 = ckd -> PerfV2.
 CLIENT_VERSION ?= 3
