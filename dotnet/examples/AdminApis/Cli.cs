@@ -52,9 +52,11 @@ internal static class Cli
 
         return text.ToString();
 
+        // Java's Throwable.toString(), "<class>: <message>": the class alone only for a null message, which
+        // a .NET exception never has, so an empty message keeps the ": ".
         static string Text(Exception e)
         {
-            return e.Message.Length == 0 ? e.GetType().Name : $"{e.GetType().Name}: {e.Message}";
+            return $"{e.GetType().Name}: {e.Message}";
         }
     }
 

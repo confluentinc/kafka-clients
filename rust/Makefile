@@ -29,6 +29,7 @@ CARGO_TEST = cargo xtask selected-cargo-test --section rust --
 CARGO_TEST_GRPC_PYTHON = cargo xtask selected-cargo-test --section python.grpc --
 CARGO_TEST_GRPC_C = cargo xtask selected-cargo-test --section c.integration --
 CARGO_TEST_GRPC_DOTNET = cargo xtask selected-cargo-test --section dotnet.grpc --
+CARGO_TEST_DOTNET_EXAMPLES = cargo xtask selected-cargo-test --section dotnet.examples --
 
 # The tag of the gRPC images the multilanguage arms run; tests/common/backend_pool.rs
 # reads it from the environment (see the root Makefile).
@@ -41,7 +42,7 @@ export MULTILANG_IMAGE_TAG
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
-	test-integration-grpc-dotnet-native-aot \
+	test-integration-grpc-dotnet-native-aot test-integration-admin-examples-dotnet \
 	test-integration-perf test-integration-perf-macos producer-perf-test verify verify-macos \
 	format-check check-generated lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
@@ -259,6 +260,15 @@ test-integration-grpc-dotnet-native-aot:
 	MULTILANG_BACKEND_MODE=native \
 	MULTILANG_DOTNET_GRPC_SERVER=$(CURDIR)/target/grpc-native/dotnet-aot/Confluent.Kafka.GrpcServer \
 		$(CARGO_TEST_GRPC_DOTNET) --all-features --test integration -- __grpc_dotnet
+
+# The admin examples test (tests/integration/admin_examples_test.rs) against the
+# .NET examples instead of the Rust ones: run by dotnet/'s
+# `test-examples-integration-dotnet`, which builds them first and passes their
+# path in ADMIN_EXAMPLES_DOTNET. The Rust examples run in test-integration,
+# test-integration-{plaintext,ssl,sasl-ssl} and test-all-features.
+test-integration-admin-examples-dotnet:
+	ADMIN_EXAMPLES_LANGUAGE=dotnet \
+		$(CARGO_TEST_DOTNET_EXAMPLES) --all-features --test integration -- admin_examples_test::
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138

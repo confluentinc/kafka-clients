@@ -17,7 +17,9 @@
 //! `#[path = "common/mod.rs"] mod common;`.
 //!
 //! Command line: `[-X key=value]... [--flag | --name=value]... <positional>...`.
-//! `--help` prints the usage text.
+//! `--help` prints the usage text. A bare `--` ends the options: every argument
+//! after it is positional, so a value that starts with `--`, such as a
+//! password, can be given.
 //! `-X` sets a client configuration property (librdkafka's convention), for
 //! example `-X security.protocol=SASL_PLAINTEXT`. The bootstrap servers come
 //! from `KAFKA_BOOTSTRAP_SERVERS` (default `localhost:9092`) unless `-X
@@ -93,7 +95,10 @@ impl Args {
         let mut positional = Vec::new();
         let mut raw = raw.peekable();
         while let Some(arg) = raw.next() {
-            if arg == "--help" {
+            if arg == "--" {
+                positional.extend(raw.by_ref());
+                break;
+            } else if arg == "--help" {
                 return Err(Failure::Help);
             } else if arg == "-X" {
                 let Some(property) = raw.next() else {
@@ -143,8 +148,10 @@ impl Args {
 
     /// Returns the positional arguments, failing on any option not taken before.
     pub fn positional(self) -> Result<Vec<String>, Failure> {
-        if let Some((name, _)) = self.options.first() {
-            return usage(format!("unknown option --{name}"));
+        if !self.options.is_empty() {
+            // Not repeated in the error: it may be a secret, such as a password
+            // that starts with `--`.
+            return usage("unknown option; an argument that starts with -- goes after a bare --");
         }
         Ok(self.positional)
     }
