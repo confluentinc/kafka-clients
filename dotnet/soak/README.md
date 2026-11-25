@@ -382,7 +382,7 @@ over the single `.prev.bz2` and delete the evidence of why the child died.
 ## Tests
 
 ```bash
-cd dotnet && make test-soak-dotnet      # format check + net10.0
+cd dotnet && make test-soak-dotnet      # build + tests on net10.0
 ```
 
 No broker, no Docker. The suites cover the parts a two-week run depends on being
