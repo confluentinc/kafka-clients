@@ -34,9 +34,9 @@ test('registrations and uses agree, and only the loader and src/internal/native.
     [RULE],
   );
   assert.equal(r.status, 0, r.text);
-  // 10 registrations (probe, headerStats, producerStats, errorStats,
-  // recordSpy, metricsStats and faultNext, the test-only ones), 3 uses, 4
-  // src/ files.
+  // 12 registrations (probe, headerStats, producerStats, errorStats,
+  // recordSpy, metricsStats, faultNext, consumerStats and
+  // consumerRefuseExternalBuffers, the test-only ones), 3 uses, 4 src/ files.
   assert.ok(r.out.includes('✅ check-native-registry: 19 item(s) checked'), r.text);
 });
 
