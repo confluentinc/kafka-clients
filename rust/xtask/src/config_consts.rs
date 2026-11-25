@@ -32,9 +32,11 @@ use std::path::{Path, PathBuf};
 
 use crate::java_parse::strip_comments;
 
+pub(crate) mod js;
+
 type Res<T> = anyhow::Result<T>;
 
-const JAVA_ROOT: &str = "kafka/clients/src/main/java";
+pub(crate) const JAVA_ROOT: &str = "kafka/clients/src/main/java";
 
 /// JDK calls whose value is the JVM's at run time, read as OpenJDK's defaults
 /// (the values the Rust core uses: `rust/src/common/config/ssl_configs.rs`).
