@@ -6,15 +6,16 @@
     a TFM-sentinel smoke test that proves the harness runs and InternalsVisibleTo
     compiles.
 
-    Test TFMs are net462;net8.0;net10.0. net462 is the TFM smoke leg of the library's
+    Test TFMs are net462;net10.0. net462 is the TFM smoke leg of the library's
     net462 assembly (PLAN §5.7): it must BUILD on the floor here (Microsoft.NETFramework.-
     ReferenceAssemblies restores the reference assemblies cross-platform), but its
-    RUN is Windows/CI-only. net8.0 runs are CI-only too (only the .NET 10 runtime is
-    installed locally), so use `dotnet test -f net10.0` locally.
+    RUN is Windows/CI-only, so use `dotnet test -f net10.0` locally.
+    ../Confluent.Kafka.UnitTests.NetStandard runs these tests against the library's
+    netstandard2.0 build, the one a .NET 8 application loads.
   -->
 
   <PropertyGroup>
-    <TargetFrameworks>net462;net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net462;net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.UnitTests</RootNamespace>
     <AssemblyName>Confluent.Kafka.UnitTests</AssemblyName>
     <IsPackable>false</IsPackable>
@@ -48,7 +49,7 @@
     net462: a binding redirect to each strong-named assembly in the output folder, at the version
     the folder holds. The .NET Framework test host runs the tests with this project's .dll.config
     followed by its own configuration, which redirects the assemblies it ships with to its own
-    versions (System.Memory to 4.0.5.0, where this folder holds 4.0.1.2), so loading them fails.
+    versions, which can differ from the ones this folder holds, so loading them fails.
     The build writes a redirect only for an assembly referenced at two versions, and none is, so
     it writes no .dll.config. For a name redirected twice the first redirect wins, so these win
     over the test host's. Skipped in design-time builds (dotnet format, IDEs), which load the project

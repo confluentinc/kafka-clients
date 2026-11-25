@@ -28,7 +28,7 @@ dotnet/soak/
 ├─ bootstrap.sh               one-time host setup, then build.sh
 ├─ build.sh                   cargo build --features ffi, then dotnet build + tests
 ├─ run.sh                     the supervisor: keeps the client alive, rotates its log
-├─ SoakClient/                the client itself (net8.0;net10.0, Exe)
+├─ SoakClient/                the client itself (net10.0, Exe)
 └─ SoakClient.Tests/          its unit tests (xunit, no broker, no Docker)
 ```
 
@@ -382,7 +382,7 @@ over the single `.prev.bz2` and delete the evidence of why the child died.
 ## Tests
 
 ```bash
-cd dotnet && make test-soak-dotnet      # format check + both TFMs
+cd dotnet && make test-soak-dotnet      # build + tests on net10.0
 ```
 
 No broker, no Docker. The suites cover the parts a two-week run depends on being

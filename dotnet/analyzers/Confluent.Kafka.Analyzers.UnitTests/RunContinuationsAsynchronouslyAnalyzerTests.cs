@@ -197,7 +197,7 @@ public sealed class RunContinuationsAsynchronouslyAnalyzerTests
             new CSharpAnalyzerTest<RunContinuationsAsynchronouslyAnalyzer, DefaultVerifier>
             {
                 TestCode = source,
-                ReferenceAssemblies = ReferenceAssemblies.Net.Net80,
+                ReferenceAssemblies = ReferenceAssemblies.Net.Net100,
             };
         test.ExpectedDiagnostics.AddRange(expected);
         return test.RunAsync();

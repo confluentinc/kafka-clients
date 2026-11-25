@@ -27,7 +27,7 @@ cargo build --features ffi     # emits the native + generated header
 dotnet build                   # copies the native to output; compiles the binding
 dotnet test                    # MockProducer / MockConsumer unit tests, no broker
 ```
-Format/lint: `dotnet format` (C#), `cargo xtask format` / `cargo xtask lint` (Rust). Confirm the TFM-matrix smoke test (net462 / net8.0 / net10.0).
+Format/lint: `dotnet format` (C#), `cargo xtask format` / `cargo xtask lint` (Rust). Confirm the TFM-matrix smoke test (net462 / net10.0, and net10.0 against the netstandard2.0 build).
 
 ## Self-review lens
 Before committing, apply the Critic's checks (the ffi-marshalling.md **Anti-patterns** blocks) — a memory-safety pass first: `SafeHandle`/`Dispose` correctness (producer joins the pump; consumer drains + `Consumer_close`, before releasing the handle), handle leak / double-free / use-after-free (`_destroy_all` after `get_all`; consumer owned containers/borrow-roots vs borrowed views — never free a borrowed view), send-path **call-scoped byte pinning** *and* receive-path **copy-out before `ConsumerRecords_destroy`** (no stored native-backed `ReadOnlyMemory`), `MarshalAs(I1)` for `bool`, UTF-8 (no `LPStr`; length-delimited receive slices use `out_len`, never a NUL-scan), no managed exception through a callback, `RunContinuationsAsynchronously` on the completion (pump/dispatcher); then each core error as the generated class of its id vs precondition .NET exceptions, and API mirrors **Java**, not confluent-kafka-dotnet: every Java method a C# method with Java's exact name, getters included, no public property beyond what .NET requires (CLAUDE.md §3 idiom map).

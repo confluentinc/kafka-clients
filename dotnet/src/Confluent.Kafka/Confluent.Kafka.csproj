@@ -4,15 +4,17 @@
     The Confluent.Kafka library: the public API, a P/Invoke binding over the Rust
     core's C ABI (Internal/Interop/), and the Confluent.Kafka NuGet package.
 
-    TFMs (CLAUDE.md §4 D1 / ffi-marshalling.md §0.1): net462 for .NET Framework 4.6.2
-    and later, netstandard2.0 for the other runtimes it covers (.NET 6 and 7 among
-    them), net8.0 and net10.0, as confluent-kafka-dotnet's package. The net462 and
-    netstandard2.0 legs build the same code but for the net462 leg's native-library preload
-    (Internal/Interop/NativeMethods.NetFramework.cs).
+    TFMs (CLAUDE.md §4 Target frameworks / ffi-marshalling.md §0.1): net462 for .NET Framework 4.6.2
+    and later, net10.0, and netstandard2.0 for the other runtimes it covers, .NET 8 and 9
+    among them: .NET 8 is out of Microsoft support, so the package has no net8.0 build.
+    The net462 and netstandard2.0 legs build the same code but for the net462
+    leg's native-library preload (Internal/Interop/NativeMethods.NetFramework.cs).
+    tests/Confluent.Kafka.UnitTests.NetStandard runs the unit tests against the netstandard2.0
+    build.
   -->
 
   <PropertyGroup>
-    <TargetFrameworks>net462;netstandard2.0;net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net462;netstandard2.0;net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka</RootNamespace>
     <AssemblyName>Confluent.Kafka</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -21,11 +23,13 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
-  <!-- Native AOT: an AOT app compiles the net8.0 or net10.0 asset, so those builds run the trim, AOT and
-       single-file analyzers, and a warning from them fails the build (TreatWarningsAsErrors).
-       tools/AotSmoke checks the whole assembly with the AOT compiler itself (make test-aot-dotnet). -->
+  <!-- Native AOT: a .NET 10 AOT app compiles the net10.0 asset, so that build runs the trim, AOT and
+       single-file analyzers, and a warning from them fails the build (TreatWarningsAsErrors). A .NET 8
+       or 9 AOT app compiles the netstandard2.0 asset, which the analyzers do not support.
+       tools/AotSmoke checks the whole assembly of both builds with the AOT compiler itself
+       (make test-aot-dotnet). -->
   <PropertyGroup>
-    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net8.0'))">true</IsAotCompatible>
+    <IsAotCompatible Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net10.0'))">true</IsAotCompatible>
   </PropertyGroup>
 
   <!--
@@ -51,7 +55,7 @@
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <RepositoryUrl>https://github.com/confluentinc/kafka-clients</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <!-- The SDK's own pack-time check that the assets of the four TFMs are compatible
+    <!-- The SDK's own pack-time check that the assets of the three TFMs are compatible
          with each other. -->
     <EnablePackageValidation>true</EnablePackageValidation>
   </PropertyGroup>
@@ -167,14 +171,15 @@
   </Target>
 
   <!-- System.Memory (ReadOnlyMemory<byte>/Span<byte>) and IAsyncDisposable /
-       ValueTask are built in on net8.0+ but need facade packages on the
+       ValueTask are built in on net10.0 but need facade packages on the
        net462 and netstandard2.0 legs. Microsoft.Bcl.AsyncInterfaces
        supplies IAsyncDisposable (DisposeAsync — the primary close-first teardown,
        no separate-op drain, CLAUDE.md §4 / ffi §B7) and transitively brings the
-       ValueTask async builder. -->
+       ValueTask async builder. The versions are properties of Directory.Build.props, which
+       tests/Confluent.Kafka.UnitTests.NetStandard references too. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net462' or '$(TargetFramework)' == 'netstandard2.0'">
-    <PackageReference Include="System.Memory" Version="4.5.5" />
-    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
+    <PackageReference Include="System.Memory" Version="$(SystemMemoryVersion)" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="$(MicrosoftBclAsyncInterfacesVersion)" />
   </ItemGroup>
 
   <!-- .NET Framework has ValueTuple built in from 4.7 on; on 4.6.2 it is this package, which the
@@ -189,11 +194,13 @@
     </PackageReference>
   </ItemGroup>
 
-  <!-- Grant the unit-test assembly access to internals (Internal/ scaffolding).
+  <!-- Grant the unit-test assemblies access to internals (Internal/ scaffolding).
        Both assemblies are strong-named (shared key, Directory.Build.props), so
-       the friend grant must carry the test assembly's full public key. -->
+       the friend grant must carry the test assembly's full public key.
+       Confluent.Kafka.UnitTests.NetStandard runs the same tests against the netstandard2.0 build. -->
   <ItemGroup>
     <InternalsVisibleTo Include="Confluent.Kafka.UnitTests" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
+    <InternalsVisibleTo Include="Confluent.Kafka.UnitTests.NetStandard" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
     <InternalsVisibleTo Include="Confluent.Kafka.GrpcServer.UnitTests" Key="0024000004800000940000000602000000240000525341310004000001000100cdaff738466af53eebbc6335998dae894592bd89390956302b8045103ec6950f55a6528b96bfaeefca287ff2b6e22f331f631d1e5ac0aa26c9fea3f8d1a920367d70e30f9acddec54303d33622c3fc7e1f78ff51d5758270fcd2f0ea2f9de83551f6077c931f72c3efdc54a15160862e1b42875030105a0db85af3035b5216da" />
   </ItemGroup>
 

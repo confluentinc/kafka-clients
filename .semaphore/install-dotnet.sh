@@ -21,34 +21,23 @@ set -euo pipefail
 # is cross-platform (Linux + macOS, both have bash + curl), so the same
 # script and the same job-level export sequence work unmodified on both.
 #
-# Two installs into a single DOTNET_ROOT ($HOME/.dotnet), coexisting:
-#   1. SDK 10.0            — builds every TFM (netstandard2.0 / net462 / net8.0 /
-#                            net10.0) AND runs the net10.0 unit tests.
-#   2. .NET 8 base runtime — needed to RUN the net8.0 unit tests. A net8.0 test
-#      (--runtime dotnet)    assembly does NOT roll forward to the net10 runtime
-#                            by default, so SDK 10 alone cannot execute
-#                            `dotnet test -f net8.0`. The lean base runtime
-#                            (Microsoft.NETCore.App) is all a net8.0 *unit* test
-#                            needs; the ASP.NET Core 8 runtime is needed only
-#                            inside the gRPC Docker images, which bundle their
-#                            own aspnet:8.0. (The native, host-process gRPC
-#                            server on the macOS job is built for net10.0 and
-#                            runs on the ASP.NET Core 10 runtime that install 1,
-#                            SDK 10, already brings -- M17/P1 D3 -- so SDK 10 is
-#                            that job's ASP.NET Core runtime as well as its
-#                            build toolchain.) (CKD installs both as full SDKs;
-#                            the lean runtime is a smaller, faster CI install
-#                            and sufficient here — deliberate, not an
-#                            omission.)
+# One install into DOTNET_ROOT ($HOME/.dotnet): SDK 10.0, which builds every TFM
+# (netstandard2.0 / net462 / net10.0) AND runs the tests, all of which target
+# net10.0; Confluent.Kafka.UnitTests.NetStandard runs the unit tests against the
+# library's netstandard2.0 build on that runtime too. No .NET 8 runtime: .NET 8 is
+# out of Microsoft support, and the package has no net8.0 build.
+# SDK 10 also brings the ASP.NET Core 10 runtime, which the native, host-process gRPC
+# server on the macOS job runs on (M17/P1 D3); the gRPC Docker images bundle their
+# own aspnet:10.0.
 #
 # DOTNET_MULTILEVEL_LOOKUP=0 + one DOTNET_ROOT keep runtime resolution
-# deterministic (both installs are found under $HOME/.dotnet only), mirroring
+# deterministic (the install is found under $HOME/.dotnet only), mirroring
 # CKD's macOS block.
 
 DOTNET_ROOT="${HOME}/.dotnet"
 
 # Runs a command up to 5 times, 5 seconds apart: for a download, which can fail for a moment.
-# The installer downloads the SDK and the runtime, so its runs are retried too.
+# The installer downloads the SDK, so its run is retried too.
 retry() {
     _n=1
     while [ "$_n" -le 5 ]; do
@@ -68,10 +57,8 @@ INSTALL_SCRIPT="$(mktemp)"
 retry curl -fsSL https://dot.net/v1/dotnet-install.sh -o "${INSTALL_SCRIPT}"
 chmod +x "${INSTALL_SCRIPT}"
 
-# 1) SDK 10 (builds all TFMs, runs net10.0).
+# SDK 10 (builds all TFMs, runs net10.0).
 retry "${INSTALL_SCRIPT}" --channel 10.0 --install-dir "${DOTNET_ROOT}"
-# 2) .NET 8 base runtime (runs net8.0 tests).
-retry "${INSTALL_SCRIPT}" --channel 8.0 --runtime dotnet --install-dir "${DOTNET_ROOT}"
 
 # This script INSTALLS only -- it deliberately does NOT export DOTNET_ROOT/PATH.
 # Semaphore runs a job's prologue + job `commands:` in ONE persistent shell
@@ -89,7 +76,6 @@ retry "${INSTALL_SCRIPT}" --channel 8.0 --runtime dotnet --install-dir "${DOTNET
 
 # Validate the install using an absolute path -- `dotnet` is NOT on PATH inside
 # this script (the PATH export happens after this script returns, in the job's
-# own commands). Both net8 and net10 runtimes must be present, or the net8.0
-# test leg fails.
+# own commands). The net10 runtime must be present, or the tests cannot run.
 "${DOTNET_ROOT}/dotnet" --list-sdks
 "${DOTNET_ROOT}/dotnet" --list-runtimes

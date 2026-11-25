@@ -172,7 +172,7 @@ fn rust_example_path(name: &str) -> PathBuf {
 /// the Release build of `dotnet/examples/AdminApis`.
 fn dotnet_examples_path() -> PathBuf {
     let path = std::env::var_os("ADMIN_EXAMPLES_DOTNET").map_or_else(
-        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../dotnet/examples/AdminApis/bin/Release/net8.0/AdminApis.dll"),
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../dotnet/examples/AdminApis/bin/Release/net10.0/AdminApis.dll"),
         PathBuf::from,
     );
     assert!(

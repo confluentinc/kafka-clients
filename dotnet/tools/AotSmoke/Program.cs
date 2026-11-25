@@ -18,7 +18,9 @@ using System.Collections.Generic;
 using System.Dynamic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.Versioning;
 using System.Threading.Tasks;
 using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
@@ -56,6 +58,17 @@ internal static class Program
             Console.Error.WriteLine("AotSmoke checks a Native AOT executable: run it through make -C dotnet test-aot-dotnet.");
             return 1;
         }
+
+        // The library build this executable compiled: the net10.0 one, or, with -p:ConfluentKafkaNetStandard=true, the
+        // netstandard2.0 one, which a .NET 8 application compiles.
+        Check(
+            "library build",
+#if CONFLUENT_KAFKA_NETSTANDARD2_0
+            ".NETStandard,Version=v2.0",
+#else
+            ".NETCoreApp,Version=v10.0",
+#endif
+            () => typeof(KafkaException).Assembly.GetCustomAttribute<TargetFrameworkAttribute>()?.FrameworkName ?? "none");
 
         Producers();
         await AsyncProducers().ConfigureAwait(false);
