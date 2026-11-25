@@ -25,7 +25,7 @@ Agents must not edit `CLAUDE.md` or `.claude/rules/*` ("Any change to this promp
 ## Environment notes (verified during planning)
 
 - The `cargo` on `PATH` (Nix) has **no clippy**. Lint with the pinned toolchain:
-  `PATH="$HOME/.rustup/toolchains/1.95.0-aarch64-apple-darwin/bin:$PATH" cargo xtask lint`
+  `PATH="$HOME/.rustup/toolchains/1.100.0-aarch64-apple-darwin/bin:$PATH" cargo xtask lint`
 - Integration tests: `cargo test --features integration-tests --test integration <filter>`. Docker 29.6.1 is running; the harness starts brokers itself.
 - The shell is zsh: quote globs (`--include='*.java'`) and brace refs in `git show "${REF}:path"` (zsh reads `$R:s…` as a modifier).
 - A test that spawns the real admin loop over `MockClient` must make the loop park (see Phase 1); otherwise the loop never yields and starves the single-threaded test runtime.

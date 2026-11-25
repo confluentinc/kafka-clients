@@ -78,7 +78,7 @@ macro_rules! multilanguage_test {
         );
     };
     ($(#[$attr:meta])* $name:ident, $body:ident, $cluster_config:expr) => {
-        ::paste::paste! {
+        ::pastey::paste! {
             // Double underscore is intentional so backend labels are
             // easy to grep in cargo test output, hence non_snake_case.
             $(#[$attr])*

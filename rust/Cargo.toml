@@ -162,8 +162,10 @@ prost = "0.13"
 tokio-stream = "0.1"
 # The test macros (`multilanguage_test!` and its consumer and admin twins, and
 # `assignment_interval_consumer_test!`) name their per-backend arms with it;
-# their `__rust` arms build under `integration-tests` alone.
-paste = "1"
+# their `__rust` arms build under `integration-tests` alone. `pastey` is the
+# maintained successor of `paste` (RUSTSEC-2024-0436, unmaintained), with the
+# same macro.
+pastey = "0.2"
 multilanguage-test-server = { path = "multilanguage-test-server" }
 
 # Admin examples: one file per `Admin` RPC under `examples/admin/`, which Cargo
