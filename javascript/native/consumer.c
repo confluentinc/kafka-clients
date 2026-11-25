@@ -207,8 +207,8 @@ static int record_has_headers(const kafka_consumer_ConsumerRecord_t* record) {
     return headers != NULL && headers_count(headers) != 0;
 }
 
-// The HeaderSource external of the record at `index`, or null when `copied`
-// and the record has no headers. NULL with a JS exception pending on failure.
+// The HeaderSource external of `record`, or null when `copied` and
+// `record` has no headers. NULL with a JS exception pending on failure.
 static napi_value source_to_js(napi_env env, Batch* b, const kafka_consumer_ConsumerRecord_t* record, int copied) {
     napi_value v = NULL;
     if (copied && !record_has_headers(record)) {

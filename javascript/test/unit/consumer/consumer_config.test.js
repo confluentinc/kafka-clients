@@ -69,6 +69,8 @@ test('ConsumerConfig is not instantiable', () => {
 //     (JS conventions, Scope).
 //   testValidateConfigPropertiesFile: skipped: it reads the Java docs'
 //     properties file.
+// security.protocol and metadata.recovery.strategy are written out: they are
+// CommonClientConfigs' keys, which ConsumerConfig does not repeat here.
 
 const { KafkaConsumer } = require('@confluentinc/kafka-javascript/consumer');
 const { UnsupportedOperationError } = require('@confluentinc/kafka-javascript');

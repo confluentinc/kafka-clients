@@ -56,9 +56,8 @@ function isIterable(value: unknown): boolean {
 
 // Java's forms of each method, in Java declaration order (src/internal/args.ts).
 // The constructor's Map and Properties forms are the one `configs`, also taken
-// bare; its two forms taking deserializers are refused until the client has
-// deserializers. Java's subscribe(Pattern...) forms are left out, and so are,
-// until the client has rebalance listeners, the forms taking one.
+// bare. Java's subscribe(Pattern...) forms are left out, and so are, until the
+// client has rebalance listeners, the forms taking one.
 const CONSTRUCTOR_FORMS = new JavaForms('KafkaConsumer', [['configs'], ['configs', 'keyDeserializer', 'valueDeserializer']], {
   bareIsPlainObject: true,
   bareTypes: { configs: (value) => typeof value === 'object' },
@@ -85,8 +84,8 @@ const METRICS_FORMS = new JavaForms('metrics', [[]], { reader: true });
 const UNSUBSCRIBE_FORMS = new JavaForms('unsubscribe', [[]]);
 const WAKEUP_FORMS = new JavaForms('wakeup', [[]]);
 
-// Until the client has deserializers (javascript/design/current/consumer, the
-// plan's decision 13), a consumer takes none: keys and values are Buffers.
+// Until the client has deserializers, a consumer takes none: keys and values
+// are Buffers, and a deserializer is refused rather than ignored.
 const NO_DESERIALIZERS = 'KafkaConsumer takes no deserializer yet: keys and values are Buffers';
 
 // What the addon builds each record of a poll with.

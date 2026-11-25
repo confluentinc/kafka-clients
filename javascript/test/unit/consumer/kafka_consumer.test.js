@@ -581,7 +581,7 @@ test('deserializers are refused until the client has them, as arguments and as c
 
 test('the constructor takes {configs} or the configs bare, and nothing else', () => {
   const forms = 'KafkaConsumer() takes one of (configs), (configs, keyDeserializer, valueDeserializer)';
-  // The bare form (decision 19's one check of it).
+  // The bare form, checked once.
   opened.push(new KafkaConsumer(configs()));
   // @ts-expect-error no argument
   assert.throws(() => new KafkaConsumer(), { constructor: IllegalArgumentError, message: `${forms}; got ()` });
@@ -724,7 +724,7 @@ test('assign, pause and resume: their forms and errors, the FFI refusing a null'
 test('poll: its forms, a negative timeout with the core message, a Temporal.Duration', async () => {
   const consumer = newConsumer();
   await consumer.assign({ partitions: [TP0] });
-  // The bare form (decision 19's one check of it).
+  // The bare form, checked once.
   assert.ok((await consumer.poll(0)) instanceof ConsumerRecords);
   assert.equal((await consumer.poll({ timeout: Temporal.Duration.from({ milliseconds: 1 }) })).count(), 0);
   await assert.rejects(consumer.poll({ timeout: -1 }), { constructor: IllegalArgumentError, message: 'Timeout must not be negative' });
