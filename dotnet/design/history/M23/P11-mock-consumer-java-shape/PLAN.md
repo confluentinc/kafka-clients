@@ -3,10 +3,14 @@
 Status: agreed with the owner in conversation (2026-11-23, "ok let's do the change"). Scope: the full plan. This
 copy is the port onto master.
 
-Milestone 23, Phase 11. Agent number N=135, ledger rows 626–632. Mode A (.NET only): no Rust, C ABI, header,
+Milestone 23, Phase 11. Agent number N=137, ledger rows 641–647. Mode A (.NET only): no Rust, C ABI, header,
 Python or proto change. Branch `esabellico/dotnet_mock_consumer_java_shape_on_master`, from master `a9a422bc9`
-(after #356, #353 and #349), in the worktree `kafka-clients-dotnet-wrapped`. Never pushed by an agent. All paths
+(after #356, #353 and #349), in the worktree `kafka-clients-dotnet-wrapped`. Pushed on the owner's go-ahead as PR #364. All paths
 below are under `dotnet/`.
+
+Renumbered on 2026-11-25, at the merge of master `2c763616e` (#360): until then this phase was N=135 with rows
+626–632, which #360 had also taken (N=135 and 136, rows 626–640). The review records that name Critic 135 for
+this phase are Critic 137's.
 
 The phase was first built on `esabellico/dotnet_mock_consumer_java_shape` (head `991014ff2`), stacked on M23/P9
 (`esabellico/dotnet_consumer_records_and_headers_wrapped`, `1081aaa19`), where a polled record wraps its native
@@ -14,7 +18,7 @@ record. M23/P9 is not on master, so this branch ports the phase without it: a po
 copy, and nothing of M23/P9 comes along (no wrapped record, no lazy headers, no `ValueMemory`). The design below
 is the stacked branch's, restated for master's copy-out; section "Port onto master" lists what differs.
 
-How it runs: Actor 135 ports one step at a time and commits it with `--no-verify` after running the step's gates
+How it runs: Actor 137 ports one step at a time and commits it with `--no-verify` after running the step's gates
 (section "Gates per step"). The rule edits were drafts (section "Rule text") until the owner accepted them on
 2026-11-23; the port applies them where their text holds on master verbatim.
 
@@ -132,7 +136,7 @@ Every other test, and every other caller (`grpc-server`, `soak`, `tools`, `examp
 behaviour of the mock (the gRPC server's chaos and serde paths, if they do) uses the internal fixture instead and
 says so in a comment.
 
-### Deviations that remain (ledger rows 626–628, 632)
+### Deviations that remain (ledger rows 641–643, 647)
 
 - A polled record is a new `ConsumerRecord` copied out of the native batch, not the instance given to
   `AddRecord`; Java returns the same object. Its key and value are the same objects. `ConsumerRecord` has no
@@ -141,7 +145,7 @@ says so in a comment.
   polled record, where Java shares the object.
 - The mocks are no longer a way to test a deserializer without a broker. Java's never was.
 - A cancelled `AsyncMockConsumer.Poll` returns a batch the C mock already delivered rather than ending with
-  `OperationCanceledException` and seeking back, as `AsyncKafkaConsumer` does (ledger 632): the C mock cannot
+  `OperationCanceledException` and seeking back, as `AsyncKafkaConsumer` does (ledger 647): the C mock cannot
   deliver a dropped batch again.
 
 ## Port onto master
@@ -158,8 +162,8 @@ What differs from the stacked branch, and why:
   which refuses a null element.
 - **Delivery count.** Master reads no delivery count on a polled record. The mock's resolving source reads it
   (`kafka_consumer_ConsumerRecord_delivery_count_err`, one more P/Invoke), so a polled mock record keeps the
-  delivery count given to `AddRecord` (ledger 628); the real consumers' copy-out is unchanged.
-- **Memory pressure** (ledger 630). On master only a batch kept for a memory-form deserializer reports pressure;
+  delivery count given to `AddRecord` (ledger 643); the real consumers' copy-out is unchanged.
+- **Memory pressure** (ledger 645). On master only a batch kept for a memory-form deserializer reports pressure;
   the mock keeps no batch, so the row says that instead of "no key and value bytes".
 - **`TopicPartition` and `Uuid`** are classes on master (#356); the tests are written for that.
 - **Tests not ported**: the ones that exist for M23/P9 only (`PolledConsumerRecordTests`, `PolledHeadersTests`,
@@ -169,7 +173,7 @@ What differs from the stacked branch, and why:
 
 One commit per step, each passing the gates. The stacked branch's fixups are folded into their steps.
 
-- **S0** This plan, `STATUS.md` entry (N=135, rows 626–632, next unused N 136).
+- **S0** This plan, `STATUS.md` entry (N=137, rows 641–647, next unused N 138).
 - **S1** Interop and core plumbing: the P/Invoke declarations for the record options builder, the
   `TimestampType` singletons and the delivery count; `ConsumerRecordMarshal` (the mock's record builder);
   `MockRecordSlots<TKey, TValue>`; `NativeConsumer.AddRecord` for a built record with the two slot values; the
@@ -221,15 +225,15 @@ One commit per step, each passing the gates. The stacked branch's fixups are fol
 
 | # | Source | Topic | Decision | Status |
 |---|---|---|---|---|
-| 626 | Design, public surface | Mock constructors | `MockConsumer` and `AsyncMockConsumer` have Java's one constructor, `(string offsetResetStrategy)`, and take no deserializer. Supersedes the deserializer-taking constructors of ledger 48 and of the "Consumer deserializers" paragraph. Breaking; the client is in preview | Agreed |
-| 627 | Design, public surface; ids | `AddRecord` | `AddRecord(ConsumerRecord<TKey, TValue> record)`, Java's form; the bytes form goes. The key and the value cross the C mock as ids in the record's `void *` slots (`MockRecordSlots`), resolved by `Poll` through two typed dictionaries; a null key or value stays `NULL` and takes no entry; an entry goes at delivery, the rest once a `Close`, `Close(CloseOptions)`, `Dispose` or `DisposeAsync` closes the consumer (one that throws, is canceled or is refused and leaves it open keeps them, so the next `Poll` still returns those records); a record the core refuses leaves no entry. *(Deviation: the polled record is a new instance copied out of the native batch, with the same key and value objects; Java returns the instance added.)* | Agreed |
-| 628 | Design, ids | Fields copied at `AddRecord` | timestamp, timestamp type, sizes, headers, leader epoch and delivery count are copied into the C record at `AddRecord`. *(Deviation: a change made to the record's `Headers` after `AddRecord` does not reach the polled record; Java shares the object.)* | Agreed |
-| 629 | Design, decode tests | Decode tests | the binding's decode tests run the real consumers over the C mock through the internal factories `KafkaConsumer.CreateOverMock` / `AsyncKafkaConsumer.CreateOverMock` (the preferred form; no fallback, "Revision" stays empty), shared through one fixture per test project; the public mocks no longer decode | Agreed |
-| 630 | Design, poll | Mock batch pressure | a mock poll keeps no native batch: its records are copied out and the batch destroyed by the poll, so it reports no memory pressure, and its slots, being ids, are never read as bytes | Agreed |
-| 631 | Rule drafts | Rule text M1–M4 | drafts below, checked against what was built (S4); on master (S5, 2026-11-24) M1 and M2 applied verbatim to `dotnet/CLAUDE.md` and M4 to `dotnet/.claude/rules/ffi-marshalling.md` (as a row of the type table); M3 applied with master's wording on the owner's go-ahead (2026-11-24, see below) | Agreed |
-| 632 | Design, poll; cancellation | A cancelled `AsyncMockConsumer.Poll` | a batch the C mock has delivered is never dropped: once the native poll has returned records, the mock resolves them and `Poll` completes with them even if the token has fired; `OperationCanceledException` only when the cancellation ended the poll before the C mock delivered a record (a token cancelled at the call, the cancellation's own `wakeup` reaching the C mock before it takes a record, or an empty poll the token fired on), and the records added stay for the next `Poll`. No seek back on this path. The C mock removes what it delivers, as Java's `MockConsumer.poll` does, so a dropped batch could not be delivered again; Java's mock checks its `wakeup` before it takes a record and returns what it took. *(Deviation from `AsyncKafkaConsumer` and the `IAsyncConsumer.Poll` contract, which drop a cancelled poll's records and seek back to them, ending with `OperationCanceledException`; stated on `AsyncMockConsumer.Poll`.)* (Critic 135 issue 4) | Agreed |
+| 641 | Design, public surface | Mock constructors | `MockConsumer` and `AsyncMockConsumer` have Java's one constructor, `(string offsetResetStrategy)`, and take no deserializer. Supersedes the deserializer-taking constructors of ledger 48 and of the "Consumer deserializers" paragraph. Breaking; the client is in preview | Agreed |
+| 642 | Design, public surface; ids | `AddRecord` | `AddRecord(ConsumerRecord<TKey, TValue> record)`, Java's form; the bytes form goes. The key and the value cross the C mock as ids in the record's `void *` slots (`MockRecordSlots`), resolved by `Poll` through two typed dictionaries; a null key or value stays `NULL` and takes no entry; an entry goes at delivery, the rest once a `Close`, `Close(CloseOptions)`, `Dispose` or `DisposeAsync` closes the consumer (one that throws, is canceled or is refused and leaves it open keeps them, so the next `Poll` still returns those records); a record the core refuses leaves no entry. *(Deviation: the polled record is a new instance copied out of the native batch, with the same key and value objects; Java returns the instance added.)* | Agreed |
+| 643 | Design, ids | Fields copied at `AddRecord` | timestamp, timestamp type, sizes, headers, leader epoch and delivery count are copied into the C record at `AddRecord`. *(Deviation: a change made to the record's `Headers` after `AddRecord` does not reach the polled record; Java shares the object.)* | Agreed |
+| 644 | Design, decode tests | Decode tests | the binding's decode tests run the real consumers over the C mock through the internal factories `KafkaConsumer.CreateOverMock` / `AsyncKafkaConsumer.CreateOverMock` (the preferred form; no fallback, "Revision" stays empty), shared through one fixture per test project; the public mocks no longer decode | Agreed |
+| 645 | Design, poll | Mock batch pressure | a mock poll keeps no native batch: its records are copied out and the batch destroyed by the poll, so it reports no memory pressure, and its slots, being ids, are never read as bytes | Agreed |
+| 646 | Rule drafts | Rule text M1–M4 | drafts below, checked against what was built (S4); on master (S5, 2026-11-24) M1 and M2 applied verbatim to `dotnet/CLAUDE.md` and M4 to `dotnet/.claude/rules/ffi-marshalling.md` (as a row of the type table); M3 applied with master's wording on the owner's go-ahead (2026-11-24, see below) | Agreed |
+| 647 | Design, poll; cancellation | A cancelled `AsyncMockConsumer.Poll` | a batch the C mock has delivered is never dropped: once the native poll has returned records, the mock resolves them and `Poll` completes with them even if the token has fired; `OperationCanceledException` only when the cancellation ended the poll before the C mock delivered a record (a token cancelled at the call, the cancellation's own `wakeup` reaching the C mock before it takes a record, or an empty poll the token fired on), and the records added stay for the next `Poll`. No seek back on this path. The C mock removes what it delivers, as Java's `MockConsumer.poll` does, so a dropped batch could not be delivered again; Java's mock checks its `wakeup` before it takes a record and returns what it took. *(Deviation from `AsyncKafkaConsumer` and the `IAsyncConsumer.Poll` contract, which drop a cancelled poll's records and seek back to them, ending with `OperationCanceledException`; stated on `AsyncMockConsumer.Poll`.)* (Critic 137 issue 4) | Agreed |
 
-Rows 627 and 630 are reworded for master's copied records (section "Port onto master"); their decisions are the
+Rows 642 and 645 are reworded for master's copied records (section "Port onto master"); their decisions are the
 agreed ones.
 
 ## Rule text (drafts M1–M4, accepted by the owner 2026-11-23)
@@ -238,7 +242,7 @@ agreed ones.
 
 ```csharp
 public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValue> {    // Java `MockConsumer`
-    // Java's shape: no deserializers, typed records (ledger 626, 627). Mock helpers are inherent, not on
+    // Java's shape: no deserializers, typed records (ledger 641, 642). Mock helpers are inherent, not on
     // IAsyncConsumer.
     public AsyncMockConsumer(string offsetResetStrategy);   // null: IllegalArgumentException, as Java's MockConsumer(String)
     public void AddRecord(ConsumerRecord<TKey, TValue> record);   // Java MockConsumer.addRecord
@@ -285,17 +289,17 @@ Current text (`dotnet/CLAUDE.md:345-347`): "Mock TAKES the serializers — Java-
 Serializer<K>/Serializer<V> and serializes records into its history); UNLIKE the consumer, where
 mock-takes-deserializers is a deviation. Send serializes K/V → bytes exactly like the real client (§4)."
 
-Stale because the mock consumers no longer take deserializers (ledger 626): there is no mock-takes-deserializers
+Stale because the mock consumers no longer take deserializers (ledger 641): there is no mock-takes-deserializers
 deviation left to contrast with. Proposed: "Mock TAKES the serializers — Java-faithful (MockProducer.java takes
 Serializer<K>/Serializer<V> and serializes records into its history); UNLIKE the consumer, whose mocks take no
-deserializers (ledger 626). Send serializes K/V → bytes exactly like the real client (§4)."
+deserializers (ledger 641). Send serializes K/V → bytes exactly like the real client (§4)."
 
 ### M6 — `CLAUDE.md`, the disposal steps of the clients (proposed, not applied)
 
 Current text (`dotnet/CLAUDE.md:1631-1632`): "The producer and consumer mocks never dispose their serializers or
 deserializers, as Java's and Python's mocks."
 
-Stale because the consumer mocks hold no deserializer to dispose (ledger 626); the sentence still describes them as
+Stale because the consumer mocks hold no deserializer to dispose (ledger 641); the sentence still describes them as
 holding ones they keep. Proposed: "The producer mocks never dispose their serializers, as Java's and Python's mocks;
 the consumer mocks hold no deserializer."
 
@@ -308,7 +312,17 @@ serializes into its history, so the mock ctors take serializers too (`(keySer, v
 Found by the F2 sweep. The past tense ("was") keeps it true, but `(keySer, valueSer, autoComplete=true)` is not the
 shipped shape: both producer mocks have a two-argument and a three-argument constructor, with no optional
 parameter. Proposed: "… so the mock ctors take serializers too (`(keySer, valueSer)` and
-`(keySer, valueSer, autoComplete)`) — **unlike** the consumer, whose mocks take no deserializers (ledger 626)."
+`(keySer, valueSer, autoComplete)`) — **unlike** the consumer, whose mocks take no deserializers (ledger 641)."
+
+### R1 — the row citations of M1/M2 and M4 after the renumbering (proposed, not applied)
+
+The merge of master `2c763616e` (#360) moved this phase's rows from 626–632 to 641–647 (see the top of this plan),
+but the two applied rule texts still cite the old numbers, which #360's rows now hold (`CLAUDE.md` lines 1220–1238
+cite 626–634 for the futures):
+
+- `dotnet/CLAUDE.md:557`: "typed records (ledger 626, 627)" → "typed records (ledger 641, 642)".
+- `dotnet/.claude/rules/ffi-marshalling.md:79`: "the mock consumers' key and value (ledger 627)" → "the mock
+  consumers' key and value (ledger 642)".
 
 ## Revision
 
@@ -318,7 +332,7 @@ parameter. Proposed: "… so the mock ctors take serializers too (`(keySer, valu
 
 Commits: S0 `d60e97154`, S1 `d7c5359cf`, S2 `2822920b2`, then S3 and S4 (the commit with this text), named by step since their hashes change when the
 fixups are squashed. The
-stacked branch's fixups for Critic 135's issues 1–4 are folded into the steps that wrote the code they fix.
+stacked branch's fixups for Critic 137's issues 1–4 are folded into the steps that wrote the code they fix.
 
 - **C mock slots.** The C mock stores the key and value slots and never reads, frees or compares them: the
   binding builds it as `MockConsumer<GenericValue, GenericValue>` with `Owns { key: false, value: false }`, and
@@ -341,14 +355,14 @@ stacked branch's fixups for Critic 135's issues 1–4 are folded into the steps 
   consumer, on both mocks (`NativeConsumer.PollResolved`, `CompletePoll`), so a close or a dispose from another
   thread cannot empty the table under it. The real consumers' poll path behaves as on master; its allocations
   are master's on the synchronous consumer, and 16 B more per `Poll` on the asynchronous one, at every batch size
-  (Critic 135, fourth pass: built-in deserializers 2712 → 2728 B at one record, 272784 → 272800 B at 1024;
+  (Critic 137, fourth pass: built-in deserializers 2712 → 2728 B at one record, 272784 → 272800 B at 1024;
   awaited ones 2832 → 2848 B, 223800 → 223816 B). The 16 B are the `slots` parameter and the `resolveFailure`
   local, fields of the state machine of the `CompletePoll` both paths share. They stay: removing them needs a
   mock-only completion method that repeats the shared prologue (`Outcome`, `KeepKeptError`, `HoldRecords`,
   `ExitUse`) and the release of the records. The allocation budgets are upper bounds and hold with master's
   constants.
   `PublicMockConsumerSlotsAtCloseTests` pins both.
-- **A cancelled asynchronous poll** (ledger 632). The mock never drops a batch the C mock has delivered. A
+- **A cancelled asynchronous poll** (ledger 647). The mock never drops a batch the C mock has delivered. A
   cancellation after the delivery is ignored and `Poll` returns the batch; one that ended the poll before any
   record was delivered throws `OperationCanceledException` and leaves the records for the next `Poll`. The real
   consumers still drop a cancelled poll's batch and seek back to it; `ConsumerAsyncCancelTests` runs that test
