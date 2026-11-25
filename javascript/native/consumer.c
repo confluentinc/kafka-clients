@@ -380,6 +380,9 @@ static void poll_on_complete(kafka_consumer_ConsumerRecords_t* value, kafka_comm
         napi_value argv[3] = {NULL, NULL, NULL};
         napi_value factory = NULL;
         if (error != NULL || value == NULL) {
+            // A failed poll has no records; any it was given are freed.
+            kafka_common_Error_t* ffi_err = NULL;
+            if (value != NULL) error_discard(FFI_ERR(kafka_consumer_ConsumerRecords_destroy_err(value, &ffi_err)));
             argv[0] = error != NULL ? error_take_to_js(env, error) : js_take_failure(env, "a poll without records");
             error = NULL;
             if (argv[0] != NULL && (napi_get_null(env, &argv[1]) != napi_ok || napi_get_null(env, &argv[2]) != napi_ok))
