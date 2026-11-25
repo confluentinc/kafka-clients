@@ -277,6 +277,9 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// </exception>
     public void UpdateBeginningOffset(string topic, int partition, long offset) =>
         _native.UpdateBeginningOffset(topic, partition, offset);
 
@@ -290,6 +293,9 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// </exception>
     public void UpdateEndOffset(string topic, int partition, long offset) =>
         _native.UpdateEndOffset(topic, partition, offset);
 
@@ -307,6 +313,10 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> or <paramref name="leaderHost"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partitionCount"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> or <paramref name="leaderHost"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     public void UpdatePartitions(string topic, int partitionCount, int leaderId, string leaderHost, int leaderPort) =>
         _native.UpdatePartitions(topic, partitionCount, leaderId, leaderHost, leaderPort);
 
@@ -320,7 +330,9 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <param name="value">The value bytes, or <see langword="null"/> for a tombstone.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
-    /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or the partition is not assigned; one whose topic holds a NUL never is.
+    /// </exception>
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
         _native.AddRecord(topic, partition, offset, key, value);
 
@@ -349,6 +361,10 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <paramref name="newOffsets"/> or a partition in it is null, or a partition in it has a null topic.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
+    /// <exception cref="ArgumentException">
+    /// A topic in <paramref name="newOffsets"/> contains a NUL character, which the native client cannot receive
+    /// unchanged.
+    /// </exception>
     public void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
         _native.UpdateDurationOffsets(newOffsets);
 
@@ -388,6 +404,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <exception cref="ArgumentException">
     /// An element or an element topic is null, or the consumer is manually assigned (Java's
     /// <c>IllegalArgumentException</c>).
+    /// The topic of a partition in <paramref name="newAssignment"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     public void Rebalance(IReadOnlyCollection<TopicPartition> newAssignment) => _native.Rebalance(newAssignment);
@@ -404,7 +422,11 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// </remarks>
     /// <param name="partitionsLost">The partitions to lose; every one must be currently assigned.</param>
     /// <exception cref="ArgumentNullException"><paramref name="partitionsLost"/> is null.</exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// An element topic is null.
+    /// The topic of a partition in <paramref name="partitionsLost"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or a partition, a null one included, is not currently assigned.
     /// </exception>

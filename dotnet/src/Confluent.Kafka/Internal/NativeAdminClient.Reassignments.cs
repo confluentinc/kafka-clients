@@ -200,7 +200,7 @@ internal sealed partial class NativeAdminClient
                         nameof(reassignments), "reassignments must not contain a TopicPartition with a null topic");
                 }
 
-                AdminStrings.Validate(entry.Key.Topic(), nameof(reassignments));
+                NativeStrings.Validate(entry.Key.Topic(), NativeStrings.InvalidAdminStringMessage, nameof(reassignments));
                 if (seen.Add(entry.Key))
                 {
                     keys.Add(entry.Key);
