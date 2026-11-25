@@ -1,9 +1,10 @@
 # JavaScript (Node.js) client — the consumer
 
 Status: **approved** by the user on 2026-11-25, with the decisions of §8, and corrected the same day (P1's tests
-and linter work, `poll(long)`, `doc-check`, the CHANGELOG, and the per-commit checks the user decided). No Actor or
-Critic has run yet. P1's phase plan, `P1.md` beside this file, is approved with its choices 2(a) to 8(a); choice
-5(a) moves the `Consumer` interface from P1 to P2.
+and linter work, `poll(long)`, `doc-check`, the CHANGELOG, and the per-commit checks the user decided). P1 is
+**done** (2026-11-25): its phase plan, `P1.md` beside this file, was approved with its choices 2(a) to 9(a), and
+its "Result" section has the commits, the review and the gate. Choice 5(a) moved the `Consumer` interface from P1
+to P2. P2's phase plan is next.
 
 - Branch `dev/javascript-consumer-bindings` (local only), at `208abeb64`, which is PR #312's head
   (`origin/dev/javascript-producer-bindings`). It was moved there, with the user's approval, on 2026-11-25.
@@ -602,3 +603,12 @@ Decided, and not built in this milestone:
   the rules branch. Line 73 says a released bare value keeps its form, so the bare forms have to be dropped before
   they're released; nothing is released yet (`javascript/CHANGELOG.md`: `4.4.0-beta.1`, not published). The user
   decided it on 2026-11-25. Until then the consumer keeps both forms, as line 73 requires (decision 19).
+- Refusing a call made inside a callback after the callback's first `await`, when the call waits for that same
+  callback (Q46, line 213). In a send callback, `flush()`, `close()`, the transaction calls and awaiting a later
+  record's future wait for that same callback, and the core refuses them only before the callback's first `await`.
+  From that point the producer can no longer tell it's inside the callback, so these calls can hang, as line 149
+  already warns. The consumer reaches the same case (risk 9). The fix carries an "inside this callback" mark across
+  `await`s with Node's `AsyncLocalStorage`, so the binding throws instead, as Python does with a `ContextVar`. A
+  spike measures its cost first, since send callbacks run once per record (line 213). The user asked on 2026-11-25
+  for it to be fixed last, after P8. Not built until then: line 213 lists it as a future improvement, which an
+  agent builds only once a rule takes its place, and that rule belongs to the rules branch.
