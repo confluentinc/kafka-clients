@@ -147,7 +147,8 @@ The producer's layout (JS conventions, Layout and modules), one Java class per f
   registered in `addon.c` and `binding.gyp`. They reuse `callback_queue.c`, `error.c`, `error_payload.c` and
   `record.c`. `headers.c` gains the copy out of a consumed record (4.2), taking the reading code of the test-only
   `record_spy.c`, which then calls it. Code that both clients need, such as the producer mock's injected-error
-  carrier in `producer.c`, moves to a shared file instead of being copied (DoD #6).
+  carrier in `producer.c`, moves to a shared file instead of being copied (DoD #6). P2's test-only switch and
+  read-back for the copy path (4.2) are built as `record_spy.c` is.
 - Tests in `test/unit/consumer/`, `test/integration/`, `test/typing/` and `test/memory/`; `examples/consumer.js`;
   `grpc-server/`; `verifiable_clients/verifiable_consumer.js`.
 
@@ -165,7 +166,9 @@ The producer's layout (JS conventions, Layout and modules), one Java class per f
   poll's batch in memory. The addon doesn't call `napi_adjust_external_memory` (line 134).
 - On Electron, which refuses external buffers, the addon copies each key and value instead, when Node-API answers
   `napi_no_external_buffers_allowed` (line 133). Headers are copied everywhere, so the limitation covers only keys
-  and values.
+  and values. A copy holds nothing native, so on that path only the `Headers` not yet copied keep the batch alive.
+  Plain Node never gives that answer, so P2 tests the copy path through a test-only switch. A real Electron run
+  stays out of CI.
 - A batch may outlive its consumer. The FFI's records handle owns its records and the buffers behind their keys
   and values (the fetch buffer or, for a compressed batch, each record's own), and holds nothing of the consumer
   (`rust/src/ffi/consumer/consumer_records.rs`). So a Buffer kept after `close()`, or after the consumer is
@@ -175,7 +178,10 @@ The producer's layout (JS conventions, Layout and modules), one Java class per f
   copies its list out of the headers that `ConsumerRecord_headers_err` lends out `const`: each key becomes a string,
   and each value a new `Buffer` with its own copy, or `null`. That copy is the one addon call outside the clients
   (line 160). Until then the `Headers` keeps the batch alive, and after it, it holds nothing native. No
-  `RecordHeaders_with_record_headers_err` handle is made (decision 2).
+  `RecordHeaders_with_record_headers_err` handle is made (decision 2). A record with no headers has nothing to
+  copy, but the addon learns that only by looking, a few calls per record, since the FFI has no header count. The
+  recommendation for P2's phase plan: look only on the copy path, which copies every key and value anyway, so there
+  a record with no headers holds nothing, and plain Node pays nothing.
 - The mock's records hold the user's own JavaScript keys and values, not bytes (4.6).
 
 ### 4.3 Waiting calls, the queue and liveness
@@ -323,6 +329,21 @@ the full gate before its hand-off (§7).
   `SaslConfigsTest` was for the producer (producer DECISIONS 28); the broker-less `KafkaConsumerTest` cases for
   these methods; one broker round trip, with the JavaScript producer writing and the JavaScript consumer reading;
   memory and ASan cases for the batch lifetime.
+- A test of the copy path that Electron needs (4.2): a broker memory probe in
+  `test/integration/memory_probes.test.js`, with a test-only switch that makes the addon act as if Node-API had
+  refused external buffers. It checks that:
+  - the keys and values are copies, compared by address, as `recordSpy()` does for the producer;
+  - the copies don't count toward the batch: once nothing but copies is left, the batch is destroyed, though the
+    test still holds every key and value. That's right after `poll()` for records with no headers, with 4.2's
+    recommendation, and right after the last record's `Headers` is read otherwise;
+  - the copies stay valid after that, and after `close()`, under the probes' poisoned allocator;
+  - without the switch, the same records keep their batch until their Buffers are collected.
+- The switch and the read-back are built and named as the producer's test-only native code is: registered in
+  `addon.c` with the rest, always built and doing nothing until a test arms them, declared in
+  `src/internal/native.ts` as "Test-only", listed with their test in `check-native-registry`'s `TEST_ONLY`, and
+  reached through `dist/internal/native`, as `recordSpy()` and `faultNext()` are. A mutant in
+  `test/memory_mutation/` (a copy that still holds the batch) shows the probe fails. A real Electron run stays out
+  of CI.
 
 **P3 — offsets and commits (N=152).**
 - `commitSync` (four forms), `commitAsync()` without a callback, `committed`, `groupMetadata()` with the temporary
@@ -529,6 +550,8 @@ conventions row (line 221) is still parked.
     wraps the FFI, so each case is re-checked.
 12. P6 changes the producer's serde shape too (decision 1(a)): `stringSerializer()` goes, so the producer's docs,
     example and tests change in the same phase.
+13. The copy path that Electron needs runs only under P2's test switch, which gives the answer Electron's Node-API
+    gives. No CI job runs Electron (4.2).
 
 ## 10. Future improvements
 
