@@ -278,13 +278,17 @@ test("the real tree without baselines: exactly the findings the baselines list, 
     .filter((m) => m.ruleId && m.ruleId.startsWith('kafka/'))
     .map((m) => `${m.messageId} ${m.message.slice(0, m.message.indexOf(': '))}`)
     .sort();
+  // Each key once: one baseline line waives every finding with its key
+  // (scripts/lint/baseline.js, waive), and a line listed twice is refused
+  // (leftovers), so a key of two findings has one line.
+  const unique = [...new Set(keys)];
   const listed = (/** @type {string} */ file) =>
     fs
       .readFileSync(path.join(ROOT, file), 'utf8')
       .split('\n')
       .map((l) => l.trim())
       .filter((l) => l !== '' && !l.startsWith('#'));
-  assert.deepEqual(keys, listed('eslint-baseline.txt').sort());
+  assert.deepEqual(unique, listed('eslint-baseline.txt').sort());
   assert.deepEqual(listed('lint-baseline.txt'), []);
   const runner = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'lint_rules.js'), '--no-baseline'], {
     cwd: ROOT,

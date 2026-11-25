@@ -85,3 +85,13 @@ overload-missing RecordHeader.constructor/RecordHeader(ByteBuffer,ByteBuffer)
 # constructor of one keyed object, though Java's constructor is private.
 member-not-public CloseOptions.constructor
 
+
+# check-type-mapping: types the JS conventions choose over the table's, which
+# this rule doesn't model.
+# ConsumerRebalanceListener: each method returns unknown, since the JS
+# conventions (Threads and callbacks) let it return a Promise, which the
+# consumer awaits, and it is handed its partitions as a TopicPartitionSet, the
+# Types table's Set<TopicPartition> the client builds.
+type-mismatch ConsumerRebalanceListener.onPartitionsRevoked
+type-mismatch ConsumerRebalanceListener.onPartitionsAssigned
+type-mismatch ConsumerRebalanceListener.onPartitionsLost

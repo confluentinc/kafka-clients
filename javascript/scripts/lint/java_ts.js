@@ -121,6 +121,7 @@ const FUNCTION_TYPES = new Set([
   'org.apache.kafka.clients.producer.Callback',
   'org.apache.kafka.common.KafkaFuture$BaseFunction',
   'org.apache.kafka.common.KafkaFuture$BiConsumer',
+  'org.apache.kafka.clients.consumer.OffsetCommitCallback',
 ]);
 
 /** The members `java.lang.Enum` gives every Java enum. */

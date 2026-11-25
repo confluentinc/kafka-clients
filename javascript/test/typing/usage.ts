@@ -65,6 +65,7 @@ import {
   ConsumerConfig,
   type ConsumerConfigs,
   ConsumerGroupMetadata,
+  type ConsumerRebalanceListener,
   ConsumerRecord,
   ConsumerRecords,
   GroupProtocol,
@@ -72,6 +73,7 @@ import {
   NoOffsetForPartitionError,
   OffsetAndMetadata,
   OffsetAndTimestamp,
+  type OffsetCommitCallback,
   OffsetOutOfRangeError,
   SubscriptionPattern,
 } from '@confluentinc/kafka-javascript/consumer';
@@ -1055,6 +1057,16 @@ expectTypeOf(closeOptions.groupMembershipOperation()).toEqualTypeOf<CloseOptions
 expectTypeOf(GroupProtocol.of({ name: 'consumer' })).toEqualTypeOf<GroupProtocol>();
 expectTypeOf(new SubscriptionPattern({ pattern: 't.*' }).pattern()).toEqualTypeOf<string>();
 expectTypeOf(new OffsetAndTimestamp({ offset: 1, timestamp: 2 }).leaderEpoch()).toEqualTypeOf<number | null>();
+const listener: ConsumerRebalanceListener = {
+  onPartitionsRevoked: async ({ partitions }) => void partitions.size(),
+  onPartitionsAssigned: ({ partitions }) => partitions.size(),
+};
+void listener;
+// @ts-expect-error onPartitionsAssigned is required, as Java's abstract method is
+const halfListener: ConsumerRebalanceListener = { onPartitionsRevoked: () => undefined };
+void halfListener;
+const commitCallback: OffsetCommitCallback = ({ offsets, exception }) => void [offsets, exception];
+void commitCallback;
 const consumerConfigs: ConsumerConfigs = { 'group.id': 'g', 'group.protocol': 'consumer', 'any.other.key': 1 };
 expectTypeOf(ConsumerConfig.GROUP_ID_CONFIG).toEqualTypeOf<string>();
 void consumerConfigs;
