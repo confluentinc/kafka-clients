@@ -19,7 +19,7 @@
 // pages around large blocks), so a use after free reads garbage and a
 // double free aborts, and it reads the addon's test-only counts
 // (native/producer.c producerStats(), native/error.c errorStats(),
-// native/headers.c headerStats()).
+// native/headers.c headerStats(), native/metrics.c metricsStats()).
 //
 // The package a probe loads is this checkout's, or the one
 // CONFLUENT_KAFKA_JS_PROBE_ROOT names: a copy with a mutated addon, which the
@@ -68,6 +68,7 @@ function leaks() {
   const s = native.producerStats();
   const e = native.errorStats();
   const h = native.headerStats();
+  const m = native.metricsStats();
   return {
     producers: s.producersMade - s.producersFreed,
     ownerUnits: s.ownerUnitsTaken - s.ownerUnitsReleased,
@@ -82,6 +83,8 @@ function leaks() {
     injectedErrors: s.injectedMade - s.injectedFreed,
     errors: e.owned + e.made - e.freed - e.given,
     recordHeaders: h.made - h.freed,
+    metricsViews: m.viewsMade - m.viewsFreed,
+    metrics: m.metricsMade - m.metricsFreed,
   };
 }
 `;
@@ -101,6 +104,8 @@ const NO_LEAKS = {
   injectedErrors: 0,
   errors: 0,
   recordHeaders: 0,
+  metricsViews: 0,
+  metrics: 0,
 };
 
 /**

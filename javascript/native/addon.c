@@ -256,6 +256,14 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"mockProducerState", NULL, js_mock_producer_state, NULL, NULL, NULL, napi_default, NULL},
         {"recordFutureGet", NULL, js_record_future_get, NULL, NULL, NULL, napi_default, NULL},
         {"producerStats", NULL, js_producer_stats, NULL, NULL, NULL, napi_default, NULL},
+        // metrics.c
+        {"metricsViewSize", NULL, js_metrics_view_size, NULL, NULL, NULL, napi_default, NULL},
+        {"metricsViewHas", NULL, js_metrics_view_has, NULL, NULL, NULL, napi_default, NULL},
+        {"metricsViewGet", NULL, js_metrics_view_get, NULL, NULL, NULL, napi_default, NULL},
+        {"metricsViewEntries", NULL, js_metrics_view_entries, NULL, NULL, NULL, napi_default, NULL},
+        {"metricValue", NULL, js_metric_value, NULL, NULL, NULL, napi_default, NULL},
+        {"metricIsMeasurable", NULL, js_metric_is_measurable, NULL, NULL, NULL, napi_default, NULL},
+        {"metricsStats", NULL, js_metrics_stats, NULL, NULL, NULL, napi_default, NULL},
         // headers.c
         {"headerStats", NULL, js_header_stats, NULL, NULL, NULL, napi_default, NULL},
         // record_spy.c

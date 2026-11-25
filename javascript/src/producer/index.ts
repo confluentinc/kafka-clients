@@ -31,8 +31,6 @@
  * `clientInstanceId`, `disableTelemetry`, `injectTimeoutException`,
  * `setClientInstanceId`, `registerMetricForSubscription`,
  * `unregisterMetricFromSubscription` and `addedMetrics`.
- * `MockProducer.setMockMetrics` is left out too: the FFI takes a native
- * `KafkaMetric`, which the binding cannot build.
  *
  * Left out because it takes an untranslated type:
  * `MockProducer(Cluster, boolean, Partitioner, Serializer, Serializer)`, so a

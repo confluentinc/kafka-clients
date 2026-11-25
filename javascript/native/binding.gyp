@@ -48,6 +48,7 @@
         "error.c",
         "error_payload.c",
         "headers.c",
+        "metrics.c",
         "producer.c",
         "record.c",
         "record_spy.c"

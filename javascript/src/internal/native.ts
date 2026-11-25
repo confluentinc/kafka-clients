@@ -28,16 +28,30 @@ import { loadAddon, platformKey } from './native_loader';
 import { warn } from './warn';
 import { RecordMetadata } from '../producer/record_metadata';
 
-/** A metric's fields and its value read when metrics() ran (native/producer.c, metric_to_js). */
-interface NativeMetric {
+/** A metric name's fields, as the addon reads them (native/metrics.c, metric_name_to_js). */
+interface NativeMetricName {
   name: string;
   group: string;
   description: string;
   // The tags sorted by key.
   tags: Array<[string, string]>;
-  // A double or an int a number, a long a bigint, a string gauge a string.
-  value: number | bigint | string;
-  measurable: boolean;
+}
+
+/** A live metrics view the addon owns (native/metrics.c), opaque to JavaScript. */
+type MetricsViewHandle = object;
+
+/** A metric taken from a view, which the addon owns (native/metrics.c), opaque to JavaScript. */
+type MetricHandle = object;
+
+/** A metric as the view gives it: its name's fields and its handle. */
+type NativeMetricEntry = [NativeMetricName, MetricHandle];
+
+/** The counts of native/metrics.c, for the memory tests: the view and metric handles made, and destroyed. */
+interface MetricsStats {
+  viewsMade: number;
+  viewsFreed: number;
+  metricsMade: number;
+  metricsFreed: number;
 }
 
 /** A node's fields, as the addon reads them (native/producer.c, node_to_js). */
@@ -175,8 +189,22 @@ interface Native {
   ): void;
   producerFlush(handle: ProducerHandle, onComplete: (error: unknown) => void): void;
   // Java's metrics() through kafka_producer_Producer_metrics (no _cb twin):
-  // every metric, read now.
-  producerMetrics(handle: ProducerHandle): NativeMetric[];
+  // the live view, valid after the producer is destroyed.
+  producerMetrics(handle: ProducerHandle): MetricsViewHandle;
+  // The view's number of metrics, read now.
+  metricsViewSize(view: MetricsViewHandle): number;
+  // Whether a metric is registered now under the name (name, group, tags),
+  // the tags as [key, value] pairs; Java's equality ignores the description.
+  metricsViewHas(view: MetricsViewHandle, name: string, group: string, tags: Array<[string, string]>): boolean;
+  // The metric registered now under that name, or null.
+  metricsViewGet(view: MetricsViewHandle, name: string, group: string, tags: Array<[string, string]>): NativeMetricEntry | null;
+  // The metrics registered now, each taken from the view.
+  metricsViewEntries(view: MetricsViewHandle): NativeMetricEntry[];
+  // The metric's value, measured now: a double or an int a number, a long a
+  // bigint, a string gauge a string.
+  metricValue(metric: MetricHandle): number | bigint | string | null;
+  // Whether the metric's provider is a Measurable.
+  metricIsMeasurable(metric: MetricHandle): boolean;
   // Java's partitionsFor through partitions_for_cb; the partitions' fields
   // as src/common/partition_info.ts's constructor takes them, each node as
   // src/common/node.ts's does. A null topic goes to the core as NULL.
@@ -236,6 +264,8 @@ interface Native {
     timeoutMs: number | null,
     done: (metadata: RecordMetadata | null, error: unknown, timedOut: boolean, failed: boolean) => void,
   ): void;
+  // The counts of native/metrics.c. Test-only.
+  metricsStats(): MetricsStats;
   // The counts of native/headers.c. Test-only.
   headerStats(): HeaderStats;
   // The counts of native/producer.c. Test-only.

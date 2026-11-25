@@ -73,6 +73,13 @@ const TEST_ONLY = new Map([
     },
   ],
   [
+    'metricsStats',
+    {
+      test: 'test/memory/metrics.test.js',
+      reason: 'a test-only registration: the counts of native/metrics.c, which prove each metrics view and metric handle is destroyed once',
+    },
+  ],
+  [
     'recordSpy',
     {
       test: 'test/memory/record_read_back.test.js',

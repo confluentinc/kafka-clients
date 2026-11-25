@@ -18,7 +18,9 @@
 // fields MetricName.equals compares, and keeps each original MetricName, so
 // keys() and entries() return MetricName objects. A key is computed when its
 // entry is stored. Read-only, as the map
-// Java's metrics() returns is unmodifiable.
+// Java's metrics() returns is unmodifiable. A client's metrics() map is live,
+// as Java's: it reads a source the library gives it (`internalLive`) at each
+// call, every iteration taking the source's entries as they are then.
 
 import { JavaForms } from '../internal/args';
 import { MetricName } from './metric_name';
@@ -38,8 +40,27 @@ const SIZE_FORMS = new JavaForms('size', [[]], { reader: true });
  * @returns its key
  */
 function keyOf(name: unknown): string {
+  return checkName(name).internalKey();
+}
+
+/**
+ * `name`, which must be a MetricName.
+ *
+ * @param name - the name given
+ * @returns the name
+ */
+function checkName(name: unknown): MetricName {
   if (!(name instanceof MetricName)) throw new TypeError('key must be a MetricName');
-  return name.internalKey();
+  return name;
+}
+
+/** What a live map reads at each call (`MetricNameMap.internalLive`). */
+interface LiveSource<V> {
+  size(): number;
+  has(key: MetricName): boolean;
+  get(key: MetricName): V | null;
+  // The entries as they are now, each key the source's own MetricName.
+  entries(): Array<[MetricName, V]>;
 }
 
 /**
@@ -57,6 +78,10 @@ function keyOf(name: unknown): string {
  */
 export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
   readonly #entries = new Map<string, [MetricName, V]>();
+
+  // A live map's source, read at each call instead of the entries; null for
+  // a map built from entries.
+  #source: LiveSource<V> | null = null;
 
   /**
    * Creates an empty map.
@@ -106,6 +131,7 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
    */
   size(): number {
     SIZE_FORMS.match(undefined, arguments.length);
+    if (this.#source !== null) return this.#source.size();
     return this.#entries.size;
   }
 
@@ -133,6 +159,7 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
   get(key: MetricName): V | null;
   get(key: unknown): V | null {
     GET_FORMS.match(key, arguments.length);
+    if (this.#source !== null) return this.#source.get(checkName(GET_FORMS.value(key, 'key')));
     const entry = this.#entries.get(keyOf(GET_FORMS.value(key, 'key')));
     return entry === undefined ? null : entry[1];
   }
@@ -159,6 +186,7 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
   has(key: MetricName): boolean;
   has(key: unknown): boolean {
     HAS_FORMS.match(key, arguments.length);
+    if (this.#source !== null) return this.#source.has(checkName(HAS_FORMS.value(key, 'key')));
     return this.#entries.has(keyOf(HAS_FORMS.value(key, 'key')));
   }
 
@@ -168,7 +196,9 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
    * @returns an iterator over the keys
    */
   keys(): IterableIterator<MetricName> {
-    return [...this.#entries.values()].map(([name]) => name)[Symbol.iterator]();
+    return this.#current()
+      .map(([name]) => name)
+      [Symbol.iterator]();
   }
 
   /**
@@ -177,7 +207,9 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
    * @returns an iterator over the values
    */
   values(): IterableIterator<V> {
-    return [...this.#entries.values()].map(([, value]) => value)[Symbol.iterator]();
+    return this.#current()
+      .map(([, value]) => value)
+      [Symbol.iterator]();
   }
 
   /**
@@ -186,7 +218,9 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
    * @returns an iterator over the entries
    */
   entries(): IterableIterator<[MetricName, V]> {
-    return [...this.#entries.values()].map(([name, value]): [MetricName, V] => [name, value])[Symbol.iterator]();
+    return this.#current()
+      .map(([name, value]): [MetricName, V] => [name, value])
+      [Symbol.iterator]();
   }
 
   /**
@@ -195,7 +229,7 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
    * @param callback - called with the value, the key and the map
    */
   forEach(callback: (value: V, key: MetricName, map: MetricNameMap<V>) => void): void {
-    for (const [name, value] of this.#entries.values()) callback(value, name, this);
+    for (const [name, value] of this.#current()) callback(value, name, this);
   }
 
   /**
@@ -211,6 +245,10 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
    */
   toJSON(): Record<string, V> {
     const out: Record<string, V> = {};
+    if (this.#source !== null) {
+      for (const [name, value] of this.#source.entries()) out[name.internalKey()] = value;
+      return out;
+    }
     for (const [key, [, value]] of this.#entries) out[key] = value;
     return out;
   }
@@ -222,5 +260,27 @@ export class MetricNameMap<V> implements Iterable<[MetricName, V]> {
    */
   [Symbol.iterator](): IterableIterator<[MetricName, V]> {
     return this.entries();
+  }
+
+  // The entries now: the source's, read at this call, or the stored ones.
+  #current(): Array<[MetricName, V]> {
+    if (this.#source !== null) return this.#source.entries();
+    return [...this.#entries.values()];
+  }
+
+  /**
+   * A live map: each call reads `source` as it is then, as Java's
+   * `metrics()` is an unmodifiable live view. Called by the clients.
+   *
+   * @param source - what the map reads: its size, its keys, its values, its
+   *   entries
+   * @returns the map
+   *
+   * @internal
+   */
+  static internalLive<V>(source: LiveSource<V>): MetricNameMap<V> {
+    const map = new MetricNameMap<V>();
+    map.#source = source;
+    return map;
   }
 }

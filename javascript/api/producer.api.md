@@ -132,6 +132,10 @@ export class MockProducer<K, V> implements Producer<K, V> {
         flushException: Error | null;
     }): void;
     setFlushException(flushException: Error | null): void;
+    setMockMetrics(options: {
+        name: MetricName;
+        metric: Metric;
+    }): void;
     setPartitionsForException(options: {
         partitionsForException: Error | null;
     }): void;

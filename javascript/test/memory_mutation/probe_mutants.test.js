@@ -141,6 +141,12 @@ const PROBES = {
   headersModel: { file: 'test/memory/headers_model.test.js', project: 'memory', name: 'random sequences on a record' },
   headersUnderStress: { file: 'test/memory/gc_stress.test.js', project: 'memory', name: 'the headers model under' },
   churn: { file: 'test/memory/lifecycle.test.js', project: 'memory', name: 'producers made, used and closed by the hundred' },
+  metricsHandles: {
+    file: 'test/memory/metrics.test.js',
+    project: 'memory',
+    name: 'every metrics view and metric handle is destroyed once',
+  },
+  metricsKept: { file: 'test/memory/metrics.test.js', project: 'memory', name: 'a map kept after its producer is closed' },
   handOver: {
     file: 'test/integration/memory_probes.test.js',
     project: 'integration',
@@ -313,6 +319,38 @@ const MUTANTS = [
       ],
     ],
     probes: [PROBES.readBack],
+  },
+  {
+    // The destroy and the count that records it go together.
+    name: "no view destroy: a metrics view's handle object is finalized without destroying the view",
+    native: true,
+    edits: [
+      [
+        'native/metrics.c',
+        '    error_warn(env, 0, FFI_ERR(kafka_common_metrics_MetricsView_destroy_err((kafka_common_metrics_MetricsView_t*)data, &ffi_err)));\n    atomic_fetch_add(&stat_views_freed, 1);\n',
+        '    (void)env;\n    (void)data;\n    (void)ffi_err;\n',
+      ],
+    ],
+    probes: [PROBES.metricsHandles, PROBES.metricsKept],
+  },
+  {
+    name: "no metric destroy: a metric's handle object is finalized without destroying the metric",
+    native: true,
+    edits: [
+      [
+        'native/metrics.c',
+        '    error_warn(env, 0, FFI_ERR(kafka_common_metrics_KafkaMetric_destroy_err((kafka_common_metrics_KafkaMetric_t*)data, &ffi_err)));\n    atomic_fetch_add(&stat_metrics_freed, 1);\n',
+        '    (void)env;\n    (void)data;\n    (void)ffi_err;\n',
+      ],
+    ],
+    probes: [PROBES.metricsHandles, PROBES.metricsKept],
+  },
+  {
+    // A removed metric's KafkaMetric, and its native handle, stay in the map's cache.
+    name: 'no cache eviction: a live map keeps the metrics that left the view',
+    native: false,
+    edits: [['dist/internal/live_metrics.js', 'cache.delete(key);', 'void key;']],
+    probes: [PROBES.metricsKept],
   },
   {
     // Java's setReadOnly() is what makes a sent record's headers refuse a change.

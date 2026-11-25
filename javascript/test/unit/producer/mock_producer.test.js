@@ -427,6 +427,39 @@ test('a callback runs inside the call that completes its record, and metrics() i
   assert.ok(producer.closed());
 });
 
+// Java's MockProducer.setMockMetrics puts into the mock's own mockMetrics
+// map, and metrics() returns that map: a metric set later shows in a map
+// taken earlier, and the Metric given comes back.
+test("setMockMetrics puts into the mock's map, which metrics() returns live", async () => {
+  const { MetricName, MetricNameMap } = require('@confluentinc/kafka-javascript/common');
+  const producer = new MockProducer();
+  const metrics = producer.metrics();
+  assert.ok(metrics instanceof MetricNameMap);
+  assert.equal(metrics.size(), 0);
+  assert.equal(producer.metrics(), metrics);
+  const name = new MetricName({ name: 'm', group: 'g', description: 'first', tags: new Map([['k', 'v']]) });
+  const equal = new MetricName({ name: 'm', group: 'g', description: 'second', tags: new Map([['k', 'v']]) });
+  /** @type {import('@confluentinc/kafka-javascript/common').Metric} */
+  const metric = { metricName: () => name, metricValue: () => 1 };
+  /** @type {import('@confluentinc/kafka-javascript/common').Metric} */
+  const replacement = { metricName: () => name, metricValue: () => 2 };
+  producer.setMockMetrics({ name, metric });
+  assert.equal(metrics.size(), 1);
+  assert.equal(metrics.has(equal), true);
+  assert.equal(metrics.get(equal), metric);
+  assert.deepEqual([...metrics], [[name, metric]]);
+  // An equal name replaces the metric and keeps the first name, as HashMap.put does.
+  producer.setMockMetrics({ name: equal, metric: replacement });
+  assert.equal(metrics.size(), 1);
+  assert.deepEqual([...metrics], [[name, replacement]]);
+  await producer.close();
+  assert.equal(metrics.get(name), replacement);
+  // @ts-expect-error a bare name: the form check throws IllegalArgumentError
+  assert.throws(() => producer.setMockMetrics(name), { constructor: IllegalArgumentError });
+  // @ts-expect-error a string for the name: the type check throws TypeError
+  assert.throws(() => producer.setMockMetrics({ name: 'm', metric }), { constructor: TypeError, message: 'name must be a MetricName' });
+});
+
 test("a callback that throws makes the completing call throw it, as Java's mock lets it propagate", async () => {
   const thrown = new Error('callback');
   const throwing = () => {

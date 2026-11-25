@@ -159,6 +159,10 @@ const ALLOWED = [
     reason: "the mock's callback Promises not settled yet, which flush() and close() wait for: not a store of records",
   },
   {
+    key: 'MockProducer.#mockMetrics',
+    reason: "Java's MockProducer.mockMetrics, the metrics setMockMetrics puts and metrics() returns: metrics, not records",
+  },
+  {
     key: 'MockProducer.#deferred',
     reason: "the mock's settlements waiting for the event-loop turn, as KafkaProducer's; the records are handed over at once",
   },

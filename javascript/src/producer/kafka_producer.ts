@@ -23,15 +23,14 @@ import { JavaForms } from '../internal/args';
 import { checkConfigs, configEntries } from '../internal/config';
 import { debug } from '../internal/debug';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
+import { liveMetrics } from '../internal/live_metrics';
 import { warnPreview } from '../internal/lifecycle';
 import { checkSerializer, closeSerializer, configuredSerializer, isThenable, serializedBytes, serializerFailure } from '../internal/serde';
 import { ApiError } from '../common/errors/api_error';
 import { KafkaError } from '../common/kafka_error';
 import { KafkaFuture } from '../common/kafka_future';
 import type { Metric } from '../common/metric';
-import { MetricName } from '../common/metric_name';
-import { MetricNameMap } from '../common/metric_name_map';
-import { KafkaMetric } from '../common/metrics/kafka_metric';
+import type { MetricNameMap } from '../common/metric_name_map';
 import { Node } from '../common/node';
 import { PartitionInfo } from '../common/partition_info';
 import { TopicPartition } from '../common/topic_partition';
@@ -745,11 +744,7 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
 
   metrics(): MetricNameMap<Metric> {
     METRICS_FORMS.match(undefined, arguments.length);
-    const entries: Array<[MetricName, Metric]> = native.producerMetrics(this.#handle).map((m) => {
-      const name = new MetricName({ name: m.name, group: m.group, description: m.description, tags: new Map(m.tags) });
-      return [name, KafkaMetric.internalSnapshot(name, m.value, m.measurable)];
-    });
-    return new MetricNameMap(entries);
+    return liveMetrics(native.producerMetrics(this.#handle));
   }
 
   close(): Promise<void>;

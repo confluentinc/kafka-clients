@@ -203,19 +203,25 @@ export class KafkaMetric implements Metric {
   }
 
   /**
-   * A metric read when the producer's `metrics()` ran: its value, as the
-   * core measured it then, through a provider that returns it (a Measurable
-   * one for a measurable metric). Called by the producer.
+   * A metric whose value provider reads `read` at each `metricValue()`, and
+   * which is a `Measurable` while `measurable()` answers true: a client's
+   * metric, measured by the core when asked. Called by the library.
    *
    * @param metricName - the metric's name
-   * @param value - the metric's value at the snapshot
-   * @param measurable - whether the metric is a `Measurable`
+   * @param read - the metric's value now
+   * @param measurable - whether the metric is a `Measurable` now
    * @returns the metric
    *
    * @internal
    */
-  static internalSnapshot(metricName: MetricName, value: unknown, measurable: boolean): KafkaMetric {
-    const valueProvider = measurable ? { measure: () => value } : { value: () => value };
+  static internalCreate(metricName: MetricName, read: () => unknown, measurable: () => boolean): KafkaMetric {
+    const measure = (): unknown => read();
+    const valueProvider = {
+      value: measure,
+      get measure(): (() => unknown) | undefined {
+        return measurable() ? measure : undefined;
+      },
+    };
     return new KafkaMetric({ lock: null, metricName, valueProvider, config: null, time: SYSTEM_TIME });
   }
 }

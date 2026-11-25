@@ -30,8 +30,7 @@ missing clients.producer.Producer#unregisterMetricFromSubscription
 # MockProducer, with the reasons of the producer package's documentation
 # (src/producer/index.ts): transactions are left out by request (the calls,
 # their state and their error fields); clientInstanceId, the telemetry and
-# metric-subscription calls have no FFI entry point; setMockMetrics needs a
-# native KafkaMetric the binding cannot build.
+# metric-subscription calls have no FFI entry point.
 missing clients.producer.MockProducer#abortTransaction
 missing clients.producer.MockProducer#abortTransactionException
 missing clients.producer.MockProducer#addedMetrics
@@ -52,7 +51,6 @@ missing clients.producer.MockProducer#sendOffsetsToTransaction
 missing clients.producer.MockProducer#sendOffsetsToTransactionException
 missing clients.producer.MockProducer#sentOffsets
 missing clients.producer.MockProducer#setClientInstanceId
-missing clients.producer.MockProducer#setMockMetrics
 missing clients.producer.MockProducer#transactionAborted
 missing clients.producer.MockProducer#transactionCommitted
 missing clients.producer.MockProducer#transactionInFlight

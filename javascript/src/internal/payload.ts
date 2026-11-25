@@ -291,7 +291,11 @@ function coreMetric(raw: unknown, payload: Readonly<Record<string, unknown>>): K
   };
   const metricName = new MetricName({ name: n.name, group: n.group, description: n.description, tags: new Map(n.tags) });
   const value = typeof payload.value === 'number' ? payload.value : 0;
-  return KafkaMetric.internalSnapshot(metricName, value, true);
+  return KafkaMetric.internalCreate(
+    metricName,
+    () => value,
+    () => true,
+  );
 }
 
 /** Java's `KafkaMetric`: a KafkaMetric or null; the core gives its name (`coreMetric`). */

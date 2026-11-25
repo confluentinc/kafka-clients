@@ -2634,8 +2634,9 @@ test("partitionsFor rejects with the core's errors: a metadata timeout, Java's n
   }
 });
 
-// metrics (Java's metrics()): synchronous, a snapshot of the core's metrics.
-test("metrics() is a MetricNameMap of KafkaMetric, read when it runs, keyed by Java's MetricName", async () => {
+// metrics (Java's metrics()): synchronous, Java's unmodifiable live view of
+// the core's metrics.
+test("metrics() is a MetricNameMap of KafkaMetric, keyed by Java's MetricName", async () => {
   const { MetricName, MetricNameMap } = require('@confluentinc/kafka-javascript/common');
   const { KafkaMetric } = require('@confluentinc/kafka-javascript/common/metrics');
   const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'client.id': 'unit-metrics' } });
@@ -2662,8 +2663,13 @@ test("metrics() is a MetricNameMap of KafkaMetric, read when it runs, keyed by J
     assert.ok(total instanceof KafkaMetric);
     assert.equal(total.isMeasurable(), true);
     assert.equal(total.metricValue(), 0);
-    // A snapshot: a second call reads the values again.
-    await producer.send(new ProducerRecord({ topic: 'unit-metrics', value: Buffer.from('v') }));
+    // One KafkaMetric per metric: get() and iteration give the same object.
+    assert.equal(metrics.get(key), total);
+    assert.equal(
+      [...metrics.values()].find((m) => m.metricName().name() === 'record-send-total'),
+      total,
+    );
+    // Each call returns a new view, as Java's Collections.unmodifiableMap does.
     assert.notEqual(producer.metrics(), metrics);
     // @ts-expect-error an argument to a reader: the form check throws TypeError
     assert.throws(() => producer.metrics(1), { constructor: TypeError, message: 'metrics() only reads: it takes no argument' });
@@ -2928,10 +2934,42 @@ test("close() removes the producer's *-time-ns-total metrics, as Java's KafkaPro
     assert.equal(before.has(producerMetric(name, 'unit-metrics-close')), true, name);
     assert.equal(before.get(producerMetric(name, 'unit-metrics-close'))?.metricValue(), 0, name);
   }
+  const sizeBefore = before.size();
   await producer.close();
   const after = producer.metrics();
   for (const name of names) assert.equal(after.has(producerMetric(name, 'unit-metrics-close')), false, name);
   assert.equal(after.has(producerMetric('record-send-total', 'unit-metrics-close')), true);
+  // The map taken before close() is live: it answers, without the removed metrics.
+  for (const name of names) {
+    assert.equal(before.has(producerMetric(name, 'unit-metrics-close')), false, name);
+    assert.equal(before.get(producerMetric(name, 'unit-metrics-close')), null, name);
+  }
+  assert.equal(before.size(), sizeBefore - names.length);
+  assert.equal([...before.keys()].length, sizeBefore - names.length);
+});
+
+// Java's metrics() is "an unmodifiable live view ... Changes to the underlying
+// metrics will be reflected in the returned map", and a KafkaMetric kept from
+// it measures on each metricValue(): metadata-age, the seconds since the last
+// metadata update, is measured when read.
+test('a KafkaMetric kept from metrics() measures on every read, after close() too', async () => {
+  const producer = new KafkaProducer({ configs: { ...UNREACHABLE, 'client.id': 'unit-metrics-live' } });
+  const metrics = producer.metrics();
+  const age = metrics.get(producerMetric('metadata-age', 'unit-metrics-live'));
+  assert.ok(age !== null);
+  const first = /** @type {number} */ (age.metricValue());
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const second = /** @type {number} */ (age.metricValue());
+  assert.ok(second > first, `${second} > ${first}`);
+  await producer.close();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(/** @type {number} */ (age.metricValue()) > second);
+  // The map still answers once the producer is closed, as Java's does.
+  assert.ok(metrics.size() > 0);
+  assert.equal(metrics.get(producerMetric('metadata-age', 'unit-metrics-live')), age);
+  assert.ok(producer.metrics().size() > 0);
+  // Read-only, as Java's unmodifiable map: no method writes it.
+  for (const write of ['set', 'delete', 'clear', 'put', 'remove']) assert.equal(/** @type {any} */ (metrics)[write], undefined, write);
 });
 
 // KafkaProducerMetricsTest.shouldRecordMetadataWaitTime, its failure half

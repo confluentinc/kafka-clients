@@ -29,9 +29,7 @@
 // fenceProducer), their state (transactionInitialized, transactionInFlight,
 // transactionCommitted, transactionAborted, sentOffsets, commitCount,
 // uncommittedRecords, consumerGroupOffsetsHistory, uncommittedOffsets) and
-// their error fields. Left out for want of an FFI entry point or a native
-// value the binding can build: setMockMetrics (the FFI takes a native
-// KafkaMetric_t, which the binding cannot build), clientInstanceId,
+// their error fields. Left out for want of an FFI entry point: clientInstanceId,
 // disableTelemetry, injectTimeoutException, setClientInstanceId,
 // registerMetricForSubscription, unregisterMetricFromSubscription and
 // addedMetrics.
@@ -45,7 +43,6 @@ import { KafkaFuture } from '../common/kafka_future';
 import type { Metric } from '../common/metric';
 import { MetricName } from '../common/metric_name';
 import { MetricNameMap } from '../common/metric_name_map';
-import { KafkaMetric } from '../common/metrics/kafka_metric';
 import { Node } from '../common/node';
 import { PartitionInfo } from '../common/partition_info';
 import { TopicPartition } from '../common/topic_partition';
@@ -70,6 +67,7 @@ const SEND_FORMS = new JavaForms('send', [['record'], ['record', 'callback']], {
 const CLOSE_FORMS = new JavaForms('close', [[], ['timeout']], { bareTypes: { timeout: isDurationOrNull } });
 const FLUSH_FORMS = new JavaForms('flush', [[]]);
 const METRICS_FORMS = new JavaForms('metrics', [[]], { reader: true });
+const SET_MOCK_METRICS_FORMS = new JavaForms('setMockMetrics', [['name', 'metric']]);
 const PARTITIONS_FOR_FORMS = new JavaForms('partitionsFor', [['topic']], {
   bareTypes: { topic: (value) => value === null || typeof value === 'string' },
 });
@@ -180,6 +178,18 @@ function failedMetadata(topic: string): RecordMetadata {
  */
 export class MockProducer<K, V> implements Producer<K, V> {
   #handle: ProducerHandle;
+
+  // Java's mockMetrics, a HashMap<MetricName, Metric> kept in JavaScript as
+  // Java's mock keeps it, by the MetricNameMap key of each name; and the
+  // live, read-only map over it that metrics() returns, Java's returning the
+  // map itself.
+  readonly #mockMetrics = new Map<string, [MetricName, Metric]>();
+  readonly #metrics: MetricNameMap<Metric> = MetricNameMap.internalLive<Metric>({
+    size: () => this.#mockMetrics.size,
+    has: (key) => this.#mockMetrics.has(key.internalKey()),
+    get: (key) => this.#mockMetrics.get(key.internalKey())?.[1] ?? null,
+    entries: () => [...this.#mockMetrics.values()].map(([name, metric]): [MetricName, Metric] => [name, metric]),
+  });
   // The serializers given, or null (typed over unknown: send() reads the
   // record as ProducerRecord<unknown, unknown>).
   readonly #keySerializer: Serializer<unknown> | null;
@@ -684,14 +694,37 @@ export class MockProducer<K, V> implements Producer<K, V> {
     });
   }
 
-  /** @remarks The mock has no metrics, as `setMockMetrics` is left out. */
+  /**
+   * @remarks The metrics set with `setMockMetrics`: the map is live over
+   * them, as Java's mock returns its own map.
+   */
   metrics(): MetricNameMap<Metric> {
     METRICS_FORMS.match(undefined, arguments.length);
-    const entries: Array<[MetricName, Metric]> = native.producerMetrics(this.#handle).map((m) => {
-      const name = new MetricName({ name: m.name, group: m.group, description: m.description, tags: new Map(m.tags) });
-      return [name, KafkaMetric.internalSnapshot(name, m.value, m.measurable)];
-    });
-    return new MetricNameMap(entries);
+    return this.#metrics;
+  }
+
+  /**
+   * Set a mock metric for testing purpose
+   *
+   * @param options - the metric's name and the metric
+   * @throws `TypeError` when `name` is not a `MetricName`
+   */
+  setMockMetrics(options: {
+    /** The metric's name. */
+    name: MetricName;
+    /** The metric. */
+    metric: Metric;
+  }): void;
+  setMockMetrics(options: unknown): void {
+    SET_MOCK_METRICS_FORMS.match(options, arguments.length);
+    const name = SET_MOCK_METRICS_FORMS.value(options, 'name');
+    // A null name throws TypeError, where Java's HashMap takes a null key: the
+    // map is keyed by a MetricName's value. An equal name replaces the metric
+    // and keeps the first name, as HashMap.put does.
+    if (!(name instanceof MetricName)) throw new TypeError('name must be a MetricName');
+    const metric = SET_MOCK_METRICS_FORMS.value(options, 'metric') as Metric;
+    const key = name.internalKey();
+    this.#mockMetrics.set(key, [this.#mockMetrics.get(key)?.[0] ?? name, metric]);
   }
 
   /**

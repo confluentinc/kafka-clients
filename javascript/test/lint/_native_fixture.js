@@ -47,6 +47,10 @@ static napi_value js_record_spy(napi_env env, napi_callback_info info) {
     return NULL;
 }
 
+static napi_value js_metrics_stats(napi_env env, napi_callback_info info) {
+    return NULL;
+}
+
 static napi_value js_fault_next(napi_env env, napi_callback_info info) {
     return NULL;
 }
@@ -58,6 +62,7 @@ napi_value addon_init(napi_env env, napi_value exports) {
         {"producerStats", NULL, js_producer_stats, NULL, NULL, NULL, napi_default, NULL},
         {"errorStats", NULL, js_error_stats, NULL, NULL, NULL, napi_default, NULL},
         {"recordSpy", NULL, js_record_spy, NULL, NULL, NULL, napi_default, NULL},
+        {"metricsStats", NULL, js_metrics_stats, NULL, NULL, NULL, napi_default, NULL},
         {"faultNext", NULL, js_fault_next, NULL, NULL, NULL, napi_default, NULL},
         {"flush", NULL, js_flush, NULL, NULL, NULL, napi_default, NULL},
         {"pump", NULL, js_pump, NULL, NULL, NULL, napi_default, NULL},
@@ -94,6 +99,7 @@ const NATIVE_TS = `interface Native {
   producerStats(): object;
   errorStats(): object;
   recordSpy(arm: boolean): object[];
+  metricsStats(): object;
   faultNext(step: string | null): string | null;
   flush(done: () => void): void;
   pump(): void;
@@ -130,6 +136,7 @@ const FILES = {
   'test/memory/native_counts.test.js':
     "const native = require('../../dist/internal/native');\nnative.producerStats();\nnative.errorStats();\nnative.headerStats();\n",
   'test/memory/record_read_back.test.js': "const native = require('../../dist/internal/native');\nnative.recordSpy(false);\n",
+  'test/memory/metrics.test.js': "const native = require('../../dist/internal/native');\nnative.metricsStats();\n",
   'test/unit/producer/kafka_producer.test.js': "const native = require('../../../dist/internal/native');\nnative.faultNext(null);\n",
 };
 

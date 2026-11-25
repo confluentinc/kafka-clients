@@ -1250,26 +1250,65 @@ async function warmedProducer(what) {
   120000,
 );
 
+// Java's metrics() is "an unmodifiable live view ... Changes to the underlying
+// metrics will be reflected in the returned map", and a KafkaMetric kept from
+// it measures on each metricValue(): record-send-total, kept once, counts each
+// record the Sender sent.
 (SKIP ? test.skip : test)(
-  'metrics() counts the records sent, read again on each call',
+  'a record-send-total kept from metrics() counts each record sent: 1, 2, 3',
   async () => {
-    const { MetricName } = require('@confluentinc/kafka-javascript/common');
     const topic = freshTopic('metrics');
     const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-it-metrics' } });
     try {
+      const found = [...producer.metrics()].find(([n]) => n.name() === 'record-send-total' && n.group() === 'producer-metrics');
+      assert.ok(found);
+      const sent = found[1];
+      assert.equal(sent.metricValue(), 0);
+      /** @type {unknown[]} */
+      const values = [];
+      for (let i = 0; i < 3; i++) {
+        await (await producer.send(new ProducerRecord({ topic, value: Buffer.from(`v${i}`) }))).get();
+        await producer.flush();
+        values.push(sent.metricValue());
+      }
+      assert.deepEqual(values, [1, 2, 3]);
+    } finally {
+      await producer.close();
+    }
+  },
+  120000,
+);
+
+// The same live view: a topic's metrics, which the Sender registers on the
+// topic's first send, appear in a map taken before it.
+(SKIP ? test.skip : test)(
+  "a map taken before a topic's first send gains the topic's metrics",
+  async () => {
+    const { MetricName } = require('@confluentinc/kafka-javascript/common');
+    const topic = freshTopic('topic-metrics');
+    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-it-topic-metrics' } });
+    try {
+      const metrics = producer.metrics();
       const key = new MetricName({
         name: 'record-send-total',
-        group: 'producer-metrics',
+        group: 'producer-topic-metrics',
         description: '',
-        tags: new Map([['client-id', 'js-it-metrics']]),
+        tags: new Map([
+          ['client-id', 'js-it-topic-metrics'],
+          ['topic', topic],
+        ]),
       });
-      const before = producer.metrics().get(key);
-      assert.ok(before);
-      assert.equal(before.metricValue(), 0);
-      for (let i = 0; i < 3; i++) await (await producer.send(new ProducerRecord({ topic, value: Buffer.from(`v${i}`) }))).get();
-      const after = producer.metrics().get(key);
-      assert.ok(after);
-      assert.equal(after.metricValue(), 3);
+      const before = metrics.size();
+      assert.equal(metrics.has(key), false);
+      assert.equal(metrics.get(key), null);
+      await (await producer.send(new ProducerRecord({ topic, value: Buffer.from('v') }))).get();
+      await producer.flush();
+      assert.equal(metrics.has(key), true);
+      assert.ok(metrics.size() > before, `${metrics.size()} > ${before}`);
+      const total = metrics.get(key);
+      assert.ok(total);
+      assert.equal(total.metricValue(), 1);
+      assert.ok([...metrics.keys()].some((n) => n.equals(key)));
     } finally {
       await producer.close();
     }
@@ -1931,8 +1970,7 @@ test.skip('the dropped send counts once in buffer-exhausted-total, as BufferPool
 // is pending. The real clock moves only while a flush does something, and an
 // empty one can take less than one of its ticks, so each flush here sends a
 // record lingering in the accumulator (linger.ms holds it well past the test)
-// and waits for its produce response. metrics() is a snapshot, so it is read
-// after each flush.
+// and waits for its produce response.
 (SKIP ? test.skip : test)(
   'flush() records flush-time-ns-total, which grows with each flush',
   async () => {

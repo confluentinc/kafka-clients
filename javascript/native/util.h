@@ -347,6 +347,12 @@ kafka_common_header_internals_RecordHeaders_t* headers_build(napi_env env, napi_
 // Destroys a RecordHeaders headers_build made.
 void headers_destroy(napi_env env, kafka_common_header_internals_RecordHeaders_t* headers);
 
+// ---- metrics.c --------------------------------------------------------------
+
+// A handle object owning `view`, which its finalizer destroys; on failure the
+// view is destroyed and NULL returned with a JS exception pending.
+napi_value metrics_view_take_to_js(napi_env env, kafka_common_metrics_MetricsView_t* view);
+
 // ---- record_spy.c ----------------------------------------------------------
 
 // Test-only: while a test armed recordSpy(), keeps what the record a send
@@ -383,6 +389,15 @@ napi_value js_producer_close(napi_env env, napi_callback_info info);
 napi_value js_producer_pump(napi_env env, napi_callback_info info);
 napi_value js_record_future_get(napi_env env, napi_callback_info info);
 napi_value js_producer_stats(napi_env env, napi_callback_info info);
+
+// metrics.c: the live view and the metrics taken from it.
+napi_value js_metrics_view_size(napi_env env, napi_callback_info info);
+napi_value js_metrics_view_has(napi_env env, napi_callback_info info);
+napi_value js_metrics_view_get(napi_env env, napi_callback_info info);
+napi_value js_metrics_view_entries(napi_env env, napi_callback_info info);
+napi_value js_metric_value(napi_env env, napi_callback_info info);
+napi_value js_metric_is_measurable(napi_env env, napi_callback_info info);
+napi_value js_metrics_stats(napi_env env, napi_callback_info info);
 
 // headers.c: the counts of the RecordHeaders the sends made.
 napi_value js_header_stats(napi_env env, napi_callback_info info);
