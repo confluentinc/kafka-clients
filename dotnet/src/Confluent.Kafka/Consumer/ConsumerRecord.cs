@@ -27,8 +27,10 @@ namespace Confluent.Kafka.Consumer;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A polled record's key and value are the deserializers' output, and its topic and headers are owned copies, so
-/// the record stays valid after the poll's native batch is freed.
+/// A record polled from a <see cref="KafkaConsumer{TKey, TValue}"/> or an
+/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> has the deserializers' output as its key and value, and its topic
+/// and headers are owned copies, so the record stays valid after the poll's native batch is freed. A record polled
+/// from a mock consumer carries the key and value given to its <c>AddRecord</c>.
 /// </para>
 /// <para>
 /// A deserializer that may keep its memory,

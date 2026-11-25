@@ -115,7 +115,7 @@ public sealed class SerializationTests
     }
 
     [Fact(Skip = "Java's deserializer half passes null data, which a ReadOnlySpan<byte> cannot express; a consumer never "
-        + "calls a deserializer for a null key or value, and reads it as null (the MockConsumer tests below)")]
+        + "calls a deserializer for a null key or value, and reads it as null (the consumer tests below, over the C mock)")]
     public void SerializationTest_allSerdesShouldSupportNull_TheDeserializerHalf()
     {
     }
@@ -603,11 +603,11 @@ public sealed class SerializationTests
     }
 
     [Fact]
-    public void MockConsumer_AReadOnlyMemorySerde_ReadsTheBatchsOwnBytes_AndNullOnlyForAnAbsentKeyOrValue()
+    public void KafkaConsumer_AReadOnlyMemorySerde_ReadsTheBatchsOwnBytes_AndNullOnlyForAnAbsentKeyOrValue()
     {
         byte[] value = Encoding.UTF8.GetBytes("my string");
-        MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
-            new MockConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
+        KafkaConsumer<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?> consumer =
+            DecodingConsumers.Create<ReadOnlyMemory<byte>?, ReadOnlyMemory<byte>?>(
                 Serdes.ReadOnlyMemory().Deserializer(), Serdes.ReadOnlyMemory().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
@@ -631,10 +631,10 @@ public sealed class SerializationTests
     }
 
     [Fact]
-    public void MockConsumer_ATombstoneOfALongSerde_ReadsANullValue()
+    public void KafkaConsumer_ATombstoneOfALongSerde_ReadsANullValue()
     {
-        MockConsumer<string, long?> consumer =
-            new MockConsumer<string, long?>(Serdes.String().Deserializer(), Serdes.Long().Deserializer());
+        KafkaConsumer<string, long?> consumer =
+            DecodingConsumers.Create<string, long?>(Serdes.String().Deserializer(), Serdes.Long().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), 0L);
@@ -648,10 +648,10 @@ public sealed class SerializationTests
     }
 
     [Fact]
-    public async Task AsyncMockConsumer_ATombstoneOfALongSerde_ReadsANullValue()
+    public async Task AsyncKafkaConsumer_ATombstoneOfALongSerde_ReadsANullValue()
     {
-        AsyncMockConsumer<string, long?> consumer =
-            new AsyncMockConsumer<string, long?>(new AsyncStringDeserializer(), new AsyncLongDeserializer());
+        AsyncKafkaConsumer<string, long?> consumer =
+            DecodingConsumers.CreateAsync<string, long?>(new AsyncStringDeserializer(), new AsyncLongDeserializer());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
@@ -671,10 +671,10 @@ public sealed class SerializationTests
     }
 
     [Fact]
-    public void MockConsumer_AValueForAVoidDeserializer_ThrowsRecordDeserializationException()
+    public void KafkaConsumer_AValueForAVoidDeserializer_ThrowsRecordDeserializationException()
     {
-        MockConsumer<string, object?> consumer =
-            new MockConsumer<string, object?>(Serdes.String().Deserializer(), Serdes.Void().Deserializer());
+        KafkaConsumer<string, object?> consumer =
+            DecodingConsumers.Create<string, object?>(Serdes.String().Deserializer(), Serdes.Void().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), 0L);
@@ -691,10 +691,10 @@ public sealed class SerializationTests
     }
 
     [Fact]
-    public async Task AsyncMockConsumer_AValueForAVoidDeserializer_ThrowsRecordDeserializationException()
+    public async Task AsyncKafkaConsumer_AValueForAVoidDeserializer_ThrowsRecordDeserializationException()
     {
-        AsyncMockConsumer<string, object?> consumer =
-            new AsyncMockConsumer<string, object?>(new AsyncStringDeserializer(), new AsyncVoidDeserializer());
+        AsyncKafkaConsumer<string, object?> consumer =
+            DecodingConsumers.CreateAsync<string, object?>(new AsyncStringDeserializer(), new AsyncVoidDeserializer());
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);

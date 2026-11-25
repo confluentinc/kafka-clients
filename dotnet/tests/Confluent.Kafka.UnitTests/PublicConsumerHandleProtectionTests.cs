@@ -45,7 +45,7 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void SyncQueryFamily_AfterDispose_ThrowsIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         TestTimeout.Dispose(consumer);
 
         TopicPartition[] partitions = new[] { Tp() };
@@ -62,7 +62,7 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void SyncStateReads_AfterDispose_ThrowIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         TestTimeout.Dispose(consumer);
 
         Assert.Throws<IllegalStateException>(() => consumer.Assignment());
@@ -83,10 +83,10 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void MockDriverHelpers_AfterDispose_ThrowIllegalState()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         TestTimeout.Dispose(consumer);
 
-        Assert.Throws<IllegalStateException>(() => consumer.AddRecord("h1-topic", 0, 0L, null, null));
+        Assert.Throws<IllegalStateException>(() => consumer.AddRecord(new ConsumerRecord<byte[], byte[]>("h1-topic", 0, 0L, null, null)));
         Assert.Throws<IllegalStateException>(() => consumer.SetPollException(new KafkaException("boom")));
         Assert.Throws<IllegalStateException>(() => consumer.UpdateBeginningOffset("h1-topic", 0, 0L));
         Assert.Throws<IllegalStateException>(() => consumer.UpdateEndOffset("h1-topic", 0, 5L));
@@ -98,7 +98,7 @@ public sealed class PublicConsumerHandleProtectionTests
     public async Task AsyncQueryFamily_AfterDisposeAsync_ThrowsIllegalState()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            new AsyncMockConsumer<byte[], byte[]>("latest");
         await TestTimeout.DisposeAsync(consumer);
 
         TopicPartition[] partitions = new[] { Tp() };
@@ -117,7 +117,7 @@ public sealed class PublicConsumerHandleProtectionTests
     [Fact]
     public void Wakeup_AfterDispose_IsANoOp_DoesNotThrow()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         TestTimeout.Dispose(consumer);
 
         consumer.Wakeup();
@@ -128,7 +128,7 @@ public sealed class PublicConsumerHandleProtectionTests
     public async Task Wakeup_AfterDisposeAsync_IsANoOp_DoesNotThrow()
     {
         AsyncMockConsumer<byte[], byte[]> consumer =
-            new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+            new AsyncMockConsumer<byte[], byte[]>("latest");
         await TestTimeout.DisposeAsync(consumer);
 
         consumer.Wakeup();
@@ -143,7 +143,7 @@ public sealed class PublicConsumerHandleProtectionTests
                 for (int i = 0; i < 200; i++)
                 {
                     MockConsumer<byte[], byte[]> consumer =
-                        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+                        new MockConsumer<byte[], byte[]>("latest");
 
                     using ManualResetEventSlim ready = new ManualResetEventSlim(false);
                     Exception? waker = null;
@@ -183,7 +183,7 @@ public sealed class PublicConsumerHandleProtectionTests
                 for (int i = 0; i < 100; i++)
                 {
                     MockConsumer<byte[], byte[]> consumer =
-                        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+                        new MockConsumer<byte[], byte[]>("latest");
                     consumer.Assign(new[] { Tp() });
 
                     using ManualResetEventSlim ready = new ManualResetEventSlim(false);
@@ -235,9 +235,9 @@ public sealed class PublicConsumerHandleProtectionTests
                 for (int i = 0; i < 100; i++)
                 {
                     MockConsumer<byte[], byte[]> consumer =
-                        new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+                        new MockConsumer<byte[], byte[]>("latest");
                     consumer.Assign(new[] { Tp() });
-                    consumer.AddRecord("h1-topic", 0, 0L, null, new byte[] { 1, 2, 3 });
+                    consumer.AddRecord(new ConsumerRecord<byte[], byte[]>("h1-topic", 0, 0L, null, new byte[] { 1, 2, 3 }));
                     consumer.Dispose();
                 }
             },
@@ -253,7 +253,7 @@ public sealed class PublicConsumerHandleProtectionTests
                 for (int i = 0; i < 100; i++)
                 {
                     AsyncMockConsumer<byte[], byte[]> consumer =
-                        new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+                        new AsyncMockConsumer<byte[], byte[]>("latest");
                     _ = consumer.Subscribe(ProofTopic());
                     await consumer.DisposeAsync();
                 }
@@ -281,8 +281,7 @@ public sealed class PublicConsumerHandleProtectionTests
                             for (int i = 0; i < 50; i++)
                             {
                                 AsyncMockConsumer<byte[], byte[]> consumer =
-                                    new AsyncMockConsumer<byte[], byte[]>(
-                                        new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+                                    new AsyncMockConsumer<byte[], byte[]>("latest");
                                 _ = consumer.Subscribe(ProofTopic());
                                 consumer.Dispose();
                             }

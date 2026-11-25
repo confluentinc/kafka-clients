@@ -212,7 +212,7 @@ public sealed class PublicAsyncConsumerCloseTests
 
     private static async Task<IAsyncConsumer<byte[], byte[]>> Create(bool mock) => mock ? Mock() : await Real();
 
-    private static AsyncMockConsumer<byte[], byte[]> Mock() => new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+    private static AsyncMockConsumer<byte[], byte[]> Mock() => new AsyncMockConsumer<byte[], byte[]>("latest");
 
     private static async Task<AsyncKafkaConsumer<byte[], byte[]>> Real(string? groupId = null)
     {

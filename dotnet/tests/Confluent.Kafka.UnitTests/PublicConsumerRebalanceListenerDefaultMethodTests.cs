@@ -386,8 +386,8 @@ public sealed class PublicConsumerRebalanceListenerDefaultMethodTests
     {
         "KafkaConsumer" => KafkaConsumer<byte[], byte[]>.Create(Configs(), Bytes(), Bytes()),
         "AsyncKafkaConsumer" => await AsyncKafkaConsumer<byte[], byte[]>.Create(Configs(), Bytes().AsAsync(), Bytes().AsAsync()),
-        "MockConsumer" => new MockConsumer<byte[], byte[]>(Bytes(), Bytes()),
-        _ => new AsyncMockConsumer<byte[], byte[]>(Bytes().AsAsync(), Bytes().AsAsync()),
+        "MockConsumer" => new MockConsumer<byte[], byte[]>("latest"),
+        _ => new AsyncMockConsumer<byte[], byte[]>("latest"),
     };
 
     private static IDeserializer<byte[]> Bytes() => Serdes.ByteArray().Deserializer();

@@ -119,7 +119,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task ACancelledSubscribe_SendsNoWakeup()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
             await AssertCancelSendsNoWakeup(consumer, token => consumer.Subscribe(new[] { Topic }, token));
@@ -133,7 +133,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task ACancelledUnsubscribe_SendsNoWakeup()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
             await WithDeadline(consumer.Subscribe(new[] { Topic }));
@@ -148,7 +148,7 @@ public sealed class ConsumerAsyncCancelTests
     [Fact]
     public async Task ACancelledWakeableOperation_PostsItsWakeDecisionToThePump()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));
@@ -254,51 +254,49 @@ public sealed class ConsumerAsyncCancelTests
         }
     }
 
+    // The real consumers' path (deserializers, no mock slots) over the C mock: a cancelled poll drops its batch and
+    // seeks back to it. The second AddFetched stands in for the broker, which serves the records again after the
+    // seek; the C mock removed the ones it delivered. AsyncMockConsumer never drops a batch: see
+    // PublicAsyncMockConsumerCancelledPollTests.
     [Fact]
     public async Task CancellingAnAsyncPollReturningRecords_SeeksThemBack()
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
-        try
+        NativeConsumer consumer = NativeConsumer.CreateMock("latest");
+        using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        consumer.Assign(new[] { (Topic, 0), (Topic, 1) });
+        consumer.Seek(new TopicPartition(Topic, 0), 0);
+        consumer.Seek(new TopicPartition(Topic, 1), 0);
+        AddFetched(consumer);
+        using CancellationTokenSource cancel = new CancellationTokenSource();
+        Task<ConsumerRecords<byte[], byte[]>> poll;
+        using (ConsumerPumpStall stall = new ConsumerPumpStall(consumer))
         {
-            await WithDeadline(consumer.Assign(new[] { s_tp0, s_tp1 }));
-            await WithDeadline(consumer.Seek(s_tp0, 0));
-            await WithDeadline(consumer.Seek(s_tp1, 0));
-            AddFetched(consumer);
-            using CancellationTokenSource cancel = new CancellationTokenSource();
-            Task<ConsumerRecords<byte[], byte[]>> poll;
-            using (ConsumerPumpStall stall = new ConsumerPumpStall(consumer))
-            {
-                poll = consumer.Poll(TimeSpan.FromSeconds(30), cancel.Token);
-                stall.WaitUntilSignaled();
-                cancel.Cancel();
-            }
+            poll = PollBytes(consumer, TimeSpan.FromSeconds(30), cancel.Token);
+            stall.WaitUntilSignaled();
+            cancel.Cancel();
+        }
 
-            await Assert.ThrowsAsync<OperationCanceledException>(() => WithDeadline(poll));
-            Assert.Equal(3L, await WithDeadline(consumer.Position(s_tp0)));
-            Assert.Equal(7L, await WithDeadline(consumer.Position(s_tp1)));
-            AddFetched(consumer);
-            Assert.Equal(
-                new[] { (0, 3L), (0, 4L), (1, 7L) },
-                (await WithDeadline(consumer.Poll(TimeSpan.FromSeconds(30))))
-                    .Select(record => (Partition: record.Partition(), Offset: record.Offset()))
-                    .OrderBy(fetched => fetched)
-                    .ToArray());
-        }
-        finally
-        {
-            await TestTimeout.DisposeAsync(consumer);
-        }
+        await Assert.ThrowsAsync<OperationCanceledException>(() => WithDeadline(poll));
+        Assert.Equal(3L, consumer.Position(s_tp0));
+        Assert.Equal(7L, consumer.Position(s_tp1));
+        AddFetched(consumer);
+        Assert.Equal(
+            new[] { (0, 3L), (0, 4L), (1, 7L) },
+            (await WithDeadline(PollBytes(consumer, TimeSpan.FromSeconds(30), CancellationToken.None)))
+                .Select(record => (Partition: record.Partition(), Offset: record.Offset()))
+                .OrderBy(fetched => fetched)
+                .ToArray());
     }
 
     [Fact]
     public async Task DisposeDuringAnOperationWhoseCompletionIsQueued_ClosesOnlyAfterTheCompletionRan()
     {
-        Thread warmUp = new Thread(new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()).Dispose);
+        Thread warmUp = new Thread(new AsyncMockConsumer<byte[], byte[]>("latest").Dispose);
         warmUp.IsBackground = true;
         warmUp.Start();
         Assert.True(warmUp.Join(s_deadline));
 
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         SafeConsumerHandle handle = HandleOf(consumer);
         Task unsubscribe;
         Thread disposing = new Thread(consumer.Dispose);
@@ -345,12 +343,20 @@ public sealed class ConsumerAsyncCancelTests
         ["default.api.timeout.ms"] = "1500",
     };
 
-    private static void AddFetched(AsyncMockConsumer<byte[], byte[]> consumer)
+    private static void AddFetched(NativeConsumer consumer)
     {
         consumer.AddRecord(Topic, 0, 3, new byte[] { 1 }, new byte[] { 3 });
         consumer.AddRecord(Topic, 0, 4, new byte[] { 1 }, new byte[] { 4 });
         consumer.AddRecord(Topic, 1, 7, new byte[] { 1 }, new byte[] { 7 });
     }
+
+    private static Task<ConsumerRecords<byte[], byte[]>> PollBytes(
+        NativeConsumer consumer, TimeSpan timeout, CancellationToken cancellationToken) =>
+        consumer.PollWithCallback(
+            timeout,
+            new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()),
+            new AsyncDeserializerCall<byte[]>(new AsyncByteArrayDeserializer()),
+            cancellationToken);
 
     private static async Task AssertCancelSendsNoWakeup(
         AsyncMockConsumer<byte[], byte[]> consumer, Func<CancellationToken, Task> operation)
@@ -371,7 +377,7 @@ public sealed class ConsumerAsyncCancelTests
     private static async Task AssertAssignedCancelSendsNoWakeup(
         Func<AsyncMockConsumer<byte[], byte[]>, CancellationToken, Task> operation)
     {
-        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
             await WithDeadline(consumer.Assign(new[] { s_tp0 }));

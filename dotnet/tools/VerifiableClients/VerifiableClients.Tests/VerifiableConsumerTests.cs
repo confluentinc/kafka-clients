@@ -18,7 +18,6 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -664,7 +663,7 @@ public sealed class VerifiableConsumerTests : IDisposable
         mock.UpdateBeginningOffset("t", 0, 0);
         foreach (long offset in offsets)
         {
-            mock.AddRecord("t", 0, offset, null, Encoding.UTF8.GetBytes(offset.ToString(CultureInfo.InvariantCulture)));
+            mock.AddRecord(new ConsumerRecord<string, string>("t", 0, offset, null, offset.ToString(CultureInfo.InvariantCulture)));
         }
     }
 
@@ -689,7 +688,7 @@ public sealed class VerifiableConsumerTests : IDisposable
 
     private MockConsumer<string, string> Mock()
     {
-        var consumer = new MockConsumer<string, string>(new StringDeserializer(), new StringDeserializer(), "earliest");
+        var consumer = new MockConsumer<string, string>("earliest");
         _consumers.Add(consumer);
         return consumer;
     }
@@ -793,7 +792,7 @@ public sealed class VerifiableConsumerLogTests
     [Fact]
     public void RunLogsAnyOtherErrorAndStillShutsDown()
     {
-        using var mock = new MockConsumer<string, string>(new StringDeserializer(), new StringDeserializer(), "earliest");
+        using var mock = new MockConsumer<string, string>("earliest");
         mock.SetPollException(new KafkaException("poll failed"));
         var stdout = new StringWriter();
         string stderr = CapturingStderr(() => Verifiable(mock, stdout).Run());

@@ -707,6 +707,69 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_destroy_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerRecordDestroy(IntPtr self, ref IntPtr outErr);
 
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_delivery_count_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern short ConsumerRecordDeliveryCount(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_new_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRecordOptionsBuilderNew(ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_topic_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetTopic(IntPtr self, IntPtr topic, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_partition_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetPartition(IntPtr self, int partition, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_offset_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetOffset(IntPtr self, long offset, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_timestamp_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetTimestamp(IntPtr self, long timestamp, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_timestamp_type_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetTimestampType(IntPtr self, IntPtr timestampType, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_serialized_key_size_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetSerializedKeySize(IntPtr self, int serializedKeySize, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_serialized_value_size_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetSerializedValueSize(IntPtr self, int serializedValueSize, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_key_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetKey(IntPtr self, IntPtr key, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_value_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetValue(IntPtr self, IntPtr value, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_headers_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetHeaders(IntPtr self, IntPtr headers, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_leader_epoch_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetLeaderEpoch(IntPtr self, int leaderEpoch, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_set_delivery_count_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderSetDeliveryCount(IntPtr self, short deliveryCount, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_build", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRecordOptionsBuilderBuild(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptionsBuilder_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsBuilderDestroy(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_with_options_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRecordWithOptions(IntPtr options, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecordOptions_destroy_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRecordOptionsDestroy(IntPtr self, ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_record_TimestampType_no_timestamp_type_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TimestampTypeNoTimestampType(ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_record_TimestampType_create_time_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TimestampTypeCreateTime(ref IntPtr outErr);
+
+    [DllImport(DllName, EntryPoint = "kafka_common_record_TimestampType_log_append_time_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr TimestampTypeLogAppendTime(ref IntPtr outErr);
+
     [DllImport(DllName, EntryPoint = "kafka_common_record_TimestampType__enum_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int TimestampTypeEnum(IntPtr self, ref IntPtr outErr);
 

@@ -53,7 +53,7 @@ public sealed class SerdeGuardTests
 
     private static readonly string[] s_producers = { "KafkaProducer", "MockProducer" };
 
-    private static readonly string[] s_consumers = { "KafkaConsumer", "MockConsumer" };
+    private static readonly string[] s_consumers = { "KafkaConsumer" };
 
     public static TheoryData<string, bool> Producers => Cases(s_producers);
 
@@ -64,8 +64,6 @@ public sealed class SerdeGuardTests
     public static TheoryData<string, bool> RealConsumers => Cases(new[] { "KafkaConsumer" });
 
     public static TheoryData<string> MockProducers => new TheoryData<string> { "MockProducer" };
-
-    public static TheoryData<string> MockConsumers => new TheoryData<string> { "MockConsumer" };
 
     [Theory]
     [MemberData(nameof(Producers))]
@@ -147,11 +145,6 @@ public sealed class SerdeGuardTests
         await DisposeBounded(Producer(producer, new ClosingSerializer(), new ClosingSerializer()));
 
     [Theory]
-    [MemberData(nameof(MockConsumers))]
-    public async Task AMockConsumer_TakesADeserializerWithAClose_SinceItDisposesNothing(string consumer) =>
-        await DisposeBounded(Consumer(consumer, new ClosingDeserializer(), new ClosingDeserializer()));
-
-    [Theory]
     [MemberData(nameof(Producers))]
     public async Task AProducer_TakesASerializerWithTheHeadersInterface_AndOneWithACloseThatIsDisposable(string producer, bool asKey)
     {
@@ -214,11 +207,9 @@ public sealed class SerdeGuardTests
         _ => new MockProducer<string, string>(key, value),
     };
 
-    private static object Consumer(string consumer, IDeserializer<string> key, IDeserializer<string> value) => consumer switch
-    {
-        "KafkaConsumer" => KafkaConsumer<string, string>.Create(ConsumerConfigs(), key, value),
-        _ => new MockConsumer<string, string>(key, value),
-    };
+    // The mock consumers take no deserializer (Java's MockConsumer(String)), so only the real consumer is here.
+    private static object Consumer(string consumer, IDeserializer<string> key, IDeserializer<string> value) =>
+        KafkaConsumer<string, string>.Create(ConsumerConfigs(), key, value);
 
     private static Task DisposeBounded(object client) =>
         client is IAsyncDisposable async ? TestTimeout.DisposeAsync(async) : Task.Run(() => TestTimeout.Dispose((IDisposable)client));

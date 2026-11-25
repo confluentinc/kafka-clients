@@ -274,7 +274,7 @@ public sealed class PublicSyncConsumerCloseTests
 
     private static IConsumer<byte[], byte[]> Create(bool mock) => mock ? Mock() : Real();
 
-    private static MockConsumer<byte[], byte[]> Mock() => new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+    private static MockConsumer<byte[], byte[]> Mock() => new MockConsumer<byte[], byte[]>("latest");
 
     private static KafkaConsumer<byte[], byte[]> Real() => KafkaConsumer<byte[], byte[]>.Create(
         new Dictionary<string, object?>

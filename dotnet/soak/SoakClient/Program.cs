@@ -228,8 +228,7 @@ internal static class Program
             using (var producer = new AsyncMockProducer<byte[], SoakRecord>(
                 new AsyncByteArraySerializer(), new SoakRecordSerializer(options.PayloadSize)))
             {
-                using var consumer = new MockConsumer<byte[], SoakRecord>(
-                    Serdes.ByteArray().Deserializer(), new SoakRecordDeserializer());
+                using var consumer = new MockConsumer<byte[], SoakRecord>("latest");
             }
 
             Console.Out.WriteLine(string.Format(

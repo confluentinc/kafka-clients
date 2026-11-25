@@ -46,7 +46,7 @@ public sealed class PublicSyncConsumerWakeupTests
 
     private static MockConsumer<byte[], byte[]> ReadyToPoll()
     {
-        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         return consumer;
@@ -57,7 +57,7 @@ public sealed class PublicSyncConsumerWakeupTests
     {
         MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.AddRecord(Topic, Partition, offset: 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
+        consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, Partition, offset: 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v")));
 
         consumer.Wakeup();
 
@@ -115,7 +115,7 @@ public sealed class PublicSyncConsumerWakeupTests
         Assert.NotNull(observed);
         Assert.False(string.IsNullOrEmpty(observed!.Message));
 
-        consumer.AddRecord(Topic, Partition, offset: 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
+        consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, Partition, offset: 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v")));
         ConsumerRecords<byte[], byte[]> records = default!;
         TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
         Assert.Single(records);

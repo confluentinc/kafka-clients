@@ -195,14 +195,14 @@ public sealed class PublicConsumerCommitCallbackLifetimeTests
                 null, await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(withGroupId), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()), false,
                 asyncCallbacks: true),
             "AsyncMockConsumer+async" => new Subject(
-                null, new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()), true, asyncCallbacks: true),
+                null, new AsyncMockConsumer<byte[], byte[]>("latest"), true, asyncCallbacks: true),
             "KafkaConsumer" => new Subject(
                 KafkaConsumer<byte[], byte[]>.Create(Config(withGroupId), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, false),
-            "MockConsumer" => new Subject(new MockConsumer<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer()), null, true),
+            "MockConsumer" => new Subject(new MockConsumer<byte[], byte[]>("latest"), null, true),
             "AsyncKafkaConsumer" => new Subject(
                 null, await AsyncKafkaConsumer<byte[], byte[]>.Create(Config(withGroupId), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()), false),
             "AsyncMockConsumer" => new Subject(
-                null, new AsyncMockConsumer<byte[], byte[]>(new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer()), true),
+                null, new AsyncMockConsumer<byte[], byte[]>("latest"), true),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
 
