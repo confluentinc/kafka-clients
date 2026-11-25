@@ -4,16 +4,18 @@ Status: **approved** by the user on 2026-11-25, with the decisions of §8, and c
 and linter work, `poll(long)`, `doc-check`, the CHANGELOG, and the per-commit checks the user decided). P1 is
 **done** (2026-11-25): its phase plan, `P1.md` beside this file, was approved with its choices 2(a) to 9(a), and
 its "Result" section has the commits, the review and the gate. Choice 5(a) moved the `Consumer` interface from P1
-to P2. P2's phase plan is next.
+to P2. P2's phase plan, `P2.md`, was approved on 2026-11-26 with its choices 2(a) to 8(a), and P2 is being built.
 
-- Branch `dev/javascript-consumer-bindings` (local only), at `208abeb64`, which is PR #312's head
-  (`origin/dev/javascript-producer-bindings`). It was moved there, with the user's approval, on 2026-11-25.
-- Rules: PR #327's head `50ded6c59` (`origin/kraina-js-claude-rules`), an ancestor of the branch. Its
-  `javascript/CLAUDE.md` is identical to lines 1–224 of this branch's, and lines 11–224 are the JavaScript Binding
-  Conventions.
+- Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
+  an ancestor of the branch. The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
+  through unchanged, under new hashes.
+- Rules: the base holds `origin/kraina-js-claude-rules` up to `31910fe32`. The rules branch is at `aa551943e`, three
+  commits ahead (lines 97, 101, 106, 131 and 160 of its file); the consumer follows them where they apply (P2.md,
+  choice 8(a)).
 - Agent numbers 150–157, one per phase (decision 17).
 - The owner deleted an earlier draft of this plan. This one is written fresh and doesn't use it.
-- Line numbers below are those of `javascript/CLAUDE.md` at `208abeb64`.
+- Line numbers below are those of `javascript/CLAUDE.md` at `208abeb64`. At `8a25205a3` they are the same up to line
+  218; the row of old line 219 is gone, so old lines 220 and 221 are 219 and 220, and the notes start at 227.
 
 ## Words used in this plan
 
@@ -97,9 +99,9 @@ of a consumed record is new in P2 (4.2).
 ## 2. Ground truth and rules
 
 These decide every question, in this order:
-1. The JS conventions, `javascript/CLAUDE.md` lines 11–224, as on PR #327's head. Before each phase, fetch
-   `origin/kraina-js-claude-rules` and diff it against the branch (producer DECISIONS 1). A change stops the phase
-   until I've checked what it touches.
+1. The JS conventions, `javascript/CLAUDE.md` lines 11–223 at `8a25205a3`, and the rules branch's newer lines where
+   they apply (P2.md, choice 8(a)). Before each phase, fetch `origin/kraina-js-claude-rules` and diff it against the
+   branch (producer DECISIONS 1). A change stops the phase until I've checked what it touches.
 2. The C ABI in `rust/target/include/confluent_kafka_bindings.h`.
 3. Java 4.4: `kafka/clients/src/main/java/org/apache/kafka/clients/consumer/` and its tests.
 4. Root `CLAUDE.md` where the JS conventions are silent, and `.claude/rules/consumer-threading.md` §31 and §41 for
@@ -175,16 +177,17 @@ The producer's layout (JS conventions, Layout and modules), one Java class per f
 - A batch may outlive its consumer. The FFI's records handle owns its records and the buffers behind their keys
   and values (the fetch buffer or, for a compressed batch, each record's own), and holds nothing of the consumer
   (`rust/src/ffi/consumer/consumer_records.rs`). So a Buffer kept after `close()`, or after the consumer is
-  collected, stays valid. P2's memory and ASan tests check it.
+  collected, stays valid. P2's broker memory probes check it (P2.md, choice 6(a)); running them under ASan is a
+  Future improvement, drafted on the rules branch (`bcaac2f6b`).
 - Each record has its own `Headers`, never `null`, empty when the record has none, which the app or a deserializer
   can change, a change touching only that record (line 137). On its first read or change, not at `poll()`, it
   copies its list out of the headers that `ConsumerRecord_headers_err` lends out `const`: each key becomes a string,
   and each value a new `Buffer` with its own copy, or `null`. That copy is the one addon call outside the clients
   (line 160). Until then the `Headers` keeps the batch alive, and after it, it holds nothing native. No
   `RecordHeaders_with_record_headers_err` handle is made (decision 2). A record with no headers has nothing to
-  copy, but the addon learns that only by looking, a few calls per record, since the FFI has no header count. The
-  recommendation for P2's phase plan: look only on the copy path, which copies every key and value anyway, so there
-  a record with no headers holds nothing, and plain Node pays nothing.
+  copy, but the addon learns that only by looking, a few calls per record, since the FFI has no header count. P2
+  looks only on the copy path (P2.md, choice 5(a)), which copies every key and value anyway, so there a record with
+  no headers holds nothing, and plain Node pays nothing.
 - The mock's records hold the user's own JavaScript keys and values, not bytes (4.6).
 
 ### 4.3 Waiting calls, the queue and liveness
@@ -198,10 +201,10 @@ The producer's layout (JS conventions, Layout and modules), one Java class per f
 - One call at a time, the core's busy error passed through unchanged; `wakeup()`, `metrics()` and the callback
   window are the exceptions (line 152). `close()` during a pending `poll()` fails.
 - An open consumer keeps Node running, and `close()` lets it exit (line 158). A call on a closed consumer still
-  holds Node until it settles (producer DECISIONS 33).
+  holds Node until it settles, as line 158 now says (producer DECISIONS 33).
 - The binding keeps no closed flag (line 184). The finalizer calls `_destroy` only for a closed consumer, and never
   while a report is pending (lines 150, 155). A consumer that's never closed runs until the process exits, with no
-  warning (decision 6).
+  warning (line 155, decision 6).
 - The preview's `ExperimentalWarning` is sent once per process, shared with the producer
   (`src/internal/lifecycle.ts`); the mock stays silent (line 186).
 - Every example and test sets `group.protocol: 'consumer'` (line 141). With `classic`, the core's
@@ -238,7 +241,8 @@ The producer's layout (JS conventions, Layout and modules), one Java class per f
 - The config keys `key.deserializer` and `value.deserializer` take `({ configs, isKey }) => deserializer`. A
   constructor argument wins. The constructor takes only synchronous functions, and `create()` also takes ones that
   return a Promise (lines 131, 156). The core never sees the client's own serde keys, nor the keys a config
-  function reads that the core doesn't know (producer DECISIONS 16).
+  function reads that the core doesn't know (producer DECISIONS 16). The rules branch's line 131 now has the keys a
+  config function reads reach the core; P6's plan follows it (P2.md §5).
 - In those keys, a class name, a serde object and a class each throw `ConfigError` with line 131's hint, which
   names the class, as in "did you mean `() => new StringDeserializer()`?". A function that returns a Promise
   throws `ConfigError` in the constructor, with a message that points to `create()` (line 131). P6 tests each of
@@ -342,17 +346,19 @@ the full gate before its hand-off (§7).
 
 **P2 — native core, bytes only (N=151).**
 - The `Consumer` interface, moved from P1 beside `KafkaConsumer`, which implements it, as the producer's `Producer`
-  landed with `KafkaProducer` (P1.md, choice 5(a)), with the members left out listed in its docs and their three
-  `missing` baseline lines (§6, gaps 1 and 2). Its design is in P1.md's "Moved to P2". P2's plan covers what P1's
-  checks found for it:
-  - the linter accepts a Promise return on `Consumer` only for a member whose implementation calls a `_cb` twin, so
-    the 42 Promise-returning signatures of the methods P3 wires keep their findings from P2 until P3;
+  landed with `KafkaProducer` (P1.md, choice 5(a)), with the members left out listed in its docs. P2.md is the
+  phase plan, with the linter probe's findings (its §6). What P1's checks found, as the user decided it on
+  2026-11-26:
+  - the interface grows phase by phase, as the admin branch's `Admin` did: P2 has P2's members only, and the
+    members P3, P5 and P6 add are baseline lines until then, with no stubs (P2.md, choice 2(a)). This replaces
+    the 42 Promise-returning signatures keeping their findings until P3;
   - Java's `KafkaConsumer` and `MockConsumer` name `subscribe`'s listener `listener`, where the interface says
-    `callback`, so P2 and P4 need the admin branch's `java_ts.js` changes (`ac3334412`, `fc71b3525`), or the admin
-    branch landed;
-  - `listTopics` and `currentLag` need the admin branch's two table rows (`ce6493d9e`, `3462a2ebc`);
-  - the left-out `Pattern` forms need a `LEFT_OUT` filter in `type_mapping.js`, or baseline lines, and `LEFT_OUT`
-    entries for `KafkaConsumer` and `MockConsumer`.
+    `callback`: P2 copies the admin branch's `java_ts.js` changes word for word (now `fc45e8ba7` and `bdc5bf9b7`,
+    once `ac3334412` and `fc71b3525`), with `35eff7d6d`'s `valueOf` change and test (choice 3(a));
+  - the type rows for `listTopics` and `currentLag` (the admin branch's `508b3da9d` and `35eff7d6d`, once
+    `ce6493d9e` and `3462a2ebc`) move to P3, with those methods;
+  - the left-out `Pattern` forms: `type_mapping.js` skips the `LEFT_OUT` forms, with a test (choice 4(a)), and
+    `LEFT_OUT` gets `KafkaConsumer`'s entries, `MockConsumer`'s in P4.
 - `native/consumer.c`: construction (`ConsumerConfig_new`, then `KafkaConsumer_new` with NULL deserializers, then
   `__as_Consumer_err`), the notify hook, the drains and the finalizer (4.3); `close()` and `close(options)`
   (decision 7).
@@ -361,17 +367,17 @@ the full gate before its hand-off (§7).
   `paused()`, `pause`, `resume`, `wakeup()` and `metrics()`, and what the three getters do on a closed consumer
   (decision 11).
 - The preview warning; an interim refusal of deserializer arguments and config keys (decision 13).
-- Tests: `ConsumerConfigTest` without its deserializer cases, ported through `new KafkaConsumer`, as
-  `SaslConfigsTest` was for the producer (producer DECISIONS 28); the broker-less `KafkaConsumerTest` cases for
-  these methods; one broker round trip, with the JavaScript producer writing and the JavaScript consumer reading;
-  memory and ASan cases for the batch lifetime.
+- Tests: `ConsumerConfigTest`, 9 of 17 ported through `new KafkaConsumer`, as `SaslConfigsTest` was for the producer
+  (producer DECISIONS 28); 30 broker-less `KafkaConsumerTest` cases for these methods (P2.md §2); one broker round
+  trip, with the JavaScript producer writing and the JavaScript consumer reading; the batch's lifetime in the broker
+  memory probes (P2.md, choice 6(a)).
 - A test of the copy path that Electron needs (4.2): a broker memory probe in
   `test/integration/memory_probes.test.js`, with a test-only switch that makes the addon act as if Node-API had
   refused external buffers. It checks that:
   - the keys and values are copies, compared by address, as `recordSpy()` does for the producer;
   - the copies don't count toward the batch: once nothing but copies is left, the batch is destroyed, though the
-    test still holds every key and value. That's right after `poll()` for records with no headers, with 4.2's
-    recommendation, and right after the last record's `Headers` is read otherwise;
+    test still holds every key and value. That's right after `poll()` for records with no headers (4.2, P2.md
+    choice 5(a)), and right after the last record's `Headers` is read otherwise;
   - the copies stay valid after that, and after `close()`, under the probes' poisoned allocator;
   - without the switch, the same records keep their batch until their Buffers are collected.
 - The switch and the read-back are built and named as the producer's test-only native code is: registered in
@@ -386,8 +392,10 @@ the full gate before its hand-off (§7).
   `group.id` check, `position`, `seek` (to an offset or an `OffsetAndMetadata`), `seekToBeginning`, `seekToEnd`,
   `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `partitionsFor`, `listTopics`, `currentLag` and
   `enforceRebalance` (decision 9).
-- Tests: the matching `KafkaConsumerTest` cases, with exact messages; broker tests for commits, `committed`, seeks
-  and `position`.
+- The 15 methods join both `Consumer` and `KafkaConsumer`, removing their 30 baseline lines; the type rows for
+  `listTopics` and `currentLag` come with them; `commitAsync`'s two callback forms are `overload-missing` until P5.
+- Tests: the matching `KafkaConsumerTest` cases, with exact messages (6, and the commit halves of the two
+  default-group-id cases P2 starts); broker tests for commits, `committed`, seeks and `position`.
 
 **P4 — MockConsumer (N=153).**
 - 4.6, with every method of the FFI's mock. The members the FFI lacks are left out and listed (§6).
@@ -413,8 +421,9 @@ the full gate before its hand-off (§7).
   `allSerdesShouldSupportNull`, the three `floatDeserializerShouldThrowSerializationExceptionOn*` cases,
   `floatSerdeShouldPreserveNaNValues`, `testSerializeVoid`, `testDeserializeVoid`,
   `voidDeserializerShouldThrowOnNotNullValues`, `testBooleanSerializer`, `testBooleanDeserializer`,
-  `booleanDeserializerShouldThrowOnEmptyInput`), and the deserializer cases of `ConsumerConfigTest` and
-  `KafkaConsumerTest`. Left out, with the reasons in the test file: the 19 `listSerde*` cases, `ListSerializerTest`
+  `booleanDeserializerShouldThrowOnEmptyInput`), and the deserializer cases of `KafkaConsumerTest`. None of
+  `ConsumerConfigTest` is left for P6: its two deserializer cases test `appendDeserializerToConfig`, which isn't
+  translated (P2.md §2). Left out, with the reasons in the test file: the 19 `listSerde*` cases, `ListSerializerTest`
   and `ListDeserializerTest` (the List serdes are left out, line 128); `testSerdeFromUnknown` and
   `testSerdeFromNotNull` (`Serdes` isn't translated); `stringSerdeShouldSupportDifferentEncodings` and
   `stringSerdeConfigureThrowsOnUnknownEncoding` (UTF-8 only, no `configure()`); `stringDeserializerSupportByteBuffer`
@@ -451,8 +460,8 @@ the full gate before its hand-off (§7).
 | `CloseOptionsTest` | 4 | P1, all |
 | `ConsumerGroupMetadataTest` | 5 | P1, 2: the two getter tests, through `internalCreate`; the three null checks are skipped, as they test the deprecated constructors |
 | `OffsetAndMetadataTest` | — | already ported |
-| `ConsumerConfigTest` | 17 | P2 through `new KafkaConsumer`; the deserializer cases in P6 |
-| `KafkaConsumerTest` | 135 | P2 to P7. Python's port is the starting point (36 broker-less, 14 broker-backed, 85 left out with reasons), and each case is re-checked against Java and the FFI |
+| `ConsumerConfigTest` | 17 | P2, 9 through `new KafkaConsumer`; the other 8 skipped, with their reasons (P2.md §2) |
+| `KafkaConsumerTest` | 135 | P2 to P7: P2 30, P3 6, P6 1, P7 14, and 84 left out with reasons (P2.md §2). Python's port is the starting point (36 broker-less, 14 broker-backed, 85 left out with reasons), and each case is re-checked against Java and the FFI |
 | `MockConsumerTest` | 13 | P4 (7) and P5 (6) |
 | `SerializationTest` | 36 | P6, the 12 in scope |
 | `ListSerializerTest`, `ListDeserializerTest` | — | left out: the List serdes are |
@@ -507,8 +516,8 @@ Three FFI behaviours the binding lives with for now:
   (`make -C javascript test-integration`). I report every result, including failures caused by the environment.
 
 **Before each phase:**
-- Check that `origin/dev/javascript-producer-bindings` is still the base (`208abeb64` today). If it moved, stop and
-  report; the user rebases with `git rebase --onto origin/dev/javascript-producer-bindings 208abeb64`.
+- Check that `origin/dev/javascript-producer-bindings` is still an ancestor of the branch (`f62d5fec9` on
+  2026-11-26). If it moved, stop and report: the user moves the branch.
 - Fetch `origin/kraina-js-claude-rules` and diff its conventions against the branch's (§2).
 - Check whether the admin branch has landed (decision 14).
 
@@ -520,6 +529,10 @@ Three FFI behaviours the binding lives with for now:
 - Never use `git stash`, and kill processes only by PID.
 - Use one shared scratch broker. The brief says the Docker VM has 8 GB; on 2026-11-25 it reported about 15.6 GiB.
 - Stage explicit paths only.
+
+**Baseline at `8a25205a3`**, after the move onto `f62d5fec9` (`make verify-javascript`, 2026-11-25, passed): static
+75, unit 578 and 1 skipped, memory 21, typing 10, verifiable-clients 127, grpc-server 13, integration 77 and 12
+skipped (the SSL and SASL suites), stress 2, lint 440.
 
 **Baseline at `208abeb64`** (`make verify-javascript`, 2026-11-25, 11:24 to 11:42, exit 0):
 - Builds: `make -C rust build-all-features` and `make -C javascript build` (node-gyp 11.5.0) passed.
@@ -546,18 +559,18 @@ Three FFI behaviours the binding lives with for now:
 
 ## 8. Decisions
 
-The user approved these on 2026-11-25, each as recommended, with the choices noted. Three wait on others: row 4 on
-the reviewer (Q50), row 6 on the design discussion (Q21), and the merge order in row 14 on the user. Row 5's
-conventions row (line 221) is still parked.
+The user approved these on 2026-11-25, each as recommended, with the choices noted. Two wait on others: row 4 on
+the reviewer (Q50), and the merge order in row 14 on the user. Row 5's conventions row (line 220 at `8a25205a3`) is
+still parked. Row 6 was settled by PR #312's conventions on 2026-11-25 (line 155).
 
 | # | Decision | Decided (2026-11-25) | Not chosen |
 |---|---|---|---|
 | 1 | **The built-in serdes.** Line 128 says they are Java's classes, built with `new`, UTF-8 only for String and UUID, with "no serde factories". The producer shipped the factory `stringSerializer()` with Java's six charsets (producer DECISIONS 17, made while the rules named that factory). Lines 25, 64 and 156 also list `KafkaProducer.create()`, which the producer doesn't have. | **(a)** Both clients follow line 128. P6 builds the ten deserializer classes and the ten serializer classes, removes `stringSerializer()` and its charsets (a preview interface change, which line 197 allows during development), updates the producer's docs, example and tests, and adds `KafkaProducer.create()`. Java's round-trip tests need both halves. | (b) Factories for both clients, which needs the rules' owner to change line 128. (c) Classes in the consumer only, the producer keeping its factory for now, so the two clients differ. |
 | 2 | **Can a consumed record's `Headers` be changed?** Settled by line 137 (Q31, decided on 2026-11-24). | Yes. The `Headers` copies its list out of the record's lent headers on the first read or change, as line 137 says (4.2): no `RecordHeaders_with_record_headers_err` handle, `record.headers` is never `null`, and the native record stays alive until the copy. | This plan's first recommendation (a copy on the first change only, reads going to the lent headers); a copy at every poll; read-only headers. |
 | 3 | **Header pairs, and `Header` validity.** Settled by lines 135 and 138 (Q31, Q60). | Plain TypeScript classes, the core getting a copy only at `send()` (line 135). Pairs wherever Java takes `Headers` or `Iterable<Header>`, typed `Iterable<Header \| readonly [string, Uint8Array \| null]>`, with the exact messages `TypeError('headers[1] key must be a string; got number')`, "Header cannot be null." and "Null header keys are not permitted"; a given `Headers` is kept (line 138). A `Header` the app has read stays valid however its `Headers` changes (line 135). The Electron limitation covers only consumed keys and values (4.2). | Java's `Headers` or `Iterable<Header>` only, with no pairs. |
-| 4 | **Must every serde method be asynchronous?** Row at line 220 (Q50), still open. | The user asks the reviewer. If there's no answer by P6, P6 implements line 127 as written, as the producer does, and both clients change together if the answer is "all asynchronous". | Hold P6 until the answer comes. |
-| 5 | **Schema Registry's config functions.** Row at line 221, still parked. | Only the generic config-function mechanism (producer DECISIONS 16); no Schema Registry code and no reading of its keys. | — |
-| 6 | **The never-closed warning.** Row at line 219 (Q21, still open), and line 155. | None, as for the producer (producer DECISIONS 35, the owner's choice of 2026-11-20): an open consumer keeps Node running, so the warning could never fire. Marked (conventions conflict) in the binding's notes, as the producer's is. | Wait for the design discussion. |
+| 4 | **Must every serde method be asynchronous?** Row at line 220 (Q50; line 219 at `8a25205a3`), still open. | The user asks the reviewer. If there's no answer by P6, P6 implements line 127 as written, as the producer does, and both clients change together if the answer is "all asynchronous". | Hold P6 until the answer comes. |
+| 5 | **Schema Registry's config functions.** Row at line 221 (line 220 at `8a25205a3`), still parked. | Only the generic config-function mechanism (producer DECISIONS 16); no Schema Registry code and no reading of its keys. | — |
+| 6 | **The never-closed warning.** Row at line 219 (Q21, still open), and line 155. Settled since: at `8a25205a3`, line 155 says nothing warns, and the row is gone. | None, as for the producer (producer DECISIONS 35, the owner's choice of 2026-11-20): an open consumer keeps Node running, so the warning could never fire. No (conventions conflict) mark is needed any more. | Wait for the design discussion. |
 | 7 | **`CloseOptions` without a timeout.** Line 79 says a `null` timeout means the default; line 171 says to send it as `-1`, which `duration_ms()` reads as zero (line 81), a close that doesn't wait. Read literally, the rule breaks `close()` (producer DECISIONS 4's exception). | Build the C options as Java does, as Python and .NET do: with a timeout, `CloseOptions_new_with_timeout_err(ms)` and then `CloseOptions_with_group_membership_operation_err` if the operation isn't the default; without one, `CloseOptions_with_operation_err(op)`, which leaves the timeout unset, so `close` waits up to Java's default of 30 seconds. Marked (conventions conflict) in the binding's notes, citing lines 79, 81 and 171. | Send `-1` as line 171 reads, and `close(options)` without a timeout doesn't wait. |
 | 8 | **Which calls the callback window refuses.** Line 149 names `poll`, `subscribe`, `assign` and `close`. `unsubscribe`, `subscription()` and `enforceRebalance` have no `ConsumerHandle` form either, so the core refuses them too. | Follow the FFI and Python's list (producer DECISIONS 2): document and test every refused method; `metrics()` and `wakeup()` work. The exact routing, including where the core's longer handle message shows, goes in P5's phase plan. | — |
 | 9 | **`enforceRebalance` and the mock's `shouldRebalance()` / `resetShouldRebalance()`.** Java's `AsyncKafkaConsumer.enforceRebalance` only logs that it's unsupported, and Python drops all three. The JS conventions have no such rule, and the FFI has all three. | Translate them: `enforceRebalance()` and `enforceRebalance(reason)` return Promises (their `_cb` twins), the two mock methods are synchronous. | Drop them, as Python does. |
@@ -565,7 +578,7 @@ conventions row (line 221) is still parked.
 | 11 | **Q61: the closed getters' error.** Line 184 says it isn't checked yet. It is now: `assignment()`, `subscription()`, `paused()` and `groupMetadata()` on a closed consumer throw `IllegalStateError('Rust panic caught at the FFI boundary in <function>: This consumer has already been closed.')`. | Accept it for the preview: the binding's notes record it, tests assert the exact text, and FFI ask 5 goes to the owner. | Hold P2's hand-off until the FFI passes Java's message through. |
 | 12 | **The FFI gaps of §6.** | Leave those members out, list them in the module docs, and send asks 1–6 to the FFI's owner. | Wait for the FFI before the affected phases. |
 | 13 | **Starting before decisions 1 and 4.** | Yes: P1 to P5 go ahead. Until P6, a deserializer argument or config key is refused with an explicit `UnsupportedOperationError` (root `CLAUDE.md` §7), tested, never released, and removed in P6. | Wait for both before P2. |
-| 14 | **The admin branch.** `origin/dev/javascript-admin-client` (`2ae721f97`, 18 commits on `208abeb64`) edits the same shared files: `native/addon.c`, `binding.gyp`, `util.h` and `producer.c`; `src/internal/args.ts`, `config.ts`, `native.ts`, `java_object.ts` and others; 16 linter rules and `scripts/lint/java_ts.js` (`DATA_CLASSES`); the xtask config generators; `grpc-server/`; the generated API, index and baseline files; the root, `javascript/` and `rust/` Makefiles; the docs; and "The binding's notes" (not the conventions). It adds `src/internal/options.ts` (`applyOptionKeys`). | The user picks the merge order. Where both need a helper, the consumer follows the admin branch's shape, and the second branch to land removes the duplicate (DoD #6). P1 copies `options.ts` unchanged, to the same path (`P1.md`). P8 waits for the admin branch. Nobody rebases on their own. | Base this branch on the admin branch now, which ties the consumer to an unmerged branch. |
+| 14 | **The admin branch.** `origin/dev/javascript-admin-client` (`2ae721f97`, 18 commits on `208abeb64`; since 2026-11-25 `0cd327cf5`, 20 commits on `f62d5fec9`) edits the same shared files: `native/addon.c`, `binding.gyp`, `util.h` and `producer.c`; `src/internal/args.ts`, `config.ts`, `native.ts`, `java_object.ts` and others; 16 linter rules and `scripts/lint/java_ts.js` (`DATA_CLASSES`); the xtask config generators; `grpc-server/`; the generated API, index and baseline files; the root, `javascript/` and `rust/` Makefiles; the docs; and "The binding's notes" (not the conventions). It adds `src/internal/options.ts` (`applyOptionKeys`). | The user picks the merge order. Where both need a helper, the consumer follows the admin branch's shape, and the second branch to land removes the duplicate (DoD #6). P1 copies `options.ts` unchanged, to the same path (`P1.md`). P8 waits for the admin branch. Nobody rebases on their own. | Base this branch on the admin branch now, which ties the consumer to an unmerged branch. |
 | 15 | **The environment.** Node and npm weren't installed, so `make verify-javascript` failed at `build-javascript`. | Done: Node v22.23.5 and npm 10.9.9 are in `/opt/homebrew/bin` (§7). | — |
 | 16 | **Commit trailer and hooks.** The session's reminder asks for an AI co-author line. | None, as the approved producer plan says, and the hooks stay on: no `--no-verify`, no breakglass. | Add the line. |
 | 17 | **Agent numbers.** | 150 to 157, one per phase, as the Manager's rules ask. | 150 for the whole milestone, as the producer used 100. |
@@ -576,10 +589,12 @@ conventions row (line 221) is still parked.
 
 1. The admin branch and this one edit the same shared files; whichever lands second has merge work (decision 14).
 2. PR #312 has been force-pushed twice in two days, and the base moved again, by five commits, on 2026-11-25
-   (`675c9a99d` to `208abeb64`). If the base moves, work stops until the user rebases.
+   (`675c9a99d` to `208abeb64`), then was rewritten the same day (`f62d5fec9`), and the user moved the branch onto
+   it. If the base moves, work stops until the user moves the branch.
 3. Resolved on 2026-11-25: Node is installed (decision 15).
 4. One kept key or value Buffer keeps its whole poll batch in memory (4.2). Documented, and measured in P7.
-5. A batch outlives its consumer by the FFI's design (4.2), but no test checks it yet. P2's ASan case does.
+5. A batch outlives its consumer by the FFI's design (4.2), but no test checks it yet. P2's broker memory probes do,
+   under the allocator's poisoning; under ASan they're a Future improvement (P2.md, choice 6).
 6. The mock keeps each added key and value until it's destroyed (4.6). Fine for a test double, and documented.
 7. Building, freezing and wrapping records costs time per record (Q9, Q24). Measured in P7, not acted on.
 8. A listener that never settles holds the rebalance and the call that delivered it, with no timeout (line 150).
