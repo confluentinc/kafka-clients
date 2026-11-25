@@ -22,6 +22,7 @@ using Confluent.Kafka.Admin;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Acl;
 using Confluent.Kafka.Common.Config;
+using Confluent.Kafka.Common.Metrics;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Common.Resource;
 using Confluent.Kafka.Common.Security.Auth;
@@ -87,6 +88,7 @@ public sealed class PublicEnumMethodsTests
     [InlineData(typeof(ClassicGroupStateMethods), typeof(ClassicGroupState))]
     [InlineData(typeof(TransactionStateMethods), typeof(TransactionState))]
     [InlineData(typeof(TimestampTypeMethods), typeof(TimestampType))]
+    [InlineData(typeof(RecordingLevelMethods), typeof(Sensor.RecordingLevel))]
     public void TheMethodsClass_IsATopLevelPublicStaticClass_BesideItsEnum(Type methods, Type enumType)
     {
         Assert.True(enumType.IsEnum, $"{enumType} is not an enum.");
