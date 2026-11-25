@@ -43,33 +43,34 @@ public sealed class AdminP3ResultMarshalTests
     [Fact]
     public async Task DescribeCluster_EachFutureDeliversItsValue_AfterTheResultIsDestroyed()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(2);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(2, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
-        (KafkaFutureImpl<IReadOnlyCollection<Node>> nodesFuture,
-            KafkaFutureImpl<Node?> controllerFuture,
-            KafkaFutureImpl<string> clusterIdFuture,
-            KafkaFutureImpl<IReadOnlyCollection<AclOperation>?> operationsFuture,
+        (IKafkaFutureImpl<IReadOnlyCollection<Node>> nodesFuture,
+            IKafkaFutureImpl<Node?> controllerFuture,
+            IKafkaFutureImpl<string> clusterIdFuture,
+            IKafkaFutureImpl<IReadOnlyCollection<AclOperation>?> operationsFuture,
             SafeAdminResultHandle result) = admin.DescribeCluster(options: new DescribeClusterOptions());
         result.Dispose();
 
-        Assert.Equal(MockClusterId, await TestTimeout.Run(() => clusterIdFuture.GetAsync(), s_deadline));
+        Assert.Equal(
+            MockClusterId, await TestTimeout.Run(() => AsyncAdminFutures.Of(clusterIdFuture).ToCompletionStage(), s_deadline));
 
-        List<Node> nodes = (await TestTimeout.Run(() => nodesFuture.GetAsync(), s_deadline))
+        List<Node> nodes = (await TestTimeout.Run(() => AsyncAdminFutures.Of(nodesFuture).ToCompletionStage(), s_deadline))
             .OrderBy(node => node.Id())
             .ToList();
         Assert.Equal(new[] { 0, 1 }, nodes.Select(node => node.Id()));
         Assert.Equal(new[] { "localhost", "localhost" }, nodes.Select(node => node.Host()));
         Assert.Equal(new[] { 1000, 1001 }, nodes.Select(node => node.Port()));
 
-        Node? controller = await TestTimeout.Run(() => controllerFuture.GetAsync(), s_deadline);
+        Node? controller = await TestTimeout.Run(() => AsyncAdminFutures.Of(controllerFuture).ToCompletionStage(), s_deadline);
         Assert.NotNull(controller);
         Assert.Equal(0, controller!.Id());
         Assert.Equal("localhost", controller.Host());
 
         // The core mock reports an empty set whatever the options say, as Java's mock does.
         IReadOnlyCollection<AclOperation>? operations =
-            await TestTimeout.Run(() => operationsFuture.GetAsync(), s_deadline);
+            await TestTimeout.Run(() => AsyncAdminFutures.Of(operationsFuture).ToCompletionStage(), s_deadline);
         Assert.NotNull(operations);
         Assert.Empty(operations!);
     }
@@ -85,22 +86,22 @@ public sealed class AdminP3ResultMarshalTests
     public async Task DescribeCluster_EachAccessorReturnsItsOwnFuture_AndANullIsASuccess()
     {
         KafkaFutureImpl<IReadOnlyCollection<Node>> nodes =
-            KafkaFutureImpl.CompletedFuture<IReadOnlyCollection<Node>>(new[] { new Node(7, "h", 9, null) });
-        KafkaFutureImpl<Node?> controller = KafkaFutureImpl.CompletedFuture<Node?>(null);
-        KafkaFutureImpl<string> clusterId = KafkaFutureImpl.CompletedFuture("cid");
+            FutureState.CompletedFuture<KafkaFutureImpl<IReadOnlyCollection<Node>>, IReadOnlyCollection<Node>>(new(), new[] { new Node(7, "h", 9, null) });
+        KafkaFutureImpl<Node?> controller = FutureState.CompletedFuture<KafkaFutureImpl<Node?>, Node?>(new(), null);
+        KafkaFutureImpl<string> clusterId = FutureState.CompletedFuture(new KafkaFutureImpl<string>(), "cid");
         KafkaFutureImpl<IReadOnlyCollection<AclOperation>?> operations =
-            KafkaFutureImpl.CompletedFuture<IReadOnlyCollection<AclOperation>?>(null);
+            FutureState.CompletedFuture<KafkaFutureImpl<IReadOnlyCollection<AclOperation>?>, IReadOnlyCollection<AclOperation>?>(new(), null);
 
         AsyncDescribeClusterResult asyncResult = new AsyncDescribeClusterResult(
-            new AsyncKafkaFuture<IReadOnlyCollection<Node>>(nodes),
-            new AsyncKafkaFuture<Node?>(controller),
-            new AsyncKafkaFuture<string>(clusterId),
-            new AsyncKafkaFuture<IReadOnlyCollection<AclOperation>?>(operations));
+            FutureState.CompletedFuture<AsyncKafkaFutureImpl<IReadOnlyCollection<Node>>, IReadOnlyCollection<Node>>(new(), new[] { new Node(7, "h", 9, null) }),
+            FutureState.CompletedFuture<AsyncKafkaFutureImpl<Node?>, Node?>(new(), null),
+            FutureState.CompletedFuture(new AsyncKafkaFutureImpl<string>(), "cid"),
+            FutureState.CompletedFuture<AsyncKafkaFutureImpl<IReadOnlyCollection<AclOperation>?>, IReadOnlyCollection<AclOperation>?>(new(), null));
         DescribeClusterResult syncResult = new DescribeClusterResult(
-            new KafkaFuture<IReadOnlyCollection<Node>>(nodes),
-            new KafkaFuture<Node?>(controller),
-            new KafkaFuture<string>(clusterId),
-            new KafkaFuture<IReadOnlyCollection<AclOperation>?>(operations));
+            nodes,
+            controller,
+            clusterId,
+            operations);
 
         Assert.Equal(asyncResult.Nodes(), asyncResult.Nodes());
         Assert.Equal(asyncResult.Controller(), asyncResult.Controller());
@@ -141,9 +142,9 @@ public sealed class AdminP3ResultMarshalTests
     [Fact]
     public async Task ListConfigResources_IsCopiedOut_AndOutlivesTheResult()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
-        (KafkaFutureImpl<IReadOnlyCollection<ConfigResource>> All, SafeAdminResultHandle Result) native =
+        (IKafkaFutureImpl<IReadOnlyCollection<ConfigResource>> All, SafeAdminResultHandle Result) native =
             admin.ListConfigResources(Array.Empty<ConfigResourceType>(), new ListConfigResourcesOptions());
         AsyncListConfigResourcesResult result = AsyncListConfigResourcesResult.OfClient(native);
 
@@ -175,7 +176,7 @@ public sealed class AdminP3ResultMarshalTests
     [Fact]
     public async Task ListConfigResources_TheTypeFilterReachesTheCore()
     {
-        NativeAdminClient admin = NativeAdminClient.CreateMock(1);
+        NativeAdminClient admin = NativeAdminClient.CreateMock(1, AdminFlavour.Async);
         using IDisposable adminDisposal = TestTimeout.Disposal(admin);
 
         IReadOnlyCollection<ConfigResource> unfiltered = await List(admin, Array.Empty<ConfigResourceType>());

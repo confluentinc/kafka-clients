@@ -31,10 +31,10 @@ namespace Confluent.Kafka.Admin;
 /// <seealso cref="DescribeAclsResult"/>
 public sealed class AsyncDescribeAclsResult
 {
-    private readonly KafkaFutureImpl<IReadOnlyCollection<AclBinding>> _values;
+    private readonly IKafkaFutureImpl<IReadOnlyCollection<AclBinding>> _values;
     private readonly SafeAdminResultHandle _native;
 
-    private AsyncDescribeAclsResult(KafkaFutureImpl<IReadOnlyCollection<AclBinding>> values, SafeAdminResultHandle native)
+    private AsyncDescribeAclsResult(IKafkaFutureImpl<IReadOnlyCollection<AclBinding>> values, SafeAdminResultHandle native)
     {
         _values = values;
         _native = native;
@@ -53,9 +53,9 @@ public sealed class AsyncDescribeAclsResult
     /// </returns>
     /// <remarks>Every call returns an equal future, as Java's accessor returns its stored field.</remarks>
     public AsyncKafkaFuture<IReadOnlyCollection<AclBinding>> Values() =>
-        new AsyncKafkaFuture<IReadOnlyCollection<AclBinding>>(_values);
+        AsyncAdminFutures.Of(_values);
 
     internal static AsyncDescribeAclsResult OfClient(
-        (KafkaFutureImpl<IReadOnlyCollection<AclBinding>> Values, SafeAdminResultHandle Result) native) =>
+        (IKafkaFutureImpl<IReadOnlyCollection<AclBinding>> Values, SafeAdminResultHandle Result) native) =>
         new AsyncDescribeAclsResult(native.Values, native.Result);
 }

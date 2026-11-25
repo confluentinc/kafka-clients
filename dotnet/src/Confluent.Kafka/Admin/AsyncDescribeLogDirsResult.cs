@@ -33,19 +33,19 @@ namespace Confluent.Kafka.Admin;
 public sealed class AsyncDescribeLogDirsResult
 {
     private readonly IReadOnlyDictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> _futures;
-    private readonly IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> _nativeDescriptions;
+    private readonly IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> _nativeDescriptions;
     private readonly SafeAdminResultHandle _native;
 
 
     private AsyncDescribeLogDirsResult(
-        IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> nativeDescriptions,
+        IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> nativeDescriptions,
         SafeAdminResultHandle native)
     {
         Dictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>> futures =
             new Dictionary<int, AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>>(nativeDescriptions.Count);
-        foreach (KeyValuePair<int, KafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> entry in nativeDescriptions)
+        foreach (KeyValuePair<int, IKafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> entry in nativeDescriptions)
         {
-            futures.Add(entry.Key, new AsyncKafkaFuture<IReadOnlyDictionary<string, LogDirDescription>>(entry.Value));
+            futures.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
         }
 
         _futures = futures;
@@ -70,11 +70,11 @@ public sealed class AsyncDescribeLogDirsResult
     /// </summary>
     /// <returns>A future yielding the whole map, or faulting with the first failure to complete.</returns>
     public AsyncKafkaFuture<IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>> AllDescriptions() =>
-        new AsyncKafkaFuture<IReadOnlyDictionary<int, IReadOnlyDictionary<string, LogDirDescription>>>(
-            KafkaFutureImpl.GatherAll(_nativeDescriptions, EqualityComparer<int>.Default));
+        AsyncAdminFutures.Of(
+            FutureState.GatherAll(new AsyncKafkaFutureImpl<object?>(), _nativeDescriptions, EqualityComparer<int>.Default));
 
     internal static AsyncDescribeLogDirsResult OfClient(
-        (IReadOnlyDictionary<int, KafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions,
+        (IReadOnlyDictionary<int, IKafkaFutureImpl<IReadOnlyDictionary<string, LogDirDescription>>> Descriptions,
             SafeAdminResultHandle Result) native) =>
         new AsyncDescribeLogDirsResult(native.Descriptions, native.Result);
 }

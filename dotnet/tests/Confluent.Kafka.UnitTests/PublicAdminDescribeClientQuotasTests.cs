@@ -141,7 +141,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
     }
 
     [Fact]
-    public void Constructor_IsPublicAndRejectsDefault()
+    public void Constructor_IsPublicAndRejectsNull()
     {
         ConstructorInfo constructor = Assert.Single(typeof(DescribeClientQuotasResult).GetConstructors());
         Assert.Equal(
@@ -149,7 +149,7 @@ public sealed class PublicAdminDescribeClientQuotasTests
             Assert.Single(constructor.GetParameters()).ParameterType);
 
         ArgumentNullException error =
-            Assert.Throws<ArgumentNullException>(() => new DescribeClientQuotasResult(default));
+            Assert.Throws<ArgumentNullException>(() => new DescribeClientQuotasResult(null!));
         Assert.Equal("entities", error.ParamName);
         Assert.Equal(new ArgumentNullException("entities").Message, error.Message);
     }

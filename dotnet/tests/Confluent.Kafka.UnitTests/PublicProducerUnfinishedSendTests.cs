@@ -131,7 +131,7 @@ public sealed class PublicProducerUnfinishedSendTests
         bool doneInCallback = true;
         bool getReturnedInCallback = true;
         Task? blockedGet = null;
-        KafkaFuture<RecordMetadata> probed = default;
+        KafkaFuture<RecordMetadata> probed = null!;
         WithUnfinishedSend(
             (future, callback, release) =>
             {
@@ -237,7 +237,7 @@ public sealed class PublicProducerUnfinishedSendTests
     {
         bool doneInCallback = true;
         bool getReturnedInCallback = true;
-        AsyncKafkaFuture<RecordMetadata> probed = default;
+        AsyncKafkaFuture<RecordMetadata> probed = null!;
         Task<RecordMetadata>? pendingGet = null;
         await WithUnfinishedAsyncSend(
             async (producer, future, callback) =>

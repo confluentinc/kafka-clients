@@ -27,14 +27,16 @@ namespace Confluent.Kafka.Analyzers;
 /// <summary>
 /// Checks that the <c>s_values</c> or <c>VALUES</c> field of an <c>&lt;Enum&gt;Methods</c> class, Java's
 /// <c>values()</c> or <c>VALUES</c> written out, lists every member of its enum once, as <c>Enum.MEMBER</c>, in
-/// declaration order (CKRDA0015).
+/// declaration order, and that each switch expression of the class that names a member of its enum, a lookup such
+/// as <c>FromString</c> or <c>ForId</c>, gives every member an arm, or its default arm's answer, and no member two
+/// arms (CKRDA0015).
 /// </summary>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
 public sealed class EnumValuesListAnalyzer : DiagnosticAnalyzer
 {
     private static readonly DiagnosticDescriptor s_rule = new DiagnosticDescriptor(
         DiagnosticIds.EnumValuesList,
-        title: "An enum's values list holds every member once, in declaration order",
+        title: "An enum's values list and lookups name every member once",
         messageFormat: "{0}",
         category: "Correctness",
         defaultSeverity: DiagnosticSeverity.Warning,
@@ -42,7 +44,10 @@ public sealed class EnumValuesListAnalyzer : DiagnosticAnalyzer
         description: "Enum.GetValues(Type) is not Native AOT safe, so an <Enum>Methods class lists its enum's members "
             + "by hand. A member added to the enum and not to the list is missed by every lookup built from it. "
             + "Only a field named s_values or VALUES, of type Enum[] or IReadOnlyList<Enum>, in a class named "
-            + "<Enum>Methods is checked.");
+            + "<Enum>Methods is checked. A switch expression of that class that names a member of the enum, a lookup "
+            + "built by hand for the same reason, gives every member an arm (or names it as its default arm's answer, "
+            + "as a FromString that answers UNKNOWN) and no member two arms; the order of its arms is free. A lookup "
+            + "written another way (an if, a ternary, a range cast) is not checked.");
 
     /// <inheritdoc/>
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => ImmutableArray.Create(s_rule);
@@ -53,6 +58,7 @@ public sealed class EnumValuesListAnalyzer : DiagnosticAnalyzer
         context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
         context.EnableConcurrentExecution();
         context.RegisterSyntaxNodeAction(AnalyzeField, SyntaxKind.FieldDeclaration);
+        context.RegisterSyntaxNodeAction(AnalyzeSwitch, SyntaxKind.SwitchExpression);
     }
 
     private static void AnalyzeField(SyntaxNodeAnalysisContext context)
@@ -153,6 +159,88 @@ public sealed class EnumValuesListAnalyzer : DiagnosticAnalyzer
         foreach (IFieldSymbol member in members.Where(member => !listed.Contains(member)))
         {
             Report(context, declarator.Identifier.GetLocation(), $"{list} does not list {enumType.Name}.{member.Name}");
+        }
+    }
+
+    // A switch expression of an <Enum>Methods class that names a member of the class's enum: each member has an arm, in
+    // its pattern or its answer (UpgradeType.FromCode's 1 => UPGRADE, SslClientAuth.ToString's REQUIRED => "required"),
+    // or is the default arm's answer (_ => UNKNOWN); no member has two arms.
+    private static void AnalyzeSwitch(SyntaxNodeAnalysisContext context)
+    {
+        var expression = (SwitchExpressionSyntax)context.Node;
+        if (expression.FirstAncestorOrSelf<ClassDeclarationSyntax>() is not { } declaration
+            || context.SemanticModel.GetDeclaredSymbol(declaration, context.CancellationToken) is not { } methods
+            || !methods.Name.EndsWith("Methods", System.StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var arms = new List<(SwitchExpressionArmSyntax Arm, HashSet<IFieldSymbol> Members)>();
+        var byDefault = new HashSet<IFieldSymbol>(SymbolEqualityComparer.Default);
+        INamedTypeSymbol? enumType = null;
+        foreach (SwitchExpressionArmSyntax arm in expression.Arms)
+        {
+            bool isDefault = arm.Pattern is DiscardPatternSyntax && arm.WhenClause is null;
+            var named = new HashSet<IFieldSymbol>(SymbolEqualityComparer.Default);
+            SyntaxNode[] parts = isDefault
+                ? new SyntaxNode[] { arm.Expression }
+                : new SyntaxNode[] { arm.Pattern, arm.Expression };
+            foreach (SyntaxNode part in parts)
+            {
+                foreach (IdentifierNameSyntax name in part.DescendantNodesAndSelf().OfType<IdentifierNameSyntax>())
+                {
+                    if (context.SemanticModel.GetSymbolInfo(name, context.CancellationToken).Symbol is IFieldSymbol
+                        {
+                            HasConstantValue: true,
+                            ContainingType: { TypeKind: TypeKind.Enum } owner,
+                        } member
+                        && methods.Name == owner.Name + "Methods")
+                    {
+                        enumType = owner;
+                        named.Add(member);
+                    }
+                }
+            }
+
+            if (isDefault)
+            {
+                byDefault.UnionWith(named);
+            }
+            else
+            {
+                arms.Add((arm, named));
+            }
+        }
+
+        if (enumType is null)
+        {
+            return;
+        }
+
+        string lookup = methods.Name + "." + (context.ContainingSymbol?.Name ?? "?");
+        var armed = new HashSet<IFieldSymbol>(SymbolEqualityComparer.Default);
+        foreach ((SwitchExpressionArmSyntax arm, HashSet<IFieldSymbol> named) in arms)
+        {
+            foreach (IFieldSymbol member in named.OrderBy(member => member.Name, System.StringComparer.Ordinal))
+            {
+                if (!armed.Add(member))
+                {
+                    Report(context, arm.GetLocation(), $"{lookup} gives {enumType.Name}.{member.Name} two arms");
+                }
+            }
+        }
+
+        IEnumerable<IFieldSymbol> members = enumType.GetMembers().OfType<IFieldSymbol>()
+            .Where(member => member.HasConstantValue);
+        foreach (IFieldSymbol member in members)
+        {
+            if (!armed.Contains(member) && !byDefault.Contains(member))
+            {
+                Report(
+                    context,
+                    expression.SwitchKeyword.GetLocation(),
+                    $"{lookup} has no arm for {enumType.Name}.{member.Name}");
+            }
         }
     }
 

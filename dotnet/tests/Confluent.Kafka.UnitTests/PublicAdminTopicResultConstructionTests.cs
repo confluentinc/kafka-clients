@@ -111,13 +111,14 @@ public sealed class PublicAdminTopicResultConstructionTests
     public async Task CreateTopicsResult_Fabricated_RoundTrips()
     {
         Uuid topicId = new Uuid(0x0102030405060708L, 0x1112131415161718L);
-        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> created = KafkaFutureImpl.CompletedFuture(
+        AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> created = FutureState.CompletedFuture(
+            new AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>(),
             new CreateTopicsResult.TopicMetadataAndConfig(topicId, 3, 2, new Config(Array.Empty<ConfigEntry>())));
 
         AsyncCreateTopicsResult result = new AsyncCreateTopicsResult(
             new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>
             {
-                ["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(created),
+                ["t"] = created,
             });
 
         int numPartitions = 0;
@@ -130,18 +131,18 @@ public sealed class PublicAdminTopicResultConstructionTests
         Assert.Equal(2, replicationFactor);
         Assert.Equal(topicId, reportedId);
 
-        Assert.Same(created.GetWrappedAsync(), Assert.Single(result.Values()).Value.Get());
+        Assert.Same(created.Get(), Assert.Single(result.Values()).Value.Get());
         await TestTimeout.Run(() => result.Values()["t"].Get(), s_deadline);
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         KafkaException fault = new KafkaException("fabricated failure");
-        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> failed = TestFutures.Failed<CreateTopicsResult.TopicMetadataAndConfig>(fault);
+        AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> failed = TestFutures.AsyncFailed<CreateTopicsResult.TopicMetadataAndConfig>(fault);
 
         AsyncCreateTopicsResult mixed = new AsyncCreateTopicsResult(
             new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>
             {
-                ["ok"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(created),
-                ["bad"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(failed),
+                ["ok"] = created,
+                ["bad"] = failed,
             });
 
         Assert.Same(fault, await FutureAssert.ThrowsAsync<KafkaException>(
@@ -158,12 +159,12 @@ public sealed class PublicAdminTopicResultConstructionTests
         AsyncCreateTopicsResult result = new AsyncCreateTopicsResult(map);
         Assert.Empty(result.Values());
 
-        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> pending = new KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>();
-        map["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(pending);
+        AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> pending = new AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>();
+        map["t"] = pending;
 
         KeyValuePair<string, AsyncKafkaFuture> added = Assert.Single(result.Values());
         Assert.Equal("t", added.Key);
-        Assert.Same(pending.GetWrappedAsync(), added.Value.Get());
+        Assert.Same(pending.Get(), added.Value.Get());
         Task all = result.All().Get();
         Task<int> partitions = result.NumPartitions("t").Get();
         Assert.False(all.IsCompleted);
@@ -173,16 +174,16 @@ public sealed class PublicAdminTopicResultConstructionTests
         await TestTimeout.Run(() => all, s_deadline);
         Assert.Equal(3, await TestTimeout.Run(() => partitions, s_deadline));
 
-        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> replacement = KafkaFutureImpl.CompletedFuture(Metadata(5));
-        map["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(replacement);
+        AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> replacement = FutureState.CompletedFuture(new AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>(), Metadata(5));
+        map["t"] = replacement;
 
-        Assert.Same(replacement.GetWrappedAsync(), Assert.Single(result.Values()).Value.Get());
+        Assert.Same(replacement.Get(), Assert.Single(result.Values()).Value.Get());
         Assert.Equal(5, await TestTimeout.Run(() => result.NumPartitions("t").Get(), s_deadline));
         await TestTimeout.Run(() => result.All().Get(), s_deadline);
 
         KafkaException fault = new KafkaException("fabricated late failure");
-        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> failed = TestFutures.Failed<CreateTopicsResult.TopicMetadataAndConfig>(fault);
-        map["late"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(failed);
+        AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> failed = TestFutures.AsyncFailed<CreateTopicsResult.TopicMetadataAndConfig>(fault);
+        map["late"] = failed;
 
         Assert.Equal(new[] { "late", "t" }, result.Values().Keys.OrderBy(key => key, StringComparer.Ordinal));
         Assert.Same(fault, await FutureAssert.ThrowsAsync<KafkaException>(
@@ -196,37 +197,37 @@ public sealed class PublicAdminTopicResultConstructionTests
     [Fact]
     public void CreateTopicsResult_Values_EachAccessReflectsTheMapAtThatMoment()
     {
-        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> a = KafkaFutureImpl.CompletedFuture(Metadata(1));
-        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> b = KafkaFutureImpl.CompletedFuture(Metadata(2));
+        AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> a = FutureState.CompletedFuture(new AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>(), Metadata(1));
+        AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> b = FutureState.CompletedFuture(new AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>(), Metadata(2));
         Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> map =
-            new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> { ["a"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(a) };
+            new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> { ["a"] = a };
         AsyncCreateTopicsResult result = new AsyncCreateTopicsResult(map);
 
         IReadOnlyDictionary<string, AsyncKafkaFuture> first = result.Values();
-        map["b"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(b);
+        map["b"] = b;
         IReadOnlyDictionary<string, AsyncKafkaFuture> second = result.Values();
         map.Remove("a");
         IReadOnlyDictionary<string, AsyncKafkaFuture> third = result.Values();
 
-        Assert.Same(a.GetWrappedAsync(), Assert.Single(first).Value.Get());
+        Assert.Same(a.Get(), Assert.Single(first).Value.Get());
         Assert.False(first.ContainsKey("b"));
 
         Assert.Equal(2, second.Count);
-        Assert.Same(a.GetWrappedAsync(), second["a"].Get());
-        Assert.Same(b.GetWrappedAsync(), second["b"].Get());
+        Assert.Same(a.Get(), second["a"].Get());
+        Assert.Same(b.Get(), second["b"].Get());
 
-        Assert.Same(b.GetWrappedAsync(), Assert.Single(third).Value.Get());
+        Assert.Same(b.Get(), Assert.Single(third).Value.Get());
         Assert.False(third.ContainsKey("a"));
     }
 
     [Fact]
     public async Task CreateTopicsResult_CaseInsensitiveCallerMap_SplitsAsJavaDoes()
     {
-        KafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> created = KafkaFutureImpl.CompletedFuture(Metadata(3));
+        AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig> created = FutureState.CompletedFuture(new AsyncKafkaFutureImpl<CreateTopicsResult.TopicMetadataAndConfig>(), Metadata(3));
         Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>> map =
             new Dictionary<string, AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>>(StringComparer.OrdinalIgnoreCase)
             {
-                ["t"] = new AsyncKafkaFuture<CreateTopicsResult.TopicMetadataAndConfig>(created),
+                ["t"] = created,
             };
         Assert.True(map.ContainsKey("T"));
 
@@ -235,7 +236,7 @@ public sealed class PublicAdminTopicResultConstructionTests
         // Values: ordinal, like Java's HashMap — the stored spelling hits, the other misses.
         KeyValuePair<string, AsyncKafkaFuture> entry = Assert.Single(result.Values());
         Assert.Equal("t", entry.Key);
-        Assert.Same(created.GetWrappedAsync(), entry.Value.Get());
+        Assert.Same(created.Get(), entry.Value.Get());
         Assert.False(result.Values().ContainsKey("T"));
 
         // The typed accessors: the caller's map, like Java's futures.get(topic).
@@ -247,12 +248,12 @@ public sealed class PublicAdminTopicResultConstructionTests
     public async Task DeleteTopicsResult_Fabricated_RoundTrips()
     {
         KafkaException fault = new KafkaException("fabricated delete failure");
-        KafkaFutureImpl<object?> failed = TestFutures.Failed(fault);
+        AsyncKafkaFutureImpl<object?> failed = TestFutures.AsyncFailed(fault);
 
         Dictionary<Uuid, AsyncKafkaFuture> byId = new Dictionary<Uuid, AsyncKafkaFuture>
         {
-            [new Uuid(1L, 1L)] = new AsyncKafkaFuture(TestFutures.Done()),
-            [new Uuid(2L, 2L)] = new AsyncKafkaFuture(failed),
+            [new Uuid(1L, 1L)] = TestFutures.AsyncDone(),
+            [new Uuid(2L, 2L)] = failed,
         };
 
         AsyncDeleteTopicsResult result = new AsyncDeleteTopicsResult(byId, null);
@@ -263,7 +264,7 @@ public sealed class PublicAdminTopicResultConstructionTests
             () => TestTimeout.Run(() => result.All().Get(), s_deadline)));
 
         AsyncDeleteTopicsResult byName = new AsyncDeleteTopicsResult(
-            null, new Dictionary<string, AsyncKafkaFuture> { ["t"] = new AsyncKafkaFuture(TestFutures.Done()) });
+            null, new Dictionary<string, AsyncKafkaFuture> { ["t"] = TestFutures.AsyncDone() });
         Assert.Null(byName.TopicIdValues());
         await TestTimeout.Run(() => byName.All().Get(), s_deadline);
     }
@@ -276,7 +277,7 @@ public sealed class PublicAdminTopicResultConstructionTests
         Dictionary<string, AsyncKafkaFuture<TopicDescription>> byName =
             new Dictionary<string, AsyncKafkaFuture<TopicDescription>>(StringComparer.OrdinalIgnoreCase)
             {
-                ["t"] = new AsyncKafkaFuture<TopicDescription>(KafkaFutureImpl.CompletedFuture(description)),
+                ["t"] = FutureState.CompletedFuture(new AsyncKafkaFutureImpl<TopicDescription>(), description),
             };
         Assert.True(byName.ContainsKey("T"));
 
@@ -287,7 +288,7 @@ public sealed class PublicAdminTopicResultConstructionTests
         Assert.Null(result.AllTopicIds());
 
         IReadOnlyDictionary<string, TopicDescription> all = default!;
-        await TestTimeout.Run(async () => all = await result.AllTopicNames()!.Value.Get(), s_deadline);
+        await TestTimeout.Run(async () => all = await result.AllTopicNames()!.Get(), s_deadline);
         Assert.Same(description, Assert.Single(all).Value);
         Assert.True(all.ContainsKey("t"));
         Assert.False(all.ContainsKey("T"));
@@ -296,13 +297,13 @@ public sealed class PublicAdminTopicResultConstructionTests
         AsyncDescribeTopicsResult byIdResult = new AsyncDescribeTopicsResult(
             new Dictionary<Uuid, AsyncKafkaFuture<TopicDescription>>
             {
-                [topicId] = new AsyncKafkaFuture<TopicDescription>(KafkaFutureImpl.CompletedFuture(description)),
+                [topicId] = FutureState.CompletedFuture(new AsyncKafkaFutureImpl<TopicDescription>(), description),
             },
             null);
 
         Assert.Null(byIdResult.AllTopicNames());
         IReadOnlyDictionary<Uuid, TopicDescription> allById = default!;
-        await TestTimeout.Run(async () => allById = await byIdResult.AllTopicIds()!.Value.Get(), s_deadline);
+        await TestTimeout.Run(async () => allById = await byIdResult.AllTopicIds()!.Get(), s_deadline);
         Assert.Same(description, allById[topicId]);
         Assert.True(allById.ContainsKey(new Uuid(7L, 9L)));
     }
@@ -320,15 +321,15 @@ public sealed class PublicAdminTopicResultConstructionTests
         Dictionary<string, AsyncKafkaFuture<TopicDescription>> byName =
             new Dictionary<string, AsyncKafkaFuture<TopicDescription>>(ReferenceComparer.Instance)
             {
-                [nameA] = new AsyncKafkaFuture<TopicDescription>(KafkaFutureImpl.CompletedFuture(first)),
-                [nameB] = new AsyncKafkaFuture<TopicDescription>(KafkaFutureImpl.CompletedFuture(second)),
+                [nameA] = FutureState.CompletedFuture(new AsyncKafkaFutureImpl<TopicDescription>(), first),
+                [nameB] = FutureState.CompletedFuture(new AsyncKafkaFutureImpl<TopicDescription>(), second),
             };
         Assert.Equal(2, byName.Count);
 
         AsyncDescribeTopicsResult result = new AsyncDescribeTopicsResult(null, byName);
 
         IReadOnlyDictionary<string, TopicDescription> all = default!;
-        await TestTimeout.Run(async () => all = await result.AllTopicNames()!.Value.Get(), s_deadline);
+        await TestTimeout.Run(async () => all = await result.AllTopicNames()!.Get(), s_deadline);
 
         TopicDescription lastEnumerated = await byName.Last().Value.Get();
         KeyValuePair<string, TopicDescription> only = Assert.Single(all);

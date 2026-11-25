@@ -455,9 +455,9 @@ public sealed class PublicAdminNullOptionsTests
             FutureProbe.Of(admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "t" }), null!).All()),
         "DeleteTopics(IReadOnlyCollection<String>)" => FutureProbe.Of(admin.DeleteTopics(new[] { "t" }, null!).All()),
         "DescribeTopics(TopicCollection)" =>
-            FutureProbe.Of(admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" }), null!).AllTopicNames()!.Value),
+            FutureProbe.Of(admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" }), null!).AllTopicNames()!),
         "DescribeTopics(IReadOnlyCollection<String>)" =>
-            FutureProbe.Of(admin.DescribeTopics(new[] { "t" }, null!).AllTopicNames()!.Value),
+            FutureProbe.Of(admin.DescribeTopics(new[] { "t" }, null!).AllTopicNames()!),
         "ListTopics()" => FutureProbe.Of(admin.ListTopics(null!).Names()),
         "CreatePartitions(IReadOnlyDictionary<String, NewPartitions>)" =>
             FutureProbe.Of(admin.CreatePartitions(PartitionIncrease(), null!).All()),
@@ -533,9 +533,9 @@ public sealed class PublicAdminNullOptionsTests
             FutureProbe.Of(admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "t" }), null!).All()),
         "DeleteTopics(IReadOnlyCollection<String>)" => FutureProbe.Of(admin.DeleteTopics(new[] { "t" }, null!).All()),
         "DescribeTopics(TopicCollection)" =>
-            FutureProbe.Of(admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" }), null!).AllTopicNames()!.Value),
+            FutureProbe.Of(admin.DescribeTopics(TopicCollection.OfTopicNames(new[] { "t" }), null!).AllTopicNames()!),
         "DescribeTopics(IReadOnlyCollection<String>)" =>
-            FutureProbe.Of(admin.DescribeTopics(new[] { "t" }, null!).AllTopicNames()!.Value),
+            FutureProbe.Of(admin.DescribeTopics(new[] { "t" }, null!).AllTopicNames()!),
         "ListTopics()" => FutureProbe.Of(admin.ListTopics(null!).Names()),
         "CreatePartitions(IReadOnlyDictionary<String, NewPartitions>)" =>
             FutureProbe.Of(admin.CreatePartitions(PartitionIncrease(), null!).All()),

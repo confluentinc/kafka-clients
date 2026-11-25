@@ -53,13 +53,13 @@ public sealed class DeleteConsumerGroupOffsetsResult
     /// </exception>
     /// <exception cref="ArgumentException"><paramref name="partition"/> has a topic with a NUL character.</exception>
     public KafkaFuture PartitionResult(TopicPartition partition) =>
-        new KafkaFuture(NativeAdminClient.DeleteConsumerGroupOffsetsPartitionResult(_native, partition));
+        SyncAdminFutures.Of(NativeAdminClient.DeleteConsumerGroupOffsetsPartitionResult(_native, partition, AdminFlavour.Sync));
 
     /// <summary>
     /// Completes when every requested partition's offset was deleted, and fails otherwise — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A new future over the whole request; its failure is the first failed partition's error.</returns>
-    public KafkaFuture All() => new KafkaFuture(NativeAdminClient.DeleteConsumerGroupOffsetsAll(_native));
+    public KafkaFuture All() => SyncAdminFutures.Of(NativeAdminClient.DeleteConsumerGroupOffsetsAll(_native, AdminFlavour.Sync));
 
     internal static DeleteConsumerGroupOffsetsResult OfClient(SafeAdminResultHandle native) => new DeleteConsumerGroupOffsetsResult(native);
 }

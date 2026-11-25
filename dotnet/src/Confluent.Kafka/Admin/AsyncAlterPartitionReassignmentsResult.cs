@@ -32,12 +32,12 @@ namespace Confluent.Kafka.Admin;
 public sealed class AsyncAlterPartitionReassignmentsResult
 {
     private readonly IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture> _values;
-    private readonly IReadOnlyList<KafkaFutureImpl> _nativeFutures;
+    private readonly IReadOnlyList<IKafkaFutureImpl> _nativeFutures;
     private readonly SafeAdminResultHandle _native;
 
     private AsyncAlterPartitionReassignmentsResult(
         IReadOnlyDictionary<TopicPartition, AsyncKafkaFuture> values,
-        IReadOnlyList<KafkaFutureImpl> nativeFutures,
+        IReadOnlyList<IKafkaFutureImpl> nativeFutures,
         SafeAdminResultHandle native)
     {
         _values = values;
@@ -58,17 +58,17 @@ public sealed class AsyncAlterPartitionReassignmentsResult
     /// complete if any partition failed — Java's <c>all()</c>.
     /// </summary>
     /// <returns>A future representing the whole batch.</returns>
-    public AsyncKafkaFuture All() => new AsyncKafkaFuture(KafkaFutureImpl.AllOf(_nativeFutures));
+    public AsyncKafkaFuture All() => AsyncAdminFutures.Of(FutureState.AllOf(new AsyncKafkaFutureImpl<object?>(), _nativeFutures));
 
     internal static AsyncAlterPartitionReassignmentsResult OfClient(
-        (IReadOnlyDictionary<TopicPartition, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
+        (IReadOnlyDictionary<TopicPartition, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result) native)
     {
         Dictionary<TopicPartition, AsyncKafkaFuture> values =
             new Dictionary<TopicPartition, AsyncKafkaFuture>(native.Values.Count);
-        List<KafkaFutureImpl> nativeFutures = new List<KafkaFutureImpl>(native.Values.Count);
-        foreach (KeyValuePair<TopicPartition, KafkaFutureImpl<object?>> entry in native.Values)
+        List<IKafkaFutureImpl> nativeFutures = new List<IKafkaFutureImpl>(native.Values.Count);
+        foreach (KeyValuePair<TopicPartition, IKafkaFutureImpl<object?>> entry in native.Values)
         {
-            values.Add(entry.Key, new AsyncKafkaFuture(entry.Value));
+            values.Add(entry.Key, AsyncAdminFutures.Of(entry.Value));
             nativeFutures.Add(entry.Value);
         }
 

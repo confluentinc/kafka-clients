@@ -63,21 +63,25 @@ internal class ListGroupsOverride : DispatchProxy
 
         return answer switch
         {
-            ListGroupsResult real => ListGroupsResult.OfClient((Failed(), Valid(), Errors(), real.Native)),
-            AsyncListGroupsResult real => AsyncListGroupsResult.OfClient((Failed(), Valid(), Errors(), real.Native)),
+            ListGroupsResult real => ListGroupsResult.OfClient(
+                (Failed(AdminFlavour.Sync), Valid(AdminFlavour.Sync), Errors(AdminFlavour.Sync), real.Native)),
+            AsyncListGroupsResult real => AsyncListGroupsResult.OfClient(
+                (Failed(AdminFlavour.Async), Valid(AdminFlavour.Async), Errors(AdminFlavour.Async), real.Native)),
             _ => answer,
         };
     }
 
     // All() fails with the first error, as Java's does when any broker answered with one.
-    private KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Failed()
+    private IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> Failed(AdminFlavour flavour)
     {
-        var all = new KafkaFutureImpl<IReadOnlyCollection<GroupListing>>();
+        IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> all = NativeAdminClient.NewFuture<IReadOnlyCollection<GroupListing>>(flavour);
         all.CompleteWithError(_errors.First());
         return all;
     }
 
-    private KafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid() => KafkaFutureImpl.CompletedFuture(_valid);
+    private IKafkaFutureImpl<IReadOnlyCollection<GroupListing>> Valid(AdminFlavour flavour) =>
+        FutureState.CompletedFuture(NativeAdminClient.NewFuture<IReadOnlyCollection<GroupListing>>(flavour), _valid);
 
-    private KafkaFutureImpl<IReadOnlyCollection<Exception>> Errors() => KafkaFutureImpl.CompletedFuture(_errors);
+    private IKafkaFutureImpl<IReadOnlyCollection<Exception>> Errors(AdminFlavour flavour) =>
+        FutureState.CompletedFuture(NativeAdminClient.NewFuture<IReadOnlyCollection<Exception>>(flavour), _errors);
 }

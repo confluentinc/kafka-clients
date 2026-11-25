@@ -55,7 +55,10 @@ public enum ElectionType
 /// </summary>
 public static class ElectionTypeMethods
 {
-    private const string ValuesText = "[" + nameof(ElectionType.PREFERRED) + ", " + nameof(ElectionType.UNCLEAN) + "]";
+    private static readonly ElectionType[] s_values = { ElectionType.PREFERRED, ElectionType.UNCLEAN };
+
+    // Java's Arrays.asList(values()) as text, built from s_values, which CKRDA0015 checks.
+    private static readonly string s_valuesText = "[" + string.Join(", ", s_values) + "]";
 
     extension(ElectionType)
     {
@@ -83,5 +86,5 @@ public static class ElectionTypeMethods
 
     private static IllegalArgumentException NotOneOf(int value) =>
         new IllegalArgumentException(
-            "Value " + value.ToString(CultureInfo.InvariantCulture) + " must be one of " + ValuesText);
+            "Value " + value.ToString(CultureInfo.InvariantCulture) + " must be one of " + s_valuesText);
 }

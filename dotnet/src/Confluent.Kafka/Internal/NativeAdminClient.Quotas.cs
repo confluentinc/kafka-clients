@@ -58,7 +58,7 @@ internal sealed partial class NativeAdminClient
         s_copyOutQuotaEntities = ClientQuotaMarshal.CopyOutEntities;
 
     internal (
-        KafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> Entities,
+        IKafkaFutureImpl<IReadOnlyDictionary<ClientQuotaEntity, IReadOnlyDictionary<string, double>>> Entities,
         SafeAdminResultHandle Result) DescribeClientQuotas(
         ClientQuotaFilter filter, DescribeClientQuotasOptions? options)
     {
@@ -128,7 +128,7 @@ internal sealed partial class NativeAdminClient
         }
     }
 
-    internal (IReadOnlyDictionary<ClientQuotaEntity, KafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result)
+    internal (IReadOnlyDictionary<ClientQuotaEntity, IKafkaFutureImpl<object?>> Values, SafeAdminResultHandle Result)
         AlterClientQuotas(IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions? options)
     {
         EnterUse();
