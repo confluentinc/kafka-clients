@@ -134,11 +134,6 @@
 //   the keys it does not use, in its own log), testInterceptorConstructorClose
 //   and testInterceptorConstructorConfigurationWithExceptionShouldCloseRemainingInstances
 //   (the client runs no interceptors).
-//
-// testMetricsRemovedOnClose: after close() the core keeps the coordinator's
-// metrics in the consumer's registry, where Java removes every metric but the
-// "count" meta-metric, so the port checks that the consumer's own group is
-// gone.
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
@@ -523,10 +518,11 @@ test('testMetricsRemovedOnClose', async () => {
   assert.ok(before.some((n) => n.startsWith('consumer-metrics:')));
   await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
   const after = metricNames(consumer);
-  assert.ok(after.includes('kafka-metrics-count:count'));
+  assert.ok(after.includes('kafka-metrics-count:count'), 'The "count" meta-metric was unexpectedly missing from the Consumer metrics');
   assert.deepEqual(
-    after.filter((n) => n.startsWith('consumer-metrics:')),
+    after.filter((n) => n !== 'kafka-metrics-count:count'),
     [],
+    'The consumer should have removed its metrics on close(), but there are metrics remaining',
   );
 });
 
