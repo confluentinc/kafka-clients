@@ -33,17 +33,17 @@ using Xunit;
 namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
-/// The admin request-string precondition, <see cref="NativeStrings"/>: its exact accept/reject boundary, and that a
-/// rejection happens before the native call and leaves the client usable.
+/// The C-string precondition, <see cref="NativeStrings"/>: its exact accept/reject boundary, and that a rejection
+/// happens before the native call and leaves the client usable.
 /// </summary>
 /// <remarks>
-/// The ordering tests cover one site per shape of guarded string, since each shape places its guard differently: a
-/// per-key key inline (<c>createTopics</c>) and in a de-dup helper (<c>deleteTopics</c>); a direct request field (an
-/// IAC config value); an <c>*Options</c> string (the ListTransactions pattern); a marshaller-fed row (a quota
-/// filter's match name); a principal row (a delegation-token owner); a result lookup
-/// (<c>DescribeUserScramCredentialsResult.Description</c>); and a mock seeding method.
+/// The ordering tests cover one admin client site per shape of guarded string, since each shape places its guard
+/// differently: a per-key key inline (<c>createTopics</c>) and in a de-dup helper (<c>deleteTopics</c>); a direct
+/// request field (an IAC config value); an <c>*Options</c> string (the ListTransactions pattern); a marshaller-fed row
+/// (a quota filter's match name); a principal row (a delegation-token owner); and a result lookup
+/// (<c>DescribeUserScramCredentialsResult.Description</c>). One more covers a mock consumer's seeding method.
 /// </remarks>
-public sealed class AdminStringsTests
+public sealed class NativeStringsTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 

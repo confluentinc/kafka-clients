@@ -863,8 +863,10 @@ each goes when the reason it gives goes:
 - **Strings.** An unpaired surrogate is encoded as `?` (`0x3F`), as Java's `String.getBytes(UTF_8)`
   does, by `StringSerde` and by every string the binding marshals to the C ABI (topics, header keys,
   group ids, admin strings); a result whose key the core names shows that `?`. A NUL character in a
-  string argument throws `ArgumentException` at the call, because a C string cannot carry it; Java
-  sends it and the broker rejects the name. A NUL in a `SubscriptionPattern` throws too, on the
+  string argument throws `ArgumentException` at the call, because a C string cannot carry it. Java
+  sends it: the broker rejects it in a topic name, but keeps it elsewhere, in offset metadata or a
+  header key for example, so there the binding refuses a string Java commits or sends. A NUL in a
+  `SubscriptionPattern` throws too, on the
   mocks as well, since they pass the pattern to the C ABI like the real consumers; Java sends it,
   and the broker evaluates it as a regular expression that no topic name can match. On the four
   consumers, and in the four producers' `SendOffsetsToTransaction`, a NUL in a topic or in the
@@ -873,6 +875,10 @@ each goes when the reason it gives goes:
   and so does, in the real consumers' `Subscribe` and `Assign`, a blank topic (Java's `isBlank`: no
   character above U+0020, so a NUL counts), which the core checks only in the call the NUL stops;
   the mocks refuse it too, as their native mock could match the cut name to another topic's state.
+  The core's next check is not made either: a `Subscribe` or `Assign` with a NUL topic on a consumer
+  already assigned, or subscribed the other way, gets the NUL error where Java throws
+  `IllegalStateException` "Subscription to topics, partitions and pattern are mutually exclusive",
+  since the C ABI does not tell the binding how the consumer subscribed.
   A topic holding a NUL is never assigned, so where Java looks a partition up in the assignment
   (`Seek`, `Position`, `Pause`, `Resume`, `SeekToBeginning`, `SeekToEnd`, `CurrentLag`, the mocks'
   `AddRecord`) it gets Java's answer for a partition that is not assigned, as a null partition does
