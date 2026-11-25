@@ -30,8 +30,10 @@
 //!   by the platform verifier (`rustls-platform-verifier`) instead: the OS
 //!   verifier on macOS and Windows, the OS root store on Linux (`SSL_CERT_FILE`
 //!   / `SSL_CERT_DIR` override it), as Java trusts the JDK's default trust
-//!   store. The C library, the Python wheel and the .NET package are built
-//!   that way, without the bundle.
+//!   store; with hostname verification off, by the OS root certificates through
+//!   the WebPKI verifier, where `SSL_CERT_FILE` / `SSL_CERT_DIR` override them
+//!   on every OS. The C library, the Python wheel and the .NET package are
+//!   built that way, without the bundle.
 //! - Hostname verification is controlled by `endpoint_identification_algorithm`:
 //!   when empty, a custom `ServerCertVerifier` validates the cert chain but skips
 //!   hostname matching.
@@ -414,9 +416,10 @@ fn default_roots() -> io::Result<RootCertStore> {
 
 /// The operating system's root certificates, the ones the platform verifier
 /// trusts: the system keychains on macOS, the system certificate stores on
-/// Windows, the OS root store on Linux (`SSL_CERT_FILE` / `SSL_CERT_DIR`
-/// override it). Loaded as the platform verifier loads them on Linux: a
-/// certificate that cannot be read or parsed is logged and skipped.
+/// Windows, the OS root store on Linux. On every OS, `SSL_CERT_FILE` /
+/// `SSL_CERT_DIR`, when set, replace them, although the macOS and Windows
+/// verifiers ignore those variables. Loaded as the platform verifier loads them
+/// on Linux: a certificate that cannot be read or parsed is logged and skipped.
 ///
 /// # Errors
 ///
@@ -446,6 +449,9 @@ fn native_roots() -> io::Result<RootCertStore> {
 /// and hostname verification is on, as Java's `TrustManagerFactory.init(null)`
 /// trusts the JDK's default trust store: the OS verifier on macOS and Windows,
 /// the OS root store on Linux (`SSL_CERT_FILE` / `SSL_CERT_DIR` override it).
+/// On Windows it also checks online (OCSP or CRL) whether the end certificate
+/// was revoked, which Java does not by default, waiting up to 10 seconds during
+/// the handshake; an unknown revocation status does not fail it.
 ///
 /// # Errors
 ///

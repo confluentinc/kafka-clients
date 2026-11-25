@@ -171,7 +171,7 @@ every compression type, TLS and SCRAM credential salting:
 | `aws-lc-rs` | yes | PBKDF2 for `Admin::alter_user_scram_credentials` upsertions, and the crypto provider of `rustls` |
 | `rustls` | yes | `security.protocol` `SSL` and `SASL_SSL`; implies `aws-lc-rs` |
 | `webpki-roots` | yes | Mozilla's root certificates, trusted without `ssl.truststore.location` or `ssl.truststore.certificates`; implies `rustls` |
-| `platform-verifier` | no | the platform's certificate verifier, used without those keys instead of Mozilla's root certificates (it wins over `webpki-roots`): the operating system's verifier on macOS and Windows, its root certificates on Linux (`SSL_CERT_FILE` / `SSL_CERT_DIR` override them); with hostname verification off, the operating system's root certificates through the WebPKI verifier; implies `rustls` |
+| `platform-verifier` | no | the platform's certificate verifier, used without those keys instead of Mozilla's root certificates (it wins over `webpki-roots`): the operating system's verifier on macOS and Windows, its root certificates on Linux (`SSL_CERT_FILE` / `SSL_CERT_DIR` override them); with hostname verification off, the operating system's root certificates through the WebPKI verifier (`SSL_CERT_FILE` / `SSL_CERT_DIR` override them on every operating system); implies `rustls` |
 | `ffi` | no | the C API |
 | `integration-tests` | no | the broker-backed test suites; implies every codec and `webpki-roots` |
 
@@ -198,8 +198,18 @@ confluent-kafka = { version = "1.0.0", default-features = false, features = ["lz
 With `platform-verifier` instead of `webpki-roots` the Mozilla bundle is not
 compiled in, and a CA installed in the operating system is trusted, as the
 Java client trusts the JDK's default trust store; the C library, the Python
-wheel and the .NET package are built that way. On Linux a host without a CA bundle (a `scratch` or
-distroless image) must then set one of the truststore keys or `SSL_CERT_FILE`.
+wheel and the .NET package are built that way. On Linux a host without a CA
+bundle (a `scratch` image, or a `debian` / `ubuntu` image without
+`ca-certificates`) must then set one of the truststore keys or
+`SSL_CERT_FILE`. With hostname verification off, `SSL_CERT_FILE` /
+`SSL_CERT_DIR`, when set, replace the operating system's root certificates on
+every operating system, while with it on the macOS and Windows verifiers
+ignore them: a CA only in the macOS keychain, for example, is then trusted
+with the check on and not with it off. Unlike Java by default, the Windows
+verifier also checks online (OCSP or CRL) whether the broker certificate was
+revoked: a revoked certificate is refused, and on a network without internet
+access the handshake can wait up to 10 seconds for the check, which then does
+not fail it, while the client's network task waits too.
 
 ## Examples
 

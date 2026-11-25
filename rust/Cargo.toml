@@ -65,7 +65,8 @@ webpki-roots = ["rustls", "dep:webpki-roots"]
 # CA installed in the operating system is trusted. The C library, the Python
 # wheel and the .NET package (`rust/Makefile` `build-cdylib`) are built with it
 # and without `webpki-roots`. Without hostname verification the OS root certificates are
-# trusted through the WebPKI verifier instead (`rustls-native-certs`).
+# trusted through the WebPKI verifier instead (`rustls-native-certs`), where
+# `SSL_CERT_FILE` / `SSL_CERT_DIR` override them on every OS.
 platform-verifier = ["rustls", "dep:rustls-platform-verifier", "dep:rustls-native-certs"]
 # The integration tests run every security protocol and compression type
 # against a real broker, so they need all of the features above.
@@ -100,6 +101,7 @@ rustls-platform-verifier = { version = "0.7", optional = true }
 # WebPKI verifier when no `ssl.truststore.*` key is set and
 # `ssl.endpoint.identification.algorithm` is empty: the OS verifiers on macOS and
 # Windows do not document that a hostname mismatch implies a trusted chain.
+# `SSL_CERT_FILE` / `SSL_CERT_DIR` override them on every OS.
 rustls-native-certs = { version = "0.8", optional = true }
 # Mozilla's root certificates (`webpki-roots` feature, default), trusted when no
 # `ssl.truststore.*` key is set and the `platform-verifier` feature is off.

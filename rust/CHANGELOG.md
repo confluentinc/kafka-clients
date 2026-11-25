@@ -18,15 +18,16 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
   (`ssl.endpoint.identification.algorithm` empty) the operating system's root
   certificates are checked by the WebPKI verifier instead
   (`rustls-native-certs`), which validates the chain before the name on every
-  platform. On Linux a host without a CA bundle (a
-  `scratch` or distroless image) must then set one of the truststore keys or
-  `SSL_CERT_FILE`: the client fails at construction with "Failed to build the
-  platform certificate verifier" otherwise. Off by default: the default
-  feature `webpki-roots` keeps trusting the Mozilla root bundle there, as
-  before; with both on, `platform-verifier` wins. Like `webpki-roots` it
-  enables `rustls`, so `default-features = false` with `platform-verifier`
-  builds TLS without the bundle. The C library, the Python wheel and the .NET
-  package are built that way.
+  platform, and `SSL_CERT_FILE` / `SSL_CERT_DIR` override them on every
+  platform. On Linux a host without a CA bundle (a `scratch` image, or a
+  `debian` / `ubuntu` image without `ca-certificates`) must then set one of
+  the truststore keys or `SSL_CERT_FILE`: the client fails at construction
+  with "Failed to build the platform certificate verifier" otherwise. Off by
+  default: the default feature `webpki-roots` keeps trusting the Mozilla root
+  bundle there, as before; with both on, `platform-verifier` wins. Like
+  `webpki-roots` it enables `rustls`, so `default-features = false` with
+  `platform-verifier` builds TLS without the bundle. The C library, the Python
+  wheel and the .NET package are built that way.
 
 ### C FFI
 

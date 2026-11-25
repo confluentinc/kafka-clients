@@ -43,7 +43,7 @@ export MULTILANG_IMAGE_TAG
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
 	test-integration-perf test-integration-perf-macos producer-perf-test verify verify-macos \
-	format-check check-generated lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
+	format-check check-generated lint clippy-default-features test-ssl-factory-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
 build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
@@ -330,6 +330,13 @@ lint:
 # LINT_ARGS leaves it out.
 clippy-default-features:
 	cargo xtask clippy-default-features
+
+# The trust-store tests with the default features, so with Mozilla's root
+# certificates (`webpki-roots`) alone: every other Rust test job builds
+# `--all-features`, where `platform-verifier` wins. CI runs it in the doc-check
+# job, which already builds the default features for clippy.
+test-ssl-factory-default-features:
+	cargo test --lib ssl_factory
 
 # Build the rustdoc of every workspace crate with warnings denied, so a broken
 # or private intra-doc link fails CI instead of surfacing only when someone
