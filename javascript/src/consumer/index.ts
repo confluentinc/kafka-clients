@@ -21,7 +21,14 @@
  * @packageDocumentation
  */
 
+export { CloseOptions } from './close_options';
+export { ConsumerGroupMetadata } from './consumer_group_metadata';
+export { ConsumerRecord } from './consumer_record';
+export { ConsumerRecords } from './consumer_records';
+export { GroupProtocol } from './group_protocol';
 export { OffsetAndMetadata } from './offset_and_metadata';
+export { OffsetAndTimestamp } from './offset_and_timestamp';
+export { SubscriptionPattern } from './subscription_pattern';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { CommitFailedError } from './commit_failed_error';
 export { InvalidOffsetError } from './invalid_offset_error';

@@ -62,6 +62,10 @@ missing clients.producer.MockProducer#unregisterMetricFromSubscription
 # configure(): a serializer is given only as a constructor argument, for
 # which Java does not call it either.
 missing common.serialization.Serializer#configure
+# ConsumerRecords: the JS conventions (Scope, and Class family's table of JDK
+# interfaces) translate Java's Iterable iterator() as [Symbol.iterator](),
+# which this rule doesn't count as iterator().
+missing clients.consumer.ConsumerRecords#iterator
 
 
 # check-overload-shape: gaps the user kept (PLAN.md §8 decision 11).
@@ -73,3 +77,11 @@ missing common.serialization.Serializer#configure
 # RecordHeader's constructor takes Java's (String, byte[]) form: JavaScript has
 # no ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
 overload-missing RecordHeader.constructor/RecordHeader(ByteBuffer,ByteBuffer)
+
+
+# check-public-audience: members the JS conventions make public although
+# Java's are not, which this rule doesn't model.
+# CloseOptions: the JS conventions (Class family) give an option class a
+# constructor of one keyed object, though Java's constructor is private.
+member-not-public CloseOptions.constructor
+

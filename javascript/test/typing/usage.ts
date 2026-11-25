@@ -61,10 +61,17 @@ import {
   TopicAuthorizationError,
 } from '@confluentinc/kafka-javascript/common/errors';
 import {
+  CloseOptions,
+  ConsumerGroupMetadata,
+  ConsumerRecord,
+  ConsumerRecords,
+  GroupProtocol,
   LogTruncationError,
   NoOffsetForPartitionError,
   OffsetAndMetadata,
+  OffsetAndTimestamp,
   OffsetOutOfRangeError,
+  SubscriptionPattern,
 } from '@confluentinc/kafka-javascript/consumer';
 import { TimestampType } from '@confluentinc/kafka-javascript/common/record';
 import { QuotaViolationError } from '@confluentinc/kafka-javascript/common/metrics';
@@ -992,3 +999,63 @@ async function mocks(): Promise<void> {
   await Promise.all([typed.close(), untyped.close()]);
 }
 void mocks;
+
+// The consumer's value types. A ConsumerRecord's type arguments come from its
+// key and value, a null one binding never, and it is covariant in both.
+const shortRecord = new ConsumerRecord({ topic: 't', partition: 0, offset: 0, key: 'k', value: 1 });
+expectTypeOf(shortRecord).toEqualTypeOf<ConsumerRecord<string, number>>();
+expectTypeOf(shortRecord.offset).toEqualTypeOf<bigint>();
+expectTypeOf(shortRecord.leaderEpoch).toEqualTypeOf<number | null>();
+const nullKey = new ConsumerRecord({ topic: 't', partition: 0, offset: 0, key: null, value: 1 });
+expectTypeOf(nullKey).toEqualTypeOf<ConsumerRecord<never, number>>();
+const tombstone = new ConsumerRecord({ topic: 't', partition: 0, offset: 0n, key: 'k', value: null });
+expectTypeOf(tombstone).toEqualTypeOf<ConsumerRecord<string, never>>();
+const longRecord = new ConsumerRecord({
+  topic: 't',
+  partition: 0,
+  offset: 0n,
+  timestamp: 0n,
+  timestampType: TimestampType.CREATE_TIME,
+  serializedKeySize: 1,
+  serializedValueSize: 1,
+  key: 'k',
+  value: 2n,
+  headers: [['h', null]],
+  leaderEpoch: null,
+  deliveryCount: 1,
+});
+expectTypeOf(longRecord).toEqualTypeOf<ConsumerRecord<string, bigint>>();
+expectTypeOf(longRecord.headers).toEqualTypeOf<Headers>();
+const widerRecord: ConsumerRecord<string | Buffer, unknown> = shortRecord;
+void [nullKey, tombstone, widerRecord];
+// @ts-expect-error a record's fields are read-only
+shortRecord.topic = 'x';
+// @ts-expect-error Java's forms take the headers only with every field of the long form
+new ConsumerRecord({ topic: 't', partition: 0, offset: 0, key: null, value: null, headers: [] });
+const records = new ConsumerRecords({
+  records: new TopicPartitionMap([[new TopicPartition({ topic: 't', partition: 0 }), [shortRecord]]]),
+  nextOffsets: new TopicPartitionMap<OffsetAndMetadata>(),
+});
+expectTypeOf(records.records('t')).toEqualTypeOf<Array<ConsumerRecord<string, number>>>();
+expectTypeOf(records.records({ partition: new TopicPartition({ topic: 't', partition: 0 }) })).toEqualTypeOf<
+  Array<ConsumerRecord<string, number>>
+>();
+expectTypeOf(records.nextOffsets()).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata>>();
+expectTypeOf(records.partitions()).toEqualTypeOf<TopicPartitionSet>();
+for (const record of records) expectTypeOf(record).toEqualTypeOf<ConsumerRecord<string, number>>();
+expectTypeOf(ConsumerRecords.empty<string, string>()).toEqualTypeOf<ConsumerRecords<string, string>>();
+const closeOptions = new CloseOptions({ operation: CloseOptions.GroupMembershipOperation.LEAVE_GROUP, timeout: 5000 });
+expectTypeOf(closeOptions.timeout()).toEqualTypeOf<number | null>();
+expectTypeOf(
+  CloseOptions.timeout({ timeout: 5000 }).withGroupMembershipOperation({ operation: CloseOptions.GroupMembershipOperation.DEFAULT }),
+).toEqualTypeOf<CloseOptions>();
+expectTypeOf(closeOptions.groupMembershipOperation()).toEqualTypeOf<CloseOptions.GroupMembershipOperation>();
+expectTypeOf(GroupProtocol.of({ name: 'consumer' })).toEqualTypeOf<GroupProtocol>();
+expectTypeOf(new SubscriptionPattern({ pattern: 't.*' }).pattern()).toEqualTypeOf<string>();
+expectTypeOf(new OffsetAndTimestamp({ offset: 1, timestamp: 2 }).leaderEpoch()).toEqualTypeOf<number | null>();
+// @ts-expect-error ConsumerGroupMetadata's constructor is private: instances come from the consumer's groupMetadata()
+new ConsumerGroupMetadata('g', 1, 'm', null);
+// @ts-expect-error GroupProtocol's constructor is private
+new GroupProtocol(0, 'CLASSIC');
+// @ts-expect-error ConsumerGroupMetadata.internalCreate is the library's own, not declared
+ConsumerGroupMetadata.internalCreate('g', 1, 'm', null);

@@ -127,6 +127,26 @@ function createRecordMetadata(fields) {
 }
 
 /**
+ * A ConsumerGroupMetadata from the library's own factory,
+ * `ConsumerGroupMetadata.internalCreate`, which the addon calls with the
+ * group metadata the core gives (src/consumer/consumer_group_metadata.ts).
+ *
+ * @param {string} groupId the group ID
+ * @param {number} generationId the generation ID
+ * @param {string} memberId the member ID
+ * @param {string | null} groupInstanceId the group instance ID, or null
+ * @returns {import('@confluentinc/kafka-javascript/consumer').ConsumerGroupMetadata} the metadata
+ */
+function createConsumerGroupMetadata(groupId, generationId, memberId, groupInstanceId) {
+  const { ConsumerGroupMetadata } = require('@confluentinc/kafka-javascript/consumer');
+  const factory =
+    /** @type {{ internalCreate(groupId: string, generationId: number, memberId: string, groupInstanceId: string | null): import('@confluentinc/kafka-javascript/consumer').ConsumerGroupMetadata }} */ (
+      /** @type {unknown} */ (ConsumerGroupMetadata)
+    );
+  return factory.internalCreate(groupId, generationId, memberId, groupInstanceId);
+}
+
+/**
  * The private FFI id of an error class, its `_ffiId`.
  *
  * @param {object} cls an error class
@@ -136,4 +156,12 @@ function ffiId(cls) {
   return /** @type {{ _ffiId?: unknown }} */ (/** @type {unknown} */ (cls))._ffiId;
 }
 
-module.exports = { createFuture, internalFuture, internalHeaders, internalRecord, createRecordMetadata, ffiId };
+module.exports = {
+  createFuture,
+  internalFuture,
+  internalHeaders,
+  internalRecord,
+  createRecordMetadata,
+  createConsumerGroupMetadata,
+  ffiId,
+};
