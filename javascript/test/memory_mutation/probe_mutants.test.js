@@ -153,6 +153,12 @@ const PROBES = {
     name: 'a future dropped before its delivery',
     broker: true,
   },
+  copyPath: {
+    file: 'test/integration/memory_probes.test.js',
+    project: 'integration',
+    name: 'where external buffers are refused, keys and values are copies',
+    broker: true,
+  },
 };
 
 /**
@@ -199,6 +205,18 @@ function probeOutcome(root, probe) {
 
 /** @type {Mutant[]} */
 const MUTANTS = [
+  {
+    name: 'a consumed key or value copied where external buffers are refused still holds its batch',
+    native: true,
+    edits: [
+      [
+        'native/consumer.c',
+        '    if (len > 0) atomic_fetch_add(&stat_copies, 1);\n',
+        '    if (len > 0) atomic_fetch_add(&stat_copies, 1);\n    if (len > 0) b->refs++;\n',
+      ],
+    ],
+    probes: [PROBES.copyPath],
+  },
   {
     name: "a dropped napi_delete_reference: a callback Promise's settle function is never released",
     native: true,
