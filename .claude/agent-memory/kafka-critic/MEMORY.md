@@ -137,3 +137,4 @@
 - [M14 verifiable tools](review_m14_verifiable_tools.md) — JVM shutdown hook ≠ ctrl_c: ducktape clean-shutdown defaults to SIGTERM; assert emitted JSON not just counters
 - [M17 Password redaction](review_m17_password_redaction.md) — r4: pub in unsupported package fails lint; r5 CLEAN; compiler-mutant proof of no-pub-signature
 - [Java-dependent lint repro](review_lint_java_rules_repro.md) — run kafka/-reading lint rules via tagged throwaway repo
+- [JS value-class review patterns](review_js_value_class_patterns.md) — raw option value forwarded into another JavaForms method leaks its form error; probe dist/ by absolute path; copy-diff recipe
