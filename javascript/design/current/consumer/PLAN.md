@@ -316,7 +316,7 @@ the full gate before its hand-off (§7).
   `eslint-baseline.txt` loses the `KafkaProducer(Properties,Serializer,Serializer)` line the copied change makes
   stale, and gets five commented lines for shapes the conventions decide and the linter doesn't model:
   `ConsumerRecords#iterator`, `CloseOptions`' keyed constructor and the listener's three methods (P1.md, choice
-  8(a)). `lint-mapping.json` gets the names Java doesn't have: `toJSON` on the value classes and enums,
+  8(a)), the last three with `test/lint/runner.test.js` comparing each finding key once (P1.md, choice 9(a)). `lint-mapping.json` gets the names Java doesn't have: `toJSON` on the value classes and enums,
   `ConsumerRecords.[Symbol.iterator]` and `ConsumerConfigs`. `java-index.json` doesn't change: it already has every
   class P1 needs.
 - `ConsumerRebalanceListener`, with `src/internal/consumer_rebalance_listener_defaults.ts`, and
