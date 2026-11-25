@@ -185,6 +185,10 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <c>bootstrap.resolve.timeout.ms</c>.</exception>
     /// <exception cref="KafkaException">The producer has encountered a previous fatal or abortable error, or any
     /// other unexpected error.</exception>
+    /// <exception cref="ArgumentException">
+    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     void SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, Consumer.OffsetAndMetadata> offsets,
         Consumer.ConsumerGroupMetadata groupMetadata);

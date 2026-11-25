@@ -270,8 +270,8 @@ internal sealed partial class NativeAdminClient
 
     private static void ValidatePrincipal(KafkaPrincipal principal, string paramName)
     {
-        AdminStrings.Validate(principal.GetPrincipalType(), paramName);
-        AdminStrings.Validate(principal.GetName(), paramName);
+        NativeStrings.Validate(principal.GetPrincipalType(), NativeStrings.InvalidAdminStringMessage, paramName);
+        NativeStrings.Validate(principal.GetName(), NativeStrings.InvalidAdminStringMessage, paramName);
     }
 
     // A null MAC reaches the mock, whose future fails as Java's mock does; the client refuses it at the call.
