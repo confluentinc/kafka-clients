@@ -70,7 +70,7 @@
 
 const { atNode } = require('../location');
 const { mappedMembers } = require('./java_members');
-const { liveForms, optionName, formOptionNames, signaturesOf } = require('./overload_shape');
+const { LEFT_OUT, liveForms, optionName, formOptionNames, signaturesOf, formKey } = require('./overload_shape');
 const { waitingMembers } = require('./waiting_call_promise');
 
 /**
@@ -470,7 +470,8 @@ module.exports = {
         continue;
       }
       if (jm.kind === 'field') continue;
-      const forms = liveForms(jm.overloads);
+      // A form the JS conventions leave out is not asked for (overload_shape.js LEFT_OUT).
+      const forms = liveForms(jm.overloads).filter((f) => !LEFT_OUT.has(`${jm.owner.fqn}#${formKey(f)}`));
       const names = formOptionNames(forms);
       // The bare values' names: the one parameter of each one-parameter form
       // (several names told apart by type, src/internal/args.ts `bareTypes`).

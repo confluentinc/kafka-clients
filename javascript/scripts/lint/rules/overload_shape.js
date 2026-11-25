@@ -91,6 +91,14 @@ const LEFT_OUT = new Map([
     'org.apache.kafka.clients.consumer.Consumer#subscribe(Pattern)',
     'javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures (Q15): a pattern is only a SubscriptionPattern, and a RegExp throws an error that points to it',
   ],
+  [
+    'org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(Pattern)',
+    'javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures (Q15): a pattern is only a SubscriptionPattern, and a RegExp throws an error that points to it',
+  ],
+  [
+    'org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(Pattern,ConsumerRebalanceListener)',
+    'javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures (Q15): a pattern is only a SubscriptionPattern, and a RegExp throws an error that points to it',
+  ],
 ]);
 const { shortName, constantsOnly, signaturesOf, formParameters } = require('../java_ts');
 
@@ -184,7 +192,11 @@ function formOptionNames(forms) {
     out.push(
       f.params.map((t, i) => {
         const earlier = out.findIndex((names, k) => names[i] !== undefined && hostKind(forms[k].params[i]) === hostKind(t));
-        return earlier >= 0 ? out[earlier][i] : optionName(t, f.param_names[i]);
+        // An enum's implicit `valueOf(String name)` has no source, so the
+        // index gives its parameter no name: the JLS names it `name`
+        // (`ElectionType.valueOf(byte value)` beside it).
+        const javaName = f.param_names[i] || (f.name === 'valueOf' && f.static && t === 'String' ? 'name' : '');
+        return earlier >= 0 ? out[earlier][i] : optionName(t, javaName);
       }),
     );
   }

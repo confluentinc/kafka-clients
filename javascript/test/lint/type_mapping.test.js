@@ -525,3 +525,40 @@ test("a nested class's members are typed as its Java nested class's, and the nes
   assert.equal(r.status, 0, r.text);
   assert.deepEqual(findings(lint(outer('number'), [RULE])), ['Outer.Inner.name: return: Java String is not TypeScript number']);
 });
+
+test("a form the JS conventions leave out (overload_shape.js LEFT_OUT) is not compared: subscribe's pattern is a SubscriptionPattern", () => {
+  const consumer = javaClass('clients.consumer.Consumer', {
+    kind: 'interface',
+    overloads: [
+      method('subscribe', ['Pattern'], { return_type: 'void', param_names: ['pattern'] }),
+      method('subscribe', ['SubscriptionPattern'], { return_type: 'void', param_names: ['pattern'] }),
+    ],
+  });
+  const pattern = javaClass('clients.consumer.SubscriptionPattern');
+  const files = (/** @type {string} */ type) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...classes, consumer, pattern]),
+      ...FILES,
+      ...LIB,
+      'src/producer/typed.ts': TYPED_TS,
+      'src/common/kafka_future.ts': FUTURE_TS,
+      'src/consumer/subscription_pattern.ts': 'export class SubscriptionPattern {\n  pattern(): string { return ""; }\n}\n',
+      'src/consumer/consumer.ts': `import type { SubscriptionPattern } from './subscription_pattern';\nexport interface Consumer {\n  subscribe(options: { pattern: ${type} }): void;\n  subscribe(pattern: ${type}): void;\n}\n`,
+    });
+  let r = lint(files('SubscriptionPattern'), [RULE]);
+  assert.deepEqual(
+    findings(r).filter((f) => f.startsWith('Consumer.')),
+    [],
+    r.text,
+  );
+  // The kept form is still compared.
+  r = lint(files('string'), [RULE]);
+  assert.deepEqual(
+    findings(r).filter((f) => f.startsWith('Consumer.')),
+    [
+      'Consumer.subscribe: option pattern: Java SubscriptionPattern is not TypeScript string',
+      'Consumer.subscribe#2: parameter pattern: Java SubscriptionPattern is not TypeScript string',
+    ],
+  );
+});
