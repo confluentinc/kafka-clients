@@ -191,7 +191,7 @@ impl MockSelector {
 
     /// Completes all initiated sends by consuming them.
     fn complete_initiated_sends(&mut self) {
-        let initiated: Vec<NetworkSend> = self.initiated_sends.drain(..).collect();
+        let initiated: Vec<NetworkSend> = std::mem::take(&mut self.initiated_sends);
         for send in initiated {
             self.completed_sends.push(send);
         }

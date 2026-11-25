@@ -37,7 +37,9 @@
 // `enum_variant_names` leaves them alone, as they are exported and
 // `avoid-breaking-exported-api` is on (`rust/clippy.toml`). tonic's own
 // `#[allow]`s stay, despite `clippy::allow_attributes`: we do not author them.
-#[expect(clippy::allow_attributes)]
+// Every generated service method returns `Result<_, tonic::Status>`, whose
+// 176-byte `Status` clippy's `result_large_err` flags: tonic's type, not ours.
+#[expect(clippy::allow_attributes, clippy::result_large_err)]
 pub mod proto {
     tonic::include_proto!("confluent.kafka.test");
 }
