@@ -225,8 +225,10 @@ function kind(value: unknown): string {
 }
 
 /**
- * A function parameter: Java dereferences it when the source completes, so a
- * `null` is refused at the call (`TypeError`), as is a non-function.
+ * A function parameter. Java dereferences it only when it calls it, so a
+ * `null` is a function that throws `TypeError` when called, and the returned
+ * future fails where Java's fails with `NullPointerException`. Any other
+ * non-function is refused at the call (`TypeError`).
  *
  * @param value - the value given
  * @param name - the parameter's name, for the error
@@ -234,7 +236,11 @@ function kind(value: unknown): string {
  * @returns the function
  */
 function checkFunction(value: unknown, name: string, shape: string): (...args: never[]) => unknown {
-  if (value === null) throw new TypeError(`${name} must not be null`);
+  if (value === null) {
+    return () => {
+      throw new TypeError(`${name} must not be null`);
+    };
+  }
   if (typeof value !== 'function') throw new TypeError(`${name} must be a function ${shape}, not ${kind(value)}`);
   return value as (...args: never[]) => unknown;
 }
@@ -386,8 +392,10 @@ export abstract class KafkaFuture<T> {
    *   failed with what the function throws, or with this future's failure
    * @throws `IllegalArgumentError` when the given parameters are not
    *   `{function}`
-   * @throws `TypeError` when `function` is `null`, `undefined` or not a
-   *   function
+   * @throws `TypeError` when `function` is `undefined` or not a function. A
+   *   `null` function fails the returned future with `TypeError` when this
+   *   future completes normally, as Java's fails with
+   *   `NullPointerException`
    */
   abstract thenApply<R>(options: {
     /** The function, called as `function(value)`. */
@@ -427,8 +435,9 @@ export abstract class KafkaFuture<T> {
    * @returns the new future
    * @throws `IllegalArgumentError` when the given parameters are not
    *   `{action}`
-   * @throws `TypeError` when `action` is `null`, `undefined` or not a
-   *   function
+   * @throws `TypeError` when `action` is `undefined` or not a function. A
+   *   `null` action throws `TypeError` when this future completes, as Java's
+   *   throws `NullPointerException`, and the rules above apply
    */
   abstract whenComplete(options: {
     /** The action to perform, called as `action(value, error)`. */

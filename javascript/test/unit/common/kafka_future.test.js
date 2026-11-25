@@ -798,8 +798,8 @@ test("undefined is refused, null is Java's null", async () => {
     name: 'TypeError',
     message: "function must not be undefined. Leave the argument out, or pass null for Java's null",
   });
-  // @ts-expect-error a null function: thenApply throws TypeError
-  assert.throws(() => future.thenApply(null), { name: 'TypeError', message: 'function must not be null' });
+  // @ts-expect-error a null function: thenApply returns a future that fails when the function is called
+  assert.equal(future.thenApply(null).isDone(), false);
   // A bare value of the wrong type fits no form; named, it is the parameter's TypeError.
   // @ts-expect-error a bare number: the form check throws IllegalArgumentError
   assert.throws(() => future.thenApply(1), { name: 'IllegalArgumentError', message: 'thenApply() takes one of (function); got a number' });
@@ -808,8 +808,8 @@ test("undefined is refused, null is Java's null", async () => {
     name: 'TypeError',
     message: 'function must be a function (value) => result, not number',
   });
-  // @ts-expect-error a null action: whenComplete throws TypeError
-  assert.throws(() => future.whenComplete(null), { name: 'TypeError', message: 'action must not be null' });
+  // @ts-expect-error a null action: whenComplete returns a future that fails when the action is called
+  assert.equal(future.whenComplete(null).isDone(), false);
   // @ts-expect-error a bare string: the form check throws IllegalArgumentError
   assert.throws(() => future.whenComplete('x'), {
     name: 'IllegalArgumentError',
@@ -876,6 +876,68 @@ test("undefined is refused, null is Java's null", async () => {
     name: 'TypeError',
     message: 'timeout must be a number of milliseconds or a Temporal.Duration',
   });
+});
+
+// Java's KafkaFutureImpl calls the function or action through a lambda that
+// dereferences it, so a null one fails the dependant with
+// NullPointerException where the call would run: thenApply's only once the
+// source succeeds, whenComplete's on either outcome (the source's failure
+// winning over the action's, as for any action that throws).
+test("a null function or action fails the returned future where Java's does, on every kind of future", async () => {
+  /** @type {Array<[string, () => KafkaFuture<string>, (f: KafkaFuture<string>) => void]>} */
+  const sources = [
+    ['a pending future, completed later', () => newFuture(), (f) => complete(/** @type {FutureImpl<string>} */ (f), 'v')],
+    ["a pending record's future, completed later", () => createFuture(true), (f) => complete(/** @type {FutureImpl<string>} */ (f), 'v')],
+    ['a done future', () => KafkaFuture.completedFuture('v'), () => {}],
+    ["allOf's future", () => KafkaFuture.allOf([KafkaFuture.completedFuture('v')]).thenApply(() => 'v'), () => {}],
+    ["a dependant's future", () => KafkaFuture.completedFuture('w').thenApply(() => 'v'), () => {}],
+  ];
+  for (const [name, make, finish] of sources) {
+    const source = make();
+    // @ts-expect-error a null function: it fails the dependant once called
+    const applied = source.thenApply(null);
+    // @ts-expect-error a null function, by name
+    const appliedByName = source.thenApply({ function: null });
+    // @ts-expect-error a null action: it fails the dependant once called
+    const completed = source.whenComplete(null);
+    // @ts-expect-error a null action, by name
+    const completedByName = source.whenComplete({ action: null });
+    finish(source);
+    for (const [dependant, message] of [
+      [applied, 'function must not be null'],
+      [appliedByName, 'function must not be null'],
+      [completed, 'action must not be null'],
+      [completedByName, 'action must not be null'],
+    ]) {
+      const cause = await assertFutureThrows(/** @type {KafkaFuture<unknown>} */ (dependant), TypeError);
+      assert.equal(cause.message, message, name);
+    }
+    assert.equal(await source.get(), 'v', name);
+  }
+});
+
+test("a null function on a failed future fails with the source's failure, the function not being called, as Java's", async () => {
+  const pending = newFuture();
+  // @ts-expect-error a null function
+  const later = pending.thenApply(null);
+  completeExceptionally(pending, new Error('We require more vespene gas'));
+  await awaitAndAssertFailure(later, Error, 'We require more vespene gas');
+  const failed = newFuture();
+  completeExceptionally(failed, new Error('We require more minerals'));
+  // @ts-expect-error a null function
+  await awaitAndAssertFailure(failed.thenApply(null), Error, 'We require more minerals');
+});
+
+test("a null action on a failed future fails with the source's failure, as an action that throws does in Java", async () => {
+  const pending = newFuture();
+  // @ts-expect-error a null action
+  const later = pending.whenComplete(null);
+  completeExceptionally(pending, new Error('We require more vespene gas'));
+  await awaitAndAssertFailure(later, Error, 'We require more vespene gas');
+  const failed = newFuture();
+  completeExceptionally(failed, new Error('We require more minerals'));
+  // @ts-expect-error a null action
+  await awaitAndAssertFailure(failed.whenComplete(null), Error, 'We require more minerals');
 });
 
 // --- The two value sources ---------------------------------------------------
