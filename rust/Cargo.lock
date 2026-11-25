@@ -691,6 +691,8 @@ dependencies = [
  "regex",
  "rustc-hash",
  "rustls",
+ "rustls-native-certs",
+ "rustls-platform-verifier",
  "schema-registry-client",
  "serde",
  "serde_json",

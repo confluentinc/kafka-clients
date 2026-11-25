@@ -49,8 +49,8 @@ name: build-test-release
 #      macosx_x64 one under Rosetta 2, which is unaffected by the linux_arm64
 #      SIGSEGV in item 1.
 #   3. "Rust additional checks (Linux amd64)" -- one job each: the rustdoc of
-#      every workspace crate with warnings denied, plus clippy over the default
-#      features (doc-check); format-check, check-generated, the custom lint
+#      every workspace crate with warnings denied, plus clippy and the
+#      trust-store tests over the default features (doc-check); format-check, check-generated, the custom lint
 #      rules and clippy over --all-features (lint); the packaged crate's
 #      contents (package-check); the Rust API and the C ABI against the last
 #      release tag, where a breaking change fails unless the Cargo.toml version
@@ -574,7 +574,10 @@ blocks:
     #     the whole workspace (the doctests already run in "Verify Rust and language bindings" as part
     #     of `cargo test`), then the clippy pass over the default features,
     #     which the lint job leaves out of its lint (LINT_ARGS) so the two
-    #     clippy passes run in parallel.
+    #     clippy passes run in parallel, and the `ssl_factory` unit tests over
+    #     the default features (`test-ssl-factory-default-features`): the test
+    #     jobs build `--all-features`, where `platform-verifier` replaces the
+    #     default `webpki-roots` trust store.
     #   - lint: the protocol-independent checks of `make -C rust verify`:
     #     format-check, check-generated, and `cargo xtask lint` (the custom
     #     lint rules and the clippy pass over --all-features).
@@ -622,6 +625,7 @@ blocks:
           commands:
             - make -C rust doc-check
             - make -C rust clippy-default-features
+            - make -C rust test-ssl-factory-default-features
         - name: "lint (Linux amd64)"
           execution_time_limit:
             minutes: 20

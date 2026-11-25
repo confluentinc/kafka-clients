@@ -6,6 +6,16 @@ Before GA the public API is not stable, and an interface may change even in a mi
 
 ## [Unreleased]
 
+### Security
+
+- Without `ssl.truststore.location` or `ssl.truststore.certificates`, the
+  broker certificate is verified by the operating system's certificate
+  verifier (its root certificates on Linux, where `SSL_CERT_FILE` /
+  `SSL_CERT_DIR` override them), as the Java client uses the JDK's default
+  trust store (the core's `platform-verifier` feature); the wheel no longer
+  ships Mozilla's root bundle. On Linux a host without a CA bundle must set
+  one of the truststore keys or `SSL_CERT_FILE`.
+
 ### Changed
 
 - A `None` for an argument Java requires reaches the Rust core, which answers

@@ -124,9 +124,11 @@
     <NativeLibraryFileName Condition="$([MSBuild]::IsOSPlatform('Linux'))">libconfluent_kafka.so</NativeLibraryFileName>
     <NativeLibraryFileName Condition="$([MSBuild]::IsOSPlatform('Windows'))">confluent_kafka.dll</NativeLibraryFileName>
 
-    <!-- Cargo profile dir mirrors $(Configuration): Debug -> debug, Release -> release. -->
+    <!-- Cargo profile dir follows $(Configuration): Debug -> debug; Release -> release-cdylib,
+         the library as the package ships it (`make -C rust build-cdylib`: the platform's
+         certificate verifier, no Mozilla root bundle). -->
     <CargoProfileDir>debug</CargoProfileDir>
-    <CargoProfileDir Condition="'$(Configuration)' == 'Release'">release</CargoProfileDir>
+    <CargoProfileDir Condition="'$(Configuration)' == 'Release'">release-cdylib</CargoProfileDir>
 
     <!-- A cargo build for an explicit target triple, as the Windows CI jobs make, puts the
          library under target/<triple>/; -p:CargoTargetTriple=<triple> reads it from there. -->
@@ -161,7 +163,7 @@
        DllNotFoundException surfaces only at runtime. -->
   <Target Name="EnsureNativeLibraryExists" BeforeTargets="Build" Condition="'$(NativeAssetsDir)' == ''">
     <Error Condition="!Exists('$(NativeLibraryPath)')"
-           Text="Native library not found at '$(NativeLibraryPath)'. Run `cargo build --features ffi` in rust/ first (CLAUDE.md §7.1: the Rust core produces the native + header the binding consumes)." />
+           Text="Native library not found at '$(NativeLibraryPath)'. Run `make -C rust devel-build-all-features` (Debug) or `make -C rust build-cdylib` (Release) first (CLAUDE.md §7.1: the Rust core produces the native + header the binding consumes)." />
   </Target>
 
   <!-- System.Memory (ReadOnlyMemory<byte>/Span<byte>) and IAsyncDisposable /

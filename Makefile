@@ -27,15 +27,16 @@ export MULTILANG_IMAGE_TAG
 
 build: init-hooks build-all
 
-# The release builds, for packaging and the benchmarks: the Rust library with
-# every feature, the C library and the Python binding. The tests use
-# devel-build. Like the other cross-language targets it first initialises every
-# submodule (kafka/ included, which the code generator and the lints read); the
-# language folders fetch only what they need.
+# The release builds, for packaging and the benchmarks: the C library and the
+# Python binding over the library as it ships (rust/Makefile `build-cdylib`, in
+# target/release-cdylib/: the platform verifier, no Mozilla bundle), one
+# release build with fat LTO. The tests use devel-build. Like the other
+# cross-language targets it first initialises every submodule (kafka/ included,
+# which the code generator and the lints read); the language folders fetch only
+# what they need.
 build-all: submodules
-	$(MAKE) -C rust build-all-features
-	$(MAKE) -C c RUST_PROFILE=release build
-	$(MAKE) -C python PROFILE=release build
+	$(MAKE) -C c RUST_PROFILE=release-cdylib build
+	$(MAKE) -C python PROFILE=release-cdylib build
 
 # The debug builds the binding tests use. They link the debug all-features
 # library (rust/Makefile `devel-build-all-features`), the library unit the Rust

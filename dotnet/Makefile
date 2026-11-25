@@ -1,6 +1,7 @@
 # .NET binding targets: `make -C dotnet <target>` from the repository root, or
 # `make <target>` from this directory. A target that needs the Rust library
-# builds it first (rust-lib, or pack's release build).
+# builds it first (rust-lib, or the release build of pack and the benchmarks,
+# rust/Makefile `build-cdylib`).
 # REPO_ROOT / RUST_PROJECT_ROOT follow python/Makefile and c/Makefile:
 # RUST_PROJECT_ROOT is the Rust workspace (rust/), NOT the repository root.
 #
@@ -39,9 +40,12 @@ DOTNET_CONFIG ?= Release
 # library unit the Rust tests build (rust/Makefile `devel-build-all-features`).
 # CARGO_PROFILE_PROP points Confluent.Kafka.csproj's native copy at it, whatever
 # $(DOTNET_CONFIG) is; every build and test of the test paths passes it. pack-dotnet
-# and the perf benchmarks build and link the release library instead.
+# and the perf benchmarks build and link the library as the package ships it
+# instead: release-cdylib (rust/Makefile `build-cdylib`: the platform's
+# certificate verifier, no Mozilla bundle), which Confluent.Kafka.csproj reads in
+# its Release configuration.
 RUST_PROFILE ?= debug
-RUST_BUILD_TARGET = $(if $(filter release,$(RUST_PROFILE)),build,devel-build-all-features)
+RUST_BUILD_TARGET = $(if $(filter release-cdylib,$(RUST_PROFILE)),build-cdylib,$(if $(filter release,$(RUST_PROFILE)),build,devel-build-all-features))
 CARGO_PROFILE_PROP = -p:CargoProfileDir=$(RUST_PROFILE)
 SOLUTION := $(REPO_ROOT)/dotnet/Confluent.Kafka.sln
 
@@ -213,7 +217,8 @@ test-integration-native-aot: grpc-native-aot
 	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-grpc-dotnet-native-aot
 
 # The Rust library the .NET binding loads, built by rust/Makefile: the debug
-# all-features build, or the release one for RUST_PROFILE=release; a cargo
+# all-features build, the shipped one for RUST_PROFILE=release-cdylib, or the
+# release one for RUST_PROFILE=release; a cargo
 # no-op once it is current.
 rust-lib:
 	$(MAKE) -C $(RUST_PROJECT_ROOT) $(RUST_BUILD_TARGET)
@@ -414,7 +419,7 @@ test-verifiable-clients-dotnet: build-dotnet
 PACKAGE_DIR := $(REPO_ROOT)/dotnet/artifacts/package
 
 pack-dotnet:
-	$(MAKE) -C $(RUST_PROJECT_ROOT) build
+	$(MAKE) -C $(RUST_PROJECT_ROOT) build-cdylib
 	rm -rf $(PACKAGE_DIR)
 	cd $(REPO_ROOT) && sh .semaphore/pack-nupkg.sh --dev $(PACKAGE_DIR)
 
@@ -535,7 +540,7 @@ perf-unit-test-dotnet: build-dotnet
 # under `make -n`, so folding it into the `case` would make a dry run actually
 # `dotnet run` the benchmark.
 producer-perf-test-dotnet:
-	@if [ "$(CLIENT_VERSION)" = "3" ]; then $(MAKE) -C $(RUST_PROJECT_ROOT) build; fi
+	@if [ "$(CLIENT_VERSION)" = "3" ]; then $(MAKE) -C $(RUST_PROJECT_ROOT) build-cdylib; fi
 	@case "$(CLIENT_VERSION)" in \
 	  3) MODE=producer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V3) ;; \
 	  2) MODE=producer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V2) ;; \
@@ -543,7 +548,7 @@ producer-perf-test-dotnet:
 	esac
 
 consumer-perf-test-dotnet:
-	@if [ "$(CLIENT_VERSION)" = "3" ]; then $(MAKE) -C $(RUST_PROJECT_ROOT) build; fi
+	@if [ "$(CLIENT_VERSION)" = "3" ]; then $(MAKE) -C $(RUST_PROJECT_ROOT) build-cdylib; fi
 	@case "$(CLIENT_VERSION)" in \
 	  3) MODE=consumer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V3) ;; \
 	  2) MODE=consumer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V2) ;; \
@@ -570,7 +575,7 @@ consumer-perf-test-dotnet:
 # A latency smoke run at a fixed low rate (100 rps, p99 budget), like the Rust
 # perf tests, so it runs on the RUST_PROFILE library (debug by default) as the
 # other binding tests do; the PerfV2 / CLIENT_VERSION=2 benchmarks stay on
-# release.
+# the shipped library (release-cdylib).
 test-integration-perf-dotnet:
 	$(MAKE) -C $(RUST_PROJECT_ROOT) $(RUST_BUILD_TARGET)
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(PERF_V3)/PerfV3.csproj

@@ -12,7 +12,7 @@ set(RUST_INCLUDE_DIR "${RUST_PROJECT_ROOT}/target/include")
 
 # The cargo profile directory to link from: target/${RUST_PROFILE}. Only that
 # directory is searched, so a library of another profile is never picked up.
-set(RUST_PROFILE "debug" CACHE STRING "Cargo profile directory of the Rust library: debug or release")
+set(RUST_PROFILE "debug" CACHE STRING "Cargo profile directory of the Rust library: debug, release or release-cdylib")
 
 # Link type: "static" or "shared"
 set(LINK_TYPE "static" CACHE STRING "Link type: static or shared")
@@ -38,8 +38,9 @@ endif()
 if(NOT CONFLUENT_KAFKA_RUST)
     message(FATAL_ERROR
         "Could not find libconfluent_kafka in ${RUST_PROJECT_ROOT}/target/${RUST_PROFILE}. "
-        "Run 'make -C rust devel-build-all-features' (debug) or 'make -C rust build-all-features' "
-        "(release) from the repository root first; c/Makefile's build does it.")
+        "Run 'make -C rust devel-build-all-features' (debug), 'make -C rust build-all-features' "
+        "(release) or 'make -C rust build-cdylib' (release-cdylib) from the repository root "
+        "first; c/Makefile's build does it.")
 endif()
 
 message(STATUS "Using Rust library: ${CONFLUENT_KAFKA_RUST}")
@@ -48,11 +49,17 @@ message(STATUS "Using Rust headers: ${RUST_INCLUDE_DIR}")
 # Unity test framework
 add_subdirectory(tests/unity)
 
-# System libraries for static linking
+# System libraries for static linking. On macOS the platform certificate
+# verifier (the `platform-verifier` feature of the library `build-cdylib`
+# builds) calls the Security and CoreFoundation frameworks, which the shared
+# library links itself but a static archive leaves to its user.
 if(LINK_TYPE STREQUAL "shared")
     set(SYSTEM_LIBS "")
 else()
     set(SYSTEM_LIBS pthread dl m)
+    if(APPLE)
+        list(APPEND SYSTEM_LIBS "-framework Security" "-framework CoreFoundation")
+    endif()
 endif()
 
 # Enable CTest
