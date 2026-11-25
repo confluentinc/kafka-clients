@@ -27,7 +27,7 @@ Follow the **Critic** role and review loop in `.claude/rules/agent-roles.md` (wa
 - **Consistency invariants:** the `src/` / `Internal/` / `Internal/Interop/` split holds and everything under `Internal/` is `internal`; host-only scaffolding (`NativeMethods`/`SafeHandle`/completion bridge — pump or dispatcher) is **expected**, not a finding.
 
 ## Verify commands (not make)
-The binding's DoD (CLAUDE.md §7): `cargo build --features ffi` → `dotnet build` → `dotnet test` (MockProducer / MockConsumer); + `dotnet format` and the net462/net8.0/net10.0 TFM smoke test.
+The binding's DoD (CLAUDE.md §7): `cargo build --features ffi` → `dotnet build` → `dotnet test` (MockProducer / MockConsumer); + `dotnet format` and the net462/net10.0 TFM smoke test, with net10.0 also against the netstandard2.0 build (Confluent.Kafka.UnitTests.NetStandard).
 
 ## Comment format
 Use the root Critic's format, but cite the **C ABI header / Java API** as the reference (not a Java source line).

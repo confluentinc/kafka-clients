@@ -42,14 +42,14 @@ COPY rust/multilanguage-test-server/proto /src/rust/multilanguage-test-server/pr
 RUN find /src/dotnet -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
 
 RUN dotnet publish /src/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj \
-        -c Release -p:CargoProfileDir=${RUST_PROFILE} -p:GrpcServerAot=true -f net8.0 \
+        -c Release -p:CargoProfileDir=${RUST_PROFILE} -p:GrpcServerAot=true -f net10.0 \
         --use-current-runtime -o /app
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime-deps, with no .NET runtime. (Identical to Dockerfile.grpc.aot
 # but for CONSUMER_FLAVOR.)
 # ---------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/runtime-deps:8.0-noble AS runtime
+FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-noble AS runtime
 
 WORKDIR /app
 

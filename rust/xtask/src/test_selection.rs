@@ -124,8 +124,9 @@ const PYTHON_SUITES: &[(&str, &str)] = &[
 const DOTNET_SUITES: &[(&str, &str, &[&str])] = &[
     (
         "solution",
-        "the tests of Confluent.Kafka.sln: dotnet/tests/Confluent.Kafka.UnitTests (the mock clients, no broker) and \
-         dotnet/tests/Confluent.Kafka.IntegrationTests (a Testcontainers broker)",
+        "the tests of Confluent.Kafka.sln: dotnet/tests/Confluent.Kafka.UnitTests (the mock clients, no broker; \
+         dotnet/tests/Confluent.Kafka.UnitTests.NetStandard runs the same tests against the library's netstandard2.0 \
+         build) and dotnet/tests/Confluent.Kafka.IntegrationTests (a Testcontainers broker)",
         &["Confluent.Kafka.UnitTests", "Confluent.Kafka.IntegrationTests"],
     ),
     ("soak", "dotnet/soak/SoakClient.Tests", &["Confluent.Kafka.Soak.Tests"]),

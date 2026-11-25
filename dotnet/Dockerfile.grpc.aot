@@ -25,8 +25,7 @@
 # Stage 1: Restore + publish the grpc-server app as a Native AOT executable
 # against the prebuilt Rust shared lib. Proto codegen (Grpc.Tools) runs here.
 # ---------------------------------------------------------------------------
-# The SDK image with the Native AOT prerequisites: clang and the zlib
-# development files, which the net8.0 link needs.
+# The SDK image with the Native AOT prerequisites (clang).
 FROM mcr.microsoft.com/dotnet/sdk:10.0-noble-aot AS builder
 
 WORKDIR /src
@@ -50,10 +49,10 @@ COPY rust/multilanguage-test-server/proto /src/rust/multilanguage-test-server/pr
 # Dockerfile.grpc.
 RUN find /src/dotnet -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} +
 
-# Publish the server's net8.0 leg, as Dockerfile.grpc does, as Native AOT for this
+# Publish the server's net10.0 leg, as Dockerfile.grpc does, as Native AOT for this
 # image's platform. A trim or AOT warning fails the publish (TreatWarningsAsErrors).
 RUN dotnet publish /src/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj \
-        -c Release -p:CargoProfileDir=${RUST_PROFILE} -p:GrpcServerAot=true -f net8.0 \
+        -c Release -p:CargoProfileDir=${RUST_PROFILE} -p:GrpcServerAot=true -f net10.0 \
         --use-current-runtime -o /app
 
 # ---------------------------------------------------------------------------
@@ -61,7 +60,7 @@ RUN dotnet publish /src/dotnet/grpc-server/Confluent.Kafka.GrpcServer.csproj \
 # .NET runtime: the server is native code. The Ubuntu 24.04 (Noble) tag, for the
 # glibc reason given in Dockerfile.grpc.
 # ---------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/runtime-deps:8.0-noble AS runtime
+FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-noble AS runtime
 
 WORKDIR /app
 

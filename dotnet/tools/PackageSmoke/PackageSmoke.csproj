@@ -22,6 +22,19 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
+  <!--
+    net8.0 is a .NET 8 application's build: the package has no net8.0 assembly, so NuGet gives it the
+    netstandard2.0 one and the dependencies the nuspec lists for it, as it gives a .NET 8 or 9 user. It
+    runs on .NET 10 (RollForward), the only runtime CI installs: .NET 8 is out of Microsoft support, so
+    nothing here runs on it. CheckEolTargetFramework: an SDK that lists net8.0 as out of support warns
+    (NETSDK1138), which TreatWarningsAsErrors would make an error, although the leg only builds against
+    .NET 8's reference assemblies.
+  -->
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0'">
+    <RollForward>Major</RollForward>
+    <CheckEolTargetFramework>false</CheckEolTargetFramework>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Confluent.Kafka" Version="[$(ConfluentKafkaVersion)]" />
   </ItemGroup>

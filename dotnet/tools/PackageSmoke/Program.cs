@@ -60,17 +60,21 @@ internal static class Program
         }
 
         // The package's assembly for this application's framework, not another framework's; .NET
-        // Framework runs its .NET Framework 4.6.2 assembly.
+        // Framework runs its .NET Framework 4.6.2 assembly, and a .NET 8 application, for which the
+        // package has no assembly of its own, its .NET Standard 2.0 one.
 #if NETFRAMEWORK
         string? expected = ".NETFramework,Version=v4.6.2";
-#else
+#elif NET10_0_OR_GREATER
         string? expected = AppContext.TargetFrameworkName;
+#else
+        string? expected = ".NETStandard,Version=v2.0";
 #endif
         string? built = assembly.GetCustomAttribute<TargetFrameworkAttribute>()?.FrameworkName;
         if (built != expected)
         {
             throw new InvalidOperationException($"loaded the Confluent.Kafka assembly built for {built}, not for {expected}");
         }
+        Console.WriteLine($"OK: loaded the Confluent.Kafka assembly built for {built}");
 
         using (var mock = new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer()))
         {

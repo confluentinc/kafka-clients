@@ -7,7 +7,7 @@
   -->
 
   <PropertyGroup>
-    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0</TargetFrameworks>
     <RootNamespace>Confluent.Kafka.IntegrationTests</RootNamespace>
     <AssemblyName>Confluent.Kafka.IntegrationTests</AssemblyName>
     <IsPackable>false</IsPackable>
