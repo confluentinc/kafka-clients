@@ -50,10 +50,11 @@
   <!-- The facade packages of the library's net462 and netstandard2.0 builds
        (src/Confluent.Kafka/Confluent.Kafka.csproj), which tests/Confluent.Kafka.UnitTests.NetStandard
        references too, as it gets the netstandard2.0 build without its dependencies. The package's
-       nuspec lists them, and .semaphore/check-nupkg.py checks it. -->
+       nuspec lists them, and .semaphore/check-nupkg.py checks it. Microsoft.Bcl.AsyncInterfaces is from
+       the .NET 10 line, which Microsoft supports; the .NET 8 one is out of support. -->
   <PropertyGroup>
     <SystemMemoryVersion>4.5.5</SystemMemoryVersion>
-    <MicrosoftBclAsyncInterfacesVersion>8.0.0</MicrosoftBclAsyncInterfacesVersion>
+    <MicrosoftBclAsyncInterfacesVersion>10.0.15</MicrosoftBclAsyncInterfacesVersion>
   </PropertyGroup>
 
   <!-- A CI build (Semaphore sets CI=true) maps the source paths in the PDBs to the repository's, so a
