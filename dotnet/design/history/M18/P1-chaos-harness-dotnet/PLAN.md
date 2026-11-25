@@ -86,7 +86,7 @@ file (§2, row 2). There are two recorded scope notes:
 - **Shell traps on this machine** (each has produced a false PASS before):
   - Start each Bash call with
     `export PATH="/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.dotnet:$PATH"`.
-  - For cargo, set `RUSTUP_TOOLCHAIN=1.95.0-aarch64-apple-darwin`.
+  - For cargo, set `RUSTUP_TOOLCHAIN=1.100.0-aarch64-apple-darwin`.
   - `grep` is ugrep, so use `/usr/bin/grep`. There is no `sed`; use awk. `cat` is bat, so use
     `/bin/cat`.
   - zsh does not split an unquoted `$var`, and globs must be quoted (`'--include=*.cs'`). `$T:t…`
@@ -668,7 +668,7 @@ phase.
 **Commands, macOS native (Apple Silicon):**
 ```
 export PATH="/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$HOME/.cargo/bin:$HOME/.dotnet:$PATH"
-export RUSTUP_TOOLCHAIN=1.95.0-aarch64-apple-darwin
+export RUSTUP_TOOLCHAIN=1.100.0-aarch64-apple-darwin
 make -C <main> build-grpc-native-dotnet          # rebuilds the dylib, publishes net10.0 into rust/target/grpc-native/dotnet
 (cd <main>/rust && MULTILANG_BACKEND_MODE=native MULTILANG_DOTNET=$HOME/.dotnet/dotnet \
    cargo xtask chaos --workload producer:dotnet --workload consumer:dotnet --cycles 1 --reports)
