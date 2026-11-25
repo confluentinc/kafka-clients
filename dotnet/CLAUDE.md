@@ -873,6 +873,13 @@ each goes when the reason it gives goes:
   and so does, in the real consumers' `Subscribe` and `Assign`, a blank topic (Java's `isBlank`: no
   character above U+0020, so a NUL counts), which the core checks only in the call the NUL stops;
   the mocks refuse it too, as their native mock could match the cut name to another topic's state.
+  A topic holding a NUL is never assigned, so where Java looks a partition up in the assignment
+  (`Seek`, `Position`, `Pause`, `Resume`, `SeekToBeginning`, `SeekToEnd`, `CurrentLag`, the mocks'
+  `AddRecord`) it gets Java's answer for a partition that is not assigned, as a null partition does
+  where the call takes one (the mocks' `CurrentLag` answers 0, as for a partition with no end
+  offset). The mocks' `AddRecord` and `UpdatePartitions` check the closed state first, as Java's
+  `MockConsumer` does. Like a null, a NUL topic is answered before Java would pause, resume or reset
+  the partitions ahead of it (A refused call does nothing, below).
   The mock consumers' `OffsetsForTimes` answers a NUL topic as Java's `MockConsumer` answers every
   map, with `UnsupportedOperationException`, and the mock consumers' constructors answer a NUL
   strategy as Java's `AutoOffsetResetStrategy.fromString` does, a `by_duration` one with the
@@ -961,11 +968,12 @@ each goes when the reason it gives goes:
   stores as given; and a real `OffsetsForTimes` with a zero timeout, given or from
   `default.api.timeout.ms`, whose Java answer is a map with the null key.
 - **A refused call does nothing.** Java works through the argument in order and throws when it reaches
-  the null; the binding answers the null first, so the work Java does before it is not done. `Pause`,
-  `Resume`, `SeekToBeginning` and `SeekToEnd` pause, resume or reset none of the partitions before the
-  null (on the mocks, a `Pause` with a partition that is not assigned and not null still pauses the ones
-  before it, as Java's does). The consumer mocks' `Assign` keeps the mock's committed offsets and its
-  subscription type, so a later `Subscribe` succeeds. Java's mock clears the offsets and switches to
+  the null, or a topic holding a NUL; the binding answers it first, so the work Java does before it is
+  not done. `Pause`, `Resume`, `SeekToBeginning` and `SeekToEnd` pause, resume or reset none of the
+  partitions before it (on the mocks, a `Pause` with a partition that is not assigned, not null, and
+  whose topic is neither null nor holds a NUL still pauses the ones before it, as Java's does). The
+  consumer mocks' `Assign` keeps the mock's committed offsets and its subscription type, so a later
+  `Subscribe` succeeds. Java's mock clears the offsets and switches to
   manual assignment first, so its next `subscribe` throws `IllegalStateException` "Subscription to
   topics, partitions and pattern are mutually exclusive". The consumer mocks' `Rebalance` clears no
   records, calls no `OnPartitionsRevoked` and keeps the assignment. Java's mock clears the records,
@@ -976,7 +984,8 @@ each goes when the reason it gives goes:
   none of the entries before the null key. `DeleteTopics` and `DescribeTopics` with a null id send
   nothing: Java's mock deletes or describes the other ids and takes a pending `TimeoutNextRequest`,
   which on .NET is left for the next call, and Java's real `DescribeTopics` sends the request for the
-  other ids. Goes when the C ABI carries a null partition and a null id.
+  other ids. Goes when the C ABI carries a null partition and a null id, and, for a topic holding a
+  NUL, when it takes length-delimited strings.
 - **A null partition's error comes first.** The binding checks the null before the call, so where Java
   meets another error first, .NET reports the null. A subscribed `MockConsumer`'s `Assign` throws the
   `ArgumentNullException` where Java's mock throws `IllegalStateException` "Subscription to topics,

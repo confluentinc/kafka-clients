@@ -31,7 +31,8 @@ namespace Confluent.Kafka.UnitTests;
 /// the four consumers: <see cref="ArgumentException"/> with the parameter's name, before anything reaches the native
 /// client, which would read the string only up to the NUL. Java's checks come first (the closed check, a null element, the
 /// group check, a negative target time, a blank topic), and a consumer call made from a rebalance listener is refused the
-/// same way.
+/// same way. Where Java looks the partition up in the assignment, which never holds a NUL topic, the answer is Java's for
+/// a partition that is not assigned.
 /// </summary>
 public sealed class PublicConsumerTopicStringTests
 {
@@ -87,21 +88,15 @@ public sealed class PublicConsumerTopicStringTests
 
     public static IEnumerable<object[]> AllConsumers() => Mocks().Concat(RealConsumers());
 
-    /// <summary>One consumer call per method and overload that takes a topic, with the parameter it names.</summary>
+    /// <summary>
+    /// One consumer call per method and overload that takes a topic and does not look it up in the assignment, with the
+    /// parameter it names.
+    /// </summary>
     private static IEnumerable<(string Name, string Param, Action<IConsumer<byte[], byte[]>> Sync, Func<IAsyncConsumer<byte[], byte[]>, Task> Async)> TopicCalls() => new (string, string, Action<IConsumer<byte[], byte[]>>, Func<IAsyncConsumer<byte[], byte[]>, Task>)[]
     {
         ("Subscribe", "topics", c => c.Subscribe(new[] { "ok", NulTopic }), c => c.Subscribe(new[] { "ok", NulTopic })),
         ("Subscribe+listener", "topics", c => c.Subscribe(new[] { NulTopic }, new NoListener()), c => c.Subscribe(new[] { NulTopic }, new NoListener())),
         ("Assign", "partitions", c => c.Assign(s_nulPartitions), c => c.Assign(s_nulPartitions)),
-        ("Pause", "partitions", c => c.Pause(s_nulPartitions), c => c.Pause(s_nulPartitions)),
-        ("Resume", "partitions", c => c.Resume(s_nulPartitions), c => c.Resume(s_nulPartitions)),
-        ("SeekToBeginning", "partitions", c => c.SeekToBeginning(s_nulPartitions), c => c.SeekToBeginning(s_nulPartitions)),
-        ("SeekToEnd", "partitions", c => c.SeekToEnd(s_nulPartitions), c => c.SeekToEnd(s_nulPartitions)),
-        ("Seek", "partition", c => c.Seek(s_nulPartition, 1), c => c.Seek(s_nulPartition, 1)),
-        ("Seek+metadata", "partition", c => c.Seek(s_nulPartition, new OffsetAndMetadata(1)), c => c.Seek(s_nulPartition, new OffsetAndMetadata(1))),
-        ("Position", "partition", c => c.Position(s_nulPartition), c => c.Position(s_nulPartition)),
-        ("Position+timeout", "partition", c => c.Position(s_nulPartition, s_timeout), c => c.Position(s_nulPartition, s_timeout)),
-        ("CurrentLag", "topicPartition", c => c.CurrentLag(s_nulPartition), c => c.CurrentLag(s_nulPartition)),
         ("Commit", "offsets", c => c.Commit(s_nulTopicOffsets), c => c.Commit(s_nulTopicOffsets)),
         ("Commit+timeout", "offsets", c => c.Commit(s_nulTopicOffsets, s_timeout), c => c.Commit(s_nulTopicOffsets, s_timeout)),
         ("CommitAsync", "offsets", c => c.CommitAsync(s_nulTopicOffsets, (IOffsetCommitCallback?)null), c => c.CommitAsync(s_nulTopicOffsets, (IOffsetCommitCallback?)null)),
@@ -240,6 +235,82 @@ public sealed class PublicConsumerTopicStringTests
         }
     }
 
+    /// <summary>
+    /// One call per method and overload that looks its partition up in the assignment, given the partition to name, with
+    /// the partitions assigned before it ("ok-0") ahead of it where it takes a collection.
+    /// </summary>
+    private static IEnumerable<(string Name, Action<IConsumer<byte[], byte[]>, TopicPartition> Sync, Func<IAsyncConsumer<byte[], byte[]>, TopicPartition, Task> Async)> AssignmentCalls() => new (string, Action<IConsumer<byte[], byte[]>, TopicPartition>, Func<IAsyncConsumer<byte[], byte[]>, TopicPartition, Task>)[]
+    {
+        ("Seek", (c, tp) => c.Seek(tp, 1), (c, tp) => c.Seek(tp, 1)),
+        ("Seek+metadata", (c, tp) => c.Seek(tp, new OffsetAndMetadata(1)), (c, tp) => c.Seek(tp, new OffsetAndMetadata(1))),
+        ("Position", (c, tp) => c.Position(tp), (c, tp) => c.Position(tp)),
+        ("Position+timeout", (c, tp) => c.Position(tp, s_timeout), (c, tp) => c.Position(tp, s_timeout)),
+        ("Pause", (c, tp) => c.Pause(AfterOk(tp)), (c, tp) => c.Pause(AfterOk(tp))),
+        ("Resume", (c, tp) => c.Resume(AfterOk(tp)), (c, tp) => c.Resume(AfterOk(tp))),
+        ("SeekToBeginning", (c, tp) => c.SeekToBeginning(AfterOk(tp)), (c, tp) => c.SeekToBeginning(AfterOk(tp))),
+        ("SeekToEnd", (c, tp) => c.SeekToEnd(AfterOk(tp)), (c, tp) => c.SeekToEnd(AfterOk(tp))),
+        ("CurrentLag", (c, tp) => c.CurrentLag(tp), (c, tp) => c.CurrentLag(tp)),
+    };
+
+    // No topic holding a NUL is ever assigned (Assign and Subscribe refuse it, and no topic name holds one), so where Java
+    // looks the partition up in the assignment, a NUL topic gets Java's answer for a partition that is not assigned: the
+    // answer the core gives for a plain topic that is not assigned, the topic printed with its NUL. On the mocks,
+    // CurrentLag answers 0, Java's MockConsumer answer for a partition with no end offset.
+    [Theory]
+    [MemberData(nameof(AllConsumers))]
+    public async Task WhereJavaLooksUpTheAssignment_ANulTopic_IsNotAssigned(string kind)
+    {
+        object consumer = await Create(kind, groupId: true);
+        using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
+        TopicPartition[] ok = { new TopicPartition("ok", 0) };
+        Assert.Null(await Outcome(consumer, c => c.Assign(ok), c => c.Assign(ok)));
+        TopicPartition unassigned = new TopicPartition("x", 0);
+        foreach ((string name, Action<IConsumer<byte[], byte[]>, TopicPartition> sync, Func<IAsyncConsumer<byte[], byte[]>, TopicPartition, Task> async) in AssignmentCalls())
+        {
+            Exception? nul = await Outcome(consumer, c => sync(c, s_nulPartition), c => async(c, s_nulPartition));
+            if (name == "CurrentLag" && kind.Contains("Mock"))
+            {
+                Assert.True(nul is null, $"{name}: {nul}");
+                Assert.Equal(0, await Lag(consumer, s_nulPartition));
+                continue;
+            }
+
+            Exception? fromTheCore = await Outcome(consumer, c => sync(c, unassigned), c => async(c, unassigned));
+            Assert.True(nul is not null && fromTheCore is not null, $"{name}: {nul} / {fromTheCore}");
+            Assert.True(nul!.GetType() == fromTheCore!.GetType(), $"{name}: {nul} / {fromTheCore}");
+            Assert.True(nul is IllegalStateException || (nul is IllegalArgumentException && kind.Contains("Mock")), $"{name}: {nul}");
+            Assert.Equal(fromTheCore.Message.Replace("x-0", "t\0u-0"), nul.Message);
+        }
+
+        Assert.Equal(ok, ((IConsumerCommon)consumer).Assignment());
+    }
+
+    // Java finds the first partition that is not assigned in the collection's order, a null one or one with a NUL topic.
+    [Theory]
+    [MemberData(nameof(AllConsumers))]
+    public async Task ACollectionWithANulTopicAndANull_ReportsTheFirstInOrder(string kind)
+    {
+        object consumer = await Create(kind, groupId: true);
+        using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
+        TopicPartition[] nulFirst = { s_nulPartition, null! };
+        TopicPartition[] nullFirst = { null!, s_nulPartition };
+        foreach ((string name, Action<IConsumer<byte[], byte[]>, IReadOnlyCollection<TopicPartition>> sync, Func<IAsyncConsumer<byte[], byte[]>, IReadOnlyCollection<TopicPartition>, Task> async) in new (string, Action<IConsumer<byte[], byte[]>, IReadOnlyCollection<TopicPartition>>, Func<IAsyncConsumer<byte[], byte[]>, IReadOnlyCollection<TopicPartition>, Task>)[]
+        {
+            ("Pause", (c, p) => c.Pause(p), (c, p) => c.Pause(p)),
+            ("Resume", (c, p) => c.Resume(p), (c, p) => c.Resume(p)),
+            ("SeekToBeginning", (c, p) => c.SeekToBeginning(p), (c, p) => c.SeekToBeginning(p)),
+            ("SeekToEnd", (c, p) => c.SeekToEnd(p), (c, p) => c.SeekToEnd(p)),
+        })
+        {
+            Exception? first = await Outcome(consumer, c => sync(c, nulFirst), c => async(c, nulFirst));
+            Assert.True(first is IllegalStateException, $"{name}: {first}");
+            Assert.Equal("No current assignment for partition t\0u-0", first!.Message);
+            Exception? second = await Outcome(consumer, c => sync(c, nullFirst), c => async(c, nullFirst));
+            Assert.True(second is IllegalStateException, $"{name}: {second}");
+            Assert.Equal("No current assignment for partition null", second!.Message);
+        }
+    }
+
     [Theory]
     [MemberData(nameof(AllConsumers))]
     public async Task AClosedConsumer_ReportsItsClosedState_BeforeTheNul(string kind)
@@ -250,6 +321,13 @@ public sealed class PublicConsumerTopicStringTests
         foreach ((string name, string _, Action<IConsumer<byte[], byte[]>> sync, Func<IAsyncConsumer<byte[], byte[]>, Task> async) in TopicCalls())
         {
             Exception? error = await Outcome(consumer, sync, async);
+            Assert.True(error is IllegalStateException, $"{name}: {error}");
+            Assert.Equal(ClosedMessage, error!.Message);
+        }
+
+        foreach ((string name, Action<IConsumer<byte[], byte[]>, TopicPartition> sync, Func<IAsyncConsumer<byte[], byte[]>, TopicPartition, Task> async) in AssignmentCalls())
+        {
+            Exception? error = await Outcome(consumer, c => sync(c, s_nulPartition), c => async(c, s_nulPartition));
             Assert.True(error is IllegalStateException, $"{name}: {error}");
             Assert.Equal(ClosedMessage, error!.Message);
         }
@@ -420,7 +498,7 @@ public sealed class PublicConsumerTopicStringTests
             Assert.IsType<IllegalArgumentException>(error).Message);
     }
 
-    // A call from a listener goes to the core's handle; the NUL is refused before it, as outside a callback.
+    // A call from a listener goes to the core's handle; the NUL is answered before it, as outside a callback.
     [Theory]
     [MemberData(nameof(Mocks))]
     public async Task FromARebalanceListener_ANulTopic_ThrowsArgumentException(string kind)
@@ -444,7 +522,13 @@ public sealed class PublicConsumerTopicStringTests
         Assert.Equal(new[] { "Seek", "Commit", "CommitAsync" }, listener.Errors.Select(e => e.Name));
         foreach ((string name, Exception? error) in listener.Errors)
         {
-            AssertNul(error, NulTopicMessage, name == "Seek" ? "partition" : "offsets", name);
+            if (name == "Seek")
+            {
+                Assert.Equal("No current assignment for partition t\0u-0", Assert.IsType<IllegalStateException>(error).Message);
+                continue;
+            }
+
+            AssertNul(error, NulTopicMessage, "offsets", name);
         }
 
         // The seek's metadata, which neither Java nor the core reads, is answered as plain metadata from a listener too.
@@ -464,14 +548,14 @@ public sealed class PublicConsumerTopicStringTests
 
     [Theory]
     [MemberData(nameof(Mocks))]
-    public async Task TheMockHelpers_RefuseANul(string kind)
+    public async Task TheMockHelpers_RefuseANul_AndAddRecordFindsItNotAssigned(string kind)
     {
         object consumer = await Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
         Dictionary<TopicPartition, long> durations = new Dictionary<TopicPartition, long> { [s_nulPartition] = 1 };
         if (consumer is MockConsumer<byte[], byte[]> sync)
         {
-            AssertNul(Record.Exception(() => sync.AddRecord(NulTopic, 0, 0, null, null)), NulTopicMessage, "topic", "AddRecord");
+            AssertAddRecordNotAssigned(Record.Exception(() => sync.AddRecord(NulTopic, 0, 0, null, null)), Record.Exception(() => sync.AddRecord("x", 0, 0, null, null)));
             AssertNul(Record.Exception(() => sync.UpdateBeginningOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateBeginningOffset");
             AssertNul(Record.Exception(() => sync.UpdateEndOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateEndOffset");
             AssertNul(Record.Exception(() => sync.UpdatePartitions(NulTopic, 1, 0, "h", 1)), NulTopicMessage, "topic", "UpdatePartitions");
@@ -482,7 +566,7 @@ public sealed class PublicConsumerTopicStringTests
         else
         {
             AsyncMockConsumer<byte[], byte[]> async = (AsyncMockConsumer<byte[], byte[]>)consumer;
-            AssertNul(Record.Exception(() => async.AddRecord(NulTopic, 0, 0, null, null)), NulTopicMessage, "topic", "AddRecord");
+            AssertAddRecordNotAssigned(Record.Exception(() => async.AddRecord(NulTopic, 0, 0, null, null)), Record.Exception(() => async.AddRecord("x", 0, 0, null, null)));
             AssertNul(Record.Exception(() => async.UpdateBeginningOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateBeginningOffset");
             AssertNul(Record.Exception(() => async.UpdateEndOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateEndOffset");
             AssertNul(Record.Exception(() => async.UpdatePartitions(NulTopic, 1, 0, "h", 1)), NulTopicMessage, "topic", "UpdatePartitions");
@@ -501,6 +585,55 @@ public sealed class PublicConsumerTopicStringTests
 
         Assert.Empty(((IConsumerCommon)consumer).Assignment());
     }
+
+    // Java's MockConsumer checks the closed state first in addRecord and updatePartitions.
+    [Theory]
+    [MemberData(nameof(Mocks))]
+    public async Task OnAClosedMock_AddRecordAndUpdatePartitions_ReportTheClosedStateBeforeTheNul(string kind)
+    {
+        object consumer = await Create(kind, groupId: true);
+        await TestTimeout.Run(() => Close(consumer), s_deadline);
+        ((IDisposable)consumer).Dispose();
+        List<Exception?> errors = new List<Exception?>();
+        if (consumer is MockConsumer<byte[], byte[]> sync)
+        {
+            errors.Add(Record.Exception(() => sync.AddRecord(NulTopic, 0, 0, null, null)));
+            errors.Add(Record.Exception(() => sync.UpdatePartitions(NulTopic, 1, 0, "h", 1)));
+            errors.Add(Record.Exception(() => sync.UpdatePartitions("ok", 1, 0, "h\0x", 1)));
+        }
+        else
+        {
+            AsyncMockConsumer<byte[], byte[]> async = (AsyncMockConsumer<byte[], byte[]>)consumer;
+            errors.Add(Record.Exception(() => async.AddRecord(NulTopic, 0, 0, null, null)));
+            errors.Add(Record.Exception(() => async.UpdatePartitions(NulTopic, 1, 0, "h", 1)));
+            errors.Add(Record.Exception(() => async.UpdatePartitions("ok", 1, 0, "h\0x", 1)));
+        }
+
+        Assert.Equal(3, errors.Count);
+        foreach (Exception? error in errors)
+        {
+            Assert.Equal(ClosedMessage, Assert.IsType<IllegalStateException>(error).Message);
+        }
+    }
+
+    // Java's MockConsumer refuses a record for a partition that is not assigned, the core's answer for a plain topic.
+    private static void AssertAddRecordNotAssigned(Exception? nul, Exception? fromTheCore)
+    {
+        Assert.Equal(
+            "Cannot add records for a partition that is not assigned to the consumer",
+            Assert.IsType<IllegalStateException>(nul).Message);
+        Assert.Equal(fromTheCore?.GetType(), nul!.GetType());
+        Assert.Equal(fromTheCore!.Message, nul.Message);
+    }
+
+    // The ok partition the test assigned, then the partition to name.
+    private static TopicPartition[] AfterOk(TopicPartition partition) => new[] { new TopicPartition("ok", 0), partition };
+
+    // The lag CurrentLag answers, from either flavour.
+    private static async Task<long?> Lag(object consumer, TopicPartition partition) =>
+        consumer is IConsumer<byte[], byte[]> sync
+            ? sync.CurrentLag(partition)
+            : await ((IAsyncConsumer<byte[], byte[]>)consumer).CurrentLag(partition);
 
     private static void AssertNul(Exception? error, string message, string param, string name)
     {

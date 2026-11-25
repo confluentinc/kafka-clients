@@ -1401,12 +1401,12 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     {
         if (IsMock)
         {
-            CheckInAUse(() => RequireAssignedPartition(partition, nameof(partition)));
+            CheckInAUse(() => RequireAssignedPartition(partition));
             return;
         }
 
         RequireSeekOffset(offset);
-        CheckInAUse(() => RequireAssignedPartition(partition, nameof(partition)));
+        CheckInAUse(() => RequireAssignedPartition(partition));
     }
 
     // Java's KafkaConsumer reads the offset before acquire(); Java's MockConsumer after ensureNotClosed(). With a
@@ -1430,7 +1430,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 throw new KafkaException(new ArgumentNullException(nameof(partition)));
             }
 
-            RequireAssignedPartition(partition, nameof(partition));
+            RequireAssignedPartition(partition);
         });
     }
 
@@ -1458,7 +1458,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
         if (GroupIdMissing)
         {
-            (string Topic, int Partition)[]? snapshot = TrySnapshotPartitions(partitions!, rejectNulTopics: false);
+            (string Topic, int Partition)[]? snapshot = TrySnapshotPartitions(partitions!, nulTopic: NulTopic.Kept);
             return snapshot is null || HasNulTopic(snapshot) ? throw GroupIdNotDefined() : snapshot;
         }
 
@@ -1798,31 +1798,32 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return (long)timeout.TotalMilliseconds;
     }
 
-    // A null partition or a null topic is never assigned and cannot cross the C ABI, so the binding throws what Java's
-    // SubscriptionState.assignedState throws for a partition that is not assigned. A NUL in the topic, which the C
-    // string would cut, is refused next (NativeStrings). A negative partition goes to the core, which answers as Java
-    // does.
-    internal static void RequireAssignedPartition(TopicPartition? partition, string paramName)
+    // A null partition, a null topic or a topic holding a NUL is never assigned (Assign and Subscribe refuse a NUL, and
+    // no topic name holds one), and none crosses the C ABI unchanged, so the binding throws what Java's
+    // SubscriptionState.assignedState throws for a partition that is not assigned. A negative partition goes to the
+    // core, which answers as Java does.
+    internal static void RequireAssignedPartition(TopicPartition? partition)
     {
-        if (partition is null || partition.Topic() is null)
+        if (IsNeverAssigned(partition))
         {
             throw new IllegalStateException(NoCurrentAssignment(partition));
         }
-
-        NativeStrings.Validate(partition.Topic(), NativeStrings.InvalidTopicMessage, paramName);
     }
 
-    // Java's MockConsumer answers a lag of 0 for a partition it has no end offset for, which a null partition or a null
-    // topic never has; Java's KafkaConsumer refuses the partition as not assigned. Returns whether the lag is the
-    // mock's 0.
+    private static bool IsNeverAssigned(TopicPartition? partition) =>
+        partition is null || partition.Topic() is null || NativeStrings.ContainsNul(partition.Topic());
+
+    // Java's MockConsumer answers a lag of 0 for a partition it has no end offset for, which a null partition, a null
+    // topic or a topic holding a NUL never has; Java's KafkaConsumer refuses the partition as not assigned. Returns
+    // whether the lag is the mock's 0.
     private bool LagOfAnUnknownPartition(TopicPartition? partition)
     {
-        if ((partition is null || partition.Topic() is null) && IsMock)
+        if (IsNeverAssigned(partition) && IsMock)
         {
             return true;
         }
 
-        RequireAssignedPartition(partition, "topicPartition");
+        RequireAssignedPartition(partition);
         return false;
     }
 
@@ -1833,18 +1834,19 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     internal const string PositionNotAssigned =
         "You can only check the position for partitions assigned to this consumer.";
 
+    private const string AddRecordNotAssignedMessage =
+        "Cannot add records for a partition that is not assigned to the consumer";
+
     // Java's position checks isAssigned first: KafkaConsumer throws IllegalStateException, MockConsumer
-    // IllegalArgumentException.
+    // IllegalArgumentException. A partition that is never assigned (IsNeverAssigned) gets that answer here.
     private void RequirePositionPartition(TopicPartition partition)
     {
-        if (partition is null || partition.Topic() is null)
+        if (IsNeverAssigned(partition))
         {
             throw IsMock
                 ? new IllegalArgumentException(PositionNotAssigned)
                 : new IllegalStateException(PositionNotAssigned);
         }
-
-        NativeStrings.Validate(partition.Topic(), NativeStrings.InvalidTopicMessage, nameof(partition));
     }
 
     internal void CloseSync() => CloseSync(IntPtr.Zero);
@@ -2038,9 +2040,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             throw new ArgumentNullException(nameof(leaderHost));
         }
 
-        NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
-        NativeStrings.Validate(leaderHost, NativeStrings.InvalidArgumentStringMessage, nameof(leaderHost));
-
         if (partitionCount < 0)
         {
             throw new ArgumentOutOfRangeException(
@@ -2049,6 +2048,10 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
         CallMock((mock, arguments) =>
         {
+            // Java's MockConsumer stores the strings after ensureNotClosed(); a NUL, which the C string would cut, is
+            // refused at that point.
+            NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
+            NativeStrings.Validate(leaderHost, NativeStrings.InvalidArgumentStringMessage, nameof(leaderHost));
             IntPtr partitions = arguments.List();
             for (int i = 0; i < partitionCount; i++)
             {
@@ -2115,9 +2118,15 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                 nameof(partition), partition, "Partition must not be negative.");
         }
 
-        NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
         CallMock((mock, arguments) =>
         {
+            // Java's MockConsumer checks the partition is assigned after ensureNotClosed(); a topic holding a NUL never
+            // is, and its name would reach the native mock cut.
+            if (NativeStrings.ContainsNul(topic))
+            {
+                throw new IllegalStateException(AddRecordNotAssignedMessage);
+            }
+
             IntPtr keyBytes = KeepRecordBytes(key);
             IntPtr valueBytes = KeepRecordBytes(value);
             IntPtr outErr = IntPtr.Zero;
@@ -2873,7 +2882,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         (string Topic, int Partition)[] snapshot = Snapshot(
-            partitions, nullTopicIsUnassigned: false, nameof(partitions), NullElement.Refused, rejectNulTopics: false)!;
+            partitions, nullTopicIsUnassigned: false, nameof(partitions), NullElement.Refused, NulTopic.Kept)!;
         if (HasNulTopic(snapshot))
         {
             throw HasBlankTopic(snapshot)
@@ -2885,13 +2894,15 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     // KafkaConsumer's seekToBeginning and seekToEnd refuse a null collection with Java's message before acquire(), so
-    // before the closed and owner checks; Java's MockConsumer has no check of its own. A null partition is one that is
-    // not assigned, which Java finds after acquire(), so after the owner check too.
+    // before the closed and owner checks; Java's MockConsumer has no check of its own. A null partition, or one whose
+    // topic holds a NUL, is one that is not assigned, which Java finds after acquire(), so after the owner check too,
+    // the first in the collection's order.
     private (string Topic, int Partition)[] SnapshotSeekPartitions(IReadOnlyCollection<TopicPartition> partitions)
     {
         if (IsMock)
         {
-            return CheckInAUse(() => SnapshotPartitions(partitions, nullElement: NullElement.NotAssigned));
+            return CheckInAUse(
+                () => SnapshotPartitions(partitions, nullElement: NullElement.NotAssigned, nulTopic: NulTopic.NotAssigned));
         }
 
         if (partitions is null)
@@ -2899,16 +2910,30 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             throw new IllegalArgumentException("Partitions collection cannot be null");
         }
 
-        (string Topic, int Partition)[]? snapshot = CheckWhenOpen(() => TrySnapshotPartitions(partitions, rejectNulTopics: false));
+        (string Topic, int Partition)[]? snapshot =
+            CheckWhenOpen(() => TrySnapshotPartitions(partitions, nulTopic: NulTopic.GivesNone));
         if (snapshot is null)
         {
-            return CheckInAUse<(string Topic, int Partition)[]>(() => throw new IllegalStateException(NoCurrentAssignment(null)));
+            TopicPartition? unassigned = FirstNullOrNulPartition(partitions);
+            return CheckInAUse<(string Topic, int Partition)[]>(
+                () => throw new IllegalStateException(NoCurrentAssignment(unassigned)));
         }
 
-        return HasNulTopic(snapshot)
-            ? CheckInAUse<(string Topic, int Partition)[]>(
-                () => throw new ArgumentException(NativeStrings.InvalidTopicMessage, nameof(partitions)))
-            : snapshot;
+        return snapshot;
+    }
+
+    // The first partition in the collection's order that is null or whose topic holds a NUL.
+    private static TopicPartition? FirstNullOrNulPartition(IReadOnlyCollection<TopicPartition> partitions)
+    {
+        foreach (TopicPartition? tp in partitions)
+        {
+            if (tp is null || (tp.Topic() is { } topic && NativeStrings.ContainsNul(topic)))
+            {
+                return tp;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>What a partition collection's snapshot does with a <see langword="null"/> element.</summary>
@@ -2924,33 +2949,58 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         Skipped,
     }
 
+    /// <summary>What a partition collection's snapshot does with a topic holding a NUL, which the C string would cut.</summary>
+    internal enum NulTopic
+    {
+        /// <summary>Throws <c>ArgumentException</c> once every element has passed the null checks.</summary>
+        Refused,
+
+        /// <summary>
+        /// Throws Java's answer for a partition that is not assigned, where the collection's order reaches it: no topic
+        /// holding a NUL is ever assigned.
+        /// </summary>
+        NotAssigned,
+
+        /// <summary>Gives no snapshot, as a null element does, for the caller to answer it.</summary>
+        GivesNone,
+
+        /// <summary>Keeps it in the snapshot, for the caller to answer it.</summary>
+        Kept,
+    }
+
     // A partition number goes to the core, which answers as Java does. A null partition or a null topic cannot cross the
     // C ABI: where Java looks the partition up in the assignment (pause, resume), it is refused as Java refuses a
-    // partition that is not assigned.
+    // partition that is not assigned. A topic holding a NUL is refused too, or, where Java looks it up in the assignment
+    // (NulTopic.NotAssigned), answered as one that is not assigned.
     internal static (string Topic, int Partition)[] SnapshotPartitions(
         IReadOnlyCollection<TopicPartition> partitions,
         bool nullTopicIsUnassigned = false,
         string paramName = "partitions",
-        NullElement nullElement = NullElement.Refused) =>
-        Snapshot(partitions, nullTopicIsUnassigned, paramName, nullElement, rejectNulTopics: true)!;
+        NullElement nullElement = NullElement.Refused,
+        NulTopic nulTopic = NulTopic.Refused) =>
+        Snapshot(partitions, nullTopicIsUnassigned, paramName, nullElement, nulTopic)!;
 
-    // Java's pause and resume look every partition up in the assignment, which holds no null partition or null topic.
+    // Java's pause and resume look every partition up in the assignment, which holds no null partition, null topic or
+    // topic holding a NUL.
     private static (string Topic, int Partition)[] SnapshotPausePartitions(IReadOnlyCollection<TopicPartition> partitions) =>
-        SnapshotPartitions(partitions, nullTopicIsUnassigned: true, nullElement: NullElement.NotAssigned);
+        SnapshotPartitions(
+            partitions, nullTopicIsUnassigned: true, nullElement: NullElement.NotAssigned, nulTopic: NulTopic.NotAssigned);
 
-    // The snapshot, or null when an element is null, for the caller to answer it; the elements after it are not read.
+    // The snapshot, or null when an element is null (or, with NulTopic.GivesNone, its topic holds a NUL), for the caller
+    // to answer it; the elements after it are not read.
     private static (string Topic, int Partition)[]? TrySnapshotPartitions(
-        IReadOnlyCollection<TopicPartition> partitions, string paramName = "partitions", bool rejectNulTopics = true) =>
-        Snapshot(partitions, nullTopicIsUnassigned: false, paramName, nullElement: null, rejectNulTopics);
+        IReadOnlyCollection<TopicPartition> partitions, string paramName = "partitions", NulTopic nulTopic = NulTopic.Refused) =>
+        Snapshot(partitions, nullTopicIsUnassigned: false, paramName, nullElement: null, nulTopic);
 
     // Gives no snapshot for a null element only when nullElement is null. A topic holding a NUL, which the C string
-    // would cut, is refused once every element has passed the null checks, as Java reaches a later null element.
+    // would cut, is answered as nulTopic says: refused once every element has passed the null checks, as Java reaches a
+    // later null element, or answered where the collection's order reaches it.
     private static (string Topic, int Partition)[]? Snapshot(
         IReadOnlyCollection<TopicPartition> partitions,
         bool nullTopicIsUnassigned,
         string paramName,
         NullElement? nullElement,
-        bool rejectNulTopics)
+        NulTopic nulTopic)
     {
         if (partitions is null)
         {
@@ -2983,6 +3033,11 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
                     : new ArgumentNullException(paramName, paramName + " must not contain a TopicPartition with a null topic");
             }
 
+            if (nulTopic is NulTopic.NotAssigned or NulTopic.GivesNone && NativeStrings.ContainsNul(tp.Topic()))
+            {
+                return nulTopic == NulTopic.NotAssigned ? throw new IllegalStateException(NoCurrentAssignment(tp)) : null;
+            }
+
             snapshot[index++] = (Topic: tp.Topic(), Partition: tp.Partition());
         }
 
@@ -2991,7 +3046,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             Array.Resize(ref snapshot, index);
         }
 
-        if (rejectNulTopics && HasNulTopic(snapshot))
+        if (nulTopic == NulTopic.Refused && HasNulTopic(snapshot))
         {
             throw new ArgumentException(NativeStrings.InvalidTopicMessage, paramName);
         }

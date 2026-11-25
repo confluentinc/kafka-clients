@@ -330,9 +330,8 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <param name="value">The value bytes, or <see langword="null"/> for a tombstone.</param>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
-    /// <exception cref="IllegalStateException">The consumer is closed, or the partition is not assigned.</exception>
-    /// <exception cref="ArgumentException">
-    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// <exception cref="IllegalStateException">
+    /// The consumer is closed, or the partition is not assigned; one whose topic holds a NUL never is.
     /// </exception>
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value) =>
         _native.AddRecord(topic, partition, offset, key, value);
