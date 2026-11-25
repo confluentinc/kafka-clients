@@ -288,9 +288,12 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    * @returns the producer's metrics, by name
    * @throws `TypeError` when it is given an argument
    *
-   * @remarks A `MetricNameMap` of `KafkaMetric`s. *(deviation)* A snapshot,
-   * not Java's live view: call `metrics()` again for newer values. Why: it is
-   * read through the C ABI.
+   * The returned map is an unmodifiable live view of the metrics. Changes to
+   * the underlying metrics will be reflected in the returned map.
+   *
+   * @remarks A `MetricNameMap` of `KafkaMetric`s, read when asked: its keys
+   * and size at each call, and each metric's value at each `metricValue()`.
+   * It answers after `close()` too.
    */
   metrics(): MetricNameMap<Metric>;
 

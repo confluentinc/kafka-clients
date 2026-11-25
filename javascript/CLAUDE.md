@@ -865,14 +865,24 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   array of its members. Where Java takes a `Map<TopicPartition, V>`, only a
   `TopicPartitionMap` is taken, and a `Map` is refused with a hint;
   `check-type-mapping` holds the rows.
-- `metrics()` (plan §5 item 3) reads every metric through the C ABI when it
-  runs: a `MetricNameMap` of `KafkaMetric`s, plain TypeScript (Java's public
-  constructor, its untranslated `MetricValueProvider`, `MetricConfig` and
-  `Measurable` placeholder types typed `unknown`, read by their Java
-  methods), each built with a provider returning the value read. *(deviation:
-  Java's map is a live view. Why: only the clients call the addon, and
-  Python's `metrics()` is a snapshot too. Goes when: the JavaScript metrics
-  wrap the core's.)* A long value is a `bigint`.
+- `metrics()` (plan §5 item 3) returns Java's unmodifiable live view: a
+  `MetricNameMap` over the native `MetricsView` the producer's `metrics()`
+  returns (`native/metrics.c`, `src/internal/live_metrics.ts`). `size()`,
+  `has()` and `get()` read the view at each call, and each iteration takes the
+  view's entries as they are then, so a metric registered later shows up and a
+  removed one is gone. Each value is a `KafkaMetric`, plain TypeScript (Java's
+  public constructor, its untranslated `MetricValueProvider`, `MetricConfig`
+  and `Measurable` placeholder types typed `unknown`, read by their Java
+  methods), built over an owned native metric handle, whose provider measures
+  the metric at each `metricValue()`. The map keeps one `KafkaMetric` per key,
+  so `get()` returns the same object, and a key read as absent leaves that
+  cache. The view and each metric handle are freed by their objects'
+  finalizers, and the map answers after `close()`, as Java's does, the view
+  outliving the producer. A long value is a `bigint`. The map and its metrics
+  call into the addon outside the clients, which the JS conventions'
+  Implementation over the FFI does not list yet: decided with the rules'
+  owner on 2026-11-25, as the .NET binding does, and the rule's exception
+  comes from its owner.
 - Serializers (JS conventions, Serialization): `Serializer` is an object
   type in `common/serialization`, run in JavaScript inside `send()`
   (`src/internal/serde.ts`), key then value, after the form and argument
@@ -1025,9 +1035,14 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `thenApply`'s function and `whenComplete`'s action are called positionally,
   `function(value)` and `action(value, error)`, as Java calls `apply(a)` and
   `accept(a, b)`: Java names those parameters `a` and `b`, which carry no
-  meaning as names. A `null` function or action throws `TypeError` at the
-  call, where Java's dependant would fail with a `NullPointerException` when
-  the source completes.
+  meaning as names. A `null` function or action does not throw at the call:
+  it is a function that throws `TypeError('function must not be null')` or
+  `TypeError('action must not be null')` when it is called, so the returned
+  future fails where Java's fails with a `NullPointerException` (JS
+  conventions, Futures and waiting). `thenApply`'s on a failed future is never
+  called, so that future fails with the source's error, as Java's does; a
+  `whenComplete` action that throws on a failed source leaves the source's
+  error, as Java's `CompletableFuture.whenComplete` does.
 - A hand-over error (what Java's `doSend` rethrows) rejects the `send()`
   Promise and never reaches the callback; that Promise is never marked
   handled, so an un-awaited failing send surfaces as an unhandled rejection,
@@ -1194,11 +1209,15 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   addon hands the core a `LocalCallbackError` whose opaque is an
   `InjectedError` holding the JS value, and `native/error.c` hands that very
   value back wherever the core reports the error (JS conventions, Errors,
-  Q38). Left out: transactions (by request), `setMockMetrics` (the FFI takes
-  a native `KafkaMetric_t`, which the binding cannot build, as .NET's mock,
-  which also wraps the FFI's, leaves it out), and the
-  telemetry and metric-subscription calls (no FFI); `metrics()` is therefore
-  always empty. The mock emits no preview warning.
+  Q38). `setMockMetrics({ name, metric })` keeps Java's `mockMetrics` map in
+  JavaScript, as Java's and Python's mocks keep theirs, rather than the FFI
+  mock's view: an equal name replaces the metric and keeps the first name, as
+  `HashMap.put` does, and `metrics()` returns the same read-only
+  `MetricNameMap`, live over it, as Java's mock returns its own map. *(A null
+  name throws `TypeError`, where Java's `HashMap` takes a null key: the map is
+  keyed by a `MetricName`'s value.)* Left out: transactions (by request), and
+  the telemetry and metric-subscription calls (no FFI). The mock emits no
+  preview warning.
 - A Java `long` is a `bigint` (JS conventions, Types): returned always as a
   `bigint` (`RecordMetadata.offset` and `.timestamp`, `ProducerRecord.timestamp`,
   a `long` constant such as `SaslConfigs.DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN`),

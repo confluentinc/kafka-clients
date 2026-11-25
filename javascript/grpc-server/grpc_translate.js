@@ -236,7 +236,7 @@ function partitionInfoToProto(info) {
 }
 
 /**
- * One entry of a metrics() snapshot as the proto's Metric
+ * One metric of metrics(), measured now, as the proto's Metric
  * (python/grpc_translate.py's _metric_to_proto): the MetricName's fields and
  * the value, a bigint (Java's long) as long_value, a string as string_value
  * and a number as double_value.

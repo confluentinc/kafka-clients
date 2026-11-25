@@ -64,6 +64,8 @@ rules and readings. Newest entries are at the end; dates are in IST.
     - A Java public mutable field becomes a setter only (`setSendException`), as Python's rule does for the same
       `MockProducer` field.
     - `metrics()` returns a snapshot, as Python's does. Java's view is live; that is a recorded deviation.
+      Superseded by the team's later decision: `metrics()` is Java's live view, its metrics measured when read,
+      as .NET's is; the mock keeps Java's `mockMetrics` map, which `setMockMetrics` fills.
 12. **Checks and test runner:**
     - The NUL-byte refusal on strings that cross as C strings stays. It is a run-time type check TypeScript can't
       enforce, and Python's marshaling layer does the same.

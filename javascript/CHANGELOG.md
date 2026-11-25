@@ -90,8 +90,10 @@ newer.
 - `MockProducer`, Java's mock, over the Rust client's own mock through the
   C FFI, implementing `Producer`: the constructors `()` and `{ autoComplete,
   partitioner, keySerializer, valueSerializer }`, `send`, `flush`, `close`,
-  `partitionsFor`, `metrics`, `history()` (the app's own records),
-  `clear()`, `completeNext()`, `errorNext(e)`, `closed()` and `flushed()`,
+  `partitionsFor`, `metrics`, `setMockMetrics({ name, metric })` (Java's
+  mock's own map, which `metrics()` returns), `history()` (the app's own
+  records), `clear()`, `completeNext()`, `errorNext(e)`, `closed()` and
+  `flushed()`,
   and Java's public error fields as the setters `setSendException`,
   `setFlushException`, `setPartitionsForException` and `setCloseException`,
   whose calls throw the very error given. The serializers run on every send,
@@ -217,7 +219,11 @@ newer.
   and a cancelled future's `get()` with the root `CancellationError`, Java's
   `CancellationException` (an `IllegalStateError`). A record's future is never
   cancelled (`cancel()` returns `false`); the futures `completedFuture`,
-  `allOf`, `thenApply` and `whenComplete` make can be.
+  `allOf`, `thenApply` and `whenComplete` make can be. A `null` function or
+  action fails the returned future when it would be called, as Java's fails
+  with `NullPointerException`: `get()` rejects with `ExecutionError` whose
+  `cause` is `TypeError('function must not be null')` or
+  `TypeError('action must not be null')`.
 - A producer keeps Node running from its creation until `close()` closes it,
   idle or not, as KafkaJS and 1.x do from `connect()` to `disconnect()`, and
   no garbage collection closes one: a script that never calls `close()` never
@@ -266,8 +272,9 @@ newer.
   `MetricNameMap<Metric>` (`common`, *js-only*: a read-only map keyed as
   `MetricName.equals` compares, by group, name and tags, with a `toJSON()`
   of its entries by that key) of `KafkaMetric`
-  (`common/metrics`), the values read when `metrics()` runs, where Java's map
-  is a live view. `MetricName` (`common`) has Java's methods, its `tags()` a
+  (`common/metrics`): Java's unmodifiable live view, its keys and size read
+  at each call and a kept metric's value at each `metricValue()`, after
+  `close()` too. `MetricName` (`common`) has Java's methods, its `tags()` a
   `Map`, and Java's `equals` and `hashCode`; `KafkaMetric` has Java's public
   constructor, its value provider, configuration and time Java types this
   client does not translate (`MetricValueProvider`, `MetricConfig` and

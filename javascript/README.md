@@ -523,7 +523,7 @@ A mock keeps Node running until it is closed, as a producer does, and a call
 made on a closed mock keeps Node running until that call settles; once closed
 and unreferenced it is collected, sends still waiting included. Left out:
 Java's constructor taking a `Cluster` (the mock's cluster is always empty, so
-the partitioner is never called), the transaction calls, `setMockMetrics`, and
+the partitioner is never called), the transaction calls, and
 the telemetry and metric-subscription calls (the producer package's
 documentation lists them).
 
