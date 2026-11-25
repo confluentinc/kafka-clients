@@ -19,7 +19,7 @@
 # test-wheels.sh, on Linux and macOS; test-nupkg.ps1 tests it on Windows. The smoke project (dotnet/tools/PackageSmoke), a copy outside the repository,
 # references the package by its exact version from that one feed (packageSourceMapping), with
 # an empty NuGet cache, so nothing but the package can be used. It is built on this machine and
-# run for net10.0: on macOS on the runner, on Linux on the runner and then in a
+# run for net10.0 and net8.0: on macOS on the runner, on Linux on the runner and then in a
 # container of each distribution of DISTRO_IMAGES, which mounts the runner's .NET install and
 # the build. A self-contained `dotnet publish` for this machine's RID must carry the native
 # library and run. With a package directory, the binding's unit tests then run against the
@@ -41,7 +41,12 @@
 
 set -eu
 
-TFMS="net10.0"
+# The smoke program's frameworks. net8.0 is a .NET 8 application's build, which gets the package's
+# netstandard2.0 assembly and its dependencies (the package has no net8.0 one); it runs on .NET 10
+# (RollForward in PackageSmoke.csproj), as no .NET 8 runtime is installed.
+SMOKE_TFMS="net10.0 net8.0"
+# The unit tests' framework against the package.
+UNIT_TFMS="net10.0"
 
 die() {
     echo "test-nupkg: $*" >&2
@@ -206,7 +211,7 @@ cmp -s "$restored" "$PACKAGE" || die "the restored Confluent.Kafka $VERSION is n
 sum=$(sha256_of "$restored") || die "could not hash $restored"
 echo "Restored Confluent.Kafka $VERSION: $sum"
 
-for tfm in $TFMS; do
+for tfm in $SMOKE_TFMS; do
     echo "== smoke test, $tfm, on this machine =="
     dotnet "$work/smoke/bin/Release/$tfm/PackageSmoke.dll" "$VERSION"
 done
@@ -215,7 +220,7 @@ if [ "$(uname -s)" = "Linux" ] && [ "$mode" != smoke ]; then
     : "${DISTRO_IMAGES:=almalinux:8 almalinux:9 ubuntu:22.04 debian:12 ubuntu:24.04}"
     for img in $DISTRO_IMAGES; do
         retry docker pull -q "$img"
-        for tfm in $TFMS; do
+        for tfm in $SMOKE_TFMS; do
             echo "== smoke test, $tfm, on $img =="
             # The images have no ICU, which the package does not need; a user's image that has
             # none sets the same.
@@ -273,7 +278,7 @@ if [ "$mode" = full ]; then
         ulimit -n 10240 2>/dev/null || ulimit -n "$(ulimit -Hn)"
         echo "ulimit -n: $(ulimit -n)"
     fi
-    for tfm in $TFMS; do
+    for tfm in $UNIT_TFMS; do
         echo "== unit tests, $tfm, against the package =="
         dotnet test --no-restore -c Release -f "$tfm" "$project" \
             -p:ConfluentKafkaPackageVersion="$VERSION" -p:AbiHeaderPath="$(cd "$(dirname "$HEADER")" && pwd -P)/$(basename "$HEADER")"

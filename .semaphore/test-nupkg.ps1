@@ -19,7 +19,9 @@
 # (Windows ...)" blocks of release.yml. The smoke project (dotnet/tools/PackageSmoke), a copy
 # outside the repository, references the package by its exact version from that one feed
 # (packageSourceMapping), with an empty NuGet cache, so nothing but the package can be used. It is
-# built for the platform and run in a process of it, on net10.0 and the agent's .NET
+# built for the platform and run in a process of it, on net10.0, on net8.0 (a .NET 8 application's
+# build, which gets the package's netstandard2.0 assembly and runs on .NET 10, as no .NET 8 runtime
+# is installed) and on the agent's .NET
 # Framework (net462), with no RID of its own, as users build it: on .NET Framework the SDK gives an
 # application the RID of its PlatformTarget, and NuGet copies that RID's native library beside it.
 # A second .NET Framework build is AnyCPU. On x64 it sets no platform, as most applications do: the
@@ -29,7 +31,7 @@
 # process from runtimes\<rid>\native, where the package's build targets copy both Windows libraries. Each run must load one copy of the library, from where it is expected. The
 # platform's .NET Framework build must need no binding redirect, so that an application that writes none can load the package. A
 # self-contained `dotnet publish` for the platform's RID must carry the native library and run. The
-# binding's unit tests then run against the package, on the same two frameworks, with no RID, as
+# binding's unit tests then run against the package, on net462 and net10.0, with no RID, as
 # a test project is built; on .NET Framework they load the library the build targets copy. The
 # unit-test project's
 # -p:ConfluentKafkaPackageVersion swaps its project reference for the package, so the assembly and
@@ -59,7 +61,10 @@ param(
 $rid = $WindowsRids[$Platform]
 $bits = @{ x64 = '64'; x86 = '32' }[$Platform]
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$tfms = 'net462', 'net10.0'
+# The smoke program's frameworks; net8.0 rolls forward to .NET 10 (PackageSmoke.csproj).
+$smokeTfms = 'net462', 'net10.0', 'net8.0'
+# The unit tests' frameworks against the package.
+$unitTfms = 'net462', 'net10.0'
 
 $listing = @(Get-ChildItem -Force $PackageDir)
 if ($listing.Count -ne 1 -or $listing[0].Name -notmatch '^Confluent\.Kafka\.(.+)\.nupkg$') {
@@ -164,7 +169,7 @@ if ((Get-FileHash -Algorithm SHA256 $restored).Hash -ne (Get-FileHash -Algorithm
     throw "the restored Confluent.Kafka $version is not the package under test"
 }
 
-foreach ($tfm in $tfms) {
+foreach ($tfm in $smokeTfms) {
     Write-Output "== smoke test, $tfm, $Platform"
     $bin = Join-Path $smoke "bin\Release\$tfm"
     if ($tfm -eq 'net462') {
@@ -278,7 +283,7 @@ foreach ($windowsRid in $WindowsRids.Values) {
     }
 }
 $failed = @()
-foreach ($tfm in $tfms) {
+foreach ($tfm in $unitTfms) {
     Write-Output "== unit tests, $tfm, $Platform, against the package"
     try {
         Invoke-Native $dotnet (@('test', '--no-build', $project, '-f', $tfm, '--blame-hang-timeout', '15m', '--blame-hang-dump-type', 'none') + $unitProperties)

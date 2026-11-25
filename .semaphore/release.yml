@@ -812,8 +812,9 @@ blocks:
   #      package as users receive it, on a VM that built nothing
   #      (.semaphore/test-nupkg.sh, .semaphore/test-nupkg.ps1 on Windows): a
   #      project outside the repository installs it from a local feed and runs
-  #      a smoke program on net10.0, on Windows also on .NET
-  #      Framework, and on Linux also in a container of each supported
+  #      a smoke program on net10.0 and as a .NET 8 application (net8.0, run
+  #      on .NET 10, which loads the package's netstandard2.0 assembly), on
+  #      Windows also on .NET Framework, and on Linux also in a container of each supported
   #      distribution; a self-contained publish runs; and the binding's unit
   #      tests run against the package. It records the SHA-256 of the tested
   #      package.

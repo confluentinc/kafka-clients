@@ -404,7 +404,8 @@ test-verifiable-clients-dotnet: build-dotnet
 #
 # package-check-dotnet installs that package from a local feed into a project
 # outside the repository, with an empty NuGet cache, and runs the smoke program
-# on net10.0 (.semaphore/test-nupkg.sh --smoke): what the release's
+# on net10.0 and as a .NET 8 application (net8.0, run on .NET 10, which loads the
+# package's netstandard2.0 assembly) (.semaphore/test-nupkg.sh --smoke): what the release's
 # package verification runs, less the unit tests against the package, the Linux
 # distribution containers and the self-contained publish. CI runs it in the
 # macOS verify-dotnet job. The version is <Version> in Directory.Build.props;
