@@ -1,7 +1,9 @@
 # JavaScript (Node.js) client — the consumer
 
-Status: **approved** by the user on 2026-11-25, with the decisions of §8. No Actor or Critic has run yet: P1's
-phase plan, `P1.md` beside this file, waits for the user's approval.
+Status: **approved** by the user on 2026-11-25, with the decisions of §8, and corrected the same day (P1's tests
+and linter work, `poll(long)`, `doc-check`, the CHANGELOG, and the per-commit checks the user decided). No Actor or
+Critic has run yet. P1's phase plan, `P1.md` beside this file, is approved with its choices 2(a) to 8(a); choice
+5(a) moves the `Consumer` interface from P1 to P2.
 
 - Branch `dev/javascript-consumer-bindings` (local only), at `208abeb64`, which is PR #312's head
   (`origin/dev/javascript-producer-bindings`). It was moved there, with the user's approval, on 2026-11-25.
@@ -80,8 +82,8 @@ of a consumed record is new in P2 (4.2).
   `CommonClientConfigs` (line 24); `run()`, an async iterator, an event emitter and `connect`/`disconnect`
   (line 26); `AbortSignal` (line 151); clients in worker threads (line 153).
 - `subscribe(Pattern)`: only `SubscriptionPattern` is taken, and a `RegExp` throws (line 76).
-- Every deprecated member: `close(Duration)`, `poll(long)`, the `ConsumerGroupMetadata` constructors,
-  `ConsumerRecords(Map)`, `MockConsumer(OffsetResetStrategy)`.
+- Every deprecated member: `close(Duration)`, the `ConsumerGroupMetadata` constructors, `ConsumerRecords(Map)`,
+  `MockConsumer(OffsetResetStrategy)`. Kafka 4.4's `Consumer` has no `poll(long)`, only `poll(Duration)`.
 - Producer transactions, which the producer left out of the preview. `groupMetadata()` is built, but nothing hands
   it to a producer yet.
 - Members the FFI has no entry point for (§6): left out and listed in the module docs (line 161).
@@ -277,8 +279,8 @@ the full gate before its hand-off (§7).
 
 | Phase | N | Delivers | Needs |
 |---|---|---|---|
-| P1 Value types and config | 150 | the plain TypeScript types, `ConsumerConfig`, the user interfaces | nothing: Node is installed (decision 15) |
-| P2 Native core, bytes only | 151 | create, `poll()` and the records, subscriptions, `close()` | P1 (decisions 2, 3 and 7 are made, and the plain `Headers` it needs is in the base) |
+| P1 Value types and config | 150 | the plain TypeScript types, `ConsumerConfig`, the listener and commit-callback interfaces | nothing: Node is installed (decision 15) |
+| P2 Native core, bytes only | 151 | the `Consumer` interface, create, `poll()` and the records, subscriptions, `close()` | P1 (decisions 2, 3 and 7 are made, and the plain `Headers` it needs is in the base) |
 | P3 Offsets and commits | 152 | commits without callbacks, positions, seeks, offset and metadata queries | P2 |
 | P4 MockConsumer | 153 | the mock over the FFI, without listeners | P3 |
 | P5 Listeners and commit callbacks | 154 | the listener, `commitAsync` callbacks, the callback window | P4 |
@@ -292,7 +294,8 @@ the full gate before its hand-off (§7).
   converter of `src/internal/payload.ts` (line 138): a given `Headers` is kept as it is, `null` throws
   `IllegalArgumentError('Headers cannot be null')`, Header objects and `[key, value]` pairs make a new `Headers`,
   and the short form uses `new Headers()`.
-- `ConsumerRecords`, with Java's methods, `[Symbol.iterator]` and `empty()`.
+- `ConsumerRecords`, with Java's methods, `[Symbol.iterator]` and `empty()`. `records` returns a new array, for a
+  topic too (P1.md, choice 7(a)).
 - `OffsetAndTimestamp`, `SubscriptionPattern` and `GroupProtocol`.
 - `ConsumerGroupMetadata`: Java's constructors are deprecated, so a private constructor and one `@internal` static
   factory (line 48), for the addon.
@@ -301,22 +304,54 @@ the full gate before its hand-off (§7).
   branch to the same path (decision 14; `P1.md`).
 - `ConsumerConfig`: its constants, configs type and key table, by adding the consumer to
   `rust/xtask/src/config_consts/js.rs` and `rust/xtask/src/config_types/js.rs`. The cargo gates apply, and
-  `cargo xtask check-generated` must pass.
+  `cargo xtask check-generated` must pass. The configs type types `key.deserializer` and `value.deserializer` as
+  plain keys, since line 131's function type needs the `Deserializer` interface, which comes in P6; P6 gives them
+  that type.
+- Shared code: `show`, Java's `toString()` of a key or value, moves from `src/producer/producer_record.ts` to
+  `src/internal/java_string.ts`, so `ProducerRecord` and `ConsumerRecord` share it (DoD #6).
+- The linter: `scripts/lint/rules/overload_shape.js` gets `ac3334412`'s three changes, word for word, with its test
+  in `test/lint/overload_shape.test.js`, and two `LEFT_OUT` entries for the `subscribe(Pattern…)` forms (line 76);
+  `scripts/lint/rules/type_mapping.js` gets `ac3334412`'s two bare-names hunks, word for word (P1.md, choice 6(a));
+  `scripts/lint/java_ts.js` gets `ConsumerRecord` in `DATA_CLASSES` and `OffsetCommitCallback` in `FUNCTION_TYPES`.
+  `eslint-baseline.txt` loses the `KafkaProducer(Properties,Serializer,Serializer)` line the copied change makes
+  stale, and gets five commented lines for shapes the conventions decide and the linter doesn't model:
+  `ConsumerRecords#iterator`, `CloseOptions`' keyed constructor and the listener's three methods (P1.md, choice
+  8(a)). `lint-mapping.json` gets the names Java doesn't have: `toJSON` on the value classes and enums,
+  `ConsumerRecords.[Symbol.iterator]` and `ConsumerConfigs`. `java-index.json` doesn't change: it already has every
+  class P1 needs.
 - `ConsumerRebalanceListener`, with `src/internal/consumer_rebalance_listener_defaults.ts`, and
   `OffsetCommitCallback`.
-- The `Consumer` interface, with the members left out listed in its docs.
 - The docs and tests write one-value calls in the named form, such as `CloseOptions.timeout({ timeout: 5000 })`,
   and each method's tests check the bare form once (decision 19).
-- Tests: `ConsumerRecordTest` (2), `ConsumerRecordsTest` (7 of 8: the eighth,
+- Tests from Java: `ConsumerRecordTest` (2), `ConsumerRecordsTest` (7 of 8: the eighth,
   `testNextOffsetsLogsErrorPeriodicallyWhenConstructedWithDeprecatedConstructor`, tests the deprecated
-  `ConsumerRecords(Map)`),
-  `CloseOptionsTest` (4). The classes Java doesn't test use the core's tests of their own translations:
-  `rust/src/consumer/offset_and_timestamp.rs` (6), `subscription_pattern.rs` (3), `group_protocol.rs` (5),
-  `consumer_group_metadata.rs` (5), `close_options.rs` (3). Java's `ConsumerGroupMetadataTest` (5) is skipped,
-  with the reason in the test file: every case uses a deprecated constructor. Tests of `ConsumerRecord`'s headers
-  (kept, copied from pairs, the exact errors). Type tests for the new shapes.
+  `ConsumerRecords(Map)`), `CloseOptionsTest` (4) and `ConsumerGroupMetadataTest` (2 of 5: `testAssignmentConstructor`
+  and `testGroupIdConstructor`, through `internalCreate`; the three null checks test the deprecated constructors, so
+  they're skipped, with the reason in the test file).
+- Tests from the core's translations, in `rust/src/consumer/`: for the classes Java doesn't test,
+  `offset_and_timestamp.rs` (6), `subscription_pattern.rs` (3) and `group_protocol.rs` (4 of 5); and, as extras
+  for classes Java does test, `close_options.rs` (3) and `consumer_group_metadata.rs` (1, `test_display`).
+  - Of `group_protocol.rs`, `test_display_lowercase` is left out (the core prints lower case, Java prints
+    `CLASSIC`), `test_of_invalid` asserts Java's message, not the core's, and `test_from_str_roundtrip` becomes the
+    test of `of`'s bare form.
+  - Of `consumer_group_metadata.rs`, two tests repeat Java's, and two test Rust-only code
+    (`test_display_through_trait_object`, `test_copy_of`).
+- In all, 15 tests from Java and 17 from the core. Also tests of `ConsumerRecord`'s headers (kept, made from pairs,
+  the exact errors) and type tests for the new shapes.
 
 **P2 — native core, bytes only (N=151).**
+- The `Consumer` interface, moved from P1 beside `KafkaConsumer`, which implements it, as the producer's `Producer`
+  landed with `KafkaProducer` (P1.md, choice 5(a)), with the members left out listed in its docs and their three
+  `missing` baseline lines (§6, gaps 1 and 2). Its design is in P1.md's "Moved to P2". P2's plan covers what P1's
+  checks found for it:
+  - the linter accepts a Promise return on `Consumer` only for a member whose implementation calls a `_cb` twin, so
+    the 42 Promise-returning signatures of the methods P3 wires keep their findings from P2 until P3;
+  - Java's `KafkaConsumer` and `MockConsumer` name `subscribe`'s listener `listener`, where the interface says
+    `callback`, so P2 and P4 need the admin branch's `java_ts.js` changes (`ac3334412`, `fc71b3525`), or the admin
+    branch landed;
+  - `listTopics` and `currentLag` need the admin branch's two table rows (`ce6493d9e`, `3462a2ebc`);
+  - the left-out `Pattern` forms need a `LEFT_OUT` filter in `type_mapping.js`, or baseline lines, and `LEFT_OUT`
+    entries for `KafkaConsumer` and `MockConsumer`.
 - `native/consumer.c`: construction (`ConsumerConfig_new`, then `KafkaConsumer_new` with NULL deserializers, then
   `__as_Consumer_err`), the notify hook, the drains and the finalizer (4.3); `close()` and `close(options)`
   (decision 7).
@@ -394,8 +429,8 @@ the full gate before its hand-off (§7).
   `java_completeness`. A check that knows only the producer is extended, with tests in `test/lint/`.
 - Memory probes. Two measurements, reported and not acted on: the per-record cost of freezing records (Q9), and of
   external buffers against copies (Q24).
-- The README, the consumer's part of the migration guide, `examples/consumer.js` and the doc-examples test. The
-  docs list the anti-patterns the JS conventions name (Q46).
+- The README, the consumer's part of the migration guide, the CHANGELOG's consumer section (P1 to P6 write none),
+  `examples/consumer.js` and the doc-examples test. The docs list the anti-patterns the JS conventions name (Q46).
 
 **P8 — gRPC backend and verifiable consumer (N=157).** After the admin branch has landed (decision 14).
 - `ConsumerService` (30 RPCs, `rust/multilanguage-test-server/proto/consumer_service.proto`) in
@@ -413,7 +448,7 @@ the full gate before its hand-off (§7).
 | `ConsumerRecordTest` | 2 | P1, all |
 | `ConsumerRecordsTest` | 8 | P1, 7 (the eighth tests the deprecated `ConsumerRecords(Map)`) |
 | `CloseOptionsTest` | 4 | P1, all |
-| `ConsumerGroupMetadataTest` | 5 | skipped: every case uses a deprecated constructor |
+| `ConsumerGroupMetadataTest` | 5 | P1, 2: the two getter tests, through `internalCreate`; the three null checks are skipped, as they test the deprecated constructors |
 | `OffsetAndMetadataTest` | — | already ported |
 | `ConsumerConfigTest` | 17 | P2 through `new KafkaConsumer`; the deserializer cases in P6 |
 | `KafkaConsumerTest` | 135 | P2 to P7. Python's port is the starting point (36 broker-less, 14 broker-backed, 85 left out with reasons), and each case is re-checked against Java and the FFI |
@@ -456,13 +491,19 @@ Three FFI behaviours the binding lives with for now:
 - `git commit` with the hooks on (no `--no-verify`, no breakglass), explicit paths only, with no AI co-author
   trailer (decision 16). A hook that blocks a commit or fails stops the work, and I report it. Nothing is pushed.
   Nobody touches `git stash`, switches branches or rebases.
-- Every Actor commit passes `make verify-javascript`. When Rust changes (P1, P8), also, from `rust/`:
-  `cargo build`, `cargo test` for the touched code, `cargo xtask format-check`, `cargo xtask lint`,
+- Every Actor commit, fix-ups included, passes the quick checks, from the root:
+  `make test-javascript-unit lint-javascript` (the static, unit, memory and typing tests, `check-api`,
+  `typecheck-tests`, the rule linter and its tests, and `format-check`). When Rust changes (P1, P8), also, from
+  `rust/`: `cargo build`, `cargo test` for the touched code, `cargo xtask format-check`, `cargo xtask lint`,
   `cargo xtask lint-custom` and `cargo xtask check-generated`.
+- The full `make verify-javascript` runs once per round: on the last commit of the Actor's build round, and on the
+  last commit of each fix round, before the Critic reviews. A failure there is fixed before the review, and the
+  Critic reviews only a state that passed it. The user decided these per-commit checks on 2026-11-25, in place of a
+  full `make verify-javascript` on every commit.
 - Before a phase's hand-off, the full gate: from `rust/`, `cargo xtask format-check`, `cargo xtask lint` and
-  `cargo xtask lint-custom`; from the root, `make doc-check`, `make verify` and `make verify-javascript`; and the
-  phase's broker tests (`make -C javascript test-integration`). I report every result, including failures caused
-  by the environment.
+  `cargo xtask lint-custom`; `make -C rust doc-check`, as the root Makefile has no `doc-check` target; from the
+  root, `make verify` and `make verify-javascript`; and the phase's broker tests
+  (`make -C javascript test-integration`). I report every result, including failures caused by the environment.
 
 **Before each phase:**
 - Check that `origin/dev/javascript-producer-bindings` is still the base (`208abeb64` today). If it moved, stop and
