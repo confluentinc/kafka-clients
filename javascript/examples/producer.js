@@ -49,9 +49,14 @@ async function main(argv) {
     // A header value is bytes, and a header may be a [key, value] pair. A
     // record with headers names its partition (null: the producer chooses),
     // as Java's constructors do.
-    const headers = [['source', Buffer.from('examples/producer.js')]];
     const future = await producer.send({
-      record: new ProducerRecord({ topic, partition: null, key, value, headers }),
+      record: new ProducerRecord({
+        topic,
+        partition: null,
+        key,
+        value,
+        headers: [['source', Buffer.from('examples/producer.js')]],
+      }),
       callback: ({ exception }) => {
         if (exception !== null) console.error(`delivery failed: ${exception.name}: ${exception.message}`);
       },
