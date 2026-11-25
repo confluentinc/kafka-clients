@@ -1902,6 +1902,17 @@ test.skip('the dropped send counts once in buffer-exhausted-total, as BufferPool
   assert.equal(await exhaustTheBuffer(), 1);
 });
 
+// BufferPool#awaitMemory records buffer-exhausted-total for the dropped send:
+// it rises. The exact count (1, above) waits on the core.
+(SKIP ? test.skip : test)(
+  'a send dropped for want of buffer memory counts in buffer-exhausted-total',
+  async () => {
+    const total = await exhaustTheBuffer();
+    assert.ok(typeof total === 'number' && total >= 1, `buffer-exhausted-total is ${total}`);
+  },
+  180000,
+);
+
 // BufferPoolTest.testCloseNotifyWaiters: BufferPool#close wakes every send
 // waiting for memory, which BufferPool#awaitMemory fails with a bare
 // KafkaException("Producer closed while allocating memory"); not an
@@ -3051,6 +3062,121 @@ async function withBrokerPaused(body) {
         await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from('after') }))
       ).get({ timeout: 30000 });
       assert.ok(after.offset >= 0n);
+    } finally {
+      await producer.close();
+    }
+  },
+  120000,
+);
+
+// SenderTest.testRetries, through the broker: a produce request that times
+// out (the broker paused) disconnects, and Sender#completeBatch retries the
+// batch (Sender#reenqueueBatch, recording record-retry-total) while retries
+// and delivery.timeout.ms allow, so the record lands once the broker answers.
+// With retries 0 the same failure fails the record at once, unretried, as
+// ProducerFailureHandlingTest's producers (retries 0) fail.
+(SKIP_CONTAINER ? test.skip : test)(
+  'a send whose request times out is retried and lands, counting record-retry-total; with retries 0 it fails at once',
+  async () => {
+    const { RetriableError } = require('@confluentinc/kafka-javascript/common/errors');
+    const topic = await newTopic('retry');
+    for (const retried of [true, false]) {
+      const configs = {
+        acks: 'all',
+        'request.timeout.ms': 1000,
+        'delivery.timeout.ms': 30000,
+        'linger.ms': 0,
+        'client.id': `js-it-retry-${retried}`,
+        ...(retried ? {} : { retries: 0, 'enable.idempotence': false }),
+      };
+      const producer = await producerWithId(configs, topic);
+      try {
+        const found = [...producer.metrics()].find(([n]) => n.name() === 'record-retry-total' && n.group() === 'producer-metrics');
+        assert.ok(found);
+        const retries = found[1];
+        assert.equal(retries.metricValue(), 0);
+        /** @type {Array<Error | null>} */
+        const calls = [];
+        const future = await withBrokerPaused(async () => {
+          const sent = await producer.send({
+            record: new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from(`retry-${retried}`) }),
+            callback: ({ exception }) => void calls.push(exception),
+          });
+          // Until the request timed out: retried, or failed.
+          const deadline = Date.now() + 20000;
+          while (retries.metricValue() === 0 && !sent.isDone() && Date.now() < deadline) await sleep(50);
+          return sent;
+        });
+        if (retried) {
+          assert.ok(/** @type {number} */ (retries.metricValue()) >= 1, `record-retry-total is ${retries.metricValue()}`);
+          const metadata = await future.get({ timeout: 30000 });
+          assert.ok(metadata.offset >= 0n);
+          assert.deepEqual(calls, [null]);
+        } else {
+          assert.equal(future.isCompletedExceptionally(), true);
+          assert.equal(calls.length, 1);
+          assert.ok(calls[0] instanceof RetriableError, String(calls[0]));
+          await assert.rejects(future.get(), (e) => /** @type {Error} */ (e).cause === calls[0]);
+          assert.equal(retries.metricValue(), 0);
+        }
+      } finally {
+        await producer.close();
+      }
+    }
+  },
+  120000,
+);
+
+// RecordAccumulatorTest.testFull, through the broker: a batch takes records
+// until the next one would not fit in batch.size, then a new batch starts,
+// and the full batches are sent while linger.ms holds the last. Each batch
+// the broker stores holds as many records as fit, and the producer's
+// batch-size-max never exceeds batch.size.
+(SKIP ? test.skip : test)(
+  'batches fill up to batch.size: each holds as many records as fit',
+  async () => {
+    const topic = await newTopic('batch-size');
+    const batchSize = 1024;
+    const producer = await producerKnowing(
+      { 'client.id': 'js-it-batch-size', 'linger.ms': 600000, 'batch.size': batchSize, 'compression.type': 'none' },
+      topic,
+    );
+    try {
+      const metric = (/** @type {string} */ name) => {
+        const found = [...producer.metrics()].find(([n]) => n.name() === name && n.group() === 'producer-metrics');
+        assert.ok(found, name);
+        return found[1];
+      };
+      const sizeMax = metric('batch-size-max');
+      const perRequest = metric('records-per-request-avg');
+      const count = 40;
+      /** @type {KafkaFuture<RecordMetadata>[]} */
+      const futures = [];
+      for (let i = 0; i < count; i++) {
+        futures.push(await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.alloc(100, 97) })));
+      }
+      await producer.flush();
+      for (const future of futures) await future.get();
+      const { batches } = await broker.fetchBatches(BOOTSTRAP, topic, 0);
+      const counts = batches.map((b) => b.count);
+      assert.equal(
+        counts.reduce((a, b) => a + b, 0),
+        count,
+      );
+      assert.ok(counts.length >= 2, `batches ${JSON.stringify(counts)}`);
+      // Every batch but the last is full: they hold the same number of records.
+      const full = counts[0];
+      assert.ok(full > 1, `batches ${JSON.stringify(counts)}`);
+      for (const n of counts.slice(0, -1)) assert.equal(n, full, `batches ${JSON.stringify(counts)}`);
+      assert.ok(counts[counts.length - 1] <= full);
+      // The full batch's bytes, the batch's overhead (61 bytes) and `full`
+      // records of one size: one more record would pass batch.size.
+      const bytes = /** @type {number} */ (sizeMax.metricValue());
+      assert.ok(bytes <= batchSize, `batch-size-max ${bytes} > ${batchSize}`);
+      const record = (bytes - 61) / full;
+      assert.ok(Number.isInteger(record) && record > 100, `${bytes} bytes in ${full} records`);
+      assert.ok(bytes + record > batchSize, `${bytes} + ${record} fits in ${batchSize}`);
+      assert.ok(/** @type {number} */ (perRequest.metricValue()) > 1);
     } finally {
       await producer.close();
     }
