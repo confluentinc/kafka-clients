@@ -392,7 +392,9 @@ public sealed class JavaTextTests
         Assert.Equal("3.4028234663852886E+38", JavaText.CoreText(float.MaxValue, ConfigType.Double));
     }
 
-#if NET5_0_OR_GREATER
+    // Not on the netstandard2.0 build: .NET Standard 2.0 has no Half, so that build writes one with its own
+    // invariant text, and a DOUBLE key refuses it.
+#if NET5_0_OR_GREATER && !CONFLUENT_KAFKA_NETSTANDARD2_0
     [Fact]
     public void CoreText_Half_IsWidenedToDoubleFirst()
     {

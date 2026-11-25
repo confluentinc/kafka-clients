@@ -1,0 +1,68 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The unit tests of Confluent.Kafka.UnitTests, run against the library's netstandard2.0 build:
+    the build a .NET 8 or .NET 9 application loads, as the package has no net8.0 build (.NET 8
+    is out of Microsoft support). They run on .NET 10, the runtime CI installs. No project of its own target
+    framework gets that build, since NuGet gives a net10.0 project the net10.0 one, so the project
+    reference names netstandard2.0 (SetTargetFramework). It compiles the test files of
+    Confluent.Kafka.UnitTests, and defines CONFLUENT_KAFKA_NETSTANDARD2_0 for the tests whose
+    library behaviour differs between the two builds. It tests the project only: the release
+    pipeline's run against the package (-p:ConfluentKafkaPackageVersion) is Confluent.Kafka.UnitTests'.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>Confluent.Kafka.UnitTests</RootNamespace>
+    <AssemblyName>Confluent.Kafka.UnitTests.NetStandard</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- Only NativeMemoryManager.cs, a MemoryManager<byte> over native memory, uses unsafe code. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>$(DefineConstants);CONFLUENT_KAFKA_NETSTANDARD2_0</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../Confluent.Kafka.UnitTests/**/*.cs"
+             Exclude="../Confluent.Kafka.UnitTests/bin/**;../Confluent.Kafka.UnitTests/obj/**"
+             LinkBase="Confluent.Kafka.UnitTests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!--
+    The netstandard2.0 build, and the package dependency of it that .NET 10 does not have built in:
+    restore resolves a project reference by its own target framework, net10.0, whose build has no
+    dependencies, so it does not bring the netstandard2.0 build's. System.Memory, the other one, is
+    part of .NET 10.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Confluent.Kafka\Confluent.Kafka.csproj" SetTargetFramework="TargetFramework=netstandard2.0" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="$(MicrosoftBclAsyncInterfacesVersion)" />
+  </ItemGroup>
+
+  <!-- The generated bindings header, for NativeAbiConformanceTests, as in Confluent.Kafka.UnitTests. -->
+  <PropertyGroup>
+    <AbiHeaderPath>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../rust/target/include/confluent_kafka_bindings.h'))</AbiHeaderPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(AbiHeaderPath)" Link="confluent_kafka_bindings.h" CopyToOutputDirectory="PreserveNewest" Visible="false" Condition="Exists('$(AbiHeaderPath)')" />
+  </ItemGroup>
+
+  <!-- The kafka submodule's client sources, for PublicNamespaceLayoutTests, as in Confluent.Kafka.UnitTests. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>KafkaSourceRoot</_Parameter1>
+      <_Parameter2>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../../../kafka/clients/src'))</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

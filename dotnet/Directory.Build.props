@@ -47,6 +47,21 @@
     <Version>4.4.0-alpha.1</Version>
   </PropertyGroup>
 
+  <!-- The facade packages of the library's net462 and netstandard2.0 builds
+       (src/Confluent.Kafka/Confluent.Kafka.csproj), which tests/Confluent.Kafka.UnitTests.NetStandard and
+       tools/AotSmoke (-p:ConfluentKafkaNetStandard=true) reference too, as they get the netstandard2.0 build
+       without its dependencies. The package's nuspec lists them, and .semaphore/check-nupkg.py checks it.
+       Microsoft.Bcl.AsyncInterfaces is from the .NET 10 line, which Microsoft supports; the .NET 8 one is out
+       of support. System.Memory must come from the dotnet/maintenance-packages release of the
+       System.Threading.Tasks.Extensions that Microsoft.Bcl.AsyncInterfaces brings (4.6.3 for 10.0.15), so that
+       they reference one System.Runtime.CompilerServices.Unsafe (6.0.3.0) and a .NET Framework application needs
+       no binding redirect: System.Memory 4.5.5 references 4.0.4.1. .semaphore/test-nupkg.ps1 fails the release
+       verification when the package's .NET Framework build needs one. -->
+  <PropertyGroup>
+    <SystemMemoryVersion>4.6.3</SystemMemoryVersion>
+    <MicrosoftBclAsyncInterfacesVersion>10.0.15</MicrosoftBclAsyncInterfacesVersion>
+  </PropertyGroup>
+
   <!-- A CI build (Semaphore sets CI=true) maps the source paths in the PDBs to the repository's, so a
        package built there names no build machine path. -->
   <PropertyGroup Condition="'$(CI)' == 'true'">

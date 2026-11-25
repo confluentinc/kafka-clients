@@ -20,7 +20,7 @@ From the repository root:
 
     make -C dotnet test-verifiable-clients-dotnet
 
-This runs the tools' tests on net8.0 and net10.0. They need no broker, only the
+This runs the tools' tests on net10.0. They need no broker, only the
 Rust library, which the target's `build-dotnet` prerequisite builds. The
 projects are in `Confluent.Kafka.sln`, so `make -C dotnet test-dotnet` runs the
 tests too. The tests that send signals run on Unix only.
@@ -96,7 +96,7 @@ under the Kafka checkout's `tests/` (mounted on every node as
 `/opt/kafka-dev/tests/`):
 
     for tool in VerifiableProducer VerifiableConsumer; do
-      dotnet publish dotnet/tools/VerifiableClients/$tool -c Release -f net8.0 \
+      dotnet publish dotnet/tools/VerifiableClients/$tool -c Release -f net10.0 \
           -r linux-$ARCH --self-contained --artifacts-path "$PUBLISH_DIR" \
           -p:NativeLibraryPath="$PWD/rust/target-linux/release/libconfluent_kafka.so" \
           -p:NativeLibraryFileName=libconfluent_kafka.so \

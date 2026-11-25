@@ -38,8 +38,9 @@ name: build-test-release
 #      (which this block uses anyway).
 #   2. "Verify Rust and language bindings (macOS arm64)" -- native Rust unit +
 #      integration + perf on s1-macos-15-arm64-8, and verify-c (ctest),
-#      verify-python (pytest test/unit) and verify-dotnet (dotnet test, net8.0 +
-#      net10.0, and the package check), the C and Python jobs followed by the
+#      verify-python (pytest test/unit) and verify-dotnet (dotnet test, net10.0,
+#      against the library's net10.0 and netstandard2.0 builds, and the package check),
+#      the C and Python jobs followed by the
 #      gRPC multilanguage arm with the gRPC server running as a native host
 #      process (MULTILANG_BACKEND_MODE=native), which tests the macOS build of
 #      each binding; the .NET arm runs in a job of its own, and a third .NET job
@@ -536,9 +537,9 @@ blocks:
           commands:
             - ./.semaphore/install-dotnet.sh
             # The .NET 10 environment is set on each make's own command line, for the reason given in
-            # "verify-dotnet (macOS arm64)". The Native AOT check: publishes a net8.0 and a net10.0 Native AOT
-            # executable with the whole library rooted, so a trim or AOT warning fails the job, then
-            # runs them.
+            # "verify-dotnet (macOS arm64)". The Native AOT check: publishes a Native AOT executable against
+            # the library's net10.0 build and one against its netstandard2.0 build, each with the whole
+            # library rooted, so a trim or AOT warning fails the job, then runs them.
             - export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH" DOTNET_MULTILEVEL_LOOKUP=0 && which dotnet && make -C dotnet test-aot-dotnet
             # The .NET arms against a Native AOT build of the gRPC server and binding, linked with
             # Xcode's clang, over the Colima broker the prologue starts.
@@ -547,8 +548,8 @@ blocks:
   - name: "Verify language bindings (Windows amd64)"
     # The .NET client on Windows, whose package carries a win-x64 and a win-x86
     # library: each job builds the library of its platform, then runs
-    # the .NET unit tests, which drive the mock clients, on net462, net8.0 and
-    # net10.0 in a process of that platform
+    # the .NET unit tests, which drive the mock clients, on net462 and net10.0,
+    # and on net10.0 against the library's netstandard2.0 build, in a process of that platform
     # (.semaphore/verify-dotnet-windows.ps1), only those the test selection
     # selects on a pull request, as in the other blocks, then, on x64, the
     # Native AOT check. The broker-backed tests and the
@@ -719,9 +720,11 @@ blocks:
     # --verify-no-changes over the solution, the soak projects and
     # tools/AotSmoke, and builds and format-checks the examples. The job then
     # runs the Native AOT check, AotSmoke (`make -C dotnet test-aot-dotnet`): it
-    # publishes tools/AotSmoke as a Native AOT executable for net8.0 and net10.0
-    # with the whole Confluent.Kafka library rooted, so any trim or AOT warning
-    # fails the job, then runs both executables, whose 28 checks must pass. The
+    # publishes tools/AotSmoke as a Native AOT executable against the library's
+    # net10.0 build and one against its netstandard2.0 build, the one a .NET 8
+    # application compiles, each with the whole Confluent.Kafka library rooted, so any
+    # trim or AOT warning fails the job, then runs both executables, each of whose 30 checks
+    # must pass. The
     # macOS and Windows x64 jobs run it too, for their platforms.
     #
     # coverage-dotnet runs the .NET unit tests with code coverage
@@ -755,8 +758,7 @@ blocks:
             - export DOTNET_MULTILEVEL_LOOKUP=0
             - make -C dotnet check-dotnet
             # The Native AOT check, AotSmoke: the solution is built already. Native AOT links with
-            # clang, or with gcc where clang is missing; the net8.0 link also needs the zlib
-            # development files.
+            # clang, or with gcc where clang is missing.
             - make -C dotnet test-aot-dotnet
         - name: "coverage-dotnet (Linux amd64)"
           commands:

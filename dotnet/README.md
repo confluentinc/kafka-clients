@@ -16,14 +16,19 @@ and `clients`: `KafkaProducer` is in `Confluent.Kafka.Producer`, `Serdes` in
 
 ## Platforms
 
-- .NET 8 and .NET 10, and .NET Framework 4.6.2 or later on Windows; the .NET Standard 2.0
-  assembly serves other .NET runtimes on these platforms
-- Linux x64 and arm64, with glibc 2.28 or later (RHEL 8, Debian 10, Ubuntu 20.04 and later)
-- macOS arm64 (Apple silicon): the native library needs macOS 11 or later, and each .NET version
-  has its own macOS minimum ([.NET 8](https://github.com/dotnet/core/blob/main/release-notes/8.0/supported-os.md),
-  [.NET 10](https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.md))
+- .NET 10, and .NET Framework 4.6.2 or later on Windows
+- Linux x64 and arm64: the native library needs glibc 2.28 or later (RHEL 8, Debian 10, Ubuntu
+  20.04 and later), and .NET 10 has its own
+  [Linux minimum](https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.md)
+- macOS arm64 (Apple silicon): the native library needs macOS 11 or later, and .NET 10 has its
+  own [macOS minimum](https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.md)
 - Windows x64 and x86, Windows 10 or Windows Server 2016 or later. The native library links the
   C runtime statically, so it needs no Visual C++ Redistributable.
+
+Other .NET runtimes on these platforms, such as .NET 8, get the package's .NET Standard 2.0
+assembly. An application on them builds and runs, Native AOT included, but they are not supported:
+.NET 8 is out of Microsoft support. That assembly refuses a `Half`, `Int128` or `UInt128`
+configuration value, types .NET Standard 2.0 does not have.
 
 On .NET Framework, NuGet copies the native library only into a project that has a runtime
 identifier. An SDK-style application gets one from its platform target, `win-x86` for AnyCPU and

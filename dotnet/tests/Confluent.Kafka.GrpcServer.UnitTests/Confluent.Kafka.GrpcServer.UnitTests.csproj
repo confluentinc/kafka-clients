@@ -12,10 +12,8 @@
     which `test-dotnet` deliberately does not call. The Actor and the PM run it per
     §7.4 gate 2.
 
-    Target net10.0 only: the server is a Microsoft.NET.Sdk.Web app, and the ASP.NET Core 8
-    runtime is absent locally and in CI (M17/P1 D3); the net8.0 server leg is covered by the
-    container smoke run (§7.5 c1). Kept OUT of Confluent.Kafka.sln, like the server, the soak
-    and the perf projects.
+    Target net10.0, the server's one target framework. Kept OUT of Confluent.Kafka.sln, like
+    the server, the soak and the perf projects.
   -->
 
   <PropertyGroup>

@@ -124,7 +124,8 @@ public sealed class ConfigCoreTextReadBackTests
         AssertReadBackBitForBit(vectors);
     }
 
-#if NET5_0_OR_GREATER
+    // Not on the netstandard2.0 build, which has no Half.
+#if NET5_0_OR_GREATER && !CONFLUENT_KAFKA_NETSTANDARD2_0
     [Fact]
     public void TheHalfCoreText_ReadsBackAsItsWidenedDoubleBitForBit()
     {
