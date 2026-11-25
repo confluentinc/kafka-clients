@@ -44,8 +44,8 @@ internal static class ConfigMarshal
         string parameter = client == ClientKind.Admin ? "conf" : "configs";
         foreach (KeyValuePair<string, string> entry in configs)
         {
-            AdminStrings.Validate(entry.Key, AdminStrings.InvalidConfigKeyMessage, parameter);
-            AdminStrings.Validate(entry.Value, AdminStrings.InvalidConfigValueMessage, parameter);
+            NativeStrings.Validate(entry.Key, NativeStrings.InvalidConfigKeyMessage, parameter);
+            NativeStrings.Validate(entry.Value, NativeStrings.InvalidConfigValueMessage, parameter);
         }
 
         ValidatedConfig config = new ValidatedConfig(client, configs.Count);

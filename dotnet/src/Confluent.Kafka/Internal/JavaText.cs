@@ -31,7 +31,8 @@ namespace Confluent.Kafka.Internal;
 /// and <see cref="CoreText"/>, the text the core parses for a configuration value (exact digits, a
 /// <see langword="double"/> as <c>"G17"</c>; the core rounds), kept apart from the message text. All are in the
 /// invariant culture. <see cref="ToUpperRoot"/> upper-cases a name for an enum lookup as Java's
-/// <c>toUpperCase(Locale.ROOT)</c> does for the letters whose upper case is ASCII.
+/// <c>toUpperCase(Locale.ROOT)</c> does for the letters whose upper case is ASCII, and <see cref="IsBlank"/> is Java's
+/// <c>Utils.isBlank</c>.
 /// </summary>
 internal static class JavaText
 {
@@ -136,6 +137,25 @@ internal static class JavaText
         return biased == 0
             ? Shortest(negative, fraction, -149, lowerGapHalved: false)
             : Shortest(negative, fraction | (1 << 23), biased - 150, lowerGapHalved: fraction == 0 && biased > 1);
+    }
+
+    // Java's Utils.isBlank: String.trim() strips every char up to U+0020, NUL included, not .NET's white space.
+    internal static bool IsBlank(string? value)
+    {
+        if (value is null)
+        {
+            return true;
+        }
+
+        foreach (char c in value)
+        {
+            if (c > ' ')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     internal static string ToUpperRoot(string value)

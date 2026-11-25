@@ -31,7 +31,8 @@ namespace Confluent.Kafka.UnitTests;
 /// producers. Java's <c>KafkaProducer</c> dereferences it after its group-metadata, transaction-manager and closed
 /// checks, Java's <c>MockProducer</c> stores it after its state checks and its injected exception: each check comes
 /// first, then an <see cref="ArgumentNullException"/>, thrown by the sync producers and faulting the asynchronous
-/// producers' <see cref="Task"/>, as those checks do. Nothing is sent.
+/// producers' <see cref="Task"/>, as those checks do. Nothing is sent. A topic or a metadata string holding a NUL
+/// character, which the native client would cut, is answered the same way, with an <see cref="ArgumentException"/>.
 /// </summary>
 public sealed class PublicProducerNullPartitionTests
 {
@@ -54,6 +55,24 @@ public sealed class PublicProducerNullPartitionTests
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
 
     private static readonly TopicPartition s_tp0 = new TopicPartition("np", 0);
+
+    private const string NulTopicMessage =
+        "A topic must not contain a NUL character: such a string cannot be passed to the native client unchanged.";
+
+    private const string NulMetadataMessage =
+        "Offset metadata must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
+
+    private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_nulTopic =
+        new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("n\0p", 0)] = new OffsetAndMetadata(5) };
+
+    private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_nulMetadata =
+        new Dictionary<TopicPartition, OffsetAndMetadata> { [new TopicPartition("np", 0)] = new OffsetAndMetadata(5, "m\0x") };
+
+    private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_nulThenNullKey =
+        new EntryMap<TopicPartition, OffsetAndMetadata>(
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(new TopicPartition("n\0p", 0), new OffsetAndMetadata(5)),
+            new KeyValuePair<TopicPartition, OffsetAndMetadata>(null!, new OffsetAndMetadata(6)));
 
     private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_nullKey =
         new EntryMap<TopicPartition, OffsetAndMetadata>(
@@ -182,6 +201,87 @@ public sealed class PublicProducerNullPartitionTests
         (Exception? closed, bool atTheCall) = await Outcome(producer, s_nullKey, GroupMetadata());
         Assert.Equal(MockClosed, Assert.IsType<IllegalStateException>(closed).Message);
         Assert.True(atTheCall);
+    }
+
+    // The real producers send an empty map in place of offsets the native client cannot carry, so they return at once
+    // without a transaction state check, then refuse the NUL; a null key anywhere in the map still wins.
+    [Theory]
+    [MemberData(nameof(RealProducers))]
+    public async Task OnTheRealProducers_ANulTopicOrMetadata_IsArgumentException_AfterJavasChecks(string kind)
+    {
+        object producer = await Real(kind, "nul-string-tx", idempotence: true);
+        try
+        {
+            foreach ((IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, string message) in Nuls())
+            {
+                (Exception? error, bool atTheCall) = await Outcome(producer, offsets, GroupMetadata());
+                AssertNul(error, message);
+                Assert.Equal(producer is IProducer<byte[], byte[]>, atTheCall);
+            }
+
+            (Exception? nullKey, bool _) = await Outcome(producer, s_nulThenNullKey, GroupMetadata());
+            AssertMustNotContainNull(nullKey);
+        }
+        finally
+        {
+            await Close(producer);
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Mocks))]
+    public async Task OnTheMocks_ANulTopicOrMetadata_IsArgumentException_InATransaction_AndNothingIsSent(string kind)
+    {
+        object producer = Mock(kind);
+        try
+        {
+            await Run(producer, p => p.InitTransactions(), p => p.InitTransactions());
+            await Run(producer, p => p.BeginTransaction(), p => p.BeginTransaction());
+            foreach ((IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, string message) in Nuls())
+            {
+                (Exception? error, bool atTheCall) = await Outcome(producer, offsets, GroupMetadata());
+                AssertNul(error, message);
+                Assert.Equal(producer is IProducer<byte[], byte[]>, atTheCall);
+            }
+
+            Assert.False(SentOffsets(producer));
+            await Run(producer, p => p.CommitTransaction(), p => p.CommitTransaction());
+            Assert.Empty(History(producer));
+        }
+        finally
+        {
+            await Close(producer);
+        }
+    }
+
+    // Java's MockProducer makes its state checks before it reads the map.
+    [Theory]
+    [MemberData(nameof(Mocks))]
+    public async Task OnTheMocks_ANulTopic_ComesAfterJavasStateChecks(string kind)
+    {
+        object producer = Mock(kind);
+        try
+        {
+            (Exception? error, bool _) = await Outcome(producer, s_nulTopic, GroupMetadata());
+            Assert.Equal(MockNotInitialized, Assert.IsType<IllegalStateException>(error).Message);
+        }
+        finally
+        {
+            await Close(producer);
+        }
+    }
+
+    private static IEnumerable<(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Offsets, string Message)> Nuls() => new[]
+    {
+        (s_nulTopic, NulTopicMessage),
+        (s_nulMetadata, NulMetadataMessage),
+    };
+
+    private static void AssertNul(Exception? error, string message)
+    {
+        Assert.True(error is not null && error.GetType() == typeof(ArgumentException), $"{error}");
+        Assert.Equal("offsets", ((ArgumentException)error!).ParamName);
+        Assert.Equal(new ArgumentException(message, "offsets").Message, error.Message);
     }
 
     private static void AssertMustNotContainNull(Exception? error)
