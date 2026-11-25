@@ -61,7 +61,7 @@ selected_run = (cd $(RUST_PROJECT_ROOT) && cargo -q xtask selected-run -C $(CURD
 .PHONY: grpc-image grpc-image-async grpc-image-aot grpc-image-async-aot grpc-native grpc-native-aot rust-lib \
 	test-integration test-integration-ssl test-integration-sasl-ssl test-integration-aot \
 	test-integration-native test-integration-native-aot build-dotnet test-dotnet check-dotnet test-soak-dotnet test-grpc-server-dotnet \
-	test-examples-dotnet test-verifiable-clients-dotnet test-dotnet-macos verify verify-except-grpc-arm verify-macos \
+	test-examples-dotnet test-examples-integration-dotnet test-verifiable-clients-dotnet test-dotnet-macos verify verify-except-grpc-arm verify-macos \
 	pack-dotnet package-check-dotnet coverage-dotnet test-aot-dotnet
 
 # Build the .NET gRPC backend image (Producer + Consumer + Admin services) used
@@ -268,25 +268,31 @@ test-dotnet: build-dotnet
 test-dotnet-macos:
 	$(MAKE) DOTNET_TEST_FILTER='FullyQualifiedName!~Confluent.Kafka.IntegrationTests' test-dotnet
 
-# The .NET gate (dotnet/CLAUDE.md §7.5): the tests, the gRPC container arms,
-# then the Docker-gated net10.0 p99 perf stage. Recipe lines rather than
-# prerequisites so each stage runs after the one before. The checks that are not
-# tests are check-dotnet, which CI runs in "check-dotnet (Linux amd64)".
+# The .NET gate (dotnet/CLAUDE.md §7.5): the tests, the gRPC container arms, the
+# admin examples against a broker, then the Docker-gated net10.0 p99 perf stage.
+# Recipe lines rather than prerequisites so each stage runs after the one before.
+# The checks that are not tests are check-dotnet, which CI runs in "check-dotnet
+# (Linux amd64)". CI runs the admin examples in "verify-dotnet (Linux amd64) —
+# admin examples".
 verify: test-dotnet
 	$(MAKE) test-integration
+	$(MAKE) test-examples-integration-dotnet
 	$(MAKE) test-integration-perf-dotnet
 
-# `verify` without the gRPC container arms: the CI job "verify-dotnet (Linux
-# amd64) — plaintext". CI runs the arms in "verify-dotnet (Linux amd64) —
-# plaintext gRPC arm" (`test-integration`), as it does for C and Python and as
-# it runs the ssl / sasl_ssl arms.
+# `verify` without the gRPC container arms and the admin examples: the CI job
+# "verify-dotnet (Linux amd64) — plaintext". CI runs the arms in "verify-dotnet
+# (Linux amd64) — plaintext gRPC arm" (`test-integration`), as it does for C and
+# Python and as it runs the ssl / sasl_ssl arms, and the admin examples in
+# "verify-dotnet (Linux amd64) — admin examples".
 verify-except-grpc-arm: test-dotnet
 	$(MAKE) test-integration-perf-dotnet
 
 # The macOS gate: the unit and soak tests, then the gRPC multilanguage arm with
-# the gRPC server as a native host process. No perf stage.
+# the gRPC server as a native host process, then the admin examples against a
+# broker. No perf stage.
 verify-macos: test-dotnet-macos
 	$(MAKE) test-integration-native
+	$(MAKE) test-examples-integration-dotnet
 
 # The checks that are not tests: `dotnet format --verify-no-changes`, which
 # enforces the checked-in .editorconfig, over the solution and over the soak
@@ -333,15 +339,23 @@ test-soak-dotnet: build-dotnet
 # ---------------------------------------------------------------------------
 # The examples (dotnet/examples/README.md). Kept out of the solution, like the soak
 # client: they target net10.0 only, as a user's program would. Their own solution
-# holds them; this target builds it
-# and checks its format, so the examples cannot rot. They are run by hand, against a
-# broker, as the README shows.
+# holds them; test-examples-dotnet builds it and checks its format, so the examples
+# cannot rot.
+# test-examples-integration-dotnet runs the admin examples against brokers in Docker:
+# the Rust harness's admin examples test (rust/tests/integration/admin_examples_test.rs)
+# with ADMIN_EXAMPLES_LANGUAGE=dotnet starts AdminApis with the command line of each
+# scenario and checks its exit code and output, as it does for the Rust examples.
 # ---------------------------------------------------------------------------
 EXAMPLES_SOLUTION := $(REPO_ROOT)/dotnet/examples/Confluent.Kafka.Examples.sln
 
 test-examples-dotnet: build-dotnet
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(EXAMPLES_SOLUTION)
 	$(DOTNET) format $(EXAMPLES_SOLUTION) --verify-no-changes
+
+test-examples-integration-dotnet: rust-lib
+	$(DOTNET) build -c $(DOTNET_CONFIG) $(CARGO_PROFILE_PROP) $(EXAMPLES_SOLUTION)
+	ADMIN_EXAMPLES_DOTNET=$(REPO_ROOT)/dotnet/examples/AdminApis/bin/$(DOTNET_CONFIG)/net10.0/AdminApis.dll \
+		$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-admin-examples-dotnet
 
 # ---------------------------------------------------------------------------
 # Unit-test coverage of the Confluent.Kafka library.

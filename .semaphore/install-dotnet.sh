@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 #
-# Job-scoped .NET SDK provisioning, shared by the "verify-dotnet (Linux amd64)
-# — plaintext" job in the "Verify Rust and language bindings (Linux amd64)" CI block
-# (M10/P1, Decision 1) and the "verify-dotnet (macOS arm64)", "verify-dotnet (macOS arm64)
-# — plaintext gRPC arm" and "verify-dotnet (macOS arm64) — plaintext Native AOT gRPC arm"
-# jobs in "Verify Rust and language bindings (macOS arm64)". The
+# Job-scoped .NET SDK provisioning, shared by two jobs in the "Verify Rust and
+# language bindings (Linux amd64)" CI block, "verify-dotnet (Linux amd64) —
+# plaintext" (M10/P1, Decision 1) and "verify-dotnet (Linux amd64) — admin
+# examples", which runs the .NET admin examples on the host, and by the
+# "verify-dotnet (macOS arm64)", "verify-dotnet (macOS arm64) — plaintext gRPC
+# arm" and "verify-dotnet (macOS arm64) — plaintext Native AOT gRPC arm" jobs in
+# "Verify Rust and language bindings (macOS arm64)". The
 # Linux "verify-dotnet (Linux amd64) —
 # plaintext gRPC arm", "— plaintext Native AOT gRPC arm", "— ssl" and "— sasl_ssl
 # (plain)" jobs do NOT run this script: they run only the gRPC multilanguage arm,

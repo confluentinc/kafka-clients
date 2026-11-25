@@ -28,6 +28,15 @@
 //! cargo run --example admin_alter_user_scram_credentials -- \
 //!     UPSERT alice SCRAM-SHA-256 8192 secret DELETE bob SCRAM-SHA-512
 //! ```
+//!
+//! A password that starts with `--` would be read as an option: put a bare
+//! `--` before the alterations, which ends the options. Cargo takes the first
+//! `--` for itself, so `cargo run` needs a second one.
+//!
+//! ```text
+//! cargo run --example admin_alter_user_scram_credentials -- \
+//!     -- UPSERT alice SCRAM-SHA-256 8192 --secret
+//! ```
 
 use std::process::ExitCode;
 use std::sync::Arc;

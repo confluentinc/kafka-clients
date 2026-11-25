@@ -12,20 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Runs the admin examples (`examples/admin`) against a broker, as a user would:
-//! each example is a separate binary given its command line, and the test checks
-//! its exit code and output.
+//! Runs the admin examples against a broker, as a user would: each example is
+//! started with its command line, and the test checks its exit code and output.
 //!
-//! The binaries are built by `cargo build --examples`, which `cargo test
-//! --all-features` does too; `cargo test --test integration` does not, so the
-//! Makefile builds them first. Each scenario uses the cluster its RPCs need: an
-//! authorizer for the ACLs, a transaction coordinator for the transactions,
-//! three brokers for reassignments and elections, two log directories for a
-//! replica move, and SASL with a token secret for the delegation tokens.
+//! The examples of every language take the same arguments and print the same
+//! text, so the scenarios check the examples of one language at a time,
+//! chosen by `ADMIN_EXAMPLES_LANGUAGE`:
+//!
+//! - `rust` (the default): the binaries of `examples/admin`, built by `cargo
+//!   build --examples`, which `cargo test --all-features` does too; `cargo test
+//!   --test integration` does not, so the Makefile builds them first.
+//! - `dotnet`: the .NET examples, `dotnet/examples/AdminApis`, run as
+//!   `dotnet AdminApis.dll <brokers> <example> ...` and built by `make -C dotnet
+//!   test-examples-dotnet`; `ADMIN_EXAMPLES_DOTNET` overrides the path of
+//!   `AdminApis.dll`. `make -C dotnet test-examples-integration-dotnet` builds
+//!   them and runs these tests against them.
+//!
+//! [`Language`] holds the texts that differ: the usage line, which names the
+//! program, and the names of the error classes, which follow each client's
+//! naming (`ElectionNotNeededError` in Rust, `ElectionNotNeededException` in
+//! .NET). Two more differ, and no scenario checks them: a Java built-in
+//! exception is `LocalIllegalArgumentError` in Rust and
+//! `IllegalArgumentException` in .NET, and a bare `KafkaException` prints its
+//! class in .NET but only its message in Rust, whose `KafkaError` displays
+//! only the message.
+//!
+//! Each scenario uses the cluster its RPCs need: an authorizer for the ACLs, a
+//! transaction coordinator for the transactions, three brokers for
+//! reassignments and elections, two log directories for a replica move, and
+//! SASL with a token secret for the delegation tokens.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use confluent_kafka::common::serialization::ByteArraySerializer;
@@ -66,9 +86,75 @@ impl Output {
     }
 }
 
+/// The language whose examples the scenarios run (see the module docs).
+#[derive(Clone, Copy)]
+enum Language {
+    Rust,
+    Dotnet,
+}
+
+static LANGUAGE: LazyLock<Language> = LazyLock::new(|| match std::env::var("ADMIN_EXAMPLES_LANGUAGE").as_deref() {
+    Err(_) | Ok("rust") => Language::Rust,
+    Ok("dotnet") => Language::Dotnet,
+    Ok(other) => panic!("ADMIN_EXAMPLES_LANGUAGE must be `rust` or `dotnet`, got `{other}`"),
+});
+
+impl Language {
+    /// The command that starts the example `name` (`create_topics`), with the
+    /// client configuration `config`: each property as `-X key=value`, except
+    /// that the .NET program takes the bootstrap servers as its first argument.
+    fn command(self, name: &str, config: &HashMap<String, String>) -> Command {
+        let mut command;
+        let mut properties: Vec<_> = config.iter().collect();
+        match self {
+            Language::Rust => command = Command::new(rust_example_path(name)),
+            Language::Dotnet => {
+                command = Command::new("dotnet");
+                let brokers = config.get("bootstrap.servers").expect("bootstrap.servers in the config");
+                command.arg(dotnet_examples_path()).arg(brokers).arg(name);
+                properties.retain(|(key, _)| *key != "bootstrap.servers");
+            },
+        }
+        for (key, value) in properties {
+            command.arg("-X").arg(format!("{key}={value}"));
+        }
+        // The C FFI that the .NET examples run on logs the core's records to
+        // stderr, filtered by `RUST_LOG`; the Rust examples log nothing.
+        command.env("RUST_LOG", "off");
+        command
+    }
+
+    /// The start of the usage line of the example `name`, which `--help`
+    /// prints and a usage error follows its message with.
+    fn usage(self, name: &str) -> String {
+        match self {
+            Language::Rust => format!("usage: admin_{name}"),
+            Language::Dotnet => {
+                let pascal: String = name
+                    .split('_')
+                    .map(|word| word[..1].to_ascii_uppercase() + &word[1..])
+                    .collect();
+                format!("Usage: AdminApis <bootstrap-brokers> {pascal}")
+            },
+        }
+    }
+
+    /// The name an example prints for the error class of Java's `<name>Exception`
+    /// (`ElectionNotNeeded`): its name in the language's client. Not for a Java
+    /// built-in exception, which the Rust client names with a `Local` prefix
+    /// (`LocalIllegalArgumentError`), nor for a bare `KafkaException` (see the
+    /// module docs).
+    fn error(self, name: &str) -> String {
+        match self {
+            Language::Rust => format!("{name}Error"),
+            Language::Dotnet => format!("{name}Exception"),
+        }
+    }
+}
+
 /// The path of the example binary `admin_<name>`, next to the test binary's
 /// `deps` directory.
-fn example_path(name: &str) -> PathBuf {
+fn rust_example_path(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("test binary path");
     let target = exe.parent().and_then(|deps| deps.parent()).expect("target directory");
     let path = target
@@ -82,13 +168,25 @@ fn example_path(name: &str) -> PathBuf {
     path
 }
 
-/// Runs the example `admin_<name>` with the client configuration `config`
-/// (passed as `-X key=value`) and `args`.
+/// The path of the .NET examples' `AdminApis.dll`: `ADMIN_EXAMPLES_DOTNET`, or
+/// the Release build of `dotnet/examples/AdminApis`.
+fn dotnet_examples_path() -> PathBuf {
+    let path = std::env::var_os("ADMIN_EXAMPLES_DOTNET").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../dotnet/examples/AdminApis/bin/Release/net10.0/AdminApis.dll"),
+        PathBuf::from,
+    );
+    assert!(
+        path.exists(),
+        "{} not found: run `make -C dotnet test-examples-dotnet` first",
+        path.display()
+    );
+    path
+}
+
+/// Runs the example `name` (`create_topics`) of [`LANGUAGE`] with the client
+/// configuration `config` and `args`.
 async fn run(name: &str, config: &HashMap<String, String>, args: &[&str]) -> Output {
-    let mut command = Command::new(example_path(name));
-    for (key, value) in config {
-        command.arg("-X").arg(format!("{key}={value}"));
-    }
+    let mut command = LANGUAGE.command(name, config);
     command.args(args);
     let output = tokio::task::spawn_blocking(move || command.output())
         .await
@@ -114,7 +212,7 @@ async fn run_until(name: &str, config: &HashMap<String, String>, args: &[&str], 
         }
         assert!(
             Instant::now() < deadline,
-            "{expected:?} not in the output of admin_{name} (exit code {})\nstdout:\n{}\nstderr:\n{}",
+            "{expected:?} not in the output of the example {name} (exit code {})\nstdout:\n{}\nstderr:\n{}",
             output.code,
             output.stdout,
             output.stderr
@@ -181,13 +279,16 @@ async fn usage_error_exits_with_code_2() {
     let config = HashMap::from([("bootstrap.servers".to_string(), "localhost:1".to_string())]);
     let stderr = run("create_topics", &config, &[]).await.failed(2).to_string();
     assert!(stderr.contains("no topic given"), "{stderr}");
-    assert!(stderr.contains("usage: admin_create_topics"), "{stderr}");
+    assert!(stderr.contains(&LANGUAGE.usage("create_topics")), "{stderr}");
 
     let stderr = run("list_topics", &config, &["--bogus"]).await.failed(2).to_string();
-    assert!(stderr.contains("unknown option --bogus"), "{stderr}");
+    assert!(
+        stderr.contains("unknown option; an argument that starts with -- goes after a bare --"),
+        "{stderr}"
+    );
 
     let output = run("list_topics", &config, &["--help"]).await;
-    assert!(output.ok().starts_with("usage: admin_list_topics"), "{}", output.stdout);
+    assert!(output.ok().starts_with(&LANGUAGE.usage("list_topics")), "{}", output.stdout);
 
     // An argument that may be a secret is never repeated in a usage error.
     let stderr = run("list_topics", &config, &["-X", "hunter2"]).await.failed(2).to_string();
@@ -204,6 +305,17 @@ async fn usage_error_exits_with_code_2() {
     .failed(2)
     .to_string();
     assert!(stderr.contains("invalid mechanism") && !stderr.contains("hunter2"), "{stderr}");
+    // A password that starts with `--` is read as an unknown option unless it
+    // follows a bare `--`.
+    let stderr = run(
+        "alter_user_scram_credentials",
+        &config,
+        &["UPSERT", "alice", "SCRAM-SHA-256", "8192", "--hunter2"],
+    )
+    .await
+    .failed(2)
+    .to_string();
+    assert!(stderr.contains("unknown option") && !stderr.contains("hunter2"), "{stderr}");
 }
 
 #[tokio::test]
@@ -432,10 +544,11 @@ async fn quota_and_scram_examples() {
         .ok();
     run_until("describe_client_quotas", &config, &["user", &user], "0 entities match").await;
 
+    // After a bare `--`, a password that starts with `--` is positional.
     let stdout = run(
         "alter_user_scram_credentials",
         &config,
-        &["UPSERT", &user, "SCRAM-SHA-256", "8192", "secret"],
+        &["--", "UPSERT", &user, "SCRAM-SHA-256", "8192", "--secret"],
     )
     .await;
     assert!(
@@ -630,7 +743,10 @@ async fn reassignment_and_election_examples() {
     } else {
         let stderr = output.failed(1);
         assert!(
-            stderr.contains(&format!("Failed to elect leader for {topic}-0: ElectionNotNeededError")),
+            stderr.contains(&format!(
+                "Failed to elect leader for {topic}-0: {}",
+                LANGUAGE.error("ElectionNotNeeded")
+            )),
             "{stderr}"
         );
     }

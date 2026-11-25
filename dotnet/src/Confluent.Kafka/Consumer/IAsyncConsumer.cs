@@ -101,12 +101,15 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null or holds a null or
     /// empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, <paramref name="topics"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, a topic name is null.
+    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged,
+    /// and, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">
@@ -145,6 +148,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="callback"/> is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
     /// <c>void OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
     /// but does not implement <see cref="IConsumerRebalanceListenerWithPartitionsLost"/>.
@@ -154,6 +158,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, a topic name is null.
+    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged,
+    /// and, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">
@@ -183,6 +189,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// <paramref name="callback"/> is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>,
     /// <paramref name="topics"/> is null or holds a null or empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// Also, checked right after the null check, when <paramref name="callback"/> declares a public
     /// <c>Task OnPartitionsLost(IReadOnlyCollection&lt;TopicPartition&gt;)</c>, which the consumer would never call,
     /// but does not implement <see cref="IAsyncConsumerRebalanceListenerWithPartitionsLost"/>.
@@ -192,6 +199,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, a topic name is null.
+    /// A topic in <paramref name="topics"/> contains a NUL character, which the native client cannot receive unchanged,
+    /// and, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">
@@ -394,12 +403,15 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalArgumentException">
     /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null or holds a null
     /// partition or a partition with a null or empty topic, with Java's message.
+    /// When a topic holds a NUL, empty means Java's <c>isBlank</c>: no character above U+0020, a NUL included.
     /// </exception>
     /// <exception cref="ArgumentNullException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
     /// </exception>
     /// <exception cref="ArgumentException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, an element or an element topic is null.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged, and, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, no topic is empty.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
@@ -419,6 +431,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or an element or its topic is null (Java's answer for a partition that is not
     /// assigned).
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -441,6 +454,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or an element or its topic is null (Java's answer for a partition that is not
     /// assigned).
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -466,9 +480,12 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentNullException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
     /// </exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// An element topic is null.
+    /// </exception>
     /// <exception cref="IllegalStateException">
-    /// The consumer is closed, or an element is null (Java's answer for a partition that is not assigned).
+    /// The consumer is closed, or an element is null or its topic holds a NUL, which is never assigned (Java's answer
+    /// for a partition that is not assigned).
     /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -494,9 +511,12 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentNullException">
     /// On an <see cref="AsyncMockConsumer{TKey, TValue}"/>, <paramref name="partitions"/> is null.
     /// </exception>
-    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// An element topic is null.
+    /// </exception>
     /// <exception cref="IllegalStateException">
-    /// The consumer is closed, or an element is null (Java's answer for a partition that is not assigned).
+    /// The consumer is closed, or an element is null or its topic holds a NUL, which is never assigned (Java's answer
+    /// for a partition that is not assigned).
     /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -524,6 +544,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, <paramref name="partition"/>
     /// is null.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -550,6 +571,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, <paramref name="partition"/>
     /// is null.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -612,6 +634,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> without <c>group.id</c> throws an
     /// <see cref="InvalidGroupIdException"/> at once for a null key, before that check.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     Task Commit(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         CancellationToken cancellationToken = default);
@@ -639,6 +665,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <see cref="InvalidGroupIdException"/> at once for a negative <paramref name="timeout"/> or a null key, before
     /// those checks. The <see cref="Task"/> faults with a <see cref="Common.Errors.TimeoutException"/> when the commit
     /// did not complete within <paramref name="timeout"/>.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     Task Commit(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
@@ -705,6 +735,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> without <c>group.id</c> throws an
     /// <see cref="InvalidGroupIdException"/> at once for a null key, before that check.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         IOffsetCommitCallback? callback,
@@ -760,6 +794,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// An <see cref="AsyncKafkaConsumer{TKey, TValue}"/> without <c>group.id</c> throws an
     /// <see cref="InvalidGroupIdException"/> at once for a null key, before that check.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
+    /// </exception>
     Task CommitAsync(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
         IAsyncOffsetCommitCallback callback,
@@ -780,6 +818,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// </exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or the partition is null or not assigned.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     /// <exception cref="UnsupportedOperationException">
@@ -803,6 +842,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or the partition is null or not assigned; a null partition with a leader epoch on an
     /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> is a <see cref="KafkaException"/> instead.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="KafkaException">
     /// On an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, <paramref name="partition"/> is null and
@@ -831,6 +871,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="IllegalStateException">
     /// The consumer is closed, or <paramref name="topicPartition"/> is null or not assigned to an
     /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/>.
+    /// A partition whose topic holds a NUL is never assigned.
     /// </exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
     Task<long?> CurrentLag(TopicPartition topicPartition, CancellationToken cancellationToken = default);
@@ -850,6 +891,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was canceled.</exception>
@@ -879,6 +922,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
@@ -924,6 +969,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// The <see cref="Task"/> faults with it on an <see cref="AsyncMockConsumer{TKey, TValue}"/>, which does not
     /// implement it.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic in <paramref name="timestampsToSearch"/> contains a NUL character, which the native client cannot
+    /// receive unchanged.
+    /// </exception>
     Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, CancellationToken cancellationToken = default);
 
@@ -953,6 +1002,10 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// The <see cref="Task"/> faults with it on an <see cref="AsyncMockConsumer{TKey, TValue}"/>, which does not
     /// implement it.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// A topic in <paramref name="timestampsToSearch"/> contains a NUL character, which the native client cannot
+    /// receive unchanged.
+    /// </exception>
     Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp?>> OffsetsForTimes(
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch,
         TimeSpan timeout,
@@ -971,6 +1024,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed; on an <see cref="AsyncMockConsumer{TKey, TValue}"/> the <see cref="Task"/> faults with
@@ -999,6 +1054,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null, even with a
     /// zero <paramref name="timeout"/>.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">
@@ -1028,6 +1085,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalStateException">
     /// The consumer is closed; on an <see cref="AsyncMockConsumer{TKey, TValue}"/> the <see cref="Task"/> faults with
@@ -1056,6 +1115,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="ArgumentException">
     /// An element topic is null, or, on an <see cref="AsyncKafkaConsumer{TKey, TValue}"/>, an element is null, even with a
     /// zero <paramref name="timeout"/>.
+    /// The topic of a partition in <paramref name="partitions"/> contains a NUL character, which the native client
+    /// cannot receive unchanged.
     /// </exception>
     /// <exception cref="IllegalArgumentException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="IllegalStateException">
@@ -1093,6 +1154,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// The <see cref="Task"/> faults with it when called inside a callback of an
     /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
     /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// </exception>
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -1122,6 +1186,9 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <exception cref="UnsupportedOperationException">
     /// The <see cref="Task"/> faults with it when called inside a callback of an
     /// <see cref="AsyncMockConsumer{TKey, TValue}"/>, whose handle does not support it.
+    /// </exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
     /// </exception>
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(
         string topic,

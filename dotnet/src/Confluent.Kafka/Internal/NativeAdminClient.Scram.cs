@@ -276,7 +276,7 @@ internal sealed partial class NativeAdminClient
                 continue;
             }
 
-            AdminStrings.Validate(user, nameof(users));
+            NativeStrings.Validate(user, NativeStrings.InvalidAdminStringMessage, nameof(users));
             requested.Add(user);
         }
 
@@ -295,7 +295,7 @@ internal sealed partial class NativeAdminClient
                 throw new ArgumentNullException(nameof(alterations), "alterations must not contain null");
             }
 
-            AdminStrings.Validate(alteration.User(), nameof(alterations));
+            NativeStrings.Validate(alteration.User(), NativeStrings.InvalidAdminStringMessage, nameof(alterations));
             requested.Add(alteration);
         }
 

@@ -45,7 +45,8 @@
 //!   `__grpc_python` tests;
 //! - `dotnet.<suite>`: fully qualified name prefixes of .NET tests (a namespace
 //!   or a class), run as a `dotnet test --filter`; `dotnet.grpc`: filters of
-//!   the `__grpc_dotnet` tests.
+//!   the `__grpc_dotnet` tests; `dotnet.examples`: filters of the
+//!   `admin_examples_test` tests, run against the .NET admin examples.
 //!
 //! The file records the change it was made for: `merge_base`,
 //! `changed_files`, `head`, `created` (Unix seconds), and `tree`, the git tree
@@ -1086,7 +1087,8 @@ Rules:
          (rust/src/ffi). The Python tests run it through python/_confluentkafka.c and the FFI. The .NET tests run it through the \
          P/Invoke declarations of dotnet/src/Confluent.Kafka and the FFI. The gRPC arms (c.integration, python.grpc, \
          dotnet.grpc) run the Rust integration harness (rust/tests/integration) against the C, Python and .NET bindings \
-         (the .NET gRPC server is dotnet/grpc-server).
+         (the .NET gRPC server is dotnet/grpc-server). dotnet.examples runs the harness's admin examples test against \
+         dotnet/examples/AdminApis, so through the .NET binding and the FFI.
 - When in doubt, include the test. A change to build files (Cargo.toml, Cargo.lock, build.rs, Makefiles, CMakeLists.txt, \
          pyproject.toml, setup.py, *.csproj, *.sln, Directory.Build.props), the code generator, shared test support, or anything you cannot trace includes every \
          suite it can reach.
@@ -1114,6 +1116,8 @@ Answer with one JSON object in a ```json block, and nothing after it. Every memb
          `Confluent.Kafka.UnitTests.ProducerRecordTests`), each running the tests whose full name contains it:
 {dotnet_suites}  - \"grpc\": filters of the `__grpc_dotnet` tests of the `integration` unit (they also select the \
          `__grpc_dotnet_async` ones)
+  - \"examples\": filters of the `admin_examples_test::` tests of the `integration` unit, run against the .NET admin \
+         examples (dotnet/examples/AdminApis) instead of the Rust ones (rust/examples/admin)
 - \"reasons\": an object mapping each member you include (`rust.lib`, `c.unit`, `python.unit`, ...) to one sentence on why.
 "
     )
@@ -1230,7 +1234,8 @@ fn validate(answer: &Value, inventory: &Inventory) -> anyhow::Result<Map<String,
             "dotnet" => {
                 for (key, entries) in object(value, "dotnet")? {
                     let entries = string_list(entries, &format!("dotnet.{key}"))?;
-                    if key != "grpc" {
+                    // `grpc` and `examples` hold libtest filters of the `integration` unit.
+                    if key != "grpc" && key != "examples" {
                         check_dotnet_entries(key, &entries)?;
                     }
                 }
@@ -2353,6 +2358,7 @@ add_test(NAME mock_producer COMMAND test_mock_producer)
                 "soak": [],
                 "performance": ["Confluent.Kafka.Performance.Tests"],
                 "grpc": ["producer::"],
+                "examples": ["admin_examples_test::"],
             },
             "reasons": {"rust.lib": "the producer changed"},
         });
