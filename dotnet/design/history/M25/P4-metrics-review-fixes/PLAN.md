@@ -28,6 +28,18 @@ The review reports are summarized in each item below; the Copilot comments are o
 - **C4. `record-error-rate` / `record-error-total` miss a send that fails before the accumulator.**
   The core's `do_send` records no `errors` sensor (only the sender does), where Java's `doSend` records
   one in its catch blocks (found by dotnet-critic 138 while checking D8).
+- **C5. A quota violation never fails the call that records it.** The core records every client
+  sensor through `record_or_log` (`rust/src/common/metrics/sensor.rs`), which logs the error. Java
+  logs it only on its I/O threads; a recording on the caller's thread throws
+  `QuotaViolationException` from the call: `flush` with a quota on `flush-time-ns-total`, the
+  transaction calls, and `poll`'s fetch sensors (Copilot's second review). Recorded in
+  `KafkaMetric.Config(MetricConfig)`'s remarks. A .NET-side refusal of such quotas would be Kafka
+  logic in the binding. The core fix: return the error from the caller-thread recordings.
+- **C6. A zero time window with a quota on the consumer's fetch rates fails `Poll`.** Already
+  recorded (ledger 650): `Poll` throws the core's caught panic as `IllegalStateException`. Copilot's
+  second review adds that the positions may have moved past records `Poll` does not return; not
+  verified. The core fix: record the fetch sensors without a panic on a zero window, or leave the
+  positions unchanged when a recording fails.
 
 ## .NET binding (N=138)
 

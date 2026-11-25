@@ -121,6 +121,10 @@ public sealed class KafkaMetric : IMetric
     /// the native core records on the <c>Send</c> or <c>Poll</c> call (<c>buffer-exhausted-rate</c>,
     /// <c>bufferpool-wait-ratio</c>, the fetch rates), that call throws <see cref="IllegalStateException"/> (the
     /// native core's caught panic) where Java's throws <c>ArithmeticException</c> (a recorded difference).
+    /// A quota violation never fails the call that records the metric: the native core logs it and the call carries
+    /// on, where Java's call throws <see cref="QuotaViolationException"/> when it records on the caller's thread
+    /// (<c>Flush</c>, the transaction calls and <c>Poll</c> among them) and logs it only on its I/O thread (a
+    /// recorded gap of the native core).
     /// </remarks>
     public void Config(MetricConfig config)
     {
