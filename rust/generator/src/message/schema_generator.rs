@@ -259,7 +259,7 @@ impl SchemaGenerator {
         // Find the last valid field index
         let last_valid_index = self.find_last_valid_field_index(struct_spec, version, false);
 
-        let mut final_line = last_valid_index.map_or(0, |idx| idx);
+        let mut final_line = last_valid_index.unwrap_or(0);
         if self.message_flexible_versions.contains(version) {
             final_line += 1;
         }
