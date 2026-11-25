@@ -375,7 +375,11 @@ const MUTANTS = [
     name: "setReadOnly() that leaves the headers writable: a sent record's headers take a change",
     native: false,
     edits: [
-      ['dist/common/header/headers.js', '    setReadOnly() {\n        this.#isReadOnly = true;\n    }\n', '    setReadOnly() {\n    }\n'],
+      [
+        'dist/common/header/headers.js',
+        '    setReadOnly() {\n        this.#list();\n        this.#isReadOnly = true;\n    }\n',
+        '    setReadOnly() {\n        this.#list();\n    }\n',
+      ],
     ],
     probes: [PROBES.headersModel, PROBES.headersUnderStress],
   },
