@@ -238,12 +238,16 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *   gets fenced by broker
    * @throws `ConcurrentModificationError` rejects with it while another call
    *   is in progress
+   * @throws `RangeError` rejects with it if the timeout is `NaN`,
+   *   `-Infinity`, holds years, months or weeks, or is beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds
+   * @throws `TypeError` rejects with it if the timeout is null
    *
-   * @remarks Java's blocking call returns a Promise here. Each key and value
-   * is a `Buffer` over the memory the client fetched, not a copy, and a value
-   * you keep holds that whole fetch in memory: to keep a value for long, copy
-   * it with `Buffer.from(value)`. Electron doesn't allow external buffers, so
-   * on Electron the client copies each key and value.
+   * @remarks Java's blocking call returns a Promise here. A key or value from
+   * `poll()` points into the memory the client fetched, and a value you keep
+   * holds that whole fetch in memory. To keep a value for long, copy it with
+   * `Buffer.from(value)`. Electron doesn't allow external buffers, so on
+   * Electron the client copies each consumed key and value.
    */
   poll(options: {
     /** The maximum time to block (must not be greater than `Long.MAX_VALUE` milliseconds). */

@@ -22,11 +22,12 @@
  * `ConsumerConfig` and the type of a consumer's configuration, and the
  * consumer's error classes, generated from the Java sources.
  *
- * `KafkaConsumer` returns keys and values as Buffers over the memory it
- * fetched: a key or value you keep holds that whole fetch in memory, so copy
- * one you keep for long with `Buffer.from(value)`. Electron doesn't allow
- * external buffers, so on Electron the client copies each consumed key and
- * value. Every consumer needs `group.protocol: 'consumer'`: the classic
+ * `KafkaConsumer` returns keys and values as Buffers. A key or value from
+ * `poll()` points into the memory the client fetched, and a value you keep
+ * holds that whole fetch in memory. To keep a value for long, copy it with
+ * `Buffer.from(value)`. Electron doesn't allow external buffers, so on
+ * Electron the client copies each consumed key and value. Every consumer needs
+ `group.protocol: 'consumer'`: the classic
  * protocol is not supported.
  *
  * Not in this release yet: `Consumer` and `KafkaConsumer`'s offset, commit and
