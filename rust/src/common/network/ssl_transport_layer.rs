@@ -1590,7 +1590,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn test_handshake_returns_when_peer_is_silent() {
         let factory = create_test_factory();
-        let (client_stream, server_stream) = make_localhost_pair().await;
+        let (client_stream, mut server_stream) = make_localhost_pair().await;
         let domain = SslFactory::create_server_name("localhost").unwrap();
         let conn = make_client_conn(&factory);
         let mut transport = SslTransportLayer::new(client_stream, conn, domain);
@@ -1606,12 +1606,15 @@ pub(crate) mod tests {
         }
 
         // Verify the peer received the ClientHello, a TLS handshake record (type 0x16).
-        tokio::time::timeout(std::time::Duration::from_secs(5), server_stream.readable())
+        // Read the byte rather than wait for readiness: since tokio 1.54 an accepted
+        // socket starts out readable, so `readable()` can resolve before the
+        // ClientHello has arrived, as it often does on macOS.
+        use tokio::io::AsyncReadExt as _;
+        let mut first = [0u8; 1];
+        tokio::time::timeout(std::time::Duration::from_secs(5), server_stream.read_exact(&mut first))
             .await
             .expect("the ClientHello never reached the peer")
             .unwrap();
-        let mut first = [0u8; 1];
-        assert_eq!(server_stream.try_read(&mut first).unwrap(), 1);
         assert_eq!(first[0], 0x16, "expected a TLS handshake record");
 
         let _ = transport.close().await;
