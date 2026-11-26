@@ -93,6 +93,10 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *
    * @remarks Java's blocking call returns a Promise here. The form with a
    * rebalance listener is not in this release.
+   * *(deviation: a null collection is refused before the closed, busy and group
+   * checks, with its null error where Java reports those first. Why: the FFI
+   * refuses the NULL at its boundary. Goes when: the FFI refuses it after the
+   * core's checks.)*
    */
   subscribe(options: {
     /** The list of topics to subscribe to. */
@@ -127,6 +131,10 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *
    * @remarks Java's blocking call returns a Promise here. A `RegExp` is no
    * pattern: Java's `Pattern` forms are left out.
+   * *(deviation: a null pattern is refused before the closed, busy and group
+   * checks, with its null error where Java reports those first. Why: the FFI
+   * refuses the NULL at its boundary. Goes when: the FFI refuses it after the
+   * core's checks.)*
    */
   subscribe(options: {
     /** Pattern to subscribe to, that must be compatible with Google RE2/J. */
@@ -169,6 +177,10 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *   `unsubscribe()`)
    *
    * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a null collection is refused before the closed, busy
+   * checks, with its null error where Java reports those first. Why: the FFI
+   * refuses the NULL at its boundary. Goes when: the FFI refuses it after the
+   * core's checks.)*
    */
   assign(options: {
     /** The list of partitions to assign this consumer. */
@@ -300,6 +312,12 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *   partitions are not currently assigned to this consumer
    *
    * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a null collection is refused before the closed and busy
+   * checks, and a partition with a null topic gets the FFI's `TypeError`
+   * "topic must not be null", where Java reports those checks first and
+   * "No current assignment for partition null-0". Why: the FFI refuses the
+   * NULL at its boundary. Goes when: the FFI refuses it after the core's
+   * checks, and takes a null topic.)*
    */
   pause(options: {
     /** The partitions which should be paused. */

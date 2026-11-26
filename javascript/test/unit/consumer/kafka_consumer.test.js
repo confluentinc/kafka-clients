@@ -727,6 +727,50 @@ test('assign, pause and resume: their forms and errors, the FFI refusing a null'
   });
 });
 
+test('the null checks come before the closed, busy and group checks: the FFI refuses the NULL at its boundary', async () => {
+  const TOPICS_NULL = { constructor: IllegalArgumentError, message: 'Topic collection to subscribe to cannot be null' };
+  const PATTERN_NULL = { constructor: IllegalArgumentError, message: 'Topic pattern to subscribe to cannot be null' };
+  const ASSIGN_NULL = { constructor: IllegalArgumentError, message: 'Topic partitions collection to assign to cannot be null' };
+  // Without a group.id: Java throws InvalidGroupIdException first.
+  const groupless = newConsumer(null);
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(groupless.subscribe({ topics: null }), TOPICS_NULL);
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(groupless.subscribe({ pattern: null }), PATTERN_NULL);
+  // While a poll is pending: Java throws ConcurrentModificationException first.
+  const busy = newConsumer();
+  await busy.subscribe({ topics: [TOPIC] });
+  const polling = busy.poll({ timeout: 10000 });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(busy.subscribe({ topics: null }), TOPICS_NULL);
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(busy.assign({ partitions: null }), ASSIGN_NULL);
+  busy.wakeup();
+  await assert.rejects(polling, WakeupError);
+  // Closed: Java throws IllegalStateException("This consumer has already been closed.") first.
+  const closed = new KafkaConsumer({ configs: configs() });
+  await closed.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.subscribe({ topics: null }), TOPICS_NULL);
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.subscribe({ pattern: null }), PATTERN_NULL);
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.assign({ partitions: null }), ASSIGN_NULL);
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.pause({ partitions: null }), { constructor: TypeError, message: 'The partitions to pause must be nonnull' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.resume({ partitions: null }), {
+    constructor: TypeError,
+    message: 'The partitions to resume must be nonnull',
+  });
+  // A null topic in pause or resume: Java throws "No current assignment for partition null-0".
+  const assigned = newConsumer();
+  await assigned.assign({ partitions: [TP0] });
+  const nullTopic = new TopicPartition({ topic: null, partition: 0 });
+  await assert.rejects(assigned.pause({ partitions: [nullTopic] }), { constructor: TypeError, message: 'topic must not be null' });
+  await assert.rejects(assigned.resume({ partitions: [nullTopic] }), { constructor: TypeError, message: 'topic must not be null' });
+});
+
 test('poll: its forms, a negative timeout with the core message, a Temporal.Duration', async () => {
   const consumer = newConsumer();
   await consumer.assign({ partitions: [TP0] });

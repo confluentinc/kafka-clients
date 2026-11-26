@@ -76,6 +76,30 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   reference on the batch. Every method of `Headers` copies first. This is the one call into the addon outside the clients
   (line 160), which `lint-mapping.json`'s `nativeCallers` lists.
 
+## The order of the null checks *(deviation)*
+
+A null argument the FFI refuses at its boundary is refused before the core's own checks, which Java runs first
+(`AsyncKafkaConsumer#subscribeInternal`, `#subscribeToRegex`, `#assign`, `#pause`, `#resume`: `acquireAndEnsureOpen()`,
+then for a subscription `throwIfGroupIdNotDefined()`, then the null check):
+
+- `subscribe({ topics: null })` and `subscribe({ pattern: null })` reject with their `IllegalArgumentError`s ("Topic
+  collection to subscribe to cannot be null", "Topic pattern to subscribe to cannot be null") on a consumer without
+  `group.id`, a closed one, or one with a `poll()` pending, where Java throws `InvalidGroupIdException`,
+  `IllegalStateException("This consumer has already been closed.")` or `ConcurrentModificationException`. A null
+  topic inside the collection crosses as a blank topic and meets the core's checks in Java's order.
+- `assign({ partitions: null })`, `pause({ partitions: null })` and `resume({ partitions: null })` do the same on a
+  closed or busy consumer.
+- `pause` or `resume` of a `TopicPartition` whose topic is null rejects with the FFI's `TypeError("topic must not be
+  null")` (`kafka_common_TopicPartition_new` refuses a NULL topic), where Java throws `IllegalStateException("No
+  current assignment for partition null-0")`.
+
+Why: the binding repeats no precondition (line 183), so it cannot run these checks itself in Java's order, and the
+FFI refuses the NULL before the core runs. Python's conventions record the same deviation ("Order": a consumer without
+`group.id` reports a null collection where Java reports `InvalidGroupIdException`). Goes when: the FFI refuses the
+NULL only after the core's closed, busy and group checks, and `TopicPartition_new` takes a null topic. The tests pin
+today's order and messages (`test/unit/consumer/kafka_consumer.test.js`, "the null checks come before the closed,
+busy and group checks").
+
 ## Liveness
 
 - As the producer's ("Threads and liveness"): a consumer keeps Node running from its creation until the core reports it
