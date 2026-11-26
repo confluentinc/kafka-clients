@@ -324,8 +324,8 @@ interface Native {
     factory: RecordFactory,
     done: (error: unknown, partitions: NativePartitionRecords[] | null, nextOffsets: NativeNextOffset[] | null) => void,
   ): void;
-  // Java's subscribe(Collection) through subscribe_with_topics_cb; null goes to the FFI as NULL.
-  consumerSubscribeTopics(handle: ConsumerHandle, topics: string[] | null, done: (error: unknown) => void): void;
+  // Java's subscribe(Collection) through subscribe_with_topics_cb; a null collection or topic goes to the FFI as NULL.
+  consumerSubscribeTopics(handle: ConsumerHandle, topics: Array<string | null> | null, done: (error: unknown) => void): void;
   // Java's subscribe(SubscriptionPattern) through subscribe_with_pattern_cb:
   // `given` false for a null pattern, else the pattern's string.
   consumerSubscribePattern(handle: ConsumerHandle, given: boolean, pattern: string | null, done: (error: unknown) => void): void;

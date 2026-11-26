@@ -928,6 +928,27 @@ test("the Consumer methods' null arguments get the FFI's errors, where Java's mo
   }
 });
 
+test("a null partition or topic given to assign() or subscribe() goes to the FFI, which refuses it, where Java's mock stores it", async () => {
+  const consumer = newMock();
+  // Java's mock throws NullPointerException at partition.topic().
+  await assert.rejects(consumer.assign([/** @type {never} */ (null)]), {
+    constructor: TypeError,
+    message: 'partitions must not contain null',
+  });
+  // Java's mock assigns null-3 and subscribes to null.
+  await assert.rejects(consumer.assign([new TopicPartition({ topic: /** @type {never} */ (null), partition: 3 })]), {
+    constructor: TypeError,
+    message: 'topic must not be null',
+  });
+  await assert.rejects(consumer.subscribe(['a', /** @type {never} */ (null)]), {
+    constructor: TypeError,
+    message: 'topics must not contain null',
+  });
+  // Nothing the test did not give was assigned or subscribed to.
+  assert.equal(consumer.assignment().size(), 0);
+  assert.equal(consumer.subscription().size, 0);
+});
+
 test("a negative timeout is the FFI's IllegalArgumentError, where Java's mock ignores it", async () => {
   const consumer = newMock();
   await consumer.assign([TP0]);

@@ -144,7 +144,7 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
   }): Promise<void>;
   subscribe(pattern: SubscriptionPattern): Promise<void>;
   subscribe(options: unknown): Promise<void> {
-    return calls.subscribe(this.#handle, options, arguments.length);
+    return calls.subscribe(this.#handle, options, arguments.length, true);
   }
 
   assign(options: {
@@ -153,7 +153,7 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
   }): Promise<void>;
   assign(partitions: Iterable<TopicPartition>): Promise<void>;
   assign(options: unknown): Promise<void> {
-    return calls.assign(this.#handle, options, arguments.length);
+    return calls.assign(this.#handle, options, arguments.length, true);
   }
 
   unsubscribe(): Promise<void> {

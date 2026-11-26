@@ -204,7 +204,7 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
   }): Promise<void>;
   subscribe(pattern: SubscriptionPattern): Promise<void>;
   subscribe(options: unknown): Promise<void> {
-    return calls.subscribe(this.#handle, options, arguments.length);
+    return calls.subscribe(this.#handle, options, arguments.length, false);
   }
 
   assign(options: {
@@ -213,7 +213,7 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
   }): Promise<void>;
   assign(partitions: Iterable<TopicPartition>): Promise<void>;
   assign(options: unknown): Promise<void> {
-    return calls.assign(this.#handle, options, arguments.length);
+    return calls.assign(this.#handle, options, arguments.length, false);
   }
 
   unsubscribe(): Promise<void> {

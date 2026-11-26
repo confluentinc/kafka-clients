@@ -525,8 +525,10 @@ Ten FFI behaviours the binding lives with for now:
     Also: on the mock's view, `partitions_for_cb` and `current_lag_cb` refuse a NULL topic or partition, where Java's
     mock answers `[]` and `0`, and a NULL collection given to `subscribe_with_topics_cb`, `assign_cb`,
     `seek_to_beginning_cb` or `seek_to_end_cb` gets `KafkaConsumer`'s `IllegalArgumentError`, where Java's mock throws
-    `NullPointerException` (a `TypeError` here). Ask: accept them where Java's mock does, and let the mock report its
-    own null pattern and null collections.
+    `NullPointerException` (a `TypeError` here). A null topic given to `assign_cb` or `subscribe_with_topics_cb` on the
+    mock's view is refused too (`TopicPartition_new`, and the list's NULL element), where Java's mock stores it; the
+    binding sends it as NULL there, keeping the blank topic of ask 7 for `KafkaConsumer`. Ask: accept them where Java's
+    mock does, and let the mock report its own null pattern and null collections.
 11. Found while building P4: `kafka_consumer_Consumer_metrics` reads the metrics through the consumer's handle, never
     through the mock, so on a closed mock it answers an empty view, where Java's mock throws "This consumer has
     already been closed." (and the core's mock would panic with that message). Ask: have

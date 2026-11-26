@@ -61,6 +61,9 @@
  *   `subscribe()`, `assign()`, `seekToBeginning()` or `seekToEnd()` rejects
  *   with `KafkaConsumer`'s `IllegalArgumentError`, where Java's mock throws
  *   a `NullPointerException`;
+ * - a null partition or topic given to `assign()` or `subscribe()` rejects
+ *   with a `TypeError`, where Java's mock throws a `NullPointerException`
+ *   for a null partition and stores a null topic;
  * - a negative timeout rejects with `IllegalArgumentError` "Timeout must not
  *   be negative", where Java's mock ignores it;
  * - `metrics()` answers an empty map after `close()` too, where Java's mock

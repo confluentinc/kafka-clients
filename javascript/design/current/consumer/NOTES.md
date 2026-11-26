@@ -293,6 +293,12 @@ does as Java's does (PLAN §6, asks 8 to 13).
   Java's `KafkaConsumer` messages ("Topic collection to subscribe to cannot be null", "Topic partitions collection to
   assign to cannot be null", "Partitions collection cannot be null"), where Java's mock throws `NullPointerException`
   (ask 10).
+- A null partition, or a null topic, given to `assign()` or `subscribe()` goes to the FFI as NULL, as the mock's
+  other calls send theirs, and the FFI refuses it with `TypeError` ("partitions must not contain null", "topic must
+  not be null", "topics must not contain null"): Java's mock throws `NullPointerException` for a null partition and
+  stores a null topic. The blank topic a `KafkaConsumer` sends instead, so that the core answers with Java's message
+  (the handle, above), is `KafkaConsumer`'s alone: Java's `AsyncKafkaConsumer` makes that check, and Java's mock
+  makes none (`consumer_calls.ts`, the `blankNull` flag of `assign` and `subscribe`; asks 7 and 10).
 - A negative timeout is refused by the FFI's `ms()` with `IllegalArgumentError` "Timeout must not be negative", the
   conventions' rule (Signatures, Q35), from `poll` and every timed form, and such a `poll` leaves `lastPollTimeout()`
   as it was; Java's mock ignores the timeouts and records each poll's (ask 12).

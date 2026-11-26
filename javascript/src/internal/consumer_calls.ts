@@ -283,9 +283,11 @@ export function subscription(handle: ConsumerHandle, count: number): Set<string>
  * @param handle - the native consumer handle
  * @param options - the argument given
  * @param count - the number of arguments given
+ * @param blankNull - whether a null topic is a blank one, as Java's
+ *   `AsyncKafkaConsumer` checks it; Java's `MockConsumer` makes no such check
  * @returns what the method returns
  */
-export function subscribe(handle: ConsumerHandle, options: unknown, count: number): Promise<void> {
+export function subscribe(handle: ConsumerHandle, options: unknown, count: number, blankNull: boolean): Promise<void> {
   return rejecting(() => {
     // A RegExp is no pattern: only a SubscriptionPattern is (javascript/CLAUDE.md,
     // JavaScript Binding Conventions, Signatures).
@@ -296,8 +298,8 @@ export function subscribe(handle: ConsumerHandle, options: unknown, count: numbe
     if (SUBSCRIBE_FORMS.match(options, count) === 0) {
       const topics = stringSet.take(SUBSCRIBE_FORMS.value(options, 'topics'), 'topics') as Set<string | null> | null;
       // A null topic is a blank one, which the core refuses with Java's
-      // message for both.
-      const list = topics === null ? null : [...topics].map((topic) => topic ?? '');
+      // message for both; on a mock it goes to the FFI as NULL.
+      const list = topics === null ? null : [...topics].map((topic) => (blankNull ? (topic ?? '') : topic));
       return completion((done) => native.consumerSubscribeTopics(handle, list, done));
     }
     const pattern = SUBSCRIBE_FORMS.value(options, 'pattern');
@@ -314,12 +316,15 @@ export function subscribe(handle: ConsumerHandle, options: unknown, count: numbe
  * @param handle - the native consumer handle
  * @param options - the argument given
  * @param count - the number of arguments given
+ * @param blankNull - whether a null partition or topic is a blank topic, as
+ *   Java's `AsyncKafkaConsumer` checks it; Java's `MockConsumer` makes no such
+ *   check
  * @returns what the method returns
  */
-export function assign(handle: ConsumerHandle, options: unknown, count: number): Promise<void> {
+export function assign(handle: ConsumerHandle, options: unknown, count: number, blankNull: boolean): Promise<void> {
   return rejecting(() => {
     ASSIGN_FORMS.match(options, count);
-    const pairs = partitionPairs(ASSIGN_FORMS.value(options, 'partitions'), true);
+    const pairs = partitionPairs(ASSIGN_FORMS.value(options, 'partitions'), blankNull);
     return completion((done) => native.consumerAssign(handle, pairs, done));
   });
 }
