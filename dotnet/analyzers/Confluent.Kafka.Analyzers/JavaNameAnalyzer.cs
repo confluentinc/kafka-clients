@@ -1029,6 +1029,11 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
                         netDone[i] = javaDone[j] = true;
                         pairs.Add((n, java[j]));
+                        if (n.DeclaredHere)
+                        {
+                            CheckCollectionTypes(n, java[j], javaName, findings);
+                        }
+
                         string added = string.Join(", ", n.Names.Skip(javaNames.Length));
                         string renamed = "names its parameters (" + string.Join(", ", n.Names.Take(javaNames.Length)) + ") where Java's "
                             + javaName + " names them (" + string.Join(", ", javaNames) + ")";
@@ -1076,6 +1081,49 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
             return pairs;
         }
+
+        // Rule 6: a parameter of one of Java's collection interfaces takes its read-only .NET counterpart, so a caller
+        // passes what a Java caller passes: an Iterable an IEnumerable<T>, a Collection an IReadOnlyCollection<T>, a Set
+        // one too (netstandard2.0 has no IReadOnlySet<T>), a List an IReadOnlyList<T> and a Map an
+        // IReadOnlyDictionary<TKey, TValue>.
+        private static void CheckCollectionTypes(NetOverload net, JavaOverload java, string javaName, List<Finding> findings)
+        {
+            for (int i = 0; i < java.Types.Length; i++)
+            {
+                // An object or a type parameter stands for any type, as it does where the overloads are paired.
+                if (ReadOnlyCounterpartOf(java.Types[i]) is not string expected
+                    || NetKind(net.Types[i]) is null
+                    || IsSystemCollection(net.Types[i], expected))
+                {
+                    continue;
+                }
+
+                string display = expected.Substring(0, expected.IndexOf('`')) + (expected.EndsWith("2", StringComparison.Ordinal)
+                    ? "<TKey, TValue>"
+                    : "<T>");
+                findings.Add(new Finding(
+                    "collection " + DocId(net.Method) + " " + net.Names[i],
+                    "takes " + net.Names[i] + " as " + net.Types[i].ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)
+                        + ", where Java's " + javaName + " takes " + (java.Types[i][0] == 'I' ? "an " : "a ") + java.Types[i]
+                        + ": take an " + display,
+                    LocationOf(net.Method)));
+            }
+        }
+
+        // The metadata name of the System.Collections.Generic interface that stands for a Java collection interface.
+        private static string? ReadOnlyCounterpartOf(string javaType) => javaType switch
+        {
+            "Iterable" => "IEnumerable`1",
+            "Collection" or "Set" => "IReadOnlyCollection`1",
+            "List" => "IReadOnlyList`1",
+            "Map" => "IReadOnlyDictionary`2",
+            _ => null,
+        };
+
+        private static bool IsSystemCollection(ITypeSymbol type, string metadataName) =>
+            type is INamedTypeSymbol named
+            && named.OriginalDefinition.MetadataName == metadataName
+            && named.OriginalDefinition.ContainingNamespace.ToDisplayString() == "System.Collections.Generic";
 
         // Whether each Java parameter type can stand for the .NET one at its place: a renamed parameter is matched only
         // where its type fits. A type the check does not know, or a named type of another name, fits.

@@ -52,7 +52,7 @@ public sealed class TopicDescription
     /// <exception cref="ArgumentNullException">
     /// <paramref name="name"/> or <paramref name="partitions"/> is null.
     /// </exception>
-    public TopicDescription(string name, bool @internal, IEnumerable<TopicPartitionInfo> partitions)
+    public TopicDescription(string name, bool @internal, IReadOnlyList<TopicPartitionInfo> partitions)
         : this(name, @internal, partitions, Array.Empty<AclOperation>())
     {
     }
@@ -75,8 +75,8 @@ public sealed class TopicDescription
     public TopicDescription(
         string name,
         bool @internal,
-        IEnumerable<TopicPartitionInfo> partitions,
-        IEnumerable<AclOperation>? authorizedOperations)
+        IReadOnlyList<TopicPartitionInfo> partitions,
+        IReadOnlyCollection<AclOperation>? authorizedOperations)
         : this(name, @internal, partitions, authorizedOperations, Uuid.ZERO_UUID)
     {
     }
@@ -97,8 +97,8 @@ public sealed class TopicDescription
     public TopicDescription(
         string name,
         bool @internal,
-        IEnumerable<TopicPartitionInfo> partitions,
-        IEnumerable<AclOperation>? authorizedOperations,
+        IReadOnlyList<TopicPartitionInfo> partitions,
+        IReadOnlyCollection<AclOperation>? authorizedOperations,
         Uuid topicId)
     {
         if (partitions is null)

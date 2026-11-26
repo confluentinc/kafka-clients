@@ -111,8 +111,8 @@ public sealed class PublicAdminJavaOverloadsTests
             type,
             nameof(IAdmin.DescribeUserScramCredentials),
             Type.EmptyTypes,
-            new[] { typeof(IReadOnlyCollection<string>) },
-            new[] { typeof(IReadOnlyCollection<string>), typeof(DescribeUserScramCredentialsOptions) });
+            new[] { typeof(IReadOnlyList<string>) },
+            new[] { typeof(IReadOnlyList<string>), typeof(DescribeUserScramCredentialsOptions) });
     }
 
     [Fact]

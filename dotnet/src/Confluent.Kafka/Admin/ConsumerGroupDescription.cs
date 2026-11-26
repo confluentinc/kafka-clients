@@ -90,12 +90,12 @@ public sealed class ConsumerGroupDescription
     public ConsumerGroupDescription(
         string? groupId,
         bool isSimpleConsumerGroup,
-        IEnumerable<MemberDescription>? members,
+        IReadOnlyCollection<MemberDescription>? members,
         string? partitionAssignor,
         GroupType type,
         GroupState groupState,
         Node? coordinator,
-        IEnumerable<AclOperation>? authorizedOperations,
+        IReadOnlyCollection<AclOperation>? authorizedOperations,
         int? groupEpoch,
         int? targetAssignmentEpoch)
     {

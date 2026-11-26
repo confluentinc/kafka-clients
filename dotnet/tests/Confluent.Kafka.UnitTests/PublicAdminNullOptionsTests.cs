@@ -97,7 +97,7 @@ public sealed class PublicAdminNullOptionsTests
 
     private static readonly string[] s_mockSwappingCalls =
     {
-        "CreateTopics(IEnumerable<NewTopic>)",
+        "CreateTopics(IReadOnlyCollection<NewTopic>)",
         "DeleteTopics(TopicCollection)",
         "DeleteTopics(IReadOnlyCollection<String>)",
         "DescribeTopics(TopicCollection)",
@@ -125,13 +125,13 @@ public sealed class PublicAdminNullOptionsTests
         "ListConsumerGroupOffsets(String)",
         "ListConsumerGroupOffsets(IReadOnlyDictionary<String, ListConsumerGroupOffsetsSpec>)",
         "DeleteConsumerGroups(IReadOnlyCollection<String>)",
-        "CreateAcls(IEnumerable<AclBinding>)",
-        "DeleteAcls(IEnumerable<AclBindingFilter>)",
+        "CreateAcls(IReadOnlyCollection<AclBinding>)",
+        "DeleteAcls(IReadOnlyCollection<AclBindingFilter>)",
         "DescribeAcls(AclBindingFilter)",
         "DescribeClientQuotas(ClientQuotaFilter)",
-        "AlterClientQuotas(IEnumerable<ClientQuotaAlteration>)",
-        "DescribeUserScramCredentials(IReadOnlyCollection<String>)",
-        "AlterUserScramCredentials(IEnumerable<UserScramCredentialAlteration>)",
+        "AlterClientQuotas(IReadOnlyCollection<ClientQuotaAlteration>)",
+        "DescribeUserScramCredentials(IReadOnlyList<String>)",
+        "AlterUserScramCredentials(IReadOnlyList<UserScramCredentialAlteration>)",
         "DescribeFeatures()",
         "UnregisterController(Int32)",
         "FenceProducers(IReadOnlyCollection<String>)",
@@ -449,7 +449,7 @@ public sealed class PublicAdminNullOptionsTests
 
     private static FutureProbe MockSwapping(IAdmin admin, string rpc) => rpc switch
     {
-        "CreateTopics(IEnumerable<NewTopic>)" =>
+        "CreateTopics(IReadOnlyCollection<NewTopic>)" =>
             FutureProbe.Of(admin.CreateTopics(new[] { new NewTopic("t", 1, 1) }, null!).All()),
         "DeleteTopics(TopicCollection)" =>
             FutureProbe.Of(admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "t" }), null!).All()),
@@ -500,17 +500,17 @@ public sealed class PublicAdminNullOptionsTests
             FutureProbe.Of(admin.ListConsumerGroupOffsets(GroupSpecs(), null!).All()),
         "DeleteConsumerGroups(IReadOnlyCollection<String>)" =>
             FutureProbe.Of(admin.DeleteConsumerGroups(new[] { "g" }, null!).All()),
-        "CreateAcls(IEnumerable<AclBinding>)" => FutureProbe.Of(admin.CreateAcls(new[] { Acl() }, null!).All()),
-        "DeleteAcls(IEnumerable<AclBindingFilter>)" =>
+        "CreateAcls(IReadOnlyCollection<AclBinding>)" => FutureProbe.Of(admin.CreateAcls(new[] { Acl() }, null!).All()),
+        "DeleteAcls(IReadOnlyCollection<AclBindingFilter>)" =>
             FutureProbe.Of(admin.DeleteAcls(new[] { AclBindingFilter.ANY }, null!).All()),
         "DescribeAcls(AclBindingFilter)" => FutureProbe.Of(admin.DescribeAcls(AclBindingFilter.ANY, null!).Values()),
         "DescribeClientQuotas(ClientQuotaFilter)" =>
             FutureProbe.Of(admin.DescribeClientQuotas(ClientQuotaFilter.All(), null!).Entities()),
-        "AlterClientQuotas(IEnumerable<ClientQuotaAlteration>)" =>
+        "AlterClientQuotas(IReadOnlyCollection<ClientQuotaAlteration>)" =>
             FutureProbe.Of(admin.AlterClientQuotas(new[] { QuotaAlteration() }, null!).All()),
-        "DescribeUserScramCredentials(IReadOnlyCollection<String>)" =>
+        "DescribeUserScramCredentials(IReadOnlyList<String>)" =>
             FutureProbe.Of(admin.DescribeUserScramCredentials(new[] { "u" }, null!).All()),
-        "AlterUserScramCredentials(IEnumerable<UserScramCredentialAlteration>)" =>
+        "AlterUserScramCredentials(IReadOnlyList<UserScramCredentialAlteration>)" =>
             FutureProbe.Of(admin.AlterUserScramCredentials(ScramDeletion(), null!).All()),
         "DescribeFeatures()" => FutureProbe.Of(admin.DescribeFeatures(null!).FeatureMetadata()),
         "UnregisterController(Int32)" => FutureProbe.Of(admin.UnregisterController(0, null!).All()),
@@ -527,7 +527,7 @@ public sealed class PublicAdminNullOptionsTests
 
     private static FutureProbe MockSwapping(IAsyncAdmin admin, string rpc) => rpc switch
     {
-        "CreateTopics(IEnumerable<NewTopic>)" =>
+        "CreateTopics(IReadOnlyCollection<NewTopic>)" =>
             FutureProbe.Of(admin.CreateTopics(new[] { new NewTopic("t", 1, 1) }, null!).All()),
         "DeleteTopics(TopicCollection)" =>
             FutureProbe.Of(admin.DeleteTopics(TopicCollection.OfTopicNames(new[] { "t" }), null!).All()),
@@ -578,17 +578,17 @@ public sealed class PublicAdminNullOptionsTests
             FutureProbe.Of(admin.ListConsumerGroupOffsets(GroupSpecs(), null!).All()),
         "DeleteConsumerGroups(IReadOnlyCollection<String>)" =>
             FutureProbe.Of(admin.DeleteConsumerGroups(new[] { "g" }, null!).All()),
-        "CreateAcls(IEnumerable<AclBinding>)" => FutureProbe.Of(admin.CreateAcls(new[] { Acl() }, null!).All()),
-        "DeleteAcls(IEnumerable<AclBindingFilter>)" =>
+        "CreateAcls(IReadOnlyCollection<AclBinding>)" => FutureProbe.Of(admin.CreateAcls(new[] { Acl() }, null!).All()),
+        "DeleteAcls(IReadOnlyCollection<AclBindingFilter>)" =>
             FutureProbe.Of(admin.DeleteAcls(new[] { AclBindingFilter.ANY }, null!).All()),
         "DescribeAcls(AclBindingFilter)" => FutureProbe.Of(admin.DescribeAcls(AclBindingFilter.ANY, null!).Values()),
         "DescribeClientQuotas(ClientQuotaFilter)" =>
             FutureProbe.Of(admin.DescribeClientQuotas(ClientQuotaFilter.All(), null!).Entities()),
-        "AlterClientQuotas(IEnumerable<ClientQuotaAlteration>)" =>
+        "AlterClientQuotas(IReadOnlyCollection<ClientQuotaAlteration>)" =>
             FutureProbe.Of(admin.AlterClientQuotas(new[] { QuotaAlteration() }, null!).All()),
-        "DescribeUserScramCredentials(IReadOnlyCollection<String>)" =>
+        "DescribeUserScramCredentials(IReadOnlyList<String>)" =>
             FutureProbe.Of(admin.DescribeUserScramCredentials(new[] { "u" }, null!).All()),
-        "AlterUserScramCredentials(IEnumerable<UserScramCredentialAlteration>)" =>
+        "AlterUserScramCredentials(IReadOnlyList<UserScramCredentialAlteration>)" =>
             FutureProbe.Of(admin.AlterUserScramCredentials(ScramDeletion(), null!).All()),
         "DescribeFeatures()" => FutureProbe.Of(admin.DescribeFeatures(null!).FeatureMetadata()),
         "UnregisterController(Int32)" => FutureProbe.Of(admin.UnregisterController(0, null!).All()),

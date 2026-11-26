@@ -33,7 +33,7 @@ public sealed class UserScramCredentialsDescription
     /// <param name="credentialInfos">The user's credential descriptions; copied.</param>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     public UserScramCredentialsDescription(
-        string name, IEnumerable<ScramCredentialInfo> credentialInfos)
+        string name, IReadOnlyList<ScramCredentialInfo> credentialInfos)
     {
         _name = name ?? throw new ArgumentNullException(nameof(name));
         if (credentialInfos is null)

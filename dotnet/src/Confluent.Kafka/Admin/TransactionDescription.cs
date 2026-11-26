@@ -61,7 +61,7 @@ public sealed class TransactionDescription
         int producerEpoch,
         long transactionTimeoutMs,
         long? transactionStartTimeMs,
-        IEnumerable<TopicPartition>? topicPartitions)
+        IReadOnlyCollection<TopicPartition>? topicPartitions)
     {
         _coordinatorId = coordinatorId;
         _state = state;

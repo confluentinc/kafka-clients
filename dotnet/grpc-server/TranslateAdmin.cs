@@ -189,7 +189,7 @@ internal static class TranslateAdmin
         }
 
         return TopicCollection.OfTopicNames(
-            names is null ? Array.Empty<string>() : (IEnumerable<string>)names.Values);
+            names is null ? (IReadOnlyCollection<string>)Array.Empty<string>() : names.Values);
     }
 
     internal static List<NewTopic> NewTopics(IEnumerable<Proto.NewTopic> protos)

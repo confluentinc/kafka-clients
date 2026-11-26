@@ -43,11 +43,11 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
     }
 
     /// <inheritdoc/>
-    public AsyncCreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics) =>
+    public AsyncCreateTopicsResult CreateTopics(IReadOnlyCollection<NewTopic> newTopics) =>
         CreateTopics(newTopics, new CreateTopicsOptions());
 
     /// <inheritdoc/>
-    public AsyncCreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions options)
+    public AsyncCreateTopicsResult CreateTopics(IReadOnlyCollection<NewTopic> newTopics, CreateTopicsOptions options)
     {
         CreateTopicsOptions? sent = AdminEarlyReturns.CreateTopics(ref newTopics, options);
         return AsyncCreateTopicsResult.OfClient(_native.CreateTopics(newTopics, sent));
@@ -348,20 +348,20 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
             _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
-    public AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls) =>
+    public AsyncCreateAclsResult CreateAcls(IReadOnlyCollection<AclBinding> acls) =>
         CreateAcls(acls, new CreateAclsOptions());
 
     /// <inheritdoc/>
-    public AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions options) =>
+    public AsyncCreateAclsResult CreateAcls(IReadOnlyCollection<AclBinding> acls, CreateAclsOptions options) =>
         AsyncCreateAclsResult.OfClient(_native.CreateAcls(acls, options));
 
     /// <inheritdoc/>
-    public AsyncDeleteAclsResult DeleteAcls(IEnumerable<AclBindingFilter> filters) =>
+    public AsyncDeleteAclsResult DeleteAcls(IReadOnlyCollection<AclBindingFilter> filters) =>
         DeleteAcls(filters, new DeleteAclsOptions());
 
     /// <inheritdoc/>
     public AsyncDeleteAclsResult DeleteAcls(
-        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions options) =>
+        IReadOnlyCollection<AclBindingFilter> filters, DeleteAclsOptions options) =>
         AsyncDeleteAclsResult.OfClient(_native.DeleteAcls(filters, options));
 
     /// <inheritdoc/>
@@ -383,12 +383,12 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
         AsyncDescribeClientQuotasResult.OfClient(_native.DescribeClientQuotas(filter, options));
 
     /// <inheritdoc/>
-    public AsyncAlterClientQuotasResult AlterClientQuotas(IEnumerable<ClientQuotaAlteration> entries) =>
+    public AsyncAlterClientQuotasResult AlterClientQuotas(IReadOnlyCollection<ClientQuotaAlteration> entries) =>
         AlterClientQuotas(entries, new AlterClientQuotasOptions());
 
     /// <inheritdoc/>
     public AsyncAlterClientQuotasResult AlterClientQuotas(
-        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions options) =>
+        IReadOnlyCollection<ClientQuotaAlteration> entries, AlterClientQuotasOptions options) =>
         AsyncAlterClientQuotasResult.OfClient(_native.AlterClientQuotas(entries, options));
 
     /// <inheritdoc/>
@@ -396,24 +396,24 @@ public sealed class AsyncKafkaAdminClient : IAsyncAdmin
         DescribeUserScramCredentials(null, new DescribeUserScramCredentialsOptions());
 
     /// <inheritdoc/>
-    public AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(IReadOnlyCollection<string>? users) =>
+    public AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(IReadOnlyList<string>? users) =>
         DescribeUserScramCredentials(users, new DescribeUserScramCredentialsOptions());
 
     /// <inheritdoc/>
     public AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(
-        IReadOnlyCollection<string>? users,
+        IReadOnlyList<string>? users,
         DescribeUserScramCredentialsOptions options) =>
         AsyncDescribeUserScramCredentialsResult.OfClient(
             _native.DescribeUserScramCredentials(users, options));
 
     /// <inheritdoc/>
     public AsyncAlterUserScramCredentialsResult AlterUserScramCredentials(
-        IEnumerable<UserScramCredentialAlteration> alterations) =>
+        IReadOnlyList<UserScramCredentialAlteration> alterations) =>
         AlterUserScramCredentials(alterations, new AlterUserScramCredentialsOptions());
 
     /// <inheritdoc/>
     public AsyncAlterUserScramCredentialsResult AlterUserScramCredentials(
-        IEnumerable<UserScramCredentialAlteration> alterations,
+        IReadOnlyList<UserScramCredentialAlteration> alterations,
         AlterUserScramCredentialsOptions options) =>
         AsyncAlterUserScramCredentialsResult.OfClient(
             _native.AlterUserScramCredentials(alterations, options));

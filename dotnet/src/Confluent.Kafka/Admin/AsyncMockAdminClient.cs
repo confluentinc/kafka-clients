@@ -101,11 +101,11 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     public static Builder Create() => new Builder(MockAdminClientBuilderCore.Create());
 
     /// <inheritdoc/>
-    public AsyncCreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics) =>
+    public AsyncCreateTopicsResult CreateTopics(IReadOnlyCollection<NewTopic> newTopics) =>
         CreateTopics(newTopics, new CreateTopicsOptions());
 
     /// <inheritdoc/>
-    public AsyncCreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions options) =>
+    public AsyncCreateTopicsResult CreateTopics(IReadOnlyCollection<NewTopic> newTopics, CreateTopicsOptions options) =>
         AsyncCreateTopicsResult.OfClient(_native.CreateTopics(newTopics, options ?? new CreateTopicsOptions()));
 
     /// <inheritdoc/>
@@ -405,8 +405,8 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
             _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
-    /// <inheritdoc cref="CreateAcls(IEnumerable{AclBinding}, CreateAclsOptions)" path="/remarks"/>
-    public AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls) =>
+    /// <inheritdoc cref="CreateAcls(IReadOnlyCollection{AclBinding}, CreateAclsOptions)" path="/remarks"/>
+    public AsyncCreateAclsResult CreateAcls(IReadOnlyCollection<AclBinding> acls) =>
         CreateAcls(acls, new CreateAclsOptions());
 
     /// <inheritdoc/>
@@ -414,12 +414,12 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// Java's mock throws <c>UnsupportedOperationException("Not implemented yet")</c> here,
     /// so every binding's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
-    public AsyncCreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions options) =>
+    public AsyncCreateAclsResult CreateAcls(IReadOnlyCollection<AclBinding> acls, CreateAclsOptions options) =>
         AsyncCreateAclsResult.OfClient(_native.CreateAcls(acls, options ?? new CreateAclsOptions()));
 
     /// <inheritdoc/>
-    /// <inheritdoc cref="DeleteAcls(IEnumerable{AclBindingFilter}, DeleteAclsOptions)" path="/remarks"/>
-    public AsyncDeleteAclsResult DeleteAcls(IEnumerable<AclBindingFilter> filters) =>
+    /// <inheritdoc cref="DeleteAcls(IReadOnlyCollection{AclBindingFilter}, DeleteAclsOptions)" path="/remarks"/>
+    public AsyncDeleteAclsResult DeleteAcls(IReadOnlyCollection<AclBindingFilter> filters) =>
         DeleteAcls(filters, new DeleteAclsOptions());
 
     /// <inheritdoc/>
@@ -428,7 +428,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// so every filter's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncDeleteAclsResult DeleteAcls(
-        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions options) =>
+        IReadOnlyCollection<AclBindingFilter> filters, DeleteAclsOptions options) =>
         AsyncDeleteAclsResult.OfClient(_native.DeleteAcls(filters, options ?? new DeleteAclsOptions()));
 
     /// <inheritdoc/>
@@ -462,8 +462,8 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
         AsyncDescribeClientQuotasResult.OfClient(_native.DescribeClientQuotas(filter, options ?? new DescribeClientQuotasOptions()));
 
     /// <inheritdoc/>
-    /// <inheritdoc cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/remarks"/>
-    public AsyncAlterClientQuotasResult AlterClientQuotas(IEnumerable<ClientQuotaAlteration> entries) =>
+    /// <inheritdoc cref="AlterClientQuotas(IReadOnlyCollection{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/remarks"/>
+    public AsyncAlterClientQuotasResult AlterClientQuotas(IReadOnlyCollection<ClientQuotaAlteration> entries) =>
         AlterClientQuotas(entries, new AlterClientQuotasOptions());
 
     /// <inheritdoc/>
@@ -472,17 +472,17 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// so every entity's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncAlterClientQuotasResult AlterClientQuotas(
-        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions options) =>
+        IReadOnlyCollection<ClientQuotaAlteration> entries, AlterClientQuotasOptions options) =>
         AsyncAlterClientQuotasResult.OfClient(_native.AlterClientQuotas(entries, options ?? new AlterClientQuotasOptions()));
 
     /// <inheritdoc/>
-    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/remarks"/>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyList{string}, DescribeUserScramCredentialsOptions)" path="/remarks"/>
     public AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials() =>
         DescribeUserScramCredentials(null, new DescribeUserScramCredentialsOptions());
 
     /// <inheritdoc/>
-    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/remarks"/>
-    public AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(IReadOnlyCollection<string>? users) =>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyList{string}, DescribeUserScramCredentialsOptions)" path="/remarks"/>
+    public AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(IReadOnlyList<string>? users) =>
         DescribeUserScramCredentials(users, new DescribeUserScramCredentialsOptions());
 
     /// <inheritdoc/>
@@ -491,15 +491,15 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// so every accessor fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncDescribeUserScramCredentialsResult DescribeUserScramCredentials(
-        IReadOnlyCollection<string>? users,
+        IReadOnlyList<string>? users,
         DescribeUserScramCredentialsOptions options) =>
         AsyncDescribeUserScramCredentialsResult.OfClient(
             _native.DescribeUserScramCredentials(users, options ?? new DescribeUserScramCredentialsOptions()));
 
     /// <inheritdoc/>
-    /// <inheritdoc cref="AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/remarks"/>
+    /// <inheritdoc cref="AlterUserScramCredentials(IReadOnlyList{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/remarks"/>
     public AsyncAlterUserScramCredentialsResult AlterUserScramCredentials(
-        IEnumerable<UserScramCredentialAlteration> alterations) =>
+        IReadOnlyList<UserScramCredentialAlteration> alterations) =>
         AlterUserScramCredentials(alterations, new AlterUserScramCredentialsOptions());
 
     /// <inheritdoc/>
@@ -508,7 +508,7 @@ public sealed class AsyncMockAdminClient : IAsyncAdmin
     /// so every user's future fails with an <see cref="UnsupportedOperationException"/> carrying that message.
     /// </remarks>
     public AsyncAlterUserScramCredentialsResult AlterUserScramCredentials(
-        IEnumerable<UserScramCredentialAlteration> alterations,
+        IReadOnlyList<UserScramCredentialAlteration> alterations,
         AlterUserScramCredentialsOptions options) =>
         AsyncAlterUserScramCredentialsResult.OfClient(
             _native.AlterUserScramCredentials(alterations, options ?? new AlterUserScramCredentialsOptions()));

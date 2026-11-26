@@ -4751,7 +4751,7 @@ public sealed class AdminP14SyncCompositionTests
             _description = description;
         }
 
-        internal static DescribeUserScramCredentialsHarness Create(string flavour, IReadOnlyCollection<string> users)
+        internal static DescribeUserScramCredentialsHarness Create(string flavour, IReadOnlyList<string> users)
         {
             if (FlavourOf(flavour) == AdminFlavour.Sync)
             {

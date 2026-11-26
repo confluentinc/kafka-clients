@@ -304,6 +304,15 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
   `IEquatable<…>`, `Equals` and `GetHashCode`, which compared references, so every answer stays the same.
   Rebuild an application that used these operators: one built against an earlier release fails with
   `MissingMethodException` where it calls them.
+- A parameter Java types as a collection takes its read-only counterpart: `IReadOnlyCollection<T>` for a
+  `Collection` or a `Set`, `IReadOnlyList<T>` for a `List`. `CreateTopics`, `CreateAcls`, `DeleteAcls`,
+  `AlterClientQuotas`, `TopicCollection.OfTopicNames` / `OfTopicIds` and the constructors of `Config`,
+  `TokenInformation`, `ConsumerGroupDescription`, `ClassicGroupDescription`, `MemberAssignment` and
+  `TransactionDescription` took an `IEnumerable<T>`: a list, an array or a set works as before, and a LINQ query
+  needs `query.ToList()`, as Java needs `collect` for a `Stream`. `AlterUserScramCredentials`,
+  `DescribeUserScramCredentials` and the constructors of `TopicPartitionInfo`, `TopicDescription`,
+  `UserScramCredentialsDescription` and `PartitionProducerState` take an `IReadOnlyList<T>`: pass a list or an
+  array, as Java takes a `List`. Rebuild an application built against an earlier release.
 
 ## Examples
 

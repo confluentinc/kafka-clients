@@ -1991,6 +1991,181 @@ public sealed class JavaNameAnalyzerTests
                 + "ctor\torg.apache.kafka.clients.admin.UserScramCredentialDeletion\tUserScramCredentialDeletion()\n"));
 
     [Fact]
+    public Task ACollectionParameter_ThatTakesTheReadOnlyCounterpartOfItsJavaType_IsNotReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class Widget
+                {
+                    private Widget()
+                    {
+                    }
+
+                    public void Take(IEnumerable<int> values)
+                    {
+                    }
+
+                    public void Count(IReadOnlyCollection<int>? values)
+                    {
+                    }
+
+                    public void Keep(IReadOnlyCollection<int> values)
+                    {
+                    }
+
+                    public void Order(IReadOnlyList<int> values)
+                    {
+                    }
+
+                    public void Index(IReadOnlyDictionary<int, int> values)
+                    {
+                    }
+
+                    public void Wrap(ReadOnlyMemory<byte> buffer)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Widget\tclass\t-\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\ttake(Iterable values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tcount(Collection values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tkeep(Set values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\torder(List values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tindex(Map values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\twrap(ByteBuffer buffer)\n"));
+
+    [Fact]
+    public Task ACollectionParameter_OfAnotherType_IsReported_WithTheCounterpartToTake() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class Widget
+                {
+                    private Widget()
+                    {
+                    }
+
+                    public void {|#0:Take|}(IReadOnlyCollection<int> values)
+                    {
+                    }
+
+                    public void {|#1:Count|}(IEnumerable<int> values)
+                    {
+                    }
+
+                    public void {|#2:Keep|}(IEnumerable<int>? values)
+                    {
+                    }
+
+                    public void {|#3:Order|}(IReadOnlyCollection<int> values)
+                    {
+                    }
+
+                    public void {|#4:Index|}(IDictionary<int, int> values)
+                    {
+                    }
+
+                    public void Wrap(ReadOnlyMemory<byte> buffer)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Widget\tclass\t-\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\ttake(Iterable values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tcount(Collection values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tkeep(Set values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\torder(List values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tindex(Map values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\twrap(ByteBuffer buffer)\n"),
+            Name(0, "collection M:Confluent.Kafka.Common.Widget.Take(System.Collections.Generic.IReadOnlyCollection{System.Int32}) "
+                + "values: takes values as IReadOnlyCollection<int>, where Java's Widget.take takes an Iterable: take an "
+                + "IEnumerable<T>"),
+            Name(1, "collection M:Confluent.Kafka.Common.Widget.Count(System.Collections.Generic.IEnumerable{System.Int32}) "
+                + "values: takes values as IEnumerable<int>, where Java's Widget.count takes a Collection: take an "
+                + "IReadOnlyCollection<T>"),
+            Name(2, "collection M:Confluent.Kafka.Common.Widget.Keep(System.Collections.Generic.IEnumerable{System.Int32}) "
+                + "values: takes values as IEnumerable<int>?, where Java's Widget.keep takes a Set: take an "
+                + "IReadOnlyCollection<T>"),
+            Name(3, "collection M:Confluent.Kafka.Common.Widget.Order(System.Collections.Generic.IReadOnlyCollection{System.Int32}) "
+                + "values: takes values as IReadOnlyCollection<int>, where Java's Widget.order takes a List: take an "
+                + "IReadOnlyList<T>"),
+            Name(4, "collection M:Confluent.Kafka.Common.Widget.Index(System.Collections.Generic.IDictionary{System.Int32,System.Int32}) "
+                + "values: takes values as IDictionary<int, int>, where Java's Widget.index takes a Map: take an "
+                + "IReadOnlyDictionary<TKey, TValue>"));
+
+    [Fact]
+    public Task AConstructorsCollectionParameter_IsCheckedToo() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class Widget
+                {
+                    public {|#0:Widget|}(IEnumerable<int> replicas)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Widget\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.Widget\tWidget(List replicas)\n"),
+            Name(0, "collection M:Confluent.Kafka.Common.Widget.#ctor(System.Collections.Generic.IEnumerable{System.Int32}) "
+                + "replicas: takes replicas as IEnumerable<int>, where Java's Widget constructor takes a List: take an "
+                + "IReadOnlyList<T>"));
+
+    [Fact]
+    public Task AnInterfacesCollectionParameter_IsReported_OnTheInterfaceAndOnEachImplementation() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Admin
+            {
+                public interface IAdmin
+                {
+                    void {|#0:CreateTopics|}(IEnumerable<string> newTopics);
+                }
+
+                public sealed class KafkaAdminClient : IAdmin
+                {
+                    private KafkaAdminClient()
+                    {
+                    }
+
+                    public void {|#1:CreateTopics|}(IEnumerable<string> newTopics)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.admin.Admin\tinterface\t-\n"
+                + "method\torg.apache.kafka.clients.admin.Admin\tinstance\tcreateTopics(Collection newTopics)\n"
+                + "type\torg.apache.kafka.clients.admin.KafkaAdminClient\tclass\t-\n"
+                + "method\torg.apache.kafka.clients.admin.KafkaAdminClient\tinstance\tcreateTopics(Collection newTopics)\n"),
+            Name(0, "collection M:Confluent.Kafka.Admin.IAdmin.CreateTopics(System.Collections.Generic.IEnumerable{System.String}) "
+                + "newTopics: takes newTopics as IEnumerable<string>, where Java's Admin.createTopics takes a Collection: "
+                + "take an IReadOnlyCollection<T>"),
+            Name(1, "collection M:Confluent.Kafka.Admin.KafkaAdminClient.CreateTopics(System.Collections.Generic.IEnumerable{System.String}) "
+                + "newTopics: takes newTopics as IEnumerable<string>, where Java's KafkaAdminClient.createTopics takes a "
+                + "Collection: take an IReadOnlyCollection<T>"));
+
+    [Fact]
     public Task APairedType_StandsForTheNestedJavaTypeItNames() =>
         Verifier.VerifyWithFilesAsync(
             """

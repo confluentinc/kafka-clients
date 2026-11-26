@@ -1118,7 +1118,19 @@ out of date). The rule:
 6. Parameters keep Java's names, the interface's declaration first. In an exception's constructor a
    `Throwable`, of any class (`InterruptException`'s `InterruptedException`), is `innerException`, and a
    `String` Java names `s` or `msg` is `message`. A Java `long` and the `TimeUnit` that qualifies it are one
-   `TimeSpan`.
+   `TimeSpan`. A parameter of one of Java's collection interfaces takes its read-only counterpart, so a caller
+   passes what a Java caller passes (a LINQ query is collected with `ToList()`, as a `Stream` with `collect`), and
+   a collection the binding hands to user code, a listener's partitions for one, has the same type:
+
+   | Java | .NET |
+   |---|---|
+   | `Iterable<T>` | `IEnumerable<T>` |
+   | `Collection<T>`, `Set<T>` | `IReadOnlyCollection<T>` (netstandard2.0 and .NET Framework have no `IReadOnlySet<T>`) |
+   | `List<T>` | `IReadOnlyList<T>` |
+   | `Map<K, V>` | `IReadOnlyDictionary<TKey, TValue>` |
+
+   CKRDA0013 checks each parameter it pairs with Java's. A method keeps the copy it makes of a collection it
+   stores: the type says what it reads, not that the caller's collection stays unchanged.
 7. .NET's own forms: `ToString`, `Equals`, `GetHashCode`; `CompareTo`;
    `GetEnumerator` for `Iterable`; `Dispose` / `DisposeAsync` for `Closeable`; `Message` /
    `InnerException`; `IEquatable<T>.Equals`; a C# enum covers `name`, `ordinal`, `values` and `valueOf`.

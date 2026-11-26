@@ -53,7 +53,7 @@ public sealed class TokenInformation
     public TokenInformation(
         string tokenId,
         KafkaPrincipal owner,
-        IEnumerable<KafkaPrincipal> renewers,
+        IReadOnlyCollection<KafkaPrincipal> renewers,
         long issueTimestamp,
         long maxTimestamp,
         long expiryTimestamp)
@@ -74,7 +74,7 @@ public sealed class TokenInformation
         string tokenId,
         KafkaPrincipal owner,
         KafkaPrincipal tokenRequester,
-        IEnumerable<KafkaPrincipal> renewers,
+        IReadOnlyCollection<KafkaPrincipal> renewers,
         long issueTimestamp,
         long maxTimestamp,
         long expiryTimestamp)
@@ -110,7 +110,7 @@ public sealed class TokenInformation
         string tokenId,
         KafkaPrincipal owner,
         KafkaPrincipal tokenRequester,
-        IEnumerable<KafkaPrincipal> renewers,
+        IReadOnlyCollection<KafkaPrincipal> renewers,
         long issueTimestamp,
         long maxTimestamp,
         long expiryTimestamp) =>
