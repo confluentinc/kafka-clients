@@ -99,6 +99,14 @@ const LEFT_OUT = new Map([
     'org.apache.kafka.clients.consumer.KafkaConsumer#subscribe(Pattern,ConsumerRebalanceListener)',
     'javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures (Q15): a pattern is only a SubscriptionPattern, and a RegExp throws an error that points to it',
   ],
+  [
+    'org.apache.kafka.clients.consumer.MockConsumer#subscribe(Pattern)',
+    'javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures (Q15): a pattern is only a SubscriptionPattern, and a RegExp throws an error that points to it',
+  ],
+  [
+    'org.apache.kafka.clients.consumer.MockConsumer#subscribe(Pattern,ConsumerRebalanceListener)',
+    'javascript/CLAUDE.md, JavaScript Binding Conventions, Signatures (Q15): a pattern is only a SubscriptionPattern, and a RegExp throws an error that points to it',
+  ],
 ]);
 const { shortName, constantsOnly, signaturesOf, formParameters } = require('../java_ts');
 

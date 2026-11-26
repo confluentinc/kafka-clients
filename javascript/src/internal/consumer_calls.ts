@@ -13,10 +13,11 @@
 // limitations under the License.
 
 // The bodies of Java's Consumer methods over a native consumer handle
-// (private): each method of KafkaConsumer calls the function of the same name
-// here, which checks the call's form and makes the call through the FFI's
-// Consumer view (native/consumer.c), so a class over the same handle runs the
-// same code.
+// (private): KafkaConsumer and MockConsumer share one native handle type
+// (native/consumer.c), so each of their Consumer methods calls the function
+// of the same name here, which checks the call's form and makes the call
+// through the FFI's Consumer view. The helpers MockConsumer's own waiting
+// calls use are exported too.
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
 import native = require('./native');
@@ -148,7 +149,7 @@ const RECORD_FACTORY: typeof ConsumerRecord.internalCreate = (...fields) => Cons
  * @param start - starts the native call with its completion
  * @returns settling once the completion ran
  */
-function completion(start: (done: (error: unknown) => void) => void): Promise<void> {
+export function completion(start: (done: (error: unknown) => void) => void): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
     start((error) => (error !== null ? reject(error) : resolve()));
@@ -180,7 +181,7 @@ export function rejecting<T>(run: () => Promise<T>): Promise<T> {
  *   Java's `assign` reads one
  * @returns the pairs
  */
-function partitionPairs(value: unknown, blankNull: boolean): Array<[string | null, number] | null> | null {
+export function partitionPairs(value: unknown, blankNull: boolean): Array<[string | null, number] | null> | null {
   const items = topicPartitionList.take(value, 'partitions') as Array<TopicPartition | null> | null;
   if (items === null) return null;
   return items.map((tp) => {

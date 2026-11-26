@@ -7,6 +7,7 @@
     "KafkaProducer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the producer",
     "MockProducer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the mock",
     "KafkaConsumer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the consumer",
+    "MockConsumer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the mock",
     "Headers.[Symbol.iterator]": "[Symbol.iterator] where Java has Iterable, JavaScript's iteration protocol",
     "SslClientAuth.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",
     "SecurityProtocol.toJSON": "toJSON() on value classes, JavaScript's JSON protocol",

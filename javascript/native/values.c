@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // The values the clients take from JS the same way: a configuration as a
-// kafka_Map_t of C strings, lists of TopicPartitions, 64-bit integers, and the
-// offsets a commit or a seek takes.
+// kafka_Map_t of C strings, lists of TopicPartitions, 64-bit integers, the
+// offsets a commit or a seek takes, and the partitions a mock is given.
 
 #include <stdlib.h>
 
@@ -335,4 +335,178 @@ kafka_Map_t* tp_long_map_from_js(napi_env env, napi_value entries) {
 
 void tp_long_map_free(napi_env env, kafka_Map_t* map) {
     tp_map_free(env, map, MAP_LONGS);
+}
+
+void node_item_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_Node_destroy_err((kafka_common_Node_t*)item, out_err);
+}
+
+void partition_info_item_destroy(void* item, kafka_common_Error_t** out_err) {
+    kafka_common_PartitionInfo_destroy_err((kafka_common_PartitionInfo_t*)item, out_err);
+}
+
+// The property `name` of object `obj` and whether it is null. -1 with a JS
+// exception pending.
+static int named(napi_env env, napi_value obj, const char* name, napi_value* out, int* is_null) {
+    napi_valuetype type;
+    if (napi_get_named_property(env, obj, name, out) != napi_ok || napi_typeof(env, *out, &type) != napi_ok) {
+        js_throw_last_napi_error(env, "napi_get_named_property");
+        return -1;
+    }
+    *is_null = type == napi_null;
+    return 0;
+}
+
+// A node from its fields { id, host, port, rack, isFenced }, as node_to_js
+// gives them, owned by the caller: a null host crosses as NULL, which the
+// FFI refuses. NULL with a JS exception pending.
+static kafka_common_Node_t* node_from_js(napi_env env, napi_value fields) {
+    napi_value id_v, host_v, port_v, rack_v, fenced_v;
+    int host_null = 0, rack_null = 0, ignored = 0;
+    if (named(env, fields, "id", &id_v, &ignored) != 0 || named(env, fields, "host", &host_v, &host_null) != 0
+        || named(env, fields, "port", &port_v, &ignored) != 0 || named(env, fields, "rack", &rack_v, &rack_null) != 0
+        || named(env, fields, "isFenced", &fenced_v, &ignored) != 0)
+        return NULL;
+    int32_t id = 0, port = 0;
+    bool fenced = false;
+    if (napi_get_value_int32(env, id_v, &id) != napi_ok || napi_get_value_int32(env, port_v, &port) != napi_ok
+        || napi_get_value_bool(env, fenced_v, &fenced) != napi_ok) {
+        napi_throw_type_error(env, NULL, "a node's id and port must be numbers, and isFenced a boolean");
+        return NULL;
+    }
+    char* host = host_null ? NULL : js_string_dup(env, host_v, "a node's host must be a string");
+    if (!host_null && host == NULL) return NULL;
+    char* rack = rack_null ? NULL : js_string_dup(env, rack_v, "a node's rack must be a string");
+    if (!rack_null && rack == NULL) {
+        free(host);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Node_t* node = NULL;
+    kafka_common_Error_t* err = FFI_SET(node, kafka_common_Node_with_rack_is_fenced_err(id, host, port, rack, fenced ? 1 : 0, &ffi_err));
+    free(host);
+    free(rack);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return node;
+}
+
+// A list of nodes from an array of node fields, a null element crossing as
+// NULL, which the FFI refuses; the list owns its nodes (list_free with
+// node_item_destroy). NULL with a JS exception pending.
+static kafka_List_t* node_list_from_js(napi_env env, napi_value array) {
+    uint32_t n = 0;
+    if (napi_get_array_length(env, array, &n) != napi_ok) {
+        napi_throw_type_error(env, NULL, "a partition's nodes must be an array");
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_List_t* list = NULL;
+    kafka_common_Error_t* err = FFI_SET(list, kafka_List_new_err(&ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        napi_value v;
+        napi_valuetype type = napi_undefined;
+        if (napi_get_element(env, array, i, &v) != napi_ok || napi_typeof(env, v, &type) != napi_ok) {
+            js_throw_last_napi_error(env, "napi_get_element");
+            list_free(env, list, node_item_destroy);
+            return NULL;
+        }
+        kafka_common_Node_t* node = NULL;
+        if (type != napi_null && (node = node_from_js(env, v)) == NULL) {
+            list_free(env, list, node_item_destroy);
+            return NULL;
+        }
+        err = FFI_ERR(kafka_List_add_err(list, node, &ffi_err));
+        if (err != NULL) {
+            if (node != NULL) FFI_DISCARD(kafka_common_Node_destroy_err(node, &ffi_err));
+            list_free(env, list, node_item_destroy);
+            error_throw_owned(env, err);
+            return NULL;
+        }
+    }
+    return list;
+}
+
+// A PartitionInfo from its fields { topic, partition, leader, replicas,
+// inSyncReplicas, offlineReplicas }, as partition_info_to_js gives them,
+// through Java's six-parameter constructor; a null topic or list crosses as
+// NULL, which the FFI refuses. NULL with a JS exception pending.
+static kafka_common_PartitionInfo_t* partition_info_from_js(napi_env env, napi_value fields) {
+    napi_value topic_v, partition_v, leader_v, lists_v[3];
+    int topic_null = 0, leader_null = 0, ignored = 0, lists_null[3] = {0, 0, 0};
+    static const char* const LISTS[3] = {"replicas", "inSyncReplicas", "offlineReplicas"};
+    if (named(env, fields, "topic", &topic_v, &topic_null) != 0 || named(env, fields, "partition", &partition_v, &ignored) != 0
+        || named(env, fields, "leader", &leader_v, &leader_null) != 0)
+        return NULL;
+    for (int i = 0; i < 3; i++)
+        if (named(env, fields, LISTS[i], &lists_v[i], &lists_null[i]) != 0) return NULL;
+    int32_t partition = 0;
+    if (napi_get_value_int32(env, partition_v, &partition) != napi_ok) {
+        napi_throw_type_error(env, NULL, "a partition's index must be a number");
+        return NULL;
+    }
+    char* topic = topic_null ? NULL : js_string_dup(env, topic_v, "a partition's topic must be a string");
+    if (!topic_null && topic == NULL) return NULL;
+    kafka_common_Node_t* leader = NULL;
+    kafka_List_t* lists[3] = {NULL, NULL, NULL};
+    int failed = !leader_null && (leader = node_from_js(env, leader_v)) == NULL;
+    for (int i = 0; !failed && i < 3; i++)
+        if (!lists_null[i] && (lists[i] = node_list_from_js(env, lists_v[i])) == NULL) failed = 1;
+    kafka_common_PartitionInfo_t* info = NULL;
+    if (!failed) {
+        kafka_common_Error_t* ffi_err = NULL;
+        // The constructor copies the nodes, which are freed after it.
+        kafka_common_Error_t* err = FFI_SET(info, kafka_common_PartitionInfo_with_offline_replicas_err(
+                                                      topic, partition, leader, lists[0], lists[1], lists[2], &ffi_err));
+        if (err != NULL) error_throw_owned(env, err);
+    }
+    free(topic);
+    kafka_common_Error_t* ffi_err = NULL;
+    if (leader != NULL) error_warn(env, 1, FFI_ERR(kafka_common_Node_destroy_err(leader, &ffi_err)));
+    for (int i = 0; i < 3; i++) list_free(env, lists[i], node_item_destroy);
+    return info;
+}
+
+kafka_List_t* partition_info_list_from_js(napi_env env, napi_value array) {
+    uint32_t n = 0;
+    if (napi_get_array_length(env, array, &n) != napi_ok) {
+        napi_throw_type_error(env, NULL, "partitions must be an array");
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_List_t* list = NULL;
+    kafka_common_Error_t* err = FFI_SET(list, kafka_List_new_err(&ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        napi_value v;
+        napi_valuetype type = napi_undefined;
+        if (napi_get_element(env, array, i, &v) != napi_ok || napi_typeof(env, v, &type) != napi_ok) {
+            js_throw_last_napi_error(env, "napi_get_element");
+            list_free(env, list, partition_info_item_destroy);
+            return NULL;
+        }
+        // A null element crosses as NULL, which the FFI refuses.
+        kafka_common_PartitionInfo_t* info = NULL;
+        if (type != napi_null && (info = partition_info_from_js(env, v)) == NULL) {
+            list_free(env, list, partition_info_item_destroy);
+            return NULL;
+        }
+        err = FFI_ERR(kafka_List_add_err(list, info, &ffi_err));
+        if (err != NULL) {
+            if (info != NULL) FFI_DISCARD(kafka_common_PartitionInfo_destroy_err(info, &ffi_err));
+            list_free(env, list, partition_info_item_destroy);
+            error_throw_owned(env, err);
+            return NULL;
+        }
+    }
+    return list;
 }

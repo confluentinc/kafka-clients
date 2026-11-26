@@ -69,6 +69,7 @@ export { ConsumerRecord } from './consumer_record';
 export { ConsumerRecords } from './consumer_records';
 export { GroupProtocol } from './group_protocol';
 export { KafkaConsumer } from './kafka_consumer';
+export { MockConsumer } from './mock_consumer';
 export { OffsetAndMetadata } from './offset_and_metadata';
 export { OffsetAndTimestamp } from './offset_and_timestamp';
 export type { OffsetCommitCallback } from './offset_commit_callback';

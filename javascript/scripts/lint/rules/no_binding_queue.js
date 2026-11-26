@@ -92,6 +92,10 @@ const ALLOWED = [
     key: 'src/internal/java_number.ts:INT64_MAX',
     reason: 'the largest Java long: a range check of one argument, not a cap of records',
   },
+  {
+    key: 'src/consumer/mock_consumer.ts:SET_MAX_POLL_RECORDS_FORMS',
+    reason: "the forms of Java's MockConsumer#setMaxPollRecords, whose cap the core's mock keeps: not a cap of records in the binding",
+  },
   { key: 'MetricName.#tags', reason: "one metric name's tags, Java's Map<String, String> field, not a store of records" },
   { key: 'Headers.#headers', reason: "one record's headers, Java's List<Header> field of RecordHeaders, not a store of records" },
   {

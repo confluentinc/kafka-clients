@@ -411,6 +411,19 @@ void offset_map_free(napi_env env, kafka_Map_t* map);
 kafka_Map_t* tp_long_map_from_js(napi_env env, napi_value entries);
 void tp_long_map_free(napi_env env, kafka_Map_t* map);
 
+// The destroy functions of node and PartitionInfo lists, for list_free.
+void node_item_destroy(void* item, kafka_common_Error_t** out_err);
+void partition_info_item_destroy(void* item, kafka_common_Error_t** out_err);
+
+// A list of PartitionInfos from an array of partition fields { topic,
+// partition, leader, replicas, inSyncReplicas, offlineReplicas }, each node
+// { id, host, port, rack, isFenced }, as partitions_to_js gives them, each
+// built through Java's six-parameter constructor; a null element, topic,
+// list or host crosses as NULL, which the FFI refuses. The list owns its
+// PartitionInfos: list_free with partition_info_item_destroy frees them.
+// NULL with a JS exception pending on failure.
+kafka_List_t* partition_info_list_from_js(napi_env env, napi_value array);
+
 // ---- headers.c -------------------------------------------------------------
 
 // A new native RecordHeaders holding a copy of a record's headers: `pairs` is
@@ -552,6 +565,18 @@ napi_value js_consumer_close(napi_env env, napi_callback_info info);
 napi_value js_consumer_record_headers(napi_env env, napi_callback_info info);
 napi_value js_consumer_stats(napi_env env, napi_callback_info info);
 napi_value js_consumer_refuse_external_buffers(napi_env env, napi_callback_info info);
+// consumer.c: the MockConsumer's own calls.
+napi_value js_mock_consumer_create(napi_env env, napi_callback_info info);
+napi_value js_mock_consumer_rebalance(napi_env env, napi_callback_info info);
+napi_value js_mock_consumer_lose_partitions(napi_env env, napi_callback_info info);
+napi_value js_mock_consumer_add_record(napi_env env, napi_callback_info info);
+napi_value js_mock_consumer_set_max_poll_records(napi_env env, napi_callback_info info);
+napi_value js_mock_consumer_set_error(napi_env env, napi_callback_info info);
+napi_value js_mock_consumer_update_offsets(napi_env env, napi_callback_info info);
+napi_value js_mock_consumer_update_partitions(napi_env env, napi_callback_info info);
+napi_value js_mock_consumer_closed(napi_env env, napi_callback_info info);
+napi_value js_mock_consumer_schedule_nop_poll_task(napi_env env, napi_callback_info info);
+napi_value js_mock_consumer_last_poll_timeout(napi_env env, napi_callback_info info);
 // consumer.c: the commits, the committed offsets, the group metadata, the
 // seeks, the positions and the lag.
 napi_value js_consumer_commit_sync(napi_env env, napi_callback_info info);

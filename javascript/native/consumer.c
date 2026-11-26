@@ -55,8 +55,11 @@ typedef struct Batch Batch;
 
 typedef struct {
     napi_env env;                              // the environment that created it (JS thread)
-    kafka_consumer_KafkaConsumer_t* kc;        // owned class handle, NULL once destroyed
-    kafka_consumer_Consumer_t* view;           // borrowed __as_Consumer view of kc
+    kafka_consumer_KafkaConsumer_t* kc;        // owned class handle of a KafkaConsumer, NULL once destroyed
+    kafka_consumer_MockConsumer_t* mock;       // owned class handle of a MockConsumer, NULL once destroyed
+    kafka_consumer_Consumer_t* view;           // borrowed __as_Consumer view of kc or mock
+    MockRecord* kept;                          // the records added to a mock, held until the destroy
+    InjectedError* injected;                   // the errors JS gave a mock, held while the core holds a copy
     CallbackQueue queue;                       // notify hook, tsfn, drain, liveness
     int owners;                                // the handle object and the tsfn
 } Consumer;
@@ -74,6 +77,7 @@ struct Batch {
     HeaderSource* sources;                      // one per record that may need its headers
     int32_t source_count;
     int refs;                                   // the build, each external buffer and HeaderSource alive
+    int mock;                                   // a mock's poll: its records are the app's own
 };
 
 // The context of a call answered by a completion that gives an error or
@@ -121,7 +125,7 @@ static void consumer_release(Consumer* c) {
 }
 
 static int consumer_alive(const Consumer* c) {
-    return c->kc != NULL;
+    return c->kc != NULL || c->mock != NULL;
 }
 
 static int is_function(napi_env env, napi_value v) {
@@ -143,6 +147,19 @@ static Consumer* unwrap_consumer(napi_env env, napi_value handle) {
         return NULL;
     }
     return c;
+}
+
+// The mock behind `c`, which a mock's call takes, or NULL with a TypeError
+// pending for a handle that is no mock's. Each mock call first lets go of the
+// errors JS gave the mock that the core holds no copy of any more.
+static kafka_consumer_MockConsumer_t* mock_of(napi_env env, Consumer* c) {
+    if (c == NULL) return NULL;
+    if (c->mock == NULL) {
+        napi_throw_type_error(env, NULL, "not a mock consumer handle");
+        return NULL;
+    }
+    injected_errors_sweep(env, &c->injected);
+    return c->mock;
 }
 
 // ---- the batch --------------------------------------------------------------
@@ -230,6 +247,26 @@ static napi_value source_to_js(napi_env env, Batch* b, const kafka_consumer_Cons
     return v;
 }
 
+// A mock's record as JS: the app's own ConsumerRecord, which the MockRecord
+// whose tag the record's key points at holds (js_mock_consumer_add_record).
+// NULL with a JS exception pending on failure.
+static napi_value mock_record_to_js(napi_env env, const kafka_consumer_ConsumerRecord_t* r) {
+    kafka_common_Error_t* ffi_err = NULL;
+    const void* key = NULL;
+    kafka_common_Error_t* err = FFI_SET(key, kafka_consumer_ConsumerRecord_key_err(r, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    MockRecord* kept = mock_record_of(key);
+    napi_value v = NULL;
+    if (kept == NULL || kept->record == NULL || napi_get_reference_value(env, kept->record, &v) != napi_ok || v == NULL) {
+        napi_throw_error(env, NULL, "a mock's record without the record it was given");
+        return NULL;
+    }
+    return v;
+}
+
 // A record as the factory builds it: (topic, partition, offset, timestamp,
 // timestampTypeId, serializedKeySize, serializedValueSize, headers, key,
 // value, leaderEpoch, deliveryCount), `topic` the partition's one string.
@@ -299,7 +336,8 @@ static napi_value partition_to_js(napi_env env, Batch* b, napi_value factory, co
     for (int32_t i = 0; !failed && i < n; i++) {
         const kafka_consumer_ConsumerRecord_t* r = NULL;
         err = FFI_SET(r, (const kafka_consumer_ConsumerRecord_t*)kafka_List_get_err(list, i, &ffi_err));
-        napi_value record = err == NULL ? record_to_js(env, b, factory, topic, r, copied) : NULL;
+        napi_value record = NULL;
+        if (err == NULL) record = b->mock ? mock_record_to_js(env, r) : record_to_js(env, b, factory, topic, r, copied);
         if (record == NULL || napi_set_element(env, records, (uint32_t)i, record) != napi_ok) failed = 1;
     }
     // The list borrows its records from the batch.
@@ -311,14 +349,16 @@ static napi_value partition_to_js(napi_env env, Batch* b, napi_value factory, co
 }
 
 // The poll's answer as JS, argv[1] the partitions and argv[2] the next
-// offsets; the batch now held by what needs it. -1 with a JS exception
-// pending on failure.
-static int batch_to_js(napi_env env, kafka_consumer_ConsumerRecords_t* records, napi_value factory, napi_value* argv) {
+// offsets; the batch now held by what needs it. A mock's batch (`mock`)
+// holds the app's own records, so nothing needs it once read: it makes no
+// external buffer and no HeaderSource, and is destroyed here. -1 with a JS
+// exception pending on failure.
+static int batch_to_js(napi_env env, kafka_consumer_ConsumerRecords_t* records, napi_value factory, int mock, napi_value* argv) {
     kafka_common_Error_t* ffi_err = NULL;
     Batch* b = (Batch*)calloc(1, sizeof(Batch));
     int32_t count = 0;
     kafka_common_Error_t* err = b == NULL ? NULL : FFI_SET(count, kafka_consumer_ConsumerRecords_count_err(records, &ffi_err));
-    if (b != NULL && err == NULL && count > 0) {
+    if (b != NULL && err == NULL && count > 0 && !mock) {
         b->sources = (HeaderSource*)calloc((size_t)count, sizeof(HeaderSource));
         if (b->sources == NULL) {
             free(b);
@@ -334,6 +374,7 @@ static int batch_to_js(napi_env env, kafka_consumer_ConsumerRecords_t* records, 
     }
     atomic_fetch_add(&stat_batches_made, 1);
     b->records = records;
+    b->mock = mock;
     // The build holds the batch until every record is made.
     b->refs = 1;
     // The test switch takes the copy path from the first record.
@@ -392,7 +433,7 @@ static void poll_on_complete(kafka_consumer_ConsumerRecords_t* value, kafka_comm
             if (argv[0] != NULL && (napi_get_null(env, &argv[1]) != napi_ok || napi_get_null(env, &argv[2]) != napi_ok))
                 argv[0] = NULL;
         } else if (napi_get_reference_value(env, ctx->factory, &factory) != napi_ok || factory == NULL
-                   || batch_to_js(env, value, factory, argv) != 0 || napi_get_null(env, &argv[0]) != napi_ok) {
+                   || batch_to_js(env, value, factory, c->mock != NULL, argv) != 0 || napi_get_null(env, &argv[0]) != napi_ok) {
             // An answer that can't be built rejects the poll with the failure.
             argv[0] = js_take_failure(env, "building a poll's records");
             if (argv[0] != NULL && (napi_get_null(env, &argv[1]) != napi_ok || napi_get_null(env, &argv[2]) != napi_ok))
@@ -603,7 +644,15 @@ napi_value js_consumer_subscribe_pattern(napi_env env, napi_callback_info info) 
     return NULL;
 }
 
-typedef enum { TP_ASSIGN, TP_PAUSE, TP_RESUME, TP_SEEK_TO_BEGINNING, TP_SEEK_TO_END } TpCall;
+typedef enum {
+    TP_ASSIGN,
+    TP_PAUSE,
+    TP_RESUME,
+    TP_SEEK_TO_BEGINNING,
+    TP_SEEK_TO_END,
+    TP_MOCK_REBALANCE,
+    TP_MOCK_LOSE_PARTITIONS
+} TpCall;
 
 // The calls taking partitions and answered with nothing: an array of [topic,
 // partition] (a null element crosses as NULL), or null. The list borrows its
@@ -613,6 +662,8 @@ static napi_value tp_call(napi_env env, napi_callback_info info, TpCall which, c
     int is_null = 0;
     Consumer* c = list_call_args(env, info, shape, argv, &is_null);
     if (c == NULL) return NULL;
+    kafka_consumer_MockConsumer_t* mock = NULL;
+    if ((which == TP_MOCK_REBALANCE || which == TP_MOCK_LOSE_PARTITIONS) && (mock = mock_of(env, c)) == NULL) return NULL;
     kafka_List_t* partitions = is_null ? NULL : tp_list_from_js(env, argv[1]);
     if (!is_null && partitions == NULL) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[2]);
@@ -629,6 +680,12 @@ static napi_value tp_call(napi_env env, napi_callback_info info, TpCall which, c
         } else if (which == TP_SEEK_TO_END) {
             cbq_call_begin(env, &c->queue);
             kafka_consumer_Consumer_seek_to_end_cb(c->view, partitions, void_on_complete, ctx);
+        } else if (which == TP_MOCK_REBALANCE) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_MockConsumer_rebalance_cb(mock, partitions, void_on_complete, ctx);
+        } else if (which == TP_MOCK_LOSE_PARTITIONS) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_MockConsumer_lose_partitions_cb(mock, partitions, void_on_complete, ctx);
         } else {
             cbq_call_begin(env, &c->queue);
             kafka_consumer_Consumer_resume_cb(c->view, partitions, void_on_complete, ctx);
@@ -662,6 +719,18 @@ napi_value js_consumer_seek_to_beginning(napi_env env, napi_callback_info info) 
 // consumerSeekToEnd(handle, partitions, done): Java's seekToEnd(Collection).
 napi_value js_consumer_seek_to_end(napi_env env, napi_callback_info info) {
     return tp_call(env, info, TP_SEEK_TO_END, "seekToEnd(handle, partitions, done)");
+}
+
+// mockConsumerRebalance(handle, partitions, done): Java's
+// MockConsumer#rebalance(Collection), through rebalance_cb.
+napi_value js_mock_consumer_rebalance(napi_env env, napi_callback_info info) {
+    return tp_call(env, info, TP_MOCK_REBALANCE, "mockConsumerRebalance(handle, partitions, done)");
+}
+
+// mockConsumerLosePartitions(handle, partitions, done): Java's
+// MockConsumer#losePartitions(Collection), through lose_partitions_cb.
+napi_value js_mock_consumer_lose_partitions(napi_env env, napi_callback_info info) {
+    return tp_call(env, info, TP_MOCK_LOSE_PARTITIONS, "mockConsumerLosePartitions(handle, partitions, done)");
 }
 
 // consumerUnsubscribe(handle, done): Java's unsubscribe().
@@ -1590,9 +1659,14 @@ static void noop_notify(void* opaque) {
 static void consumer_destroy(napi_env env, Consumer* c) {
     kafka_common_Error_t* ffi_err = NULL;
     c->queue.stopped = 1;
-    error_warn(env, !c->queue.finalizing, FFI_ERR(kafka_consumer_KafkaConsumer_destroy_err(c->kc, &ffi_err)));
+    if (c->kc != NULL) error_warn(env, !c->queue.finalizing, FFI_ERR(kafka_consumer_KafkaConsumer_destroy_err(c->kc, &ffi_err)));
+    else error_warn(env, !c->queue.finalizing, FFI_ERR(kafka_consumer_MockConsumer_destroy_err(c->mock, &ffi_err)));
     c->kc = NULL;
+    c->mock = NULL;
     c->view = NULL;
+    // The core holds no record or error of a mock's any more.
+    mock_records_free(env, &c->kept);
+    injected_errors_release(env, &c->injected);
     cbq_release(env, &c->queue);
 }
 
@@ -1624,9 +1698,69 @@ static void consumer_finalize(napi_env env, void* data, void* hint) {
 
 // ---- construction -----------------------------------------------------------
 
-static void class_destroy(napi_env env, kafka_consumer_KafkaConsumer_t* kc) {
+// Destroys class handle `kc` or `mock` (one is NULL), on a construction's
+// failure paths, before a handle object, and so a finalizer, exists.
+static void class_destroy(napi_env env, kafka_consumer_KafkaConsumer_t* kc, kafka_consumer_MockConsumer_t* mock) {
     kafka_common_Error_t* ffi_err = NULL;
-    error_warn(env, 1, FFI_ERR(kafka_consumer_KafkaConsumer_destroy_err(kc, &ffi_err)));
+    if (kc != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_KafkaConsumer_destroy_err(kc, &ffi_err)));
+    if (mock != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_MockConsumer_destroy_err(mock, &ffi_err)));
+}
+
+// The native handle over class handle `kc` or `mock` (one is NULL), which it
+// owns from now on: its view, callback queue and handle object, the same for
+// a KafkaConsumer and a MockConsumer. Throws, and destroys the class handle,
+// on failure.
+static napi_value consumer_handle_new(napi_env env, kafka_consumer_KafkaConsumer_t* kc, kafka_consumer_MockConsumer_t* mock) {
+    kafka_common_Error_t* ffi_err = NULL;
+    Consumer* c = (Consumer*)calloc(1, sizeof(Consumer));
+    if (c == NULL) {
+        class_destroy(env, kc, mock);
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    atomic_fetch_add(&stat_consumers_made, 1);
+    c->env = env;
+    c->kc = kc;
+    c->mock = mock;
+    kafka_common_Error_t* err = kc != NULL ? FFI_SET(c->view, kafka_consumer_KafkaConsumer__as_Consumer_err(kc, &ffi_err))
+                                           : FFI_SET(c->view, kafka_consumer_MockConsumer__as_Consumer_err(mock, &ffi_err));
+    if (err != NULL || cbq_init(env, &c->queue, "confluent-kafka consumer callbacks", c, consumer_execute,
+                                consumer_tsfn_finalized) != 0) {
+        class_destroy(env, kc, mock);
+        free(c);
+        atomic_fetch_add(&stat_consumers_freed, 1);
+        if (err != NULL) error_throw_owned(env, err);
+        return NULL;
+    }
+    c->owners = 1;  // the tsfn
+    napi_value result = NULL;
+    int thrown = 0;
+    if (napi_create_object(env, &result) != napi_ok || napi_wrap(env, result, c, consumer_finalize, NULL, NULL) != napi_ok) {
+        js_throw_last_napi_error(env, "napi_wrap");
+        thrown = 1;
+    } else {
+        c->owners = 2;  // and the handle object
+        if (cbq_attach(env, &c->queue, result) != 0) thrown = 1;
+    }
+    // A test's faultNext('notify') fails the registration through the FFI's
+    // own error path: a NULL view.
+    if (!thrown)
+        err = FFI_ERR(kafka_consumer_Consumer__set_callbacks_notify_err(fault_due(FAULT_NOTIFY) ? NULL : c->view, cbq_notify,
+                                                                       &c->queue, &ffi_err));
+    if (err != NULL || thrown) {
+        class_destroy(env, kc, mock);
+        c->kc = NULL;
+        c->mock = NULL;
+        c->view = NULL;
+        // The handle object, never handed out, may be collected: its
+        // finalizer releases its unit of c, a destroyed client's.
+        cbq_detach(env, &c->queue);
+        // Releases the tsfn, whose finalizer frees c when it is the only owner.
+        cbq_release(env, &c->queue);
+        if (err != NULL) error_throw_owned(env, err);
+        return NULL;
+    }
+    return result;
 }
 
 // consumerCreate(entries): a native consumer handle over
@@ -1656,52 +1790,285 @@ napi_value js_consumer_create(napi_env env, napi_callback_info info) {
         error_throw_owned(env, err);
         return NULL;
     }
-    Consumer* c = (Consumer*)calloc(1, sizeof(Consumer));
-    if (c == NULL) {
-        class_destroy(env, kc);
-        napi_throw_error(env, NULL, "out of memory");
+    return consumer_handle_new(env, kc, NULL);
+}
+
+// ---- MockConsumer -------------------------------------------------------------
+
+// mockConsumerCreate(offsetResetStrategy): a native consumer handle over the
+// FFI's MockConsumer, Java's MockConsumer(String); a null strategy goes to
+// the FFI as NULL, which refuses it with Java's message. Throws the core's
+// error for a strategy it refuses.
+napi_value js_mock_consumer_create(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 1) {
+        napi_throw_type_error(env, NULL, "mockConsumerCreate(offsetResetStrategy)");
         return NULL;
     }
-    atomic_fetch_add(&stat_consumers_made, 1);
-    c->env = env;
-    c->kc = kc;
-    err = FFI_SET(c->view, kafka_consumer_KafkaConsumer__as_Consumer_err(kc, &ffi_err));
-    if (err != NULL || cbq_init(env, &c->queue, "confluent-kafka consumer callbacks", c, consumer_execute,
-                                consumer_tsfn_finalized) != 0) {
-        class_destroy(env, kc);
-        free(c);
-        atomic_fetch_add(&stat_consumers_freed, 1);
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[0], &type), NULL);
+    char* strategy = NULL;
+    if (type != napi_null && (strategy = js_string_dup(env, argv[0], "offsetResetStrategy must be a string")) == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_consumer_MockConsumer_t* mock = NULL;
+    // MockConsumer_new takes an out_err of its own.
+    kafka_common_Error_t* err = FFI_SET(mock, kafka_consumer_MockConsumer_new(strategy, &ffi_err));
+    free(strategy);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return consumer_handle_new(env, NULL, mock);
+}
+
+// mockConsumerAddRecord(handle, record, topic, partition, offset,
+// leaderEpoch): Java's addRecord(record) of the app's own ConsumerRecord
+// `record`, or null, which goes to the FFI as NULL. The C record carries what
+// the FFI's mock reads: the topic, partition, offset and leader epoch (-1 for
+// none, the builder's setter not called); its key and value are a
+// MockRecord's tags, and the MockRecord holds `record` until the destroy, as
+// the core's copy of the C record shares them. A record the FFI refuses is
+// released at once.
+napi_value js_mock_consumer_add_record(napi_env env, napi_callback_info info) {
+    size_t argc = 6;
+    napi_value argv[6];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 6) {
+        napi_throw_type_error(env, NULL, "mockConsumerAddRecord(handle, record, topic, partition, offset, leaderEpoch)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    kafka_consumer_MockConsumer_t* mock = mock_of(env, c);
+    if (mock == NULL) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* err = NULL;
+    if (type == napi_null) {
+        // add_record takes an out_err of its own.
+        err = FFI_ERR(kafka_consumer_MockConsumer_add_record(mock, NULL, &ffi_err));
         if (err != NULL) error_throw_owned(env, err);
         return NULL;
     }
-    c->owners = 1;  // the tsfn
-    napi_value result = NULL;
-    int thrown = 0;
-    if (napi_create_object(env, &result) != napi_ok || napi_wrap(env, result, c, consumer_finalize, NULL, NULL) != napi_ok) {
-        js_throw_last_napi_error(env, "napi_wrap");
-        thrown = 1;
-    } else {
-        c->owners = 2;  // and the handle object
-        if (cbq_attach(env, &c->queue, result) != 0) thrown = 1;
-    }
-    // A test's faultNext('notify') fails the registration through the FFI's
-    // own error path: a NULL view.
-    if (!thrown)
-        err = FFI_ERR(kafka_consumer_Consumer__set_callbacks_notify_err(fault_due(FAULT_NOTIFY) ? NULL : c->view, cbq_notify,
-                                                                       &c->queue, &ffi_err));
-    if (err != NULL || thrown) {
-        class_destroy(env, kc);
-        c->kc = NULL;
-        c->view = NULL;
-        // The handle object, never handed out, may be collected: its
-        // finalizer releases its unit of c, a destroyed client's.
-        cbq_detach(env, &c->queue);
-        // Releases the tsfn, whose finalizer frees c when it is the only owner.
-        cbq_release(env, &c->queue);
-        if (err != NULL) error_throw_owned(env, err);
+    int32_t partition = -1, leader_epoch = -1;
+    int64_t offset = -1;
+    if (napi_get_value_int32(env, argv[3], &partition) != napi_ok || napi_get_value_int32(env, argv[5], &leader_epoch) != napi_ok) {
+        napi_throw_type_error(env, NULL, "a record's partition and leader epoch must be numbers");
         return NULL;
     }
-    return result;
+    if (js_int64(env, argv[4], "a record's offset must be a bigint or a number", &offset) != 0) return NULL;
+    char* topic = js_string_dup(env, argv[2], "a record's topic must be a string");
+    if (topic == NULL) return NULL;
+    MockRecord* kept = mock_record_new(env, argv[1]);
+    if (kept == NULL) {
+        free(topic);
+        return NULL;
+    }
+    kafka_consumer_ConsumerRecordOptionsBuilder_t* builder = NULL;
+    kafka_consumer_ConsumerRecordOptions_t* options = NULL;
+    kafka_consumer_ConsumerRecord_t* record = NULL;
+    err = FFI_SET(builder, kafka_consumer_ConsumerRecordOptionsBuilder_new_err(&ffi_err));
+    if (err == NULL) err = FFI_ERR(kafka_consumer_ConsumerRecordOptionsBuilder_set_topic_err(builder, topic, &ffi_err));
+    if (err == NULL) err = FFI_ERR(kafka_consumer_ConsumerRecordOptionsBuilder_set_partition_err(builder, partition, &ffi_err));
+    if (err == NULL) err = FFI_ERR(kafka_consumer_ConsumerRecordOptionsBuilder_set_offset_err(builder, offset, &ffi_err));
+    if (err == NULL) err = FFI_ERR(kafka_consumer_ConsumerRecordOptionsBuilder_set_key_err(builder, &kept->key_tag, &ffi_err));
+    if (err == NULL) err = FFI_ERR(kafka_consumer_ConsumerRecordOptionsBuilder_set_value_err(builder, &kept->value_tag, &ffi_err));
+    // A negative leader epoch is Java's Optional.empty(): the setter is not called.
+    if (err == NULL && leader_epoch >= 0)
+        err = FFI_ERR(kafka_consumer_ConsumerRecordOptionsBuilder_set_leader_epoch_err(builder, leader_epoch, &ffi_err));
+    // build takes an out_err of its own.
+    if (err == NULL) err = FFI_SET(options, kafka_consumer_ConsumerRecordOptionsBuilder_build(builder, &ffi_err));
+    if (err == NULL) err = FFI_SET(record, kafka_consumer_ConsumerRecord_with_options_err(options, &ffi_err));
+    free(topic);
+    // add_record takes an out_err of its own; it copies the record, sharing its key and value.
+    if (err == NULL) err = FFI_ERR(kafka_consumer_MockConsumer_add_record(mock, record, &ffi_err));
+    if (record != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_ConsumerRecord_destroy_err(record, &ffi_err)));
+    if (options != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_ConsumerRecordOptions_destroy_err(options, &ffi_err)));
+    if (builder != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_ConsumerRecordOptionsBuilder_destroy_err(builder, &ffi_err)));
+    if (err != NULL) {
+        // Refused: the core keeps no copy of the record.
+        mock_record_free(env, kept);
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    kept->next = c->kept;
+    c->kept = kept;
+    return NULL;
+}
+
+// mockConsumerSetError(handle, which, error): Java's setPollException
+// (`which` "poll") or setOffsetsException ("offsets") with `error`, or
+// cleared by null; the mock throws the very same value, once.
+napi_value js_mock_consumer_set_error(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    char* which = argc == 3 ? js_string_dup(env, argv[1], "which must be a string") : NULL;
+    if (which == NULL) {
+        if (argc != 3) napi_throw_type_error(env, NULL, "mockConsumerSetError(handle, which, error)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    kafka_consumer_MockConsumer_t* mock = mock_of(env, c);
+    kafka_common_Error_t* error = NULL;
+    if (mock == NULL || injected_error_new(env, &c->injected, argv[2], &error) != 0) {
+        free(which);
+        return NULL;
+    }
+    int poll = strcmp(which, "poll") == 0;
+    free(which);
+    kafka_common_Error_t* ffi_err = NULL;
+    // The setter takes the error over.
+    error_stat_given(error);
+    kafka_common_Error_t* err = poll ? FFI_ERR(kafka_consumer_MockConsumer_set_poll_error_err(mock, error, &ffi_err))
+                                     : FFI_ERR(kafka_consumer_MockConsumer_set_offsets_error_err(mock, error, &ffi_err));
+    if (err != NULL) error_throw_owned(env, err);
+    return NULL;
+}
+
+// mockConsumerUpdateOffsets(handle, which, entries): Java's
+// updateBeginningOffsets (`which` "beginning"), updateEndOffsets ("end") or
+// updateDurationOffsets ("duration"), `entries` [[topic, partition], offset]
+// or null, a null map or key going to the FFI as NULL. The FFI copies the
+// map, which is freed after the call.
+napi_value js_mock_consumer_update_offsets(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    char* which = argc == 3 ? js_string_dup(env, argv[1], "which must be a string") : NULL;
+    if (which == NULL) {
+        if (argc != 3) napi_throw_type_error(env, NULL, "mockConsumerUpdateOffsets(handle, which, entries)");
+        return NULL;
+    }
+    int end = strcmp(which, "end") == 0;
+    int duration = strcmp(which, "duration") == 0;
+    free(which);
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    kafka_consumer_MockConsumer_t* mock = mock_of(env, c);
+    if (mock == NULL) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[2], &type), NULL);
+    kafka_Map_t* map = NULL;
+    if (type != napi_null && (map = tp_long_map_from_js(env, argv[2])) == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* err = NULL;
+    if (end) err = FFI_ERR(kafka_consumer_MockConsumer_update_end_offsets_err(mock, map, &ffi_err));
+    else if (duration) err = FFI_ERR(kafka_consumer_MockConsumer_update_duration_offsets_err(mock, map, &ffi_err));
+    else err = FFI_ERR(kafka_consumer_MockConsumer_update_beginning_offsets_err(mock, map, &ffi_err));
+    tp_long_map_free(env, map);
+    if (err != NULL) error_throw_owned(env, err);
+    return NULL;
+}
+
+// mockConsumerUpdatePartitions(handle, topic, partitions): Java's
+// updatePartitions(topic, partitions), each partition's fields built into a
+// PartitionInfo (partition_info_list_from_js); a null topic, list, element or
+// field goes to the FFI as NULL, which refuses it. The FFI copies the
+// partitions, which are freed after the call.
+napi_value js_mock_consumer_update_partitions(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 3) {
+        napi_throw_type_error(env, NULL, "mockConsumerUpdatePartitions(handle, topic, partitions)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    kafka_consumer_MockConsumer_t* mock = mock_of(env, c);
+    if (mock == NULL) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    char* topic = NULL;
+    if (type != napi_null && (topic = js_string_dup(env, argv[1], "topic must be a string")) == NULL) return NULL;
+    NAPI_CHECK(env, napi_typeof(env, argv[2], &type), NULL);
+    kafka_List_t* partitions = NULL;
+    if (type != napi_null && (partitions = partition_info_list_from_js(env, argv[2])) == NULL) {
+        free(topic);
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    // update_partitions takes an out_err of its own.
+    kafka_common_Error_t* err = FFI_ERR(kafka_consumer_MockConsumer_update_partitions(mock, topic, partitions, &ffi_err));
+    free(topic);
+    list_free(env, partitions, partition_info_item_destroy);
+    if (err != NULL) error_throw_owned(env, err);
+    return NULL;
+}
+
+// mockConsumerSetMaxPollRecords(handle, maxPollRecords): Java's
+// setMaxPollRecords(long); the FFI refuses a value below 1 with Java's
+// message.
+napi_value js_mock_consumer_set_max_poll_records(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 2) {
+        napi_throw_type_error(env, NULL, "mockConsumerSetMaxPollRecords(handle, maxPollRecords)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    kafka_consumer_MockConsumer_t* mock = mock_of(env, c);
+    if (mock == NULL) return NULL;
+    int64_t max = 0;
+    if (js_int64(env, argv[1], "maxPollRecords must be a bigint or a number", &max) != 0) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    // set_max_poll_records takes an out_err of its own.
+    kafka_common_Error_t* err = FFI_ERR(kafka_consumer_MockConsumer_set_max_poll_records(mock, max, &ffi_err));
+    if (err != NULL) error_throw_owned(env, err);
+    return NULL;
+}
+
+// The mock of a call taking only the handle; NULL with a JS exception pending.
+static kafka_consumer_MockConsumer_t* mock_arg(napi_env env, napi_callback_info info, const char* shape) {
+    Consumer* c = handle_arg(env, info, shape);
+    return c == NULL ? NULL : mock_of(env, c);
+}
+
+// mockConsumerScheduleNopPollTask(handle): Java's scheduleNopPollTask().
+napi_value js_mock_consumer_schedule_nop_poll_task(napi_env env, napi_callback_info info) {
+    kafka_consumer_MockConsumer_t* mock = mock_arg(env, info, "mockConsumerScheduleNopPollTask(handle)");
+    if (mock == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* err = FFI_ERR(kafka_consumer_MockConsumer_schedule_nop_poll_task_err(mock, &ffi_err));
+    if (err != NULL) error_throw_owned(env, err);
+    return NULL;
+}
+
+// mockConsumerClosed(handle): Java's closed(), which the FFI reads through
+// the handle, so it answers while another call is pending.
+napi_value js_mock_consumer_closed(napi_env env, napi_callback_info info) {
+    kafka_consumer_MockConsumer_t* mock = mock_arg(env, info, "mockConsumerClosed(handle)");
+    if (mock == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    int8_t answer = 0;
+    kafka_common_Error_t* err = FFI_SET(answer, kafka_consumer_MockConsumer_closed_err(mock, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value v;
+    NAPI_CHECK(env, napi_get_boolean(env, answer == 1, &v), NULL);
+    return v;
+}
+
+// mockConsumerLastPollTimeout(handle): Java's lastPollTimeout() as a bigint
+// of milliseconds, -1 for Java's null (no poll yet); the FFI reads it through
+// the handle, so it answers while another call is pending.
+napi_value js_mock_consumer_last_poll_timeout(napi_env env, napi_callback_info info) {
+    kafka_consumer_MockConsumer_t* mock = mock_arg(env, info, "mockConsumerLastPollTimeout(handle)");
+    if (mock == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    int64_t timeout = -1;
+    kafka_common_Error_t* err = FFI_SET(timeout, kafka_consumer_MockConsumer_last_poll_timeout_err(mock, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    napi_value v;
+    NAPI_CHECK(env, napi_create_bigint_int64(env, timeout, &v), NULL);
+    return v;
 }
 
 // ---- test-only --------------------------------------------------------------

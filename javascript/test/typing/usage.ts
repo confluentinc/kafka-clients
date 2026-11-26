@@ -72,6 +72,7 @@ import {
   GroupProtocol,
   KafkaConsumer,
   LogTruncationError,
+  MockConsumer,
   NoOffsetForPartitionError,
   OffsetAndMetadata,
   OffsetAndTimestamp,
@@ -1185,3 +1186,47 @@ async function consumerUsage(): Promise<void> {
   }
 }
 void consumerUsage;
+
+// MockConsumer: Java's MockConsumer, over the FFI's mock. It takes no
+// deserializers, so its type arguments are written, as Java's are.
+async function mockConsumerUsage(): Promise<void> {
+  const mock = new MockConsumer<string, number>('earliest');
+  expectTypeOf(mock).toEqualTypeOf<MockConsumer<string, number>>();
+  void new MockConsumer<string, number>({ offsetResetStrategy: 'by_duration:PT1H' });
+  // @ts-expect-error Java has no no-argument constructor
+  void new MockConsumer<string, number>();
+  // A mock is a Consumer of its types.
+  const asConsumer: Consumer<string, number> = mock;
+  void asConsumer;
+  const tp = new TopicPartition({ topic: 't', partition: 0 });
+  await mock.assign([tp]);
+  mock.addRecord(new ConsumerRecord({ topic: 't', partition: 0, offset: 0, key: 'k', value: 1 }));
+  mock.addRecord({ record: new ConsumerRecord({ topic: 't', partition: 0, offset: 1, key: null, value: null }) });
+  // @ts-expect-error a record of another key type
+  mock.addRecord(new ConsumerRecord({ topic: 't', partition: 0, offset: 2, key: 3, value: 1 }));
+  const records = await mock.poll(0);
+  expectTypeOf(records).toEqualTypeOf<ConsumerRecords<string, number>>();
+  for (const record of records) {
+    expectTypeOf(record.key).toEqualTypeOf<string | null>();
+    expectTypeOf(record.value).toEqualTypeOf<number | null>();
+  }
+  expectTypeOf(mock.rebalance([tp])).toEqualTypeOf<Promise<void>>();
+  expectTypeOf(mock.losePartitions({ partitionsLost: [tp] })).toEqualTypeOf<Promise<void>>();
+  expectTypeOf(mock.setMaxPollRecords(2n)).toEqualTypeOf<void>();
+  mock.setPollException(new KafkaError('x'));
+  mock.setOffsetsException({ exception: null });
+  // @ts-expect-error only a KafkaError, Java's KafkaException
+  mock.setPollException(new Error('x'));
+  mock.updateBeginningOffsets(new TopicPartitionMap([[tp, 0n]]));
+  mock.updateEndOffsets({ newOffsets: new TopicPartitionMap([[tp, 5]]) });
+  mock.updateDurationOffsets(new TopicPartitionMap<bigint | number>());
+  mock.updatePartitions({ topic: 't', partitions: [] });
+  // @ts-expect-error Java's two parameters go by name
+  mock.updatePartitions('t');
+  expectTypeOf(mock.closed()).toEqualTypeOf<boolean>();
+  expectTypeOf(mock.scheduleNopPollTask()).toEqualTypeOf<void>();
+  expectTypeOf(mock.lastPollTimeout()).toEqualTypeOf<number | null>();
+  expectTypeOf(mock[Symbol.asyncDispose]()).toEqualTypeOf<Promise<void>>();
+  await mock.close();
+}
+void mockConsumerUsage;

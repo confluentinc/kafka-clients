@@ -67,6 +67,11 @@ const DESTROY_CALLERS = [
     key: 'js_consumer_create',
     reason: "the consumer's constructor's failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists",
   },
+  {
+    key: 'js_mock_consumer_create',
+    reason:
+      "the mock consumer's constructor's failure paths: the class handle is destroyed before a handle object, and so a finalizer, exists",
+  },
 ];
 
 module.exports = {

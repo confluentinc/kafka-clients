@@ -13,7 +13,9 @@
 // limitations under the License.
 
 // The cluster metadata the clients' partitionsFor and listTopics answer, from
-// the fields the addon reads (native/producer.c, partitions_to_js).
+// the fields the addon reads (native/producer.c, partitions_to_js), and the
+// partitions a MockConsumer is given, as the addon takes them
+// (native/values.c, partition_info_list_from_js).
 
 import { Node } from '../common/node';
 import { PartitionInfo } from '../common/partition_info';
@@ -63,4 +65,52 @@ export function partitionInfoOf(fields: PartitionFields): PartitionInfo {
     inSyncReplicas: nodes(fields.inSyncReplicas),
     offlineReplicas: nodes(fields.offlineReplicas),
   });
+}
+
+/** A node's fields, as the addon takes them: a null host crosses as NULL. */
+export interface NodeArgs {
+  id: number;
+  host: string | null;
+  port: number;
+  rack: string | null;
+  isFenced: boolean;
+}
+
+/** A partition's fields, as the addon takes them: a null topic, list or element crosses as NULL. */
+export interface PartitionInfoArgs {
+  topic: string | null;
+  partition: number;
+  leader: NodeArgs | null;
+  replicas: Array<NodeArgs | null> | null;
+  inSyncReplicas: Array<NodeArgs | null> | null;
+  offlineReplicas: Array<NodeArgs | null> | null;
+}
+
+/**
+ * A node's fields as the addon takes them, the reverse of `nodeOf`.
+ *
+ * @param node - the node, or null
+ * @returns its fields, or null
+ */
+function nodeArgs(node: Node | null): NodeArgs | null {
+  return node === null ? null : { id: node.id, host: node.host, port: node.port, rack: node.rack, isFenced: node.isFenced };
+}
+
+/**
+ * A PartitionInfo's fields as the addon takes them, the reverse of
+ * `partitionInfoOf`.
+ *
+ * @param info - the partition's information
+ * @returns its fields
+ */
+export function partitionInfoArgs(info: PartitionInfo): PartitionInfoArgs {
+  const nodes = (list: Array<Node | null> | null): Array<NodeArgs | null> | null => (list === null ? null : list.map(nodeArgs));
+  return {
+    topic: info.topic(),
+    partition: info.partition(),
+    leader: nodeArgs(info.leader()),
+    replicas: nodes(info.replicas()),
+    inSyncReplicas: nodes(info.inSyncReplicas()),
+    offlineReplicas: nodes(info.offlineReplicas()),
+  };
 }

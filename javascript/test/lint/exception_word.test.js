@@ -31,6 +31,13 @@ const KEPT =
   '  setFlushException(flushException: unknown): void { void flushException; }\n' +
   '  setPartitionsForException(partitionsForException: unknown): void { void partitionsForException; }\n' +
   '  setCloseException(closeException: unknown): void { void closeException; }\n' +
+  '}\n' +
+  'export class N {\n' +
+  '  setPollException(options: { exception: unknown }): void;\n' +
+  '  setPollException(exception: unknown): void;\n' +
+  '  setPollException(options: unknown): void { void options; }\n' +
+  '  setOffsetsException(exception: unknown): void;\n' +
+  '  setOffsetsException(options: unknown): void { void options; }\n' +
   '}\n';
 
 test('identifiers without the word pass; comments and strings may name Java classes', () => {
@@ -44,7 +51,7 @@ test('identifiers without the word pass; comments and strings may name Java clas
   // src: msg, t, msg, F, isCompletedExceptionally, DeserializationExceptionOrigin, C, options, exception, M and its 4 setters, their
   // parameters and their 4 uses (Java's MockProducer error fields); native (every word token): const,
   // char, s, int, f, void, return, and the two Node-API calls.
-  assert.ok(r.out.includes('✅ check-exception-word: 31 item(s) checked'), r.text);
+  assert.ok(r.out.includes('✅ check-exception-word: 45 item(s) checked'), r.text);
 });
 
 test('an identifier with the word, in any case, is a finding: TypeScript and C', () => {
@@ -106,7 +113,9 @@ test('an exemption no identifier uses is a finding', () => {
     "closeException: exempt as Java's public field MockProducer#closeException, the parameter of its setter (plan §5 item 2; Python's set_close_exception), but no src/ identifier is named so: delete the exemption",
     "setCloseException: exempt as the setter of Java's public field MockProducer#closeException (plan §5 item 2: a Java public mutable field is a setter only), but no src/ identifier is named so: delete the exemption",
     "DeserializationExceptionOrigin: exempt as Java's nested enum RecordDeserializationException.DeserializationExceptionOrigin: only a class name's Exception suffix becomes Error (javascript/CLAUDE.md, JavaScript Binding Conventions, Names), as the Python client keeps the name, but no src/ identifier is named so: delete the exemption",
-    "exception: exempt as the parameter of Java's Callback#onCompletion, a named parameter of the send callback's one object (javascript/CLAUDE.md \"Java shape, JS idiom\": parameters are named as Java names them, as the Python client's are), as a property name only, but no src/ identifier is named so: delete the exemption",
+    "setPollException: exempt as Java's MockConsumer#setPollException(KafkaException), as Python's set_poll_exception, but no src/ identifier is named so: delete the exemption",
+    "setOffsetsException: exempt as Java's MockConsumer#setOffsetsException(KafkaException), as Python's set_offsets_exception, but no src/ identifier is named so: delete the exemption",
+    "exception: exempt as the parameter of Java's Callback#onCompletion, a named parameter of the send callback's one object, and of MockConsumer#setPollException and #setOffsetsException, an option key (javascript/CLAUDE.md \"Java shape, JS idiom\": parameters are named as Java names them, as the Python client's are), as a property name only, and as the parameter of those two setters' signatures, but no src/ identifier is named so: delete the exemption",
   ]);
 });
 
@@ -141,7 +150,7 @@ test('sources without identifiers fail: 0 items checked', () => {
       'src/a.ts': '// nothing\n',
       'native/a.c': '/* nothing */\n',
       // The unused exemption is waived, so only the count is left.
-      'eslint-baseline.txt': `unused-exemption isCompletedExceptionally\nunused-exemption exception\nunused-exemption sendException\nunused-exemption setSendException\nunused-exemption flushException\nunused-exemption setFlushException\nunused-exemption partitionsForException\nunused-exemption setPartitionsForException\nunused-exemption closeException\nunused-exemption setCloseException\nunused-exemption DeserializationExceptionOrigin\n`,
+      'eslint-baseline.txt': `unused-exemption isCompletedExceptionally\nunused-exemption exception\nunused-exemption sendException\nunused-exemption setSendException\nunused-exemption flushException\nunused-exemption setFlushException\nunused-exemption partitionsForException\nunused-exemption setPartitionsForException\nunused-exemption closeException\nunused-exemption setCloseException\nunused-exemption DeserializationExceptionOrigin\nunused-exemption setPollException\nunused-exemption setOffsetsException\n`,
     }),
     [RULE],
   );

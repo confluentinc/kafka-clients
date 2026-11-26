@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { debug } from './debug';
 import { fromNative } from './errors';
 import { loadAddon, platformKey } from './native_loader';
+import type { PartitionInfoArgs } from './metadata';
 import { warn } from './warn';
 import { RecordMetadata } from '../producer/record_metadata';
 
@@ -185,6 +186,11 @@ interface ConsumerStats {
   sourcesFreed: number;
   // The keys and values copied, where external buffers are refused.
   copies: number;
+  // Every mock's records and injected errors (native/mock_values.c), made and freed.
+  mockRecordsMade: number;
+  mockRecordsFreed: number;
+  injectedMade: number;
+  injectedFreed: number;
 }
 
 /** The functions the addon registers (native/addon.c). */
@@ -444,6 +450,58 @@ interface Native {
   // Makes the addon act as if Node-API refused external buffers, as Electron
   // does, for the polls completed from now on. Test-only.
   consumerRefuseExternalBuffers(on: boolean): void;
+  // A native consumer handle over the FFI's MockConsumer, Java's
+  // MockConsumer(String); a null strategy goes to the FFI as NULL. Every
+  // consumer* function takes it, through its __as_Consumer view, and a poll
+  // of it returns the records addRecord was given (native/consumer.c).
+  mockConsumerCreate(offsetResetStrategy: string | null): ConsumerHandle;
+  // Java's rebalance(Collection) and losePartitions(Collection), through their
+  // `_cb` twins; a null collection or element goes to the FFI as NULL.
+  mockConsumerRebalance(
+    handle: ConsumerHandle,
+    partitions: Array<[string | null, number] | null> | null,
+    done: (error: unknown) => void,
+  ): void;
+  mockConsumerLosePartitions(
+    handle: ConsumerHandle,
+    partitions: Array<[string | null, number] | null> | null,
+    done: (error: unknown) => void,
+  ): void;
+  // Java's addRecord of the app's own record, which the addon holds until the
+  // mock is destroyed, its key and value crossing as the FFI's `void *`
+  // (native/mock_values.c, MockRecord); a null record goes to the FFI as NULL.
+  // The C record carries the topic, partition, offset and leader epoch (-1
+  // for none).
+  mockConsumerAddRecord(
+    handle: ConsumerHandle,
+    record: object | null,
+    topic: string | null,
+    partition: number,
+    offset: bigint,
+    leaderEpoch: number,
+  ): void;
+  // Java's setMaxPollRecords(long).
+  mockConsumerSetMaxPollRecords(handle: ConsumerHandle, maxPollRecords: bigint): void;
+  // Java's setPollException or setOffsetsException, cleared by null; the mock
+  // throws the very same value.
+  mockConsumerSetError(handle: ConsumerHandle, which: 'poll' | 'offsets', error: Error | null): void;
+  // Java's updateBeginningOffsets, updateEndOffsets or updateDurationOffsets:
+  // [[topic, partition], offset] entries, a null map or key going to the FFI
+  // as NULL.
+  mockConsumerUpdateOffsets(
+    handle: ConsumerHandle,
+    which: 'beginning' | 'end' | 'duration',
+    newOffsets: Array<[[string | null, number] | null, bigint]> | null,
+  ): void;
+  // Java's updatePartitions: each partition's fields as partitionsFor answers
+  // them (src/internal/metadata.ts), a null topic, list, element or field
+  // going to the FFI as NULL.
+  mockConsumerUpdatePartitions(handle: ConsumerHandle, topic: string | null, partitions: Array<PartitionInfoArgs | null> | null): void;
+  // Java's closed(), scheduleNopPollTask() and lastPollTimeout() (-1n for
+  // Java's null).
+  mockConsumerClosed(handle: ConsumerHandle): boolean;
+  mockConsumerScheduleNopPollTask(handle: ConsumerHandle): void;
+  mockConsumerLastPollTimeout(handle: ConsumerHandle): bigint;
   // The counts of native/metrics.c. Test-only.
   metricsStats(): MetricsStats;
   // The counts of native/headers.c. Test-only.

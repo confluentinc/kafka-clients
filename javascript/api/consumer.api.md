@@ -796,6 +796,254 @@ export class LogTruncationError extends OffsetOutOfRangeError {
 }
 
 // @public
+export class MockConsumer<K, V> implements Consumer<K, V> {
+    // (undocumented)
+    [Symbol.asyncDispose](): Promise<void>;
+    constructor(options: {
+        offsetResetStrategy: string;
+    });
+    constructor(offsetResetStrategy: string);
+    addRecord(options: {
+        record: ConsumerRecord<K, V>;
+    }): void;
+    addRecord(record: ConsumerRecord<K, V>): void;
+    // (undocumented)
+    assign(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    // (undocumented)
+    assign(partitions: Iterable<TopicPartition>): Promise<void>;
+    // (undocumented)
+    assignment(): TopicPartitionSet;
+    // (undocumented)
+    beginningOffsets(options: {
+        partitions: Iterable<TopicPartition>;
+        timeout?: never;
+    }): Promise<TopicPartitionMap<bigint>>;
+    // (undocumented)
+    beginningOffsets(partitions: Iterable<TopicPartition>): Promise<TopicPartitionMap<bigint>>;
+    // (undocumented)
+    beginningOffsets(options: {
+        partitions: Iterable<TopicPartition>;
+        timeout: Duration;
+    }): Promise<TopicPartitionMap<bigint>>;
+    // (undocumented)
+    close(): Promise<void>;
+    // (undocumented)
+    close(options: {
+        option: CloseOptions;
+    }): Promise<void>;
+    // (undocumented)
+    close(option: CloseOptions): Promise<void>;
+    closed(): boolean;
+    // (undocumented)
+    commitAsync(): Promise<void>;
+    // (undocumented)
+    commitSync(): Promise<void>;
+    // (undocumented)
+    commitSync(options: {
+        timeout: Duration;
+        offsets?: never;
+    }): Promise<void>;
+    // (undocumented)
+    commitSync(timeout: Duration): Promise<void>;
+    // (undocumented)
+    commitSync(options: {
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        timeout?: never;
+    }): Promise<void>;
+    // (undocumented)
+    commitSync(offsets: TopicPartitionMap<OffsetAndMetadata>): Promise<void>;
+    // (undocumented)
+    commitSync(options: {
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        timeout: Duration;
+    }): Promise<void>;
+    // (undocumented)
+    committed(options: {
+        partitions: Iterable<TopicPartition>;
+        timeout?: never;
+    }): Promise<TopicPartitionMap<OffsetAndMetadata | null>>;
+    // (undocumented)
+    committed(partitions: Iterable<TopicPartition>): Promise<TopicPartitionMap<OffsetAndMetadata | null>>;
+    // (undocumented)
+    committed(options: {
+        partitions: Iterable<TopicPartition>;
+        timeout: Duration;
+    }): Promise<TopicPartitionMap<OffsetAndMetadata | null>>;
+    // (undocumented)
+    currentLag(options: {
+        topicPartition: TopicPartition;
+    }): Promise<bigint | null>;
+    // (undocumented)
+    currentLag(topicPartition: TopicPartition): Promise<bigint | null>;
+    // (undocumented)
+    endOffsets(options: {
+        partitions: Iterable<TopicPartition>;
+        timeout?: never;
+    }): Promise<TopicPartitionMap<bigint>>;
+    // (undocumented)
+    endOffsets(partitions: Iterable<TopicPartition>): Promise<TopicPartitionMap<bigint>>;
+    // (undocumented)
+    endOffsets(options: {
+        partitions: Iterable<TopicPartition>;
+        timeout: Duration;
+    }): Promise<TopicPartitionMap<bigint>>;
+    // (undocumented)
+    groupMetadata(): ConsumerGroupMetadata;
+    lastPollTimeout(): number | null;
+    // (undocumented)
+    listTopics(): Promise<Map<string, PartitionInfo[]>>;
+    // (undocumented)
+    listTopics(options: {
+        timeout: Duration;
+    }): Promise<Map<string, PartitionInfo[]>>;
+    // (undocumented)
+    listTopics(timeout: Duration): Promise<Map<string, PartitionInfo[]>>;
+    losePartitions(options: {
+        partitionsLost: Iterable<TopicPartition>;
+    }): Promise<void>;
+    losePartitions(partitionsLost: Iterable<TopicPartition>): Promise<void>;
+    // (undocumented)
+    metrics(): MetricNameMap<Metric>;
+    // (undocumented)
+    offsetsForTimes(options: {
+        timestampsToSearch: TopicPartitionMap<bigint | number>;
+        timeout?: never;
+    }): Promise<TopicPartitionMap<OffsetAndTimestamp | null>>;
+    // (undocumented)
+    offsetsForTimes(timestampsToSearch: TopicPartitionMap<bigint | number>): Promise<TopicPartitionMap<OffsetAndTimestamp | null>>;
+    // (undocumented)
+    offsetsForTimes(options: {
+        timestampsToSearch: TopicPartitionMap<bigint | number>;
+        timeout: Duration;
+    }): Promise<TopicPartitionMap<OffsetAndTimestamp | null>>;
+    // (undocumented)
+    partitionsFor(options: {
+        topic: string;
+        timeout?: never;
+    }): Promise<PartitionInfo[]>;
+    // (undocumented)
+    partitionsFor(topic: string): Promise<PartitionInfo[]>;
+    // (undocumented)
+    partitionsFor(options: {
+        topic: string;
+        timeout: Duration;
+    }): Promise<PartitionInfo[]>;
+    // (undocumented)
+    pause(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    // (undocumented)
+    pause(partitions: Iterable<TopicPartition>): Promise<void>;
+    // (undocumented)
+    paused(): TopicPartitionSet;
+    // (undocumented)
+    poll(options: {
+        timeout: Duration;
+    }): Promise<ConsumerRecords<K, V>>;
+    // (undocumented)
+    poll(timeout: Duration): Promise<ConsumerRecords<K, V>>;
+    // (undocumented)
+    position(options: {
+        partition: TopicPartition;
+        timeout?: never;
+    }): Promise<bigint>;
+    // (undocumented)
+    position(partition: TopicPartition): Promise<bigint>;
+    // (undocumented)
+    position(options: {
+        partition: TopicPartition;
+        timeout: Duration;
+    }): Promise<bigint>;
+    rebalance(options: {
+        newAssignment: Iterable<TopicPartition>;
+    }): Promise<void>;
+    rebalance(newAssignment: Iterable<TopicPartition>): Promise<void>;
+    // (undocumented)
+    resume(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    // (undocumented)
+    resume(partitions: Iterable<TopicPartition>): Promise<void>;
+    scheduleNopPollTask(): void;
+    // (undocumented)
+    seek(options: {
+        partition: TopicPartition;
+        offset: bigint | number;
+        offsetAndMetadata?: never;
+    }): Promise<void>;
+    // (undocumented)
+    seek(options: {
+        partition: TopicPartition;
+        offsetAndMetadata: OffsetAndMetadata;
+        offset?: never;
+    }): Promise<void>;
+    // (undocumented)
+    seekToBeginning(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    // (undocumented)
+    seekToBeginning(partitions: Iterable<TopicPartition>): Promise<void>;
+    // (undocumented)
+    seekToEnd(options: {
+        partitions: Iterable<TopicPartition>;
+    }): Promise<void>;
+    // (undocumented)
+    seekToEnd(partitions: Iterable<TopicPartition>): Promise<void>;
+    setMaxPollRecords(options: {
+        maxPollRecords: bigint | number;
+    }): void;
+    setMaxPollRecords(maxPollRecords: bigint | number): void;
+    setOffsetsException(options: {
+        exception: KafkaError | null;
+    }): void;
+    setOffsetsException(exception: KafkaError | null): void;
+    setPollException(options: {
+        exception: KafkaError | null;
+    }): void;
+    setPollException(exception: KafkaError | null): void;
+    // (undocumented)
+    subscribe(options: {
+        topics: Iterable<string>;
+        pattern?: never;
+        callback?: never;
+    }): Promise<void>;
+    // (undocumented)
+    subscribe(topics: Iterable<string>): Promise<void>;
+    // (undocumented)
+    subscribe(options: {
+        pattern: SubscriptionPattern;
+        topics?: never;
+        callback?: never;
+    }): Promise<void>;
+    // (undocumented)
+    subscribe(pattern: SubscriptionPattern): Promise<void>;
+    // (undocumented)
+    subscription(): Set<string>;
+    // (undocumented)
+    unsubscribe(): Promise<void>;
+    updateBeginningOffsets(options: {
+        newOffsets: TopicPartitionMap<bigint | number>;
+    }): void;
+    updateBeginningOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
+    updateDurationOffsets(options: {
+        newOffsets: TopicPartitionMap<bigint | number>;
+    }): void;
+    updateDurationOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
+    updateEndOffsets(options: {
+        newOffsets: TopicPartitionMap<bigint | number>;
+    }): void;
+    updateEndOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
+    updatePartitions(options: {
+        topic: string;
+        partitions: Iterable<PartitionInfo>;
+    }): void;
+    // (undocumented)
+    wakeup(): void;
+}
+
+// @public
 export class NoOffsetForPartitionError extends InvalidOffsetError {
     constructor(options: {
         partition: TopicPartition;

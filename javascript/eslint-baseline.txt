@@ -79,6 +79,23 @@ missing clients.consumer.KafkaConsumer#unregisterMetricFromSubscription
 # here, Java's consumer only logs it as unsupported. Kept for good.
 missing clients.consumer.Consumer#enforceRebalance
 missing clients.consumer.KafkaConsumer#enforceRebalance
+# MockConsumer: clientInstanceId, setClientInstanceId, the telemetry and
+# metric-subscription calls and schedulePollTask have no FFI entry point (the
+# consumer package's documentation).
+missing clients.consumer.MockConsumer#addedMetrics
+missing clients.consumer.MockConsumer#clientInstanceId
+missing clients.consumer.MockConsumer#disableTelemetry
+missing clients.consumer.MockConsumer#injectTimeoutException
+missing clients.consumer.MockConsumer#registerMetricForSubscription
+missing clients.consumer.MockConsumer#schedulePollTask
+missing clients.consumer.MockConsumer#setClientInstanceId
+missing clients.consumer.MockConsumer#unregisterMetricFromSubscription
+# MockConsumer: enforceRebalance, both forms, and the shouldRebalance and
+# resetShouldRebalance helpers that only track it, dropped by the user on
+# 2026-11-26, as Python drops them. Kept for good.
+missing clients.consumer.MockConsumer#enforceRebalance
+missing clients.consumer.MockConsumer#resetShouldRebalance
+missing clients.consumer.MockConsumer#shouldRebalance
 
 
 # check-overload-shape: gaps the user kept (PLAN.md §8 decision 11).
@@ -96,12 +113,16 @@ overload-missing Consumer.subscribe/subscribe(Collection,ConsumerRebalanceListen
 overload-missing Consumer.subscribe/subscribe(SubscriptionPattern,ConsumerRebalanceListener)
 overload-missing KafkaConsumer.subscribe/subscribe(Collection,ConsumerRebalanceListener)
 overload-missing KafkaConsumer.subscribe/subscribe(SubscriptionPattern,ConsumerRebalanceListener)
+overload-missing MockConsumer.subscribe/subscribe(Collection,ConsumerRebalanceListener)
+overload-missing MockConsumer.subscribe/subscribe(SubscriptionPattern,ConsumerRebalanceListener)
 # Consumer and KafkaConsumer: commitAsync's forms with an offset-commit
 # callback, which come with the commit callbacks.
 overload-missing Consumer.commitAsync/commitAsync(OffsetCommitCallback)
 overload-missing Consumer.commitAsync/commitAsync(Map,OffsetCommitCallback)
 overload-missing KafkaConsumer.commitAsync/commitAsync(OffsetCommitCallback)
 overload-missing KafkaConsumer.commitAsync/commitAsync(Map,OffsetCommitCallback)
+overload-missing MockConsumer.commitAsync/commitAsync(OffsetCommitCallback)
+overload-missing MockConsumer.commitAsync/commitAsync(Map,OffsetCommitCallback)
 # KafkaConsumer's constructor: the forms with deserializers, which come with
 # the deserializers.
 overload-missing KafkaConsumer.constructor/KafkaConsumer(Map,Deserializer,Deserializer)

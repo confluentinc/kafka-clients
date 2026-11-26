@@ -166,6 +166,64 @@ test("the consumer's commits, seeks, positions, offset and metadata queries use 
   }
 });
 
+test("the mock consumer's calls use their entry points", () => {
+  const called = new Set(sources.flatMap((s) => [...calledFunctions(path.join(NATIVE, s))]));
+  for (const name of [
+    'kafka_consumer_MockConsumer_new',
+    'kafka_consumer_MockConsumer__as_Consumer_err',
+    'kafka_consumer_MockConsumer_destroy_err',
+    'kafka_consumer_MockConsumer_rebalance_cb',
+    'kafka_consumer_MockConsumer_lose_partitions_cb',
+    'kafka_consumer_MockConsumer_add_record',
+    'kafka_consumer_ConsumerRecordOptionsBuilder_new_err',
+    'kafka_consumer_ConsumerRecordOptionsBuilder_set_topic_err',
+    'kafka_consumer_ConsumerRecordOptionsBuilder_set_partition_err',
+    'kafka_consumer_ConsumerRecordOptionsBuilder_set_offset_err',
+    'kafka_consumer_ConsumerRecordOptionsBuilder_set_key_err',
+    'kafka_consumer_ConsumerRecordOptionsBuilder_set_value_err',
+    'kafka_consumer_ConsumerRecordOptionsBuilder_set_leader_epoch_err',
+    'kafka_consumer_ConsumerRecordOptionsBuilder_build',
+    'kafka_consumer_ConsumerRecordOptionsBuilder_destroy_err',
+    'kafka_consumer_ConsumerRecordOptions_destroy_err',
+    'kafka_consumer_ConsumerRecord_with_options_err',
+    'kafka_consumer_ConsumerRecord_destroy_err',
+    'kafka_consumer_ConsumerRecord_key_err',
+    'kafka_consumer_MockConsumer_set_max_poll_records',
+    'kafka_consumer_MockConsumer_set_poll_error_err',
+    'kafka_consumer_MockConsumer_set_offsets_error_err',
+    'kafka_common_Error_local_callback_err',
+    'kafka_consumer_MockConsumer_update_beginning_offsets_err',
+    'kafka_consumer_MockConsumer_update_end_offsets_err',
+    'kafka_consumer_MockConsumer_update_duration_offsets_err',
+    'kafka_consumer_MockConsumer_update_partitions',
+    'kafka_common_PartitionInfo_with_offline_replicas_err',
+    'kafka_common_PartitionInfo_destroy_err',
+    'kafka_common_Node_with_rack_is_fenced_err',
+    'kafka_common_Node_destroy_err',
+    'kafka_consumer_MockConsumer_closed_err',
+    'kafka_consumer_MockConsumer_schedule_nop_poll_task_err',
+    'kafka_consumer_MockConsumer_last_poll_timeout_err',
+  ]) {
+    assert.ok(called.has(name), `${name} is not called`);
+  }
+});
+
+test('no blocking mock consumer call, and none of the dropped enforceRebalance helpers', () => {
+  for (const name of [
+    'kafka_consumer_MockConsumer_rebalance',
+    'kafka_consumer_MockConsumer_lose_partitions',
+    // Dropped as Python drops them, with enforceRebalance.
+    'kafka_consumer_MockConsumer_should_rebalance',
+    'kafka_consumer_MockConsumer_reset_should_rebalance',
+  ]) {
+    for (const source of sources) {
+      const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));
+      const calls = [...code.matchAll(new RegExp(`\\b${name}(_err)?\\s*\\(`, 'g'))];
+      assert.equal(calls.length, 0, `${source} calls ${name}`);
+    }
+  }
+});
+
 test('no blocking consumer call: every waiting call is a _cb twin (rule 4)', () => {
   for (const name of [
     'kafka_consumer_Consumer_poll',

@@ -53,6 +53,17 @@ function isPropertyName(ts, node) {
 }
 
 /**
+ * Whether identifier `node` names a parameter of a method signature or
+ * declaration whose name is one of `methods`.
+ */
+function isSetterParameter(ts, node, methods) {
+  const parent = node.parent;
+  if (parent === undefined || !ts.isParameter(parent) || parent.name !== node) return false;
+  const fn = parent.parent;
+  return fn !== undefined && ts.isMethodDeclaration(fn) && fn.name !== undefined && methods.includes(fn.name.getText());
+}
+
+/**
  * The TypeScript names kept from Java: why, and in which positions (`where`,
  * absent for every position).
  */
@@ -124,13 +135,26 @@ const JAVA_NAMES = new Map([
     },
   ],
   [
+    'setPollException',
+    {
+      reason: "Java's MockConsumer#setPollException(KafkaException), as Python's set_poll_exception",
+    },
+  ],
+  [
+    'setOffsetsException',
+    {
+      reason: "Java's MockConsumer#setOffsetsException(KafkaException), as Python's set_offsets_exception",
+    },
+  ],
+  [
     'exception',
     {
       reason:
-        "the parameter of Java's Callback#onCompletion, a named parameter of the send callback's one object " +
+        "the parameter of Java's Callback#onCompletion, a named parameter of the send callback's one object, and of " +
+        'MockConsumer#setPollException and #setOffsetsException, an option key ' +
         '(javascript/CLAUDE.md "Java shape, JS idiom": parameters are named as Java names them, as the Python client\'s are), ' +
-        'as a property name only',
-      where: isPropertyName,
+        "as a property name only, and as the parameter of those two setters' signatures",
+      where: (ts, node) => isPropertyName(ts, node) || isSetterParameter(ts, node, ['setPollException', 'setOffsetsException']),
     },
   ],
 ]);
