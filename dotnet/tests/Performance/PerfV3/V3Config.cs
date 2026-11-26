@@ -78,7 +78,7 @@ internal static class V3Config
             }
 
             conf["linger.ms"] = PerfEnv.GetString("LINGER_MS", "5");
-            conf[AllocationStrategyKey] = AllocationStrategy(conf["compression.type"], batchSize);
+            conf[AllocationStrategyKey] = AllocationStrategy();
         }
 
         return conf;
@@ -86,9 +86,9 @@ internal static class V3Config
 
     /// <summary>
     /// The effective <c>buffer.memory.allocation.strategy</c> of a producer config: <c>BUFFER_MEMORY_ALLOCATION_STRATEGY</c>
-    /// when set, else <c>incremental</c> where the core runs it and <c>full</c> where it does not (it refuses
-    /// incremental with compression and falls back to full below a 16 KiB batch). A config that leaves the key unset
-    /// (<c>USE_DEFAULTS</c>, as the Rust harness does) runs the core's default, <c>full</c>.
+    /// when set, else <c>full</c>, the core's default; an <c>incremental</c> one is <c>full</c> below a 16 KiB batch, where
+    /// the core falls back to it. A config that leaves the key unset (<c>USE_DEFAULTS</c>, as the Rust harness does) runs
+    /// the core's default, <c>full</c>.
     /// </summary>
     internal static string EffectiveAllocationStrategy(IReadOnlyDictionary<string, string> conf)
     {
@@ -103,17 +103,12 @@ internal static class V3Config
         return smallBatch && string.Equals(strategy, "incremental", StringComparison.OrdinalIgnoreCase) ? "full" : strategy;
     }
 
-    private static string AllocationStrategy(string compressionType, int batchSize)
+    // Full unless the test sets it: the core's non-blocking send, which the async arm uses, fails a record whose
+    // incremental append has to start over (KAFKA-21470), so incremental is a test of its own.
+    private static string AllocationStrategy()
     {
         string? explicitStrategy = PerfEnv.GetStringOrNull("BUFFER_MEMORY_ALLOCATION_STRATEGY");
-        if (!string.IsNullOrEmpty(explicitStrategy))
-        {
-            return explicitStrategy;
-        }
-
-        bool coreRunsIncremental = string.Equals(compressionType, "none", StringComparison.OrdinalIgnoreCase)
-            && batchSize >= IncrementalMinBatchSize;
-        return coreRunsIncremental ? "incremental" : "full";
+        return string.IsNullOrEmpty(explicitStrategy) ? "full" : explicitStrategy;
     }
 
     internal static Dictionary<string, string> BuildConsumerConfig(ConsumerBenchmarkConfig cfg)

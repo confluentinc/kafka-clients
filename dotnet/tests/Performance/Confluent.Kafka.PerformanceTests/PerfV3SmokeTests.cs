@@ -58,9 +58,7 @@ public sealed class PerfV3SmokeTests : IClassFixture<KafkaBrokerFixture>
     [SkippableFact]
     public Task Producer_Smoke_Sync() => RunProducerSmokeAsync("producer-perf-smoke", asyncMode: false);
 
-    [SkippableFact(Skip =
-        "With buffer.memory.allocation.strategy=incremental, the core's non-blocking send fails a record that has " +
-        "to wait for buffer memory instead of waiting for it. Re-enable when the core waits there.")]
+    [SkippableFact]
     public Task Producer_Smoke_Async() => RunProducerSmokeAsync("producer-perf-smoke-async", asyncMode: true);
 
     [SkippableFact]
@@ -97,9 +95,9 @@ public sealed class PerfV3SmokeTests : IClassFixture<KafkaBrokerFixture>
         _output.WriteLine(stderr);
         Assert.True(exitCode == 0, $"producer perf run failed (rc={exitCode}); see output above");
 
-        // The harness defaults, which the removed keys leave in force: the incremental buffer at the default 1 MiB
-        // batch with no compression, and an async run that waits for each send's acceptance.
-        Assert.Contains("Effective buffer.memory.allocation.strategy: incremental", stdout, StringComparison.Ordinal);
+        // The harness defaults, which the removed keys leave in force: the full buffer, and an async run that waits
+        // for each send's acceptance.
+        Assert.Contains("Effective buffer.memory.allocation.strategy: full", stdout, StringComparison.Ordinal);
         if (asyncMode)
         {
             Assert.Contains("AWAIT_ACCEPTED: True", stdout, StringComparison.Ordinal);
