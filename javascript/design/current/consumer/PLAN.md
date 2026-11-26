@@ -5,7 +5,8 @@ and linter work, `poll(long)`, `doc-check`, the CHANGELOG, and the per-commit ch
 **done** (2026-11-25): its phase plan, `P1.md` beside this file, was approved with its choices 2(a) to 9(a), and
 its "Result" section has the commits, the review and the gate. Choice 5(a) moved the `Consumer` interface from P1
 to P2. P2 is **done** (2026-11-26): its phase plan, `P2.md`, was approved with its choices 2(a) to 8(a), and its
-"Result" section has the commits, the review and the gate. P3's phase plan is next.
+"Result" section has the commits, the review and the gate. P3's phase plan, `P3.md`, was approved on 2026-11-26 with
+its choices 2(a) and 3(a), and P3 is being built.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch. The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
@@ -396,7 +397,9 @@ the full gate before its hand-off (§7).
 - The 15 methods join both `Consumer` and `KafkaConsumer`, removing their 30 baseline lines; the type rows for
   `listTopics` and `currentLag` come with them; `commitAsync`'s two callback forms are `overload-missing` until P5.
 - Tests: the matching `KafkaConsumerTest` cases, with exact messages (6, and the commit halves of the two
-  default-group-id cases P2 starts); broker tests for commits, `committed`, seeks and `position`.
+  default-group-id cases P2 starts); 13 of the 14 broker-backed `KafkaConsumerTest` cases, in
+  `test/integration/kafka_consumer_broker.test.js` (P3.md, choice 2(a)), and broker round trips for commits,
+  `committed`, seeks and `position`.
 
 **P4 — MockConsumer (N=153).**
 - 4.6, with every method of the FFI's mock. The members the FFI lacks are left out and listed (§6).
@@ -410,7 +413,8 @@ the full gate before its hand-off (§7).
 - Tests: the six `MockConsumerTest` cases with a listener (`testRebalanceListener`,
   `testLosePartitionsCallsOnPartitionsLost`, `testLosePartitionsRemovesFromAssignment`,
   `testLosePartitionsThrowsIfNotAssigned`, `testLosePartitionsClearsOnlyLostRecords`,
-  `testLosePartitionsThenRebalance`); the listener and commit-callback cases of `KafkaConsumerTest`; the two tests
+  `testLosePartitionsThenRebalance`); the listener and commit-callback cases of `KafkaConsumerTest`, and its
+  broker-backed `testSubscriptionOnInvalidTopic`, which subscribes with a listener (P3.md, choice 2(a)); the two tests
   `consumer-threading.md` §31 requires (a `commitSync` inside `onPartitionsRevoked` succeeds, and `poll()` stays
   pending until the listener's Promise settles); one test for each method refused in the window.
 
@@ -431,7 +435,7 @@ the full gate before its hand-off (§7).
   (the ByteBuffer serdes are left out).
 
 **P7 — broker tests, typing, docs and linter coverage (N=156).**
-- The broker-backed `KafkaConsumerTest` cases, also over the SSL and SASL_SSL listeners
+- The broker tests of P3 to P6, also over the SSL and SASL_SSL listeners
   (`make -C javascript test-integration-ssl` and `test-integration-sasl`).
 - `tsc --strict` type tests, TypeDoc and the API report.
 - Linter coverage: each check that applies to the consumer covers its code, for example `zero_copy` on the receive
@@ -462,7 +466,7 @@ the full gate before its hand-off (§7).
 | `ConsumerGroupMetadataTest` | 5 | P1, 2: the two getter tests, through `internalCreate`; the three null checks are skipped, as they test the deprecated constructors |
 | `OffsetAndMetadataTest` | — | already ported |
 | `ConsumerConfigTest` | 17 | P2, 9 through `new KafkaConsumer`; the other 8 skipped, with their reasons (P2.md §2) |
-| `KafkaConsumerTest` | 135 | P2 to P7: P2 30, P3 6, P6 1, P7 14, and 84 left out with reasons (P2.md §2). Python's port is the starting point (36 broker-less, 14 broker-backed, 85 left out with reasons), and each case is re-checked against Java and the FFI |
+| `KafkaConsumerTest` | 135 | P2 to P6: P2 30, P3 19, P5 1, P6 1, and 84 left out with reasons (P2.md §2; P3.md, choice 2(a)); P7 reruns the broker cases over SSL and SASL_SSL. Python's port is the starting point (36 broker-less, 14 broker-backed, 85 left out with reasons), and each case is re-checked against Java and the FFI |
 | `MockConsumerTest` | 13 | P4 (7) and P5 (6) |
 | `SerializationTest` | 36 | P6, the 12 in scope |
 | `ListSerializerTest`, `ListDeserializerTest` | — | left out: the List serdes are |
