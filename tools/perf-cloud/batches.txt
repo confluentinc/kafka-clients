@@ -45,9 +45,10 @@ python-preview-consumer-2  python  consumer-fixed-150k-100b-200p consumer-fixed-
 # The .NET client, sync and async over the Rust core and over librdkafka
 # (Confluent.Kafka), on the Python Preview tests with higher rates (250k
 # producer, 300k consumer), plus a 350k, an unbounded and a 500 KiB consumer
-# test: 35 tests. At the group's 15 minutes measured and 3 of warmup the
-# batches take ~12 h, ~10 h 40 min, ~12 h and ~12 h.
-dotnet-producer-1  dotnet  producer-max-1kb-200p producer-max-100b-200p producer-max-100kb-200p producer-fixed-250k-1kb-200p producer-max-10kb-36p-gzip producer-max-10kb-36p-lz4 producer-max-10kb-36p-zstd producer-max-10kb-36p-snappy producer-max-1kb-200p-acks1
-dotnet-producer-2  dotnet  producer-max-1kb-36p-idempotent producer-max-1kb-200p-idempotent producer-max-1kb-200p-acks0 producer-max-1kb-200p-key100b txn-max-1kb-200p-100rpt txn-max-1kb-200p-1000rpt txn-max-1kb-200p-10000rpt txn-max-1kb-200p-1000rpt-abort50
+# test, a 500 KiB producer test, 1 KiB lz4 compression and transactions at a
+# fixed 10k msg/s: 38 tests. At the group's 15 minutes measured and 3 of
+# warmup the batches take ~13 h 20 min, ~13 h 20 min, ~12 h and ~12 h.
+dotnet-producer-1  dotnet  producer-max-1kb-200p producer-max-100b-200p producer-max-100kb-200p producer-max-500kb-200p producer-fixed-250k-1kb-200p producer-max-10kb-36p-gzip producer-max-10kb-36p-lz4 producer-max-10kb-36p-zstd producer-max-10kb-36p-snappy producer-max-1kb-200p-acks1
+dotnet-producer-2  dotnet  producer-max-1kb-36p-idempotent producer-max-1kb-200p-idempotent producer-max-1kb-200p-acks0 producer-max-1kb-200p-key100b producer-max-1kb-36p-lz4 txn-fixed-10k-1kb-200p txn-max-1kb-200p-100rpt txn-max-1kb-200p-1000rpt txn-max-1kb-200p-10000rpt txn-max-1kb-200p-1000rpt-abort50
 dotnet-consumer-1  dotnet  consumer-fixed-300k-1kb-36p consumer-fixed-300k-1kb-36p-librdkafka-poll consumer-fixed-300k-1kb-200p consumer-fixed-5k-1kb-36p consumer-fixed-5k-1kb-200p consumer-fixed-500-10kb-36p consumer-fixed-500-10kb-200p consumer-fixed-300k-100b-36p consumer-max-1kb-200p
 dotnet-consumer-2  dotnet  consumer-fixed-300k-100b-200p consumer-fixed-300k-1kb-36p-fetch-tuned consumer-fixed-300k-1kb-200p-fetch-tuned consumer-fixed-15k-10kb-36p-gzip consumer-fixed-15k-10kb-36p-lz4 consumer-fixed-15k-10kb-36p-zstd consumer-fixed-15k-10kb-36p-snappy consumer-fixed-350k-1kb-200p consumer-fixed-600-500kb-200p

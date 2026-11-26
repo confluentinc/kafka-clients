@@ -149,6 +149,10 @@ txn-max-1kb-200p-1000rpt-abort50   rust,python,dotnet  WORKLOAD=transactional PA
 producer-max-100b-200p   rust,python,dotnet  PARTITIONS=200 VALUE_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024
 producer-max-100kb-200p  rust,python,dotnet  PARTITIONS=200 VALUE_SIZE=102400 LIMIT_RPS=0 BATCH_SIZE=1024
 
+# The large-message producer test: unbounded 500 KiB values (512000 B), the
+# producer side of consumer-fixed-600-500kb-200p.
+producer-max-500kb-200p  dotnet  PARTITIONS=200 VALUE_SIZE=512000 LIMIT_RPS=0 BATCH_SIZE=1024
+
 # Rust GA consumer, read as produced with the client defaults: 300 MB/s and
 # 5 MB/s of 1 KiB values into 36 and 200 partitions, 100 KiB values at 250
 # msg/s (~25 MB/s), and 300 MB/s of 10 KiB values per codec. The 5 MB/s
