@@ -628,6 +628,27 @@ export function resume(handle: ConsumerHandle, options: unknown, count: number):
 }
 
 /**
+ * A `TopicPartitionMap` of longs as the addon takes it: `[[topic, partition],
+ * value]` entries, read by `tp_long_map_from_js` (native/values.c). A null map
+ * or key goes to the FFI as NULL, which refuses it. A null value, which Java's
+ * unboxing refuses with NullPointerException, has no int64 to cross as, and
+ * the FFI would read a NULL one as 0: the binding's run-time type check.
+ *
+ * @param value - the map given
+ * @param name - the parameter's name, for the errors
+ * @param what - what a value is (`timestamp`, `offset`), for the errors
+ * @returns the entries, or null for a null map
+ */
+export function longEntries(value: unknown, name: string, what: string): Array<[[string | null, number] | null, bigint]> | null {
+  const map = topicPartitionLongMap.take(value, name) as TopicPartitionMap<bigint | null> | null;
+  if (map === null) return null;
+  return [...map.entries()].map(([tp, v]): [[string | null, number] | null, bigint] => {
+    if (v === null) throw new TypeError(`${name} must not contain a null ${what}`);
+    return [tp === null ? null : [tp.topic, tp.partition], v];
+  });
+}
+
+/**
  * The body of `Consumer#offsetsForTimes`, over a native consumer handle.
  *
  * @param handle - the native consumer handle
@@ -642,20 +663,7 @@ export function offsetsForTimes(
 ): Promise<TopicPartitionMap<OffsetAndTimestamp | null>> {
   return rejecting(async () => {
     const form = OFFSETS_FOR_TIMES_FORMS.match(options, count);
-    const map = topicPartitionLongMap.take(
-      OFFSETS_FOR_TIMES_FORMS.value(options, 'timestampsToSearch'),
-      'timestampsToSearch',
-    ) as TopicPartitionMap<bigint | null> | null;
-    // A null map or key goes to the FFI as NULL, which refuses it. A null
-    // timestamp, which Java's unboxing refuses with NullPointerException,
-    // has no int64 to cross as: the binding's run-time type check.
-    const entries =
-      map === null
-        ? null
-        : [...map.entries()].map(([tp, timestamp]): [[string | null, number] | null, bigint] => {
-            if (timestamp === null) throw new TypeError('timestampsToSearch must not contain a null timestamp');
-            return [tp === null ? null : [tp.topic, tp.partition], timestamp];
-          });
+    const entries = longEntries(OFFSETS_FOR_TIMES_FORMS.value(options, 'timestampsToSearch'), 'timestampsToSearch', 'timestamp');
     const timeoutMs = timeoutOf(OFFSETS_FOR_TIMES_FORMS, options, form === 1);
     const found = await answer<NativeTimestampEntry[]>((done) => native.consumerOffsetsForTimes(handle, entries, timeoutMs, done));
     const result = new TopicPartitionMap<OffsetAndTimestamp | null>();

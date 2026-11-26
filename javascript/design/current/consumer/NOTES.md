@@ -251,8 +251,9 @@ Java's own `IllegalStateError('This consumer has already been closed.')`. A seco
   (`PartitionInfo_with_offline_replicas_err`, `Node_with_rack_is_fenced_err`, `partition_info_list_from_js` in
   `native/values.c`, from `partitionInfoArgs` in `src/internal/metadata.ts`, the reverse of `partitionInfoOf`); the
   FFI copies them, and they are destroyed after the call. `partitionsFor` and `listTopics` read them back as equal
-  `PartitionInfo`s. The `update*Offsets` calls build their maps with `tp_long_map_from_js`, as `offsetsForTimes`
-  does. `lastPollTimeout()` crosses as a bigint, `-1` for Java's null and `Long.MAX_VALUE` read as `Infinity`.
+  `PartitionInfo`s. The `update*Offsets` calls build their maps with `tp_long_map_from_js`, from the entries
+  `longEntries` (`src/internal/consumer_calls.ts`) builds, as `offsetsForTimes` does. `lastPollTimeout()` crosses as
+  a bigint, `-1` for Java's null and `Long.MAX_VALUE` read as `Infinity`.
 - The checks are the FFI's and the core's, with Java's messages where the core has them: a record of a partition not
   assigned, a partition lost that isn't assigned, `setMaxPollRecords(0)`, an invalid or null strategy, a partition
   with no offset to reset to, and `offsetsForTimes()`, "Not implemented yet.". The binding's own are the form and

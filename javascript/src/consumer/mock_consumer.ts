@@ -40,7 +40,7 @@ import * as calls from '../internal/consumer_calls';
 import { UNBOUNDED_MILLIS } from '../internal/duration';
 import { partitionInfoArgs } from '../internal/metadata';
 import type { PartitionInfoArgs } from '../internal/metadata';
-import { long, topicPartitionLongMap } from '../internal/payload';
+import { long } from '../internal/payload';
 import { KafkaError } from '../common/kafka_error';
 import type { Metric } from '../common/metric';
 import type { MetricNameMap } from '../common/metric_name_map';
@@ -98,23 +98,6 @@ const LAST_POLL_TIMEOUT_FORMS = new JavaForms('lastPollTimeout', [[]], { reader:
 function checkKafkaError(value: unknown): KafkaError | null {
   if (value !== null && !(value instanceof KafkaError)) throw new TypeError('exception must be a KafkaError or null');
   return value;
-}
-
-/**
- * The offsets of a mock's update as the addon takes them: `[[topic,
- * partition], offset]` entries, a null map or key going to the FFI as NULL.
- *
- * @param value - the offsets given
- * @returns the entries
- */
-function offsetEntries(value: unknown): Array<[[string | null, number] | null, bigint]> | null {
-  const map = topicPartitionLongMap.take(value, 'newOffsets') as TopicPartitionMap<bigint | null> | null;
-  if (map === null) return null;
-  return [...map.entries()].map(([tp, offset]): [[string | null, number] | null, bigint] => {
-    // The FFI reads a NULL offset as 0, where Java's mock keeps the null.
-    if (offset === null) throw new TypeError('newOffsets must not contain a null offset');
-    return [tp === null ? null : [tp.topic, tp.partition], offset];
-  });
 }
 
 /**
@@ -666,7 +649,11 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
   updateBeginningOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
   updateBeginningOffsets(options: unknown): void {
     UPDATE_BEGINNING_FORMS.match(options, arguments.length);
-    native.mockConsumerUpdateOffsets(this.#handle, 'beginning', offsetEntries(UPDATE_BEGINNING_FORMS.value(options, 'newOffsets')));
+    native.mockConsumerUpdateOffsets(
+      this.#handle,
+      'beginning',
+      calls.longEntries(UPDATE_BEGINNING_FORMS.value(options, 'newOffsets'), 'newOffsets', 'offset'),
+    );
   }
 
   /**
@@ -690,7 +677,11 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
   updateEndOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
   updateEndOffsets(options: unknown): void {
     UPDATE_END_FORMS.match(options, arguments.length);
-    native.mockConsumerUpdateOffsets(this.#handle, 'end', offsetEntries(UPDATE_END_FORMS.value(options, 'newOffsets')));
+    native.mockConsumerUpdateOffsets(
+      this.#handle,
+      'end',
+      calls.longEntries(UPDATE_END_FORMS.value(options, 'newOffsets'), 'newOffsets', 'offset'),
+    );
   }
 
   /**
@@ -714,7 +705,11 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
   updateDurationOffsets(newOffsets: TopicPartitionMap<bigint | number>): void;
   updateDurationOffsets(options: unknown): void {
     UPDATE_DURATION_FORMS.match(options, arguments.length);
-    native.mockConsumerUpdateOffsets(this.#handle, 'duration', offsetEntries(UPDATE_DURATION_FORMS.value(options, 'newOffsets')));
+    native.mockConsumerUpdateOffsets(
+      this.#handle,
+      'duration',
+      calls.longEntries(UPDATE_DURATION_FORMS.value(options, 'newOffsets'), 'newOffsets', 'offset'),
+    );
   }
 
   /**
