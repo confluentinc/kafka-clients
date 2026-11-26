@@ -1196,7 +1196,8 @@ test('partitionsFor and listTopics: their forms and errors', async () => {
   // while fetching topic metadata" for both. At the deadline the core's
   // topic-metadata manager, which gives Java's text, or its event reaper, "<event>
   // was <n> ms past its expiration of <deadline>", may complete the request
-  // first, as Java's race the application thread too, so either is taken.
+  // first, so either is taken; in Java, whose application thread waits with no
+  // deadline of its own, the two race each other.
   /** @param {string} usual */
   const metadataTimeout = (usual) =>
     new RegExp(`^(${usual}|Timeout expired while fetching topic metadata|.+ was \\d+ ms past its expiration of \\d+)$`);
