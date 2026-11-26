@@ -1191,7 +1191,9 @@ test('groupMetadata(): the group, the temporary group.id check, no argument', ()
 
 test('partitionsFor and listTopics: their forms and errors', async () => {
   const consumer = newConsumer(GROUP_ID, { 'default.api.timeout.ms': 300 });
-  // No broker: the core's timeouts.
+  // No broker: the core's timeouts. Their texts are the core's: Java's
+  // TopicMetadataRequestManager says "Timeout expired while fetching topic
+  // metadata" for both.
   await assert.rejects(consumer.partitionsFor({ topic: TOPIC }), {
     constructor: KafkaTimeoutError,
     message: 'Timeout expired while waiting for TopicMetadata',
@@ -1203,6 +1205,7 @@ test('partitionsFor and listTopics: their forms and errors', async () => {
     message: 'Timeout expired while waiting for AllTopicsMetadata',
   });
   await assert.rejects(consumer.listTopics(100), KafkaTimeoutError);
+  // The core's text too: Java's listTopics throws a TimeoutException with no message.
   await assert.rejects(consumer.listTopics({ timeout: 0 }), {
     constructor: KafkaTimeoutError,
     message: "Timeout of 0ms expired before all topics' metadata could be listed",
@@ -1347,6 +1350,9 @@ test('one call at a time: the core busy error, wakeup() ending the waiting poll,
     consumer.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[TP0, 0n]]) }),
     consumer.beginningOffsets({ partitions: [TP0] }),
     consumer.endOffsets({ partitions: [TP0] }),
+    // The core guards it as every call, where Java's takes no acquire().
+    consumer.enforceRebalance(),
+    consumer.enforceRebalance({ reason: 'r' }),
     consumer.close(),
   ]) {
     await assert.rejects(call, { constructor: ConcurrentModificationError, message: CONCURRENT });

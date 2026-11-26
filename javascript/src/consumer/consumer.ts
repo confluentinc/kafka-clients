@@ -1402,7 +1402,8 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *
    * @remarks Under the consumer group protocol, the only one this client
    * has, it only logs "Operation not supported in new consumer group
-   * protocol", as Java's consumer does.
+   * protocol", as Java's consumer does. It is refused while another call is
+   * pending, as every guarded call is, where Java takes no lock for it.
    *
    * @see `enforceRebalance({ reason })`
    */
@@ -1426,7 +1427,8 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *
    * @remarks Under the consumer group protocol, the only one this client
    * has, it only logs "Operation not supported in new consumer group
-   * protocol", as Java's consumer does, and so resolves.
+   * protocol", as Java's consumer does, and so resolves; it is refused while
+   * another call is pending, where Java takes no lock for it.
    */
   enforceRebalance(options: {
     /** The reason why the new rebalance is needed. */
