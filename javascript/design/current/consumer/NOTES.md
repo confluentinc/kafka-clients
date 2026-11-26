@@ -17,7 +17,7 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   `close_cb` and `close_with_options_cb`, and the offset calls' twins (below). The three getters and
   `groupMetadata()` go through their fallible forms (`kafka_consumer_Consumer_assignment`, `_subscription`, `_paused`,
   `_group_metadata`), `wakeup()` and `metrics()` through their `_err` twins. Each `_cb` call has its own context
-  (`VoidCtx`, `ValueCtx`, `PollCtx`, `CloseCtx`), the completion's opaque, freed by the completion.
+  (`CallCtx`, `PollCtx`, `CloseCtx`), the completion's opaque, freed by the completion.
 - A list the addon builds with `kafka_List_new` (the topics, the partitions) only borrows its elements: the topics'
   strings and the `TopicPartition`s are freed after the call (`list_free`, `tp_item_destroy`), which copied them. A
   list the core returns owns its elements: destroying it frees them (`tp_list_take_to_js`, the subscription's strings).
@@ -83,9 +83,10 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   metadata. A call answered with nothing completes through `void_on_complete`; one answered with a value through its
   own completion (`committed_on_complete`, `position_on_complete`, `current_lag_on_complete`,
   `partitions_for_on_complete`, `list_topics_on_complete`, `offsets_for_times_on_complete`, `offsets_on_complete`),
-  each ending its call's count as its last statement. The answer is read, then freed, before the Promise settles: the
-  owned map of `committed`, `offsetsForTimes`, `beginningOffsets`, `endOffsets` and `listTopics` (with its lists of
-  partitions) and the owned list of `partitionsFor`.
+  each ending its call's count as its last statement. The answer is read into JavaScript values, then `done` runs,
+  which settles the Promise, and then the answer is freed, before any `.then` runs: the owned map of `committed`,
+  `offsetsForTimes`, `beginningOffsets`, `endOffsets` and `listTopics` (with its lists of partitions). The owned list
+  of `partitionsFor` is freed as it is read (`partitions_take_to_js`), before `done` runs, and so is an error.
 - What a call takes is built for it and destroyed after it, since a list or map the addon builds with `kafka_List_new`
   or `kafka_Map_new` only borrows its items: the `TopicPartition` of `seek`, `position` and `currentLag`, the
   `OffsetAndMetadata` of `seek` (`OffsetAndMetadata_with_leader_epoch_metadata`, `-1` for no leader epoch, line 172),
@@ -104,7 +105,8 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
 - `commitSync(null)` is the form error: a bare `null` fits both its one-parameter forms (line 73).
 - `enforceRebalance()` and `enforceRebalance(reason)` resolve once the core logged "Operation not supported in new
   consumer group protocol", as Java's `AsyncKafkaConsumer` does (decision 9), on a closed consumer too, where Java
-  makes no check either.
+  makes no check either. Unlike Java's, which takes no `acquire()`, they are refused while another call is pending,
+  with the core's busy error: the core guards every call (line 152, consumer-threading.md §1).
 
 ## The `group.id` check (line 119, choice 3(a))
 
@@ -125,7 +127,8 @@ kafka_consumer_Consumer_group_metadata: This consumer has already been closed.')
 
 ## The order of the null checks *(deviation)*
 
-A null argument the FFI refuses at its boundary is refused before the core's own checks, which Java runs first
+A null argument the FFI refuses at its boundary, and a negative timeout (below), are refused before the core's own
+checks, which Java runs first
 (`AsyncKafkaConsumer#subscribeInternal`, `#subscribeToRegex`, `#assign`, `#pause`, `#resume`: `acquireAndEnsureOpen()`,
 then for a subscription `throwIfGroupIdNotDefined()`, then the null check):
 
@@ -154,6 +157,14 @@ then for a subscription `throwIfGroupIdNotDefined()`, then the null check):
 - `seek` with a negative offset on a busy consumer rejects with `ConcurrentModificationError`, where Java's `seek`
   checks the offset first, before `acquireAndEnsureOpen()`: the FFI's busy check runs before the core's offset check.
   On a closed consumer the offset check comes first, as in Java.
+- A negative timeout is refused by the FFI's `ms()` (`rust/src/ffi/consumer/mod.rs`) inside each `_cb` twin's task,
+  after the busy check but before the core's closed and `group.id` checks, with `IllegalArgumentError("Timeout must
+  not be negative")`: both timed `commitSync` forms, `position`, `committed`, `partitionsFor`, `listTopics`,
+  `offsetsForTimes`, `beginningOffsets` and `endOffsets` with `timeout: -1` reject with it on a closed consumer, and
+  the two `commitSync` forms and `committed` on one without `group.id`, where Java reports the closed consumer
+  (`acquireAndEnsureOpen()`) or `InvalidGroupIdException` (`throwIfGroupIdNotDefined()`) first. A busy consumer gets
+  the busy error first, as in Java. `poll` keeps Java's order: Java's `poll` builds its `Timer`, and so checks the
+  timeout, before `acquireAndEnsureOpen()`.
 
 Java checks these before its closed and busy checks too, so their order is Java's: `commitSync({ offsets: null })`
 (Java's `new HashMap<>(null)`, the FFI's `TypeError("offsets must not be null")`), `seekToBeginning(null)` and
@@ -162,9 +173,10 @@ Java checks these before its closed and busy checks too, so their order is Java'
 must not be null")`).
 
 Why: the binding repeats no precondition (line 183), so it cannot run these checks itself in Java's order, and the
-FFI refuses the NULL, and checks a busy consumer, before the core runs. Python's conventions record the same deviation ("Order": a consumer without
-`group.id` reports a null collection where Java reports `InvalidGroupIdException`). Goes when: the FFI refuses the
-NULL only after the core's closed, busy and group checks, and `TopicPartition_new` takes a null topic. The tests pin
+FFI refuses the NULL, checks a busy consumer and checks the timeout before the core runs. Python's conventions
+record the same deviation ("Order": a consumer without `group.id` reports a null collection where Java reports
+`InvalidGroupIdException`). Goes when: the FFI refuses the NULL and the negative timeout only after the core's
+closed, busy and group checks, and `TopicPartition_new` takes a null topic. The tests pin
 today's order and messages (`test/unit/consumer/kafka_consumer.test.js`, "the null checks come before the closed,
 busy and group checks" and "the null checks of the offset calls come before the closed and busy checks, and the
 group.id check before all").
