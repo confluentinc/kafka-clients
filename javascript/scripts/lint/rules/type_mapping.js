@@ -38,7 +38,7 @@
 // | String                                       | string                                  |
 // | void, Void                                   | void                                    |
 // | Object                                       | unknown                                 |
-// | Optional<T>, OptionalInt                     | T (or number) | null                    |
+// | Optional<T>, OptionalInt, OptionalLong       | T (or number, bigint) | null            |
 // | Duration; long x, TimeUnit unit (one Duration) | number (milliseconds) or a Temporal.Duration |
 // | byte[], taken                                | Uint8Array (a Buffer is one), never a string |
 // | byte[], returned (a return, a field)         | Buffer                                  |
@@ -60,8 +60,8 @@
 // | Set<TopicPartition>, returned                | TopicPartitionSet                       |
 // | Map<TopicPartition, V>                       | TopicPartitionMap<V>                    |
 // | Map<MetricName, ? extends Metric>            | MetricNameMap<Metric>                   |
-// | Map<String, String>, returned                | Map<string, string>                     |
-// | Map<String, String>, taken                   | a Map or ReadonlyMap, or a plain object (Record) of string to string |
+// | Map<String, V>, returned                     | Map<string, V>                          |
+// | Map<String, V>, taken                        | a Map or ReadonlyMap, or a plain object (Record) of string to V |
 // | Map, Properties (a client's configuration)   | the `...Configs` configuration type (& its serde keys) |
 // | a type variable                              | a type parameter                        |
 // | a Java class translated in src/              | its TypeScript type                     |
@@ -314,6 +314,7 @@ module.exports = {
       // Conventions, Types): null is stripped, T compared.
       if (j.name === 'Optional') return j.args.length === 0 ? true : matches(j.args[0], t);
       if (j.name === 'OptionalInt') return (t.flags & ts.TypeFlags.NumberLike) !== 0;
+      if (j.name === 'OptionalLong') return (t.flags & ts.TypeFlags.BigIntLike) !== 0;
       if (j.name === 'Future' || j.name === 'KafkaFuture') {
         return symbolName(t) === 'KafkaFuture' && (j.args.length === 0 || matches(j.args[0], checker.getTypeArguments(t)[0]) === true);
       }
@@ -333,10 +334,10 @@ module.exports = {
       if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'TopicPartition') {
         return symbolName(t) === 'TopicPartitionMap' && matches(j.args[1], typeArgs(t)[0]) === true;
       }
-      if (j.name === 'Map' && j.args.length === 2 && j.args.every((a) => a.name === 'String' && a.dims === 0)) {
+      if (j.name === 'Map' && j.args.length === 2 && j.args[0].name === 'String' && j.args[0].dims === 0 && j.args[1].name !== 'Object') {
         // A map keyed by strings: a Map returned; taken, a Map, a ReadonlyMap
-        // or a plain object of string to string (javascript/CLAUDE.md, JavaScript
-        // Binding Conventions, Types, "Other collections taken").
+        // or a plain object of string to its values (javascript/CLAUDE.md,
+        // JavaScript Binding Conventions, Types, "Other collections taken").
         if ((t0.aliasSymbol && t0.aliasSymbol.name.endsWith('Configs')) || symbolName(t).endsWith('Configs')) return true;
         const part = (p) => {
           const n = symbolName(p);

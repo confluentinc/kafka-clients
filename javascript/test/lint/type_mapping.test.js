@@ -409,7 +409,7 @@ test("a serializer's serialize may also return a Promise of the bytes it takes (
   assert.match(findings(r)[0], /^Serializer\.serialize: return: Java byte\[\] is not TypeScript /);
 });
 
-test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition and MetricName collections', () => {
+test('a Java array or collection taken is any iterable; one returned is an array, a Set, or the TopicPartition and MetricName collections; a map keyed by strings is a Map of its values; an OptionalLong is a bigint or null', () => {
   const coll = javaClass('clients.producer.Coll', {
     overloads: [
       method('take', ['Node[]'], { param_types: ['Node[]'], return_type: 'void', param_names: ['nodes'] }),
@@ -421,6 +421,8 @@ test('a Java array or collection taken is any iterable; one returned is an array
       method('metrics', [], { return_type: 'Map<MetricName, ? extends Metric>' }),
       method('labels', [], { return_type: 'Map<String, String>' }),
       method('label', ['Map'], { param_types: ['Map<String, String>'], return_type: 'void', param_names: ['labels'] }),
+      method('topics', [], { return_type: 'Map<String, List<Node>>' }),
+      method('total', [], { return_type: 'OptionalLong' }),
     ],
   });
   const extra = [
@@ -440,6 +442,8 @@ test('a Java array or collection taken is any iterable; one returned is an array
     metrics: 'metrics(): MetricNameMap<Metric> { return new MetricNameMap(); }',
     labels: 'labels(): Map<string, string> { return new Map(); }',
     label: 'label(labels: ReadonlyMap<string, string> | Readonly<Record<string, string>>): void { void labels; }',
+    topics: 'topics(): Map<string, Node[]> { return new Map(); }',
+    total: 'total(): bigint | null { return null; }',
   };
   const source = (/** @type {Record<string, string>} */ members) =>
     "import { Node } from '../common/node';\nimport { TopicPartition } from '../common/topic_partition';\n" +
@@ -495,6 +499,12 @@ test('a Java array or collection taken is any iterable; one returned is an array
       'metrics(): Map<MetricName, Metric> { return new Map(); }',
       'Coll.metrics: return: Java Map<MetricName, Metric> is not TypeScript Map<MetricName, Metric>',
     ],
+    [
+      'topics',
+      'topics(): Map<string, Iterable<Node>> { return new Map(); }',
+      'Coll.topics: return: Java Map<String, List<Node>> is not TypeScript Map<string, Iterable<Node>>',
+    ],
+    ['total', 'total(): number | null { return null; }', 'Coll.total: return: Java OptionalLong is not TypeScript number | null'],
   ]) {
     r = lint(files({ ...GOOD, [name]: member }), [RULE]);
     assert.deepEqual(findings(r), [finding], member);
