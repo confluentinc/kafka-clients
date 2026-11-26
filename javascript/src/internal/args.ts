@@ -77,11 +77,63 @@ export function kind(value: unknown): string {
   return /^[aeiouAEIOU]/.test(name) ? `an ${name}` : `a ${name}`;
 }
 
+/**
+ * The order a form error lists the names of `forms` in, as Python's
+ * Signatures rule orders the union of the overloads' parameters: every form
+ * keeps its own order, and where that leaves a choice, the name of the
+ * earliest-declared form goes first (`subscribe`'s `(topics)`, `(topics,
+ * callback)`, `(pattern, callback)`, `(pattern)` give `topics, pattern,
+ * callback`). A topological sort of the names, each form's consecutive names
+ * an edge.
+ *
+ * @param method - the method's name, for the error
+ * @param forms - the method's Java forms, in Java declaration order
+ * @returns every name of the forms, once, in that order
+ * @throws `Error` when two forms order two names both ways, which no order
+ *   keeps
+ */
+export function formOrder(method: string, forms: readonly Form[]): string[] {
+  // Each name's rank for a tie: where it first appears, by form, then by
+  // position in that form.
+  const rank = new Map<string, number>();
+  const after = new Map<string, Set<string>>();
+  const before = new Map<string, number>();
+  forms.forEach((form, index) => {
+    form.forEach((name, position) => {
+      if (!rank.has(name)) rank.set(name, index * 64 + position);
+      if (!after.has(name)) after.set(name, new Set());
+      if (!before.has(name)) before.set(name, 0);
+      const next = form[position + 1];
+      if (next !== undefined && next !== name && !(after.get(name) as Set<string>).has(next)) {
+        (after.get(name) as Set<string>).add(next);
+        before.set(next, (before.get(next) ?? 0) + 1);
+      }
+    });
+  });
+  const out: string[] = [];
+  const ready = [...rank.keys()].filter((name) => before.get(name) === 0);
+  while (ready.length > 0) {
+    ready.sort((a, b) => (rank.get(a) as number) - (rank.get(b) as number));
+    const name = ready.shift() as string;
+    out.push(name);
+    for (const next of after.get(name) as Set<string>) {
+      const left = (before.get(next) as number) - 1;
+      before.set(next, left);
+      if (left === 0) ready.push(next);
+    }
+  }
+  if (out.length !== rank.size) {
+    const cycle = [...rank.keys()].filter((name) => !out.includes(name));
+    throw new Error(`JavaForms(${method}): the forms order ${cycle.join(', ')} both ways`);
+  }
+  return out;
+}
+
 /** Options of a `JavaForms`. */
 export interface JavaFormsOptions {
   /**
-   * The order a message lists given names in; by default each name where it
-   * first appears in the forms.
+   * The order a message lists given names in; by default the forms' own
+   * orders merged (`formOrder`).
    */
   readonly order?: readonly string[];
   /**
@@ -172,8 +224,8 @@ export class JavaForms {
    *   object, and the messages for `undefined`
    */
   constructor(method: string, forms: readonly Form[], options: JavaFormsOptions = {}) {
-    const union: string[] = [];
-    for (const form of forms) for (const name of form) if (!union.includes(name)) union.push(name);
+    // An explicit order is checked to hold the forms' names; else they are sorted.
+    const union = options.order === undefined ? formOrder(method, forms) : [...new Set(forms.flat())];
     const names = options.order ?? union;
     if (names.length !== union.length || union.some((name) => !names.includes(name))) {
       throw new Error(`JavaForms(${method}): the order ${names.join(', ')} is not the forms' names ${union.join(', ')}`);
