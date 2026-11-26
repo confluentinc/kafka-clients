@@ -245,6 +245,14 @@ int payload_topic_partition_long_map(napi_env env, napi_value obj, const char* n
     }
     napi_value arr;
     if (map == NULL) return napi_get_null(env, &arr) == napi_ok ? set_named(env, obj, name, arr) : -1;
+    arr = long_map_to_js(env, map);
+    kafka_common_Error_t* ffi_err = NULL;
+    error_discard(FFI_ERR(kafka_Map_destroy_err(map, &ffi_err)));
+    return arr == NULL ? -1 : set_named(env, obj, name, arr);
+}
+
+napi_value long_map_to_js(napi_env env, const kafka_Map_t* map) {
+    napi_value arr;
     kafka_common_Error_t* ffi_err = NULL;
     int32_t size = 0;
     error_discard(FFI_SET(size, kafka_Map_size_err(map, &ffi_err)));
@@ -262,9 +270,7 @@ int payload_topic_partition_long_map(napi_env env, napi_value obj, const char* n
             rc = -1;
         }
     }
-    error_discard(FFI_ERR(kafka_Map_destroy_err(map, &ffi_err)));
-    if (rc == 0) rc = set_named(env, obj, name, arr);
-    return rc;
+    return rc == 0 ? arr : NULL;
 }
 
 int payload_string(napi_env env, napi_value obj, const char* name, const char* value, kafka_common_Error_t* failed) {

@@ -21,7 +21,7 @@
 // protocol's arm. Where Java drives a MockClient only to make a call wait, an
 // unreachable bootstrap address stands for it.
 //
-// Of Java's 135 tests, 33 are ported here:
+// Of Java's 135 tests, 36 are ported here:
 //   testConstructorClose, testOsDefaultSocketBufferSizes,
 //   shouldIgnoreGroupInstanceIdForEmptyGroupId, testEmptyGroupId,
 //   testGroupIdWithWhitespace,
@@ -41,12 +41,11 @@
 //   a broker), testMetricsRemovedOnClose, testClosingConsumerUnregistersConsumerMetrics,
 //   testPollIdleRatioZero (its default value: the zero-length poll is recorded
 //   through the package-private kafkaConsumerMetrics() on a MockTime) and
-//   testCloseShouldBeIdempotent, testSeekNegative, testInvalidGroupMetadata
-//   and testCommittedThrowsTimeoutExceptionForNoResponse.
+//   testCloseShouldBeIdempotent, testSeekNegative, testInvalidGroupMetadata,
+//   testCommittedThrowsTimeoutExceptionForNoResponse, testOffsetsForTimesTimeout,
+//   testBeginningOffsetsTimeout and testEndOffsetsTimeout.
 //
-// Not here yet, for want of the methods they test (the offset queries):
-// testOffsetsForTimesTimeout, testBeginningOffsetsTimeout and
-// testEndOffsetsTimeout; for want of deserializers:
+// Not here yet, for want of deserializers:
 // configurableObjectsShouldSeeGeneratedClientId.
 // Against a broker, where Java scripts a MockClient: testMissingOffsetNoResetPolicy,
 // testResetToCommittedOffset, testResetUsingAutoResetPolicy,
@@ -606,6 +605,22 @@ test('testCommittedThrowsTimeoutExceptionForNoResponse', async () => {
   });
 });
 
+// Java's MockClient never answers the ListOffsets; an unreachable broker never
+// does either, so default.api.timeout.ms (Java's 60000) runs out sooner.
+for (const [name, call] of /** @type {const} */ ([
+  [
+    'testOffsetsForTimesTimeout',
+    (/** @type {KafkaConsumer} */ c) => c.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[TP0, 0n]]) }),
+  ],
+  ['testBeginningOffsetsTimeout', (/** @type {KafkaConsumer} */ c) => c.beginningOffsets({ partitions: [TP0] })],
+  ['testEndOffsetsTimeout', (/** @type {KafkaConsumer} */ c) => c.endOffsets({ partitions: [TP0] })],
+])) {
+  test(name, async () => {
+    const consumer = newConsumer(GROUP_ID, { 'default.api.timeout.ms': 500 });
+    await assert.rejects(call(consumer), { constructor: KafkaTimeoutError, message: 'Failed to get offsets by times in 500ms' });
+  });
+}
+
 // ---- the binding's own contracts --------------------------------------------
 
 test('the classic protocol, the default, gets the core UnsupportedOperationError', () => {
@@ -830,6 +845,19 @@ test('the null checks of the offset calls come before the closed and busy checks
   await assert.rejects(closed.currentLag(null), { constructor: TypeError, message: 'topic_partition must not be null' });
   // @ts-expect-error a null the types forbid
   await assert.rejects(closed.seek({ partition: null, offset: 0 }), { constructor: TypeError, message: 'partition must not be null' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.offsetsForTimes(null), { constructor: TypeError, message: 'Timestamps to search cannot be null' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.offsetsForTimes(new TopicPartitionMap([[TP0, null]])), {
+    constructor: TypeError,
+    message: 'timestampsToSearch must not contain a null timestamp',
+  });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.beginningOffsets(null), { constructor: TypeError, message: 'Partitions cannot be null' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.endOffsets(null), { constructor: TypeError, message: 'Partitions cannot be null' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.partitionsFor(null), { constructor: TypeError, message: 'topic must not be null' });
   // Java checks these first too: no deviation.
   // @ts-expect-error a null the types forbid
   await assert.rejects(closed.commitSync({ offsets: null }), { constructor: TypeError, message: 'offsets must not be null' });
@@ -1126,6 +1154,131 @@ test('groupMetadata(): the group, the temporary group.id check, no argument', ()
   });
 });
 
+test('partitionsFor and listTopics: their forms and errors', async () => {
+  const consumer = newConsumer(GROUP_ID, { 'default.api.timeout.ms': 300 });
+  // No broker: the core's timeouts.
+  await assert.rejects(consumer.partitionsFor({ topic: TOPIC }), {
+    constructor: KafkaTimeoutError,
+    message: 'Timeout expired while waiting for TopicMetadata',
+  });
+  // The bare forms, checked once each.
+  await assert.rejects(consumer.partitionsFor(TOPIC), KafkaTimeoutError);
+  await assert.rejects(consumer.listTopics(), {
+    constructor: KafkaTimeoutError,
+    message: 'Timeout expired while waiting for AllTopicsMetadata',
+  });
+  await assert.rejects(consumer.listTopics(100), KafkaTimeoutError);
+  await assert.rejects(consumer.listTopics({ timeout: 0 }), {
+    constructor: KafkaTimeoutError,
+    message: "Timeout of 0ms expired before all topics' metadata could be listed",
+  });
+  await assert.rejects(consumer.partitionsFor({ topic: TOPIC, timeout: 100 }), KafkaTimeoutError);
+  // The FFI refuses a null topic.
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.partitionsFor(null), { constructor: TypeError, message: 'topic must not be null' });
+  for (const call of [() => consumer.partitionsFor({ topic: TOPIC, timeout: -1 }), () => consumer.listTopics({ timeout: -1 })]) {
+    await assert.rejects(call(), { constructor: IllegalArgumentError, message: 'Timeout must not be negative' });
+  }
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.listTopics(null), { constructor: TypeError, message: 'timeout must not be null' });
+  // @ts-expect-error a number is no topic
+  await assert.rejects(consumer.partitionsFor(1), {
+    constructor: IllegalArgumentError,
+    message: 'partitionsFor() takes one of (topic), (topic, timeout); got a number',
+  });
+  // @ts-expect-error a string is no timeout
+  await assert.rejects(consumer.listTopics('1'), {
+    constructor: IllegalArgumentError,
+    message: 'listTopics() takes one of (), (timeout); got a string',
+  });
+});
+
+test('offsetsForTimes: its forms, a null timestamp, a Map refused, and the core checks', async () => {
+  const consumer = newConsumer(GROUP_ID, { 'default.api.timeout.ms': 300 });
+  // Nothing asked: an empty map, the core's answer without a request.
+  const none = await consumer.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap() });
+  assert.ok(none instanceof TopicPartitionMap);
+  assert.equal(none.size(), 0);
+  // The bare form, checked once; a number is a long too.
+  assert.equal((await consumer.offsetsForTimes(new TopicPartitionMap())).size(), 0);
+  await assert.rejects(consumer.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[TP0, 5]]), timeout: 100 }), {
+    constructor: KafkaTimeoutError,
+    message: 'Failed to get offsets by times in 100ms',
+  });
+  // Java's check of each timestamp, the core's.
+  await assert.rejects(consumer.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[TP0, -5n]]) }), {
+    constructor: IllegalArgumentError,
+    message: 'The target time for partition test-0 is -5. The target time cannot be negative.',
+  });
+  // A null timestamp has no int64 to cross as: Java's unboxing throws NullPointerException.
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[TP0, null]]) }), {
+    constructor: TypeError,
+    message: 'timestampsToSearch must not contain a null timestamp',
+  });
+  // Java's requireNonNull, the FFI's.
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.offsetsForTimes(null), { constructor: TypeError, message: 'Timestamps to search cannot be null' });
+  const hint =
+    'timestampsToSearch must be a TopicPartitionMap, not a Map: a Map keyed by TopicPartition compares its keys by identity, so build one with new TopicPartitionMap(entries)';
+  // @ts-expect-error a Map is no TopicPartitionMap
+  await assert.rejects(consumer.offsetsForTimes(new Map([[TP0, 0n]])), { constructor: TypeError, message: hint });
+  // @ts-expect-error a Map is no TopicPartitionMap
+  await assert.rejects(consumer.offsetsForTimes({ timestampsToSearch: new Map() }), { constructor: TypeError, message: hint });
+  await assert.rejects(consumer.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[TP0, 2 ** 60]]) }), RangeError);
+  await assert.rejects(consumer.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap(), timeout: -1 }), {
+    constructor: IllegalArgumentError,
+    message: 'Timeout must not be negative',
+  });
+});
+
+test('beginningOffsets and endOffsets: their forms and errors', async () => {
+  const consumer = newConsumer(GROUP_ID, { 'default.api.timeout.ms': 300 });
+  for (const method of /** @type {const} */ (['beginningOffsets', 'endOffsets'])) {
+    const none = await consumer[method]({ partitions: [] });
+    assert.ok(none instanceof TopicPartitionMap);
+    assert.equal(none.size(), 0);
+    // The bare form, checked once each.
+    assert.equal((await consumer[method](new Set())).size(), 0);
+    // A zero timeout answers an empty map at once, as Java's.
+    assert.equal((await consumer[method]({ partitions: [TP0], timeout: 0 })).size(), 0);
+    await assert.rejects(consumer[method]({ partitions: [TP0], timeout: 100 }), {
+      constructor: KafkaTimeoutError,
+      message: 'Failed to get offsets by times in 100ms',
+    });
+    // Java's requireNonNull, the FFI's.
+    // @ts-expect-error a null the types forbid
+    await assert.rejects(consumer[method](null), { constructor: TypeError, message: 'Partitions cannot be null' });
+    await assert.rejects(consumer[method]({ partitions: [TP0], timeout: -1 }), {
+      constructor: IllegalArgumentError,
+      message: 'Timeout must not be negative',
+    });
+    // @ts-expect-error a string
+    await assert.rejects(consumer[method]('test-0'), {
+      constructor: IllegalArgumentError,
+      message: `${method}() takes one of (partitions), (partitions, timeout); got a string`,
+    });
+  }
+});
+
+test('enforceRebalance() resolves: the core only logs that the consumer protocol does not support it', async () => {
+  const consumer = newConsumer();
+  await consumer.enforceRebalance();
+  await consumer.enforceRebalance({ reason: 'why' });
+  // The bare form, checked once.
+  await consumer.enforceRebalance('why');
+  // @ts-expect-error a null the types forbid: Java's null, which its consumer ignores too
+  await consumer.enforceRebalance({ reason: null });
+  // @ts-expect-error a number is no reason
+  await assert.rejects(consumer.enforceRebalance(1), {
+    constructor: IllegalArgumentError,
+    message: 'enforceRebalance() takes one of (), (reason); got a number',
+  });
+  // Java's AsyncKafkaConsumer.enforceRebalance makes no check: a closed consumer resolves too.
+  await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+  await consumer.enforceRebalance();
+});
+
 test('unsubscribe, wakeup and the getters take no argument', async () => {
   const consumer = newConsumer();
   // @ts-expect-error an argument
@@ -1154,6 +1307,11 @@ test('one call at a time: the core busy error, wakeup() ending the waiting poll,
     consumer.position({ partition: TP0 }),
     consumer.committed({ partitions: [TP0] }),
     consumer.currentLag({ topicPartition: TP0 }),
+    consumer.partitionsFor({ topic: TOPIC }),
+    consumer.listTopics(),
+    consumer.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[TP0, 0n]]) }),
+    consumer.beginningOffsets({ partitions: [TP0] }),
+    consumer.endOffsets({ partitions: [TP0] }),
     consumer.close(),
   ]) {
     await assert.rejects(call, { constructor: ConcurrentModificationError, message: CONCURRENT });
@@ -1225,6 +1383,16 @@ test('close(option) with and without a timeout, a negative one read as zero; the
     () => leave.committed({ partitions: [TP0] }),
     () => leave.committed({ partitions: [TP0], timeout: 0 }),
     () => leave.currentLag({ topicPartition: TP0 }),
+    () => leave.partitionsFor({ topic: TOPIC }),
+    () => leave.partitionsFor({ topic: TOPIC, timeout: 0 }),
+    () => leave.listTopics(),
+    () => leave.listTopics({ timeout: 0 }),
+    () => leave.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap() }),
+    () => leave.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap(), timeout: 0 }),
+    () => leave.beginningOffsets({ partitions: [TP0] }),
+    () => leave.beginningOffsets({ partitions: [TP0], timeout: 0 }),
+    () => leave.endOffsets({ partitions: [TP0] }),
+    () => leave.endOffsets({ partitions: [TP0], timeout: 0 }),
   ]) {
     await assert.rejects(call(), { constructor: IllegalStateError, message: CLOSED });
   }
@@ -1272,6 +1440,18 @@ test('a Promise method never throws: it rejects', () => {
     () => consumer.committed(1),
     // @ts-expect-error a wrong argument
     () => consumer.currentLag(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.partitionsFor(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.listTopics('x'),
+    // @ts-expect-error a wrong argument
+    () => consumer.offsetsForTimes(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.beginningOffsets(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.endOffsets(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.enforceRebalance(1),
   ]) {
     const result = call();
     assert.ok(result instanceof Promise);

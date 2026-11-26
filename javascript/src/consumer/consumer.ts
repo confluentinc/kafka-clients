@@ -19,6 +19,7 @@
 
 import type { Metric } from '../common/metric';
 import type { MetricNameMap } from '../common/metric_name_map';
+import type { PartitionInfo } from '../common/partition_info';
 import type { TopicPartition } from '../common/topic_partition';
 import type { TopicPartitionMap } from '../common/topic_partition_map';
 import type { TopicPartitionSet } from '../common/topic_partition_set';
@@ -27,6 +28,7 @@ import type { CloseOptions } from './close_options';
 import type { ConsumerGroupMetadata } from './consumer_group_metadata';
 import type { ConsumerRecords } from './consumer_records';
 import type { OffsetAndMetadata } from './offset_and_metadata';
+import type { OffsetAndTimestamp } from './offset_and_timestamp';
 import type { SubscriptionPattern } from './subscription_pattern';
 
 /**
@@ -872,6 +874,144 @@ export interface Consumer<K = Buffer, V = Buffer> {
   metrics(): MetricNameMap<Metric>;
 
   /**
+   * Get metadata about the partitions for a given topic. This method will
+   * issue a remote call to the server if it does not already have any
+   * metadata about the given topic.
+   *
+   * @param options - The topic to get partition metadata for
+   * @returns resolving to the list of partitions, which will be empty when
+   *   the given topic is not found. Note: when both the broker config
+   *   `auto.create.topics.enable` and the consumer config
+   *   `allow.auto.create.topics` are `true`, this method may return an empty
+   *   list even though the topic is being auto-created in the background.
+   *   Callers should not assume the topic does not exist based solely on an
+   *   empty result.
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   specified topic
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   * @throws `TimeoutError` rejects with it if the offset metadata could not be
+   *   fetched before the amount of time allocated by `default.api.timeout.ms`
+   *   expires
+   * @throws `BootstrapResolutionError` rejects with it if DNS resolution of
+   *   the bootstrap servers fails within `bootstrap.resolve.timeout.ms`
+   *
+   * @remarks Java's blocking call returns a Promise here. A null topic gets
+   * the FFI's `TypeError`.
+   */
+  partitionsFor(options: {
+    /** The topic to get partition metadata for. */
+    topic: string;
+    timeout?: never;
+  }): Promise<PartitionInfo[]>;
+  /**
+   * Get metadata about the partitions for a given topic: the topic on its
+   * own, the same as `partitionsFor({ topic })`.
+   *
+   * @param topic - The topic to get partition metadata for
+   * @returns resolving to the list of partitions, empty when the topic is not
+   *   found
+   */
+  partitionsFor(topic: string): Promise<PartitionInfo[]>;
+  /**
+   * Get metadata about the partitions for a given topic. This method will
+   * issue a remote call to the server if it does not already have any
+   * metadata about the given topic.
+   *
+   * @param options - The topic to get partition metadata for, and the maximum
+   *   of time to await topic metadata
+   * @returns resolving to the list of partitions, which will be empty when
+   *   the given topic is not found. Note: when both the broker config
+   *   `auto.create.topics.enable` and the consumer config
+   *   `allow.auto.create.topics` are `true`, this method may return an empty
+   *   list even though the topic is being auto-created in the background.
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   specified topic
+   * @throws `TimeoutError` rejects with it if topic metadata cannot be fetched
+   *   before expiration of the passed timeout
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   * @throws `IllegalArgumentError` rejects with it if the timeout value is
+   *   negative
+   * @throws `RangeError` rejects with it if the timeout is `NaN`,
+   *   `-Infinity`, holds years, months or weeks, or is beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds
+   * @throws `TypeError` rejects with it if the timeout or the topic is null
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a negative timeout is refused, where Java makes no check
+   * and waits without a time limit. Why: the binding repeats no
+   * precondition, and the FFI refuses it. Goes when: the FFI treats it as
+   * Java does.)*
+   */
+  partitionsFor(options: {
+    /** The topic to get partition metadata for. */
+    topic: string;
+    /** The maximum of time to await topic metadata. */
+    timeout: Duration;
+  }): Promise<PartitionInfo[]>;
+
+  /**
+   * Get metadata about partitions for all topics that the user is authorized
+   * to view. This method will issue a remote call to the server.
+   *
+   * @returns resolving to the map of topics and its partitions
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   * @throws `TimeoutError` rejects with it if the offset metadata could not be
+   *   fetched before the amount of time allocated by `default.api.timeout.ms`
+   *   expires
+   * @throws `BootstrapResolutionError` rejects with it if DNS resolution of
+   *   the bootstrap servers fails within `bootstrap.resolve.timeout.ms`
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   */
+  listTopics(): Promise<Map<string, PartitionInfo[]>>;
+  /**
+   * Get metadata about partitions for all topics that the user is authorized
+   * to view. This method will issue a remote call to the server.
+   *
+   * @param options - The maximum time this operation will block to fetch
+   *   topic metadata
+   * @returns resolving to the map of topics and its partitions
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `TimeoutError` rejects with it if the topic metadata could not be
+   *   fetched before expiration of the passed timeout
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   * @throws `IllegalArgumentError` rejects with it if the timeout value is
+   *   negative
+   * @throws `RangeError` rejects with it if the timeout is `NaN`,
+   *   `-Infinity`, holds years, months or weeks, or is beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds
+   * @throws `TypeError` rejects with it if the timeout is null
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a negative timeout is refused, where Java makes no check
+   * and waits without a time limit. Why: the binding repeats no
+   * precondition, and the FFI refuses it. Goes when: the FFI treats it as
+   * Java does.)*
+   */
+  listTopics(options: {
+    /** The maximum time this operation will block to fetch topic metadata. */
+    timeout: Duration;
+  }): Promise<Map<string, PartitionInfo[]>>;
+  /**
+   * Get metadata about partitions for all topics: the timeout on its own, the
+   * same as `listTopics({ timeout })`.
+   *
+   * @param timeout - The maximum time this operation will block to fetch
+   *   topic metadata
+   * @returns resolving to the map of topics and its partitions
+   */
+  listTopics(timeout: Duration): Promise<Map<string, PartitionInfo[]>>;
+
+  /**
    * Get the set of partitions that were previously paused by a call to
    * `pause`.
    *
@@ -945,6 +1085,263 @@ export interface Consumer<K = Buffer, V = Buffer> {
   resume(partitions: Iterable<TopicPartition>): Promise<void>;
 
   /**
+   * Look up the offsets for the given partitions by timestamp. The returned
+   * offset for each partition is the earliest offset whose timestamp is
+   * greater than or equal to the given timestamp in the corresponding
+   * partition.
+   *
+   * This is a blocking call. The consumer does not have to be assigned the
+   * partitions. If the message format version in a partition is before
+   * 0.10.0, i.e. the messages do not have timestamps, null will be returned
+   * for that partition.
+   *
+   * @param options - the mapping from partition to the timestamp to look up.
+   * @returns resolving to a mapping from partition to the timestamp and
+   *   offset of the first message with timestamp greater than or equal to the
+   *   target timestamp. If the timestamp and offset for a specific partition
+   *   cannot be found within the default timeout, and no corresponding
+   *   message exists, the entry in the returned map will be `null`
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic(s)
+   * @throws `IllegalArgumentError` rejects with it if the target timestamp is
+   *   negative
+   * @throws `TimeoutError` rejects with it if the offset metadata could not be
+   *   fetched before the amount of time allocated by `default.api.timeout.ms`
+   *   expires
+   * @throws `UnsupportedVersionError` rejects with it if the broker does not
+   *   support looking up the offsets by timestamp
+   * @throws `BootstrapResolutionError` rejects with it if DNS resolution of
+   *   the bootstrap servers fails within `bootstrap.resolve.timeout.ms`
+   * @throws `TypeError` rejects with it if the map, a key or a timestamp is
+   *   null, or the map is not a `TopicPartitionMap`
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a null map, key or timestamp is refused before the closed
+   * and busy checks. Why: the FFI refuses the NULL at its boundary, and a
+   * null timestamp has no value to cross as. Goes when: the FFI refuses them
+   * after the core's checks.)*
+   */
+  offsetsForTimes(options: {
+    /** The mapping from partition to the timestamp to look up: a bigint, or a whole number up to 2^53 - 1. */
+    timestampsToSearch: TopicPartitionMap<bigint | number>;
+    timeout?: never;
+  }): Promise<TopicPartitionMap<OffsetAndTimestamp | null>>;
+  /**
+   * Look up the offsets for the given partitions by timestamp: the map on its
+   * own, the same as `offsetsForTimes({ timestampsToSearch })`.
+   *
+   * @param timestampsToSearch - the mapping from partition to the timestamp
+   *   to look up
+   * @returns resolving to a mapping from partition to the offset and
+   *   timestamp found, `null` for a partition with none
+   */
+  offsetsForTimes(timestampsToSearch: TopicPartitionMap<bigint | number>): Promise<TopicPartitionMap<OffsetAndTimestamp | null>>;
+  /**
+   * Look up the offsets for the given partitions by timestamp. The returned
+   * offset for each partition is the earliest offset whose timestamp is
+   * greater than or equal to the given timestamp in the corresponding
+   * partition.
+   *
+   * This is a blocking call. The consumer does not have to be assigned the
+   * partitions. If the message format version in a partition is before
+   * 0.10.0, i.e. the messages do not have timestamps, null will be returned
+   * for that partition.
+   *
+   * @param options - the mapping from partition to the timestamp to look up,
+   *   and the maximum amount of time to await retrieval of the offsets
+   * @returns resolving to a mapping from partition to the timestamp and
+   *   offset of the first message with timestamp greater than or equal to the
+   *   target timestamp. If the timestamp and offset for a specific partition
+   *   cannot be found within timeout, and no corresponding message exists,
+   *   the entry in the returned map will be `null`
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic(s)
+   * @throws `IllegalArgumentError` rejects with it if the target timestamp or
+   *   the timeout is negative
+   * @throws `TimeoutError` rejects with it if the offset metadata could not be
+   *   fetched before expiration of the passed timeout
+   * @throws `UnsupportedVersionError` rejects with it if the broker does not
+   *   support looking up the offsets by timestamp
+   * @throws `RangeError` rejects with it if the timeout is `NaN`,
+   *   `-Infinity`, holds years, months or weeks, or is beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds
+   * @throws `TypeError` rejects with it if the timeout, the map, a key or a
+   *   timestamp is null
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a negative timeout is refused, where Java makes no check
+   * and waits without a time limit. Why: the binding repeats no
+   * precondition, and the FFI refuses it. Goes when: the FFI treats it as
+   * Java does.)*
+   */
+  offsetsForTimes(options: {
+    /** The mapping from partition to the timestamp to look up: a bigint, or a whole number up to 2^53 - 1. */
+    timestampsToSearch: TopicPartitionMap<bigint | number>;
+    /** The maximum amount of time to await retrieval of the offsets. */
+    timeout: Duration;
+  }): Promise<TopicPartitionMap<OffsetAndTimestamp | null>>;
+
+  /**
+   * Get the first offset for the given partitions.
+   *
+   * This method does not change the current consumer position of the
+   * partitions.
+   *
+   * @param options - the partitions to get the earliest offsets.
+   * @returns resolving to the earliest available offsets for the given
+   *   partitions
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic(s)
+   * @throws `TimeoutError` rejects with it if the offset metadata could not be
+   *   fetched before expiration of the configured `default.api.timeout.ms`
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a null collection gets the FFI's `TypeError` before the
+   * closed and busy checks. Why: the FFI refuses the NULL first. Goes when:
+   * it refuses it after them.)*
+   *
+   * @see `seekToBeginning`
+   */
+  beginningOffsets(options: {
+    /** The partitions to get the earliest offsets. */
+    partitions: Iterable<TopicPartition>;
+    timeout?: never;
+  }): Promise<TopicPartitionMap<bigint>>;
+  /**
+   * Get the first offset for the given partitions: the partitions on their
+   * own, the same as `beginningOffsets({ partitions })`.
+   *
+   * @param partitions - the partitions to get the earliest offsets
+   * @returns resolving to the earliest available offsets for the given
+   *   partitions
+   */
+  beginningOffsets(partitions: Iterable<TopicPartition>): Promise<TopicPartitionMap<bigint>>;
+  /**
+   * Get the first offset for the given partitions.
+   *
+   * This method does not change the current consumer position of the
+   * partitions.
+   *
+   * @param options - the partitions to get the earliest offsets, and the
+   *   maximum amount of time to await retrieval of the beginning offsets
+   * @returns resolving to the earliest available offsets for the given
+   *   partitions, and it will return empty map if zero timeout is provided
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic(s)
+   * @throws `TimeoutError` rejects with it if the offset metadata could not be
+   *   fetched before expiration of the passed timeout
+   * @throws `IllegalArgumentError` rejects with it if the timeout value is
+   *   negative
+   * @throws `RangeError` rejects with it if the timeout is `NaN`,
+   *   `-Infinity`, holds years, months or weeks, or is beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds
+   * @throws `TypeError` rejects with it if the timeout is null
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a negative timeout is refused, where Java makes no check
+   * and waits without a time limit. Why: the binding repeats no
+   * precondition, and the FFI refuses it. Goes when: the FFI treats it as
+   * Java does.)*
+   *
+   * @see `seekToBeginning`
+   */
+  beginningOffsets(options: {
+    /** The partitions to get the earliest offsets. */
+    partitions: Iterable<TopicPartition>;
+    /** The maximum amount of time to await retrieval of the beginning offsets. */
+    timeout: Duration;
+  }): Promise<TopicPartitionMap<bigint>>;
+
+  /**
+   * Get the end offsets for the given partitions. In the default
+   * `read_uncommitted` isolation level, the end offset is the high watermark
+   * (that is, the offset of the last successfully replicated message plus
+   * one). For `read_committed` consumers, the end offset is the last stable
+   * offset (LSO), which is the minimum of the high watermark and the smallest
+   * offset of any open transaction. Finally, if the partition has never been
+   * written to, the end offset is 0.
+   *
+   * This method does not change the current consumer position of the
+   * partitions.
+   *
+   * @param options - the partitions to get the end offsets.
+   * @returns resolving to the end offsets for the given partitions, each a
+   *   bigint
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic(s)
+   * @throws `TimeoutError` rejects with it if the offset metadata could not be
+   *   fetched before the amount of time allocated by `default.api.timeout.ms`
+   *   expires
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a null collection gets the FFI's `TypeError` before the
+   * closed and busy checks. Why: the FFI refuses the NULL first. Goes when:
+   * it refuses it after them.)*
+   *
+   * @see `seekToEnd`
+   */
+  endOffsets(options: {
+    /** The partitions to get the end offsets. */
+    partitions: Iterable<TopicPartition>;
+    timeout?: never;
+  }): Promise<TopicPartitionMap<bigint>>;
+  /**
+   * Get the end offsets for the given partitions: the partitions on their
+   * own, the same as `endOffsets({ partitions })`.
+   *
+   * @param partitions - the partitions to get the end offsets
+   * @returns resolving to the end offsets for the given partitions
+   */
+  endOffsets(partitions: Iterable<TopicPartition>): Promise<TopicPartitionMap<bigint>>;
+  /**
+   * Get the end offsets for the given partitions. In the default
+   * `read_uncommitted` isolation level, the end offset is the high watermark
+   * (that is, the offset of the last successfully replicated message plus
+   * one). For `read_committed` consumers, the end offset is the last stable
+   * offset (LSO), which is the minimum of the high watermark and the smallest
+   * offset of any open transaction. Finally, if the partition has never been
+   * written to, the end offset is 0.
+   *
+   * This method does not change the current consumer position of the
+   * partitions.
+   *
+   * @param options - the partitions to get the end offsets, and the maximum
+   *   amount of time to await retrieval of the end offsets
+   * @returns resolving to the end offsets for the given partitions, and it
+   *   will return empty map if zero timeout is provided
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic(s)
+   * @throws `TimeoutError` rejects with it if the offsets could not be
+   *   fetched before expiration of the passed timeout
+   * @throws `IllegalArgumentError` rejects with it if the timeout value is
+   *   negative
+   * @throws `RangeError` rejects with it if the timeout is `NaN`,
+   *   `-Infinity`, holds years, months or weeks, or is beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds
+   * @throws `TypeError` rejects with it if the timeout is null
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a negative timeout is refused, where Java makes no check
+   * and waits without a time limit. Why: the binding repeats no
+   * precondition, and the FFI refuses it. Goes when: the FFI treats it as
+   * Java does.)*
+   *
+   * @see `seekToEnd`
+   */
+  endOffsets(options: {
+    /** The partitions to get the end offsets. */
+    partitions: Iterable<TopicPartition>;
+    /** The maximum amount of time to await retrieval of the end offsets. */
+    timeout: Duration;
+  }): Promise<TopicPartitionMap<bigint>>;
+
+  /**
    * Get the consumer's current lag on the partition. Returns an "empty"
    * value, `null`, if the lag is not known, for example if there is no
    * position yet, or if the end offset is not known yet.
@@ -985,6 +1382,55 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `ConcurrentModificationError` while another call is in progress
    */
   groupMetadata(): ConsumerGroupMetadata;
+
+  /**
+   * Alert the consumer to trigger a new rebalance by rejoining the group.
+   * This is a nonblocking call that forces the consumer to trigger a new
+   * rebalance on the next `poll` call. Note that this API does not itself
+   * initiate the rebalance, so you must still call `poll`.
+   *
+   * @returns settling once the core answered
+   *
+   * @remarks Under the consumer group protocol, the only one this client
+   * has, it only logs "Operation not supported in new consumer group
+   * protocol", as Java's consumer does.
+   *
+   * @see `enforceRebalance({ reason })`
+   */
+  enforceRebalance(): Promise<void>;
+  /**
+   * Alert the consumer to trigger a new rebalance by rejoining the group.
+   * This is a nonblocking call that forces the consumer to trigger a new
+   * rebalance on the next `poll` call. Note that this API does not itself
+   * initiate the rebalance, so you must still call `poll`. If a rebalance is
+   * already in progress this call will be a no-op. If you wish to force an
+   * additional rebalance you must complete the current one by calling poll
+   * before retrying this API.
+   *
+   * You do not need to call this during normal processing, as the consumer
+   * group will manage itself automatically and rebalance when necessary.
+   *
+   * @param options - The reason why the new rebalance is needed.
+   * @returns settling once the core answered
+   * @throws `IllegalStateError` rejects with it if the consumer does not use
+   *   group subscription
+   *
+   * @remarks Under the consumer group protocol, the only one this client
+   * has, it only logs "Operation not supported in new consumer group
+   * protocol", as Java's consumer does, and so resolves.
+   */
+  enforceRebalance(options: {
+    /** The reason why the new rebalance is needed. */
+    reason: string;
+  }): Promise<void>;
+  /**
+   * Alert the consumer to trigger a new rebalance: the reason on its own, the
+   * same as `enforceRebalance({ reason })`.
+   *
+   * @param reason - The reason why the new rebalance is needed.
+   * @returns settling once the core answered
+   */
+  enforceRebalance(reason: string): Promise<void>;
 
   /**
    * Close the consumer with the default leave group behavior, waiting for up

@@ -74,21 +74,6 @@ missing clients.consumer.Consumer#unregisterMetricFromSubscription
 missing clients.consumer.KafkaConsumer#clientInstanceId
 missing clients.consumer.KafkaConsumer#registerMetricForSubscription
 missing clients.consumer.KafkaConsumer#unregisterMetricFromSubscription
-# Consumer and KafkaConsumer: the offset and metadata queries and
-# enforceRebalance, which the next change of the consumer adds, removing these
-# lines.
-missing clients.consumer.Consumer#beginningOffsets
-missing clients.consumer.Consumer#endOffsets
-missing clients.consumer.Consumer#enforceRebalance
-missing clients.consumer.Consumer#listTopics
-missing clients.consumer.Consumer#offsetsForTimes
-missing clients.consumer.Consumer#partitionsFor
-missing clients.consumer.KafkaConsumer#beginningOffsets
-missing clients.consumer.KafkaConsumer#endOffsets
-missing clients.consumer.KafkaConsumer#enforceRebalance
-missing clients.consumer.KafkaConsumer#listTopics
-missing clients.consumer.KafkaConsumer#offsetsForTimes
-missing clients.consumer.KafkaConsumer#partitionsFor
 
 
 # check-overload-shape: gaps the user kept (PLAN.md §8 decision 11).

@@ -383,6 +383,44 @@ interface Native {
   // Java's groupMetadata() through its fallible form: groupId, generationId,
   // memberId and groupInstanceId (null for none).
   consumerGroupMetadata(handle: ConsumerHandle): [string, number, string, string | null];
+  // Java's partitionsFor, timeoutMs null for the form without a timeout; a
+  // null topic goes to the FFI as NULL.
+  consumerPartitionsFor(
+    handle: ConsumerHandle,
+    topic: string | null,
+    timeoutMs: number | bigint | null,
+    done: (error: unknown, partitions: NativePartitionInfo[] | null) => void,
+  ): void;
+  // Java's listTopics: each topic with its partitions.
+  consumerListTopics(
+    handle: ConsumerHandle,
+    timeoutMs: number | bigint | null,
+    done: (error: unknown, topics: Array<[string, NativePartitionInfo[]]> | null) => void,
+  ): void;
+  // Java's offsetsForTimes: [[topic, partition], timestamp] entries, a null
+  // map or key going to the FFI as NULL; each answer [topic, partition,
+  // offset, timestamp, leaderEpoch (-1 for none)], or [topic, partition, null].
+  consumerOffsetsForTimes(
+    handle: ConsumerHandle,
+    timestampsToSearch: Array<[[string | null, number] | null, bigint]> | null,
+    timeoutMs: number | bigint | null,
+    done: (error: unknown, entries: Array<[string, number, bigint | null, bigint?, number?]> | null) => void,
+  ): void;
+  // Java's beginningOffsets and endOffsets: each answer [topic, partition, offset].
+  consumerBeginningOffsets(
+    handle: ConsumerHandle,
+    partitions: Array<[string | null, number] | null> | null,
+    timeoutMs: number | bigint | null,
+    done: (error: unknown, entries: Array<[string, number, bigint]> | null) => void,
+  ): void;
+  consumerEndOffsets(
+    handle: ConsumerHandle,
+    partitions: Array<[string | null, number] | null> | null,
+    timeoutMs: number | bigint | null,
+    done: (error: unknown, entries: Array<[string, number, bigint]> | null) => void,
+  ): void;
+  // Java's enforceRebalance() and, withReason, enforceRebalance(String).
+  consumerEnforceRebalance(handle: ConsumerHandle, withReason: boolean, reason: string | null, done: (error: unknown) => void): void;
   // Java's assignment(), subscription() and paused(), through their fallible forms.
   consumerAssignment(handle: ConsumerHandle): Array<[string, number]>;
   consumerSubscription(handle: ConsumerHandle): string[];

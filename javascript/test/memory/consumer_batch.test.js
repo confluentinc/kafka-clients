@@ -195,7 +195,21 @@ test('the offset calls free every error they fail with, every answer, and the va
           await c.currentLag({ topicPartition: tp });
           await fail(c.currentLag({ topicPartition: other }));
           c.groupMetadata();
+          await fail(c.partitionsFor({ topic: 't', timeout: 20 }));
+          await fail(c.partitionsFor(null));
+          await fail(c.listTopics({ timeout: 20 }));
+          await c.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap() });
+          await fail(c.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[tp, 0n]]), timeout: 20 }));
+          await fail(c.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[tp, -1n]]) }));
+          await fail(c.offsetsForTimes(null));
+          await c.beginningOffsets({ partitions: [tp], timeout: 0 });
+          await fail(c.beginningOffsets({ partitions: [tp], timeout: 20 }));
+          await fail(c.endOffsets({ partitions: [tp], timeout: 20 }));
+          await fail(c.endOffsets(null));
+          await c.enforceRebalance();
+          await c.enforceRebalance({ reason: 'r' });
           await c.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+          await fail(c.listTopics());
           await fail(c.commitSync());
           await fail(c.position({ partition: tp }));
           await fail(c.committed({ partitions: [tp] }));
@@ -207,5 +221,5 @@ test('the offset calls free every error they fail with, every answer, and the va
     })();
   `);
   assert.deepEqual(out.leaks, NO_LEAKS);
-  assert.equal(out.failures, 5 * 15);
+  assert.equal(out.failures, 5 * 25);
 });

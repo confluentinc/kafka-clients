@@ -123,7 +123,7 @@ test('the consumer uses the functions of the plan', () => {
   }
 });
 
-test("the consumer's commits, seeks, positions and group metadata use their entry points", () => {
+test("the consumer's commits, seeks, positions, offset and metadata queries use their entry points", () => {
   const called = new Set(sources.flatMap((s) => [...calledFunctions(path.join(NATIVE, s))]));
   for (const name of [
     'kafka_consumer_Consumer_commit_sync_cb',
@@ -148,6 +148,21 @@ test("the consumer's commits, seeks, positions and group metadata use their entr
     'kafka_consumer_ConsumerGroupMetadata_member_id_err',
     'kafka_consumer_ConsumerGroupMetadata_group_instance_id_err',
     'kafka_consumer_ConsumerGroupMetadata_destroy_err',
+    'kafka_consumer_Consumer_partitions_for_cb',
+    'kafka_consumer_Consumer_partitions_for_with_timeout_cb',
+    'kafka_consumer_Consumer_list_topics_cb',
+    'kafka_consumer_Consumer_list_topics_with_timeout_cb',
+    'kafka_consumer_Consumer_offsets_for_times_cb',
+    'kafka_consumer_Consumer_offsets_for_times_with_timeout_cb',
+    'kafka_consumer_OffsetAndTimestamp_offset_err',
+    'kafka_consumer_OffsetAndTimestamp_timestamp_err',
+    'kafka_consumer_OffsetAndTimestamp_leader_epoch_err',
+    'kafka_consumer_Consumer_beginning_offsets_cb',
+    'kafka_consumer_Consumer_beginning_offsets_with_timeout_cb',
+    'kafka_consumer_Consumer_end_offsets_cb',
+    'kafka_consumer_Consumer_end_offsets_with_timeout_cb',
+    'kafka_consumer_Consumer_enforce_rebalance_cb',
+    'kafka_consumer_Consumer_enforce_rebalance_with_reason_cb',
   ]) {
     assert.ok(called.has(name), `${name} is not called`);
   }
@@ -178,6 +193,18 @@ test('no blocking consumer call: every waiting call is a _cb twin (rule 4)', () 
     'kafka_consumer_Consumer_committed',
     'kafka_consumer_Consumer_committed_with_timeout',
     'kafka_consumer_Consumer_current_lag',
+    'kafka_consumer_Consumer_partitions_for',
+    'kafka_consumer_Consumer_partitions_for_with_timeout',
+    'kafka_consumer_Consumer_list_topics',
+    'kafka_consumer_Consumer_list_topics_with_timeout',
+    'kafka_consumer_Consumer_offsets_for_times',
+    'kafka_consumer_Consumer_offsets_for_times_with_timeout',
+    'kafka_consumer_Consumer_beginning_offsets',
+    'kafka_consumer_Consumer_beginning_offsets_with_timeout',
+    'kafka_consumer_Consumer_end_offsets',
+    'kafka_consumer_Consumer_end_offsets_with_timeout',
+    'kafka_consumer_Consumer_enforce_rebalance',
+    'kafka_consumer_Consumer_enforce_rebalance_with_reason',
   ]) {
     for (const source of sources) {
       const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));

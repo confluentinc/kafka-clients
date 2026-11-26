@@ -25,9 +25,18 @@ import { debug } from '../internal/debug';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { warnPreview } from '../internal/lifecycle';
 import { liveMetrics } from '../internal/live_metrics';
-import { long, stringSet, topicPartition as topicPartitionKind, topicPartitionList, topicPartitionOffsetMap } from '../internal/payload';
+import { partitionInfoOf } from '../internal/metadata';
+import {
+  long,
+  stringSet,
+  topicPartition as topicPartitionKind,
+  topicPartitionList,
+  topicPartitionLongMap,
+  topicPartitionOffsetMap,
+} from '../internal/payload';
 import type { Metric } from '../common/metric';
 import type { MetricNameMap } from '../common/metric_name_map';
+import type { PartitionInfo } from '../common/partition_info';
 import { TopicPartition } from '../common/topic_partition';
 import { TopicPartitionMap } from '../common/topic_partition_map';
 import { TopicPartitionSet } from '../common/topic_partition_set';
@@ -41,6 +50,7 @@ import { ConsumerGroupMetadata } from './consumer_group_metadata';
 import { ConsumerRecord } from './consumer_record';
 import { ConsumerRecords } from './consumer_records';
 import { OffsetAndMetadata } from './offset_and_metadata';
+import { OffsetAndTimestamp } from './offset_and_timestamp';
 import { SubscriptionPattern } from './subscription_pattern';
 
 /** The native consumer handle (`internal/native.ts`). */
@@ -48,6 +58,15 @@ type ConsumerHandle = ReturnType<typeof native.consumerCreate>;
 
 /** A committed offset as the addon reads it: topic, partition, then offset, leader epoch and metadata, or null for none. */
 type NativeOffsetEntry = [string, number, bigint | null, number?, string?];
+
+/** A partition's fields, as the addon reads them (`internal/native.ts`). */
+type NativePartitionInfo = Parameters<typeof partitionInfoOf>[0];
+
+/** An offset found for a time, as the addon reads it: topic, partition, then offset, timestamp and leader epoch, or null for none. */
+type NativeTimestampEntry = [string, number, bigint | null, bigint?, number?];
+
+/** An offset as the addon reads it: topic, partition, offset. */
+type NativeLongEntry = [string, number, bigint];
 
 /**
  * Whether `value` is an iterable object, which a bare collection is.
@@ -112,6 +131,22 @@ const COMMITTED_FORMS = new JavaForms('committed', [['partitions'], ['partitions
 });
 const CURRENT_LAG_FORMS = new JavaForms('currentLag', [['topicPartition']], { bareTypes: { topicPartition: isPartitionOrNull } });
 const GROUP_METADATA_FORMS = new JavaForms('groupMetadata', [[]], { reader: true });
+const PARTITIONS_FOR_FORMS = new JavaForms('partitionsFor', [['topic'], ['topic', 'timeout']], {
+  bareTypes: { topic: (value) => value === null || typeof value === 'string' },
+});
+const LIST_TOPICS_FORMS = new JavaForms('listTopics', [[], ['timeout']], { bareTypes: { timeout: isDurationOrNull } });
+const OFFSETS_FOR_TIMES_FORMS = new JavaForms('offsetsForTimes', [['timestampsToSearch'], ['timestampsToSearch', 'timeout']], {
+  bareTypes: { timestampsToSearch: (value) => value === null || value instanceof TopicPartitionMap || value instanceof Map },
+});
+const BEGINNING_OFFSETS_FORMS = new JavaForms('beginningOffsets', [['partitions'], ['partitions', 'timeout']], {
+  bareTypes: { partitions: (value) => value === null || isIterable(value) },
+});
+const END_OFFSETS_FORMS = new JavaForms('endOffsets', [['partitions'], ['partitions', 'timeout']], {
+  bareTypes: { partitions: (value) => value === null || isIterable(value) },
+});
+const ENFORCE_REBALANCE_FORMS = new JavaForms('enforceRebalance', [[], ['reason']], {
+  bareTypes: { reason: (value) => value === null || typeof value === 'string' },
+});
 
 // Until the client has deserializers, a consumer takes none: keys and values
 // are Buffers, and a deserializer is refused rather than ignored.
@@ -223,6 +258,18 @@ function answer<T>(start: (done: (error: unknown, value: T | null) => void) => v
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
     start((error, value) => (error !== null ? reject(error) : resolve(value as T)));
   });
+}
+
+/**
+ * The addon's `[topic, partition, offset]` entries as a `TopicPartitionMap<bigint>`.
+ *
+ * @param entries - the entries
+ * @returns the map
+ */
+function longMap(entries: NativeLongEntry[]): TopicPartitionMap<bigint> {
+  const map = new TopicPartitionMap<bigint>();
+  for (const [topic, partition, offset] of entries) map.set(new TopicPartition({ topic, partition }), offset);
+  return map;
 }
 
 /**
@@ -582,6 +629,48 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
     return liveMetrics(native.consumerMetrics(this.#handle));
   }
 
+  partitionsFor(options: {
+    /** The topic to get partition metadata for. */
+    topic: string;
+    timeout?: never;
+  }): Promise<PartitionInfo[]>;
+  partitionsFor(topic: string): Promise<PartitionInfo[]>;
+  partitionsFor(options: {
+    /** The topic to get partition metadata for. */
+    topic: string;
+    /** The maximum of time to await topic metadata. */
+    timeout: Duration;
+  }): Promise<PartitionInfo[]>;
+  partitionsFor(options: unknown): Promise<PartitionInfo[]> {
+    const count = arguments.length;
+    return rejecting(async () => {
+      const form = PARTITIONS_FOR_FORMS.match(options, count);
+      const topic = PARTITIONS_FOR_FORMS.value(options, 'topic');
+      if (topic !== null && typeof topic !== 'string') throw new TypeError('topic must be a string');
+      const timeoutMs = timeoutOf(PARTITIONS_FOR_FORMS, options, form === 1);
+      const partitions = await answer<NativePartitionInfo[]>((done) => native.consumerPartitionsFor(this.#handle, topic, timeoutMs, done));
+      return partitions.map(partitionInfoOf);
+    });
+  }
+
+  listTopics(): Promise<Map<string, PartitionInfo[]>>;
+  listTopics(options: {
+    /** The maximum time this operation will block to fetch topic metadata. */
+    timeout: Duration;
+  }): Promise<Map<string, PartitionInfo[]>>;
+  listTopics(timeout: Duration): Promise<Map<string, PartitionInfo[]>>;
+  listTopics(options?: unknown): Promise<Map<string, PartitionInfo[]>> {
+    const count = arguments.length;
+    return rejecting(async () => {
+      const form = LIST_TOPICS_FORMS.match(options, count);
+      const timeoutMs = timeoutOf(LIST_TOPICS_FORMS, options, form === 1);
+      const topics = await answer<Array<[string, NativePartitionInfo[]]>>((done) =>
+        native.consumerListTopics(this.#handle, timeoutMs, done),
+      );
+      return new Map(topics.map(([topic, partitions]) => [topic, partitions.map(partitionInfoOf)]));
+    });
+  }
+
   paused(): TopicPartitionSet {
     PAUSED_FORMS.match(undefined, arguments.length);
     return partitionSet(native.consumerPaused(this.#handle));
@@ -615,6 +704,93 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
     });
   }
 
+  offsetsForTimes(options: {
+    /** The mapping from partition to the timestamp to look up: a bigint, or a whole number up to 2^53 - 1. */
+    timestampsToSearch: TopicPartitionMap<bigint | number>;
+    timeout?: never;
+  }): Promise<TopicPartitionMap<OffsetAndTimestamp | null>>;
+  offsetsForTimes(timestampsToSearch: TopicPartitionMap<bigint | number>): Promise<TopicPartitionMap<OffsetAndTimestamp | null>>;
+  offsetsForTimes(options: {
+    /** The mapping from partition to the timestamp to look up: a bigint, or a whole number up to 2^53 - 1. */
+    timestampsToSearch: TopicPartitionMap<bigint | number>;
+    /** The maximum amount of time to await retrieval of the offsets. */
+    timeout: Duration;
+  }): Promise<TopicPartitionMap<OffsetAndTimestamp | null>>;
+  offsetsForTimes(options: unknown): Promise<TopicPartitionMap<OffsetAndTimestamp | null>> {
+    const count = arguments.length;
+    return rejecting(async () => {
+      const form = OFFSETS_FOR_TIMES_FORMS.match(options, count);
+      const map = topicPartitionLongMap.take(
+        OFFSETS_FOR_TIMES_FORMS.value(options, 'timestampsToSearch'),
+        'timestampsToSearch',
+      ) as TopicPartitionMap<bigint | null> | null;
+      // A null map or key goes to the FFI as NULL, which refuses it. A null
+      // timestamp, which Java's unboxing refuses with NullPointerException,
+      // has no int64 to cross as: the binding's run-time type check.
+      const entries =
+        map === null
+          ? null
+          : [...map.entries()].map(([tp, timestamp]): [[string | null, number] | null, bigint] => {
+              if (timestamp === null) throw new TypeError('timestampsToSearch must not contain a null timestamp');
+              return [tp === null ? null : [tp.topic, tp.partition], timestamp];
+            });
+      const timeoutMs = timeoutOf(OFFSETS_FOR_TIMES_FORMS, options, form === 1);
+      const found = await answer<NativeTimestampEntry[]>((done) => native.consumerOffsetsForTimes(this.#handle, entries, timeoutMs, done));
+      const result = new TopicPartitionMap<OffsetAndTimestamp | null>();
+      for (const [topic, partition, offset, timestamp = -1n, leaderEpoch = -1] of found) {
+        result.set(
+          new TopicPartition({ topic, partition }),
+          offset === null ? null : new OffsetAndTimestamp({ offset, timestamp, leaderEpoch: leaderEpoch < 0 ? null : leaderEpoch }),
+        );
+      }
+      return result;
+    });
+  }
+
+  beginningOffsets(options: {
+    /** The partitions to get the earliest offsets. */
+    partitions: Iterable<TopicPartition>;
+    timeout?: never;
+  }): Promise<TopicPartitionMap<bigint>>;
+  beginningOffsets(partitions: Iterable<TopicPartition>): Promise<TopicPartitionMap<bigint>>;
+  beginningOffsets(options: {
+    /** The partitions to get the earliest offsets. */
+    partitions: Iterable<TopicPartition>;
+    /** The maximum amount of time to await retrieval of the beginning offsets. */
+    timeout: Duration;
+  }): Promise<TopicPartitionMap<bigint>>;
+  beginningOffsets(options: unknown): Promise<TopicPartitionMap<bigint>> {
+    const count = arguments.length;
+    return rejecting(async () => {
+      const form = BEGINNING_OFFSETS_FORMS.match(options, count);
+      const pairs = partitionPairs(BEGINNING_OFFSETS_FORMS.value(options, 'partitions'), false);
+      const timeoutMs = timeoutOf(BEGINNING_OFFSETS_FORMS, options, form === 1);
+      return longMap(await answer<NativeLongEntry[]>((done) => native.consumerBeginningOffsets(this.#handle, pairs, timeoutMs, done)));
+    });
+  }
+
+  endOffsets(options: {
+    /** The partitions to get the end offsets. */
+    partitions: Iterable<TopicPartition>;
+    timeout?: never;
+  }): Promise<TopicPartitionMap<bigint>>;
+  endOffsets(partitions: Iterable<TopicPartition>): Promise<TopicPartitionMap<bigint>>;
+  endOffsets(options: {
+    /** The partitions to get the end offsets. */
+    partitions: Iterable<TopicPartition>;
+    /** The maximum amount of time to await retrieval of the end offsets. */
+    timeout: Duration;
+  }): Promise<TopicPartitionMap<bigint>>;
+  endOffsets(options: unknown): Promise<TopicPartitionMap<bigint>> {
+    const count = arguments.length;
+    return rejecting(async () => {
+      const form = END_OFFSETS_FORMS.match(options, count);
+      const pairs = partitionPairs(END_OFFSETS_FORMS.value(options, 'partitions'), false);
+      const timeoutMs = timeoutOf(END_OFFSETS_FORMS, options, form === 1);
+      return longMap(await answer<NativeLongEntry[]>((done) => native.consumerEndOffsets(this.#handle, pairs, timeoutMs, done)));
+    });
+  }
+
   currentLag(options: {
     /** The partition to get the lag for. */
     topicPartition: TopicPartition;
@@ -635,6 +811,22 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
     if (!this.#groupIdDefined) throw new InvalidGroupIdError(NO_GROUP_ID);
     const [groupId, generationId, memberId, groupInstanceId] = native.consumerGroupMetadata(this.#handle);
     return ConsumerGroupMetadata.internalCreate(groupId, generationId, memberId, groupInstanceId);
+  }
+
+  enforceRebalance(): Promise<void>;
+  enforceRebalance(options: {
+    /** The reason why the new rebalance is needed. */
+    reason: string;
+  }): Promise<void>;
+  enforceRebalance(reason: string): Promise<void>;
+  enforceRebalance(options?: unknown): Promise<void> {
+    const count = arguments.length;
+    return rejecting(() => {
+      const withReason = ENFORCE_REBALANCE_FORMS.match(options, count) === 1;
+      const reason = withReason ? ENFORCE_REBALANCE_FORMS.value(options, 'reason') : null;
+      if (reason !== null && typeof reason !== 'string') throw new TypeError('reason must be a string');
+      return completion((done) => native.consumerEnforceRebalance(this.#handle, withReason, reason, done));
+    });
   }
 
   close(): Promise<void>;

@@ -328,3 +328,11 @@ kafka_Map_t* offset_map_from_js(napi_env env, napi_value entries) {
 void offset_map_free(napi_env env, kafka_Map_t* map) {
     tp_map_free(env, map, MAP_OFFSETS);
 }
+
+kafka_Map_t* tp_long_map_from_js(napi_env env, napi_value entries) {
+    return tp_map_from_js(env, entries, MAP_LONGS);
+}
+
+void tp_long_map_free(napi_env env, kafka_Map_t* map) {
+    tp_map_free(env, map, MAP_LONGS);
+}

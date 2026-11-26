@@ -1156,6 +1156,325 @@ napi_value js_consumer_current_lag(napi_env env, napi_callback_info info) {
     return NULL;
 }
 
+// ---- the offset and metadata queries and enforceRebalance -------------------
+
+// The partitions_for_cb completion: the owned list of PartitionInfo as
+// partitions_take_to_js reads it, the list freed.
+static void partitions_for_on_complete(kafka_List_t* value, kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
+    ValueCtx* ctx = (ValueCtx*)opaque;
+    Consumer* c = ctx->c;
+    napi_env env = c->env;
+    kafka_common_Error_t* ffi_err = NULL;
+    if (!c->queue.finalizing) {
+        napi_value partitions = NULL;
+        if (value != NULL) {
+            partitions = partitions_take_to_js(env, value);
+            value = NULL;
+        }
+        if (partitions == NULL && error == NULL) js_throw_last_napi_error(env, "reading the partitions");
+        value_settle(env, ctx, error, partitions, "converting a partitionsFor() answer");
+        error = NULL;
+    }
+    if (value != NULL) error_discard(FFI_ERR(kafka_List_destroy_err(value, &ffi_err)));
+    error_discard(error);
+    delete_ref(env, &ctx->done);
+    free(ctx);
+    cbq_call_end(env, &c->queue);
+}
+
+// consumerPartitionsFor(handle, topic, timeoutMs, done): Java's
+// partitionsFor(String) and partitionsFor(String, Duration); a null topic
+// crosses as NULL, which the FFI reports. `done(error | null, partitions |
+// null)`, each partition's fields as partitions_to_js gives them.
+napi_value js_consumer_partitions_for(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 4 || !is_function(env, argv[3])) {
+        napi_throw_type_error(env, NULL, "partitionsFor(handle, topic, timeoutMs, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    int timed = 0;
+    int64_t timeout = 0;
+    if (timeout_arg(env, argv[2], "partitionsFor timeoutMs", &timed, &timeout) != 0) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    char* topic = type == napi_null ? NULL : js_string_dup(env, argv[1], "topic must be a string");
+    if (type != napi_null && topic == NULL) return NULL;
+    ValueCtx* ctx = value_ctx_new(env, c, argv[3]);
+    if (ctx != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_partitions_for_cb(c->view, topic, partitions_for_on_complete, ctx);
+    } else if (ctx != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_partitions_for_with_timeout_cb(c->view, topic, timeout, partitions_for_on_complete, ctx);
+    }
+    free(topic);
+    return NULL;
+}
+
+// A borrowed map of topic (a C string) to a list of PartitionInfo as an array
+// of [topic, partitions], NULL when Node-API failed.
+static napi_value topics_to_js(napi_env env, const kafka_Map_t* map) {
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t n = 0;
+    error_warn(env, 1, FFI_SET(n, kafka_Map_size_err(map, &ffi_err)));
+    napi_value arr;
+    if (napi_create_array_with_length(env, (size_t)n, &arr) != napi_ok) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        const char* topic = NULL;
+        const kafka_List_t* list = NULL;
+        error_warn(env, 1, FFI_SET(topic, (const char*)kafka_Map_key_err(map, i, &ffi_err)));
+        error_warn(env, 1, FFI_SET(list, (const kafka_List_t*)kafka_Map_value_err(map, i, &ffi_err)));
+        napi_value entry, t;
+        napi_value partitions = list == NULL ? NULL : partitions_to_js(env, list);
+        if (topic == NULL || partitions == NULL || napi_create_array_with_length(env, 2, &entry) != napi_ok
+            || napi_create_string_utf8(env, topic, NAPI_AUTO_LENGTH, &t) != napi_ok || napi_set_element(env, entry, 0, t) != napi_ok
+            || napi_set_element(env, entry, 1, partitions) != napi_ok || napi_set_element(env, arr, (uint32_t)i, entry) != napi_ok)
+            return NULL;
+    }
+    return arr;
+}
+
+// The list_topics_cb completion: the owned map of topic to its partitions, as
+// topics_to_js reads it, the map (and its lists) freed.
+static void list_topics_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
+    ValueCtx* ctx = (ValueCtx*)opaque;
+    Consumer* c = ctx->c;
+    napi_env env = c->env;
+    kafka_common_Error_t* ffi_err = NULL;
+    if (!c->queue.finalizing) {
+        napi_value topics = error == NULL && value != NULL ? topics_to_js(env, value) : NULL;
+        if (topics == NULL && error == NULL) js_throw_last_napi_error(env, "reading the topics");
+        value_settle(env, ctx, error, topics, "converting a listTopics() answer");
+        error = NULL;
+    }
+    if (value != NULL) error_warn(env, !c->queue.finalizing, FFI_ERR(kafka_Map_destroy_err(value, &ffi_err)));
+    error_discard(error);
+    delete_ref(env, &ctx->done);
+    free(ctx);
+    cbq_call_end(env, &c->queue);
+}
+
+// consumerListTopics(handle, timeoutMs, done): Java's listTopics() and
+// listTopics(Duration). `done(error | null, topics | null)`, the topics as
+// topics_to_js gives them.
+napi_value js_consumer_list_topics(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 3 || !is_function(env, argv[2])) {
+        napi_throw_type_error(env, NULL, "listTopics(handle, timeoutMs, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    int timed = 0;
+    int64_t timeout = 0;
+    if (timeout_arg(env, argv[1], "listTopics timeoutMs", &timed, &timeout) != 0) return NULL;
+    ValueCtx* ctx = value_ctx_new(env, c, argv[2]);
+    if (ctx == NULL) return NULL;
+    if (!timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_list_topics_cb(c->view, list_topics_on_complete, ctx);
+    } else {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_list_topics_with_timeout_cb(c->view, timeout, list_topics_on_complete, ctx);
+    }
+    return NULL;
+}
+
+// A borrowed map of TopicPartition to OffsetAndTimestamp as an array of
+// [topic, partition, offset, timestamp, leaderEpoch (-1 for none)], or
+// [topic, partition, null] for a NULL value; NULL when Node-API failed.
+static napi_value timestamps_to_js(napi_env env, const kafka_Map_t* map) {
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t n = 0;
+    error_warn(env, 1, FFI_SET(n, kafka_Map_size_err(map, &ffi_err)));
+    napi_value arr;
+    if (napi_create_array_with_length(env, (size_t)n, &arr) != napi_ok) return NULL;
+    for (int32_t i = 0; i < n; i++) {
+        const kafka_common_TopicPartition_t* tp = NULL;
+        const kafka_consumer_OffsetAndTimestamp_t* ot = NULL;
+        error_warn(env, 1, FFI_SET(tp, (const kafka_common_TopicPartition_t*)kafka_Map_key_err(map, i, &ffi_err)));
+        error_warn(env, 1, FFI_SET(ot, (const kafka_consumer_OffsetAndTimestamp_t*)kafka_Map_value_err(map, i, &ffi_err)));
+        napi_value entry = tp == NULL ? NULL : topic_partition_to_js(env, tp);
+        if (entry == NULL) return NULL;
+        napi_value v;
+        if (ot == NULL) {
+            if (napi_get_null(env, &v) != napi_ok || napi_set_element(env, entry, 2, v) != napi_ok) return NULL;
+        } else {
+            int64_t offset = -1, timestamp = -1;
+            int32_t epoch = -1;
+            error_warn(env, 1, FFI_SET(offset, kafka_consumer_OffsetAndTimestamp_offset_err(ot, &ffi_err)));
+            error_warn(env, 1, FFI_SET(timestamp, kafka_consumer_OffsetAndTimestamp_timestamp_err(ot, &ffi_err)));
+            error_warn(env, 1, FFI_SET(epoch, kafka_consumer_OffsetAndTimestamp_leader_epoch_err(ot, &ffi_err)));
+            if (napi_create_bigint_int64(env, offset, &v) != napi_ok || napi_set_element(env, entry, 2, v) != napi_ok
+                || napi_create_bigint_int64(env, timestamp, &v) != napi_ok || napi_set_element(env, entry, 3, v) != napi_ok
+                || napi_create_int32(env, epoch, &v) != napi_ok || napi_set_element(env, entry, 4, v) != napi_ok)
+                return NULL;
+        }
+        if (napi_set_element(env, arr, (uint32_t)i, entry) != napi_ok) return NULL;
+    }
+    return arr;
+}
+
+// The completion of the calls answered with a map of TopicPartition:
+// offsets_for_times_cb's (OffsetAndTimestamp values, read by
+// timestamps_to_js) or beginning_offsets_cb's and end_offsets_cb's (int64_t
+// values, read by long_map_to_js); the map freed.
+static void tp_map_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque, int timestamps) {
+    error_stat_owned(error);
+    ValueCtx* ctx = (ValueCtx*)opaque;
+    Consumer* c = ctx->c;
+    napi_env env = c->env;
+    kafka_common_Error_t* ffi_err = NULL;
+    if (!c->queue.finalizing) {
+        napi_value entries = NULL;
+        if (error == NULL && value != NULL) entries = timestamps ? timestamps_to_js(env, value) : long_map_to_js(env, value);
+        if (entries == NULL && error == NULL) js_throw_last_napi_error(env, "reading the offsets");
+        value_settle(env, ctx, error, entries, "converting an offsets answer");
+        error = NULL;
+    }
+    if (value != NULL) error_warn(env, !c->queue.finalizing, FFI_ERR(kafka_Map_destroy_err(value, &ffi_err)));
+    error_discard(error);
+    delete_ref(env, &ctx->done);
+    free(ctx);
+}
+
+static void offsets_for_times_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque) {
+    Consumer* c = ((ValueCtx*)opaque)->c;
+    tp_map_on_complete(value, error, opaque, 1);
+    cbq_call_end(c->env, &c->queue);
+}
+
+static void offsets_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque) {
+    Consumer* c = ((ValueCtx*)opaque)->c;
+    tp_map_on_complete(value, error, opaque, 0);
+    cbq_call_end(c->env, &c->queue);
+}
+
+// consumerOffsetsForTimes(handle, timestampsToSearch, timeoutMs, done): Java's
+// offsetsForTimes(Map) and offsetsForTimes(Map, Duration);
+// `timestampsToSearch` an array of [[topic, partition], timestamp] entries,
+// or null, which the FFI reports. `done(error | null, entries | null)`, the
+// entries as timestamps_to_js gives them.
+napi_value js_consumer_offsets_for_times(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 4 || !is_function(env, argv[3])) {
+        napi_throw_type_error(env, NULL, "offsetsForTimes(handle, timestampsToSearch, timeoutMs, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    int timed = 0;
+    int64_t timeout = 0;
+    if (timeout_arg(env, argv[2], "offsetsForTimes timeoutMs", &timed, &timeout) != 0) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    kafka_Map_t* timestamps = type == napi_null ? NULL : tp_long_map_from_js(env, argv[1]);
+    if (type != napi_null && timestamps == NULL) return NULL;
+    ValueCtx* ctx = value_ctx_new(env, c, argv[3]);
+    if (ctx != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_offsets_for_times_cb(c->view, timestamps, offsets_for_times_on_complete, ctx);
+    } else if (ctx != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_offsets_for_times_with_timeout_cb(c->view, timestamps, timeout, offsets_for_times_on_complete, ctx);
+    }
+    // The call copied the timestamps.
+    tp_long_map_free(env, timestamps);
+    return NULL;
+}
+
+// beginningOffsets and endOffsets: (handle, partitions, timeoutMs, done), the
+// partitions an array of [topic, partition] (a null element crosses as NULL),
+// or null, which the FFI reports. `done(error | null, entries | null)`, the
+// entries as long_map_to_js gives them.
+static napi_value offsets_call(napi_env env, napi_callback_info info, int end, const char* shape) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 4 || !is_function(env, argv[3])) {
+        napi_throw_type_error(env, NULL, shape);
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    int timed = 0;
+    int64_t timeout = 0;
+    if (timeout_arg(env, argv[2], "offsets timeoutMs", &timed, &timeout) != 0) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    kafka_List_t* partitions = type == napi_null ? NULL : tp_list_from_js(env, argv[1]);
+    if (type != napi_null && partitions == NULL) return NULL;
+    ValueCtx* ctx = value_ctx_new(env, c, argv[3]);
+    if (ctx != NULL && !end && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_beginning_offsets_cb(c->view, partitions, offsets_on_complete, ctx);
+    } else if (ctx != NULL && !end) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_beginning_offsets_with_timeout_cb(c->view, partitions, timeout, offsets_on_complete, ctx);
+    } else if (ctx != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_end_offsets_cb(c->view, partitions, offsets_on_complete, ctx);
+    } else if (ctx != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_end_offsets_with_timeout_cb(c->view, partitions, timeout, offsets_on_complete, ctx);
+    }
+    list_free(env, partitions, tp_item_destroy);
+    return NULL;
+}
+
+// consumerBeginningOffsets(handle, partitions, timeoutMs, done): Java's
+// beginningOffsets(Collection) and beginningOffsets(Collection, Duration).
+napi_value js_consumer_beginning_offsets(napi_env env, napi_callback_info info) {
+    return offsets_call(env, info, 0, "beginningOffsets(handle, partitions, timeoutMs, done)");
+}
+
+// consumerEndOffsets(handle, partitions, timeoutMs, done): Java's
+// endOffsets(Collection) and endOffsets(Collection, Duration).
+napi_value js_consumer_end_offsets(napi_env env, napi_callback_info info) {
+    return offsets_call(env, info, 1, "endOffsets(handle, partitions, timeoutMs, done)");
+}
+
+// consumerEnforceRebalance(handle, withReason, reason, done): Java's
+// enforceRebalance() and enforceRebalance(String), `reason` a string or null,
+// which crosses as NULL. The core logs that the operation is not supported
+// and answers, as Java's AsyncKafkaConsumer does.
+napi_value js_consumer_enforce_rebalance(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    bool with_reason = false;
+    if (argc != 4 || napi_get_value_bool(env, argv[1], &with_reason) != napi_ok || !is_function(env, argv[3])) {
+        napi_throw_type_error(env, NULL, "enforceRebalance(handle, withReason, reason, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[2], &type), NULL);
+    char* reason = !with_reason || type == napi_null ? NULL : js_string_dup(env, argv[2], "reason must be a string");
+    if (with_reason && type != napi_null && reason == NULL) return NULL;
+    VoidCtx* ctx = void_ctx_new(env, c, argv[3]);
+    if (ctx != NULL && !with_reason) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_enforce_rebalance_cb(c->view, void_on_complete, ctx);
+    } else if (ctx != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_enforce_rebalance_with_reason_cb(c->view, reason, void_on_complete, ctx);
+    }
+    free(reason);
+    return NULL;
+}
+
 // ---- a record's headers -----------------------------------------------------
 
 // consumerRecordHeaders(source): a consumed record's headers, copied out of

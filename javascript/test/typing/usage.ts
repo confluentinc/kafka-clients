@@ -1143,6 +1143,27 @@ async function consumerUsage(): Promise<void> {
   expectTypeOf(await consumer.currentLag({ topicPartition: tp })).toEqualTypeOf<bigint | null>();
   expectTypeOf(await consumer.currentLag(tp)).toEqualTypeOf<bigint | null>();
   expectTypeOf(consumer.groupMetadata()).toEqualTypeOf<ConsumerGroupMetadata>();
+  // The offset and metadata queries.
+  expectTypeOf(await consumer.partitionsFor({ topic: 't' })).toEqualTypeOf<PartitionInfo[]>();
+  expectTypeOf(await consumer.partitionsFor('t')).toEqualTypeOf<PartitionInfo[]>();
+  expectTypeOf(await consumer.partitionsFor({ topic: 't', timeout: 100 })).toEqualTypeOf<PartitionInfo[]>();
+  expectTypeOf(await consumer.listTopics()).toEqualTypeOf<Map<string, PartitionInfo[]>>();
+  expectTypeOf(await consumer.listTopics({ timeout: 100 })).toEqualTypeOf<Map<string, PartitionInfo[]>>();
+  expectTypeOf(await consumer.listTopics(100)).toEqualTypeOf<Map<string, PartitionInfo[]>>();
+  const times = new TopicPartitionMap<bigint | number>([[tp, 1700000000000n]]);
+  const found = await consumer.offsetsForTimes({ timestampsToSearch: times });
+  expectTypeOf(found).toEqualTypeOf<TopicPartitionMap<OffsetAndTimestamp | null>>();
+  expectTypeOf(await consumer.offsetsForTimes(times)).toEqualTypeOf<TopicPartitionMap<OffsetAndTimestamp | null>>();
+  await consumer.offsetsForTimes({ timestampsToSearch: times, timeout: 100 });
+  // @ts-expect-error a Map keyed by TopicPartition is no TopicPartitionMap
+  await consumer.offsetsForTimes({ timestampsToSearch: new Map([[tp, 0n]]) });
+  expectTypeOf(await consumer.beginningOffsets({ partitions: [tp] })).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await consumer.beginningOffsets([tp])).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await consumer.endOffsets({ partitions: [tp], timeout: 100 })).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await consumer.endOffsets(new Set([tp]))).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(consumer.enforceRebalance()).toEqualTypeOf<Promise<void>>();
+  await consumer.enforceRebalance({ reason: 'r' });
+  await consumer.enforceRebalance('r');
   const records = await consumer.poll({ timeout: 100 });
   expectTypeOf(records).toEqualTypeOf<ConsumerRecords<Buffer, Buffer>>();
   expectTypeOf(await consumer.poll(100)).toEqualTypeOf<ConsumerRecords<Buffer, Buffer>>();

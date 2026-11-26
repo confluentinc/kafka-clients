@@ -139,6 +139,11 @@ napi_value topic_partition_to_js(napi_env env, const kafka_common_TopicPartition
 // or [topic, partition, null] for a NULL value; NULL when Node-API failed.
 napi_value offset_map_to_js(napi_env env, const kafka_Map_t* map);
 
+// A borrowed map of TopicPartition to int64_t * as an array of [topic,
+// partition, offset (a bigint, or null for a NULL value)], NULL when
+// Node-API failed.
+napi_value long_map_to_js(napi_env env, const kafka_Map_t* map);
+
 // A KafkaError for a BORROWED error (never destroyed here), or `null` for
 // NULL. Returns NULL only when Node-API itself failed.
 napi_value error_to_js(napi_env env, const kafka_common_Error_t* e);
@@ -399,6 +404,13 @@ void offset_and_metadata_free(napi_env env, kafka_consumer_OffsetAndMetadata_t* 
 kafka_Map_t* offset_map_from_js(napi_env env, napi_value entries);
 void offset_map_free(napi_env env, kafka_Map_t* map);
 
+// A map of TopicPartition to int64_t * from JS [[topic, partition], long]
+// entries (a null key crossing as NULL, which the FFI reports), borrowing its
+// keys and values as offset_map_from_js's: tp_long_map_free frees them, then
+// the map (NULL is a no-op). NULL with a JS exception pending on failure.
+kafka_Map_t* tp_long_map_from_js(napi_env env, napi_value entries);
+void tp_long_map_free(napi_env env, kafka_Map_t* map);
+
 // ---- headers.c -------------------------------------------------------------
 
 // A new native RecordHeaders holding a copy of a record's headers: `pairs` is
@@ -514,6 +526,13 @@ napi_value js_consumer_position(napi_env env, napi_callback_info info);
 napi_value js_consumer_committed(napi_env env, napi_callback_info info);
 napi_value js_consumer_current_lag(napi_env env, napi_callback_info info);
 napi_value js_consumer_group_metadata(napi_env env, napi_callback_info info);
+// consumer.c: the offset and metadata queries and enforceRebalance.
+napi_value js_consumer_partitions_for(napi_env env, napi_callback_info info);
+napi_value js_consumer_list_topics(napi_env env, napi_callback_info info);
+napi_value js_consumer_offsets_for_times(napi_env env, napi_callback_info info);
+napi_value js_consumer_beginning_offsets(napi_env env, napi_callback_info info);
+napi_value js_consumer_end_offsets(napi_env env, napi_callback_info info);
+napi_value js_consumer_enforce_rebalance(napi_env env, napi_callback_info info);
 
 // headers.c: the counts of the RecordHeaders the sends made.
 napi_value js_header_stats(napi_env env, napi_callback_info info);
