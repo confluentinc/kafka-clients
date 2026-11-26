@@ -312,7 +312,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable { 
     Task InitTransactions(CancellationToken cancellationToken = default);
     Task BeginTransaction(CancellationToken cancellationToken = default);   // a Task, as Python's async begin_transaction
     Task SendOffsetsToTransaction(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        ConsumerGroupMetadata groupMetadata, CancellationToken cancellationToken = default);
+        IConsumerGroupMetadata groupMetadata, CancellationToken cancellationToken = default);
     Task CommitTransaction(CancellationToken cancellationToken = default);
     Task AbortTransaction(CancellationToken cancellationToken = default);
 }
@@ -475,7 +475,7 @@ public sealed class ConsumerRecords<TKey, TValue>          // Java `ConsumerReco
 
 public interface IConsumerCommon {               // shared sync surface (IAsyncConsumer + IConsumer)
     void Wakeup();                                // interrupt a blocked poll — one-shot (idiom map)
-    ConsumerGroupMetadata GroupMetadata();        // no group.id → InvalidGroupIdException (24), Java's message (ledger 105)
+    IConsumerGroupMetadata GroupMetadata();        // no group.id → InvalidGroupIdException (24), Java's message (ledger 105)
 
     // non-blocking / instantaneous in Java → stays sync (idiom map; consumer-threading §1).
     // Java's methods, as every Java getter is: each returns a fresh owned snapshot per call.
@@ -1607,7 +1607,11 @@ call, and on `SendOffsetsToTransaction` the consumer commit's check of the offse
 the map is built from the managed dictionary. With an empty `offsets` the real producers return at
 once without checking the transaction state, as Java's `KafkaProducer` does; the mocks check it
 first, as Java's `MockProducer` does. `SendOffsetsToTransaction` passes the core's own `ConsumerGroupMetadata` handle, which the
-object keeps from the consumer that gave it, the mocks' included. Recorded deviations:
+object keeps from the consumer that gave it, the mocks' included. Group metadata is the interface
+`IConsumerGroupMetadata`, as Java's class becomes in Kafka 5.0 (KIP-1136), so an implementation of the user's own
+can be passed too: its four values are read once, on the calling thread (a NUL refused with `ArgumentException`), and
+registered with the core for that call through `kafka_consumer_ConsumerGroupMetadata_new` (ffi-marshalling.md §A6).
+Recorded deviations:
 
 - **Overlapping calls.** A transaction call while the core still runs another one's operation on
   the same producer throws the core's `ConcurrentModificationException` "Transactional methods of

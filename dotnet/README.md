@@ -282,6 +282,11 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
   class of your own. Its plain method is `Serialize(topic, data, cancellationToken)` /
   `Deserialize(topic, data, cancellationToken)`; one that reads the headers also implements
   `IAsyncSerializerWithHeaders<T>` / `IAsyncDeserializerWithHeaders<T>`.
+- `ConsumerGroupMetadata` is now the interface `IConsumerGroupMetadata`, as Java's class becomes an
+  interface in Kafka 5.0 (KIP-1136): `GroupMetadata()` returns it and `SendOffsetsToTransaction` takes
+  it. Write `IConsumerGroupMetadata` where you named the type, including in a class of your own that
+  implements a consumer or producer interface; code that uses `var` needs no change. An
+  implementation of your own can now be passed to `SendOffsetsToTransaction`.
 
 ## Examples
 

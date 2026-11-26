@@ -295,7 +295,7 @@ public sealed class PublicProducerNullPartitionTests
     private static async Task<(Exception? Error, bool AtTheCall)> Outcome(
         object producer,
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        ConsumerGroupMetadata? groupMetadata)
+        IConsumerGroupMetadata? groupMetadata)
     {
         if (producer is IProducer<byte[], byte[]> sync)
         {
@@ -349,7 +349,7 @@ public sealed class PublicProducerNullPartitionTests
         ? new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), true)
         : new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), true);
 
-    private static ConsumerGroupMetadata GroupMetadata()
+    private static IConsumerGroupMetadata GroupMetadata()
     {
         using MockConsumer<byte[], byte[]> consumer =
             new MockConsumer<byte[], byte[]>("latest");

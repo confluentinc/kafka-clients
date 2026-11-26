@@ -195,7 +195,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public Task SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        ConsumerGroupMetadata groupMetadata,
+        IConsumerGroupMetadata groupMetadata,
         CancellationToken cancellationToken = default) =>
         _native.SendOffsetsToTransactionWithCallback(offsets, groupMetadata, cancellationToken);
 

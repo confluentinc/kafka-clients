@@ -298,7 +298,7 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
 
     public void Wakeup() => _inner.Wakeup();
 
-    public ConsumerGroupMetadata GroupMetadata() => _inner.GroupMetadata();
+    public IConsumerGroupMetadata GroupMetadata() => _inner.GroupMetadata();
 
     public IReadOnlyCollection<TopicPartition> Assignment() => _inner.Assignment();
 

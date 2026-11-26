@@ -417,7 +417,7 @@ public sealed class PublicNamespaceLayoutTests
         ("AsyncMockConsumer`2", "=MockConsumer`2"),
         ("CloseOptions", "org.apache.kafka.clients.consumer.CloseOptions"),
         ("ConsumerConfig", "org.apache.kafka.clients.consumer.ConsumerConfig"),
-        ("ConsumerGroupMetadata", "org.apache.kafka.clients.consumer.ConsumerGroupMetadata"),
+        ("IConsumerGroupMetadata", "org.apache.kafka.clients.consumer.ConsumerGroupMetadata"),
         ("ConsumerRebalanceListenerExtensions", "=IConsumerRebalanceListener"),
         ("ConsumerRecord`2", "org.apache.kafka.clients.consumer.ConsumerRecord"),
         ("ConsumerRecords`2", "org.apache.kafka.clients.consumer.ConsumerRecords"),

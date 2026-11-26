@@ -532,7 +532,7 @@ public sealed class PublicMockProducerTransactionControlTests
         return new WeakReference(injected);
     }
 
-    private static ConsumerGroupMetadata GroupMetadata()
+    private static IConsumerGroupMetadata GroupMetadata()
     {
         using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         return consumer.GroupMetadata();

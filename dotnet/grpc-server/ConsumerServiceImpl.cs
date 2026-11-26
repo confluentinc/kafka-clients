@@ -480,7 +480,7 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
 
         try
         {
-            ConsumerGroupMetadata groupMetadata;
+            IConsumerGroupMetadata groupMetadata;
             lock (entry.Gate)
             {
                 groupMetadata = entry.Consumer.GroupMetadata();

@@ -160,7 +160,7 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
 
     public void Wakeup() => _inner.Wakeup();
 
-    public ConsumerGroupMetadata GroupMetadata() => _inner.GroupMetadata();
+    public IConsumerGroupMetadata GroupMetadata() => _inner.GroupMetadata();
 
     public IReadOnlyCollection<TopicPartition> Assignment() => _inner.Assignment();
 

@@ -130,7 +130,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
 
     public Task SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        ConsumerGroupMetadata groupMetadata,
+        IConsumerGroupMetadata groupMetadata,
         CancellationToken cancellationToken = default)
     {
         _probe.Tokens.Record(nameof(SendOffsetsToTransaction), cancellationToken);

@@ -232,7 +232,7 @@ internal sealed class V3TransactionalConsumer : ITransactionalConsumer
         _offThread = offThread;
     }
 
-    internal ConsumerGroupMetadata GroupMetadata() => _consumer.GroupMetadata();
+    internal IConsumerGroupMetadata GroupMetadata() => _consumer.GroupMetadata();
 
     public ValueTask<IReadOnlyList<SourceRecord>> Poll(int maxRecords, TimeSpan timeout) =>
         _offThread

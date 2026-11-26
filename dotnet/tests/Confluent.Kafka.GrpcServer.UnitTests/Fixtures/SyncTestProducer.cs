@@ -79,7 +79,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
     public void BeginTransaction() => _inner.BeginTransaction();
 
     public void SendOffsetsToTransaction(
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, ConsumerGroupMetadata groupMetadata) =>
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, IConsumerGroupMetadata groupMetadata) =>
         _inner.SendOffsetsToTransaction(offsets, groupMetadata);
 
     public void CommitTransaction() => _inner.CommitTransaction();

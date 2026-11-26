@@ -235,7 +235,7 @@ internal sealed class NativeConsumerHandle : IDisposable
         }
     }
 
-    internal ConsumerGroupMetadata GroupMetadata()
+    internal ConsumerGroupMetadataImpl GroupMetadata()
     {
         IntPtr outErr = IntPtr.Zero;
         IntPtr metadata = NativeMethods.ConsumerHandleGroupMetadata(_handle, ref outErr);

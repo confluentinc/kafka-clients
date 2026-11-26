@@ -155,7 +155,8 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// </para>
     /// </remarks>
     /// <param name="offsets">The offsets to commit with the transaction.</param>
-    /// <param name="groupMetadata">The consumer group metadata, from the consumer's <c>GroupMetadata()</c>.</param>
+    /// <param name="groupMetadata">The consumer group metadata, from the consumer's <c>GroupMetadata()</c> or an
+    /// implementation of your own, whose values are read once, at the call.</param>
     /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
     /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null, a key of it is null or has a null
@@ -186,12 +187,12 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="KafkaException">The producer has encountered a previous fatal or abortable error, or any
     /// other unexpected error.</exception>
     /// <exception cref="ArgumentException">
-    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
-    /// cannot receive unchanged.
+    /// A topic or a metadata string in <paramref name="offsets"/>, or a string of a <paramref name="groupMetadata"/> of
+    /// your own, contains a NUL character, which the native client cannot receive unchanged.
     /// </exception>
     void SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, Consumer.OffsetAndMetadata> offsets,
-        Consumer.ConsumerGroupMetadata groupMetadata);
+        Consumer.IConsumerGroupMetadata groupMetadata);
 
     /// <summary>
     /// Commits the ongoing transaction (Java <c>commitTransaction()</c>). This method will flush any unsent records

@@ -400,7 +400,7 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     public void Wakeup() => _native.Wakeup();
 
     /// <inheritdoc/>
-    public ConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
+    public IConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
 
     /// <inheritdoc/>
     public IReadOnlyCollection<TopicPartition> Assignment() => _native.Assignment();

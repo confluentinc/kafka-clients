@@ -208,7 +208,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// a call made again after a cancel, and what a call from inside a delivery callback does.
     /// </remarks>
     /// <param name="offsets">The offsets to commit with the transaction.</param>
-    /// <param name="groupMetadata">The consumer group metadata, from the consumer's <c>GroupMetadata()</c>.</param>
+    /// <param name="groupMetadata">The consumer group metadata, from the consumer's <c>GroupMetadata()</c> or an
+    /// implementation of your own, whose values are read once, at the call.</param>
     /// <param name="cancellationToken">Ends the wait, never the operation.</param>
     /// <returns>A task that completes when the coordinator has acknowledged the offsets.</returns>
     /// <exception cref="IllegalArgumentException"><paramref name="groupMetadata"/> is null ("Consumer group metadata
@@ -228,12 +229,12 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// <exception cref="KafkaException">The producer has encountered a previous fatal or abortable error, or any
     /// other unexpected error.</exception>
     /// <exception cref="ArgumentException">
-    /// A topic or a metadata string in <paramref name="offsets"/> contains a NUL character, which the native client
-    /// cannot receive unchanged.
+    /// A topic or a metadata string in <paramref name="offsets"/>, or a string of a <paramref name="groupMetadata"/> of
+    /// your own (thrown at the call), contains a NUL character, which the native client cannot receive unchanged.
     /// </exception>
     Task SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, Consumer.OffsetAndMetadata> offsets,
-        Consumer.ConsumerGroupMetadata groupMetadata,
+        Consumer.IConsumerGroupMetadata groupMetadata,
         CancellationToken cancellationToken = default);
 
     /// <summary>

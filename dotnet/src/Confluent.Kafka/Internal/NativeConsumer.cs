@@ -2792,7 +2792,7 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         return false;
     }
 
-    internal ConsumerGroupMetadata GroupMetadata()
+    internal ConsumerGroupMetadataImpl GroupMetadata()
     {
         int owner = EnterUse(UseKind.UnownedOnMock);
         try

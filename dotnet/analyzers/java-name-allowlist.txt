@@ -33,6 +33,14 @@ kind T:Confluent.Kafka.Common.KafkaFuture.BiConsumer`2
 # as a static class, which nothing constructs or derives from.
 kind T:Confluent.Kafka.Common.Serialization.Serdes
 
+# Java's ConsumerGroupMetadata becomes an interface in Kafka 5.0 (KIP-1136, its constructors deprecated since 4.2), so
+# the binding ships that shape now, as the Rust core does. An interface cannot hold Java's equals, hashCode and
+# toString; the instance a consumer returns keeps them. These lines go when the Java API moves to 5.0.
+kind T:Confluent.Kafka.Consumer.IConsumerGroupMetadata
+missing T:Confluent.Kafka.Consumer.IConsumerGroupMetadata org.apache.kafka.clients.consumer.ConsumerGroupMetadata#equals(Object)
+missing T:Confluent.Kafka.Consumer.IConsumerGroupMetadata org.apache.kafka.clients.consumer.ConsumerGroupMetadata#hashCode()
+missing T:Confluent.Kafka.Consumer.IConsumerGroupMetadata org.apache.kafka.clients.consumer.ConsumerGroupMetadata#toString()
+
 # C2: the two-argument mock producer constructors replace an optional argument (autoComplete true) with an
 # overload, so a parameter added later breaks no compiled caller. The mock producer's other forms stay in the
 # baseline: Java's take a partitioner and a cluster, which are not translated.

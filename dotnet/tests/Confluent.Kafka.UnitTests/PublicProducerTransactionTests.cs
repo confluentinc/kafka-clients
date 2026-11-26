@@ -499,7 +499,7 @@ public sealed class PublicProducerTransactionTests
     [Fact]
     public void GroupMetadata_OutlivesTheConsumerThatGaveIt()
     {
-        ConsumerGroupMetadata metadata;
+        IConsumerGroupMetadata metadata;
         using (MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest"))
         {
             metadata = consumer.GroupMetadata();
@@ -530,7 +530,7 @@ public sealed class PublicProducerTransactionTests
         string operation,
         string operationName)
     {
-        ConsumerGroupMetadata metadata = GroupMetadata();
+        IConsumerGroupMetadata metadata = GroupMetadata();
         Exception? timedOut = null;
         long elapsedMs = 0;
         object producer = flavor == SyncFlavor ? Sync(MaxBlockMs) : await Async(MaxBlockMs);
@@ -900,7 +900,7 @@ public sealed class PublicProducerTransactionTests
         ? new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete)
         : new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete);
 
-    private static ConsumerGroupMetadata GroupMetadata()
+    private static IConsumerGroupMetadata GroupMetadata()
     {
         using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         return consumer.GroupMetadata();
@@ -950,7 +950,7 @@ public sealed class PublicProducerTransactionTests
     private static Task SendOffsetsTo(
         object producer,
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets,
-        ConsumerGroupMetadata? metadata) => producer switch
+        IConsumerGroupMetadata? metadata) => producer switch
         {
             IProducer<byte[], byte[]> sync => Run(() => sync.SendOffsetsToTransaction(offsets!, metadata!)),
             IAsyncProducer<byte[], byte[]> async => async.SendOffsetsToTransaction(offsets!, metadata!),

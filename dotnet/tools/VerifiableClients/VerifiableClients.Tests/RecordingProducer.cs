@@ -54,7 +54,7 @@ internal sealed class RecordingProducer : IProducer<string, string>
     public void BeginTransaction() => Mock.BeginTransaction();
 
     public void SendOffsetsToTransaction(
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, ConsumerGroupMetadata groupMetadata) =>
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, IConsumerGroupMetadata groupMetadata) =>
         Mock.SendOffsetsToTransaction(offsets, groupMetadata);
 
     public void CommitTransaction() => Mock.CommitTransaction();

@@ -59,6 +59,10 @@ internal static class NativeStrings
         "Offset metadata must not contain a NUL character: such a string cannot be passed to the native client " +
         "unchanged.";
 
+    internal const string InvalidGroupMetadataMessage =
+        "Group metadata must not contain a NUL character: such a string cannot be passed to the native client " +
+        "unchanged.";
+
     internal static bool ContainsNul(string? value) => value is not null && value.IndexOf('\0') >= 0;
 
     internal static void Validate(string? value, string message, string parameterName)
