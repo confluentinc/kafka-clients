@@ -30,11 +30,8 @@
  * `group.protocol: 'consumer'`: the classic
  * protocol is not supported.
  *
- * Not in this release yet: `Consumer` and `KafkaConsumer`'s offset, commit and
- * metadata calls (`commitSync`, `commitAsync`, `seek`, `seekToBeginning`,
- * `seekToEnd`, `position`, `committed`, `partitionsFor`, `listTopics`,
- * `beginningOffsets`, `endOffsets`, `offsetsForTimes`, `currentLag`,
- * `groupMetadata` and `enforceRebalance`), `subscribe`'s forms with a
+ * Not in this release yet: `commitAsync`'s forms with an
+ * `OffsetCommitCallback`, `subscribe`'s forms with a
  * `ConsumerRebalanceListener`, and `KafkaConsumer`'s constructor forms with
  * deserializers, which throw `UnsupportedOperationError`.
  *

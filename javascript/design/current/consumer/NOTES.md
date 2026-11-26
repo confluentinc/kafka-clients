@@ -14,10 +14,10 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   (`native/values.c`), which the producer's constructor calls too.
 - Every waiting call goes through its `_cb` twin (JS conventions, Futures and waiting): `poll_cb`,
   `subscribe_with_topics_cb`, `subscribe_with_pattern_cb`, `assign_cb`, `unsubscribe_cb`, `pause_cb`, `resume_cb`,
-  `close_cb` and `close_with_options_cb`. The three getters go through their fallible forms
-  (`kafka_consumer_Consumer_assignment`, `_subscription`, `_paused`), `wakeup()` and `metrics()` through their `_err`
-  twins. Each `_cb` call has its own context (`VoidCtx`, `PollCtx`, `CloseCtx`), the completion's opaque, freed by the
-  completion.
+  `close_cb` and `close_with_options_cb`, and the offset calls' twins (below). The three getters and
+  `groupMetadata()` go through their fallible forms (`kafka_consumer_Consumer_assignment`, `_subscription`, `_paused`,
+  `_group_metadata`), `wakeup()` and `metrics()` through their `_err` twins. Each `_cb` call has its own context
+  (`VoidCtx`, `ValueCtx`, `PollCtx`, `CloseCtx`), the completion's opaque, freed by the completion.
 - A list the addon builds with `kafka_List_new` (the topics, the partitions) only borrows its elements: the topics'
   strings and the `TopicPartition`s are freed after the call (`list_free`, `tp_item_destroy`), which copied them. A
   list the core returns owns its elements: destroying it frees them (`tp_list_take_to_js`, the subscription's strings).
@@ -76,6 +76,53 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   reference on the batch. Every method of `Headers` copies first. This is the one call into the addon outside the clients
   (line 160), which `lint-mapping.json`'s `nativeCallers` lists.
 
+## The offsets, the commits and the metadata queries
+
+- Every one of these calls goes through its `_cb` twin, but `groupMetadata()`, which calls the fallible
+  `kafka_consumer_Consumer_group_metadata` and reads the `ConsumerGroupMetadata_*_err` accessors before it frees the
+  metadata. A call answered with nothing completes through `void_on_complete`; one answered with a value through its
+  own completion (`committed_on_complete`, `position_on_complete`, `current_lag_on_complete`,
+  `partitions_for_on_complete`, `list_topics_on_complete`, `offsets_for_times_on_complete`, `offsets_on_complete`),
+  each ending its call's count as its last statement. The answer is read, then freed, before the Promise settles: the
+  owned map of `committed`, `offsetsForTimes`, `beginningOffsets`, `endOffsets` and `listTopics` (with its lists of
+  partitions) and the owned list of `partitionsFor`.
+- What a call takes is built for it and destroyed after it, since a list or map the addon builds with `kafka_List_new`
+  or `kafka_Map_new` only borrows its items: the `TopicPartition` of `seek`, `position` and `currentLag`, the
+  `OffsetAndMetadata` of `seek` (`OffsetAndMetadata_with_leader_epoch_metadata`, `-1` for no leader epoch, line 172),
+  the partitions of the seeks and queries, the commit's map of `TopicPartition` to `OffsetAndMetadata` and
+  `offsetsForTimes`' map of `TopicPartition` to `int64_t` (`native/values.c`: `offset_and_metadata_from_js`,
+  `offset_map_from_js`, `tp_long_map_from_js`, shared for the mock and `commitAsync(offsets, callback)` to come).
+- The answers' maps are read by shared readers: `offset_map_to_js` (`native/error.c`, the poll's next offsets and an
+  error's payload too) reads `committed`'s, a NULL value, a partition with no committed offset, as `null`;
+  `long_map_to_js` (`native/error.c`, an error's payload too) the offset lookups'; `partitions_to_js` and
+  `node_to_js` (`native/producer.c`) the partitions of `partitionsFor` and `listTopics`, for both clients, and
+  `partitionInfoOf` (`src/internal/metadata.ts`) builds the `PartitionInfo`s from them for both.
+- `offsets` and `timestampsToSearch` are `TopicPartitionMap`s only, and a `Map` gets `payload.ts`' hint, given by
+  name or bare (line 62). A `null` timestamp in `timestampsToSearch` is a `TypeError`, "timestampsToSearch must not
+  contain a null timestamp", as Java's unboxing throws `NullPointerException`: the binding's run-time type check,
+  since a `null` has no `int64` to cross as, and the FFI reads a NULL value as 0 (`map_topic_partition_i64`).
+- `commitSync(null)` is the form error: a bare `null` fits both its one-parameter forms (line 73).
+- `enforceRebalance()` and `enforceRebalance(reason)` resolve once the core logged "Operation not supported in new
+  consumer group protocol", as Java's `AsyncKafkaConsumer` does (decision 9), on a closed consumer too, where Java
+  makes no check either.
+
+## The `group.id` check (line 119, choice 3(a))
+
+The class records at construction whether `group.id` was given, a value that is neither `null` nor `undefined`
+(`#groupIdDefined`), and `groupMetadata()` and `committed(null)` check it before calling the FFI, throwing or
+rejecting with `InvalidGroupIdError` and Java's message ("To use the group management or offset commit APIs, you must
+provide a valid group.id in the consumer configuration."). It is the binding's only check of its own (line 119), and
+it keeps no other state. **(deviation)** It runs before the core's closed and busy checks, which Java runs first
+(`acquireAndEnsureOpen()` before `throwIfGroupIdNotDefined()`): a closed or busy consumer without `group.id` throws
+`InvalidGroupIdError` from `groupMetadata()` and `committed(null)` where Java throws `IllegalStateException` or
+`ConcurrentModificationException`. Why: the binding keeps no closed flag (line 184), and the core makes the
+`groupMetadata()` check with a panic, which reaches JavaScript as `IllegalStateError` with the FFI's prefix; for
+`committed(null)` the FFI refuses the NULL before the core's group check. Goes when: the FFI returns
+`InvalidGroupIdError` (PLAN §6, ask 6) and refuses the NULL after the core's checks (ask 7). With a `group.id`,
+`committed(null)` gets the FFI's `TypeError("partitions must not be null")`, after nothing, as below. A closed
+consumer's `groupMetadata()` throws decision 11's text, `IllegalStateError('Rust panic caught at the FFI boundary in
+kafka_consumer_Consumer_group_metadata: This consumer has already been closed.')`.
+
 ## The order of the null checks *(deviation)*
 
 A null argument the FFI refuses at its boundary is refused before the core's own checks, which Java runs first
@@ -92,13 +139,35 @@ then for a subscription `throwIfGroupIdNotDefined()`, then the null check):
 - `pause` or `resume` of a `TopicPartition` whose topic is null rejects with the FFI's `TypeError("topic must not be
   null")` (`kafka_common_TopicPartition_new` refuses a NULL topic), where Java throws `IllegalStateException("No
   current assignment for partition null-0")`.
+- `position(null)`, `currentLag(null)` and `seek({ partition: null, ... })` reject with the FFI's `TypeError`s
+  ("partition must not be null", "topic_partition must not be null": the FFI names its own parameters) on a closed or
+  busy consumer, where Java reports those first, and then, for `position`, "You can only check the position for
+  partitions assigned to this consumer."; a `TopicPartition` whose topic is null gets "topic must not be null" there
+  too, as in `pause`.
+- `committed({ partitions: null })` on a consumer with a `group.id` rejects with the FFI's `TypeError("partitions must
+  not be null")` on a closed or busy consumer; without one, the binding's `InvalidGroupIdError` comes first (above).
+- `beginningOffsets(null)` and `endOffsets(null)` reject with the FFI's `TypeError("Partitions cannot be null")`,
+  `offsetsForTimes(null)` with `TypeError("Timestamps to search cannot be null")`, Java's own messages, and
+  `partitionsFor(null)` with `TypeError("topic must not be null")`, on a closed or busy consumer, where Java checks
+  those first. A null timestamp in `offsetsForTimes` is the binding's run-time type check (above), made before the
+  call reaches the FFI.
+- `seek` with a negative offset on a busy consumer rejects with `ConcurrentModificationError`, where Java's `seek`
+  checks the offset first, before `acquireAndEnsureOpen()`: the FFI's busy check runs before the core's offset check.
+  On a closed consumer the offset check comes first, as in Java.
+
+Java checks these before its closed and busy checks too, so their order is Java's: `commitSync({ offsets: null })`
+(Java's `new HashMap<>(null)`, the FFI's `TypeError("offsets must not be null")`), `seekToBeginning(null)` and
+`seekToEnd(null)` (Java's and the FFI's `IllegalArgumentError("Partitions collection cannot be null")`) and
+`seek({ offsetAndMetadata: null })` (Java's `offsetAndMetadata.offset()`, the FFI's `TypeError("offset_and_metadata
+must not be null")`).
 
 Why: the binding repeats no precondition (line 183), so it cannot run these checks itself in Java's order, and the
-FFI refuses the NULL before the core runs. Python's conventions record the same deviation ("Order": a consumer without
+FFI refuses the NULL, and checks a busy consumer, before the core runs. Python's conventions record the same deviation ("Order": a consumer without
 `group.id` reports a null collection where Java reports `InvalidGroupIdException`). Goes when: the FFI refuses the
 NULL only after the core's closed, busy and group checks, and `TopicPartition_new` takes a null topic. The tests pin
 today's order and messages (`test/unit/consumer/kafka_consumer.test.js`, "the null checks come before the closed,
-busy and group checks").
+busy and group checks" and "the null checks of the offset calls come before the closed and busy checks, and the
+group.id check before all").
 
 ## Liveness
 
@@ -129,7 +198,7 @@ it as zero (line 81's deviation). The wording proposed to the rules' owner: line
 
 `assignment()`, `subscription()` and `paused()` on a closed consumer throw the core's panic, caught by the FFI:
 `IllegalStateError('Rust panic caught at the FFI boundary in kafka_consumer_Consumer_assignment: This consumer has
-already been closed.')`, with `_subscription` or `_paused` in place of `_assignment`. Accepted for the preview; the
+already been closed.')`, with `_subscription`, `_paused` or `_group_metadata` in place of `_assignment`. Accepted for the preview; the
 tests assert the text, and PLAN §6's ask 5 goes to the FFI's owner. The waiting calls on a closed consumer reject with
 Java's own `IllegalStateError('This consumer has already been closed.')`. A second `close()` is harmless, and
 `metrics()` answers after `close()`, the view outliving the consumer.
