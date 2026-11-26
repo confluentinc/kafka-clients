@@ -8,7 +8,8 @@ to P2. P2 is **done** (2026-11-26): its phase plan, `P2.md`, was approved with i
 "Result" section has the commits, the review and the gate. P3 is **done** (2026-11-26): its phase plan, `P3.md`, was
 approved with its choices 2(a) and 3(a), and its "Result" section has the commits, the review and the gate. P4 is
 **done** (2026-11-27): its phase plan, `P4.md`, was approved with its choice 2(a), and its "Result" section has the
-commits, the review and the gate. P5's phase plan is next.
+commits, the review and the gate. P5's phase plan, `P5.md`, was approved on 2026-11-27 with its choices 2(a) and
+3(a), and P5 is in progress.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch. The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
@@ -225,14 +226,18 @@ The producer's layout (JS conventions, Layout and modules), one Java class per f
 - A callback may return a Promise. The binding waits for it with `Promise.resolve`, then reports through
   `Consumer__set_callback_result_err`. A throw or rejection crosses as a `LocalCallbackError`, and the delivering
   call fails with it, with Java's wrapping where the core applies it ("User rebalance callback throws an error",
-  "Failed to close kafka consumer") (line 148).
+  "Failed to close kafka consumer") (line 148). The core wraps a `LocalCallbackError` even where Java would leave a
+  `KafkaException` alone, so the binding puts the user's value back where Java has it (P5.md has the table).
 - Calls made while a report is pending (line 149; `consumer-threading.md` §31, §41): the binding counts pending
   reports. The methods the `ConsumerHandle` has go through it: `commitSync`, `commitAsync`, the seeks, `pause`,
   `resume`, `position`, `committed`, the offset and metadata queries and `currentLag` through its `_cb` forms, and
   `assignment()`, `paused()`, `groupMetadata()` and `wakeup()` through its synchronous ones. `metrics()` goes to
   the consumer, which allows it. Every other method has no handle form, goes to the consumer, and the core's busy
-  check refuses it with `ConcurrentModificationError` (decision 8).
+  check refuses it with `ConcurrentModificationError` (decision 8). P5.md has the table, where the core's longer
+  message shows, and what a mock's handle lacks (ask 16).
 - A callback that never settles has no timeout, and `wakeup()` doesn't end it (line 150). The docs say so.
+- A listener's registration lives as long as the FFI's docs say, and a pending report keeps its consumer from being
+  destroyed (line 150; P5.md).
 - `commitAsync`'s callback runs inside the next waiting call (line 65).
 
 ### 4.5 Deserializers and `create()` (P6)
@@ -417,11 +422,12 @@ the full gate before its hand-off (§7).
 - 4.4.
 - Tests: the three `MockConsumerTest` cases with a listener (`testRebalanceListener`,
   `testLosePartitionsCallsOnPartitionsLost`, `testLosePartitionsThenRebalance`; P4.md, choice 2(a)), and
-  `testRe2JPatternSubscription`'s `subscribe(pattern, null)` assertion; the listener and commit-callback cases of
-  `KafkaConsumerTest`, and its
-  broker-backed `testSubscriptionOnInvalidTopic`, which subscribes with a listener (P3.md, choice 2(a)); the two tests
+  `testRe2JPatternSubscription`'s `subscribe(pattern, null)` assertion; of `KafkaConsumerTest`, the broker-backed
+  `testSubscriptionOnInvalidTopic`, which subscribes with a listener (P3.md, choice 2(a)), and Java's listener in
+  `verifyPollTimesOutDuringMetadataUpdate`, which its port left out (Java's other cases with a listener run the
+  classic protocol or script a `MockClient`, and are left out with their reasons); the two tests
   `consumer-threading.md` §31 requires (a `commitSync` inside `onPartitionsRevoked` succeeds, and `poll()` stays
-  pending until the listener's Promise settles); one test for each method refused in the window.
+  pending until the listener's Promise settles); one test for each row of the window's table (P5.md).
 
 **P6 — deserializers and `create()` (N=155).** Decision 1 is (a); decision 4 waits on the reviewer.
 - 4.5. The built-in classes, with Java's test vectors in `test/java_vectors.json`. The interim refusal goes.
@@ -484,7 +490,7 @@ FFI has them:
 2. `registerMetricForSubscription` and `unregisterMetricFromSubscription`, and the mock's `addedMetrics()`.
 3. The mock's `schedulePollTask(Runnable)`, `setClientInstanceId`, `disableTelemetry` and `injectTimeoutException`.
 
-Ten FFI behaviours the binding lives with for now:
+Thirteen FFI behaviours the binding lives with for now:
 
 4. A negative `CloseOptions` timeout is read as zero (`duration_ms()` in `rust/src/ffi/consumer/close_options.rs`),
    where Java throws "The timeout cannot be negative." It's already a listed deviation (line 81). Ask: Java's check
@@ -542,6 +548,24 @@ Ten FFI behaviours the binding lives with for now:
     take the single-owner flag, so they fail with the `ConcurrentModificationException` translation while another call
     is pending, where Java's synchronized mock waits for them and its unsynchronized `groupMetadata()` answers at once.
     Ask: read them as `closed` and `last_poll_timeout` are read, through the handle.
+14. Found while planning P5: the FFI refuses a NULL commit callback with `TypeError` ("callback must not be null";
+    `require_ref` in `commit_callback_registration`, `rust/src/ffi/consumer/offset_commit_callback.rs`), where Java's
+    `commitAsync(callback)` and `commitAsync(offsets, callback)` take `null` and log a failed commit. The binding
+    sends `commitAsync({ callback: null })` to `commit_async_cb`, which is Java's `commitAsync()`, so only
+    `commitAsync({ offsets, callback: null })` meets it (P5.md, choice 2). Ask: take a NULL callback as Java's null.
+15. Found while planning P5: a commit callback gets an empty map where Java's gets `null`: for a failed commit, and
+    for an empty map committed, which Java's `commit()` answers with `completedFuture(null)` (`register_async_commit`
+    in `rust/src/consumer/internals/async_kafka_consumer.rs`). The binding passes `null` there for now (P5.md,
+    choice 3). Ask: pass NULL offsets there.
+16. Found while planning P5: while the mock runs a listener or commit callback (`rebalance_cb`,
+    `lose_partitions_cb`, `commit_async_*_cb`), it holds its single-owner flag
+    (`kafka_consumer_MockConsumer_rebalance_cb` in `rust/src/ffi/consumer/mock_consumer.rs`), so a call the
+    `ConsumerHandle` has no form of gets `ConcurrentModificationError`. The mock's handle runs only the commits, `currentLag` and the synchronous reads: its
+    other async operations fail with `UnsupportedOperationError` ("ConsumerHandle async operations are not supported
+    on a MockConsumer handle; drive the MockConsumer directly."; `ConsumerHandle::async_state` in
+    `rust/src/consumer/internals/async_kafka_consumer.rs`). Java's synchronized mock is reentrant and takes them all.
+    Ask: let the mock's handle reach the mock for every operation, and the mock's own calls pass while its callback
+    runs.
 
 ## 7. Execution: Actor and Critic
 
