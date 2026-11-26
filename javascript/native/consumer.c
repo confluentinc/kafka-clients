@@ -797,9 +797,10 @@ napi_value js_consumer_record_headers(napi_env env, napi_callback_info info) {
 
 // ---- close and destroy ------------------------------------------------------
 
-// The close completion: any outcome but a refused call (another call holds
-// the consumer) closed it, as Java's close runs every step and throws the
-// first error after. `done(error | null, closedNow)`.
+// The close completion: any outcome but a refused call closed it, as Java's
+// close runs every step and throws the first error after. A close refused
+// before the core runs closed nothing: another call holds the consumer, or the
+// FFI refused NULL options. `done(error | null, closedNow)`.
 static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
     CloseCtx* ctx = (CloseCtx*)opaque;
@@ -810,7 +811,7 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
     if (error != NULL) {
         int code = 0;
         error_warn(env, !c->queue.finalizing, FFI_SET(code, (int)kafka_common_Error__enum_err(error, &ffi_err)));
-        refused = code == kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION;
+        refused = code == kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION || code == kafka_common_Error_LOCAL_NULL_POINTER;
     }
     int closed_now = refused || c->queue.finalizing ? 0 : cbq_closed(env, &c->queue);
     if (!c->queue.finalizing) {

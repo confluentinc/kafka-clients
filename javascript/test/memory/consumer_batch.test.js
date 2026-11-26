@@ -112,6 +112,24 @@ test('an open consumer is never destroyed by a collection', () => {
   assert.equal(out.stats.consumersFreed, 0);
 });
 
+test('a consumer whose close the FFI refused is still open: a collection never destroys it', () => {
+  const out = probe(`
+    const { KafkaConsumer } = require(D + '/consumer');
+    (async () => {
+      await (async () => {
+        const c = new KafkaConsumer({ configs: ${CONFIGS} });
+        await c.close({ option: null }).catch(() => {});
+      })();
+      await settle();
+      console.log(JSON.stringify({ stats: native.consumerStats() }));
+      // The open consumer keeps Node running: the probe ends it.
+      process.exit(0);
+    })();
+  `);
+  assert.equal(out.stats.consumersMade, 1);
+  assert.equal(out.stats.consumersFreed, 0);
+});
+
 test('the test-only switch of the copy path arms and disarms, and a poll with no records makes no batch hold', () => {
   const out = probe(`
     const { KafkaConsumer } = require(D + '/consumer');

@@ -873,6 +873,15 @@ test('a consumer keeps Node running until close(), and every call made on it get
   const open = child(`${CHILD_CONSUMER} console.log('open');`, 3000);
   assert.equal(open.signal, 'SIGTERM');
   assert.equal(open.stdout, 'open\n');
+  // A close the FFI refuses (null options) closes nothing: the consumer stays
+  // open and keeps Node running.
+  const refused = child(
+    `${CHILD_CONSUMER}
+    c.close({ option: null }).catch((e) => console.log('refused: ' + e.message + '; ' + c.assignment().size()));`,
+    3000,
+  );
+  assert.equal(refused.signal, 'SIGTERM', refused.stderr);
+  assert.equal(refused.stdout, 'refused: options must not be null; 0\n');
   // Closed: Node exits, after the answers of the calls made on it, the closed
   // consumer included.
   const closed = child(

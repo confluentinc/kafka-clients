@@ -28,8 +28,10 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   sends them; a null element in `pause` or `resume` crosses as NULL, which the FFI refuses ("partitions must not contain
   null").
 - One call at a time (JS conventions, Threads and callbacks): the binding keeps no count and no lock; the core's busy
-  error, "KafkaConsumer is not safe for multi-threaded access.", comes back as it is. A close the core refuses for it
-  (`LOCAL_CONCURRENT_MODIFICATION`) closed nothing, so it does not record the consumer closed (`close_on_complete`).
+  error, "KafkaConsumer is not safe for multi-threaded access.", comes back as it is. A close refused before the core runs
+  closes nothing, so it does not record the consumer closed (`close_on_complete`): the busy refusal
+  (`LOCAL_CONCURRENT_MODIFICATION`), and the FFI's refusal of NULL options, `close({ option: null })`
+  (`LOCAL_NULL_POINTER`, "options must not be null").
 - A RegExp given as a pattern is refused with a `TypeError` that names `SubscriptionPattern` (JS conventions,
   Signatures, Q15).
 
@@ -81,7 +83,7 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   `cbq_call_begin` is the statement right before each `_cb` call, and `cbq_call_end` the last statement of its
   completion, on every path.
 - The binding keeps no closed flag (line 184). The handle object's finalizer destroys only a consumer the core reported
-  closed (`consumer_finalize`, `KafkaConsumer_destroy_err`), outside a drain, running no JS; an open one is never
+  closed, never one whose close was refused (above) (`consumer_finalize`, `KafkaConsumer_destroy_err`), outside a drain, running no JS; an open one is never
   destroyed by a finalizer, and a consumer that's never closed gets no warning (line 155). `consumer_execute` is the
   queue's only executor, and `js_consumer_create`'s failure paths the only other place that destroys a class handle,
   before a handle object exists (`check-single-drainer`).
