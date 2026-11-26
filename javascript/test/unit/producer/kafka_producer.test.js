@@ -2659,6 +2659,18 @@ test("metrics() is a MetricNameMap of KafkaMetric, keyed by Java's MetricName", 
       tags: new Map([['client-id', 'unit-metrics']]),
     });
     assert.equal(metrics.has(key), true);
+    // A null tag value, which Java's map holds, names no metric of the core,
+    // whose tags are strings, and the string "null" none either.
+    for (const tag of [null, 'null']) {
+      const nullTag = new MetricName({
+        name: 'record-send-total',
+        group: 'producer-metrics',
+        description: '',
+        tags: new Map([['client-id', tag]]),
+      });
+      assert.equal(metrics.has(nullTag), false);
+      assert.equal(metrics.get(nullTag), null);
+    }
     const total = metrics.get(key);
     assert.ok(total instanceof KafkaMetric);
     assert.equal(total.isMeasurable(), true);

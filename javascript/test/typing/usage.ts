@@ -441,11 +441,14 @@ async function produce(): Promise<void> {
   expectTypeOf(metrics).toEqualTypeOf<MetricNameMap<Metric>>();
   expectTypeOf(asInterface.metrics()).toEqualTypeOf<MetricNameMap<Metric>>();
   for (const [metricName, metric] of metrics) {
-    expectTypeOf(metricName.tags()).toEqualTypeOf<Map<string, string>>();
+    expectTypeOf(metricName.tags()).toEqualTypeOf<Map<string, string | null>>();
     expectTypeOf(metric.metricValue()).toEqualTypeOf<unknown>();
   }
   const metricName = new MetricName({ name: 'n', group: 'g', description: '', tags: new Map([['client-id', 'c']]) });
   expectTypeOf(metrics.get(metricName)).toEqualTypeOf<Metric | null>();
+  // A tag value may be null, as in Java's map, from a Map or a plain object.
+  void new MetricName({ name: 'n', group: 'g', description: '', tags: new Map([['client-id', null]]) });
+  void new MetricName({ name: 'n', group: 'g', description: '', tags: { 'client-id': null } });
   expectTypeOf(new MetricNameMap<number>()).toEqualTypeOf<MetricNameMap<number>>();
   const maybeEntries: Array<[MetricName, number]> | undefined = undefined as Array<[MetricName, number]> | undefined;
   // @ts-expect-error undefined is no entries: leave the argument out

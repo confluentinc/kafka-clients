@@ -15,7 +15,8 @@
 // Java's MetricName: Java's methods (it is not a data class, the JS
 // conventions' list not naming it) over private fields. The tags, Java's
 // Map<String, String>, are taken as a Map or a plain object, as a map keyed
-// by strings is (javascript/CLAUDE.md, JavaScript Binding Conventions, Types).
+// by strings is (javascript/CLAUDE.md, JavaScript Binding Conventions, Types),
+// and a tag value may be null, as Java's map holds one.
 // A Map is kept as given and tags() returns it, as Java's constructor stores
 // the map and tags() returns that field; a plain object is read into a new
 // Map. `equals` and
@@ -40,24 +41,29 @@ function checkString(value: unknown, what: string): string {
   return value;
 }
 
-const TAGS_TYPE = 'tags must be a Map or a plain object of string to string';
+const TAGS_TYPE = 'tags must be a Map or a plain object of string to string or null';
 
-// Java's Map<String, String> taken: a Map of string to string, kept as it
-// is (Java stores the map it is given), or a plain object's own enumerable
-// string keys, read into a new Map.
-function checkTags(value: unknown): Map<string, string> {
+// A tag value: a string, or Java's null, which Java's HashMap holds.
+function isTagValue(tag: unknown): tag is string | null {
+  return tag === null || typeof tag === 'string';
+}
+
+// Java's Map<String, String> taken: a Map of string to string or null, kept
+// as it is (Java stores the map it is given), or a plain object's own
+// enumerable string keys, read into a new Map.
+function checkTags(value: unknown): Map<string, string | null> {
   if (value === null) throw new TypeError('tags must not be null');
   if (value instanceof Map) {
     for (const [key, tag] of value as Map<unknown, unknown>) {
-      if (typeof key !== 'string' || typeof tag !== 'string') throw new TypeError(TAGS_TYPE);
+      if (typeof key !== 'string' || !isTagValue(tag)) throw new TypeError(TAGS_TYPE);
     }
-    return value as Map<string, string>;
+    return value as Map<string, string | null>;
   }
   const proto: unknown = typeof value === 'object' ? Object.getPrototypeOf(value) : undefined;
   if (proto !== Object.prototype && proto !== null) throw new TypeError(TAGS_TYPE);
-  const out = new Map<string, string>();
+  const out = new Map<string, string | null>();
   for (const [key, tag] of Object.entries(value as object)) {
-    if (typeof tag !== 'string') throw new TypeError(TAGS_TYPE);
+    if (!isTagValue(tag)) throw new TypeError(TAGS_TYPE);
     out.set(key, tag);
   }
   return out;
@@ -83,7 +89,7 @@ export class MetricName {
   readonly #name: string;
   readonly #group: string;
   readonly #description: string;
-  readonly #tags: Map<string, string>;
+  readonly #tags: Map<string, string | null>;
 
   /**
    * Creates a metric name.
@@ -95,7 +101,7 @@ export class MetricName {
    *   `Objects.requireNonNull`), `undefined` or of the wrong type
    *
    * @remarks The tags are a `Map`, kept as given, as Java keeps it, or a plain
-   * object, read into a new `Map`.
+   * object, read into a new `Map`. A tag value may be `null`, as in Java's map.
    */
   constructor(options: {
     /** The name of the metric */
@@ -105,7 +111,7 @@ export class MetricName {
     /** A human-readable description to include in the metric */
     description: string;
     /** additional key/value attributes of the metric */
-    tags: Map<string, string> | Readonly<Record<string, string>>;
+    tags: Map<string, string | null> | Readonly<Record<string, string | null>>;
   }) {
     FORMS.match(options, arguments.length);
     this.#name = checkString(FORMS.value(options, 'name'), 'name');
@@ -143,7 +149,7 @@ export class MetricName {
    *   read a plain object into
    * @throws `TypeError` when it is given an argument
    */
-  tags(): Map<string, string> {
+  tags(): Map<string, string | null> {
     TAGS_FORMS.match(undefined, arguments.length);
     return this.#tags;
   }
@@ -205,7 +211,10 @@ export class MetricName {
     if (obj === null || obj === undefined || !sameClass(this, obj)) return false;
     const other = obj as MetricName;
     if (this.#group !== other.#group || this.#name !== other.#name || this.#tags.size !== other.#tags.size) return false;
-    for (const [key, value] of this.#tags) if (other.#tags.get(key) !== value) return false;
+    // Java's AbstractMap.equals: a null value matches only a present null.
+    for (const [key, value] of this.#tags) {
+      if (other.#tags.get(key) !== value || !other.#tags.has(key)) return false;
+    }
     return true;
   }
 

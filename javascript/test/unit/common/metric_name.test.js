@@ -102,11 +102,11 @@ test("the constructor checks Java's requireNonNull and the run-time types", () =
     const options = { name: 'n', group: 'g', description: 'd', tags: new Map(), [field]: null };
     assert.throws(() => new MetricName(options), { constructor: TypeError, message: `${field} must not be null` });
   }
-  for (const tags of [[['a', 'b']], new Map([['a', 1]]), { a: 1 }, 'a=b']) {
+  for (const tags of [[['a', 'b']], new Map([['a', 1]]), { a: 1 }, { a: undefined }, 'a=b']) {
     // @ts-expect-error tags that are not a map of string to string: the type check throws TypeError
     assert.throws(() => new MetricName({ name: 'n', group: 'g', description: 'd', tags }), {
       constructor: TypeError,
-      message: 'tags must be a Map or a plain object of string to string',
+      message: 'tags must be a Map or a plain object of string to string or null',
     });
   }
   // @ts-expect-error no description or tags: the form check throws IllegalArgumentError
@@ -175,4 +175,39 @@ test('equals is false for a name that differs only in its name, its group or a t
   assert.equal(base.equals(name('n2', 'g', 'v')), false);
   assert.equal(base.equals(name('n', 'g2', 'v')), false);
   assert.equal(base.equals(name('n', 'g', 'v2')), false);
+});
+
+// Java's MetricName takes a Map<String, String>, and Java's HashMap holds a
+// null value: Map.hashCode counts it 0 (key.hashCode() ^ 0), equals matches
+// it only with a present null, and toString prints it as null.
+test("a tag value may be null, as in Java's map", () => {
+  /** @param {Map<string, string | null> | Record<string, string | null>} tags */
+  const name = (tags) => new MetricName({ name: 'name', group: 'group', description: 'description', tags });
+  const fromMap = name(new Map([['a', null]]));
+  const fromObject = name({ a: null });
+  assert.equal(fromMap.tags().get('a'), null);
+  assert.equal(fromObject.tags().get('a'), null);
+  assert.deepEqual([...fromObject.tags()], [['a', null]]);
+  assert.equal(fromMap.toString(), 'MetricName [name=name, group=group, description=description, tags={a=null}]');
+  // Java: new MetricName("name", "group", "description", Map.of()).hashCode()
+  // is 398040563, and the entry a=null adds "a".hashCode() ^ 0, 97.
+  assert.equal(fromMap.hashCode(), 398040660);
+  assert.equal(fromObject.hashCode(), fromMap.hashCode());
+  assert.equal(fromMap.equals(fromObject), true);
+  // A null is neither the string "null" nor a missing key of the same size.
+  assert.equal(fromMap.equals(name({ a: 'null' })), false);
+  assert.equal(fromMap.equals(name({ b: null })), false);
+  assert.equal(name({ b: null }).equals(name({ a: null })), false);
+});
+
+test('a MetricNameMap tells a null tag from the string "null"', () => {
+  /** @param {string | null} value */
+  const name = (value) => new MetricName({ name: 'n', group: 'g', description: '', tags: { a: value } });
+  const map = new MetricNameMap([
+    [name(null), 'null value'],
+    [name('null'), 'string value'],
+  ]);
+  assert.equal(map.size(), 2);
+  assert.equal(map.get(name(null)), 'null value');
+  assert.equal(map.get(name('null')), 'string value');
 });
