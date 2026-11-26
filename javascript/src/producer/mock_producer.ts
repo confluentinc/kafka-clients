@@ -37,6 +37,7 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
 import native = require('../internal/native');
 import { JavaForms } from '../internal/args';
+import { isErrorOrNull } from '../internal/throwable';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { partitionInfoOf } from '../internal/metadata';
 import { checkSerializer, isThenable } from '../internal/serde';
@@ -74,7 +75,6 @@ const PARTITIONS_FOR_FORMS = new JavaForms('partitionsFor', [['topic']], {
 const HISTORY_FORMS = new JavaForms('history', [[]], { reader: true });
 const CLEAR_FORMS = new JavaForms('clear', [[]]);
 const COMPLETE_NEXT_FORMS = new JavaForms('completeNext', [[]]);
-const isErrorOrNull = (value: unknown): boolean => value === null || value instanceof Error;
 const ERROR_NEXT_FORMS = new JavaForms('errorNext', [['e']], { bareTypes: { e: isErrorOrNull } });
 const CLOSED_FORMS = new JavaForms('closed', [[]], { reader: true });
 const FLUSHED_FORMS = new JavaForms('flushed', [[]], { reader: true });

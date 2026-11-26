@@ -204,7 +204,14 @@ function isError(value: unknown): boolean {
   return value instanceof Error;
 }
 
-function isErrorOrNull(value: unknown): boolean {
+/**
+ * Whether `value` is an Error or null: the bare value of an error's `(cause)`
+ * form, and of the mocks' error setters.
+ *
+ * @param value - the value given
+ * @returns whether it is one
+ */
+export function isErrorOrNull(value: unknown): boolean {
   return value === null || value instanceof Error;
 }
 

@@ -36,6 +36,7 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
 import native = require('../internal/native');
 import { JavaForms } from '../internal/args';
+import { isErrorOrNull } from '../internal/throwable';
 import * as calls from '../internal/consumer_calls';
 import { UNBOUNDED_MILLIS } from '../internal/duration';
 import { partitionInfoArgs } from '../internal/metadata';
@@ -76,7 +77,6 @@ const SET_MAX_POLL_RECORDS_FORMS = new JavaForms('setMaxPollRecords', [['maxPoll
 });
 // Any Error is taken bare, so one that is no KafkaError gets the TypeError
 // that says so rather than the form error.
-const isErrorOrNull = (value: unknown): boolean => value === null || value instanceof Error;
 const SET_POLL_FORMS = new JavaForms('setPollException', [['exception']], { bareTypes: { exception: isErrorOrNull } });
 const SET_OFFSETS_FORMS = new JavaForms('setOffsetsException', [['exception']], { bareTypes: { exception: isErrorOrNull } });
 // A Map is taken bare too, so it gets payload.ts' hint rather than the form error.
