@@ -16,22 +16,36 @@
 
 // The consumer against a broker: records the JavaScript producer wrote, read
 // back by the JavaScript consumer, by subscribe and by assign, with their
-// keys, values, headers, offsets and timestamps.
+// keys, values, headers, offsets and timestamps; the commits read back by
+// committed(), the seeks and positions, the offset lookups, the partition
+// metadata and the group metadata.
 
 const assert = require('node:assert/strict');
 
-const { TopicPartition } = require('@confluentinc/kafka-javascript/common');
+const { Node, PartitionInfo, TopicPartition, TopicPartitionMap } = require('@confluentinc/kafka-javascript/common');
 const { Headers, RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
 const { TimestampType } = require('@confluentinc/kafka-javascript/common/record');
-const { CloseOptions, ConsumerRecord, KafkaConsumer } = require('@confluentinc/kafka-javascript/consumer');
+const {
+  CloseOptions,
+  ConsumerRecord,
+  KafkaConsumer,
+  OffsetAndMetadata,
+  OffsetAndTimestamp,
+} = require('@confluentinc/kafka-javascript/consumer');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
-const { createTopic } = require('./_fetch_records');
+const { createTopic, waitForBroker } = require('./_fetch_records');
 
 /** @typedef {import('@confluentinc/kafka-javascript/consumer').ConsumerRecords<Buffer, Buffer>} Records */
 
 const BOOTSTRAP = /** @type {string} */ (process.env.KAFKA_BOOTSTRAP_SERVERS);
 const SKIP = BOOTSTRAP ? false : 'KAFKA_BOOTSTRAP_SERVERS is not set: no broker to consume from';
 if (SKIP) console.log(`skipping the consumer integration tests: ${SKIP}`);
+
+// The broker `make test-integration` has just started may not listen yet, and
+// this file may be the first to run.
+beforeAll(async () => {
+  if (!SKIP) await waitForBroker(BOOTSTRAP);
+}, 90_000);
 
 let topicCount = 0;
 /** @param {string} what */
@@ -192,6 +206,168 @@ function checkRecords(records, topic, timestamps) {
       assert.equal((await consumer.poll({ timeout: 200 })).isEmpty(), true);
     } finally {
       await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'commitSync and commitAsync are read back by committed, with the leader epoch and metadata',
+  async () => {
+    const topic = freshTopic('commit');
+    await createTopic(BOOTSTRAP, topic);
+    await produce(topic);
+    const group = `${topic}-group`;
+    const consumer = new KafkaConsumer({
+      configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'group.id': group, 'auto.offset.reset': 'earliest' },
+    });
+    const tp = new TopicPartition({ topic, partition: 0 });
+    try {
+      await consumer.assign({ partitions: [tp] });
+      assert.equal((await consumer.committed({ partitions: [tp] })).get(tp), null);
+      await consumer.commitSync({
+        offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata({ offset: 1n, leaderEpoch: 0, metadata: 'm' })]]),
+      });
+      const first = (await consumer.committed({ partitions: [tp], timeout: 10000 })).get(tp);
+      assert.ok(first instanceof OffsetAndMetadata);
+      assert.equal(first.offset, 1n);
+      assert.equal(first.leaderEpoch, 0);
+      assert.equal(first.metadata, 'm');
+      // commitSync() and commitAsync() commit the consumed positions.
+      await pollFor(consumer, 3);
+      await consumer.commitSync();
+      assert.equal((await consumer.committed({ partitions: [tp] })).get(tp)?.offset, 3n);
+      await consumer.seek({ partition: tp, offset: 2 });
+      await consumer.poll({ timeout: 500 });
+      await consumer.commitAsync();
+      // commitAsync() settled once the core took the commit; the broker's
+      // answer comes later, so the read waits on a deadline.
+      const deadline = Date.now() + 30000;
+      let offset = -1n;
+      while (offset !== 3n && Date.now() < deadline) {
+        offset = (await consumer.committed({ partitions: [tp] })).get(tp)?.offset ?? -1n;
+      }
+      assert.equal(offset, 3n);
+      await consumer.commitSync({ offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(2)]]), timeout: 10000 });
+      assert.equal((await consumer.committed({ partitions: [tp] })).get(tp)?.offset, 2n);
+    } finally {
+      await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'seek, seekToBeginning and seekToEnd move the position; the offset lookups and currentLag answer from the log',
+  async () => {
+    const topic = freshTopic('offsets');
+    await createTopic(BOOTSTRAP, topic);
+    const timestamps = await produce(topic);
+    const consumer = new KafkaConsumer({
+      configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest' },
+    });
+    const tp = new TopicPartition({ topic, partition: 0 });
+    try {
+      await consumer.assign({ partitions: [tp] });
+      await consumer.seek({ partition: tp, offset: 1 });
+      assert.equal(await consumer.position({ partition: tp }), 1n);
+      const [record] = (await pollFor(consumer, 2)).slice(0, 1);
+      assert.equal(record.offset, 1n);
+      await consumer.seek({ partition: tp, offsetAndMetadata: new OffsetAndMetadata({ offset: 2n, leaderEpoch: 0, metadata: '' }) });
+      assert.equal(await consumer.position({ partition: tp, timeout: 10000 }), 2n);
+      await consumer.seekToBeginning({ partitions: [tp] });
+      assert.equal(await consumer.position({ partition: tp }), 0n);
+      await consumer.seekToEnd({ partitions: [tp] });
+      assert.equal(await consumer.position({ partition: tp }), 3n);
+      // With the position and the end offset known, the lag is known.
+      await consumer.seek({ partition: tp, offset: 1 });
+      const ends = await consumer.endOffsets({ partitions: [tp] });
+      assert.equal(ends.get(tp), 3n);
+      assert.equal(await consumer.currentLag({ topicPartition: tp }), 2n);
+      const begins = await consumer.beginningOffsets({ partitions: [tp], timeout: 10000 });
+      assert.equal(begins.size(), 1);
+      assert.equal(begins.get(tp), 0n);
+      assert.equal((await consumer.endOffsets({ partitions: [tp], timeout: 10000 })).get(tp), 3n);
+      // The first record at or after each timestamp, and none past the last.
+      const found = await consumer.offsetsForTimes({
+        timestampsToSearch: new TopicPartitionMap([[tp, timestamps[1]]]),
+      });
+      const hit = found.get(tp);
+      assert.ok(hit instanceof OffsetAndTimestamp);
+      assert.equal(hit.offset(), 1n);
+      assert.equal(hit.timestamp(), timestamps[1]);
+      assert.equal(hit.leaderEpoch(), 0);
+      const past = await consumer.offsetsForTimes({
+        timestampsToSearch: new TopicPartitionMap([[tp, timestamps[2] + 1n]]),
+        timeout: 10000,
+      });
+      assert.equal(past.size(), 1);
+      assert.equal(past.get(tp), null);
+    } finally {
+      await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'partitionsFor and listTopics of a real topic, an empty list for a missing one',
+  async () => {
+    const topic = freshTopic('metadata');
+    await createTopic(BOOTSTRAP, topic, { partitions: 2 });
+    const consumer = new KafkaConsumer({
+      configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'allow.auto.create.topics': false },
+    });
+    try {
+      const partitions = await consumer.partitionsFor({ topic });
+      assert.deepEqual(partitions.map((p) => p.partition()).sort(), [0, 1]);
+      for (const p of partitions) {
+        assert.ok(p instanceof PartitionInfo);
+        assert.equal(p.topic(), topic);
+        assert.ok(p.leader() instanceof Node);
+        assert.equal(p.replicas()?.length, 1);
+      }
+      assert.equal((await consumer.partitionsFor({ topic, timeout: 10000 })).length, 2);
+      assert.deepEqual(await consumer.partitionsFor({ topic: freshTopic('missing') }), []);
+      const topics = await consumer.listTopics();
+      assert.ok(topics instanceof Map);
+      assert.equal(topics.get(topic)?.length, 2);
+      assert.ok(topics.get(topic)?.every((p) => p instanceof PartitionInfo && p.topic() === topic));
+      assert.ok((await consumer.listTopics({ timeout: 10000 })).has(topic));
+    } finally {
+      await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'groupMetadata() before and after the member joins',
+  async () => {
+    const topic = freshTopic('group');
+    await createTopic(BOOTSTRAP, topic);
+    const group = `${topic}-group`;
+    const consumer = new KafkaConsumer({
+      configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'group.id': group },
+    });
+    try {
+      const before = consumer.groupMetadata();
+      assert.equal(before.groupId(), group);
+      assert.equal(before.generationId(), -1);
+      assert.equal(before.memberId(), '');
+      await consumer.subscribe({ topics: [topic] });
+      const deadline = Date.now() + 30000;
+      while (consumer.assignment().size() === 0 && Date.now() < deadline) await consumer.poll({ timeout: 200 });
+      const after = consumer.groupMetadata();
+      assert.equal(after.groupId(), group);
+      assert.ok(after.generationId() > 0);
+      assert.notEqual(after.memberId(), '');
+      assert.equal(after.groupInstanceId(), null);
+      // enforceRebalance() only logs under the consumer protocol, and resolves.
+      await consumer.enforceRebalance();
+      await consumer.enforceRebalance({ reason: 'test' });
+    } finally {
+      await consumer.close();
     }
   },
   120000,

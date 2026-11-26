@@ -40,21 +40,16 @@
 //   testAssignedPartitionsMetrics (its assign half: the group assignment needs
 //   a broker), testMetricsRemovedOnClose, testClosingConsumerUnregistersConsumerMetrics,
 //   testPollIdleRatioZero (its default value: the zero-length poll is recorded
-//   through the package-private kafkaConsumerMetrics() on a MockTime) and
+//   through the package-private kafkaConsumerMetrics() on a MockTime),
 //   testCloseShouldBeIdempotent, testSeekNegative, testInvalidGroupMetadata,
 //   testCommittedThrowsTimeoutExceptionForNoResponse, testOffsetsForTimesTimeout,
 //   testBeginningOffsetsTimeout and testEndOffsetsTimeout.
 //
 // Not here yet, for want of deserializers:
-// configurableObjectsShouldSeeGeneratedClientId.
-// Against a broker, where Java scripts a MockClient: testMissingOffsetNoResetPolicy,
-// testResetToCommittedOffset, testResetUsingAutoResetPolicy,
-// testResetUsingDurationBasedAutoResetPolicy, testOffsetIsValidAfterSeek,
-// testCommitsFetchedDuringAssign, testNoCommittedOffsets,
-// testManualAssignmentChangeWithAutoCommitEnabled,
-// testManualAssignmentChangeWithAutoCommitDisabled, testOffsetOfPausedPartitions,
-// testListOffsetShouldUpdateSubscriptions, testSubscriptionOnInvalidTopic,
-// verifyNoCoordinatorLookupForManualAssignmentWithSeek and testPollSendsRequestToJoin.
+// configurableObjectsShouldSeeGeneratedClientId. Against a broker, where Java
+// scripts a MockClient, in test/integration/kafka_consumer_broker.test.js: 13
+// cases, listed there, and, for want of the rebalance listeners,
+// testSubscriptionOnInvalidTopic.
 //
 // The other 84 are not ported, each for its reason:
 // - the classic protocol only: Java runs these with group.protocol=classic,
