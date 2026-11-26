@@ -17,7 +17,7 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka.Admin;
 
 /// <summary>
-/// Options for <see cref="IAdmin.CreateTopics(System.Collections.Generic.IEnumerable{NewTopic}, CreateTopicsOptions)"/> — the .NET realization of Java's
+/// Options for <see cref="IAdmin.CreateTopics(System.Collections.Generic.IReadOnlyCollection{NewTopic}, CreateTopicsOptions)"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.admin.CreateTopicsOptions</c>.
 /// </summary>
 /// <remarks>

@@ -571,13 +571,7 @@ public sealed class PublicAsyncKafkaFutureTests
         Assert.Equal(GenericParameterAttributes.None, typeParameter.GenericParameterAttributes);
         Assert.Empty(typeParameter.GetGenericParameterConstraints());
 
-        Assert.Equal(
-            new[]
-            {
-                "System.IEquatable`1[Confluent.Kafka.Common.AsyncKafkaFuture]",
-                "System.IEquatable`1[Confluent.Kafka.Common.AsyncKafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata]]",
-            },
-            type.GetInterfaces().Select(face => face.ToString()).OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Empty(type.GetInterfaces());
 
         Assert.Equal(
             new[]
@@ -587,9 +581,6 @@ public sealed class PublicAsyncKafkaFutureTests
                 "Confluent.Kafka.Common.AsyncKafkaFuture`1[TR] ThenApply("
                     + "Confluent.Kafka.Common.KafkaFuture+BaseFunction`2[Confluent.Kafka.Producer.RecordMetadata,TR])",
                 "Confluent.Kafka.Producer.RecordMetadata GetNow(Confluent.Kafka.Producer.RecordMetadata)",
-                "System.Boolean Equals(Confluent.Kafka.Common.AsyncKafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
-                "System.Boolean Equals(System.Object)",
-                "System.Int32 GetHashCode()",
                 "System.Threading.Tasks.Task`1[Confluent.Kafka.Producer.RecordMetadata] Get()",
                 "System.Threading.Tasks.Task`1[Confluent.Kafka.Producer.RecordMetadata] Get(System.Threading.CancellationToken)",
                 "System.Threading.Tasks.Task`1[Confluent.Kafka.Producer.RecordMetadata] Get(System.TimeSpan)",
@@ -597,8 +588,7 @@ public sealed class PublicAsyncKafkaFutureTests
             },
             Signatures(type, BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
         Assert.All(
-            type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
-                .Where(method => method.Name is not ("Equals" or "GetHashCode")),
+            type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly),
             method => Assert.True(method.IsAbstract, method.Name + " should be abstract"));
 
         foreach (string inherited in new[] { "Cancel", "IsCancelled", "IsCompletedExceptionally", "IsDone", "ToString" })
@@ -612,15 +602,7 @@ public sealed class PublicAsyncKafkaFutureTests
         Assert.Null(type.GetMethod("GetAwaiter", AnyInstance));
         Assert.Null(type.GetMethod("ConfigureAwait", AnyInstance));
 
-        Assert.Equal(
-            new[]
-            {
-                "System.Boolean op_Equality(Confluent.Kafka.Common.AsyncKafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata], "
-                    + "Confluent.Kafka.Common.AsyncKafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
-                "System.Boolean op_Inequality(Confluent.Kafka.Common.AsyncKafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata], "
-                    + "Confluent.Kafka.Common.AsyncKafkaFuture`1[Confluent.Kafka.Producer.RecordMetadata])",
-            },
-            Signatures(type, BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
+        Assert.Empty(type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
 
         ConstructorInfo constructor = Assert.Single(type.GetConstructors(AnyInstance));
         Assert.True(constructor.IsFamilyAndAssembly);

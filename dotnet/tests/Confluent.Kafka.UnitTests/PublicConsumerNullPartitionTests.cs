@@ -586,13 +586,13 @@ public sealed class PublicConsumerNullPartitionTests
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
         if (consumer is MockConsumer<byte[], byte[]> mock)
         {
-            mock.UpdateBeginningOffset(Topic, 0, 0);
-            mock.UpdateEndOffset(Topic, 0, 9);
+            mock.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 0 });
+            mock.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 9 });
         }
         else if (consumer is AsyncMockConsumer<byte[], byte[]> asyncMock)
         {
-            asyncMock.UpdateBeginningOffset(Topic, 0, 0);
-            asyncMock.UpdateEndOffset(Topic, 0, 9);
+            asyncMock.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 0 });
+            asyncMock.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 9 });
         }
 
         foreach (bool beginning in new[] { true, false })
@@ -709,22 +709,34 @@ public sealed class PublicConsumerNullPartitionTests
 
     // Java's MockConsumer#updateDurationOffsets stores a null key, which a native map cannot carry; refused before
     // the closed check, as a null topic is.
+    // Java's updateBeginningOffsets, updateEndOffsets and updateDurationOffsets store the null with putAll, and make no
+    // closed check.
     [Theory]
-    [InlineData("MockConsumer")]
-    [InlineData("AsyncMockConsumer")]
-    public async Task UpdateDurationOffsets_ANullKey_IsArgumentNullException_BeforeTheClosedCheck(string kind)
+    [InlineData("MockConsumer", "Beginning")]
+    [InlineData("MockConsumer", "End")]
+    [InlineData("MockConsumer", "Duration")]
+    [InlineData("AsyncMockConsumer", "Beginning")]
+    [InlineData("AsyncMockConsumer", "End")]
+    [InlineData("AsyncMockConsumer", "Duration")]
+    public async Task UpdateOffsets_ANullKey_IsArgumentNullException_BeforeTheClosedCheck(string kind, string offsets)
     {
         object consumer = await Create(kind);
         TestTimeout.Dispose((IDisposable)consumer);
         EntryMap<TopicPartition, long> newOffsets = new EntryMap<TopicPartition, long>(
             new KeyValuePair<TopicPartition, long>(s_tp0, 1),
             new KeyValuePair<TopicPartition, long>(null!, 2));
+        Action<IReadOnlyDictionary<TopicPartition, long>> update = (consumer, offsets) switch
+        {
+            (MockConsumer<byte[], byte[]> mock, "Beginning") => mock.UpdateBeginningOffsets,
+            (MockConsumer<byte[], byte[]> mock, "End") => mock.UpdateEndOffsets,
+            (MockConsumer<byte[], byte[]> mock, _) => mock.UpdateDurationOffsets,
+            (AsyncMockConsumer<byte[], byte[]> mock, "Beginning") => mock.UpdateBeginningOffsets,
+            (AsyncMockConsumer<byte[], byte[]> mock, "End") => mock.UpdateEndOffsets,
+            (AsyncMockConsumer<byte[], byte[]> mock, _) => mock.UpdateDurationOffsets,
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
 
-        Exception? error = consumer is MockConsumer<byte[], byte[]> mock
-            ? Record.Exception(() => mock.UpdateDurationOffsets(newOffsets))
-            : Record.Exception(() => ((AsyncMockConsumer<byte[], byte[]>)consumer).UpdateDurationOffsets(newOffsets));
-
-        AssertMustNotContainNull("newOffsets", error);
+        AssertMustNotContainNull("newOffsets", Record.Exception(() => update(newOffsets)));
     }
 
     // Java's default ConsumerRebalanceListener#onPartitionsLost passes its collection, a null element included, to

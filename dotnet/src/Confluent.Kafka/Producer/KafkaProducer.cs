@@ -204,7 +204,7 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <inheritdoc/>
     public void SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        ConsumerGroupMetadata groupMetadata) =>
+        IConsumerGroupMetadata groupMetadata) =>
         _native.SendOffsetsToTransaction(offsets, groupMetadata);
 
     /// <inheritdoc/>

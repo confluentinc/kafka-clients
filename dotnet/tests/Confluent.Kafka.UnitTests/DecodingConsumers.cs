@@ -15,6 +15,7 @@
 using System.Collections.Generic;
 using System.Threading;
 
+using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
 using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal;
@@ -64,16 +65,11 @@ internal static class DecodingConsumers
         this AsyncKafkaConsumer<TKey, TValue> consumer, string topic, int partition, long offset, byte[]? key, byte[]? value) =>
         consumer.Native.AddRecord(topic, partition, offset, key, value);
 
-    internal static void UpdateBeginningOffset<TKey, TValue>(
-        this KafkaConsumer<TKey, TValue> consumer, string topic, int partition, long offset) =>
-        consumer.Native.UpdateBeginningOffset(topic, partition, offset);
+    internal static void UpdateBeginningOffsets<TKey, TValue>(
+        this KafkaConsumer<TKey, TValue> consumer, IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        consumer.Native.UpdateBeginningOffsets(newOffsets);
 
     internal static void UpdatePartitions<TKey, TValue>(
-        this KafkaConsumer<TKey, TValue> consumer,
-        string topic,
-        int partitionCount,
-        int leaderId,
-        string leaderHost,
-        int leaderPort) =>
-        consumer.Native.UpdatePartitions(topic, partitionCount, leaderId, leaderHost, leaderPort);
+        this KafkaConsumer<TKey, TValue> consumer, string topic, IReadOnlyList<PartitionInfo> partitions) =>
+        consumer.Native.UpdatePartitions(topic, partitions);
 }

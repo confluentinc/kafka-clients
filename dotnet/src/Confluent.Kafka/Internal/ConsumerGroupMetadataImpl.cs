@@ -14,29 +14,23 @@
 
 using System;
 using System.Globalization;
+using Confluent.Kafka.Consumer;
 using Confluent.Kafka.Internal.Interop;
 
-namespace Confluent.Kafka.Consumer;
+namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// A snapshot of the consumer's group membership, Java's
-/// <c>org.apache.kafka.clients.consumer.ConsumerGroupMetadata</c>, returned by <c>GroupMetadata()</c>.
+/// The <see cref="IConsumerGroupMetadata"/> a consumer returns: a copy of the core's metadata, which keeps the core's
+/// handle for a producer's <c>SendOffsetsToTransaction</c>, with Java's value equality and <c>toString()</c>.
 /// </summary>
-/// <remarks>
-/// Before the consumer has joined a group, <see cref="GroupId()"/> is the configured <c>group.id</c>,
-/// <see cref="GenerationId()"/> is <c>-1</c>, <see cref="MemberId()"/> is empty, and <see cref="GroupInstanceId()"/> is
-/// the configured <c>group.instance.id</c>, or <see langword="null"/>. A mock consumer returns Java's mock values.
-/// An instance can be passed to a producer's <c>SendOffsetsToTransaction</c>, also after its consumer is closed: it
-/// keeps the client's own copy of the metadata, released when the instance is garbage-collected.
-/// </remarks>
-public sealed class ConsumerGroupMetadata
+internal sealed class ConsumerGroupMetadataImpl : IConsumerGroupMetadata
 {
     private readonly string _groupId;
     private readonly int _generationId;
     private readonly string _memberId;
     private readonly string? _groupInstanceId;
 
-    internal ConsumerGroupMetadata(
+    internal ConsumerGroupMetadataImpl(
         string groupId,
         int generationId,
         string memberId,
@@ -50,32 +44,19 @@ public sealed class ConsumerGroupMetadata
         _groupInstanceId = groupInstanceId;
     }
 
-    /// <summary>The consumer group id (the configured <c>group.id</c>).</summary>
-    /// <returns>The consumer group id (the configured <c>group.id</c>).</returns>
+    // The core's metadata, which a producer's SendOffsetsToTransaction passes on. Not disposable: the finalizer frees it.
+    internal SafeConsumerGroupMetadataHandle Handle { get; }
+
+    /// <inheritdoc/>
     public string GroupId() => _groupId;
 
-    /// <summary>
-    /// The group generation id, or <c>-1</c> when unknown (before the consumer has
-    /// joined a group).
-    /// </summary>
-    /// <returns>The group generation id, or <c>-1</c> when unknown (before the consumer has joined a
-    /// group).</returns>
+    /// <inheritdoc/>
     public int GenerationId() => _generationId;
 
-    /// <summary>
-    /// The member id assigned by the coordinator, or the empty string before the
-    /// consumer has joined a group.
-    /// </summary>
-    /// <returns>The member id assigned by the coordinator, or the empty string before the consumer has joined a
-    /// group.</returns>
+    /// <inheritdoc/>
     public string MemberId() => _memberId;
 
-    /// <summary>
-    /// The static group instance id (the configured <c>group.instance.id</c>), or
-    /// <see langword="null"/> when the consumer is not a static member.
-    /// </summary>
-    /// <returns>The static group instance id (the configured <c>group.instance.id</c>), or <see langword="null"/>
-    /// when the consumer is not a static member.</returns>
+    /// <inheritdoc/>
     public string? GroupInstanceId() => _groupInstanceId;
 
     /// <summary>
@@ -86,7 +67,7 @@ public sealed class ConsumerGroupMetadata
     /// <returns>Whether the two are the same group membership.</returns>
     public override bool Equals(object? obj) =>
         ReferenceEquals(this, obj)
-        || (obj is ConsumerGroupMetadata other
+        || (obj is ConsumerGroupMetadataImpl other
             && _generationId == other._generationId
             && string.Equals(_groupId, other._groupId, StringComparison.Ordinal)
             && string.Equals(_memberId, other._memberId, StringComparison.Ordinal)
@@ -119,7 +100,4 @@ public sealed class ConsumerGroupMetadata
             _generationId,
             _memberId,
             _groupInstanceId ?? string.Empty);
-
-    // The core's metadata, which a producer's SendOffsetsToTransaction passes on. Not disposable: the finalizer frees it.
-    internal SafeConsumerGroupMetadataHandle Handle { get; }
 }

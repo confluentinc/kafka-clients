@@ -60,12 +60,12 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
             {
                 typeof(string),
                 typeof(bool),
-                typeof(IEnumerable<MemberDescription>),
+                typeof(IReadOnlyCollection<MemberDescription>),
                 typeof(string),
                 typeof(GroupType),
                 typeof(GroupState),
                 typeof(Node),
-                typeof(IEnumerable<AclOperation>),
+                typeof(IReadOnlyCollection<AclOperation>),
                 typeof(int?),
                 typeof(int?),
             },
@@ -327,7 +327,7 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
             "g-1", false, new[] { s_memberOne, s_memberTwo }, "range", GroupType.CONSUMER,
             GroupState.STABLE, s_coordinatorNode, Operations(), 7, 9);
 
-    private static ConsumerGroupDescription WithOperations(IEnumerable<AclOperation>? operations) =>
+    private static ConsumerGroupDescription WithOperations(IReadOnlyCollection<AclOperation>? operations) =>
         Describe(
             "g-1", false, new[] { s_memberOne }, "range", GroupType.CONSUMER, GroupState.STABLE,
             s_coordinatorNode, operations, 7, 9);
@@ -345,12 +345,12 @@ public sealed class PublicAdminConsumerGroupDescriptionTests
     private static ConsumerGroupDescription Describe(
         string? groupId,
         bool isSimpleConsumerGroup,
-        IEnumerable<MemberDescription>? members,
+        IReadOnlyCollection<MemberDescription>? members,
         string? partitionAssignor,
         GroupType type,
         GroupState groupState,
         Node? coordinator,
-        IEnumerable<AclOperation>? authorizedOperations,
+        IReadOnlyCollection<AclOperation>? authorizedOperations,
         int? groupEpoch,
         int? targetAssignmentEpoch) =>
         new ConsumerGroupDescription(

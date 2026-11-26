@@ -88,7 +88,7 @@ public sealed class PublicProducerDeliveryCallbackTfmSmokeTests
     public async Task AsyncMockProducer_SendWithCallback_FailurePath_DeliversPlaceholderMetadata()
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(autoComplete: false, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
         SmokeDeliveryCallback callback = new SmokeDeliveryCallback();
 

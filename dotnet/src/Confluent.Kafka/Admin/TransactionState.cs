@@ -33,8 +33,8 @@ namespace Confluent.Kafka.Admin;
 /// </para>
 /// <para>
 /// Members are in Java's declaration order, so <c>default(TransactionState)</c> is
-/// <see cref="ONGOING"/> rather than <see cref="UNKNOWN"/>. Never persist the underlying
-/// <see langword="int"/>: Java's constants carry no numeric id.
+/// <see cref="ONGOING"/> rather than <see cref="UNKNOWN"/>. Java's constants carry no numeric id:
+/// a member's number never changes once released, and has no meaning on the wire.
 /// </para>
 /// <para>
 /// <c>ToString()</c> gives the Java constant name (<c>PREPARE_ABORT</c>), not Java's
@@ -46,31 +46,31 @@ namespace Confluent.Kafka.Admin;
 public enum TransactionState
 {
     /// <summary>Java's <c>ONGOING</c>; wire spelling <c>"Ongoing"</c>.</summary>
-    ONGOING,
+    ONGOING = 0,
 
     /// <summary>Java's <c>PREPARE_ABORT</c>; wire spelling <c>"PrepareAbort"</c>.</summary>
-    PREPARE_ABORT,
+    PREPARE_ABORT = 1,
 
     /// <summary>Java's <c>PREPARE_COMMIT</c>; wire spelling <c>"PrepareCommit"</c>.</summary>
-    PREPARE_COMMIT,
+    PREPARE_COMMIT = 2,
 
     /// <summary>Java's <c>COMPLETE_ABORT</c>; wire spelling <c>"CompleteAbort"</c>.</summary>
-    COMPLETE_ABORT,
+    COMPLETE_ABORT = 3,
 
     /// <summary>Java's <c>COMPLETE_COMMIT</c>; wire spelling <c>"CompleteCommit"</c>.</summary>
-    COMPLETE_COMMIT,
+    COMPLETE_COMMIT = 4,
 
     /// <summary>Java's <c>EMPTY</c>; wire spelling <c>"Empty"</c>.</summary>
-    EMPTY,
+    EMPTY = 5,
 
     /// <summary>Java's <c>PREPARE_EPOCH_FENCE</c>; wire spelling <c>"PrepareEpochFence"</c>.</summary>
-    PREPARE_EPOCH_FENCE,
+    PREPARE_EPOCH_FENCE = 6,
 
     /// <summary>
     /// Java's <c>UNKNOWN</c>; wire spelling <c>"Unknown"</c>, and the value <c>parse</c> yields
     /// for any name it does not recognise.
     /// </summary>
-    UNKNOWN,
+    UNKNOWN = 7,
 }
 
 /// <summary>

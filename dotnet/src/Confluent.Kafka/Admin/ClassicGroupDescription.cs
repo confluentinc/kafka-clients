@@ -74,7 +74,7 @@ public sealed class ClassicGroupDescription
         string? groupId,
         string? protocol,
         string? protocolData,
-        IEnumerable<MemberDescription>? members,
+        IReadOnlyCollection<MemberDescription>? members,
         ClassicGroupState state,
         Node? coordinator)
         : this(
@@ -110,10 +110,10 @@ public sealed class ClassicGroupDescription
         string? groupId,
         string? protocol,
         string? protocolData,
-        IEnumerable<MemberDescription>? members,
+        IReadOnlyCollection<MemberDescription>? members,
         ClassicGroupState state,
         Node? coordinator,
-        IEnumerable<AclOperation>? authorizedOperations)
+        IReadOnlyCollection<AclOperation>? authorizedOperations)
     {
         _groupId = groupId ?? string.Empty;
         _protocol = protocol;

@@ -78,10 +78,12 @@ internal sealed class ConsumerServer : IDisposable
         switch (Consumer(consumerId))
         {
             case MockConsumer<byte[], byte[]> sync:
-                sync.UpdateBeginningOffset(topic, partition, offset);
+                sync.UpdateBeginningOffsets(
+                    new Dictionary<TopicPartition, long> { [new TopicPartition(topic, partition)] = offset });
                 break;
             case AsyncMockConsumer<byte[], byte[]> async:
-                async.UpdateBeginningOffset(topic, partition, offset);
+                async.UpdateBeginningOffsets(
+                    new Dictionary<TopicPartition, long> { [new TopicPartition(topic, partition)] = offset });
                 break;
             default:
                 throw new InvalidOperationException("not a mock consumer");
@@ -93,10 +95,12 @@ internal sealed class ConsumerServer : IDisposable
         switch (Consumer(consumerId))
         {
             case MockConsumer<byte[], byte[]> sync:
-                sync.UpdateEndOffset(topic, partition, offset);
+                sync.UpdateEndOffsets(
+                    new Dictionary<TopicPartition, long> { [new TopicPartition(topic, partition)] = offset });
                 break;
             case AsyncMockConsumer<byte[], byte[]> async:
-                async.UpdateEndOffset(topic, partition, offset);
+                async.UpdateEndOffsets(
+                    new Dictionary<TopicPartition, long> { [new TopicPartition(topic, partition)] = offset });
                 break;
             default:
                 throw new InvalidOperationException("not a mock consumer");

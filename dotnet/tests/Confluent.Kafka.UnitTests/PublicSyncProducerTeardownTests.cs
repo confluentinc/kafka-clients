@@ -136,7 +136,7 @@ public sealed class PublicSyncProducerTeardownTests
     public void SyncDispose_WithUncompletedManualSend_CompletesTheSend()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            autoComplete: false, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         RecordingCallback callback = new RecordingCallback();
         KafkaFuture<RecordMetadata> future =
             producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback);
@@ -156,7 +156,7 @@ public sealed class PublicSyncProducerTeardownTests
     public void SyncDispose_AfterClose_DoesNotFlush_AndDoesNotThrow()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            autoComplete: false, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         RecordingCallback callback = new RecordingCallback();
         KafkaFuture<RecordMetadata> future =
             producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null), callback);
@@ -175,7 +175,7 @@ public sealed class PublicSyncProducerTeardownTests
         // Java's MockProducer.close() only marks the mock closed: a send it never completed stays pending, so a
         // Get blocked on it ends only by its own timeout.
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            autoComplete: false, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         KafkaFuture<RecordMetadata> future =
             producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value: Encoding.UTF8.GetBytes("v"), partition: 0, key: null));
         Task<bool> timedOut = Task.Run(() =>

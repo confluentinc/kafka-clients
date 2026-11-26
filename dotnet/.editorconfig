@@ -180,6 +180,9 @@ dotnet_naming_rule.private_static_fields_are_s_camel_case.severity = warning
 # CA1715: Identifiers should have correct prefix (I-prefix on interfaces). CLAUDE.md §7.2 / §4.
 dotnet_diagnostic.CA1715.severity = warning
 
+# CA1069: Enums values should not be duplicated, so two members never share a number. CLAUDE.md §3 rule 7.
+dotnet_diagnostic.CA1069.severity = warning
+
 #### The binding's own analyzers (analyzers/Confluent.Kafka.Analyzers) ####
 
 # CKRDA0001: a TaskCompletionSource runs its continuations asynchronously (ffi-marshalling.md §A7, §B7, §C1).
@@ -232,3 +235,20 @@ dotnet_diagnostic.CKRDA0016.severity = none
 
 [src/**.cs]
 dotnet_diagnostic.CKRDA0016.severity = warning
+
+# CKRDA0017: every member of a public enum has its number written out, so a member added before it cannot renumber
+# it (CLAUDE.md §3 rule 7). Off by default, on in src/: only the library's enums are compiled into a user's code.
+[*.cs]
+dotnet_diagnostic.CKRDA0017.severity = none
+
+[src/**.cs]
+dotnet_diagnostic.CKRDA0017.severity = warning
+
+# CKRDA0018: no public type has an operator == or !=, so == compares references as Java's does and Equals stands for
+# Java's equals (CLAUDE.md §3 rule 7). Off by default, on in src/: only the library's types are compiled into a user's
+# code.
+[*.cs]
+dotnet_diagnostic.CKRDA0018.severity = none
+
+[src/**.cs]
+dotnet_diagnostic.CKRDA0018.severity = warning

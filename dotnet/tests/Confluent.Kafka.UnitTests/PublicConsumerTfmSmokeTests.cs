@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -80,8 +81,8 @@ public sealed class PublicConsumerTfmSmokeTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
-            consumer.UpdateBeginningOffset(Topic, Partition, 5);
-            consumer.UpdateEndOffset(Topic, Partition, 99);
+            consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, Partition)] = 5 });
+            consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, Partition)] = 99 });
             TopicPartition[] request = { new TopicPartition(Topic, Partition) };
 
             System.Collections.Generic.IReadOnlyDictionary<TopicPartition, long> begin = default!;
@@ -114,7 +115,7 @@ public sealed class PublicConsumerTfmSmokeTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
-            consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
+            consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092));
 
             System.Collections.Generic.IReadOnlyList<PartitionInfo> partitions = default!;
             await TestTimeout.Run(async () => partitions = await consumer.PartitionsFor(Topic), s_deadline);
@@ -180,12 +181,12 @@ public sealed class PublicConsumerTfmSmokeTests
             Assert.Equal("meta-x", committed[tp]!.Metadata());
             Assert.Equal(7, committed[tp]!.LeaderEpoch());
 
-            consumer.UpdateBeginningOffset(Topic, Partition, 5);
-            consumer.UpdateEndOffset(Topic, Partition, 99);
+            consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, Partition)] = 5 });
+            consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, Partition)] = 99 });
             Assert.Equal(5, consumer.BeginningOffsets(new[] { tp })[tp]);
             Assert.Equal(99, consumer.EndOffsets(new[] { tp })[tp]);
 
-            consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
+            consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092));
             PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
             Assert.Equal(Topic, info.Topic());
             Assert.True(consumer.ListTopics().ContainsKey(Topic));
@@ -224,7 +225,7 @@ public sealed class PublicConsumerTfmSmokeTests
             Assert.Equal(5, committed[tp]!.Offset());
             Assert.Equal("m", committed[tp]!.Metadata());
 
-            mock.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
+            mock.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092));
             PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
             Assert.Equal(Topic, info.Topic());
             Assert.True(consumer.ListTopics().ContainsKey(Topic));

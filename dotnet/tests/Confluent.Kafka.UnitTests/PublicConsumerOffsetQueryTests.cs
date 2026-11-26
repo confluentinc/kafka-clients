@@ -43,8 +43,8 @@ public sealed class PublicConsumerOffsetQueryTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateBeginningOffset(Topic, 0, 5);
-        consumer.UpdateBeginningOffset(Topic, 1, 7);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 5 });
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 1)] = 7 });
 
         IReadOnlyDictionary<TopicPartition, long> result = await BeginningOffsetsOf(
             consumer,
@@ -61,7 +61,7 @@ public sealed class PublicConsumerOffsetQueryTests
         const string nonAscii = "topic-grüße-Ω-🎉";
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateBeginningOffset(nonAscii, 3, 99);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(nonAscii, 3)] = 99 });
 
         IReadOnlyDictionary<TopicPartition, long> result = await BeginningOffsetsOf(
             consumer, new[] { new TopicPartition(nonAscii, 3) });
@@ -88,8 +88,8 @@ public sealed class PublicConsumerOffsetQueryTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateEndOffset(Topic, 0, 100);
-        consumer.UpdateEndOffset(Topic, 2, 250);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 100 });
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 2)] = 250 });
 
         IReadOnlyDictionary<TopicPartition, long> result = await EndOffsetsOf(
             consumer,
@@ -119,7 +119,7 @@ public sealed class PublicConsumerOffsetQueryTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateEndOffset(Topic, 0, 11);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 11 });
 
         await Assert.ThrowsAsync<IllegalStateException>(
             () => EndOffsetsOf(consumer, new[] { new TopicPartition(Topic, 9) }));
@@ -332,7 +332,7 @@ public sealed class PublicConsumerOffsetQueryTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateBeginningOffset(Topic, 0, 1);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 1 });
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -357,7 +357,7 @@ public sealed class PublicConsumerOffsetQueryTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateEndOffset(Topic, 0, 5);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 5 });
 
         consumer.Wakeup();
 

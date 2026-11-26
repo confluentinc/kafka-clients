@@ -47,7 +47,7 @@ public sealed class Config
     /// <exception cref="ArgumentNullException">
     /// <paramref name="entries"/> is null, or contains a null element.
     /// </exception>
-    public Config(IEnumerable<ConfigEntry> entries)
+    public Config(IReadOnlyCollection<ConfigEntry> entries)
     {
         if (entries is null)
         {

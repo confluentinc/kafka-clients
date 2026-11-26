@@ -56,8 +56,12 @@ public sealed class PublicMockConsumerJavaHelpersTests
         Assert.Equal(0, consumer.Poll(TimeSpan.Zero).Count());
         consumer.Rebalance(new[] { s_test0, s_test1 });
         // Mock consumers need to seek manually since they cannot automatically reset offsets
-        consumer.UpdateBeginningOffset("test", 0, 0L);
-        consumer.UpdateBeginningOffset("test", 1, 0L);
+        Dictionary<TopicPartition, long> beginningOffsets = new Dictionary<TopicPartition, long>
+        {
+            [new TopicPartition("test", 0)] = 0L,
+            [new TopicPartition("test", 1)] = 0L,
+        };
+        consumer.UpdateBeginningOffsets(beginningOffsets);
         consumer.Seek(s_test0, 0);
         ConsumerRecord<string, string> rec1 = Record(0, "key1", "value1");
         ConsumerRecord<string, string> rec2 = Record(1, "key2", "value2");
@@ -82,8 +86,12 @@ public sealed class PublicMockConsumerJavaHelpersTests
         await consumer.Subscribe(new[] { "test" });
         Assert.Equal(0, (await consumer.Poll(TimeSpan.Zero)).Count());
         await consumer.Rebalance(new[] { s_test0, s_test1 });
-        consumer.UpdateBeginningOffset("test", 0, 0L);
-        consumer.UpdateBeginningOffset("test", 1, 0L);
+        Dictionary<TopicPartition, long> beginningOffsets = new Dictionary<TopicPartition, long>
+        {
+            [new TopicPartition("test", 0)] = 0L,
+            [new TopicPartition("test", 1)] = 0L,
+        };
+        consumer.UpdateBeginningOffsets(beginningOffsets);
         await consumer.Seek(s_test0, 0);
         ConsumerRecord<string, string> rec1 = Record(0, "key1", "value1");
         ConsumerRecord<string, string> rec2 = Record(1, "key2", "value2");
@@ -106,7 +114,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Assign(new[] { s_test0 });
         consumer.AddRecord(new ConsumerRecord<string, string>("test", 0, 0, null, null));
-        consumer.UpdateEndOffset("test", 0, 1L);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("test", 0)] = 1L });
         consumer.SeekToEnd(new[] { s_test0 });
 
         ConsumerRecords<string, string> records = Poll(consumer);
@@ -123,7 +131,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
         TopicPartition[] testPartitionList = { s_test0 };
         consumer.Assign(testPartitionList);
         consumer.AddRecord(new ConsumerRecord<string, string>("test", 0, 0, null, null));
-        consumer.UpdateBeginningOffset("test", 0, 0L);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("test", 0)] = 0L });
         consumer.SeekToBeginning(testPartitionList);
 
         consumer.Pause(testPartitionList);
@@ -141,14 +149,14 @@ public sealed class PublicMockConsumerJavaHelpersTests
     {
         MockConsumer<string, string> consumer = new MockConsumer<string, string>(Earliest);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateEndOffset("test", 0, 10L);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("test", 0)] = 10L });
         // consumer.EndOffsets should NOT change the value of end offsets
         for (int i = 0; i < 3; i++)
         {
             Assert.Equal(10L, consumer.EndOffsets(new[] { s_test0 })[s_test0]);
         }
 
-        consumer.UpdateEndOffset("test", 0, 11L);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("test", 0)] = 11L });
         for (int i = 0; i < 3; i++)
         {
             Assert.Equal(11L, consumer.EndOffsets(new[] { s_test0 })[s_test0]);
@@ -214,7 +222,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
         AsyncMockConsumer<string, string> consumer = new AsyncMockConsumer<string, string>(Earliest);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await consumer.Assign(new[] { s_test0 });
-        consumer.UpdateBeginningOffset("test", 0, 0L);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("test", 0)] = 0L });
         for (int offset = 0; offset < 10; offset++)
         {
             consumer.AddRecord(new ConsumerRecord<string, string>("test", 0, offset, null, null));
@@ -245,8 +253,8 @@ public sealed class PublicMockConsumerJavaHelpersTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateBeginningOffset("test", 0, 5L);
-        consumer.UpdateEndOffset("test", 0, 9L);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("test", 0)] = 5L });
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("test", 0)] = 9L });
         KafkaException injected = new KafkaException("offsets down");
 
         consumer.SetOffsetsException(injected);
@@ -267,7 +275,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateBeginningOffset("test", 0, 5L);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("test", 0)] = 5L });
         KafkaException injected = new KafkaException("offsets down");
 
         consumer.SetOffsetsException(injected);
@@ -303,7 +311,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Earliest);
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         await consumer.Assign(new[] { s_test0 });
-        consumer.UpdateBeginningOffset("test", 0, 0L);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("test", 0)] = 0L });
 
         Assert.Null(consumer.LastPollTimeout());
         await TestTimeout.Run(() => consumer.Poll(TimeSpan.FromMilliseconds(250)), s_deadline);
@@ -377,17 +385,26 @@ public sealed class PublicMockConsumerJavaHelpersTests
             Assert.Throws<IllegalArgumentException>(() => new AsyncMockConsumer<byte[], byte[]>(strategy!)).Message);
     }
 
-    [Fact]
-    public void UpdateDurationOffsets_RefusesANullMapOrANullTopic()
+    [Theory]
+    [InlineData("Beginning")]
+    [InlineData("End")]
+    [InlineData("Duration")]
+    public void UpdateOffsets_RefuseANullMapOrANullTopic(string offsets)
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
+        Action<IReadOnlyDictionary<TopicPartition, long>> update = offsets switch
+        {
+            "Beginning" => consumer.UpdateBeginningOffsets,
+            "End" => consumer.UpdateEndOffsets,
+            _ => consumer.UpdateDurationOffsets,
+        };
 
-        Assert.Equal("newOffsets", Assert.Throws<ArgumentNullException>(() => consumer.UpdateDurationOffsets(null!)).ParamName);
-        Assert.Equal(
-            "newOffsets",
-            Assert.Throws<ArgumentNullException>(
-                () => consumer.UpdateDurationOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(null!, 0)] = 1L })).ParamName);
+        Assert.Equal("newOffsets", Assert.Throws<ArgumentNullException>(() => update(null!)).ParamName);
+        ArgumentNullException nullTopic = Assert.Throws<ArgumentNullException>(
+            () => update(new Dictionary<TopicPartition, long> { [new TopicPartition(null!, 0)] = 1L }));
+        Assert.Equal("newOffsets", nullTopic.ParamName);
+        Assert.StartsWith("newOffsets must not contain a TopicPartition with a null topic", nullTopic.Message, StringComparison.Ordinal);
     }
 
     // Java's MockConsumerTest builds its consumer with the earliest reset strategy.
@@ -409,7 +426,7 @@ public sealed class PublicMockConsumerJavaHelpersTests
         MockConsumer<string, string> consumer =
             new MockConsumer<string, string>(Earliest);
         consumer.Assign(new[] { s_test0 });
-        consumer.UpdateBeginningOffset("test", 0, 0L);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("test", 0)] = 0L });
         for (int offset = 0; offset < 10; offset++)
         {
             consumer.AddRecord(new ConsumerRecord<string, string>("test", 0, offset, null, null));

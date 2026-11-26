@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Consumer;
 /// <remarks>
 /// <para>
 /// The mock-only helpers (<see cref="AddRecord"/>, <see cref="SetPollException"/>,
-/// <see cref="UpdateBeginningOffset"/>, <see cref="UpdateEndOffset"/>, <see cref="UpdatePartitions"/>,
+/// <see cref="UpdateBeginningOffsets"/>, <see cref="UpdateEndOffsets"/>, <see cref="UpdatePartitions"/>,
 /// <see cref="Rebalance"/>, <see cref="LosePartitions"/>) are on this type only; hold a
 /// <see cref="MockConsumer{TKey, TValue}"/> and pass it where an <see cref="IConsumer{TKey, TValue}"/> is expected.
 /// </para>
@@ -188,7 +188,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void Wakeup() => _native.Wakeup();
 
     /// <inheritdoc/>
-    public ConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
+    public IConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
 
     /// <inheritdoc/>
     public IReadOnlyCollection<TopicPartition> Assignment() => _native.Assignment();
@@ -221,57 +221,54 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
     /// <summary>
-    /// Sets the beginning offset of a partition, used when <see cref="SeekToBeginning"/> resets it (Java
-    /// <c>updateBeginningOffsets</c>, one entry).
+    /// Updates the beginning offsets for the specified partitions, used when <see cref="SeekToBeginning"/> resets them
+    /// (Java <c>MockConsumer.updateBeginningOffsets(Map)</c>).
     /// </summary>
-    /// <param name="topic">The record topic.</param>
-    /// <param name="partition">The partition (non-negative).</param>
-    /// <param name="offset">The beginning offset to reset to.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
+    /// <param name="newOffsets">The beginning offsets to set.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="newOffsets"/> or a partition in it is null, or a partition in it has a null topic.
+    /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// A topic in <paramref name="newOffsets"/> contains a NUL character, which the native client cannot receive
+    /// unchanged.
     /// </exception>
-    public void UpdateBeginningOffset(string topic, int partition, long offset) =>
-        _native.UpdateBeginningOffset(topic, partition, offset);
+    public void UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        _native.UpdateBeginningOffsets(newOffsets);
 
     /// <summary>
-    /// Sets the end offset of a partition, used when <see cref="SeekToEnd"/> resets it (Java
-    /// <c>updateEndOffsets</c>, one entry).
+    /// Updates the end offsets for the specified partitions, used when <see cref="SeekToEnd"/> resets them
+    /// (Java <c>MockConsumer.updateEndOffsets(Map)</c>).
     /// </summary>
-    /// <param name="topic">The record topic.</param>
-    /// <param name="partition">The partition (non-negative).</param>
-    /// <param name="offset">The end offset to reset to.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
+    /// <param name="newOffsets">The end offsets to set.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="newOffsets"/> or a partition in it is null, or a partition in it has a null topic.
+    /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="topic"/> contains a NUL character, which the native client cannot receive unchanged.
+    /// A topic in <paramref name="newOffsets"/> contains a NUL character, which the native client cannot receive
+    /// unchanged.
     /// </exception>
-    public void UpdateEndOffset(string topic, int partition, long offset) =>
-        _native.UpdateEndOffset(topic, partition, offset);
+    public void UpdateEndOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        _native.UpdateEndOffsets(newOffsets);
 
     /// <summary>
-    /// Registers <paramref name="partitionCount"/> partitions of <paramref name="topic"/> for
-    /// <see cref="PartitionsFor(string)"/> and <see cref="ListTopics()"/> (Java <c>updatePartitions</c>). Each
-    /// partition's leader, sole replica and sole in-sync replica is the node
-    /// <c>(leaderId, leaderHost, leaderPort)</c>, with no rack and no offline replicas.
+    /// Updates the partition information for the specified topic, which <see cref="PartitionsFor(string)"/> and
+    /// <see cref="ListTopics()"/> answer (Java <c>MockConsumer.updatePartitions(String, List)</c>).
     /// </summary>
-    /// <param name="topic">The topic to register partition metadata for.</param>
-    /// <param name="partitionCount">The number of partitions to register (non-negative).</param>
-    /// <param name="leaderId">The leader node id for every partition.</param>
-    /// <param name="leaderHost">The leader host for every partition.</param>
-    /// <param name="leaderPort">The leader port for every partition.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="topic"/> or <paramref name="leaderHost"/> is null.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partitionCount"/> is negative.</exception>
+    /// <param name="topic">The topic to update.</param>
+    /// <param name="partitions">The partition information.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="topic"/> or <paramref name="partitions"/> is null, or an element of
+    /// <paramref name="partitions"/> is null or has a null topic, a null node array or a null node.
+    /// </exception>
     /// <exception cref="IllegalStateException">The consumer is closed.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="topic"/> or <paramref name="leaderHost"/> contains a NUL character, which the native client
-    /// cannot receive unchanged.
+    /// <paramref name="topic"/>, or a topic, host or rack in <paramref name="partitions"/>, contains a NUL character,
+    /// which the native client cannot receive unchanged.
     /// </exception>
-    public void UpdatePartitions(string topic, int partitionCount, int leaderId, string leaderHost, int leaderPort) =>
-        _native.UpdatePartitions(topic, partitionCount, leaderId, leaderHost, leaderPort);
+    public void UpdatePartitions(string topic, IReadOnlyList<PartitionInfo> partitions) =>
+        _native.UpdatePartitions(topic, partitions);
 
     /// <summary>
     /// Queues <paramref name="record"/> for the next <see cref="Poll"/> (Java <c>MockConsumer.addRecord</c>). The

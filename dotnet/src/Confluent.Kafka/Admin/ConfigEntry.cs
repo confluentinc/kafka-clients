@@ -332,39 +332,40 @@ public sealed class ConfigEntry
     /// The data type of a configuration entry — Java's nested <c>ConfigEntry.ConfigType</c>.
     /// </summary>
     /// <remarks>
-    /// Java's enum has no numeric id, so the member values are C# ordinals with no wire meaning.
+    /// Java's enum has no numeric id. A member's number never changes once released, and has no
+    /// meaning on the wire.
     /// </remarks>
     public enum ConfigType
     {
         /// <summary>Java's <c>UNKNOWN</c> — also where an unrecognised name lands.</summary>
-        UNKNOWN,
+        UNKNOWN = 0,
 
         /// <summary>Java's <c>BOOLEAN</c>.</summary>
-        BOOLEAN,
+        BOOLEAN = 1,
 
         /// <summary>Java's <c>STRING</c>.</summary>
-        STRING,
+        STRING = 2,
 
         /// <summary>Java's <c>INT</c>.</summary>
-        INT,
+        INT = 3,
 
         /// <summary>Java's <c>SHORT</c>.</summary>
-        SHORT,
+        SHORT = 4,
 
         /// <summary>Java's <c>LONG</c>.</summary>
-        LONG,
+        LONG = 5,
 
         /// <summary>Java's <c>DOUBLE</c>.</summary>
-        DOUBLE,
+        DOUBLE = 6,
 
         /// <summary>Java's <c>LIST</c>.</summary>
-        LIST,
+        LIST = 7,
 
         /// <summary>Java's <c>CLASS</c>.</summary>
-        CLASS,
+        CLASS = 8,
 
         /// <summary>Java's <c>PASSWORD</c>.</summary>
-        PASSWORD,
+        PASSWORD = 9,
     }
 
     /// <summary>
@@ -377,34 +378,34 @@ public sealed class ConfigEntry
     public enum ConfigSource
     {
         /// <summary>Java's <c>DYNAMIC_TOPIC_CONFIG</c> — set for a specific topic.</summary>
-        DYNAMIC_TOPIC_CONFIG,
+        DYNAMIC_TOPIC_CONFIG = 0,
 
         /// <summary>Java's <c>DYNAMIC_BROKER_LOGGER_CONFIG</c> — set for a specific broker's logger.</summary>
-        DYNAMIC_BROKER_LOGGER_CONFIG,
+        DYNAMIC_BROKER_LOGGER_CONFIG = 1,
 
         /// <summary>Java's <c>DYNAMIC_BROKER_CONFIG</c> — set for a specific broker.</summary>
-        DYNAMIC_BROKER_CONFIG,
+        DYNAMIC_BROKER_CONFIG = 2,
 
         /// <summary>Java's <c>DYNAMIC_DEFAULT_BROKER_CONFIG</c> — the cluster-wide broker default.</summary>
-        DYNAMIC_DEFAULT_BROKER_CONFIG,
+        DYNAMIC_DEFAULT_BROKER_CONFIG = 3,
 
         /// <summary>Java's <c>DYNAMIC_CLIENT_METRICS_CONFIG</c> — a client-metrics subscription config.</summary>
-        DYNAMIC_CLIENT_METRICS_CONFIG,
+        DYNAMIC_CLIENT_METRICS_CONFIG = 4,
 
         /// <summary>Java's <c>DYNAMIC_GROUP_CONFIG</c> — set for a specific group.</summary>
-        DYNAMIC_GROUP_CONFIG,
+        DYNAMIC_GROUP_CONFIG = 5,
 
         /// <summary>Java's <c>STATIC_BROKER_CONFIG</c> — supplied as broker properties at start-up.</summary>
-        STATIC_BROKER_CONFIG,
+        STATIC_BROKER_CONFIG = 6,
 
         /// <summary>
         /// Java's <c>DEFAULT_CONFIG</c> — the built-in default. This is the one member
         /// <see cref="ConfigEntry.IsDefault()"/> tests for.
         /// </summary>
-        DEFAULT_CONFIG,
+        DEFAULT_CONFIG = 7,
 
         /// <summary>Java's <c>UNKNOWN</c> — also where an unrecognised name lands.</summary>
-        UNKNOWN,
+        UNKNOWN = 8,
     }
 
     /// <summary>

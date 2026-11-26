@@ -227,7 +227,8 @@ are queued for the client's `__execute_callbacks`, with one exception: the produ
 and `send_with_callback_cb` fire their completion `cb` inside the call, on the calling thread,
 when the producer takes or refuses the record at once (§A1; `rust/src/ffi/producer/mod.rs:131-155`
 at `851c8d95`). No callback fires on a native thread of its own; the binding chooses the thread
-that drains. When the queue goes from empty to non-empty, the core calls the hook set with
+that drains. The one exception is the group metadata getters of §A6, which return only values the
+binding copied at the call. When the queue goes from empty to non-empty, the core calls the hook set with
 `__set_callbacks_notify`. The hook only signals. The core calls it after releasing its
 registration lock, so it can run on any thread that queues work, including a sending thread
 inside `send_with_callback_cb`, and two calls can overlap. `__set_callbacks_notify` does not wait
@@ -900,6 +901,19 @@ it returns the failed future (CLAUDE.md §3, as Java's `doSend`). The mocks reth
     callback_id)` fires once, later, and the binding reports its end through
     `Producer__set_callback_result`. A plain `Send(record)` passes one too: it is what completes
     the record's future; only the user callback is absent.
+  - **The group metadata getters**, for a user's own `IConsumerGroupMetadata` passed to
+    `SendOffsetsToTransaction` (a consumer's passes the core's handle and needs none):
+    `ConsumerGroupMetadata_new_err(self_, group_id, generation_id, member_id, group_instance_id)`.
+    Unlike the forms above, the core may call them on any thread, concurrently, until the
+    operation has completed (its `# Safety`). So the binding reads the four values once, on the
+    calling thread, into one native block that `self_` points at (`ConsumerGroupMetadataValues`),
+    and the getters only return what it holds: no user code runs there, and nothing can throw.
+    The header takes `NULL` only from the group instance id getter (`Optional.empty()`): a null group
+    id or member id is refused with `ArgumentNullException` before the block is built, as Java's
+    class refuses it.
+    The handle is freed after the submit, as the core keeps its own reference; the block, in the
+    operation's completion, which the submit roots until it runs, or by the finalizer when no
+    submit took it.
 
 `RecordMetadata_copy` (the old form A) does not exist at `0035d9ff`, and the managed-only delivery
 callback of M14/P1 (the old form C) is replaced by `Callback_t`.

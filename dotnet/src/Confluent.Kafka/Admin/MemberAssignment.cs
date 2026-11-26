@@ -43,7 +43,7 @@ public sealed class MemberAssignment
     /// <exception cref="ArgumentNullException">
     /// <paramref name="topicPartitions"/> contains a <see langword="null"/>, which Java's <c>Set.copyOf</c> rejects.
     /// </exception>
-    public MemberAssignment(IEnumerable<TopicPartition>? topicPartitions)
+    public MemberAssignment(IReadOnlyCollection<TopicPartition>? topicPartitions)
     {
         if (topicPartitions is null)
         {

@@ -47,7 +47,7 @@ public abstract class TopicCollection
     /// <see cref="Admin.IAdmin.DescribeTopics(TopicCollection, Admin.DescribeTopicsOptions)"/> reject it with
     /// <see cref="System.ArgumentNullException"/>.
     /// </remarks>
-    public static TopicIdCollection OfTopicIds(IEnumerable<Uuid> topics) => new TopicIdCollection(topics);
+    public static TopicIdCollection OfTopicIds(IReadOnlyCollection<Uuid> topics) => new TopicIdCollection(topics);
 
     /// <summary>
     /// A collection of topics identified by topic name — Java's <c>ofTopicNames</c>.
@@ -63,7 +63,7 @@ public abstract class TopicCollection
     /// reject the whole call with <see cref="System.ArgumentException"/>, where Java fails only
     /// that key's future with <c>InvalidTopicException</c>.
     /// </remarks>
-    public static TopicNameCollection OfTopicNames(IEnumerable<string> topics) =>
+    public static TopicNameCollection OfTopicNames(IReadOnlyCollection<string> topics) =>
         new TopicNameCollection(topics);
 
     /// <summary>

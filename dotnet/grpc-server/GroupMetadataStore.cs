@@ -25,20 +25,20 @@ namespace Confluent.Kafka.GrpcServer;
 /// </summary>
 internal sealed class GroupMetadataStore
 {
-    private readonly ConcurrentDictionary<ulong, ConsumerGroupMetadata> _entries =
-        new ConcurrentDictionary<ulong, ConsumerGroupMetadata>();
+    private readonly ConcurrentDictionary<ulong, IConsumerGroupMetadata> _entries =
+        new ConcurrentDictionary<ulong, IConsumerGroupMetadata>();
 
     private long _lastId;
 
-    internal ulong Add(ConsumerGroupMetadata groupMetadata)
+    internal ulong Add(IConsumerGroupMetadata groupMetadata)
     {
         ulong groupMetadataId = (ulong)Interlocked.Increment(ref _lastId);
         _entries[groupMetadataId] = groupMetadata;
         return groupMetadataId;
     }
 
-    internal ConsumerGroupMetadata? Get(ulong groupMetadataId) =>
-        _entries.TryGetValue(groupMetadataId, out ConsumerGroupMetadata? groupMetadata) ? groupMetadata : null;
+    internal IConsumerGroupMetadata? Get(ulong groupMetadataId) =>
+        _entries.TryGetValue(groupMetadataId, out IConsumerGroupMetadata? groupMetadata) ? groupMetadata : null;
 
     internal void Release(ulong groupMetadataId) => _entries.TryRemove(groupMetadataId, out _);
 }

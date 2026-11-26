@@ -1302,7 +1302,7 @@ public sealed class PublicConsumerCallbackRoutingTests
 
     private static string Format(long value) => value.ToString(CultureInfo.InvariantCulture);
 
-    private static string Format(ConsumerGroupMetadata metadata) =>
+    private static string Format(IConsumerGroupMetadata metadata) =>
         metadata.GroupId() + "/" + metadata.GenerationId().ToString(CultureInfo.InvariantCulture) + "/" + metadata.MemberId()
         + "/" + (metadata.GroupInstanceId() ?? "null");
 

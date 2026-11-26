@@ -40,11 +40,11 @@ public sealed class KafkaAdminClient : IAdmin
     }
 
     /// <inheritdoc/>
-    public CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics) =>
+    public CreateTopicsResult CreateTopics(IReadOnlyCollection<NewTopic> newTopics) =>
         CreateTopics(newTopics, new CreateTopicsOptions());
 
     /// <inheritdoc/>
-    public CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions options)
+    public CreateTopicsResult CreateTopics(IReadOnlyCollection<NewTopic> newTopics, CreateTopicsOptions options)
     {
         CreateTopicsOptions? sent = AdminEarlyReturns.CreateTopics(ref newTopics, options);
         return CreateTopicsResult.OfClient(_native.CreateTopics(newTopics, sent));
@@ -341,20 +341,20 @@ public sealed class KafkaAdminClient : IAdmin
             _native.RemoveMembersFromConsumerGroup(groupId, options), options);
 
     /// <inheritdoc/>
-    public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls) =>
+    public CreateAclsResult CreateAcls(IReadOnlyCollection<AclBinding> acls) =>
         CreateAcls(acls, new CreateAclsOptions());
 
     /// <inheritdoc/>
-    public CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions options) =>
+    public CreateAclsResult CreateAcls(IReadOnlyCollection<AclBinding> acls, CreateAclsOptions options) =>
         CreateAclsResult.OfClient(_native.CreateAcls(acls, options));
 
     /// <inheritdoc/>
-    public DeleteAclsResult DeleteAcls(IEnumerable<AclBindingFilter> filters) =>
+    public DeleteAclsResult DeleteAcls(IReadOnlyCollection<AclBindingFilter> filters) =>
         DeleteAcls(filters, new DeleteAclsOptions());
 
     /// <inheritdoc/>
     public DeleteAclsResult DeleteAcls(
-        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions options) =>
+        IReadOnlyCollection<AclBindingFilter> filters, DeleteAclsOptions options) =>
         DeleteAclsResult.OfClient(_native.DeleteAcls(filters, options));
 
     /// <inheritdoc/>
@@ -376,12 +376,12 @@ public sealed class KafkaAdminClient : IAdmin
         DescribeClientQuotasResult.OfClient(_native.DescribeClientQuotas(filter, options));
 
     /// <inheritdoc/>
-    public AlterClientQuotasResult AlterClientQuotas(IEnumerable<ClientQuotaAlteration> entries) =>
+    public AlterClientQuotasResult AlterClientQuotas(IReadOnlyCollection<ClientQuotaAlteration> entries) =>
         AlterClientQuotas(entries, new AlterClientQuotasOptions());
 
     /// <inheritdoc/>
     public AlterClientQuotasResult AlterClientQuotas(
-        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions options) =>
+        IReadOnlyCollection<ClientQuotaAlteration> entries, AlterClientQuotasOptions options) =>
         AlterClientQuotasResult.OfClient(_native.AlterClientQuotas(entries, options));
 
     /// <inheritdoc/>
@@ -389,23 +389,23 @@ public sealed class KafkaAdminClient : IAdmin
         DescribeUserScramCredentials(null, new DescribeUserScramCredentialsOptions());
 
     /// <inheritdoc/>
-    public DescribeUserScramCredentialsResult DescribeUserScramCredentials(IReadOnlyCollection<string>? users) =>
+    public DescribeUserScramCredentialsResult DescribeUserScramCredentials(IReadOnlyList<string>? users) =>
         DescribeUserScramCredentials(users, new DescribeUserScramCredentialsOptions());
 
     /// <inheritdoc/>
     public DescribeUserScramCredentialsResult DescribeUserScramCredentials(
-        IReadOnlyCollection<string>? users,
+        IReadOnlyList<string>? users,
         DescribeUserScramCredentialsOptions options) =>
         DescribeUserScramCredentialsResult.OfClient(
             _native.DescribeUserScramCredentials(users, options));
 
     /// <inheritdoc/>
-    public AlterUserScramCredentialsResult AlterUserScramCredentials(IEnumerable<UserScramCredentialAlteration> alterations) =>
+    public AlterUserScramCredentialsResult AlterUserScramCredentials(IReadOnlyList<UserScramCredentialAlteration> alterations) =>
         AlterUserScramCredentials(alterations, new AlterUserScramCredentialsOptions());
 
     /// <inheritdoc/>
     public AlterUserScramCredentialsResult AlterUserScramCredentials(
-        IEnumerable<UserScramCredentialAlteration> alterations,
+        IReadOnlyList<UserScramCredentialAlteration> alterations,
         AlterUserScramCredentialsOptions options) =>
         AlterUserScramCredentialsResult.OfClient(
             _native.AlterUserScramCredentials(alterations, options));

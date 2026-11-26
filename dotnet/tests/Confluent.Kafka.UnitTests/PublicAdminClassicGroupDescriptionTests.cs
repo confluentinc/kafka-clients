@@ -58,7 +58,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
                 typeof(string),
                 typeof(string),
                 typeof(string),
-                typeof(IEnumerable<MemberDescription>),
+                typeof(IReadOnlyCollection<MemberDescription>),
                 typeof(ClassicGroupState),
                 typeof(Node),
             },
@@ -70,10 +70,10 @@ public sealed class PublicAdminClassicGroupDescriptionTests
                 typeof(string),
                 typeof(string),
                 typeof(string),
-                typeof(IEnumerable<MemberDescription>),
+                typeof(IReadOnlyCollection<MemberDescription>),
                 typeof(ClassicGroupState),
                 typeof(Node),
-                typeof(IEnumerable<AclOperation>),
+                typeof(IReadOnlyCollection<AclOperation>),
             },
             actual[1]);
 
@@ -410,7 +410,7 @@ public sealed class PublicAdminClassicGroupDescriptionTests
             "g-1", "consumer", "range", new[] { s_memberOne },
             state, s_coordinatorNode, Operations());
 
-    private static ClassicGroupDescription WithOperations(IEnumerable<AclOperation>? operations) =>
+    private static ClassicGroupDescription WithOperations(IReadOnlyCollection<AclOperation>? operations) =>
         Describe(
             "g-1", "consumer", "range", new[] { s_memberOne },
             ClassicGroupState.STABLE, s_coordinatorNode, operations);
@@ -424,10 +424,10 @@ public sealed class PublicAdminClassicGroupDescriptionTests
         string? groupId,
         string? protocol,
         string? protocolData,
-        IEnumerable<MemberDescription>? members,
+        IReadOnlyCollection<MemberDescription>? members,
         ClassicGroupState state,
         Node? coordinator,
-        IEnumerable<AclOperation>? authorizedOperations) =>
+        IReadOnlyCollection<AclOperation>? authorizedOperations) =>
         new ClassicGroupDescription(
             groupId,
             protocol,

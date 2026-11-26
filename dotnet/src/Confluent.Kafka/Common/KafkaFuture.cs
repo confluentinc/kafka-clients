@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Runtime.CompilerServices;
 using System.Threading;
 
 using Confluent.Kafka.Internal;
@@ -32,7 +31,7 @@ namespace Confluent.Kafka.Common;
 /// synchronizes on the future object itself. Do not lock on a future: a <c>lock (future)</c> can delay its completion
 /// and every later one of the same client, and a <see cref="Get()"/> inside it can wait forever.
 /// </remarks>
-public abstract class KafkaFuture<T> : KafkaFuture, IEquatable<KafkaFuture<T>>
+public abstract class KafkaFuture<T> : KafkaFuture
 {
     private protected KafkaFuture()
     {
@@ -82,25 +81,6 @@ public abstract class KafkaFuture<T> : KafkaFuture, IEquatable<KafkaFuture<T>>
     /// </summary>
     public abstract T GetNow(T valueIfAbsent);
 
-    /// <summary>
-    /// Determines whether two <see cref="KafkaFuture{T}"/> references are the same future.
-    /// </summary>
-    public static bool operator ==(KafkaFuture<T>? left, KafkaFuture<T>? right) => ReferenceEquals(left, right);
-
-    /// <summary>
-    /// Determines whether two <see cref="KafkaFuture{T}"/> references are different futures.
-    /// </summary>
-    public static bool operator !=(KafkaFuture<T>? left, KafkaFuture<T>? right) => !ReferenceEquals(left, right);
-
-    /// <inheritdoc/>
-    public bool Equals(KafkaFuture<T>? other) => ReferenceEquals(this, other);
-
-    /// <inheritdoc/>
-    public override bool Equals(object? obj) => ReferenceEquals(this, obj);
-
-    /// <inheritdoc/>
-    public override int GetHashCode() => RuntimeHelpers.GetHashCode(this);
-
     private protected sealed override void WaitForGet() => _ = Get();
 
     private protected sealed override void WaitForGet(TimeSpan timeout) => _ = Get(timeout);
@@ -118,7 +98,7 @@ public abstract class KafkaFuture<T> : KafkaFuture, IEquatable<KafkaFuture<T>>
 /// synchronizes on the future object itself. Do not lock on a future: a <c>lock (future)</c> can delay its completion
 /// and every later one of the same client, and a <see cref="Get()"/> inside it can wait forever.
 /// </remarks>
-public abstract class KafkaFuture : IEquatable<KafkaFuture>
+public abstract class KafkaFuture
 {
     // Only the binding's engines derive from the futures, so every future is one of them.
     private protected KafkaFuture()
@@ -239,25 +219,6 @@ public abstract class KafkaFuture : IEquatable<KafkaFuture>
 
     /// <inheritdoc/>
     public abstract override string ToString();
-
-    /// <summary>
-    /// Determines whether two <see cref="KafkaFuture"/> references are the same future.
-    /// </summary>
-    public static bool operator ==(KafkaFuture? left, KafkaFuture? right) => ReferenceEquals(left, right);
-
-    /// <summary>
-    /// Determines whether two <see cref="KafkaFuture"/> references are different futures.
-    /// </summary>
-    public static bool operator !=(KafkaFuture? left, KafkaFuture? right) => !ReferenceEquals(left, right);
-
-    /// <inheritdoc/>
-    public bool Equals(KafkaFuture? other) => ReferenceEquals(this, other);
-
-    /// <inheritdoc/>
-    public override bool Equals(object? obj) => ReferenceEquals(this, obj);
-
-    /// <inheritdoc/>
-    public override int GetHashCode() => RuntimeHelpers.GetHashCode(this);
 
     // The wait behind the plain Get forms: a future of a value waits through its own typed Get.
     private protected abstract void WaitForGet();

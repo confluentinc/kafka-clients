@@ -37,7 +37,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
     {
         _behaviour = behaviour;
         _probe = probe;
-        _inner = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: behaviour.FailEach is null);
+        _inner = new MockProducer<byte[], byte[]>(autoComplete: behaviour.FailEach is null, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
     }
 
     public KafkaFuture<RecordMetadata> Send(ProducerRecord<byte[], byte[]> record) => _inner.Send(record);
@@ -79,7 +79,7 @@ internal sealed class SyncTestProducer : IProducer<byte[], byte[]>
     public void BeginTransaction() => _inner.BeginTransaction();
 
     public void SendOffsetsToTransaction(
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, ConsumerGroupMetadata groupMetadata) =>
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, IConsumerGroupMetadata groupMetadata) =>
         _inner.SendOffsetsToTransaction(offsets, groupMetadata);
 
     public void CommitTransaction() => _inner.CommitTransaction();

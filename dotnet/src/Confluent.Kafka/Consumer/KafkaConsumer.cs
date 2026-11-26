@@ -313,7 +313,7 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void Wakeup() => _native.Wakeup();
 
     /// <inheritdoc/>
-    public ConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
+    public IConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
 
     /// <inheritdoc/>
     public IReadOnlyCollection<TopicPartition> Assignment() => _native.Assignment();

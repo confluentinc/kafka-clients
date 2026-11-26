@@ -65,10 +65,10 @@ public class RecordDeserializationException : SerializationException
     public enum DeserializationExceptionOrigin
     {
         /// <summary>The key.</summary>
-        KEY,
+        KEY = 0,
 
         /// <summary>The value.</summary>
-        VALUE,
+        VALUE = 1,
     }
 
     /// <summary>Whether the key or the value failed, Java's <c>origin()</c>.</summary>

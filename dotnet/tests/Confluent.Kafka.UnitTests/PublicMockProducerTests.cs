@@ -65,8 +65,8 @@ public sealed class PublicMockProducerTests : IDisposable
 
     private const string MockTransactionStarted = "Transaction already started";
 
-    private static readonly ConcurrentDictionary<string, ConsumerGroupMetadata> s_groupMetadata =
-        new ConcurrentDictionary<string, ConsumerGroupMetadata>();
+    private static readonly ConcurrentDictionary<string, IConsumerGroupMetadata> s_groupMetadata =
+        new ConcurrentDictionary<string, IConsumerGroupMetadata>();
 
     private static readonly IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> s_noOffsets =
         new Dictionary<TopicPartition, OffsetAndMetadata>();
@@ -88,7 +88,7 @@ public sealed class PublicMockProducerTests : IDisposable
         using KafkaConsumer<byte[], byte[]> consumer =
             KafkaConsumer<byte[], byte[]>.Create(ConsumerConfig("g1"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
 
-        ConsumerGroupMetadata metadata = consumer.GroupMetadata();
+        IConsumerGroupMetadata metadata = consumer.GroupMetadata();
 
         Assert.Equal("g1", metadata.GroupId());
         Assert.Equal("g2", GroupMetadata("g2").GroupId());
@@ -472,7 +472,7 @@ public sealed class PublicMockProducerTests : IDisposable
     }
 
     [Fact(Skip = "Its NullPointerException comes from Java's deprecated ConsumerGroupMetadata(null) constructor, which "
-        + ".NET does not have: group metadata comes only from a consumer, whose group id is never null. A null "
+        + ".NET does not have: IConsumerGroupMetadata is an interface, as Java's becomes in Kafka 5.0. A null "
         + "groupMetadata is the core's IllegalArgumentException (PublicProducerTransactionTests).")]
     public void ShouldThrowOnNullConsumerGroupMetadataWhenSendOffsetsToTransaction()
     {
@@ -813,7 +813,7 @@ public sealed class PublicMockProducerTests : IDisposable
     };
 
     // The metadata outlives the consumer that gave it, so each group id needs one consumer for the whole class.
-    private static ConsumerGroupMetadata GroupMetadata(string groupId) =>
+    private static IConsumerGroupMetadata GroupMetadata(string groupId) =>
         s_groupMetadata.GetOrAdd(groupId, id =>
         {
             using KafkaConsumer<byte[], byte[]> consumer =
@@ -863,7 +863,7 @@ public sealed class PublicMockProducerTests : IDisposable
     }
 
     private void BuildMockProducer(bool autoComplete) =>
-        _producer = new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer(), autoComplete);
+        _producer = new MockProducer<string, string>(autoComplete, Serdes.String().Serializer(), Serdes.String().Serializer());
 
     private sealed class IntegerKeySerializer : ISerializer<object>
     {

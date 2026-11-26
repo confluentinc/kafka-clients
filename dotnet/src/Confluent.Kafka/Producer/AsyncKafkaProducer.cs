@@ -300,7 +300,7 @@ public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TVal
     /// <inheritdoc/>
     public Task SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        ConsumerGroupMetadata groupMetadata,
+        IConsumerGroupMetadata groupMetadata,
         CancellationToken cancellationToken = default) =>
         _native.SendOffsetsToTransactionWithCallback(offsets, groupMetadata, cancellationToken);
 

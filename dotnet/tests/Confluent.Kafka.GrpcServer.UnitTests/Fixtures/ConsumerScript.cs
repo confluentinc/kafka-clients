@@ -83,10 +83,13 @@ internal sealed class ConsumerScript
                 switch (step.Kind)
                 {
                     case StepKind.Rebalance:
+                        Dictionary<TopicPartition, long> beginningOffsets = new Dictionary<TopicPartition, long>();
                         foreach (TopicPartition partition in step.Partitions!)
                         {
-                            mock.UpdateBeginningOffset(partition.Topic(), partition.Partition(), 0);
+                            beginningOffsets[partition] = 0;
                         }
+
+                        mock.UpdateBeginningOffsets(beginningOffsets);
 
                         await mock.Rebalance(step.Partitions!).ConfigureAwait(false);
                         break;
@@ -132,7 +135,7 @@ internal sealed class ConsumerScript
 /// <summary>The mock-only helpers a script step needs, common to both flavours' mock consumers.</summary>
 internal interface IMockConsumerOperations
 {
-    void UpdateBeginningOffset(string topic, int partition, long offset);
+    void UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets);
 
     Task Rebalance(IReadOnlyCollection<TopicPartition> partitions);
 

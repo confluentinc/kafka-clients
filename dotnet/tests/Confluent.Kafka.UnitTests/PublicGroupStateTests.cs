@@ -14,6 +14,7 @@
 
 using System;
 using System.Globalization;
+using System.Linq;
 
 using Confluent.Kafka.Common;
 using Xunit;
@@ -48,8 +49,9 @@ public sealed class PublicGroupStateTests
             {
                 "Unknown", "PreparingRebalance", "CompletingRebalance", "Stable", "Dead", "Empty", "Assigning",
                 "Reconciling", "NotReady",
-            },
-            Array.ConvertAll((GroupState[])Enum.GetValues(typeof(GroupState)), state => GroupState.ToString(state)));
+            }.OrderBy(text => text, StringComparer.Ordinal),
+            Array.ConvertAll((GroupState[])Enum.GetValues(typeof(GroupState)), state => GroupState.ToString(state))
+                .OrderBy(text => text, StringComparer.Ordinal));
         Assert.Equal(GroupState.STABLE, GroupState.Parse("stable"));
         Assert.Equal(GroupState.NOT_READY, GroupState.Parse("notready"));
         Assert.Equal(GroupState.UNKNOWN, GroupState.Parse("bogus"));

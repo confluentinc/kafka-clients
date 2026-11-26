@@ -27,7 +27,7 @@ namespace Confluent.Kafka.Internal;
 /// </summary>
 internal static class AdminEarlyReturns
 {
-    internal static CreateTopicsOptions? CreateTopics(ref IEnumerable<NewTopic> newTopics, CreateTopicsOptions? options)
+    internal static CreateTopicsOptions? CreateTopics(ref IReadOnlyCollection<NewTopic> newTopics, CreateTopicsOptions? options)
     {
         if (options is not null || newTopics is null)
         {

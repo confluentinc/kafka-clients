@@ -29,7 +29,7 @@ namespace Confluent.Kafka.Common;
 /// <para>
 /// The value crossing the C ABI is Java's <c>toString()</c> spelling (<c>"Consumer"</c>,
 /// <c>"Classic"</c>, <c>"Share"</c>, <c>"Streams"</c>, <c>"Unknown"</c>), not the underlying
-/// <c>int</c>, which means nothing outside this assembly; do not persist it.
+/// <c>int</c>, which has no meaning on the wire. A member's number never changes once released.
 /// </para>
 /// <para>
 /// <c>ToString()</c> gives the Java constant name (<c>CONSUMER</c>), not Java's <c>toString()</c>
@@ -43,19 +43,19 @@ public enum GroupType
     /// The type is not known to this client — Java's <c>UNKNOWN</c>, the type for a name this
     /// client does not recognise.
     /// </summary>
-    UNKNOWN,
+    UNKNOWN = 0,
 
     /// <summary>A consumer group using the KIP-848 protocol — Java's <c>CONSUMER</c>.</summary>
-    CONSUMER,
+    CONSUMER = 1,
 
     /// <summary>A consumer group using the classic protocol — Java's <c>CLASSIC</c>.</summary>
-    CLASSIC,
+    CLASSIC = 2,
 
     /// <summary>A share group — Java's <c>SHARE</c>.</summary>
-    SHARE,
+    SHARE = 3,
 
     /// <summary>A Kafka Streams group — Java's <c>STREAMS</c>.</summary>
-    STREAMS,
+    STREAMS = 4,
 }
 
 /// <summary>

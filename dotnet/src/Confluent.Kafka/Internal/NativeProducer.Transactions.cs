@@ -59,16 +59,17 @@ internal sealed partial class NativeProducer
 
     internal void SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets,
-        ConsumerGroupMetadata? groupMetadata)
+        IConsumerGroupMetadata? groupMetadata)
     {
         ThrowIfClosed();
-        WithTransactionOffsets(offsets, groupMetadata, (map, metadata, deferred) =>
+        WithTransactionOffsets(offsets, groupMetadata, (map, metadata, values, deferred) =>
         {
             Transaction(
                 SendOffsetsOperation,
                 waitsForReports: false,
                 opaque => NativeMethods.ProducerSendOffsetsToTransactionCb(_handle, map, metadata, s_voidCompletion, opaque),
-                (ref IntPtr outErr) => NativeMethods.ProducerSendOffsetsToTransaction(_handle, map, metadata, ref outErr));
+                (ref IntPtr outErr) => NativeMethods.ProducerSendOffsetsToTransaction(_handle, map, metadata, ref outErr),
+                values);
             return deferred is null ? 0 : throw deferred;
         });
     }
@@ -105,7 +106,7 @@ internal sealed partial class NativeProducer
 
     internal Task SendOffsetsToTransactionWithCallback(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets,
-        ConsumerGroupMetadata? groupMetadata,
+        IConsumerGroupMetadata? groupMetadata,
         CancellationToken cancellationToken = default)
     {
         ThrowIfClosed();
@@ -113,14 +114,15 @@ internal sealed partial class NativeProducer
 
         // The core copies the map and takes its own reference on the metadata during the call, so both are freed
         // once the submit has returned.
-        return WithTransactionOffsets(offsets, groupMetadata, (map, metadata, deferred) =>
+        return WithTransactionOffsets(offsets, groupMetadata, (map, metadata, values, deferred) =>
         {
             Task sent = TransactionWithCallback(
                 SendOffsetsOperation,
                 waitsForReports: false,
                 opaque => NativeMethods.ProducerSendOffsetsToTransactionCb(_handle, map, metadata, s_voidCompletion, opaque),
                 (ref IntPtr outErr) => NativeMethods.ProducerSendOffsetsToTransaction(_handle, map, metadata, ref outErr),
-                cancellationToken);
+                cancellationToken,
+                values);
             return deferred is null ? sent : ThrowAfter(sent, deferred);
         });
     }
@@ -158,17 +160,31 @@ internal sealed partial class NativeProducer
     // see, the blocking form too for the three operations that wait for no report: it runs no queued callback and
     // completes at once, as Java's mock does (ffi-marshalling.md §A7). Everywhere else the _cb form, whose wait is
     // bounded by max.block.ms inside a callback, where its completion is queued behind it.
-    private void Transaction(string operation, bool waitsForReports, Action<IntPtr> submit, BlockingCall blocking)
+    private void Transaction(
+        string operation,
+        bool waitsForReports,
+        Action<IntPtr> submit,
+        BlockingCall blocking,
+        IDisposable? keepUntilDone = null)
     {
         ThrowIfClosed();
         if (MockTakesTheBlockingForm(waitsForReports))
         {
-            TransactionBlocking(blocking);
+            try
+            {
+                TransactionBlocking(blocking);
+            }
+            finally
+            {
+                keepUntilDone?.Dispose();
+            }
+
             return;
         }
 
         Completion<IntPtr> done = new Completion<IntPtr>(FreeError);
-        IntPtr error = WaitQueued(done, new Action<IntPtr>(done.Complete), submit, operation, waitsForReports);
+        IntPtr error = WaitQueued(
+            done, Completing(done.Complete, keepUntilDone), submit, operation, waitsForReports);
         KafkaException.ThrowIfFfiFailed(ref error);
     }
 
@@ -178,7 +194,8 @@ internal sealed partial class NativeProducer
         bool waitsForReports,
         Action<IntPtr> submit,
         BlockingCall blocking,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IDisposable? keepUntilDone = null)
     {
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
@@ -193,14 +210,30 @@ internal sealed partial class NativeProducer
             {
                 return Task.FromException(exception);
             }
+            finally
+            {
+                keepUntilDone?.Dispose();
+            }
         }
 
         TimeSpan timeout = waitsForReports ? ReportWaitTimeout : WaitTimeout;
         string format = CallbackWaitFormat;
         AsyncCompletion<IntPtr> done = new AsyncCompletion<IntPtr>(FreeError);
-        Submit(new Action<IntPtr>(done.Complete), submit);
+        Submit(Completing(done.Complete, keepUntilDone), submit);
         return AwaitVoid(done, timeout, format, operation, cancellationToken);
     }
+
+    // A user's group metadata is read by the core until it completes the operation, which may be after the caller
+    // stopped waiting, so its values are freed in the completion, which the submit roots until it runs. A path that
+    // never submits leaves them to the finalizer.
+    private static Action<IntPtr> Completing(Action<IntPtr> complete, IDisposable? keepUntilDone) =>
+        keepUntilDone is null
+            ? complete
+            : error =>
+            {
+                keepUntilDone.Dispose();
+                complete(error);
+            };
 
     private bool MockTakesTheBlockingForm(bool waitsForReports) =>
         IsMock && (_completion.IsDraining || (!waitsForReports && InCallback));
@@ -225,22 +258,43 @@ internal sealed partial class NativeProducer
     /// Runs one <c>SendOffsetsToTransaction</c> call with its native arguments: the offsets map and a reference on the
     /// group metadata's handle, both released after the call. A null argument crosses as <c>NULL</c>, which the core
     /// reports with Java's error; with a null group metadata the offsets are not read, as the core reads them only
-    /// after it. Java's producers read a key only after the checks they make for an empty map (Java's
+    /// after it. A consumer's group metadata passes the core's own handle; any other implementation is read first, as
+    /// Java's producers read it first, and registered for this call, its values given to the call to free once the
+    /// operation has completed. Java's producers read a key only after the checks they make for an empty map (Java's
     /// <c>MockProducer</c> after its state checks and its injected exception), so offsets with a null key cross as an
-    /// empty map, for the core to make those checks, and the call's third argument is the error the caller throws once
+    /// empty map, for the core to make those checks, and the call's last argument is the error the caller throws once
     /// they have passed. A topic or metadata holding a NUL, which the C string would cut, is answered the same way.
     /// </summary>
     private static T WithTransactionOffsets<T>(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets,
-        ConsumerGroupMetadata? groupMetadata,
-        Func<IntPtr, IntPtr, Exception?, T> call)
+        IConsumerGroupMetadata? groupMetadata,
+        Func<IntPtr, IntPtr, ConsumerGroupMetadataValues?, Exception?, T> call)
     {
         if (groupMetadata is null)
         {
-            return call(IntPtr.Zero, IntPtr.Zero, null);
+            return call(IntPtr.Zero, IntPtr.Zero, null, null);
         }
 
-        SafeConsumerGroupMetadataHandle metadata = groupMetadata.Handle;
+        ConsumerGroupMetadataValues? values = null;
+        SafeConsumerGroupMetadataHandle metadata;
+        if (groupMetadata is ConsumerGroupMetadataImpl consumers)
+        {
+            metadata = consumers.Handle;
+        }
+        else
+        {
+            values = ConsumerGroupMetadataValues.Of(groupMetadata);
+            try
+            {
+                metadata = values.Register();
+            }
+            catch
+            {
+                values.Dispose();
+                throw;
+            }
+        }
+
         NativeCallArguments? arguments = null;
         bool added = false;
         try
@@ -258,13 +312,18 @@ internal sealed partial class NativeProducer
             }
 
             metadata.DangerousAddRef(ref added);
-            return call(map, metadata.DangerousGetHandle(), deferred);
+            return call(map, metadata.DangerousGetHandle(), values, deferred);
         }
         finally
         {
             if (added)
             {
                 metadata.DangerousRelease();
+            }
+
+            if (values is not null)
+            {
+                metadata.Dispose();
             }
 
             arguments?.Dispose();

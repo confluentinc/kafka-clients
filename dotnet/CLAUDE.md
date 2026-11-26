@@ -312,7 +312,7 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable { 
     Task InitTransactions(CancellationToken cancellationToken = default);
     Task BeginTransaction(CancellationToken cancellationToken = default);   // a Task, as Python's async begin_transaction
     Task SendOffsetsToTransaction(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        ConsumerGroupMetadata groupMetadata, CancellationToken cancellationToken = default);
+        IConsumerGroupMetadata groupMetadata, CancellationToken cancellationToken = default);
     Task CommitTransaction(CancellationToken cancellationToken = default);
     Task AbortTransaction(CancellationToken cancellationToken = default);
 }
@@ -352,8 +352,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     // and serializes records into its history); UNLIKE the consumer, where mock-takes-deserializers is
     // a deviation. Send serializes K/V → bytes exactly like the real client (§4).
     public AsyncMockProducer(IAsyncSerializer<TKey> keySerializer, IAsyncSerializer<TValue> valueSerializer);  // autoComplete true
-    public AsyncMockProducer(IAsyncSerializer<TKey> keySerializer, IAsyncSerializer<TValue> valueSerializer,
-        bool autoComplete);
+    public AsyncMockProducer(bool autoComplete, IAsyncSerializer<TKey> keySerializer,
+        IAsyncSerializer<TValue> valueSerializer);   // Java's (boolean, Partitioner, Serializer, Serializer), no partitioner
     public bool CompleteNext();
     public bool ErrorNext(Exception e);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
     public int HistoryCount();                  // .NET-only: history() needs typed records, the ABI's hold bytes
@@ -438,8 +438,9 @@ binding builds it (ledger 300; an internal `SerializedProducerRecord` carrier). 
     Contrast the consumer's deserialize wrap, which is Java's `RecordDeserializationException`.
   - **Mock-takes-serializers is Java-faithful.** Java's `MockProducer` takes
     `Serializer<K>/Serializer<V>` and serializes into its history, so the mock ctors
-    take serializers too (`(keySer, valueSer, autoComplete=true)`) — **unlike** the
-    consumer, where mock-takes-deserializers was a deviation.
+    take serializers too (`(autoComplete, keySer, valueSer)`, Java's order without the partitioner, and
+    `(keySer, valueSer)` with `autoComplete` true) — **unlike** the consumer, where mock-takes-deserializers
+    was a deviation.
 
 **Consumer** follows the identical pattern — the Java surface in C# idiom. Its C
 ABI has **landed**, so it's a **Mode A** build (§6.2); the receive-path key/value
@@ -475,7 +476,7 @@ public sealed class ConsumerRecords<TKey, TValue>          // Java `ConsumerReco
 
 public interface IConsumerCommon {               // shared sync surface (IAsyncConsumer + IConsumer)
     void Wakeup();                                // interrupt a blocked poll — one-shot (idiom map)
-    ConsumerGroupMetadata GroupMetadata();        // no group.id → InvalidGroupIdException (24), Java's message (ledger 105)
+    IConsumerGroupMetadata GroupMetadata();        // no group.id → InvalidGroupIdException (24), Java's message (ledger 105)
 
     // non-blocking / instantaneous in Java → stays sync (idiom map; consumer-threading §1).
     // Java's methods, as every Java getter is: each returns a fresh owned snapshot per call.
@@ -964,7 +965,8 @@ each goes when the reason it gives goes:
   throws.
 - **A null partition Java keeps.** These throw case 4's `ArgumentNullException` where Java stores or
   skips the null. The consumer mocks throw it for `Commit` and `CommitAsync` with a null key and for
-  `UpdateDurationOffsets` (Java's mock stores it with `putAll`). The producer mocks throw it for
+  `UpdateBeginningOffsets`, `UpdateEndOffsets` and `UpdateDurationOffsets` (Java's mock stores it with
+  `putAll`). The producer mocks throw it for
   `SendOffsetsToTransaction`, after the checks Java's mock makes first. The admin mocks throw it for
   `ListPartitionReassignments` (Java's mock looks the null up and skips it), `ListConsumerGroupOffsets`
   with one group spec (Java's mock never matches it), and `UpdateBeginningOffsets`, `UpdateEndOffsets`
@@ -1041,10 +1043,14 @@ each goes when the reason it gives goes:
   `Metrics`, and `MockProducer`'s and `AsyncMockProducer`'s `PartitionsFor`, `Metrics`,
   `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, `SetSendException`, `SetFlushException`,
   `SetPartitionsForException`, the five `Set*TransactionException` setters
-  and the transaction state readers (`TransactionInitialized` to `UncommittedOffsets`) throw the
-  closed client's `IllegalStateException`, because the native handle is gone; Java answers (Java's
-  mock checks for close only in `send`, `flush`, `fenceProducer` and the transaction methods). Goes
-  when the native object outlives `Close`.
+  and the transaction state readers (`TransactionInitialized` to `UncommittedOffsets`), and
+  `MockConsumer`'s and `AsyncMockConsumer`'s `Rebalance`, `LosePartitions`, `SetMaxPollRecords`,
+  `SetPollException`, `SetOffsetsException`, `UpdateBeginningOffsets`, `UpdateEndOffsets`,
+  `UpdateDurationOffsets`, `ScheduleNopPollTask` and `LastPollTimeout` throw the closed client's
+  `IllegalStateException`, because the native handle is gone; Java answers (Java's producer mock
+  checks for close only in `send`, `flush`, `fenceProducer` and the transaction methods, and of its
+  consumer mock's own methods only `addRecord` and `updatePartitions` check, which throw here too).
+  Goes when the native object outlives `Close`.
 - **The core admin mock.** `MockAdminClient.Builder` checks that live only in the core mock
   (`controller(int)` out of range, `numBrokers` below the log-dir count, `Build()` with no
   brokers, `AddTopic` with a leader without log dirs) and `SetFetchesRemainingUntilVisible` on an
@@ -1114,13 +1120,35 @@ out of date). The rule:
    builds an object of its type) included: never a constructor, `Parse` or a property.
 5. Fields and constants keep Java's spelling (ledger 285).
 6. Parameters keep Java's names, the interface's declaration first. In an exception's constructor a
-   `Throwable` is `innerException`, and a `String` Java names `s` or `msg` is `message`. A Java `long` and
-   the `TimeUnit` that qualifies it are one `TimeSpan`.
-7. .NET's own forms: `ToString`, `Equals` (with `==` and `!=`), `GetHashCode`; `CompareTo`;
+   `Throwable`, of any class (`InterruptException`'s `InterruptedException`), is `innerException`, and a
+   `String` Java names `s` or `msg` is `message`. A Java `long` and the `TimeUnit` that qualifies it are one
+   `TimeSpan`. A parameter of one of Java's collection interfaces takes its read-only counterpart, so a caller
+   passes what a Java caller passes (a LINQ query is collected with `ToList()`, as a `Stream` with `collect`), and
+   a collection the binding hands to user code, a listener's partitions for one, has the same type:
+
+   | Java | .NET |
+   |---|---|
+   | `Iterable<T>` | `IEnumerable<T>` |
+   | `Collection<T>`, `Set<T>` | `IReadOnlyCollection<T>` (netstandard2.0 and .NET Framework have no `IReadOnlySet<T>`) |
+   | `List<T>` | `IReadOnlyList<T>` |
+   | `Map<K, V>` | `IReadOnlyDictionary<TKey, TValue>` |
+
+   CKRDA0013 checks each parameter it pairs with Java's. A method keeps the copy it makes of a collection it
+   stores: the type says what it reads, not that the caller's collection stays unchanged.
+7. .NET's own forms: `ToString`, `Equals`, `GetHashCode`; `CompareTo`;
    `GetEnumerator` for `Iterable`; `Dispose` / `DisposeAsync` for `Closeable`; `Message` /
    `InnerException`; `IEquatable<T>.Equals`; a C# enum covers `name`, `ordinal`, `values` and `valueOf`.
+   `Equals` and `IEquatable<T>.Equals` stand for Java's `equals`, `GetHashCode` for `hashCode`: a type overrides
+   them exactly where its Java type, or a Java supertype, overrides those (CKRDA0013), and elsewhere both compare
+   references, as Java's do. No public type has an `operator ==` or `!=`, a record's included: `==` compares
+   references, as Java's does, and cannot be added or removed after a release without changing what a user's `==`
+   means (CKRDA0018).
    `Enum.GetValues` and `CompareTo` order by value, not by Java's declaration (`ConfigResourceType`…), and
-   `Enum.Parse` accepts numbers and comma lists; the binding's own lookups never use it. A member that overrides
+   `Enum.Parse` accepts numbers and comma lists; the binding's own lookups never use it. Every member's number is
+   written out and never changes once released, since C# compiles it into each caller: a constant Java adds sits at
+   Java's place in the declaration, with Java's integer field or else the next unused number
+   (`PublicJavaEnumConstantsTests` pins them; CKRDA0017 asks for the written number in `src/`, and CA1069 refuses
+   two members with one number). A member that overrides
    or implements a `System` member keeps its parameter names. A method may end with an
    optional `CancellationToken cancellationToken`.
 8. Java's constructor and method overloads, each in Java's parameter order; a `Properties` overload is its
@@ -1603,7 +1631,12 @@ call, and on `SendOffsetsToTransaction` the consumer commit's check of the offse
 the map is built from the managed dictionary. With an empty `offsets` the real producers return at
 once without checking the transaction state, as Java's `KafkaProducer` does; the mocks check it
 first, as Java's `MockProducer` does. `SendOffsetsToTransaction` passes the core's own `ConsumerGroupMetadata` handle, which the
-object keeps from the consumer that gave it, the mocks' included. Recorded deviations:
+object keeps from the consumer that gave it, the mocks' included. Group metadata is the interface
+`IConsumerGroupMetadata`, as Java's class becomes in Kafka 5.0 (KIP-1136), so an implementation of the user's own
+can be passed too: its four values are read once, on the calling thread (a null group id or member id refused with
+`ArgumentNullException`, as Java's class refuses it, and a NUL with `ArgumentException`), and registered with the core
+for that call through `kafka_consumer_ConsumerGroupMetadata_new` (ffi-marshalling.md §A6).
+Recorded deviations:
 
 - **Overlapping calls.** A transaction call while the core still runs another one's operation on
   the same producer throws the core's `ConcurrentModificationException` "Transactional methods of
@@ -1625,7 +1658,12 @@ object keeps from the consumer that gave it, the mocks' included. Recorded devia
   a null `offsets` (`ArgumentNullException`), then the state, on all four classes. Java's
   `KafkaProducer` and `MockProducer` check `groupMetadata` before the closed check (the mock with
   `NullPointerException`), and Java's mock checks a null `offsets` only after its closed and state
-  checks.
+  checks. A group metadata of the user's own is read right after the null `groupMetadata` check, so a
+  null group id or member id (`ArgumentNullException` with the messages of Java's constructor, "group.id
+  can't be null" and "member.id can't be null") or a NUL in one of its strings throws before a null
+  `offsets` and the state, on all four classes. Java's `KafkaProducer` reads the group metadata before
+  its own checks too, but Java's `MockProducer` reads it only after its closed, fencing and transaction
+  checks and its injected exception: here the core makes those in the call that takes the values.
 - **From a delivery callback.** From a sync delivery callback on `KafkaProducer` and
   `AsyncKafkaProducer` each of the five calls ends after `max.block.ms` with Kafka's
   `TimeoutException`, `BeginTransaction` included, where Java's `beginTransaction` returns at

@@ -23,6 +23,7 @@ using Confluent.Kafka.Common.Header.Internals;
 using Confluent.Kafka.Common.Metrics;
 using Confluent.Kafka.Common.Record;
 using Confluent.Kafka.Consumer;
+using Confluent.Kafka.Internal;
 using Confluent.Kafka.Internal.Interop;
 
 using Xunit;
@@ -32,7 +33,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// Java's <c>equals</c>, <c>hashCode</c> and <c>toString</c> on <see cref="TopicDescription"/>,
 /// <see cref="TopicPartitionInfo"/>, <see cref="PartitionInfo"/>, <see cref="OffsetAndTimestamp"/>,
-/// <see cref="ConsumerGroupMetadata"/>, <see cref="ConsumerRecord{TKey, TValue}"/> and <see cref="KafkaMetric"/>.
+/// <see cref="IConsumerGroupMetadata"/>, <see cref="ConsumerRecord{TKey, TValue}"/> and <see cref="KafkaMetric"/>.
 /// </summary>
 public sealed class PublicValueTypeJavaEqualityTests
 {
@@ -160,8 +161,8 @@ public sealed class PublicValueTypeJavaEqualityTests
     [Fact]
     public void ConsumerGroupMetadata_Equality_AndToString_FollowJava()
     {
-        ConsumerGroupMetadata a = GroupMetadata("g", 1, "m", null);
-        ConsumerGroupMetadata b = GroupMetadata("g", 1, "m", null);
+        ConsumerGroupMetadataImpl a = GroupMetadata("g", 1, "m", null);
+        ConsumerGroupMetadataImpl b = GroupMetadata("g", 1, "m", null);
 
         Assert.Equal(a, b);
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
@@ -224,12 +225,12 @@ public sealed class PublicValueTypeJavaEqualityTests
 
     // The library builds this type only from the core's metadata. Equality and ToString read only the four ids, so the
     // tests pass an invalid (zero) handle, which is never released.
-    private static ConsumerGroupMetadata GroupMetadata(
+    private static ConsumerGroupMetadataImpl GroupMetadata(
         string groupId,
         int generationId,
         string memberId,
         string? groupInstanceId) =>
-        new ConsumerGroupMetadata(
+        new ConsumerGroupMetadataImpl(
             groupId,
             generationId,
             memberId,

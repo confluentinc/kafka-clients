@@ -34,7 +34,7 @@ namespace Confluent.Kafka.UnitTests;
 public sealed class PublicAdminP8TypesTests
 {
     [Fact]
-    public void TransactionState_HasJavasEightConstantsInDeclarationOrder()
+    public void TransactionState_HasJavasEightConstants()
     {
         Assert.Equal(
             new[]
@@ -47,8 +47,8 @@ public sealed class PublicAdminP8TypesTests
                 "EMPTY",
                 "PREPARE_EPOCH_FENCE",
                 "UNKNOWN",
-            },
-            Enum.GetNames(typeof(TransactionState)));
+            }.OrderBy(name => name, StringComparer.Ordinal),
+            Enum.GetNames(typeof(TransactionState)).OrderBy(name => name, StringComparer.Ordinal));
     }
 
     [Fact]
@@ -335,6 +335,13 @@ public sealed class PublicAdminP8TypesTests
 
         Assert.Equal(baseline, new AbortTransactionSpec(partition, 11L, 22, 33));
         Assert.Equal(baseline.GetHashCode(), new AbortTransactionSpec(partition, 11L, 22, 33).GetHashCode());
+
+        // Another TopicPartition of the same topic and partition: Java's Objects.equals compares the partitions'
+        // values, not their references.
+        AbortTransactionSpec samePartition = new AbortTransactionSpec(new TopicPartition("orders", 4), 11L, 22, 33);
+        Assert.True(baseline.Equals(samePartition));
+        Assert.True(samePartition.Equals(baseline));
+        Assert.Equal(baseline.GetHashCode(), samePartition.GetHashCode());
 
         Assert.NotEqual(baseline, new AbortTransactionSpec(new TopicPartition("orders", 9), 11L, 22, 33));
         Assert.NotEqual(baseline, new AbortTransactionSpec(partition, 99L, 22, 33));

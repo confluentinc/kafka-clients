@@ -374,7 +374,7 @@ public sealed class PublicSyncConsumerRoundTripTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
-        consumer.UpdateBeginningOffset(Topic, Partition, 10);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, Partition)] = 10 });
 
         consumer.SeekToBeginning(new[] { tp });
 
@@ -390,7 +390,7 @@ public sealed class PublicSyncConsumerRoundTripTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
-        consumer.UpdateEndOffset(Topic, Partition, 77);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, Partition)] = 77 });
 
         consumer.SeekToEnd(new[] { tp });
 

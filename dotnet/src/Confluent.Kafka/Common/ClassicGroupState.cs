@@ -35,8 +35,8 @@ namespace Confluent.Kafka.Common;
 /// </para>
 /// <para>
 /// The wire value is Java's <c>toString()</c> spelling (<c>"Stable"</c>,
-/// <c>"PreparingRebalance"</c>, …); Java's constants carry no numeric id, so never persist the
-/// underlying <see langword="int"/>.
+/// <c>"PreparingRebalance"</c>, …). Java's constants carry no numeric id: a member's number never
+/// changes once released, and has no meaning on the wire.
 /// </para>
 /// <para>
 /// <c>ToString()</c> gives the Java constant name (<c>STABLE</c>), not Java's <c>toString()</c>
@@ -50,22 +50,22 @@ public enum ClassicGroupState
     /// The state is not known to this client — Java's <c>UNKNOWN</c>, the value <c>parse</c>
     /// yields for a name it does not recognise.
     /// </summary>
-    UNKNOWN,
+    UNKNOWN = 0,
 
     /// <summary>Java's <c>PREPARING_REBALANCE</c>.</summary>
-    PREPARING_REBALANCE,
+    PREPARING_REBALANCE = 1,
 
     /// <summary>Java's <c>COMPLETING_REBALANCE</c>.</summary>
-    COMPLETING_REBALANCE,
+    COMPLETING_REBALANCE = 2,
 
     /// <summary>Java's <c>STABLE</c>.</summary>
-    STABLE,
+    STABLE = 3,
 
     /// <summary>Java's <c>DEAD</c>.</summary>
-    DEAD,
+    DEAD = 4,
 
     /// <summary>Java's <c>EMPTY</c>.</summary>
-    EMPTY,
+    EMPTY = 5,
 }
 
 /// <summary>

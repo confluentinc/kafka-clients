@@ -673,15 +673,15 @@ public sealed class PublicConsumerTopicStringTests
     {
         object consumer = await Create(kind, groupId: true);
         using IDisposable disposal = TestTimeout.Disposal((IDisposable)consumer);
-        Dictionary<TopicPartition, long> durations = new Dictionary<TopicPartition, long> { [s_nulPartition] = 1 };
+        Dictionary<TopicPartition, long> nulOffsets = new Dictionary<TopicPartition, long> { [s_nulPartition] = 1 };
         if (consumer is MockConsumer<byte[], byte[]> sync)
         {
             AssertAddRecordNotAssigned(Record.Exception(() => sync.AddRecord(new ConsumerRecord<byte[], byte[]>(NulTopic, 0, 0L, key: null, value: null))), Record.Exception(() => sync.AddRecord(new ConsumerRecord<byte[], byte[]>("x", 0, 0L, key: null, value: null))));
-            AssertNul(Record.Exception(() => sync.UpdateBeginningOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateBeginningOffset");
-            AssertNul(Record.Exception(() => sync.UpdateEndOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateEndOffset");
-            AssertNul(Record.Exception(() => sync.UpdatePartitions(NulTopic, 1, 0, "h", 1)), NulTopicMessage, "topic", "UpdatePartitions");
-            AssertNul(Record.Exception(() => sync.UpdatePartitions("ok", 1, 0, "h\0x", 1)), NulArgumentMessage, "leaderHost", "UpdatePartitions");
-            AssertNul(Record.Exception(() => sync.UpdateDurationOffsets(durations)), NulTopicMessage, "newOffsets", "UpdateDurationOffsets");
+            AssertNul(Record.Exception(() => sync.UpdateBeginningOffsets(nulOffsets)), NulTopicMessage, "newOffsets", "UpdateBeginningOffsets");
+            AssertNul(Record.Exception(() => sync.UpdateEndOffsets(nulOffsets)), NulTopicMessage, "newOffsets", "UpdateEndOffsets");
+            AssertNul(Record.Exception(() => sync.UpdatePartitions(NulTopic, TestPartitions.Led(NulTopic, 1, 0, "h", 1))), NulTopicMessage, "topic", "UpdatePartitions");
+            AssertNul(Record.Exception(() => sync.UpdatePartitions("ok", TestPartitions.Led("ok", 1, 0, "h\0x", 1))), NulArgumentMessage, "partitions", "UpdatePartitions");
+            AssertNul(Record.Exception(() => sync.UpdateDurationOffsets(nulOffsets)), NulTopicMessage, "newOffsets", "UpdateDurationOffsets");
             AssertNul(Record.Exception(() => sync.Rebalance(s_nulPartitions)), NulTopicMessage, "newAssignment", "Rebalance");
             AssertNul(Record.Exception(() => sync.LosePartitions(s_nulPartitions)), NulTopicMessage, "partitionsLost", "LosePartitions");
         }
@@ -689,11 +689,11 @@ public sealed class PublicConsumerTopicStringTests
         {
             AsyncMockConsumer<byte[], byte[]> async = (AsyncMockConsumer<byte[], byte[]>)consumer;
             AssertAddRecordNotAssigned(Record.Exception(() => async.AddRecord(new ConsumerRecord<byte[], byte[]>(NulTopic, 0, 0L, key: null, value: null))), Record.Exception(() => async.AddRecord(new ConsumerRecord<byte[], byte[]>("x", 0, 0L, key: null, value: null))));
-            AssertNul(Record.Exception(() => async.UpdateBeginningOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateBeginningOffset");
-            AssertNul(Record.Exception(() => async.UpdateEndOffset(NulTopic, 0, 0)), NulTopicMessage, "topic", "UpdateEndOffset");
-            AssertNul(Record.Exception(() => async.UpdatePartitions(NulTopic, 1, 0, "h", 1)), NulTopicMessage, "topic", "UpdatePartitions");
-            AssertNul(Record.Exception(() => async.UpdatePartitions("ok", 1, 0, "h\0x", 1)), NulArgumentMessage, "leaderHost", "UpdatePartitions");
-            AssertNul(Record.Exception(() => async.UpdateDurationOffsets(durations)), NulTopicMessage, "newOffsets", "UpdateDurationOffsets");
+            AssertNul(Record.Exception(() => async.UpdateBeginningOffsets(nulOffsets)), NulTopicMessage, "newOffsets", "UpdateBeginningOffsets");
+            AssertNul(Record.Exception(() => async.UpdateEndOffsets(nulOffsets)), NulTopicMessage, "newOffsets", "UpdateEndOffsets");
+            AssertNul(Record.Exception(() => async.UpdatePartitions(NulTopic, TestPartitions.Led(NulTopic, 1, 0, "h", 1))), NulTopicMessage, "topic", "UpdatePartitions");
+            AssertNul(Record.Exception(() => async.UpdatePartitions("ok", TestPartitions.Led("ok", 1, 0, "h\0x", 1))), NulArgumentMessage, "partitions", "UpdatePartitions");
+            AssertNul(Record.Exception(() => async.UpdateDurationOffsets(nulOffsets)), NulTopicMessage, "newOffsets", "UpdateDurationOffsets");
             AssertNul(
                 await Record.ExceptionAsync(() => TestTimeout.Run(() => async.Rebalance(s_nulPartitions), s_deadline)),
                 NulTopicMessage,
@@ -709,7 +709,7 @@ public sealed class PublicConsumerTopicStringTests
         Assert.Empty(((IConsumerCommon)consumer).Assignment());
     }
 
-    // Java's MockConsumer checks the closed state first in addRecord and updatePartitions.
+    // Java's MockConsumer checks the closed state first in addRecord and updatePartitions, before a NUL or a null.
     [Theory]
     [MemberData(nameof(Mocks))]
     public async Task OnAClosedMock_AddRecordAndUpdatePartitions_ReportTheClosedStateBeforeTheNul(string kind)
@@ -721,18 +721,22 @@ public sealed class PublicConsumerTopicStringTests
         if (consumer is MockConsumer<byte[], byte[]> sync)
         {
             errors.Add(Record.Exception(() => sync.AddRecord(new ConsumerRecord<byte[], byte[]>(NulTopic, 0, 0L, key: null, value: null))));
-            errors.Add(Record.Exception(() => sync.UpdatePartitions(NulTopic, 1, 0, "h", 1)));
-            errors.Add(Record.Exception(() => sync.UpdatePartitions("ok", 1, 0, "h\0x", 1)));
+            errors.Add(Record.Exception(() => sync.UpdatePartitions(NulTopic, TestPartitions.Led(NulTopic, 1, 0, "h", 1))));
+            errors.Add(Record.Exception(() => sync.UpdatePartitions("ok", TestPartitions.Led("ok", 1, 0, "h\0x", 1))));
+            errors.Add(Record.Exception(() => sync.UpdatePartitions(null!, TestPartitions.Led("ok", 1, 0, "h", 1))));
+            errors.Add(Record.Exception(() => sync.UpdatePartitions("ok", null!)));
         }
         else
         {
             AsyncMockConsumer<byte[], byte[]> async = (AsyncMockConsumer<byte[], byte[]>)consumer;
             errors.Add(Record.Exception(() => async.AddRecord(new ConsumerRecord<byte[], byte[]>(NulTopic, 0, 0L, key: null, value: null))));
-            errors.Add(Record.Exception(() => async.UpdatePartitions(NulTopic, 1, 0, "h", 1)));
-            errors.Add(Record.Exception(() => async.UpdatePartitions("ok", 1, 0, "h\0x", 1)));
+            errors.Add(Record.Exception(() => async.UpdatePartitions(NulTopic, TestPartitions.Led(NulTopic, 1, 0, "h", 1))));
+            errors.Add(Record.Exception(() => async.UpdatePartitions("ok", TestPartitions.Led("ok", 1, 0, "h\0x", 1))));
+            errors.Add(Record.Exception(() => async.UpdatePartitions(null!, TestPartitions.Led("ok", 1, 0, "h", 1))));
+            errors.Add(Record.Exception(() => async.UpdatePartitions("ok", null!)));
         }
 
-        Assert.Equal(3, errors.Count);
+        Assert.Equal(5, errors.Count);
         foreach (Exception? error in errors)
         {
             Assert.Equal(ClosedMessage, Assert.IsType<IllegalStateException>(error).Message);

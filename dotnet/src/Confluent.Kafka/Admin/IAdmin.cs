@@ -55,11 +55,11 @@ namespace Confluent.Kafka.Admin;
 public interface IAdmin : IDisposable
 {
     /// <summary>Creates topics with the default options.</summary>
-    /// <inheritdoc cref="CreateTopics(IEnumerable{NewTopic}, CreateTopicsOptions)" path="/param[@name!='options']"/>
-    /// <inheritdoc cref="CreateTopics(IEnumerable{NewTopic}, CreateTopicsOptions)" path="/returns"/>
-    /// <inheritdoc cref="CreateTopics(IEnumerable{NewTopic}, CreateTopicsOptions)" path="/exception[not(paramref[@name='options'])]"/>
-    /// <seealso cref="IAsyncAdmin.CreateTopics(IEnumerable{NewTopic})"/>
-    CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics);
+    /// <inheritdoc cref="CreateTopics(IReadOnlyCollection{NewTopic}, CreateTopicsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="CreateTopics(IReadOnlyCollection{NewTopic}, CreateTopicsOptions)" path="/returns"/>
+    /// <inheritdoc cref="CreateTopics(IReadOnlyCollection{NewTopic}, CreateTopicsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    /// <seealso cref="IAsyncAdmin.CreateTopics(IReadOnlyCollection{NewTopic})"/>
+    CreateTopicsResult CreateTopics(IReadOnlyCollection<NewTopic> newTopics);
 
     /// <summary>
     /// Creates topics — Java's <c>createTopics(Collection&lt;NewTopic&gt;,
@@ -90,8 +90,8 @@ public interface IAdmin : IDisposable
     /// constructor.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    /// <seealso cref="IAsyncAdmin.CreateTopics(IEnumerable{NewTopic}, CreateTopicsOptions)"/>
-    CreateTopicsResult CreateTopics(IEnumerable<NewTopic> newTopics, CreateTopicsOptions options);
+    /// <seealso cref="IAsyncAdmin.CreateTopics(IReadOnlyCollection{NewTopic}, CreateTopicsOptions)"/>
+    CreateTopicsResult CreateTopics(IReadOnlyCollection<NewTopic> newTopics, CreateTopicsOptions options);
 
     /// <summary>Deletes topics with the default options.</summary>
     /// <inheritdoc cref="DeleteTopics(TopicCollection, DeleteTopicsOptions)" path="/param[@name!='options']"/>
@@ -1243,11 +1243,11 @@ public interface IAdmin : IDisposable
         string groupId, RemoveMembersFromConsumerGroupOptions options);
 
     /// <summary>Creates ACL bindings on the cluster with the default options.</summary>
-    /// <inheritdoc cref="CreateAcls(IEnumerable{AclBinding}, CreateAclsOptions)" path="/param[@name!='options']"/>
-    /// <inheritdoc cref="CreateAcls(IEnumerable{AclBinding}, CreateAclsOptions)" path="/returns"/>
-    /// <inheritdoc cref="CreateAcls(IEnumerable{AclBinding}, CreateAclsOptions)" path="/exception[not(paramref[@name='options'])]"/>
-    /// <seealso cref="IAsyncAdmin.CreateAcls(IEnumerable{AclBinding})"/>
-    CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls);
+    /// <inheritdoc cref="CreateAcls(IReadOnlyCollection{AclBinding}, CreateAclsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="CreateAcls(IReadOnlyCollection{AclBinding}, CreateAclsOptions)" path="/returns"/>
+    /// <inheritdoc cref="CreateAcls(IReadOnlyCollection{AclBinding}, CreateAclsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    /// <seealso cref="IAsyncAdmin.CreateAcls(IReadOnlyCollection{AclBinding})"/>
+    CreateAclsResult CreateAcls(IReadOnlyCollection<AclBinding> acls);
 
     /// <summary>
     /// Creates ACL bindings on the cluster — Java's
@@ -1277,15 +1277,15 @@ public interface IAdmin : IDisposable
     /// the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    /// <seealso cref="IAsyncAdmin.CreateAcls(IEnumerable{AclBinding}, CreateAclsOptions)"/>
-    CreateAclsResult CreateAcls(IEnumerable<AclBinding> acls, CreateAclsOptions options);
+    /// <seealso cref="IAsyncAdmin.CreateAcls(IReadOnlyCollection{AclBinding}, CreateAclsOptions)"/>
+    CreateAclsResult CreateAcls(IReadOnlyCollection<AclBinding> acls, CreateAclsOptions options);
 
     /// <summary>Deletes every ACL matching any of the given filters, with the default options.</summary>
-    /// <inheritdoc cref="DeleteAcls(IEnumerable{AclBindingFilter}, DeleteAclsOptions)" path="/param[@name!='options']"/>
-    /// <inheritdoc cref="DeleteAcls(IEnumerable{AclBindingFilter}, DeleteAclsOptions)" path="/returns"/>
-    /// <inheritdoc cref="DeleteAcls(IEnumerable{AclBindingFilter}, DeleteAclsOptions)" path="/exception[not(paramref[@name='options'])]"/>
-    /// <seealso cref="IAsyncAdmin.DeleteAcls(IEnumerable{AclBindingFilter})"/>
-    DeleteAclsResult DeleteAcls(IEnumerable<AclBindingFilter> filters);
+    /// <inheritdoc cref="DeleteAcls(IReadOnlyCollection{AclBindingFilter}, DeleteAclsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DeleteAcls(IReadOnlyCollection{AclBindingFilter}, DeleteAclsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DeleteAcls(IReadOnlyCollection{AclBindingFilter}, DeleteAclsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    /// <seealso cref="IAsyncAdmin.DeleteAcls(IReadOnlyCollection{AclBindingFilter})"/>
+    DeleteAclsResult DeleteAcls(IReadOnlyCollection<AclBindingFilter> filters);
 
     /// <summary>
     /// Deletes every ACL matching any of the given filters — Java's
@@ -1317,9 +1317,9 @@ public interface IAdmin : IDisposable
     /// (see the <see cref="IAdmin"/> remarks). A null name, principal or host means "any" and is accepted.
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    /// <seealso cref="IAsyncAdmin.DeleteAcls(IEnumerable{AclBindingFilter}, DeleteAclsOptions)"/>
+    /// <seealso cref="IAsyncAdmin.DeleteAcls(IReadOnlyCollection{AclBindingFilter}, DeleteAclsOptions)"/>
     DeleteAclsResult DeleteAcls(
-        IEnumerable<AclBindingFilter> filters, DeleteAclsOptions options);
+        IReadOnlyCollection<AclBindingFilter> filters, DeleteAclsOptions options);
 
     /// <summary>Lists every ACL matching the given filter, with the default options.</summary>
     /// <inheritdoc cref="DescribeAcls(AclBindingFilter, DescribeAclsOptions)" path="/param[@name!='options']"/>
@@ -1397,11 +1397,11 @@ public interface IAdmin : IDisposable
         ClientQuotaFilter filter, DescribeClientQuotasOptions options);
 
     /// <summary>Alters the quotas of the given entities with the default options.</summary>
-    /// <inheritdoc cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/param[@name!='options']"/>
-    /// <inheritdoc cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/returns"/>
-    /// <inheritdoc cref="AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/exception[not(paramref[@name='options'])]"/>
-    /// <seealso cref="IAsyncAdmin.AlterClientQuotas(IEnumerable{ClientQuotaAlteration})"/>
-    AlterClientQuotasResult AlterClientQuotas(IEnumerable<ClientQuotaAlteration> entries);
+    /// <inheritdoc cref="AlterClientQuotas(IReadOnlyCollection{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="AlterClientQuotas(IReadOnlyCollection{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/returns"/>
+    /// <inheritdoc cref="AlterClientQuotas(IReadOnlyCollection{ClientQuotaAlteration}, AlterClientQuotasOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    /// <seealso cref="IAsyncAdmin.AlterClientQuotas(IReadOnlyCollection{ClientQuotaAlteration})"/>
+    AlterClientQuotasResult AlterClientQuotas(IReadOnlyCollection<ClientQuotaAlteration> entries);
 
     /// <summary>
     /// Alters the quotas of the given entities — Java's
@@ -1433,22 +1433,22 @@ public interface IAdmin : IDisposable
     /// quota name, containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    /// <seealso cref="IAsyncAdmin.AlterClientQuotas(IEnumerable{ClientQuotaAlteration}, AlterClientQuotasOptions)"/>
+    /// <seealso cref="IAsyncAdmin.AlterClientQuotas(IReadOnlyCollection{ClientQuotaAlteration}, AlterClientQuotasOptions)"/>
     AlterClientQuotasResult AlterClientQuotas(
-        IEnumerable<ClientQuotaAlteration> entries, AlterClientQuotasOptions options);
+        IReadOnlyCollection<ClientQuotaAlteration> entries, AlterClientQuotasOptions options);
 
     /// <summary>Describes <b>every</b> user's SASL/SCRAM credentials with the default options.</summary>
-    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyList{string}, DescribeUserScramCredentialsOptions)" path="/returns"/>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
     /// <seealso cref="IAsyncAdmin.DescribeUserScramCredentials()"/>
     DescribeUserScramCredentialsResult DescribeUserScramCredentials();
 
     /// <summary>Describes the given users' SASL/SCRAM credentials with the default options.</summary>
-    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/param[@name!='options']"/>
-    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/returns"/>
-    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)" path="/exception[not(paramref[@name='options'])]"/>
-    /// <seealso cref="IAsyncAdmin.DescribeUserScramCredentials(IReadOnlyCollection{string})"/>
-    DescribeUserScramCredentialsResult DescribeUserScramCredentials(IReadOnlyCollection<string>? users);
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyList{string}, DescribeUserScramCredentialsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyList{string}, DescribeUserScramCredentialsOptions)" path="/returns"/>
+    /// <inheritdoc cref="DescribeUserScramCredentials(IReadOnlyList{string}, DescribeUserScramCredentialsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    /// <seealso cref="IAsyncAdmin.DescribeUserScramCredentials(IReadOnlyList{string})"/>
+    DescribeUserScramCredentialsResult DescribeUserScramCredentials(IReadOnlyList<string>? users);
 
     /// <summary>
     /// Describes users' SASL/SCRAM credentials — Java's
@@ -1471,18 +1471,18 @@ public interface IAdmin : IDisposable
     /// <paramref name="users"/> contains a user name containing a NUL character (see the <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    /// <seealso cref="IAsyncAdmin.DescribeUserScramCredentials(IReadOnlyCollection{string}, DescribeUserScramCredentialsOptions)"/>
+    /// <seealso cref="IAsyncAdmin.DescribeUserScramCredentials(IReadOnlyList{string}, DescribeUserScramCredentialsOptions)"/>
     DescribeUserScramCredentialsResult DescribeUserScramCredentials(
-        IReadOnlyCollection<string>? users,
+        IReadOnlyList<string>? users,
         DescribeUserScramCredentialsOptions options);
 
     /// <summary>Upserts and deletes users' SASL/SCRAM credentials with the default options.</summary>
-    /// <inheritdoc cref="AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/param[@name!='options']"/>
-    /// <inheritdoc cref="AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/returns"/>
-    /// <inheritdoc cref="AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/exception[not(paramref[@name='options'])]"/>
-    /// <seealso cref="IAsyncAdmin.AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration})"/>
+    /// <inheritdoc cref="AlterUserScramCredentials(IReadOnlyList{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/param[@name!='options']"/>
+    /// <inheritdoc cref="AlterUserScramCredentials(IReadOnlyList{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/returns"/>
+    /// <inheritdoc cref="AlterUserScramCredentials(IReadOnlyList{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)" path="/exception[not(paramref[@name='options'])]"/>
+    /// <seealso cref="IAsyncAdmin.AlterUserScramCredentials(IReadOnlyList{UserScramCredentialAlteration})"/>
     AlterUserScramCredentialsResult AlterUserScramCredentials(
-        IEnumerable<UserScramCredentialAlteration> alterations);
+        IReadOnlyList<UserScramCredentialAlteration> alterations);
 
     /// <summary>
     /// Upserts and deletes users' SASL/SCRAM credentials — Java's
@@ -1510,9 +1510,9 @@ public interface IAdmin : IDisposable
     /// <see cref="IAdmin"/> remarks).
     /// </exception>
     /// <exception cref="IllegalStateException">The client has been closed.</exception>
-    /// <seealso cref="IAsyncAdmin.AlterUserScramCredentials(IEnumerable{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)"/>
+    /// <seealso cref="IAsyncAdmin.AlterUserScramCredentials(IReadOnlyList{UserScramCredentialAlteration}, AlterUserScramCredentialsOptions)"/>
     AlterUserScramCredentialsResult AlterUserScramCredentials(
-        IEnumerable<UserScramCredentialAlteration> alterations,
+        IReadOnlyList<UserScramCredentialAlteration> alterations,
         AlterUserScramCredentialsOptions options);
 
     /// <summary>Creates a delegation token with the default options.</summary>

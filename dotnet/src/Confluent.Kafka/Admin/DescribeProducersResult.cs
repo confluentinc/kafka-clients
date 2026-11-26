@@ -114,7 +114,7 @@ public sealed class DescribeProducersResult
         /// <summary>Creates a partition state — Java's public constructor.</summary>
         /// <param name="activeProducers">That partition's active producers.</param>
         /// <exception cref="ArgumentNullException"><paramref name="activeProducers"/> is null.</exception>
-        public PartitionProducerState(IEnumerable<ProducerState> activeProducers)
+        public PartitionProducerState(IReadOnlyList<ProducerState> activeProducers)
         {
             if (activeProducers is null)
             {

@@ -31,7 +31,7 @@ internal sealed class RecordingProducer : IProducer<string, string>
 
     internal RecordingProducer(bool autoComplete = true)
     {
-        Mock = new MockProducer<string, string>(new StringSerializer(), new StringSerializer(), autoComplete);
+        Mock = new MockProducer<string, string>(autoComplete, new StringSerializer(), new StringSerializer());
     }
 
     internal MockProducer<string, string> Mock { get; }
@@ -54,7 +54,7 @@ internal sealed class RecordingProducer : IProducer<string, string>
     public void BeginTransaction() => Mock.BeginTransaction();
 
     public void SendOffsetsToTransaction(
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, ConsumerGroupMetadata groupMetadata) =>
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, IConsumerGroupMetadata groupMetadata) =>
         Mock.SendOffsetsToTransaction(offsets, groupMetadata);
 
     public void CommitTransaction() => Mock.CommitTransaction();

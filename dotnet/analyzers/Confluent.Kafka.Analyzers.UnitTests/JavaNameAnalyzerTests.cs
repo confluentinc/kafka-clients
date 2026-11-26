@@ -88,6 +88,8 @@ public sealed class JavaNameAnalyzerTests
                 + "ctor\torg.apache.kafka.common.Node\tNode(int id, String host)\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\tid()\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\tequals(Object obj)\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\thashCode()\n"
                 + "field\torg.apache.kafka.common.Node\tstatic\tNO_ID\n"));
 
     [Fact]
@@ -988,6 +990,40 @@ public sealed class JavaNameAnalyzerTests
             Name(0, "parameter M:Confluent.Kafka.Common.Config.ConfigException.#ctor(System.String,System.Object): names its "
                 + "parameters (key, value) where Java's ConfigException constructor names them (name, value)"));
 
+    [Fact]
+    public Task AnExceptionNamesACauseOfAThrowableSubclassInnerException() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Common.Errors
+            {
+                public class InterruptException : Exception
+                {
+                    public InterruptException(Exception innerException)
+                        : base(null, innerException)
+                    {
+                    }
+
+                    public InterruptException(string message, Exception innerException)
+                        : base(message, innerException)
+                    {
+                    }
+
+                    public InterruptException(string message)
+                        : base(message)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.errors.InterruptException\tclass\tRuntimeException\n"
+                + "ctor\torg.apache.kafka.common.errors.InterruptException\tInterruptException(InterruptedException cause)\n"
+                + "ctor\torg.apache.kafka.common.errors.InterruptException\t"
+                + "InterruptException(String message, InterruptedException cause)\n"
+                + "ctor\torg.apache.kafka.common.errors.InterruptException\tInterruptException(String message)\n"));
+
     private const string ScramMechanism =
         "type\torg.apache.kafka.clients.admin.ScramMechanism\tenum\t-\n"
         + "constant\torg.apache.kafka.clients.admin.ScramMechanism\tUNKNOWN\n"
@@ -1850,7 +1886,7 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.clients.consumer.KafkaConsumer\tinstance\tsubscribe(Pattern pattern)\n"));
 
     [Fact]
-    public Task EqualityOperators_OnATypeThatOverridesEquals_AreDotNetsEquals() =>
+    public Task EqualityOperators_AreLeftToCKRDA0018_WhetherOrNotTheTypeOverridesEquals() =>
         Verifier.VerifyWithFilesAsync(
             """
             namespace Confluent.Kafka.Common
@@ -1871,12 +1907,263 @@ public sealed class JavaNameAnalyzerTests
 
                     public static bool operator !=(Uuid left, Uuid right) => !left.Equals(right);
                 }
+
+                public sealed class Node
+                {
+                    private Node()
+                    {
+                    }
+
+                    public static bool operator ==(Node left, Node right) => ReferenceEquals(left, right);
+
+                    public static bool operator !=(Node left, Node right) => !ReferenceEquals(left, right);
+                }
             }
             """,
             Files(
                 "type\torg.apache.kafka.common.Uuid\tclass\t-\n"
                 + "method\torg.apache.kafka.common.Uuid\tinstance\tequals(Object o)\n"
-                + "method\torg.apache.kafka.common.Uuid\tinstance\thashCode()\n"));
+                + "method\torg.apache.kafka.common.Uuid\tinstance\thashCode()\n"
+                + "type\torg.apache.kafka.common.Node\tclass\t-\n"));
+
+    [Fact]
+    public Task EqualsAndGetHashCode_WhereJavaDoesNotOverrideThem_AreReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public abstract class KafkaFuture : System.IEquatable<KafkaFuture>
+                {
+                    protected KafkaFuture()
+                    {
+                    }
+
+                    public bool {|#0:Equals|}(KafkaFuture other) => ReferenceEquals(this, other);
+
+                    public override bool {|#1:Equals|}(object obj) => ReferenceEquals(this, obj);
+
+                    public override int {|#2:GetHashCode|}() => 0;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.KafkaFuture\tabstract class\t-\n"
+                + "ctor\torg.apache.kafka.common.KafkaFuture\tKafkaFuture()\n"),
+            Name(0, "unmatched M:Confluent.Kafka.Common.KafkaFuture.Equals(Confluent.Kafka.Common.KafkaFuture): Java's "
+                + "KafkaFuture does not override equals(Object); remove this, so Equals compares references, as Java's does"),
+            Name(1, "unmatched M:Confluent.Kafka.Common.KafkaFuture.Equals(System.Object): Java's KafkaFuture does not "
+                + "override equals(Object); remove this, so Equals compares references, as Java's does"),
+            Name(2, "unmatched M:Confluent.Kafka.Common.KafkaFuture.GetHashCode: Java's KafkaFuture does not override "
+                + "hashCode(); remove this, so GetHashCode hashes the reference, as Java's does"));
+
+    [Fact]
+    public Task EqualsAndGetHashCode_WhereAJavaSupertypeOverridesThem_AreNotReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Admin
+            {
+                public abstract class UserScramCredentialAlteration
+                {
+                    protected UserScramCredentialAlteration()
+                    {
+                    }
+
+                    public override bool Equals(object obj) => false;
+
+                    public override int GetHashCode() => 0;
+                }
+
+                public sealed class UserScramCredentialDeletion : UserScramCredentialAlteration
+                {
+                    public override bool Equals(object obj) => false;
+
+                    public override int GetHashCode() => 0;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.admin.UserScramCredentialAlteration\tabstract class\t-\n"
+                + "ctor\torg.apache.kafka.clients.admin.UserScramCredentialAlteration\tUserScramCredentialAlteration()\n"
+                + "method\torg.apache.kafka.clients.admin.UserScramCredentialAlteration\tinstance\tequals(Object o)\n"
+                + "method\torg.apache.kafka.clients.admin.UserScramCredentialAlteration\tinstance\thashCode()\n"
+                + "type\torg.apache.kafka.clients.admin.UserScramCredentialDeletion\tclass\t"
+                + "org.apache.kafka.clients.admin.UserScramCredentialAlteration\n"
+                + "ctor\torg.apache.kafka.clients.admin.UserScramCredentialDeletion\tUserScramCredentialDeletion()\n"));
+
+    [Fact]
+    public Task ACollectionParameter_ThatTakesTheReadOnlyCounterpartOfItsJavaType_IsNotReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class Widget
+                {
+                    private Widget()
+                    {
+                    }
+
+                    public void Take(IEnumerable<int> values)
+                    {
+                    }
+
+                    public void Count(IReadOnlyCollection<int>? values)
+                    {
+                    }
+
+                    public void Keep(IReadOnlyCollection<int> values)
+                    {
+                    }
+
+                    public void Order(IReadOnlyList<int> values)
+                    {
+                    }
+
+                    public void Index(IReadOnlyDictionary<int, int> values)
+                    {
+                    }
+
+                    public void Wrap(ReadOnlyMemory<byte> buffer)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Widget\tclass\t-\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\ttake(Iterable values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tcount(Collection values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tkeep(Set values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\torder(List values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tindex(Map values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\twrap(ByteBuffer buffer)\n"));
+
+    [Fact]
+    public Task ACollectionParameter_OfAnotherType_IsReported_WithTheCounterpartToTake() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class Widget
+                {
+                    private Widget()
+                    {
+                    }
+
+                    public void {|#0:Take|}(IReadOnlyCollection<int> values)
+                    {
+                    }
+
+                    public void {|#1:Count|}(IEnumerable<int> values)
+                    {
+                    }
+
+                    public void {|#2:Keep|}(IEnumerable<int>? values)
+                    {
+                    }
+
+                    public void {|#3:Order|}(IReadOnlyCollection<int> values)
+                    {
+                    }
+
+                    public void {|#4:Index|}(IDictionary<int, int> values)
+                    {
+                    }
+
+                    public void Wrap(ReadOnlyMemory<byte> buffer)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Widget\tclass\t-\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\ttake(Iterable values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tcount(Collection values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tkeep(Set values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\torder(List values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\tindex(Map values)\n"
+                + "method\torg.apache.kafka.common.Widget\tinstance\twrap(ByteBuffer buffer)\n"),
+            Name(0, "collection M:Confluent.Kafka.Common.Widget.Take(System.Collections.Generic.IReadOnlyCollection{System.Int32}) "
+                + "values: takes values as IReadOnlyCollection<int>, where Java's Widget.take takes an Iterable: take an "
+                + "IEnumerable<T>"),
+            Name(1, "collection M:Confluent.Kafka.Common.Widget.Count(System.Collections.Generic.IEnumerable{System.Int32}) "
+                + "values: takes values as IEnumerable<int>, where Java's Widget.count takes a Collection: take an "
+                + "IReadOnlyCollection<T>"),
+            Name(2, "collection M:Confluent.Kafka.Common.Widget.Keep(System.Collections.Generic.IEnumerable{System.Int32}) "
+                + "values: takes values as IEnumerable<int>?, where Java's Widget.keep takes a Set: take an "
+                + "IReadOnlyCollection<T>"),
+            Name(3, "collection M:Confluent.Kafka.Common.Widget.Order(System.Collections.Generic.IReadOnlyCollection{System.Int32}) "
+                + "values: takes values as IReadOnlyCollection<int>, where Java's Widget.order takes a List: take an "
+                + "IReadOnlyList<T>"),
+            Name(4, "collection M:Confluent.Kafka.Common.Widget.Index(System.Collections.Generic.IDictionary{System.Int32,System.Int32}) "
+                + "values: takes values as IDictionary<int, int>, where Java's Widget.index takes a Map: take an "
+                + "IReadOnlyDictionary<TKey, TValue>"));
+
+    [Fact]
+    public Task AConstructorsCollectionParameter_IsCheckedToo() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Common
+            {
+                public sealed class Widget
+                {
+                    public {|#0:Widget|}(IEnumerable<int> replicas)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.Widget\tclass\t-\n"
+                + "ctor\torg.apache.kafka.common.Widget\tWidget(List replicas)\n"),
+            Name(0, "collection M:Confluent.Kafka.Common.Widget.#ctor(System.Collections.Generic.IEnumerable{System.Int32}) "
+                + "replicas: takes replicas as IEnumerable<int>, where Java's Widget constructor takes a List: take an "
+                + "IReadOnlyList<T>"));
+
+    [Fact]
+    public Task AnInterfacesCollectionParameter_IsReported_OnTheInterfaceAndOnEachImplementation() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System.Collections.Generic;
+
+            namespace Confluent.Kafka.Admin
+            {
+                public interface IAdmin
+                {
+                    void {|#0:CreateTopics|}(IEnumerable<string> newTopics);
+                }
+
+                public sealed class KafkaAdminClient : IAdmin
+                {
+                    private KafkaAdminClient()
+                    {
+                    }
+
+                    public void {|#1:CreateTopics|}(IEnumerable<string> newTopics)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.admin.Admin\tinterface\t-\n"
+                + "method\torg.apache.kafka.clients.admin.Admin\tinstance\tcreateTopics(Collection newTopics)\n"
+                + "type\torg.apache.kafka.clients.admin.KafkaAdminClient\tclass\t-\n"
+                + "method\torg.apache.kafka.clients.admin.KafkaAdminClient\tinstance\tcreateTopics(Collection newTopics)\n"),
+            Name(0, "collection M:Confluent.Kafka.Admin.IAdmin.CreateTopics(System.Collections.Generic.IEnumerable{System.String}) "
+                + "newTopics: takes newTopics as IEnumerable<string>, where Java's Admin.createTopics takes a Collection: "
+                + "take an IReadOnlyCollection<T>"),
+            Name(1, "collection M:Confluent.Kafka.Admin.KafkaAdminClient.CreateTopics(System.Collections.Generic.IEnumerable{System.String}) "
+                + "newTopics: takes newTopics as IEnumerable<string>, where Java's KafkaAdminClient.createTopics takes a "
+                + "Collection: take an IReadOnlyCollection<T>"));
 
     [Fact]
     public Task APairedType_StandsForTheNestedJavaTypeItNames() =>

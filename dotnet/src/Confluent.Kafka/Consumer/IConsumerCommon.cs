@@ -50,7 +50,7 @@ public interface IConsumerCommon
     /// A <see cref="KafkaConsumer{TKey, TValue}"/> or <see cref="AsyncKafkaConsumer{TKey, TValue}"/> has no
     /// <c>group.id</c>, with Java's message, after the closed and concurrency checks.
     /// </exception>
-    ConsumerGroupMetadata GroupMetadata();
+    IConsumerGroupMetadata GroupMetadata();
 
     /// <summary>
     /// Returns the current partition assignment (Java <c>assignment()</c>), as a new copy.

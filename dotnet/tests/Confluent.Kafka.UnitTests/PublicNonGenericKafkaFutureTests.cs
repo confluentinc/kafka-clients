@@ -430,7 +430,7 @@ public sealed class PublicNonGenericKafkaFutureTests
         Assert.False(type.IsGenericType);
         Assert.Equal(typeof(object), type.BaseType);
 
-        Assert.Equal(new[] { typeof(IEquatable<KafkaFuture>) }, type.GetInterfaces());
+        Assert.Empty(type.GetInterfaces());
 
         Assert.Equal(
             new[]
@@ -438,12 +438,9 @@ public sealed class PublicNonGenericKafkaFutureTests
                 "Confluent.Kafka.Common.KafkaFuture WhenComplete(System.Action`1[System.Exception])",
                 "Confluent.Kafka.Common.KafkaFuture`1[TR] ThenApply(System.Func`1[TR])",
                 "System.Boolean Cancel(System.Boolean)",
-                "System.Boolean Equals(Confluent.Kafka.Common.KafkaFuture)",
-                "System.Boolean Equals(System.Object)",
                 "System.Boolean IsCancelled()",
                 "System.Boolean IsCompletedExceptionally()",
                 "System.Boolean IsDone()",
-                "System.Int32 GetHashCode()",
                 "System.String ToString()",
                 "System.Void Get()",
                 "System.Void Get(System.Threading.CancellationToken)",
@@ -453,7 +450,7 @@ public sealed class PublicNonGenericKafkaFutureTests
             Signatures(type, BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly));
         foreach (MethodInfo method in type.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
         {
-            bool abstractJavaMember = method.Name is not ("Get" or "Equals" or "GetHashCode");
+            bool abstractJavaMember = method.Name is not "Get";
             Assert.Equal(abstractJavaMember, method.IsAbstract);
         }
 
@@ -483,8 +480,6 @@ public sealed class PublicNonGenericKafkaFutureTests
                 "Confluent.Kafka.Common.KafkaFuture AllOf(Confluent.Kafka.Common.KafkaFuture[])",
                 "Confluent.Kafka.Common.KafkaFuture AllOf(Confluent.Kafka.Common.KafkaFuture`1[T][])",
                 "Confluent.Kafka.Common.KafkaFuture`1[TU] CompletedFuture(TU)",
-                "System.Boolean op_Equality(Confluent.Kafka.Common.KafkaFuture, Confluent.Kafka.Common.KafkaFuture)",
-                "System.Boolean op_Inequality(Confluent.Kafka.Common.KafkaFuture, Confluent.Kafka.Common.KafkaFuture)",
             },
             Signatures(type, BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly));
 

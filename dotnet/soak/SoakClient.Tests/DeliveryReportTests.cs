@@ -71,7 +71,7 @@ public sealed class DeliveryReportTests
     {
         var sink = new CapturingSink();
         var producer = new AsyncMockProducer<byte[], SoakRecord>(
-            new AsyncByteArraySerializer(), new SoakRecordSerializer(50), autoComplete: false);
+            autoComplete: false, new AsyncByteArraySerializer(), new SoakRecordSerializer(50));
         using SoakClient client = NewClient(producer, sink);
 
         await client.ProduceRecordAsync();

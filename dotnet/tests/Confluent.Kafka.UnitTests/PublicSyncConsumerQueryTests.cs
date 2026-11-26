@@ -144,8 +144,8 @@ public sealed class PublicSyncConsumerQueryTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateBeginningOffset(Topic, 0, 5);
-        consumer.UpdateBeginningOffset(Topic, 1, 7);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 5 });
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 1)] = 7 });
 
         IReadOnlyDictionary<TopicPartition, long> result = consumer.BeginningOffsets(
             new[] { new TopicPartition(Topic, 0), new TopicPartition(Topic, 1) });
@@ -182,7 +182,7 @@ public sealed class PublicSyncConsumerQueryTests
         const string nonAscii = "topic-grüße-Ω-🎉";
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateBeginningOffset(nonAscii, 3, 99);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(nonAscii, 3)] = 99 });
 
         IReadOnlyDictionary<TopicPartition, long> result = consumer.BeginningOffsets(
             new[] { new TopicPartition(nonAscii, 3) });
@@ -195,8 +195,8 @@ public sealed class PublicSyncConsumerQueryTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateEndOffset(Topic, 0, 100);
-        consumer.UpdateEndOffset(Topic, 2, 250);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 100 });
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 2)] = 250 });
 
         IReadOnlyDictionary<TopicPartition, long> result = consumer.EndOffsets(
             new[] { new TopicPartition(Topic, 0), new TopicPartition(Topic, 2) });
@@ -223,7 +223,7 @@ public sealed class PublicSyncConsumerQueryTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateEndOffset(Topic, 0, 11);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 11 });
 
         Assert.Throws<IllegalStateException>(() => consumer.EndOffsets(new[] { new TopicPartition(Topic, 9) }));
 
@@ -236,7 +236,7 @@ public sealed class PublicSyncConsumerQueryTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(Topic, partitionCount: 3, LeaderId, LeaderHost, LeaderPort);
+        consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 3, LeaderId, LeaderHost, LeaderPort));
 
         IReadOnlyList<PartitionInfo> partitions = consumer.PartitionsFor(Topic);
 
@@ -289,7 +289,7 @@ public sealed class PublicSyncConsumerQueryTests
         const string nonAsciiHost = "hôte-Ω-🎉.example.com";
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, nonAsciiHost, LeaderPort);
+        consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 1, LeaderId, nonAsciiHost, LeaderPort));
 
         PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
         Assert.Equal(nonAsciiHost, info.Leader()!.Host());
@@ -301,8 +301,8 @@ public sealed class PublicSyncConsumerQueryTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions("topic-a", partitionCount: 2, LeaderId, LeaderHost, LeaderPort);
-        consumer.UpdatePartitions("topic-b", partitionCount: 1, leaderId: 9, "broker-2", leaderPort: 9093);
+        consumer.UpdatePartitions("topic-a", TestPartitions.Led("topic-a", partitionCount: 2, LeaderId, LeaderHost, LeaderPort));
+        consumer.UpdatePartitions("topic-b", TestPartitions.Led("topic-b", partitionCount: 1, leaderId: 9, "broker-2", leaderPort: 9093));
 
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = consumer.ListTopics();
 
@@ -478,8 +478,8 @@ public sealed class PublicSyncConsumerQueryTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
-        consumer.UpdateBeginningOffset(Topic, 0, 3);
+        consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort));
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 3 });
 
         for (int i = 0; i < 5; i++)
         {

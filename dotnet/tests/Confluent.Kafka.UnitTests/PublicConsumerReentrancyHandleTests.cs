@@ -624,8 +624,8 @@ public sealed class PublicConsumerReentrancyHandleTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition unassigned = new TopicPartition("unassigned-lag-topic", 0);
         consumer.Assign(new[] { s_tp0 });
-        consumer.UpdateEndOffset(s_tp0.Topic(), s_tp0.Partition(), 2);
-        consumer.UpdateEndOffset(unassigned.Topic(), unassigned.Partition(), 2);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [s_tp0] = 2 });
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [unassigned] = 2 });
         consumer.Seek(s_tp0, 5);
         using NativeConsumerHandle handle = CoreConsumerHandles.Of(consumer);
         long? lag = null;

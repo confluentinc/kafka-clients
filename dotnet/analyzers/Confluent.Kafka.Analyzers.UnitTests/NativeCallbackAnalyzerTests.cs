@@ -59,6 +59,24 @@ public sealed class NativeCallbackAnalyzerTests
 
         """;
 
+    private const string ValueNative = """
+        using System;
+        using System.Runtime.InteropServices;
+
+        internal static class NativeMethods
+        {
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate IntPtr PointerGetter(IntPtr self);
+
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate int NumberGetter(IntPtr self);
+
+            [DllImport("confluent_kafka", CallingConvention = CallingConvention.Cdecl)]
+            internal static extern IntPtr Register(PointerGetter pointer, NumberGetter number);
+        }
+
+        """;
+
     // On netstandard2.0, (IntPtr)present is IntPtr's user-defined operator; from C# 11 on .NET 7+ it is built in.
     private const string ForwardedArgumentsTheBindingUses = """
         internal static class C
@@ -344,6 +362,57 @@ public sealed class NativeCallbackAnalyzerTests
                 }
                 """),
             Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnCallback", "s_callback", MustWrap));
+
+    [Theory]
+    [InlineData("IntPtr", "PointerGetter", "Marshal.ReadIntPtr(self)", "return default;", false)]
+    [InlineData("IntPtr", "PointerGetter", "Marshal.ReadIntPtr(self)", "return default;", true)]
+    [InlineData("int", "NumberGetter", "Marshal.ReadInt32(self)", "return -1;", false)]
+    [InlineData("int", "NumberGetter", "Marshal.ReadInt32(self)", "return -1;", true)]
+    public Task ACallbackThatReturnsAConstantWhenItFails_IsNotReported(
+        string type, string getter, string read, string fallback, bool netStandard20) =>
+        Verifier.VerifyAsync(
+            netStandard20 ? ReferenceAssemblies.NetStandard.NetStandard20 : ReferenceAssemblies.Net.Net100,
+            ValueNative + $$"""
+            internal static class C
+            {
+                private static readonly NativeMethods.{{getter}} s_getter = OnGet;
+
+                private static {{type}} OnGet(IntPtr self)
+                {
+                    try
+                    {
+                        return {{read}};
+                    }
+                    catch (Exception)
+                    {
+                        {{fallback}}
+                    }
+                }
+            }
+            """);
+
+    [Fact]
+    public Task ACallbackThatReturnsAValueThatCanThrowWhenItFails_IsReported() =>
+        Verifier.VerifyAsync(
+            ValueNative + """
+                internal static class C
+                {
+                    private static readonly NativeMethods.PointerGetter s_getter = OnGet;
+
+                    private static IntPtr {|#0:OnGet|}(IntPtr self)
+                    {
+                        try
+                        {
+                            return Marshal.ReadIntPtr(self);
+                        }
+                        catch (Exception)
+                        {
+                            return Marshal.ReadIntPtr(self, 8);
+                        }
+                    }
+                }
+                """,
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnGet", "s_getter", MustWrap));
 
     [Fact]
     public Task ACatchAndFinallyThatCallGuardedHelpers_AreNotReported() =>
