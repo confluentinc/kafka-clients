@@ -233,21 +233,23 @@ function checkRecords(records, topic, timestamps) {
       assert.equal(first.offset, 1n);
       assert.equal(first.leaderEpoch, 0);
       assert.equal(first.metadata, 'm');
-      // commitSync() and commitAsync() commit the consumed positions.
-      await pollFor(consumer, 3);
+      // commitSync() and commitAsync() commit the consumed positions. The
+      // poll starts at the committed offset 1, so two records are left.
+      assert.equal((await pollFor(consumer, 2)).length, 2);
       await consumer.commitSync();
       assert.equal((await consumer.committed({ partitions: [tp] })).get(tp)?.offset, 3n);
-      await consumer.seek({ partition: tp, offset: 2 });
-      await consumer.poll({ timeout: 500 });
+      // A seek back to 1 makes 1 the position commitAsync() commits, an offset
+      // other than the one committed, so the read fails if it commits nothing.
+      await consumer.seek({ partition: tp, offset: 1 });
       await consumer.commitAsync();
       // commitAsync() settled once the core took the commit; the broker's
       // answer comes later, so the read waits on a deadline.
       const deadline = Date.now() + 30000;
       let offset = -1n;
-      while (offset !== 3n && Date.now() < deadline) {
+      while (offset !== 1n && Date.now() < deadline) {
         offset = (await consumer.committed({ partitions: [tp] })).get(tp)?.offset ?? -1n;
       }
-      assert.equal(offset, 3n);
+      assert.equal(offset, 1n);
       await consumer.commitSync({ offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(2)]]), timeout: 10000 });
       assert.equal((await consumer.committed({ partitions: [tp] })).get(tp)?.offset, 2n);
     } finally {
