@@ -4,7 +4,8 @@ Status: **approved** by the user on 2026-11-25, with the decisions of §8, and c
 and linter work, `poll(long)`, `doc-check`, the CHANGELOG, and the per-commit checks the user decided). P1 is
 **done** (2026-11-25): its phase plan, `P1.md` beside this file, was approved with its choices 2(a) to 9(a), and
 its "Result" section has the commits, the review and the gate. Choice 5(a) moved the `Consumer` interface from P1
-to P2. P2's phase plan, `P2.md`, was approved on 2026-11-26 with its choices 2(a) to 8(a), and P2 is being built.
+to P2. P2 is **done** (2026-11-26): its phase plan, `P2.md`, was approved with its choices 2(a) to 8(a), and its
+"Result" section has the commits, the review and the gate. P3's phase plan is next.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch. The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
@@ -474,7 +475,7 @@ FFI has them:
 2. `registerMetricForSubscription` and `unregisterMetricFromSubscription`, and the mock's `addedMetrics()`.
 3. The mock's `schedulePollTask(Runnable)`, `setClientInstanceId`, `disableTelemetry` and `injectTimeoutException`.
 
-Three FFI behaviours the binding lives with for now:
+Four FFI behaviours the binding lives with for now:
 
 4. A negative `CloseOptions` timeout is read as zero (`duration_ms()` in `rust/src/ffi/consumer/close_options.rs`),
    where Java throws "The timeout cannot be negative." It's already a listed deviation (line 81). Ask: Java's check
@@ -484,6 +485,13 @@ Three FFI behaviours the binding lives with for now:
    (`rust/src/ffi/precondition.rs`), which passes Java's error through unchanged.
 6. `groupMetadata()` without `group.id` panics in the core too; the binding's temporary check (line 119) catches it
    first. Ask: report `InvalidGroupIdError` through the error slot, so that the temporary check can go.
+7. The FFI refuses a NULL collection, pattern or `CloseOptions` at its boundary, before the core's group, closed and
+   busy checks, which Java runs first: with no `group.id`, `subscribe({ topics: null })` gives
+   `IllegalArgumentError` where Java throws `InvalidGroupIdException`, and a closed or busy consumer gives it where
+   Java throws `IllegalStateException` or `ConcurrentModificationException`. `kafka_common_TopicPartition_new`
+   refuses a NULL topic, which Java's `TopicPartition` holds, so `pause` and `resume` of a null-topic partition give
+   `TypeError` where Java says "No current assignment for partition null-0". Recorded as a deviation, as in Python
+   (P2.md, issue 151-3). Ask: refuse a NULL only after the core's earlier checks, and accept a null topic.
 
 ## 7. Execution: Actor and Critic
 
