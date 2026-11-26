@@ -1323,10 +1323,11 @@ static napi_value timestamps_to_js(napi_env env, const kafka_Map_t* map) {
     return arr;
 }
 
-// The completion of the calls answered with a map of TopicPartition:
-// offsets_for_times_cb's (OffsetAndTimestamp values, read by
-// timestamps_to_js) or beginning_offsets_cb's and end_offsets_cb's (int64_t
-// values, read by long_map_to_js); the map freed.
+// What the completions of the calls answered with a map of TopicPartition
+// share: offsets_for_times_cb's (OffsetAndTimestamp values, read by
+// timestamps_to_js) and beginning_offsets_cb's and end_offsets_cb's (int64_t
+// values, read by long_map_to_js); the map freed. Each completion ends its
+// call's count itself, as its last statement.
 static void tp_map_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque, int timestamps) {
     error_stat_owned(error);
     ValueCtx* ctx = (ValueCtx*)opaque;

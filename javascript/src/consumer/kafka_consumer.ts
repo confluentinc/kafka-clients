@@ -81,7 +81,7 @@ function isIterable(value: unknown): boolean {
 // Java's forms of each method, in Java declaration order (src/internal/args.ts).
 // The constructor's Map and Properties forms are the one `configs`, also taken
 // bare. Java's subscribe(Pattern...) forms are left out, and so are, until the
-// client has rebalance listeners, the forms taking one.
+// client has rebalance listeners and commit callbacks, the forms taking one.
 const CONSTRUCTOR_FORMS = new JavaForms('KafkaConsumer', [['configs'], ['configs', 'keyDeserializer', 'valueDeserializer']], {
   bareIsPlainObject: true,
   bareTypes: { configs: (value) => typeof value === 'object' },
