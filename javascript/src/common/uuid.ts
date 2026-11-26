@@ -18,6 +18,7 @@
 // with `get`, so they stay methods (javascript/CLAUDE.md, JavaScript Binding
 // Conventions, Class family).
 
+import { finalStatics } from '../internal/static_finals';
 import { randomBytes } from 'node:crypto';
 
 import { JavaForms, kind } from '../internal/args';
@@ -351,14 +352,16 @@ export class Uuid {
 }
 
 // Uuid.RESERVED, Java's Set.of(ZERO_UUID, ONE_UUID), a read-only UuidSet:
-// made on its first read, since UuidSet's module reads this one's, and kept
-// from then on as a constant property.
+// made on its first read, since UuidSet's module reads this one's, and the
+// same set from then on.
+let reserved: UuidSet | null = null;
 Object.defineProperty(Uuid, 'RESERVED', {
   configurable: true,
   enumerable: true,
   get(): UuidSet {
-    const reserved = new UuidSet([Uuid.ZERO_UUID, Uuid.ONE_UUID]).internalSetReadOnly();
-    Object.defineProperty(Uuid, 'RESERVED', { value: reserved, enumerable: true });
+    reserved ??= new UuidSet([Uuid.ZERO_UUID, Uuid.ONE_UUID]).internalSetReadOnly();
     return reserved;
   },
 });
+// Java's static finals: they can't be reassigned, RESERVED keeping its getter.
+finalStatics(Uuid, 'ONE_UUID', 'METADATA_TOPIC_ID', 'ZERO_UUID', 'RESERVED');

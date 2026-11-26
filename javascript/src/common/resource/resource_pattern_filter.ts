@@ -17,6 +17,7 @@
 // Java's public constructor, ANY, getters, matches, equals, hashCode and
 // toString.
 
+import { finalStatics } from '../../internal/static_finals';
 import { JavaForms } from '../../internal/args';
 import { listHashCode, sameClass } from '../../internal/java_object';
 import { IllegalArgumentError } from '../../illegal_argument_error';
@@ -88,6 +89,11 @@ export class ResourcePatternFilter {
     name: null,
     patternType: PatternType.ANY,
   });
+
+  // Java's static final: it can't be reassigned.
+  static {
+    finalStatics(this, 'ANY');
+  }
 
   /**
    * @returns `true` if this filter has any UNKNOWN components.

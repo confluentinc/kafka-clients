@@ -16,6 +16,7 @@
 // (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family): Java's public
 // constructor, ANY, getters, matches, equals, hashCode and toString.
 
+import { finalStatics } from '../../internal/static_finals';
 import { JavaForms } from '../../internal/args';
 import { listHashCode, sameClass } from '../../internal/java_object';
 import { ResourcePatternFilter } from '../resource/resource_pattern_filter';
@@ -71,6 +72,11 @@ export class AclBindingFilter {
     patternFilter: ResourcePatternFilter.ANY,
     entryFilter: AccessControlEntryFilter.ANY,
   });
+
+  // Java's static final: it can't be reassigned.
+  static {
+    finalStatics(this, 'ANY');
+  }
 
   /**
    * @returns `true` if this filter has any UNKNOWN components.

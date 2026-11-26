@@ -16,6 +16,7 @@
 // (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family): Java's
 // public constructor, getters, equals, hashCode and toString.
 
+import { finalStatics } from '../../internal/static_finals';
 import { JavaForms } from '../../internal/args';
 import { listHashCode, sameClass } from '../../internal/java_object';
 import { IllegalArgumentError } from '../../illegal_argument_error';
@@ -40,6 +41,11 @@ const EQUALS_FORMS = new JavaForms('equals', [['o']]);
 export class ResourcePattern {
   /** A special literal resource name that corresponds to 'all resources of a certain type'. */
   static readonly WILDCARD_RESOURCE: string = '*';
+
+  // Java's static final: it can't be reassigned.
+  static {
+    finalStatics(this, 'WILDCARD_RESOURCE');
+  }
 
   readonly #resourceType: ResourceType;
   readonly #name: string;

@@ -20,6 +20,7 @@
 // toString. Java's `implements Principal` is not translated (the JDK
 // interface table: Principal is dropped, the class keeps its own methods).
 
+import { finalStatics } from '../../../internal/static_finals';
 import { JavaForms, kind } from '../../../internal/args';
 import { stringHashCode, sameClass } from '../../../internal/java_object';
 import { GetterSetter, checkBoolean } from '../../../internal/options';
@@ -92,6 +93,11 @@ export class KafkaPrincipal {
 
   /** The anonymous user, `User:ANONYMOUS`. */
   static readonly ANONYMOUS: KafkaPrincipal = new KafkaPrincipal({ principalType: KafkaPrincipal.USER_TYPE, name: 'ANONYMOUS' });
+
+  // Java's static finals: they can't be reassigned.
+  static {
+    finalStatics(this, 'USER_TYPE', 'ANONYMOUS');
+  }
 
   /**
    * The principal's name.

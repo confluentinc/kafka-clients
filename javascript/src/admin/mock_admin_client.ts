@@ -32,6 +32,7 @@
 import native = require('../internal/native');
 import { isPlainObject, JavaForms, kind } from '../internal/args';
 import * as calls from '../internal/admin_calls';
+import { finalStatics } from '../internal/static_finals';
 import type { AdminHandle } from '../internal/admin_result';
 import { checkInt, checkLong, checkShort } from '../internal/java_number';
 import { applyOptionKeys, checkBoolean, Setter } from '../internal/options';
@@ -258,6 +259,11 @@ export class MockAdminClient implements Admin {
 
   /** The log dirs of each broker a Builder adds. */
   static readonly DEFAULT_LOG_DIRS: ReadonlyArray<string> = Object.freeze(['/tmp/kafka-logs']);
+
+  // Java's static finals: they can't be reassigned.
+  static {
+    finalStatics(this, 'DEFAULT_CLUSTER_ID', 'DEFAULT_LOG_DIRS');
+  }
 
   readonly #handle: AdminHandle;
 

@@ -20,6 +20,7 @@
 // ClientQuotaEntityMap cannot change, and `entries()` hands out a new `Map`.
 // The map is taken as a `Map` or a plain object (Types).
 
+import { finalStatics } from '../../internal/static_finals';
 import { JavaForms, kind } from '../../internal/args';
 import { mapEquals, mapHashCode, sameClass } from '../../internal/java_object';
 import { javaString } from '../../internal/java_string';
@@ -48,6 +49,11 @@ export class ClientQuotaEntity {
   static readonly CLIENT_ID: string = 'client-id';
   /** The type of an entity entry: an IP address. */
   static readonly IP: string = 'ip';
+
+  // Java's static finals: they can't be reassigned.
+  static {
+    finalStatics(this, 'USER', 'CLIENT_ID', 'IP');
+  }
 
   readonly #entries: Map<string, string | null> | null;
 
