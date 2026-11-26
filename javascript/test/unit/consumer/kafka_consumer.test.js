@@ -1191,18 +1191,24 @@ test('groupMetadata(): the group, the temporary group.id check, no argument', ()
 
 test('partitionsFor and listTopics: their forms and errors', async () => {
   const consumer = newConsumer(GROUP_ID, { 'default.api.timeout.ms': 300 });
-  // No broker: the core's timeouts. Their texts are the core's: Java's
-  // TopicMetadataRequestManager says "Timeout expired while fetching topic
-  // metadata" for both.
+  // No broker: the core's timeouts. The usual text is the one the core's
+  // application side gives when it stops waiting; Java's says "Timeout expired
+  // while fetching topic metadata" for both. At the deadline the core's
+  // topic-metadata manager, which gives Java's text, or its event reaper, "<event>
+  // was <n> ms past its expiration of <deadline>", may complete the request
+  // first, as Java's race the application thread too, so either is taken.
+  /** @param {string} usual */
+  const metadataTimeout = (usual) =>
+    new RegExp(`^(${usual}|Timeout expired while fetching topic metadata|.+ was \\d+ ms past its expiration of \\d+)$`);
   await assert.rejects(consumer.partitionsFor({ topic: TOPIC }), {
     constructor: KafkaTimeoutError,
-    message: 'Timeout expired while waiting for TopicMetadata',
+    message: metadataTimeout('Timeout expired while waiting for TopicMetadata'),
   });
   // The bare forms, checked once each.
   await assert.rejects(consumer.partitionsFor(TOPIC), KafkaTimeoutError);
   await assert.rejects(consumer.listTopics(), {
     constructor: KafkaTimeoutError,
-    message: 'Timeout expired while waiting for AllTopicsMetadata',
+    message: metadataTimeout('Timeout expired while waiting for AllTopicsMetadata'),
   });
   await assert.rejects(consumer.listTopics(100), KafkaTimeoutError);
   // The core's text too: Java's listTopics throws a TimeoutException with no message.
