@@ -368,6 +368,8 @@ public sealed class NativeCallbackAnalyzerTests
     [InlineData("IntPtr", "PointerGetter", "Marshal.ReadIntPtr(self)", "return default;", true)]
     [InlineData("int", "NumberGetter", "Marshal.ReadInt32(self)", "return -1;", false)]
     [InlineData("int", "NumberGetter", "Marshal.ReadInt32(self)", "return -1;", true)]
+    [InlineData("IntPtr", "PointerGetter", "Marshal.ReadIntPtr(self)", "return (IntPtr)0;", false)]
+    [InlineData("IntPtr", "PointerGetter", "Marshal.ReadIntPtr(self)", "return (IntPtr)0;", true)]
     public Task ACallbackThatReturnsAConstantWhenItFails_IsNotReported(
         string type, string getter, string read, string fallback, bool netStandard20) =>
         Verifier.VerifyAsync(
@@ -390,6 +392,36 @@ public sealed class NativeCallbackAnalyzerTests
                 }
             }
             """);
+
+    // A conversion that can throw is not looked through: unboxing a boxed long as an int throws
+    // InvalidCastException out of the catch.
+    [Theory]
+    [InlineData("int", "NumberGetter", "Marshal.ReadInt32(self)", "return (int)(object)0L;", false)]
+    [InlineData("int", "NumberGetter", "Marshal.ReadInt32(self)", "return (int)(object)0L;", true)]
+    [InlineData("IntPtr", "PointerGetter", "Marshal.ReadIntPtr(self)", "return (IntPtr)(object)0L;", false)]
+    public Task ACallbackThatReturnsAConstantThroughAThrowingConversion_IsReported(
+        string type, string getter, string read, string fallback, bool netStandard20) =>
+        Verifier.VerifyAsync(
+            netStandard20 ? ReferenceAssemblies.NetStandard.NetStandard20 : ReferenceAssemblies.Net.Net100,
+            ValueNative + $$"""
+            internal static class C
+            {
+                private static readonly NativeMethods.{{getter}} s_getter = OnGet;
+
+                private static {{type}} {|#0:OnGet|}(IntPtr self)
+                {
+                    try
+                    {
+                        return {{read}};
+                    }
+                    catch (Exception)
+                    {
+                        {{fallback}}
+                    }
+                }
+            }
+            """,
+            Verifier.Diagnostic(DiagnosticIds.NoThrowNativeCallback).WithLocation(0).WithArguments("OnGet", "s_getter", MustWrap));
 
     [Fact]
     public Task ACallbackThatReturnsAValueThatCanThrowWhenItFails_IsReported() =>

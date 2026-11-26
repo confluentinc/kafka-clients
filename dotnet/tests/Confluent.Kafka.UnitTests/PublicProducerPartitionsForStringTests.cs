@@ -119,7 +119,7 @@ public sealed class PublicProducerPartitionsForStringTests
         using MockProducer<string, string> producer =
             new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer());
         KafkaException injected = new KafkaException("partitionsFor");
-        producer.SetPartitionsForException(injected);
+        producer.PartitionsForException(injected);
 
         Assert.Same(injected, Assert.Throws<KafkaException>(() => producer.PartitionsFor(NulTopic)));
     }
@@ -130,7 +130,7 @@ public sealed class PublicProducerPartitionsForStringTests
         await using AsyncMockProducer<string, string> producer =
             new AsyncMockProducer<string, string>(new AsyncStringSerializer(), new AsyncStringSerializer());
         KafkaException injected = new KafkaException("partitionsFor");
-        producer.SetPartitionsForException(injected);
+        producer.PartitionsForException(injected);
 
         Assert.Same(injected, await Assert.ThrowsAsync<KafkaException>(() => producer.PartitionsFor(NulTopic)));
     }

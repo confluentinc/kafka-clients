@@ -369,11 +369,11 @@ public sealed class PublicProducerNullPartitionTests
     {
         if (producer is MockProducer<byte[], byte[]> sync)
         {
-            sync.SetSendOffsetsToTransactionException(exception);
+            sync.SendOffsetsToTransactionException(exception);
         }
         else
         {
-            ((AsyncMockProducer<byte[], byte[]>)producer).SetSendOffsetsToTransactionException(exception);
+            ((AsyncMockProducer<byte[], byte[]>)producer).SendOffsetsToTransactionException(exception);
         }
     }
 

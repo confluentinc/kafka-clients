@@ -127,6 +127,9 @@ pub struct JavaClass {
     /// The fields of `fields` declared `static`, a field of an interface
     /// included (it is implicitly `static`); never an enum constant.
     pub static_fields: BTreeSet<String>,
+    /// The fields of `fields` declared `final`, a field of an interface
+    /// included (it is implicitly `final`); never an enum constant.
+    pub final_fields: BTreeSet<String>,
     /// The enum constants, in declaration order (empty for anything but an
     /// enum): `Enum.compareTo` orders by it.
     pub enum_constants: Vec<String>,
@@ -1041,6 +1044,7 @@ pub(crate) fn push_classes(package: &[String], source: &str, is_test: bool, out:
             fields: class.fields,
             field_visibility: class.field_visibility,
             static_fields: class.static_fields,
+            final_fields: class.final_fields,
             enum_constants: class.enum_constants,
             deprecated: class.deprecated,
             is_test,
@@ -1194,6 +1198,7 @@ struct Scanned {
     fields: BTreeMap<String, bool>,
     field_visibility: BTreeMap<String, Visibility>,
     static_fields: BTreeSet<String>,
+    final_fields: BTreeSet<String>,
     enum_constants: Vec<String>,
     deprecated: bool,
     kind: JavaKind,
@@ -1296,6 +1301,8 @@ fn scan(src: &str) -> Vec<Scanned> {
     let mut visibility: Option<Visibility> = None;
     // A `static` seen, waiting for the declaration it applies to.
     let mut is_static = false;
+    // A `final` seen, waiting for the declaration it applies to.
+    let mut is_final = false;
     // A `default` seen, waiting for the interface method it applies to.
     let mut is_default = false;
     // An `abstract` seen, waiting for the declaration it applies to.
@@ -1354,6 +1361,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                         fields: BTreeMap::new(),
                         field_visibility: BTreeMap::new(),
                         static_fields: BTreeSet::new(),
+                        final_fields: BTreeSet::new(),
                         enum_constants: Vec::new(),
                         deprecated: dep,
                         kind: match keyword.as_str() {
@@ -1378,6 +1386,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                     deprecated = false;
                     visibility = None;
                     is_static = false;
+                    is_final = false;
                     is_default = false;
                     is_abstract = false;
                     functional = false;
@@ -1393,6 +1402,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                 deprecated = false;
                 visibility = None;
                 is_static = false;
+                is_final = false;
                 is_default = false;
                 is_abstract = false;
                 functional = false;
@@ -1402,6 +1412,7 @@ fn scan(src: &str) -> Vec<Scanned> {
                 deprecated = false;
                 visibility = None;
                 is_static = false;
+                is_final = false;
                 is_default = false;
                 is_abstract = false;
                 functional = false;
@@ -1433,11 +1444,13 @@ fn scan(src: &str) -> Vec<Scanned> {
                         javadoc: doc.take(),
                     });
                     is_static = false;
+                    is_final = false;
                     i += 2;
                     continue;
                 }
             },
             Tok::Ident(m) if member_level && m == "static" => is_static = true,
+            Tok::Ident(m) if member_level && m == "final" => is_final = true,
             Tok::Ident(m) if member_level && m == "default" => is_default = true,
             Tok::Ident(m) if member_level && m == "abstract" => is_abstract = true,
             Tok::Ident(m) if member_level && matches!(m.as_str(), "public" | "protected" | "private") => {
@@ -1517,6 +1530,9 @@ fn scan(src: &str) -> Vec<Scanned> {
                         .insert(name.clone(), visibility.take().unwrap_or(implicit));
                     if std::mem::take(&mut is_static) || out[idx].is_interface {
                         out[idx].static_fields.insert(name.clone());
+                    }
+                    if std::mem::take(&mut is_final) || out[idx].is_interface {
+                        out[idx].final_fields.insert(name.clone());
                     }
                 }
             },
@@ -2295,6 +2311,7 @@ mod tests {
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
             static_fields: BTreeSet::new(),
+            final_fields: BTreeSet::new(),
             enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
@@ -2330,6 +2347,7 @@ mod tests {
             fields: BTreeMap::new(),
             field_visibility: BTreeMap::new(),
             static_fields: BTreeSet::new(),
+            final_fields: BTreeSet::new(),
             enum_constants: Vec::new(),
             deprecated: false,
             is_test: false,
