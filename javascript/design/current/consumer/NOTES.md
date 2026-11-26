@@ -163,7 +163,8 @@ then for a subscription `throwIfGroupIdNotDefined()`, then the null check):
   the two `commitSync` forms and `committed` on one without `group.id`, where Java reports the closed consumer
   (`acquireAndEnsureOpen()`) or `InvalidGroupIdException` (`throwIfGroupIdNotDefined()`) first. A busy consumer gets
   the busy error first, as in Java. `poll` keeps Java's order: Java's `poll` builds its `Timer`, and so checks the
-  timeout, before `acquireAndEnsureOpen()`.
+  timeout, before `acquireAndEnsureOpen()`. The user accepted this order on 2026-11-26 as a known difference (P3.md,
+  issue 152-2); 151-3's order, above, is unchanged and still the user's question.
 
 Java checks these before its closed and busy checks too, so their order is Java's: `commitSync({ offsets: null })`
 (Java's `new HashMap<>(null)`, the FFI's `TypeError("offsets must not be null")`), `seekToBeginning(null)` and
