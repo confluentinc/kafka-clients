@@ -1680,7 +1680,10 @@ fn render_nested_enum(info: &ClassInfo, e: &NestedEnum) -> String {
         doc("The name of this constant, Java's `Enum.toString()`.\n\n@returns the name")
     ));
     out.push(format!(
-        "{}\n    toJSON(key?: string): string {{\n      void key;\n      return this.#name;\n    }}\n  }}",
+        "{}\n    toJSON(key?: string): string {{\n      void key;\n      return this.#name;\n    }}\n\n    \
+         // Java's constants are static finals: the class is frozen once its\n    \
+         // static fields are set, so none can be reassigned.\n    \
+         static {{\n      Object.freeze(this);\n    }}\n  }}",
         doc("The name, which `JSON.stringify` writes for the constant.\n\n\
              @param key - the key `JSON.stringify` passes, which is ignored\n@returns the name\n\n\
              @remarks *(js-only)* JavaScript's JSON protocol.")
@@ -2511,6 +2514,10 @@ mod tests {
         assert!(deserialization
             .content
             .contains("  export class DeserializationExceptionOrigin {\n"));
+        // The nested enum is frozen once its static fields are set.
+        assert!(deserialization
+            .content
+            .contains("    static {\n      Object.freeze(this);\n    }\n  }\n}\n"));
         assert!(deserialization.content.contains("timestampType: P.enumOf(TimestampType)"));
         assert!(deserialization
             .content

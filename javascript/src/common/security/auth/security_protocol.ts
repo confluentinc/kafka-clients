@@ -253,4 +253,10 @@ export class SecurityProtocol {
     void key;
     return this.#name;
   }
+
+  // Java's constants are static finals: the class is frozen once its static
+  // fields are set, so none can be reassigned.
+  static {
+    Object.freeze(this);
+  }
 }

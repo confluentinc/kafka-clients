@@ -21,6 +21,7 @@
 import native = require('../internal/native');
 import { JavaForms } from '../internal/args';
 import { checkConfigs, configEntries } from '../internal/config';
+import { finalStatics } from '../internal/static_finals';
 import { debug } from '../internal/debug';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { liveMetrics } from '../internal/live_metrics';
@@ -322,6 +323,11 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
 
   /** The group of the producer's metrics. */
   static readonly PRODUCER_METRIC_GROUP_NAME: string = 'producer-metrics';
+
+  // Java's static finals: they can't be reassigned.
+  static {
+    finalStatics(this, 'NETWORK_THREAD_PREFIX', 'PRODUCER_METRIC_GROUP_NAME');
+  }
 
   #handle: ProducerHandle;
   // The serializers given, or null: the record's bytes cross as they are.
