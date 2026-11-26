@@ -1291,7 +1291,7 @@ napi_value js_producer_flush(napi_env env, napi_callback_info info) {
 
 // A node's fields as src/common/node.ts's constructor takes them: { id, host,
 // port, rack, isFenced }, or null for a NULL node.
-static napi_value node_to_js(napi_env env, const kafka_common_Node_t* n) {
+napi_value node_to_js(napi_env env, const kafka_common_Node_t* n) {
     napi_value obj, v;
     if (n == NULL) {
         NAPI_CHECK(env, napi_get_null(env, &obj), NULL);
@@ -1385,9 +1385,9 @@ static napi_value partition_info_to_js(napi_env env, const kafka_common_Partitio
     return obj;
 }
 
-// The owned list of owned kafka_common_PartitionInfo_t * partitions_for_cb
-// delivers, as an array of partition fields; the list (and its elements) freed.
-static napi_value partitions_take_to_js(napi_env env, kafka_List_t* list) {
+// A borrowed list of kafka_common_PartitionInfo_t *, as the partitions_for_cb
+// and list_topics_cb answers hold them, as an array of partition fields.
+napi_value partitions_to_js(napi_env env, const kafka_List_t* list) {
     kafka_common_Error_t* ffi_err = NULL;
     int32_t size = 0;
     error_warn(env, 1, FFI_SET(size, kafka_List_size_err(list, &ffi_err)));
@@ -1403,6 +1403,14 @@ static napi_value partitions_take_to_js(napi_env env, kafka_List_t* list) {
             if (v == NULL || napi_set_element(env, arr, (uint32_t)i, v) != napi_ok) result = NULL;
         }
     }
+    return result;
+}
+
+// The owned list partitions_for_cb delivers, as partitions_to_js reads it; the
+// list (and its elements) freed.
+napi_value partitions_take_to_js(napi_env env, kafka_List_t* list) {
+    napi_value result = partitions_to_js(env, list);
+    kafka_common_Error_t* ffi_err = NULL;
     error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
     return result;
 }

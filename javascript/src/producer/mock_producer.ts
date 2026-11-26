@@ -38,13 +38,13 @@
 import native = require('../internal/native');
 import { JavaForms } from '../internal/args';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
+import { partitionInfoOf } from '../internal/metadata';
 import { checkSerializer, isThenable } from '../internal/serde';
 import { KafkaFuture } from '../common/kafka_future';
 import type { Metric } from '../common/metric';
 import { MetricName } from '../common/metric_name';
 import { MetricNameMap } from '../common/metric_name_map';
-import { Node } from '../common/node';
-import { PartitionInfo } from '../common/partition_info';
+import type { PartitionInfo } from '../common/partition_info';
 import { TopicPartition } from '../common/topic_partition';
 import { Headers } from '../common/header/headers';
 import type { Serializer } from '../common/serialization/serializer';
@@ -90,16 +90,6 @@ const SET_CLOSE_FORMS = new JavaForms('setCloseException', [['closeException']],
 // FAST_PATH_YIELD_EVERY), so a loop awaiting the mock's sends lets timers
 // and I/O run.
 const FAST_PATH_YIELD_EVERY = 1000;
-
-/**
- * The native layer's node fields as a Node, Java's five-parameter constructor.
- *
- * @param fields - the node's fields, or null
- * @returns the node, or null
- */
-function nodeOf(fields: { id: number; host: string | null; port: number; rack: string | null; isFenced: boolean } | null): Node | null {
-  return fields === null ? null : new Node(fields);
-}
 
 /**
  * The callback `send` was given, or null; throws a TypeError for a non-function.
@@ -673,19 +663,7 @@ export class MockProducer<K, V> implements Producer<K, V> {
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
         if (error !== null) return reject(error);
         try {
-          resolve(
-            (partitions ?? []).map(
-              (fields) =>
-                new PartitionInfo({
-                  topic: fields.topic,
-                  partition: fields.partition,
-                  leader: nodeOf(fields.leader),
-                  replicas: fields.replicas === null ? null : fields.replicas.map((n) => nodeOf(n) as Node),
-                  inSyncReplicas: fields.inSyncReplicas === null ? null : fields.inSyncReplicas.map((n) => nodeOf(n) as Node),
-                  offlineReplicas: fields.offlineReplicas === null ? null : fields.offlineReplicas.map((n) => nodeOf(n) as Node),
-                }),
-            ),
-          );
+          resolve((partitions ?? []).map(partitionInfoOf));
         } catch (thrown) {
           // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what building the values threw (typed unknown by catch)
           reject(thrown);

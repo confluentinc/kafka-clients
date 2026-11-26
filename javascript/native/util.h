@@ -421,6 +421,17 @@ napi_value metrics_view_take_to_js(napi_env env, kafka_common_metrics_MetricsVie
 // the caller's typed arrays `key` and `value`. A no-op otherwise.
 void record_spy_capture(napi_env env, const kafka_producer_ProducerRecord_t* record, napi_value key, napi_value value);
 
+// producer.c: a borrowed node as its fields ({ id, host, port, rack,
+// isFenced }), `null` for NULL; NULL when Node-API failed.
+napi_value node_to_js(napi_env env, const kafka_common_Node_t* n);
+
+// producer.c: a list of kafka_common_PartitionInfo_t * as an array of
+// partition fields ({ topic, partition, leader, replicas, inSyncReplicas,
+// offlineReplicas }), the list borrowed (partitions_to_js) or owned and freed
+// (partitions_take_to_js); NULL when Node-API failed.
+napi_value partitions_to_js(napi_env env, const kafka_List_t* list);
+napi_value partitions_take_to_js(napi_env env, kafka_List_t* list);
+
 // producer.c: the JS value an error JS gave a mock carries, for the
 // LocalCallbackError `opaque` the mock's error holds, or NULL when `opaque`
 // is not one (another callback's error) or its value is gone (the mock
