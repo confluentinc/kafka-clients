@@ -70,7 +70,7 @@ type NativeLongEntry = [string, number, bigint];
  * @param value - the value given
  * @returns whether it is one
  */
-function isIterable(value: unknown): boolean {
+export function isIterable(value: unknown): boolean {
   return typeof value === 'object' && value !== null && typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] === 'function';
 }
 

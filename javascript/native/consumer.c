@@ -15,7 +15,9 @@
 // The KafkaConsumer handle: a marshaling-only bridge to the Rust consumer FFI
 // (javascript/CLAUDE.md), built with NULL deserializers, so keys and values
 // cross as kafka_Bytes_t. It runs no thread of its own and holds no Kafka
-// logic.
+// logic. A MockConsumer is the same handle over the FFI's mock, whose records
+// are the app's own (native/mock_values.c, MockRecord): a poll of it returns
+// them and makes no external buffer.
 //
 // Every waiting call uses its `_cb` twin, whose completion the core queues on
 // the consumer's callback vector; the consumer's CallbackQueue

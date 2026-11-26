@@ -62,13 +62,11 @@ import type { SubscriptionPattern } from './subscription_pattern';
 const CONSTRUCTOR_FORMS = new JavaForms('MockConsumer', [['offsetResetStrategy']], {
   bareTypes: { offsetResetStrategy: (value) => value === null || typeof value === 'string' },
 });
-const isIterable = (value: unknown): boolean =>
-  typeof value === 'object' && value !== null && typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] === 'function';
 const REBALANCE_FORMS = new JavaForms('rebalance', [['newAssignment']], {
-  bareTypes: { newAssignment: (v) => v === null || isIterable(v) },
+  bareTypes: { newAssignment: (v) => v === null || calls.isIterable(v) },
 });
 const LOSE_PARTITIONS_FORMS = new JavaForms('losePartitions', [['partitionsLost']], {
-  bareTypes: { partitionsLost: (v) => v === null || isIterable(v) },
+  bareTypes: { partitionsLost: (v) => v === null || calls.isIterable(v) },
 });
 const ADD_RECORD_FORMS = new JavaForms('addRecord', [['record']], {
   bareTypes: { record: (v) => v === null || v instanceof ConsumerRecord },
@@ -129,7 +127,7 @@ function offsetEntries(value: unknown): Array<[[string | null, number] | null, b
  */
 function partitionInfoArgsOf(value: unknown): Array<PartitionInfoArgs | null> | null {
   if (value === null) return null;
-  if (!isIterable(value) || typeof value === 'string') throw new TypeError('partitions must be an iterable of PartitionInfo');
+  if (!calls.isIterable(value)) throw new TypeError('partitions must be an iterable of PartitionInfo');
   return [...(value as Iterable<unknown>)].map((info) => {
     if (info === null) return null;
     if (!(info instanceof PartitionInfo)) throw new TypeError('partitions must be an iterable of PartitionInfo');
@@ -767,8 +765,8 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
   /**
    * Returns the timeout used in the last `poll` call.
    *
-   * @returns the last poll timeout, in milliseconds, or null if poll has not
-   *   been called
+   * @returns the last poll timeout, in milliseconds (`Infinity` for no
+   *   limit), or null if poll has not been called
    * @throws `TypeError` when it is given an argument
    */
   lastPollTimeout(): number | null {
