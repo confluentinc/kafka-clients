@@ -261,18 +261,6 @@ function answer<T>(start: (done: (error: unknown, value: T | null) => void) => v
 }
 
 /**
- * The addon's `[topic, partition, offset]` entries as a `TopicPartitionMap<bigint>`.
- *
- * @param entries - the entries
- * @returns the map
- */
-function longMap(entries: NativeLongEntry[]): TopicPartitionMap<bigint> {
-  const map = new TopicPartitionMap<bigint>();
-  for (const [topic, partition, offset] of entries) map.set(new TopicPartition({ topic, partition }), offset);
-  return map;
-}
-
-/**
  * A `TopicPartitionSet` of the addon's `[topic, partition]` pairs.
  *
  * @param pairs - the pairs
@@ -765,7 +753,9 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
       const form = BEGINNING_OFFSETS_FORMS.match(options, count);
       const pairs = partitionPairs(BEGINNING_OFFSETS_FORMS.value(options, 'partitions'), false);
       const timeoutMs = timeoutOf(BEGINNING_OFFSETS_FORMS, options, form === 1);
-      return longMap(await answer<NativeLongEntry[]>((done) => native.consumerBeginningOffsets(this.#handle, pairs, timeoutMs, done)));
+      const entries = await answer<NativeLongEntry[]>((done) => native.consumerBeginningOffsets(this.#handle, pairs, timeoutMs, done));
+      // The entries an error's payload holds too: the same reader builds the map.
+      return topicPartitionLongMap.core(entries, {}) as TopicPartitionMap<bigint>;
     });
   }
 
@@ -787,7 +777,9 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
       const form = END_OFFSETS_FORMS.match(options, count);
       const pairs = partitionPairs(END_OFFSETS_FORMS.value(options, 'partitions'), false);
       const timeoutMs = timeoutOf(END_OFFSETS_FORMS, options, form === 1);
-      return longMap(await answer<NativeLongEntry[]>((done) => native.consumerEndOffsets(this.#handle, pairs, timeoutMs, done)));
+      const entries = await answer<NativeLongEntry[]>((done) => native.consumerEndOffsets(this.#handle, pairs, timeoutMs, done));
+      // The entries an error's payload holds too: the same reader builds the map.
+      return topicPartitionLongMap.core(entries, {}) as TopicPartitionMap<bigint>;
     });
   }
 

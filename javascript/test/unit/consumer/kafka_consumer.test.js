@@ -867,6 +867,40 @@ test('the null checks of the offset calls come before the closed and busy checks
   assert.throws(() => closedGroupless.groupMetadata(), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
   // @ts-expect-error a null the types forbid
   await assert.rejects(closedGroupless.committed(null), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  // A negative timeout: the FFI checks it before the core's closed and group
+  // checks, which Java runs first (on an open consumer, Java's commitSync and
+  // position say "Invalid negative timeout -1", the others wait).
+  const NEGATIVE = { constructor: IllegalArgumentError, message: 'Timeout must not be negative' };
+  const offsets = new TopicPartitionMap([[TP0, new OffsetAndMetadata(1)]]);
+  for (const c of [closed, closedGroupless]) {
+    for (const call of [
+      () => c.commitSync({ timeout: -1 }),
+      () => c.commitSync({ offsets, timeout: -1 }),
+      () => c.position({ partition: TP0, timeout: -1 }),
+      () => c.committed({ partitions: [TP0], timeout: -1 }),
+      () => c.partitionsFor({ topic: TOPIC, timeout: -1 }),
+      () => c.listTopics({ timeout: -1 }),
+      () => c.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[TP0, 0n]]), timeout: -1 }),
+      () => c.beginningOffsets({ partitions: [TP0], timeout: -1 }),
+      () => c.endOffsets({ partitions: [TP0], timeout: -1 }),
+    ]) {
+      await assert.rejects(call(), NEGATIVE);
+    }
+  }
+  // Open, without group.id: the FFI's timeout check before the core's group check.
+  const groupless = newConsumer(null);
+  for (const call of [
+    () => groupless.commitSync({ timeout: -1 }),
+    () => groupless.commitSync({ offsets, timeout: -1 }),
+    () => groupless.committed({ partitions: [TP0], timeout: -1 }),
+  ]) {
+    await assert.rejects(call(), NEGATIVE);
+  }
+  // poll keeps Java's order: Java checks the timeout before the closed check.
+  await assert.rejects(closed.poll({ timeout: -1 }), NEGATIVE);
+  // With a valid timeout, the closed and group checks answer.
+  await assert.rejects(closed.commitSync({ timeout: 0 }), { constructor: IllegalStateError, message: CLOSED });
+  await assert.rejects(groupless.commitSync({ timeout: 0 }), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
   // While a poll is pending: Java throws ConcurrentModificationException first.
   const busy = newConsumer();
   await busy.assign({ partitions: [TP0] });
@@ -913,7 +947,8 @@ test('commitSync: its four forms, bare and by name, and their errors', async () 
   await consumer.commitSync(new TopicPartitionMap());
   await consumer.commitSync({ offsets: new TopicPartitionMap(), timeout: Temporal.Duration.from({ milliseconds: 100 }) });
   // Offsets to an unassigned partition: the broker would take them; the
-  // unreachable one never answers.
+  // unreachable one never answers. The text is the core's: Java's commitSync
+  // attaches no message of its own.
   await assert.rejects(consumer.commitSync({ offsets, timeout: 300 }), {
     constructor: KafkaTimeoutError,
     message: 'Timeout of 300ms expired before successfully committing offsets',
@@ -973,8 +1008,11 @@ test('commitAsync() settles once the core took the commit, and takes no argument
     consumer.commitAsync(() => {}),
     { constructor: IllegalArgumentError, message: 'commitAsync() takes one of (); got a function' },
   );
-  // @ts-expect-error an argument
-  await assert.rejects(consumer.commitAsync(undefined), TypeError);
+  await assert.rejects(
+    // @ts-expect-error an argument
+    consumer.commitAsync(undefined),
+    { constructor: TypeError, message: 'commitAsync() takes no argument: leave it out rather than pass undefined' },
+  );
 });
 
 test('seek: its two forms and their errors', async () => {

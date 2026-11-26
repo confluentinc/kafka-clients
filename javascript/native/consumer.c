@@ -76,10 +76,13 @@ struct Batch {
     int refs;                                   // the build, each external buffer and HeaderSource alive
 };
 
+// The context of a call answered by a completion that gives an error or
+// nothing, `done(error | null)` (void_on_complete), or an error or a value,
+// `done(error | null, value | null)` (value_settle).
 typedef struct {
     Consumer* c;
-    napi_ref done;                             // JS (error | null) => void
-} VoidCtx;
+    napi_ref done;
+} CallCtx;
 
 typedef struct {
     Consumer* c;
@@ -443,7 +446,7 @@ napi_value js_consumer_poll(napi_env env, napi_callback_info info) {
 
 static void void_on_complete(kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
-    VoidCtx* ctx = (VoidCtx*)opaque;
+    CallCtx* ctx = (CallCtx*)opaque;
     Consumer* c = ctx->c;
     napi_env env = c->env;
     if (!c->queue.finalizing) {
@@ -459,10 +462,10 @@ static void void_on_complete(kafka_common_Error_t* error, void* opaque) {
     cbq_call_end(env, &c->queue);
 }
 
-// The context of a call answered by void_on_complete, its `done` the last
-// argument; NULL with a JS exception pending.
-static VoidCtx* void_ctx_new(napi_env env, Consumer* c, napi_value done) {
-    VoidCtx* ctx = (VoidCtx*)calloc(1, sizeof(VoidCtx));
+// The context of a call, its `done` the last argument; NULL with a JS
+// exception pending.
+static CallCtx* call_ctx_new(napi_env env, Consumer* c, napi_value done) {
+    CallCtx* ctx = (CallCtx*)calloc(1, sizeof(CallCtx));
     if (ctx == NULL) {
         napi_throw_error(env, NULL, "out of memory");
         return NULL;
@@ -550,7 +553,7 @@ napi_value js_consumer_subscribe_topics(napi_env env, napi_callback_info info) {
         strings_free(strings, count);
         return NULL;
     }
-    VoidCtx* ctx = void_ctx_new(env, c, argv[2]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[2]);
     if (ctx != NULL) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_subscribe_with_topics_cb(c->view, topics, void_on_complete, ctx);
@@ -590,7 +593,7 @@ napi_value js_consumer_subscribe_pattern(napi_env env, napi_callback_info info) 
             return NULL;
         }
     }
-    VoidCtx* ctx = void_ctx_new(env, c, argv[3]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[3]);
     if (ctx != NULL) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_subscribe_with_pattern_cb(c->view, pattern, void_on_complete, ctx);
@@ -612,7 +615,7 @@ static napi_value tp_call(napi_env env, napi_callback_info info, TpCall which, c
     if (c == NULL) return NULL;
     kafka_List_t* partitions = is_null ? NULL : tp_list_from_js(env, argv[1]);
     if (!is_null && partitions == NULL) return NULL;
-    VoidCtx* ctx = void_ctx_new(env, c, argv[2]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[2]);
     if (ctx != NULL) {
         if (which == TP_ASSIGN) {
             cbq_call_begin(env, &c->queue);
@@ -672,7 +675,7 @@ napi_value js_consumer_unsubscribe(napi_env env, napi_callback_info info) {
     }
     Consumer* c = unwrap_consumer(env, argv[0]);
     if (c == NULL) return NULL;
-    VoidCtx* ctx = void_ctx_new(env, c, argv[1]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[1]);
     if (ctx == NULL) return NULL;
     cbq_call_begin(env, &c->queue);
     kafka_consumer_Consumer_unsubscribe_cb(c->view, void_on_complete, ctx);
@@ -818,7 +821,7 @@ napi_value js_consumer_commit_sync(napi_env env, napi_callback_info info) {
     NAPI_CHECK(env, napi_typeof(env, argv[2], &type), NULL);
     kafka_Map_t* offsets = NULL;
     if (with_offsets && type != napi_null && (offsets = offset_map_from_js(env, argv[2])) == NULL) return NULL;
-    VoidCtx* ctx = void_ctx_new(env, c, argv[4]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[4]);
     if (ctx != NULL) {
         if (!with_offsets && !timed) {
             cbq_call_begin(env, &c->queue);
@@ -851,40 +854,18 @@ napi_value js_consumer_commit_async(napi_env env, napi_callback_info info) {
     }
     Consumer* c = unwrap_consumer(env, argv[0]);
     if (c == NULL) return NULL;
-    VoidCtx* ctx = void_ctx_new(env, c, argv[1]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[1]);
     if (ctx == NULL) return NULL;
     cbq_call_begin(env, &c->queue);
     kafka_consumer_Consumer_commit_async_cb(c->view, void_on_complete, ctx);
     return NULL;
 }
 
-// The context of a call whose completion answers with a value: `done(error |
-// null, value | null)`.
-typedef struct {
-    Consumer* c;
-    napi_ref done;
-} ValueCtx;
-
-static ValueCtx* value_ctx_new(napi_env env, Consumer* c, napi_value done) {
-    ValueCtx* ctx = (ValueCtx*)calloc(1, sizeof(ValueCtx));
-    if (ctx == NULL) {
-        napi_throw_error(env, NULL, "out of memory");
-        return NULL;
-    }
-    ctx->c = c;
-    if (napi_create_reference(env, done, 1, &ctx->done) != napi_ok) {
-        free(ctx);
-        js_throw_last_napi_error(env, "napi_create_reference");
-        return NULL;
-    }
-    return ctx;
-}
-
 // Calls `done(error, null)` for an owned error, or `done(null, value)`, where
 // `value` is NULL when the answer could not be built (a JS exception pending),
 // which settles the call with the failure. Frees the error; the caller ends
 // the call's count.
-static void value_settle(napi_env env, ValueCtx* ctx, kafka_common_Error_t* error, napi_value value, const char* what) {
+static void value_settle(napi_env env, CallCtx* ctx, kafka_common_Error_t* error, napi_value value, const char* what) {
     napi_value argv[2] = {NULL, NULL};
     if (error != NULL) {
         argv[0] = error_take_to_js(env, error);
@@ -905,7 +886,7 @@ static void value_settle(napi_env env, ValueCtx* ctx, kafka_common_Error_t* erro
 // as offset_map_to_js reads it; the map freed.
 static void committed_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
-    ValueCtx* ctx = (ValueCtx*)opaque;
+    CallCtx* ctx = (CallCtx*)opaque;
     Consumer* c = ctx->c;
     napi_env env = c->env;
     kafka_common_Error_t* ffi_err = NULL;
@@ -944,7 +925,7 @@ napi_value js_consumer_committed(napi_env env, napi_callback_info info) {
     NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
     kafka_List_t* partitions = type == napi_null ? NULL : tp_list_from_js(env, argv[1]);
     if (type != napi_null && partitions == NULL) return NULL;
-    ValueCtx* ctx = value_ctx_new(env, c, argv[3]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[3]);
     if (ctx != NULL && !timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_committed_cb(c->view, partitions, committed_on_complete, ctx);
@@ -1045,7 +1026,7 @@ napi_value js_consumer_seek(napi_env env, napi_callback_info info) {
         offset_and_metadata_free(env, om);
         return NULL;
     }
-    VoidCtx* ctx = void_ctx_new(env, c, argv[4]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[4]);
     if (ctx != NULL && !with_metadata) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_seek_with_offset_cb(c->view, tp, offset, void_on_complete, ctx);
@@ -1063,7 +1044,7 @@ napi_value js_consumer_seek(napi_env env, napi_callback_info info) {
 // position a bigint.
 static void position_on_complete(int64_t value, kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
-    ValueCtx* ctx = (ValueCtx*)opaque;
+    CallCtx* ctx = (CallCtx*)opaque;
     Consumer* c = ctx->c;
     napi_env env = c->env;
     if (!c->queue.finalizing) {
@@ -1098,7 +1079,7 @@ napi_value js_consumer_position(napi_env env, napi_callback_info info) {
     if (timeout_arg(env, argv[2], "position timeoutMs", &timed, &timeout) != 0) return NULL;
     kafka_common_TopicPartition_t* tp = NULL;
     if (partition_arg(env, argv[1], &tp) != 0) return NULL;
-    ValueCtx* ctx = value_ctx_new(env, c, argv[3]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[3]);
     if (ctx != NULL && !timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_position_cb(c->view, tp, position_on_complete, ctx);
@@ -1114,7 +1095,7 @@ napi_value js_consumer_position(napi_env env, napi_callback_info info) {
 // or null for Java's empty OptionalLong.
 static void current_lag_on_complete(int8_t present, int64_t lag, kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
-    ValueCtx* ctx = (ValueCtx*)opaque;
+    CallCtx* ctx = (CallCtx*)opaque;
     Consumer* c = ctx->c;
     napi_env env = c->env;
     if (!c->queue.finalizing) {
@@ -1147,7 +1128,7 @@ napi_value js_consumer_current_lag(napi_env env, napi_callback_info info) {
     if (c == NULL) return NULL;
     kafka_common_TopicPartition_t* tp = NULL;
     if (partition_arg(env, argv[1], &tp) != 0) return NULL;
-    ValueCtx* ctx = value_ctx_new(env, c, argv[2]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[2]);
     if (ctx != NULL) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_current_lag_cb(c->view, tp, current_lag_on_complete, ctx);
@@ -1162,7 +1143,7 @@ napi_value js_consumer_current_lag(napi_env env, napi_callback_info info) {
 // partitions_take_to_js reads it, the list freed.
 static void partitions_for_on_complete(kafka_List_t* value, kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
-    ValueCtx* ctx = (ValueCtx*)opaque;
+    CallCtx* ctx = (CallCtx*)opaque;
     Consumer* c = ctx->c;
     napi_env env = c->env;
     kafka_common_Error_t* ffi_err = NULL;
@@ -1204,7 +1185,7 @@ napi_value js_consumer_partitions_for(napi_env env, napi_callback_info info) {
     NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
     char* topic = type == napi_null ? NULL : js_string_dup(env, argv[1], "topic must be a string");
     if (type != napi_null && topic == NULL) return NULL;
-    ValueCtx* ctx = value_ctx_new(env, c, argv[3]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[3]);
     if (ctx != NULL && !timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_partitions_for_cb(c->view, topic, partitions_for_on_complete, ctx);
@@ -1243,7 +1224,7 @@ static napi_value topics_to_js(napi_env env, const kafka_Map_t* map) {
 // topics_to_js reads it, the map (and its lists) freed.
 static void list_topics_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
-    ValueCtx* ctx = (ValueCtx*)opaque;
+    CallCtx* ctx = (CallCtx*)opaque;
     Consumer* c = ctx->c;
     napi_env env = c->env;
     kafka_common_Error_t* ffi_err = NULL;
@@ -1276,7 +1257,7 @@ napi_value js_consumer_list_topics(napi_env env, napi_callback_info info) {
     int timed = 0;
     int64_t timeout = 0;
     if (timeout_arg(env, argv[1], "listTopics timeoutMs", &timed, &timeout) != 0) return NULL;
-    ValueCtx* ctx = value_ctx_new(env, c, argv[2]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[2]);
     if (ctx == NULL) return NULL;
     if (!timed) {
         cbq_call_begin(env, &c->queue);
@@ -1330,7 +1311,7 @@ static napi_value timestamps_to_js(napi_env env, const kafka_Map_t* map) {
 // call's count itself, as its last statement.
 static void tp_map_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque, int timestamps) {
     error_stat_owned(error);
-    ValueCtx* ctx = (ValueCtx*)opaque;
+    CallCtx* ctx = (CallCtx*)opaque;
     Consumer* c = ctx->c;
     napi_env env = c->env;
     kafka_common_Error_t* ffi_err = NULL;
@@ -1348,13 +1329,13 @@ static void tp_map_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, 
 }
 
 static void offsets_for_times_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque) {
-    Consumer* c = ((ValueCtx*)opaque)->c;
+    Consumer* c = ((CallCtx*)opaque)->c;
     tp_map_on_complete(value, error, opaque, 1);
     cbq_call_end(c->env, &c->queue);
 }
 
 static void offsets_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque) {
-    Consumer* c = ((ValueCtx*)opaque)->c;
+    Consumer* c = ((CallCtx*)opaque)->c;
     tp_map_on_complete(value, error, opaque, 0);
     cbq_call_end(c->env, &c->queue);
 }
@@ -1381,7 +1362,7 @@ napi_value js_consumer_offsets_for_times(napi_env env, napi_callback_info info) 
     NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
     kafka_Map_t* timestamps = type == napi_null ? NULL : tp_long_map_from_js(env, argv[1]);
     if (type != napi_null && timestamps == NULL) return NULL;
-    ValueCtx* ctx = value_ctx_new(env, c, argv[3]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[3]);
     if (ctx != NULL && !timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_offsets_for_times_cb(c->view, timestamps, offsets_for_times_on_complete, ctx);
@@ -1415,7 +1396,7 @@ static napi_value offsets_call(napi_env env, napi_callback_info info, int end, c
     NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
     kafka_List_t* partitions = type == napi_null ? NULL : tp_list_from_js(env, argv[1]);
     if (type != napi_null && partitions == NULL) return NULL;
-    ValueCtx* ctx = value_ctx_new(env, c, argv[3]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[3]);
     if (ctx != NULL && !end && !timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_beginning_offsets_cb(c->view, partitions, offsets_on_complete, ctx);
@@ -1464,7 +1445,7 @@ napi_value js_consumer_enforce_rebalance(napi_env env, napi_callback_info info) 
     NAPI_CHECK(env, napi_typeof(env, argv[2], &type), NULL);
     char* reason = !with_reason || type == napi_null ? NULL : js_string_dup(env, argv[2], "reason must be a string");
     if (with_reason && type != napi_null && reason == NULL) return NULL;
-    VoidCtx* ctx = void_ctx_new(env, c, argv[3]);
+    CallCtx* ctx = call_ctx_new(env, c, argv[3]);
     if (ctx != NULL && !with_reason) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_enforce_rebalance_cb(c->view, void_on_complete, ctx);

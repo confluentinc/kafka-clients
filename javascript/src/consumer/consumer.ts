@@ -385,6 +385,9 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `TypeError` rejects with it if the timeout is null
    *
    * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a negative timeout is refused before the closed and group
+   * checks, which Java runs first. Why: the FFI checks it first. Goes when:
+   * it checks it after them.)*
    */
   commitSync(options: {
     /** The maximum amount of time to await completion of the offset commit. */
@@ -510,6 +513,9 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *   or `offsets` is not a `TopicPartitionMap`
    *
    * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a negative timeout is refused before the closed and group
+   * checks, which Java runs first. Why: the FFI checks it first. Goes when:
+   * it checks it after them.)*
    */
   commitSync(options: {
     /** A map of offsets by partition with associated metadata, copied by the call. */
@@ -754,6 +760,9 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `TypeError` rejects with it if the timeout is null
    *
    * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a negative timeout is refused before the closed check,
+   * which Java runs first. Why: the FFI checks it first. Goes when: it
+   * checks it after it.)*
    */
   position(options: {
     /** The partition to get the position for. */
@@ -850,10 +859,10 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `TypeError` rejects with it if the timeout is null
    *
    * @remarks Java's blocking call returns a Promise here.
-   * *(deviation: a negative timeout is refused, where Java makes no check
-   * and waits without a time limit. Why: the binding repeats no
-   * precondition, and the FFI refuses it. Goes when: the FFI treats it as
-   * Java does.)*
+   * *(deviation: a negative timeout is refused, before the closed and group
+   * checks too, where Java makes no check and waits without a time limit.
+   * Why: the binding repeats no precondition, and the FFI refuses it. Goes
+   * when: the FFI treats it as Java does.)*
    */
   committed(options: {
     /** The partitions to check. */
@@ -943,10 +952,10 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `TypeError` rejects with it if the timeout or the topic is null
    *
    * @remarks Java's blocking call returns a Promise here.
-   * *(deviation: a negative timeout is refused, where Java makes no check
-   * and waits without a time limit. Why: the binding repeats no
-   * precondition, and the FFI refuses it. Goes when: the FFI treats it as
-   * Java does.)*
+   * *(deviation: a negative timeout is refused, before the closed check
+   * too, where Java makes no check and waits without a time limit.
+   * Why: the binding repeats no precondition, and the FFI refuses it. Goes
+   * when: the FFI treats it as Java does.)*
    */
   partitionsFor(options: {
     /** The topic to get partition metadata for. */
@@ -1171,10 +1180,10 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *   timestamp is null
    *
    * @remarks Java's blocking call returns a Promise here.
-   * *(deviation: a negative timeout is refused, where Java makes no check
-   * and waits without a time limit. Why: the binding repeats no
-   * precondition, and the FFI refuses it. Goes when: the FFI treats it as
-   * Java does.)*
+   * *(deviation: a negative timeout is refused, before the closed check
+   * too, where Java makes no check and waits without a time limit.
+   * Why: the binding repeats no precondition, and the FFI refuses it. Goes
+   * when: the FFI treats it as Java does.)*
    */
   offsetsForTimes(options: {
     /** The mapping from partition to the timestamp to look up: a bigint, or a whole number up to 2^53 - 1. */
@@ -1327,10 +1336,10 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `TypeError` rejects with it if the timeout is null
    *
    * @remarks Java's blocking call returns a Promise here.
-   * *(deviation: a negative timeout is refused, where Java makes no check
-   * and waits without a time limit. Why: the binding repeats no
-   * precondition, and the FFI refuses it. Goes when: the FFI treats it as
-   * Java does.)*
+   * *(deviation: a negative timeout is refused, before the closed check
+   * too, where Java makes no check and waits without a time limit.
+   * Why: the binding repeats no precondition, and the FFI refuses it. Goes
+   * when: the FFI treats it as Java does.)*
    *
    * @see `seekToEnd`
    */
