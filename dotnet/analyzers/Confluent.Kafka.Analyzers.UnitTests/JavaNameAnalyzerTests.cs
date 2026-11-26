@@ -88,6 +88,8 @@ public sealed class JavaNameAnalyzerTests
                 + "ctor\torg.apache.kafka.common.Node\tNode(int id, String host)\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\tid()\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\tequals(Object obj)\n"
+                + "method\torg.apache.kafka.common.Node\tinstance\thashCode()\n"
                 + "field\torg.apache.kafka.common.Node\tstatic\tNO_ID\n"));
 
     [Fact]
@@ -1884,7 +1886,7 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.clients.consumer.KafkaConsumer\tinstance\tsubscribe(Pattern pattern)\n"));
 
     [Fact]
-    public Task EqualityOperators_OnATypeThatOverridesEquals_AreDotNetsEquals() =>
+    public Task EqualityOperators_AreLeftToCKRDA0018_WhetherOrNotTheTypeOverridesEquals() =>
         Verifier.VerifyWithFilesAsync(
             """
             namespace Confluent.Kafka.Common
@@ -1905,12 +1907,88 @@ public sealed class JavaNameAnalyzerTests
 
                     public static bool operator !=(Uuid left, Uuid right) => !left.Equals(right);
                 }
+
+                public sealed class Node
+                {
+                    private Node()
+                    {
+                    }
+
+                    public static bool operator ==(Node left, Node right) => ReferenceEquals(left, right);
+
+                    public static bool operator !=(Node left, Node right) => !ReferenceEquals(left, right);
+                }
             }
             """,
             Files(
                 "type\torg.apache.kafka.common.Uuid\tclass\t-\n"
                 + "method\torg.apache.kafka.common.Uuid\tinstance\tequals(Object o)\n"
-                + "method\torg.apache.kafka.common.Uuid\tinstance\thashCode()\n"));
+                + "method\torg.apache.kafka.common.Uuid\tinstance\thashCode()\n"
+                + "type\torg.apache.kafka.common.Node\tclass\t-\n"));
+
+    [Fact]
+    public Task EqualsAndGetHashCode_WhereJavaDoesNotOverrideThem_AreReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Common
+            {
+                public abstract class KafkaFuture : System.IEquatable<KafkaFuture>
+                {
+                    protected KafkaFuture()
+                    {
+                    }
+
+                    public bool {|#0:Equals|}(KafkaFuture other) => ReferenceEquals(this, other);
+
+                    public override bool {|#1:Equals|}(object obj) => ReferenceEquals(this, obj);
+
+                    public override int {|#2:GetHashCode|}() => 0;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.KafkaFuture\tabstract class\t-\n"
+                + "ctor\torg.apache.kafka.common.KafkaFuture\tKafkaFuture()\n"),
+            Name(0, "unmatched M:Confluent.Kafka.Common.KafkaFuture.Equals(Confluent.Kafka.Common.KafkaFuture): Java's "
+                + "KafkaFuture does not override equals(Object); remove this, so Equals compares references, as Java's does"),
+            Name(1, "unmatched M:Confluent.Kafka.Common.KafkaFuture.Equals(System.Object): Java's KafkaFuture does not "
+                + "override equals(Object); remove this, so Equals compares references, as Java's does"),
+            Name(2, "unmatched M:Confluent.Kafka.Common.KafkaFuture.GetHashCode: Java's KafkaFuture does not override "
+                + "hashCode(); remove this, so GetHashCode hashes the reference, as Java's does"));
+
+    [Fact]
+    public Task EqualsAndGetHashCode_WhereAJavaSupertypeOverridesThem_AreNotReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Admin
+            {
+                public abstract class UserScramCredentialAlteration
+                {
+                    protected UserScramCredentialAlteration()
+                    {
+                    }
+
+                    public override bool Equals(object obj) => false;
+
+                    public override int GetHashCode() => 0;
+                }
+
+                public sealed class UserScramCredentialDeletion : UserScramCredentialAlteration
+                {
+                    public override bool Equals(object obj) => false;
+
+                    public override int GetHashCode() => 0;
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.clients.admin.UserScramCredentialAlteration\tabstract class\t-\n"
+                + "ctor\torg.apache.kafka.clients.admin.UserScramCredentialAlteration\tUserScramCredentialAlteration()\n"
+                + "method\torg.apache.kafka.clients.admin.UserScramCredentialAlteration\tinstance\tequals(Object o)\n"
+                + "method\torg.apache.kafka.clients.admin.UserScramCredentialAlteration\tinstance\thashCode()\n"
+                + "type\torg.apache.kafka.clients.admin.UserScramCredentialDeletion\tclass\t"
+                + "org.apache.kafka.clients.admin.UserScramCredentialAlteration\n"
+                + "ctor\torg.apache.kafka.clients.admin.UserScramCredentialDeletion\tUserScramCredentialDeletion()\n"));
 
     [Fact]
     public Task APairedType_StandsForTheNestedJavaTypeItNames() =>

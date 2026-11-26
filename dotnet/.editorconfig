@@ -243,3 +243,12 @@ dotnet_diagnostic.CKRDA0017.severity = none
 
 [src/**.cs]
 dotnet_diagnostic.CKRDA0017.severity = warning
+
+# CKRDA0018: no public type has an operator == or !=, so == compares references as Java's does and Equals stands for
+# Java's equals (CLAUDE.md §3 rule 7). Off by default, on in src/: only the library's types are compiled into a user's
+# code.
+[*.cs]
+dotnet_diagnostic.CKRDA0018.severity = none
+
+[src/**.cs]
+dotnet_diagnostic.CKRDA0018.severity = warning

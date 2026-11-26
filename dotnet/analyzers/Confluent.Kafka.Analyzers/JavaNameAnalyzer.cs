@@ -545,16 +545,27 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         {
             // A companion class is not checked as a type of its own: every public member of it is the type's.
             IEnumerable<ISymbol> companionMembers = CompanionMembers(type, companions);
-            bool overridesEquals = type.GetMembers("Equals")
-                .OfType<IMethodSymbol>()
-                .Any(m => m.IsOverride && m.Parameters.Length == 1 && m.Parameters[0].Type.SpecialType == SpecialType.System_Object);
             foreach (ISymbol member in type.GetMembers().Concat(companionMembers))
             {
+                // == and != are CKRDA0018's, which reports them on every public type.
                 if (member.DeclaredAccessibility != Accessibility.Public
                     || member.IsImplicitlyDeclared
                     || member is INamedTypeSymbol
-                    || IsFixed(type, member, jdk)
-                    || (overridesEquals && member.Name is "op_Equality" or "op_Inequality"))
+                    || member.Name is WellKnownMemberNames.EqualityOperatorName or WellKnownMemberNames.InequalityOperatorName)
+                {
+                    continue;
+                }
+
+                if (EqualityJavaDoesNotOverride(type, member, javaMethods) is string explanation)
+                {
+                    findings.Add(new Finding(
+                        "unmatched " + DocId(member),
+                        "Java's " + java.SimpleName + " does not override " + explanation,
+                        LocationOf(member)));
+                    continue;
+                }
+
+                if (IsFixed(type, member, jdk))
                 {
                     continue;
                 }
@@ -1257,6 +1268,32 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             }
 
             return false;
+        }
+
+        // Rule 7: object.Equals and IEquatable<T>.Equals stand for Java's equals(Object), object.GetHashCode for
+        // hashCode(), so a type overrides them only where its Java type, or a Java supertype, does; elsewhere both sides
+        // compare references. The rest of the finding's explanation when Java's type does not, else null.
+        private static string? EqualityJavaDoesNotOverride(
+            INamedTypeSymbol type,
+            ISymbol member,
+            Dictionary<string, string> javaMethods)
+        {
+            if (member is not IMethodSymbol method)
+            {
+                return null;
+            }
+
+            bool overridesEquals = method is { IsOverride: true, Name: "Equals", Parameters.Length: 1 }
+                && method.Parameters[0].Type.SpecialType == SpecialType.System_Object;
+            if ((overridesEquals || ImplementsEquatable(type, method)) && !javaMethods.ContainsKey("Equals"))
+            {
+                return "equals(Object); remove this, so Equals compares references, as Java's does";
+            }
+
+            return method is { IsOverride: true, Name: "GetHashCode", Parameters.Length: 0 }
+                && !javaMethods.ContainsKey("GetHashCode")
+                ? "hashCode(); remove this, so GetHashCode hashes the reference, as Java's does"
+                : null;
         }
 
         // IEquatable<T>.Equals is a member .NET adds beside object.Equals, which stands for Java's equals(Object).

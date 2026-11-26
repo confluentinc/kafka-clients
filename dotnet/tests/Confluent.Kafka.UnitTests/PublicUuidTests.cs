@@ -176,12 +176,26 @@ public sealed class PublicUuidTests
         Uuid b = new Uuid(1L, 2L);
         Uuid c = new Uuid(1L, 3L);
 
-        Assert.True(a == b);
-        Assert.False(a == c);
-        Assert.True(a != c);
+        Assert.True(a.Equals(b));
+        Assert.False(a.Equals(c));
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
         Assert.True(a.Equals((object)b));
         Assert.False(a.Equals("not a uuid"));
+    }
+
+    [Fact]
+    public void TheEqualityOperators_CompareReferences_AsJavas()
+    {
+        Uuid id = new Uuid(1L, 2L);
+        Uuid equal = new Uuid(1L, 2L);
+        Uuid alias = id;
+
+        Assert.True(id.Equals(equal));
+        Assert.False(id == equal);
+        Assert.True(id != equal);
+        Assert.True(id == alias);
+        Assert.False(id != alias);
+        Assert.False(Uuid.ZERO_UUID == new Uuid(0L, 0L));
     }
 
     [Fact]
@@ -319,14 +333,6 @@ public sealed class PublicUuidTests
             typeof(Uuid).GetMethods(BindingFlags.Public | BindingFlags.Instance),
             method => method.Name == nameof(Uuid.Equals) && method.GetParameters()[0].ParameterType == typeof(Uuid));
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(equals.GetParameters()[0]));
-
-        foreach (string op in new[] { "op_Equality", "op_Inequality" })
-        {
-            MethodInfo method = typeof(Uuid).GetMethod(op, BindingFlags.Public | BindingFlags.Static)!;
-            Assert.All(
-                method.GetParameters(),
-                parameter => Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(parameter)));
-        }
     }
 
     [Fact]
@@ -334,7 +340,7 @@ public sealed class PublicUuidTests
     {
         Assert.NotNull(Uuid.ZERO_UUID);
         Assert.Equal(new Uuid(0L, 0L), Uuid.ZERO_UUID);
-        Assert.True(Uuid.ZERO_UUID == new Uuid(0L, 0L));
+        Assert.True(Uuid.ZERO_UUID.Equals(new Uuid(0L, 0L)));
         Assert.Equal("AAAAAAAAAAAAAAAAAAAAAA", Uuid.ZERO_UUID.ToString());
     }
 
@@ -343,16 +349,16 @@ public sealed class PublicUuidTests
     {
         Assert.All(Uuid.RESERVED, id => Assert.NotNull(id));
         Assert.DoesNotContain(null!, Uuid.RESERVED);
-        Assert.Same(Uuid.ZERO_UUID, Assert.Single(Uuid.RESERVED, id => id == new Uuid(0L, 0L)));
-        Assert.Same(Uuid.ONE_UUID, Assert.Single(Uuid.RESERVED, id => id == new Uuid(0L, 1L)));
+        Assert.Same(Uuid.ZERO_UUID, Assert.Single(Uuid.RESERVED, id => id.Equals(new Uuid(0L, 0L))));
+        Assert.Same(Uuid.ONE_UUID, Assert.Single(Uuid.RESERVED, id => id.Equals(new Uuid(0L, 1L))));
     }
 
     [Fact]
     public void Default_IsNull() => Assert.Null(default(Uuid));
 
-    // CompareTo throws for null, as Java's compareTo throws; Equals answers false and the operators accept null.
+    // CompareTo throws for null, as Java's compareTo throws; Equals answers false, as Java's equals.
     [Fact]
-    public void NullOperands_CompareToThrows_EqualsIsFalse_AndTheOperatorsAcceptNull()
+    public void NullOperands_CompareToThrows_AndEqualsIsFalse()
     {
         Uuid id = new Uuid(1L, 2L);
         Uuid? none = null;
@@ -364,12 +370,8 @@ public sealed class PublicUuidTests
 
         Assert.False(id.Equals(none));
         Assert.False(id.Equals((object?)null));
-        Assert.False(id == none);
-        Assert.False(none == id);
-        Assert.True(id != none);
-        Assert.True(none != id);
-        Assert.True(none == null);
-        Assert.False(none != null);
+        Assert.False(Equals(id, none));
+        Assert.False(Equals(none, id));
         Assert.False(EqualityComparer<Uuid?>.Default.Equals(none, id));
         Assert.False(EqualityComparer<Uuid?>.Default.Equals(id, none));
         Assert.True(EqualityComparer<Uuid?>.Default.Equals(none, null));

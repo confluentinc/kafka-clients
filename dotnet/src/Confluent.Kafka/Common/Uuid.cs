@@ -26,7 +26,11 @@ namespace Confluent.Kafka.Common;
 /// unpadded base64 of its 16 big-endian bytes, ordered as Java orders it, by the signed high half, then the
 /// signed low half.
 /// </summary>
-/// <remarks>It is not a <see cref="System.Guid"/>, whose text form and byte order differ from Kafka's.</remarks>
+/// <remarks>
+/// It is not a <see cref="System.Guid"/>, whose text form and byte order differ from Kafka's.
+/// <see cref="Equals(Uuid)"/> compares the 128 bits, as Java's <c>equals</c>; <c>==</c>, as Java's, compares
+/// references.
+/// </remarks>
 public sealed class Uuid : IEquatable<Uuid>, IComparable<Uuid>
 {
     private const int ByteCount = 16;
@@ -70,13 +74,6 @@ public sealed class Uuid : IEquatable<Uuid>, IComparable<Uuid>
     /// <summary>The low 64 bits.</summary>
     /// <returns>The low 64 bits.</returns>
     public long GetLeastSignificantBits() => _leastSignificantBits;
-
-    /// <summary>Determines whether two ids are equal; two <see langword="null"/> references are equal.</summary>
-    public static bool operator ==(Uuid? left, Uuid? right) =>
-        ReferenceEquals(left, right) || (left is not null && left.Equals(right));
-
-    /// <summary>Determines whether two ids differ.</summary>
-    public static bool operator !=(Uuid? left, Uuid? right) => !(left == right);
 
     /// <summary>
     /// Creates an id from the URL-safe base64 text form <see cref="ToString"/> writes, padded or not: Java's

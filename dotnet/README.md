@@ -297,6 +297,13 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
   `new MockProducer<K, V>(autoComplete, keySerializer, valueSerializer)` where you wrote
   `new MockProducer<K, V>(keySerializer, valueSerializer, autoComplete)`, and the same for
   `AsyncMockProducer`. The two-argument constructor is unchanged.
+- No class has an `==` or `!=` operator, so `==` compares references, as Java's does. `TopicPartition`,
+  `Uuid` and `MetricName` had operators that compared values: write `tp.Equals(other)` where you wrote
+  `tp == other`, as Java's `equals`. `Dictionary`, `HashSet` and `Contains` use `Equals` and are unchanged.
+  The futures (`KafkaFuture`, `AsyncKafkaFuture` and their generic forms) also lose their `==`, `!=`,
+  `IEquatable<…>`, `Equals` and `GetHashCode`, which compared references, so every answer stays the same.
+  Rebuild an application that used these operators: one built against an earlier release fails with
+  `MissingMethodException` where it calls them.
 
 ## Examples
 

@@ -106,4 +106,9 @@ public static class DiagnosticIds
     /// A member of a public enum whose number is not written out.
     /// </summary>
     public const string EnumMemberValue = "CKRDA0017";
+
+    /// <summary>
+    /// An <c>operator ==</c> or <c>operator !=</c> of a public type.
+    /// </summary>
+    public const string EqualityOperator = "CKRDA0018";
 }

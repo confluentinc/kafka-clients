@@ -1119,9 +1119,14 @@ out of date). The rule:
    `Throwable`, of any class (`InterruptException`'s `InterruptedException`), is `innerException`, and a
    `String` Java names `s` or `msg` is `message`. A Java `long` and the `TimeUnit` that qualifies it are one
    `TimeSpan`.
-7. .NET's own forms: `ToString`, `Equals` (with `==` and `!=`), `GetHashCode`; `CompareTo`;
+7. .NET's own forms: `ToString`, `Equals`, `GetHashCode`; `CompareTo`;
    `GetEnumerator` for `Iterable`; `Dispose` / `DisposeAsync` for `Closeable`; `Message` /
    `InnerException`; `IEquatable<T>.Equals`; a C# enum covers `name`, `ordinal`, `values` and `valueOf`.
+   `Equals` and `IEquatable<T>.Equals` stand for Java's `equals`, `GetHashCode` for `hashCode`: a type overrides
+   them exactly where its Java type, or a Java supertype, overrides those (CKRDA0013), and elsewhere both compare
+   references, as Java's do. No public type has an `operator ==` or `!=`, a record's included: `==` compares
+   references, as Java's does, and cannot be added or removed after a release without changing what a user's `==`
+   means (CKRDA0018).
    `Enum.GetValues` and `CompareTo` order by value, not by Java's declaration (`ConfigResourceType`…), and
    `Enum.Parse` accepts numbers and comma lists; the binding's own lookups never use it. Every member's number is
    written out and never changes once released, since C# compiles it into each caller: a constant Java adds sits at

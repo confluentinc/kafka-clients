@@ -24,7 +24,10 @@ namespace Confluent.Kafka.Common;
 /// <see cref="Name()"/>, <see cref="Group()"/> and <see cref="Tags()"/> match, as in Java, which ignores
 /// <see cref="Description()"/>.
 /// </summary>
-/// <remarks>The constructor copies <c>tags</c> into an ordinal-keyed dictionary, where Java keeps the caller's map.</remarks>
+/// <remarks>
+/// The constructor copies <c>tags</c> into an ordinal-keyed dictionary, where Java keeps the caller's map.
+/// <see cref="Equals(MetricName)"/> compares them, as Java's <c>equals</c>; <c>==</c>, as Java's, compares references.
+/// </remarks>
 public sealed class MetricName : IEquatable<MetricName>
 {
     private readonly Dictionary<string, string> _tags;
@@ -70,13 +73,6 @@ public sealed class MetricName : IEquatable<MetricName>
     /// <summary>The metric's tags.</summary>
     /// <returns>The metric's tags.</returns>
     public IReadOnlyDictionary<string, string> Tags() => _tags;
-
-    /// <summary>Determines whether two <see cref="MetricName"/> values are equal.</summary>
-    public static bool operator ==(MetricName? left, MetricName? right) =>
-        left is null ? right is null : left.Equals(right);
-
-    /// <summary>Determines whether two <see cref="MetricName"/> values differ.</summary>
-    public static bool operator !=(MetricName? left, MetricName? right) => !(left == right);
 
     /// <inheritdoc/>
     public bool Equals(MetricName? other)

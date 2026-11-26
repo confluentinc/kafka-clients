@@ -20,7 +20,8 @@ namespace Confluent.Kafka.Common;
 /// <summary>A topic and a partition, Java's <c>TopicPartition</c>, with value equality.</summary>
 /// <remarks>
 /// The constructor, like Java's, stores a <see langword="null"/> topic and a negative partition as given, though
-/// <see cref="Topic()"/> is annotated non-nullable.
+/// <see cref="Topic()"/> is annotated non-nullable. <see cref="Equals(TopicPartition)"/> compares the topic and the
+/// partition, as Java's <c>equals</c>; <c>==</c>, as Java's, compares references.
 /// </remarks>
 public sealed class TopicPartition : IEquatable<TopicPartition>
 {
@@ -42,18 +43,6 @@ public sealed class TopicPartition : IEquatable<TopicPartition>
     /// <summary>The partition index.</summary>
     /// <returns>The partition index.</returns>
     public int Partition() => _partition;
-
-    /// <summary>
-    /// Determines whether two <see cref="TopicPartition"/> values are equal; two <see langword="null"/> references
-    /// are equal.
-    /// </summary>
-    public static bool operator ==(TopicPartition? left, TopicPartition? right) =>
-        ReferenceEquals(left, right) || (left is not null && left.Equals(right));
-
-    /// <summary>
-    /// Determines whether two <see cref="TopicPartition"/> values are not equal.
-    /// </summary>
-    public static bool operator !=(TopicPartition? left, TopicPartition? right) => !(left == right);
 
     /// <inheritdoc/>
     public bool Equals(TopicPartition? other) =>

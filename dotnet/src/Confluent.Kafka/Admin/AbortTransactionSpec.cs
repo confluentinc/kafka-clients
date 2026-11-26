@@ -73,7 +73,7 @@ public sealed class AbortTransactionSpec
         && ProducerId() == other.ProducerId()
         && ProducerEpoch() == other.ProducerEpoch()
         && CoordinatorEpoch() == other.CoordinatorEpoch()
-        && TopicPartition() == other.TopicPartition();
+        && Equals(TopicPartition(), other.TopicPartition());
 
     /// <summary>The hash of all four fields — Java's <c>hashCode</c>.</summary>
     /// <returns>The hash code.</returns>

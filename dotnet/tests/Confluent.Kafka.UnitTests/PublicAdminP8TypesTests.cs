@@ -336,6 +336,13 @@ public sealed class PublicAdminP8TypesTests
         Assert.Equal(baseline, new AbortTransactionSpec(partition, 11L, 22, 33));
         Assert.Equal(baseline.GetHashCode(), new AbortTransactionSpec(partition, 11L, 22, 33).GetHashCode());
 
+        // Another TopicPartition of the same topic and partition: Java's Objects.equals compares the partitions'
+        // values, not their references.
+        AbortTransactionSpec samePartition = new AbortTransactionSpec(new TopicPartition("orders", 4), 11L, 22, 33);
+        Assert.True(baseline.Equals(samePartition));
+        Assert.True(samePartition.Equals(baseline));
+        Assert.Equal(baseline.GetHashCode(), samePartition.GetHashCode());
+
         Assert.NotEqual(baseline, new AbortTransactionSpec(new TopicPartition("orders", 9), 11L, 22, 33));
         Assert.NotEqual(baseline, new AbortTransactionSpec(partition, 99L, 22, 33));
         Assert.NotEqual(baseline, new AbortTransactionSpec(partition, 11L, 99, 33));
