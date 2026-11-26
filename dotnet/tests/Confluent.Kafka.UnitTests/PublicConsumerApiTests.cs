@@ -26,7 +26,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Which consumer members are sync and which async, the <c>Seek</c> negative-offset precondition,
-/// <see cref="ConsumerGroupMetadata"/> on the real and mock consumers, and the group-id checks.
+/// <see cref="IConsumerGroupMetadata"/> on the real and mock consumers, and the group-id checks.
 /// </summary>
 public sealed class PublicConsumerApiTests
 {
@@ -108,7 +108,7 @@ public sealed class PublicConsumerApiTests
     {
         AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(RealConfig("sync-group"), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ConsumerGroupMetadata meta = consumer.GroupMetadata();
+        IConsumerGroupMetadata meta = consumer.GroupMetadata();
         Assert.Equal("sync-group", meta.GroupId());
     }
 
@@ -140,7 +140,7 @@ public sealed class PublicConsumerApiTests
         AsyncKafkaConsumer<byte[], byte[]> consumer = await AsyncKafkaConsumer<byte[], byte[]>.Create(RealConfig("public-group"), new AsyncByteArrayDeserializer(), new AsyncByteArrayDeserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ConsumerGroupMetadata meta = consumer.GroupMetadata();
+        IConsumerGroupMetadata meta = consumer.GroupMetadata();
 
         Assert.Equal("public-group", meta.GroupId());
         Assert.Equal(-1, meta.GenerationId());
@@ -163,7 +163,7 @@ public sealed class PublicConsumerApiTests
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ConsumerGroupMetadata meta = consumer.GroupMetadata();
+        IConsumerGroupMetadata meta = consumer.GroupMetadata();
 
         Assert.Equal("dummy.group.id", meta.GroupId());
         Assert.Equal(1, meta.GenerationId());
@@ -218,7 +218,7 @@ public sealed class PublicConsumerApiTests
             RealConfig("sync-public-group"), Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ConsumerGroupMetadata meta = consumer.GroupMetadata();
+        IConsumerGroupMetadata meta = consumer.GroupMetadata();
 
         Assert.Equal("sync-public-group", meta.GroupId());
         Assert.Equal(-1, meta.GenerationId());
@@ -236,7 +236,7 @@ public sealed class PublicConsumerApiTests
             : new AsyncMockConsumer<byte[], byte[]>("latest");
         try
         {
-            ConsumerGroupMetadata meta = consumer.GroupMetadata();
+            IConsumerGroupMetadata meta = consumer.GroupMetadata();
 
             Assert.Equal("dummy.group.id", meta.GroupId());
             Assert.Equal(1, meta.GenerationId());

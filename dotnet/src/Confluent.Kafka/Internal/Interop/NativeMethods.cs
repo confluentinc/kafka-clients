@@ -653,6 +653,21 @@ internal static partial class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_destroy_err", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerGroupMetadataDestroy(IntPtr self, ref IntPtr outErr);
 
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate IntPtr ConsumerGroupMetadataStringGetter(IntPtr self);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate int ConsumerGroupMetadataIntGetter(IntPtr self);
+
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_new_err", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerGroupMetadataNew(
+        IntPtr self,
+        ConsumerGroupMetadataStringGetter groupId,
+        ConsumerGroupMetadataIntGetter generationId,
+        ConsumerGroupMetadataStringGetter memberId,
+        ConsumerGroupMetadataStringGetter groupInstanceId,
+        ref IntPtr outErr);
+
     internal const int MetricValueKindString = 1;
 
     internal const int MetricValueKindLong = 2;

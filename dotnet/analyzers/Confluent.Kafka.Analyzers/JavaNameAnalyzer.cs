@@ -545,16 +545,27 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
         {
             // A companion class is not checked as a type of its own: every public member of it is the type's.
             IEnumerable<ISymbol> companionMembers = CompanionMembers(type, companions);
-            bool overridesEquals = type.GetMembers("Equals")
-                .OfType<IMethodSymbol>()
-                .Any(m => m.IsOverride && m.Parameters.Length == 1 && m.Parameters[0].Type.SpecialType == SpecialType.System_Object);
             foreach (ISymbol member in type.GetMembers().Concat(companionMembers))
             {
+                // == and != are CKRDA0018's, which reports them on every public type.
                 if (member.DeclaredAccessibility != Accessibility.Public
                     || member.IsImplicitlyDeclared
                     || member is INamedTypeSymbol
-                    || IsFixed(type, member, jdk)
-                    || (overridesEquals && member.Name is "op_Equality" or "op_Inequality"))
+                    || member.Name is WellKnownMemberNames.EqualityOperatorName or WellKnownMemberNames.InequalityOperatorName)
+                {
+                    continue;
+                }
+
+                if (EqualityJavaDoesNotOverride(type, member, javaMethods) is string explanation)
+                {
+                    findings.Add(new Finding(
+                        "unmatched " + DocId(member),
+                        "Java's " + java.SimpleName + " does not override " + explanation,
+                        LocationOf(member)));
+                    continue;
+                }
+
+                if (IsFixed(type, member, jdk))
                 {
                     continue;
                 }
@@ -941,6 +952,13 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
         // The names .NET gives Java's parameters: a long and the TimeUnit that qualifies it are one TimeSpan named after
         // the long; in an exception's constructor a Throwable is innerException and a String named s or msg is message.
+        // A Throwable is one by Java's naming: Throwable itself, or a class named ...Exception or ...Error, as
+        // InterruptException's InterruptedException cause.
+        private static bool IsThrowable(string type) =>
+            type == "Throwable"
+            || type.EndsWith("Exception", StringComparison.Ordinal)
+            || type.EndsWith("Error", StringComparison.Ordinal);
+
         private static (string[] Names, string[] Types) Parameters(JavaMember member, bool isExceptionConstructor)
         {
             List<string> names = new List<string>();
@@ -949,7 +967,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             {
                 string type = member.ParameterTypes[i];
                 string name = member.ParameterNames[i];
-                if (isExceptionConstructor && type == "Throwable")
+                if (isExceptionConstructor && IsThrowable(type))
                 {
                     name = "innerException";
                 }
@@ -1011,6 +1029,11 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
                         netDone[i] = javaDone[j] = true;
                         pairs.Add((n, java[j]));
+                        if (n.DeclaredHere)
+                        {
+                            CheckCollectionTypes(n, java[j], javaName, findings);
+                        }
+
                         string added = string.Join(", ", n.Names.Skip(javaNames.Length));
                         string renamed = "names its parameters (" + string.Join(", ", n.Names.Take(javaNames.Length)) + ") where Java's "
                             + javaName + " names them (" + string.Join(", ", javaNames) + ")";
@@ -1058,6 +1081,49 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
             return pairs;
         }
+
+        // Rule 6: a parameter of one of Java's collection interfaces takes its read-only .NET counterpart, so a caller
+        // passes what a Java caller passes: an Iterable an IEnumerable<T>, a Collection an IReadOnlyCollection<T>, a Set
+        // one too (netstandard2.0 has no IReadOnlySet<T>), a List an IReadOnlyList<T> and a Map an
+        // IReadOnlyDictionary<TKey, TValue>.
+        private static void CheckCollectionTypes(NetOverload net, JavaOverload java, string javaName, List<Finding> findings)
+        {
+            for (int i = 0; i < java.Types.Length; i++)
+            {
+                // An object or a type parameter stands for any type, as it does where the overloads are paired.
+                if (ReadOnlyCounterpartOf(java.Types[i]) is not string expected
+                    || NetKind(net.Types[i]) is null
+                    || IsSystemCollection(net.Types[i], expected))
+                {
+                    continue;
+                }
+
+                string display = expected.Substring(0, expected.IndexOf('`')) + (expected.EndsWith("2", StringComparison.Ordinal)
+                    ? "<TKey, TValue>"
+                    : "<T>");
+                findings.Add(new Finding(
+                    "collection " + DocId(net.Method) + " " + net.Names[i],
+                    "takes " + net.Names[i] + " as " + net.Types[i].ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat)
+                        + ", where Java's " + javaName + " takes " + (java.Types[i][0] == 'I' ? "an " : "a ") + java.Types[i]
+                        + ": take an " + display,
+                    LocationOf(net.Method)));
+            }
+        }
+
+        // The metadata name of the System.Collections.Generic interface that stands for a Java collection interface.
+        private static string? ReadOnlyCounterpartOf(string javaType) => javaType switch
+        {
+            "Iterable" => "IEnumerable`1",
+            "Collection" or "Set" => "IReadOnlyCollection`1",
+            "List" => "IReadOnlyList`1",
+            "Map" => "IReadOnlyDictionary`2",
+            _ => null,
+        };
+
+        private static bool IsSystemCollection(ITypeSymbol type, string metadataName) =>
+            type is INamedTypeSymbol named
+            && named.OriginalDefinition.MetadataName == metadataName
+            && named.OriginalDefinition.ContainingNamespace.ToDisplayString() == "System.Collections.Generic";
 
         // Whether each Java parameter type can stand for the .NET one at its place: a renamed parameter is matched only
         // where its type fits. A type the check does not know, or a named type of another name, fits.
@@ -1250,6 +1316,32 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             }
 
             return false;
+        }
+
+        // Rule 7: object.Equals and IEquatable<T>.Equals stand for Java's equals(Object), object.GetHashCode for
+        // hashCode(), so a type overrides them only where its Java type, or a Java supertype, does; elsewhere both sides
+        // compare references. The rest of the finding's explanation when Java's type does not, else null.
+        private static string? EqualityJavaDoesNotOverride(
+            INamedTypeSymbol type,
+            ISymbol member,
+            Dictionary<string, string> javaMethods)
+        {
+            if (member is not IMethodSymbol method)
+            {
+                return null;
+            }
+
+            bool overridesEquals = method is { IsOverride: true, Name: "Equals", Parameters.Length: 1 }
+                && method.Parameters[0].Type.SpecialType == SpecialType.System_Object;
+            if ((overridesEquals || ImplementsEquatable(type, method)) && !javaMethods.ContainsKey("Equals"))
+            {
+                return "equals(Object); remove this, so Equals compares references, as Java's does";
+            }
+
+            return method is { IsOverride: true, Name: "GetHashCode", Parameters.Length: 0 }
+                && !javaMethods.ContainsKey("GetHashCode")
+                ? "hashCode(); remove this, so GetHashCode hashes the reference, as Java's does"
+                : null;
         }
 
         // IEquatable<T>.Equals is a member .NET adds beside object.Equals, which stands for Java's equals(Object).

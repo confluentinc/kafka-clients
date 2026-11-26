@@ -17,9 +17,10 @@ using System;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// The owned <c>kafka_consumer_ConsumerGroupMetadata_t</c> a <see cref="Consumer.ConsumerGroupMetadata"/> keeps, so
-/// that <c>SendOffsetsToTransaction</c> can pass it to the core. It holds no reference to the consumer it came from, and
-/// is destroyed once, when the handle is released (by the finalizer, as the public class is not disposable).
+/// An owned <c>kafka_consumer_ConsumerGroupMetadata_t</c>: the one a <see cref="ConsumerGroupMetadataImpl"/> keeps, so
+/// that <c>SendOffsetsToTransaction</c> can pass it to the core, or the one made of a user's metadata for one call. It
+/// holds no reference to the consumer it came from, and is destroyed once, when the handle is released (for a
+/// consumer's, by the finalizer, as the public type is not disposable).
 /// </summary>
 internal sealed class SafeConsumerGroupMetadataHandle : SafeHandleZeroIsInvalid
 {

@@ -583,7 +583,7 @@ public sealed class PublicProducerAsyncDeliveryCallbackTests
     }
 
     private static AsyncMockProducer<byte[], byte[]> ManualMock() =>
-        new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
+        new AsyncMockProducer<byte[], byte[]>(autoComplete: false, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
     private static TaskCompletionSource<bool> NewGate() =>
         new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

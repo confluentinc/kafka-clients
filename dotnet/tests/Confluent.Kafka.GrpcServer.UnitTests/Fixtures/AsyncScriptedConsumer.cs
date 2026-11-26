@@ -298,7 +298,7 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
 
     public void Wakeup() => _inner.Wakeup();
 
-    public ConsumerGroupMetadata GroupMetadata() => _inner.GroupMetadata();
+    public IConsumerGroupMetadata GroupMetadata() => _inner.GroupMetadata();
 
     public IReadOnlyCollection<TopicPartition> Assignment() => _inner.Assignment();
 
@@ -387,8 +387,8 @@ internal sealed class AsyncScriptedConsumer : IAsyncConsumer<byte[], byte[]>, IM
         return _inner.DisposeAsync();
     }
 
-    void IMockConsumerOperations.UpdateBeginningOffset(string topic, int partition, long offset) =>
-        _inner.UpdateBeginningOffset(topic, partition, offset);
+    void IMockConsumerOperations.UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        _inner.UpdateBeginningOffsets(newOffsets);
 
     Task IMockConsumerOperations.Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _inner.Rebalance(partitions);
 

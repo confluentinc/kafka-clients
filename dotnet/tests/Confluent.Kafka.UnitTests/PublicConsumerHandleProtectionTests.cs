@@ -88,10 +88,10 @@ public sealed class PublicConsumerHandleProtectionTests
 
         Assert.Throws<IllegalStateException>(() => consumer.AddRecord(new ConsumerRecord<byte[], byte[]>("h1-topic", 0, 0L, null, null)));
         Assert.Throws<IllegalStateException>(() => consumer.SetPollException(new KafkaException("boom")));
-        Assert.Throws<IllegalStateException>(() => consumer.UpdateBeginningOffset("h1-topic", 0, 0L));
-        Assert.Throws<IllegalStateException>(() => consumer.UpdateEndOffset("h1-topic", 0, 5L));
+        Assert.Throws<IllegalStateException>(() => consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("h1-topic", 0)] = 0L }));
+        Assert.Throws<IllegalStateException>(() => consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("h1-topic", 0)] = 5L }));
         Assert.Throws<IllegalStateException>(
-            () => consumer.UpdatePartitions("h1-topic", 1, 1, "localhost", 9092));
+            () => consumer.UpdatePartitions("h1-topic", TestPartitions.Led("h1-topic", 1, 1, "localhost", 9092)));
     }
 
     [Fact]

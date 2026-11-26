@@ -66,8 +66,6 @@ public sealed class PublicMetricNameTests
         MetricName b = new MetricName("n", "g", "desc-a", Tags(("k", "v")));
 
         Assert.True(a.Equals(b));
-        Assert.True(a == b);
-        Assert.False(a != b);
         Assert.True(a.Equals((object)b));
         Assert.Equal(a.GetHashCode(), b.GetHashCode());
     }
@@ -98,7 +96,6 @@ public sealed class PublicMetricNameTests
         MetricName a = new MetricName("n1", "g", "d", Tags(("k", "v")));
         MetricName b = new MetricName("n2", "g", "d", Tags(("k", "v")));
         Assert.False(a.Equals(b));
-        Assert.True(a != b);
     }
 
     [Fact]
@@ -145,13 +142,17 @@ public sealed class PublicMetricNameTests
     }
 
     [Fact]
-    public void Operators_NullHandling()
+    public void TheEqualityOperators_CompareReferences_AsJavas()
     {
-        MetricName a = new MetricName("n", "g", "d", Tags());
-        Assert.False(a == null);
-        Assert.False(null == a);
-        Assert.True(a != null);
-        Assert.True((MetricName?)null == (MetricName?)null);
+        MetricName a = new MetricName("n", "g", "d", Tags(("k", "v")));
+        MetricName equal = new MetricName("n", "g", "d", Tags(("k", "v")));
+        MetricName alias = a;
+
+        Assert.True(a.Equals(equal));
+        Assert.False(a == equal);
+        Assert.True(a != equal);
+        Assert.True(a == alias);
+        Assert.False(a != alias);
     }
 
     [Fact]

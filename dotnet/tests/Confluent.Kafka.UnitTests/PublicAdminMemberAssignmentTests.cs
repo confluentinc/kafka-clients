@@ -37,7 +37,7 @@ public sealed class PublicAdminMemberAssignmentTests
             .ToArray();
 
         var only = Assert.Single(parameters);
-        Assert.Equal(new[] { typeof(IEnumerable<TopicPartition>) }, only);
+        Assert.Equal(new[] { typeof(IReadOnlyCollection<TopicPartition>) }, only);
     }
 
     [Fact]

@@ -21,11 +21,11 @@ namespace Confluent.Kafka.Consumer;
 public enum GroupMembershipOperation
 {
     /// <summary>The consumer leaves the group, which triggers a rebalance.</summary>
-    LEAVE_GROUP,
+    LEAVE_GROUP = 0,
 
     /// <summary>The consumer remains in the group.</summary>
-    REMAIN_IN_GROUP,
+    REMAIN_IN_GROUP = 1,
 
     /// <summary>A static member remains in the group and a dynamic member leaves it.</summary>
-    DEFAULT,
+    DEFAULT = 2,
 }

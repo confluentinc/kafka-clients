@@ -50,7 +50,7 @@ internal static class TestValues
     internal static KafkaException Coded(int code, string message)
     {
         using MockProducer<byte[], byte[]> producer =
-            new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            new MockProducer<byte[], byte[]>(autoComplete: false, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         CapturingCallback callback = new CapturingCallback();
         producer.Send(new ProducerRecord<byte[], byte[]>("t", value: new byte[] { 1 }), callback);
         Assert.True(producer.ErrorNext(OfClass(code, message)));

@@ -53,30 +53,31 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
     /// </exception>
     public AsyncMockProducer(IAsyncSerializer<TKey> keySerializer, IAsyncSerializer<TValue> valueSerializer)
-        : this(keySerializer, valueSerializer, true)
+        : this(true, keySerializer, valueSerializer)
     {
     }
 
     /// <summary>
-    /// Creates a broker-free mock producer with the key and value serializers, as Java's <c>MockProducer</c> takes them.
-    /// <c>Send</c> awaits the serializers unless both are built-in ones, as on
-    /// <see cref="AsyncKafkaProducer{TKey, TValue}"/>. The mock never disposes them.
+    /// Creates a broker-free mock producer, Java's <c>MockProducer(boolean, Partitioner, Serializer, Serializer)</c>
+    /// without the partitioner, which the binding does not take: partitioning is the native mock's. <c>Send</c> awaits
+    /// the serializers unless both are built-in ones, as on <see cref="AsyncKafkaProducer{TKey, TValue}"/>. The mock
+    /// never disposes them.
     /// </summary>
-    /// <param name="keySerializer">The serializer for record keys.</param>
-    /// <param name="valueSerializer">The serializer for record values.</param>
     /// <param name="autoComplete">
     /// When <see langword="true"/>, each send completes at once. When <see langword="false"/>, a
     /// send's future stays pending until <see cref="CompleteNext"/> or <see cref="ErrorNext"/> resolves it;
     /// <see cref="Dispose"/> and <see cref="DisposeAsync"/> first flush, completing the pending sends, unless a
     /// close has begun, and <c>Close</c> leaves a pending send pending.
     /// </param>
+    /// <param name="keySerializer">The serializer for record keys.</param>
+    /// <param name="valueSerializer">The serializer for record values.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
     /// </exception>
     public AsyncMockProducer(
+        bool autoComplete,
         IAsyncSerializer<TKey> keySerializer,
-        IAsyncSerializer<TValue> valueSerializer,
-        bool autoComplete)
+        IAsyncSerializer<TValue> valueSerializer)
     {
         IAsyncSerializer<TKey> key = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
         IAsyncSerializer<TValue> value = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
@@ -195,7 +196,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public Task SendOffsetsToTransaction(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
-        ConsumerGroupMetadata groupMetadata,
+        IConsumerGroupMetadata groupMetadata,
         CancellationToken cancellationToken = default) =>
         _native.SendOffsetsToTransactionWithCallback(offsets, groupMetadata, cancellationToken);
 

@@ -131,7 +131,7 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         NativeConsumer consumer = NativeConsumer.Create(RealConsumerConfig("proof-group"));
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ConsumerGroupMetadata meta = consumer.GroupMetadata();
+        IConsumerGroupMetadata meta = consumer.GroupMetadata();
 
         Assert.Equal("proof-group", meta.GroupId());
         Assert.Equal(-1, meta.GenerationId());
@@ -145,7 +145,7 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         NativeConsumer consumer = NativeConsumer.Create(RealConsumerConfig("grüße-café-Ω-日本語-😀"));
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ConsumerGroupMetadata meta = consumer.GroupMetadata();
+        IConsumerGroupMetadata meta = consumer.GroupMetadata();
 
         Assert.Equal("grüße-café-Ω-日本語-😀", meta.GroupId());
     }
@@ -157,7 +157,7 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
             RealConsumerConfig("static-group", groupInstanceId: "instance-7"));
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ConsumerGroupMetadata meta = consumer.GroupMetadata();
+        IConsumerGroupMetadata meta = consumer.GroupMetadata();
 
         Assert.Equal("static-group", meta.GroupId());
         Assert.Equal("instance-7", meta.GroupInstanceId());
@@ -169,7 +169,7 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         NativeConsumer consumer = NativeConsumer.CreateMock();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
 
-        ConsumerGroupMetadata meta = consumer.GroupMetadata();
+        IConsumerGroupMetadata meta = consumer.GroupMetadata();
 
         Assert.Equal("dummy.group.id", meta.GroupId());
         Assert.Equal(1, meta.GenerationId());

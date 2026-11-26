@@ -76,7 +76,7 @@ public sealed class PublicAdminP7ShapeParityTests
             new[] { typeof(IReadOnlyDictionary<string, FeatureUpdate>) },
             Required(nameof(IAdmin.UpdateFeatures)));
         Assert.Equal(
-            new[] { typeof(IEnumerable<UserScramCredentialAlteration>) },
+            new[] { typeof(IReadOnlyList<UserScramCredentialAlteration>) },
             Required(nameof(IAdmin.AlterUserScramCredentials)));
 
         foreach (string optionsOnly in new[]
@@ -91,7 +91,7 @@ public sealed class PublicAdminP7ShapeParityTests
 
         // DescribeUserScramCredentials' users are nullable: null means every user, as the zero-argument overload does.
         ParameterInfo users = LongForm(nameof(IAdmin.DescribeUserScramCredentials)).GetParameters()[0];
-        Assert.Equal(typeof(IReadOnlyCollection<string>), users.ParameterType);
+        Assert.Equal(typeof(IReadOnlyList<string>), users.ParameterType);
         Assert.False(users.IsOptional);
         Assert.Equal(NullableAnnotation.Annotated, NullableAnnotation.Flag(users));
         Assert.NotNull(typeof(IAdmin).GetMethod(nameof(IAdmin.DescribeUserScramCredentials), Type.EmptyTypes));

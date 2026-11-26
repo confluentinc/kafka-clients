@@ -25,10 +25,10 @@ namespace Confluent.Kafka.Consumer;
 public enum GroupProtocol
 {
     /// <summary>The Classic consumer group protocol (pre KIP-848) — Java's <c>CLASSIC</c>.</summary>
-    CLASSIC,
+    CLASSIC = 0,
 
     /// <summary>The Consumer rebalance protocol (KIP-848) — Java's <c>CONSUMER</c>.</summary>
-    CONSUMER,
+    CONSUMER = 1,
 }
 
 /// <summary>

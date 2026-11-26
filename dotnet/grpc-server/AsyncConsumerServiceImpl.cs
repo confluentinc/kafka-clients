@@ -539,7 +539,7 @@ internal sealed class AsyncConsumerServiceImpl
 
         try
         {
-            ConsumerGroupMetadata groupMetadata;
+            IConsumerGroupMetadata groupMetadata;
             await entry.Gate.WaitAsync().ConfigureAwait(false);
             try
             {

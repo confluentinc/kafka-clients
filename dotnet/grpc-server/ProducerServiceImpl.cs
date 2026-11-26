@@ -229,7 +229,7 @@ internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServic
             return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) });
         }
 
-        ConsumerGroupMetadata? groupMetadata = _groupMetadata.Get(request.GroupMetadataId);
+        IConsumerGroupMetadata? groupMetadata = _groupMetadata.Get(request.GroupMetadataId);
         if (groupMetadata is null)
         {
             return Task.FromResult(new Proto.StatusResponse { Error = Translate.UnknownGroupMetadata(request.GroupMetadataId) });

@@ -137,9 +137,29 @@ public sealed class KafkaProducerTransactionTests
     {
     }
 
-    [Fact(Skip = "needs ConsumerGroupMetadata's deprecated public constructor, which the binding does not expose")]
+    [Fact]
     public void TestInvalidGenerationIdAndMemberIdCombinedInSendOffsets()
     {
+        // Java first initializes and begins a transaction against its MockClient. Java's sendOffsetsToTransaction checks
+        // the group metadata before the transaction state, so the check needs no broker here.
+        KafkaProducer<string, string> producer = KafkaProducer<string, string>.Create(
+            new Dictionary<string, object?>
+            {
+                ["transactional.id"] = "some.id",
+                ["bootstrap.servers"] = "localhost:9999",
+            },
+            Serdes.String().Serializer(),
+            Serdes.String().Serializer());
+        using IDisposable producerDisposal = TestTimeout.Disposal(producer);
+
+        IllegalArgumentException e = Assert.Throws<IllegalArgumentException>(
+            () => producer.SendOffsetsToTransaction(
+                new Dictionary<TopicPartition, OffsetAndMetadata>(),
+                new TestGroupMetadata("groupId", 1, string.Empty)));
+        Assert.Equal(
+            "Passed in group metadata GroupMetadata(groupId = groupId, generationId = 1, memberId = , groupInstanceId = ) "
+                + "has generationId > 0 but the member.id is unknown",
+            e.Message);
     }
 
     [Fact(Skip = NeedsMockClient)]
@@ -261,7 +281,7 @@ public sealed class KafkaProducerTransactionTests
             Serdes.ByteArray().Deserializer(),
             Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        ConsumerGroupMetadata groupMetadata = consumer.GroupMetadata();
+        IConsumerGroupMetadata groupMetadata = consumer.GroupMetadata();
 
         // The second call guards against the bootstrap error being cleared after the first failure.
         if (flavor == UnreachableProducers.SyncFlavor)

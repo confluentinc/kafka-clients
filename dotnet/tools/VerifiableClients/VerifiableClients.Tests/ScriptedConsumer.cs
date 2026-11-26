@@ -176,7 +176,7 @@ internal sealed class ScriptedConsumer : IConsumer<string, string>
         Mock.Wakeup();
     }
 
-    public ConsumerGroupMetadata GroupMetadata() => Mock.GroupMetadata();
+    public IConsumerGroupMetadata GroupMetadata() => Mock.GroupMetadata();
 
     public IReadOnlyCollection<TopicPartition> Assignment() => Mock.Assignment();
 

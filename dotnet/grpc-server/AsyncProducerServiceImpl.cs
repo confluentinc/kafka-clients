@@ -241,7 +241,7 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             return new Proto.StatusResponse { Error = Translate.UnknownProducer(request.ProducerId) };
         }
 
-        ConsumerGroupMetadata? groupMetadata = _groupMetadata.Get(request.GroupMetadataId);
+        IConsumerGroupMetadata? groupMetadata = _groupMetadata.Get(request.GroupMetadataId);
         if (groupMetadata is null)
         {
             return new Proto.StatusResponse { Error = Translate.UnknownGroupMetadata(request.GroupMetadataId) };

@@ -47,7 +47,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(Topic, partitionCount: 3, LeaderId, LeaderHost, LeaderPort);
+        consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 3, LeaderId, LeaderHost, LeaderPort));
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, Topic);
 
@@ -96,7 +96,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         const string nonAscii = "topic-grüße-Ω-🎉";
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(nonAscii, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
+        consumer.UpdatePartitions(nonAscii, TestPartitions.Led(nonAscii, partitionCount: 1, LeaderId, LeaderHost, LeaderPort));
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, nonAscii);
 
@@ -110,7 +110,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         const string nonAsciiHost = "hôte-Ω-🎉.example.com";
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, nonAsciiHost, LeaderPort);
+        consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 1, LeaderId, nonAsciiHost, LeaderPort));
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, Topic);
 
@@ -136,8 +136,8 @@ public sealed class PublicConsumerPartitionMetadataTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions("topic-a", partitionCount: 2, LeaderId, LeaderHost, LeaderPort);
-        consumer.UpdatePartitions("topic-b", partitionCount: 1, leaderId: 9, "broker-2", leaderPort: 9093);
+        consumer.UpdatePartitions("topic-a", TestPartitions.Led("topic-a", partitionCount: 2, LeaderId, LeaderHost, LeaderPort));
+        consumer.UpdatePartitions("topic-b", TestPartitions.Led("topic-b", partitionCount: 1, leaderId: 9, "broker-2", leaderPort: 9093));
 
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
 
@@ -176,7 +176,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         const string nonAscii = "тема-Ω-🎉";
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(nonAscii, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
+        consumer.UpdatePartitions(nonAscii, TestPartitions.Led(nonAscii, partitionCount: 1, LeaderId, LeaderHost, LeaderPort));
 
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
 
@@ -216,7 +216,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
+        consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort));
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -240,7 +240,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
+        consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort));
 
         consumer.Wakeup();
 
@@ -253,7 +253,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
+        consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort));
 
         for (int i = 0; i < 5; i++)
         {

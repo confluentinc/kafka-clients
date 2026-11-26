@@ -14,18 +14,17 @@
 
 using System;
 using Confluent.Kafka.Common;
-using Confluent.Kafka.Consumer;
 
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// Copies the fields of an owned <c>ConsumerGroupMetadata_t</c> into a <see cref="ConsumerGroupMetadata"/>, which keeps
+/// Copies the fields of an owned <c>ConsumerGroupMetadata_t</c> into a <see cref="ConsumerGroupMetadataImpl"/>, which keeps
 /// the handle for <c>SendOffsetsToTransaction</c>. The handle is owned by a
 /// <see cref="SafeConsumerGroupMetadataHandle"/> from the start, so a failed read frees it at once.
 /// </summary>
 internal static class ConsumerGroupMetadataMarshal
 {
-    internal static ConsumerGroupMetadata CopyOutAndKeep(IntPtr metadata)
+    internal static ConsumerGroupMetadataImpl CopyOutAndKeep(IntPtr metadata)
     {
         SafeConsumerGroupMetadataHandle handle = new SafeConsumerGroupMetadataHandle(metadata);
         try
@@ -40,7 +39,7 @@ internal static class ConsumerGroupMetadataMarshal
             string? groupInstanceId = Utf8Marshal.PtrToString(NativeMethods.ConsumerGroupMetadataGroupInstanceId(metadata, ref outErr));
             KafkaException.ThrowIfFfiFailed(ref outErr);
 
-            return new ConsumerGroupMetadata(groupId, generationId, memberId, groupInstanceId, handle);
+            return new ConsumerGroupMetadataImpl(groupId, generationId, memberId, groupInstanceId, handle);
         }
         catch
         {

@@ -61,8 +61,7 @@ public sealed class PublicTopicPartitionTests
 
         Assert.NotSame(other, constructed);
         Assert.Equal(other, constructed);
-        Assert.True(constructed == other);
-        Assert.False(constructed != other);
+        Assert.True(constructed.Equals(other));
         Assert.True(constructed.Equals((object)other));
         Assert.Equal(other.GetHashCode(), constructed.GetHashCode());
 
@@ -79,16 +78,13 @@ public sealed class PublicTopicPartitionTests
         TopicPartition tp = new TopicPartition("t", 0);
         TopicPartition? none = null;
 
-        Assert.False(tp == none);
-        Assert.False(none == tp);
-        Assert.True(tp != none);
-        Assert.True(none != tp);
-        Assert.True(none == null);
-        Assert.False(none != null);
         Assert.False(tp.Equals(none));
         Assert.False(tp.Equals((object?)null));
+        Assert.False(Equals(tp, none));
+        Assert.False(Equals(none, tp));
         Assert.False(EqualityComparer<TopicPartition?>.Default.Equals(none, tp));
         Assert.False(EqualityComparer<TopicPartition?>.Default.Equals(tp, none));
+        Assert.True(EqualityComparer<TopicPartition?>.Default.Equals(none, none));
     }
 
     [Fact]
@@ -98,10 +94,24 @@ public sealed class PublicTopicPartitionTests
 
         Assert.True(tp.Equals(tp));
         Assert.True(tp.Equals(new TopicPartition("t", 1)));
-        Assert.True(tp == new TopicPartition("t", 1));
+        Assert.True(tp.Equals((object)new TopicPartition("t", 1)));
         Assert.False(tp.Equals(new TopicPartition("t", 2)));
         Assert.False(tp.Equals(new TopicPartition("u", 1)));
         Assert.False(tp.Equals((object)"t-1"));
+    }
+
+    [Fact]
+    public void TheEqualityOperators_CompareReferences_AsJavas()
+    {
+        TopicPartition tp = new TopicPartition("t", 1);
+        TopicPartition equal = new TopicPartition("t", 1);
+        TopicPartition alias = tp;
+
+        Assert.True(tp.Equals(equal));
+        Assert.False(tp == equal);
+        Assert.True(tp != equal);
+        Assert.True(tp == alias);
+        Assert.False(tp != alias);
     }
 
     [Theory]

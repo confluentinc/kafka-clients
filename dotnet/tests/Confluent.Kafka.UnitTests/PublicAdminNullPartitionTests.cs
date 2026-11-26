@@ -647,6 +647,6 @@ public sealed class PublicAdminNullPartitionTests
         return info.Offset();
     }
 
-    private static TransactionDescription Description(IEnumerable<TopicPartition> partitions) =>
+    private static TransactionDescription Description(IReadOnlyCollection<TopicPartition> partitions) =>
         new TransactionDescription(1, TransactionState.ONGOING, 2L, 3, 4L, 5L, partitions);
 }

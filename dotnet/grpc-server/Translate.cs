@@ -116,7 +116,7 @@ internal static class Translate
         return TimeSpan.FromTicks(ms * TimeSpan.TicksPerMillisecond);
     }
 
-    internal static Proto.ConsumerGroupMetadata GroupMetadataToProto(ConsumerGroupMetadata groupMetadata)
+    internal static Proto.ConsumerGroupMetadata GroupMetadataToProto(IConsumerGroupMetadata groupMetadata)
     {
         Proto.ConsumerGroupMetadata proto = new Proto.ConsumerGroupMetadata
         {

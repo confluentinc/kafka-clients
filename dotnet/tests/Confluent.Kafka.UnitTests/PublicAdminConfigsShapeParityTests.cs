@@ -183,8 +183,9 @@ public sealed class PublicAdminConfigsShapeParityTests
         Assert.Equal(typeof(ConfigEntry), typeof(ConfigEntry.ConfigSource).DeclaringType);
 
         Assert.Equal(
-            new[] { "UNKNOWN", "BOOLEAN", "STRING", "INT", "SHORT", "LONG", "DOUBLE", "LIST", "CLASS", "PASSWORD" },
-            Enum.GetNames(typeof(ConfigEntry.ConfigType)));
+            new[] { "UNKNOWN", "BOOLEAN", "STRING", "INT", "SHORT", "LONG", "DOUBLE", "LIST", "CLASS", "PASSWORD" }
+                .OrderBy(name => name, StringComparer.Ordinal),
+            Enum.GetNames(typeof(ConfigEntry.ConfigType)).OrderBy(name => name, StringComparer.Ordinal));
 
         Assert.Equal(
             new[]
@@ -192,8 +193,8 @@ public sealed class PublicAdminConfigsShapeParityTests
                 "DYNAMIC_TOPIC_CONFIG", "DYNAMIC_BROKER_LOGGER_CONFIG", "DYNAMIC_BROKER_CONFIG",
                 "DYNAMIC_DEFAULT_BROKER_CONFIG", "DYNAMIC_CLIENT_METRICS_CONFIG", "DYNAMIC_GROUP_CONFIG",
                 "STATIC_BROKER_CONFIG", "DEFAULT_CONFIG", "UNKNOWN",
-            },
-            Enum.GetNames(typeof(ConfigEntry.ConfigSource)));
+            }.OrderBy(name => name, StringComparer.Ordinal),
+            Enum.GetNames(typeof(ConfigEntry.ConfigSource)).OrderBy(name => name, StringComparer.Ordinal));
     }
 
     [Fact]

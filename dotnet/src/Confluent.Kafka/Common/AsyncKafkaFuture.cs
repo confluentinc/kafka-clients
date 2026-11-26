@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -35,7 +34,7 @@ namespace Confluent.Kafka.Common;
 /// future: a <c>lock (future)</c> can delay its completion and every later one of the same client, and a
 /// <see cref="Get()"/> inside it can wait forever.
 /// </remarks>
-public abstract class AsyncKafkaFuture<T> : AsyncKafkaFuture, IEquatable<AsyncKafkaFuture<T>>
+public abstract class AsyncKafkaFuture<T> : AsyncKafkaFuture
 {
     private protected AsyncKafkaFuture()
     {
@@ -87,27 +86,6 @@ public abstract class AsyncKafkaFuture<T> : AsyncKafkaFuture, IEquatable<AsyncKa
     /// <inheritdoc cref="KafkaFuture{T}.GetNow"/>
     public abstract T GetNow(T valueIfAbsent);
 
-    /// <summary>
-    /// Determines whether two <see cref="AsyncKafkaFuture{T}"/> references are the same future.
-    /// </summary>
-    public static bool operator ==(AsyncKafkaFuture<T>? left, AsyncKafkaFuture<T>? right) =>
-        ReferenceEquals(left, right);
-
-    /// <summary>
-    /// Determines whether two <see cref="AsyncKafkaFuture{T}"/> references are different futures.
-    /// </summary>
-    public static bool operator !=(AsyncKafkaFuture<T>? left, AsyncKafkaFuture<T>? right) =>
-        !ReferenceEquals(left, right);
-
-    /// <inheritdoc/>
-    public bool Equals(AsyncKafkaFuture<T>? other) => ReferenceEquals(this, other);
-
-    /// <inheritdoc/>
-    public override bool Equals(object? obj) => ReferenceEquals(this, obj);
-
-    /// <inheritdoc/>
-    public override int GetHashCode() => RuntimeHelpers.GetHashCode(this);
-
     private protected sealed override Task CompletionStageTask() => ToCompletionStage();
 
     private protected sealed override Task GetTask() => Get();
@@ -127,7 +105,7 @@ public abstract class AsyncKafkaFuture<T> : AsyncKafkaFuture, IEquatable<AsyncKa
 /// <c>lock (future)</c> can delay its completion and every later one of the same client, and a <see cref="Get()"/>
 /// inside it can wait forever.
 /// </remarks>
-public abstract class AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
+public abstract class AsyncKafkaFuture
 {
     // Only the binding's engines derive from the futures, so every future is one of them.
     private protected AsyncKafkaFuture()
@@ -231,25 +209,6 @@ public abstract class AsyncKafkaFuture : IEquatable<AsyncKafkaFuture>
 
     /// <inheritdoc/>
     public abstract override string ToString();
-
-    /// <summary>
-    /// Determines whether two <see cref="AsyncKafkaFuture"/> references are the same future.
-    /// </summary>
-    public static bool operator ==(AsyncKafkaFuture? left, AsyncKafkaFuture? right) => ReferenceEquals(left, right);
-
-    /// <summary>
-    /// Determines whether two <see cref="AsyncKafkaFuture"/> references are different futures.
-    /// </summary>
-    public static bool operator !=(AsyncKafkaFuture? left, AsyncKafkaFuture? right) => !ReferenceEquals(left, right);
-
-    /// <inheritdoc/>
-    public bool Equals(AsyncKafkaFuture? other) => ReferenceEquals(this, other);
-
-    /// <inheritdoc/>
-    public override bool Equals(object? obj) => ReferenceEquals(this, obj);
-
-    /// <inheritdoc/>
-    public override int GetHashCode() => RuntimeHelpers.GetHashCode(this);
 
     // The tasks behind the plain ToCompletionStage and Get forms: a future of a value hands out its own typed tasks.
     private protected abstract Task CompletionStageTask();

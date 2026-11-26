@@ -499,7 +499,7 @@ public sealed class PublicProducerTransactionTests
     [Fact]
     public void GroupMetadata_OutlivesTheConsumerThatGaveIt()
     {
-        ConsumerGroupMetadata metadata;
+        IConsumerGroupMetadata metadata;
         using (MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest"))
         {
             metadata = consumer.GroupMetadata();
@@ -530,7 +530,7 @@ public sealed class PublicProducerTransactionTests
         string operation,
         string operationName)
     {
-        ConsumerGroupMetadata metadata = GroupMetadata();
+        IConsumerGroupMetadata metadata = GroupMetadata();
         Exception? timedOut = null;
         long elapsedMs = 0;
         object producer = flavor == SyncFlavor ? Sync(MaxBlockMs) : await Async(MaxBlockMs);
@@ -784,7 +784,7 @@ public sealed class PublicProducerTransactionTests
         string? timedOutOperation)
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(autoComplete: false, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         await using IAsyncDisposable teardown = TestTimeout.AsyncDisposal(producer);
         SetMaxBlockMs(producer, timedOutOperation is null ? AtOnceMaxBlockMs : MaxBlockMs);
         TaskCompletionSource<bool> gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -897,10 +897,10 @@ public sealed class PublicProducerTransactionTests
     }
 
     private static object Mock(string flavor, bool autoComplete) => flavor == SyncFlavor
-        ? new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete)
-        : new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete);
+        ? new MockProducer<byte[], byte[]>(autoComplete, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
+        : new AsyncMockProducer<byte[], byte[]>(autoComplete, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
-    private static ConsumerGroupMetadata GroupMetadata()
+    private static IConsumerGroupMetadata GroupMetadata()
     {
         using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         return consumer.GroupMetadata();
@@ -950,7 +950,7 @@ public sealed class PublicProducerTransactionTests
     private static Task SendOffsetsTo(
         object producer,
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>? offsets,
-        ConsumerGroupMetadata? metadata) => producer switch
+        IConsumerGroupMetadata? metadata) => producer switch
         {
             IProducer<byte[], byte[]> sync => Run(() => sync.SendOffsetsToTransaction(offsets!, metadata!)),
             IAsyncProducer<byte[], byte[]> async => async.SendOffsetsToTransaction(offsets!, metadata!),

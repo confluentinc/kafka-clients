@@ -55,8 +55,8 @@ public sealed class TopicPartitionInfo
     public TopicPartitionInfo(
         int partition,
         Node? leader,
-        IEnumerable<Node> replicas,
-        IEnumerable<Node> isr)
+        IReadOnlyList<Node> replicas,
+        IReadOnlyList<Node> isr)
         : this(Copy(replicas, nameof(replicas)), Copy(isr, nameof(isr)), null, null, partition, leader)
     {
     }
@@ -83,10 +83,10 @@ public sealed class TopicPartitionInfo
     public TopicPartitionInfo(
         int partition,
         Node? leader,
-        IEnumerable<Node> replicas,
-        IEnumerable<Node> isr,
-        IEnumerable<Node> elr,
-        IEnumerable<Node> lastKnownElr)
+        IReadOnlyList<Node> replicas,
+        IReadOnlyList<Node> isr,
+        IReadOnlyList<Node> elr,
+        IReadOnlyList<Node> lastKnownElr)
         : this(
             Copy(replicas, nameof(replicas)),
             Copy(isr, nameof(isr)),

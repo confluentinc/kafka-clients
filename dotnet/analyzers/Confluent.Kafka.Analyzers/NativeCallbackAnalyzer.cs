@@ -365,7 +365,8 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
 
         private Body(ImmutableArray<ISymbol>? calls) => _calls = calls;
 
-        // The body is empty; or one catch-all try whose catch and finally blocks only make calls; or one call.
+        // The body is empty; or one catch-all try whose catch and finally blocks only make calls or return a constant
+        // (a callback that returns a value answers one when it fails); or one call.
         internal static Body Of(IBlockOperation body, INamedTypeSymbol? owner, INamedTypeSymbol? exception)
         {
             IOperation[] statements = Statements(body);
@@ -393,6 +394,11 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             IEnumerable<IBlockOperation?> blocks = tryOperation.Catches.Select(clause => clause.Handler).Append(tryOperation.Finally);
             foreach (IOperation statement in blocks.Where(block => block is not null).SelectMany(block => Statements(block!)))
             {
+                if (statement is IReturnOperation { ReturnedValue: { } value } && IsConstant(value))
+                {
+                    continue;
+                }
+
                 if (Call(statement, owner) is not { } call)
                 {
                     return s_canThrow;
@@ -411,6 +417,17 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
 
         private static IOperation[] Statements(IBlockOperation block) =>
             block.Operations.Where(operation => operation is not IEmptyOperation and not IReturnOperation { ReturnedValue: null }).ToArray();
+
+        // A constant or a type's default value, through any conversion that runs no user code.
+        private static bool IsConstant(IOperation value)
+        {
+            while (value is IConversionOperation { Conversion.IsUserDefined: false } conversion)
+            {
+                value = conversion.Operand;
+            }
+
+            return value.ConstantValue.HasValue || value is IDefaultValueOperation;
+        }
 
         private static bool IsCatchAll(ICatchClauseOperation clause, INamedTypeSymbol? exception) =>
             clause.Filter is null

@@ -282,6 +282,38 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
   class of your own. Its plain method is `Serialize(topic, data, cancellationToken)` /
   `Deserialize(topic, data, cancellationToken)`; one that reads the headers also implements
   `IAsyncSerializerWithHeaders<T>` / `IAsyncDeserializerWithHeaders<T>`.
+- `ConsumerGroupMetadata` is now the interface `IConsumerGroupMetadata`, as Java's class becomes an
+  interface in Kafka 5.0 (KIP-1136): `GroupMetadata()` returns it and `SendOffsetsToTransaction` takes
+  it. Write `IConsumerGroupMetadata` where you named the type, including in a class of your own that
+  implements a consumer or producer interface; code that uses `var` needs no change. An
+  implementation of your own can now be passed to `SendOffsetsToTransaction`.
+- The mock consumers' offset and partition helpers take Java's arguments. Write
+  `UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [tp] = offset })` where you wrote
+  `UpdateBeginningOffset(topic, partition, offset)`, and the same for `UpdateEndOffsets`; one call can set
+  several partitions. Write `UpdatePartitions(topic, partitions)`, with the `PartitionInfo` list
+  `PartitionsFor` should answer, where you wrote `UpdatePartitions(topic, partitionCount, leaderId,
+  leaderHost, leaderPort)`.
+- The mock producers' three-argument constructor takes `autoComplete` first, in Java's order: write
+  `new MockProducer<K, V>(autoComplete, keySerializer, valueSerializer)` where you wrote
+  `new MockProducer<K, V>(keySerializer, valueSerializer, autoComplete)`, and the same for
+  `AsyncMockProducer`. The two-argument constructor is unchanged.
+- No class has an `==` or `!=` operator, so `==` compares references, as Java's does. `TopicPartition`,
+  `Uuid` and `MetricName` had operators that compared values: write `tp.Equals(other)` where you wrote
+  `tp == other`, as Java's `equals`. `Dictionary`, `HashSet` and `Contains` use `Equals` and are unchanged.
+  The futures (`KafkaFuture`, `AsyncKafkaFuture` and their generic forms) also lose their `==`, `!=`,
+  `IEquatable<…>`, `Equals` and `GetHashCode`, which compared references, so every answer stays the same.
+  Rebuild an application that used these operators: one built against an earlier release fails with
+  `MissingMethodException` where it calls them.
+- A parameter Java types as a collection takes its read-only counterpart: `IReadOnlyCollection<T>` for a
+  `Collection` or a `Set`, `IReadOnlyList<T>` for a `List`. `CreateTopics`, `CreateAcls`, `DeleteAcls`,
+  `AlterClientQuotas`, `TopicCollection.OfTopicNames` / `OfTopicIds`, `TokenInformation.FromRecord`, the
+  constructors of `Config`, `TokenInformation`, `ConsumerGroupDescription`, `ClassicGroupDescription`,
+  `MemberAssignment` and `TransactionDescription`, and `TopicDescription`'s `authorizedOperations` took an
+  `IEnumerable<T>`: a list, an array or a set works as before, and a LINQ query needs `query.ToList()`, as Java
+  needs `collect` for a `Stream`. `AlterUserScramCredentials`, `DescribeUserScramCredentials`, the constructors of
+  `TopicPartitionInfo`, `UserScramCredentialsDescription` and `PartitionProducerState`, and `TopicDescription`'s
+  `partitions` take an `IReadOnlyList<T>`: pass a list or an array, as Java takes a `List`. Rebuild an application
+  built against an earlier release.
 
 ## Examples
 

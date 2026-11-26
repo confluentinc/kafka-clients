@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Common.Serialization;
@@ -43,7 +44,7 @@ public sealed class PublicSyncConsumerQueryAllocationBudgetTests
     {
         KafkaConsumer<byte[], byte[]> consumer = DecodingConsumers.Create<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateBeginningOffset(Topic, 0, 1);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 1 });
         TopicPartition[] request = { new TopicPartition(Topic, 0) };
 
         for (int i = 0; i < 10; i++)
@@ -68,7 +69,7 @@ public sealed class PublicSyncConsumerQueryAllocationBudgetTests
     {
         KafkaConsumer<byte[], byte[]> consumer = DecodingConsumers.Create<byte[], byte[]>(Serdes.ByteArray().Deserializer(), Serdes.ByteArray().Deserializer());
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
+        consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092));
 
         for (int i = 0; i < 10; i++)
         {
