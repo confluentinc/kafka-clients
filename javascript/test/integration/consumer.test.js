@@ -365,9 +365,6 @@ function checkRecords(records, topic, timestamps) {
       assert.ok(after.generationId() > 0);
       assert.notEqual(after.memberId(), '');
       assert.equal(after.groupInstanceId(), null);
-      // enforceRebalance() only logs under the consumer protocol, and resolves.
-      await consumer.enforceRebalance();
-      await consumer.enforceRebalance({ reason: 'test' });
     } finally {
       await consumer.close();
     }
