@@ -19,6 +19,7 @@
 // counterpart: AccessControlEntry.toFilter uses the public one, which takes
 // the same fields.
 
+import { finalStatics } from '../../internal/static_finals';
 import { JavaForms } from '../../internal/args';
 import { listHashCode } from '../../internal/java_object';
 import { AccessControlEntry } from './access_control_entry';
@@ -92,6 +93,11 @@ export class AccessControlEntryFilter {
     operation: AclOperation.ANY,
     permissionType: AclPermissionType.ANY,
   });
+
+  // Java's static final: it can't be reassigned.
+  static {
+    finalStatics(this, 'ANY');
+  }
 
   /**
    * Return the principal or null.

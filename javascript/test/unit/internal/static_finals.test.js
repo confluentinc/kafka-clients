@@ -85,6 +85,12 @@ test('a strict-mode assignment to a static final throws TypeError, and the class
   const { SslClientAuth, SslConfigs } = require('@confluentinc/kafka-javascript/common/config');
   const { ProducerConfig, RecordMetadata, KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
   const { RecordDeserializationError } = require('@confluentinc/kafka-javascript/common/errors');
+  const { AdminClientConfig, ConfigEntry, MockAdminClient } = require('@confluentinc/kafka-javascript/admin');
+  const { AclOperation } = require('@confluentinc/kafka-javascript/common/acl');
+  const { TopicConfig } = require('@confluentinc/kafka-javascript/common/config');
+  const { KafkaPrincipal } = require('@confluentinc/kafka-javascript/common/security/auth');
+  const { Uuid } = require('@confluentinc/kafka-javascript/common');
+  const reserved = Uuid.RESERVED;
   const createTime = TimestampType.CREATE_TIME;
   /** @type {Array<[unknown, string]>} */
   const classes = [
@@ -97,6 +103,15 @@ test('a strict-mode assignment to a static final throws TypeError, and the class
     [RecordMetadata, 'UNKNOWN_PARTITION'],
     [KafkaProducer, 'NETWORK_THREAD_PREFIX'],
     [RecordDeserializationError.DeserializationExceptionOrigin, 'KEY'],
+    [ConfigEntry.ConfigSource, 'DEFAULT_CONFIG'],
+    [AclOperation, 'READ'],
+    [MockAdminClient, 'DEFAULT_CLUSTER_ID'],
+    [MockAdminClient, 'DEFAULT_LOG_DIRS'],
+    [AdminClientConfig, 'BOOTSTRAP_SERVERS_CONFIG'],
+    [TopicConfig, 'CLEANUP_POLICY_CONFIG'],
+    [KafkaPrincipal, 'ANONYMOUS'],
+    [Uuid, 'ZERO_UUID'],
+    [Uuid, 'RESERVED'],
   ];
   const finals = classes.map(([cls, key]) => /** @type {[Record<string, unknown>, string]} */ ([cls, key]));
   for (const [cls, key] of finals) {
@@ -117,6 +132,11 @@ test('a strict-mode assignment to a static final throws TypeError, and the class
   assert.equal(TimestampType.forName('CreateTime'), createTime);
   assert.equal(TimestampType.valueOf('LOG_APPEND_TIME'), TimestampType.LOG_APPEND_TIME);
   assert.equal(RecordMetadata.UNKNOWN_PARTITION, -1);
+  // A static made on its first read keeps its getter, and gives the same set.
+  assert.equal(Uuid.RESERVED, reserved);
+  assert.equal(typeof Object.getOwnPropertyDescriptor(Uuid, 'RESERVED')?.get, 'function');
+  assert.equal(ConfigEntry.ConfigSource.valueOf('DEFAULT_CONFIG'), ConfigEntry.ConfigSource.DEFAULT_CONFIG);
+  assert.equal(MockAdminClient.DEFAULT_CLUSTER_ID, 'I4ZmrWqfT2e-upky_4fdPA');
 });
 
 test('finalStatics makes a data property final and a getter non-configurable, and refuses a name the class lacks', () => {
