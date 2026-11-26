@@ -30,8 +30,8 @@ namespace Confluent.Kafka.Common;
 /// </para>
 /// <para>
 /// The value crossing the C ABI is Java's <c>toString()</c> spelling (<c>"Stable"</c>,
-/// <c>"NotReady"</c>, …), not the underlying <c>int</c>, which means nothing outside this
-/// assembly; do not persist it.
+/// <c>"NotReady"</c>, …), not the underlying <c>int</c>, which has no meaning on the wire. A
+/// member's number never changes once released.
 /// </para>
 /// <para>
 /// <c>ToString()</c> gives the Java constant name (<c>STABLE</c>), not Java's <c>toString()</c>
@@ -45,31 +45,31 @@ public enum GroupState
     /// The state is not known to this client — Java's <c>UNKNOWN</c>, the state for a name this
     /// client does not recognise.
     /// </summary>
-    UNKNOWN,
+    UNKNOWN = 0,
 
     /// <summary>Java's <c>PREPARING_REBALANCE</c>.</summary>
-    PREPARING_REBALANCE,
+    PREPARING_REBALANCE = 1,
 
     /// <summary>Java's <c>COMPLETING_REBALANCE</c>.</summary>
-    COMPLETING_REBALANCE,
+    COMPLETING_REBALANCE = 2,
 
     /// <summary>Java's <c>STABLE</c>.</summary>
-    STABLE,
+    STABLE = 3,
 
     /// <summary>Java's <c>DEAD</c>.</summary>
-    DEAD,
+    DEAD = 4,
 
     /// <summary>Java's <c>EMPTY</c>.</summary>
-    EMPTY,
+    EMPTY = 5,
 
     /// <summary>Java's <c>ASSIGNING</c>.</summary>
-    ASSIGNING,
+    ASSIGNING = 6,
 
     /// <summary>Java's <c>RECONCILING</c>.</summary>
-    RECONCILING,
+    RECONCILING = 7,
 
     /// <summary>Java's <c>NOT_READY</c>.</summary>
-    NOT_READY,
+    NOT_READY = 8,
 }
 
 /// <summary>

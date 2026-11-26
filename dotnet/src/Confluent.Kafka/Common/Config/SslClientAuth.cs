@@ -32,13 +32,13 @@ namespace Confluent.Kafka.Common.Config;
 public enum SslClientAuth
 {
     /// <summary>The server requires client authentication — Java's <c>REQUIRED</c>.</summary>
-    REQUIRED,
+    REQUIRED = 0,
 
     /// <summary>The server requests client authentication — Java's <c>REQUESTED</c>.</summary>
-    REQUESTED,
+    REQUESTED = 1,
 
     /// <summary>The server does not authenticate clients — Java's <c>NONE</c>.</summary>
-    NONE,
+    NONE = 2,
 }
 
 /// <summary>

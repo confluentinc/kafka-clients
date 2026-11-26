@@ -1120,7 +1120,11 @@ out of date). The rule:
    `GetEnumerator` for `Iterable`; `Dispose` / `DisposeAsync` for `Closeable`; `Message` /
    `InnerException`; `IEquatable<T>.Equals`; a C# enum covers `name`, `ordinal`, `values` and `valueOf`.
    `Enum.GetValues` and `CompareTo` order by value, not by Java's declaration (`ConfigResourceType`…), and
-   `Enum.Parse` accepts numbers and comma lists; the binding's own lookups never use it. A member that overrides
+   `Enum.Parse` accepts numbers and comma lists; the binding's own lookups never use it. Every member's number is
+   written out and never changes once released, since C# compiles it into each caller: a constant Java adds sits at
+   Java's place in the declaration, with Java's integer field or else the next unused number
+   (`PublicJavaEnumConstantsTests` pins them; CKRDA0017 asks for the written number in `src/`, and CA1069 refuses
+   two members with one number). A member that overrides
    or implements a `System` member keeps its parameter names. A method may end with an
    optional `CancellationToken cancellationToken`.
 8. Java's constructor and method overloads, each in Java's parameter order; a `Properties` overload is its

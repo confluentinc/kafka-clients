@@ -34,7 +34,7 @@ namespace Confluent.Kafka.UnitTests;
 public sealed class PublicAdminP8TypesTests
 {
     [Fact]
-    public void TransactionState_HasJavasEightConstantsInDeclarationOrder()
+    public void TransactionState_HasJavasEightConstants()
     {
         Assert.Equal(
             new[]
@@ -47,8 +47,8 @@ public sealed class PublicAdminP8TypesTests
                 "EMPTY",
                 "PREPARE_EPOCH_FENCE",
                 "UNKNOWN",
-            },
-            Enum.GetNames(typeof(TransactionState)));
+            }.OrderBy(name => name, StringComparer.Ordinal),
+            Enum.GetNames(typeof(TransactionState)).OrderBy(name => name, StringComparer.Ordinal));
     }
 
     [Fact]

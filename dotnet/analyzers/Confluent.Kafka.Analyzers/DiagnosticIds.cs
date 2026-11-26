@@ -101,4 +101,9 @@ public static class DiagnosticIds
     /// <c>CancellationToken cancellationToken = default</c>.
     /// </summary>
     public const string AsyncCancellationToken = "CKRDA0016";
+
+    /// <summary>
+    /// A member of a public enum whose number is not written out.
+    /// </summary>
+    public const string EnumMemberValue = "CKRDA0017";
 }
