@@ -216,7 +216,8 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// could not be null"), or its generation id is above 0 while its member id is unknown.</exception>
     /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null, a key of it is null or has a null
     /// topic, or a value is null. For a null key the <see cref="Task"/> faults with it, after the checks an empty
-    /// <paramref name="offsets"/> makes.</exception>
+    /// <paramref name="offsets"/> makes. A <paramref name="groupMetadata"/> of your own that returns a null group id
+    /// ("group.id can't be null") or member id ("member.id can't be null") throws at the call.</exception>
     /// <exception cref="IllegalStateException">No <c>transactional.id</c> has been configured, no transaction has
     /// been started, or the producer is closed.</exception>
     /// <exception cref="ConcurrentModificationException">Another transaction method is running on this

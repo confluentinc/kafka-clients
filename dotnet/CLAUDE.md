@@ -1629,8 +1629,9 @@ once without checking the transaction state, as Java's `KafkaProducer` does; the
 first, as Java's `MockProducer` does. `SendOffsetsToTransaction` passes the core's own `ConsumerGroupMetadata` handle, which the
 object keeps from the consumer that gave it, the mocks' included. Group metadata is the interface
 `IConsumerGroupMetadata`, as Java's class becomes in Kafka 5.0 (KIP-1136), so an implementation of the user's own
-can be passed too: its four values are read once, on the calling thread (a NUL refused with `ArgumentException`), and
-registered with the core for that call through `kafka_consumer_ConsumerGroupMetadata_new` (ffi-marshalling.md §A6).
+can be passed too: its four values are read once, on the calling thread (a null group id or member id refused with
+`ArgumentNullException`, as Java's class refuses it, and a NUL with `ArgumentException`), and registered with the core
+for that call through `kafka_consumer_ConsumerGroupMetadata_new` (ffi-marshalling.md §A6).
 Recorded deviations:
 
 - **Overlapping calls.** A transaction call while the core still runs another one's operation on
@@ -1653,7 +1654,12 @@ Recorded deviations:
   a null `offsets` (`ArgumentNullException`), then the state, on all four classes. Java's
   `KafkaProducer` and `MockProducer` check `groupMetadata` before the closed check (the mock with
   `NullPointerException`), and Java's mock checks a null `offsets` only after its closed and state
-  checks.
+  checks. A group metadata of the user's own is read right after the null `groupMetadata` check, so a
+  null group id or member id (`ArgumentNullException` with the messages of Java's constructor, "group.id
+  can't be null" and "member.id can't be null") or a NUL in one of its strings throws before a null
+  `offsets` and the state, on all four classes. Java's `KafkaProducer` reads the group metadata before
+  its own checks too, but Java's `MockProducer` reads it only after its closed, fencing and transaction
+  checks and its injected exception: here the core makes those in the call that takes the values.
 - **From a delivery callback.** From a sync delivery callback on `KafkaProducer` and
   `AsyncKafkaProducer` each of the five calls ends after `max.block.ms` with Kafka's
   `TimeoutException`, `BeginTransaction` included, where Java's `beginTransaction` returns at

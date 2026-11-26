@@ -26,7 +26,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Which consumer members are sync and which async, the <c>Seek</c> negative-offset precondition,
-/// <see cref="ConsumerGroupMetadata"/> on the real and mock consumers, and the group-id checks.
+/// <see cref="IConsumerGroupMetadata"/> on the real and mock consumers, and the group-id checks.
 /// </summary>
 public sealed class PublicConsumerApiTests
 {

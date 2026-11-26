@@ -33,7 +33,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// Java's <c>equals</c>, <c>hashCode</c> and <c>toString</c> on <see cref="TopicDescription"/>,
 /// <see cref="TopicPartitionInfo"/>, <see cref="PartitionInfo"/>, <see cref="OffsetAndTimestamp"/>,
-/// <see cref="ConsumerGroupMetadata"/>, <see cref="ConsumerRecord{TKey, TValue}"/> and <see cref="KafkaMetric"/>.
+/// <see cref="IConsumerGroupMetadata"/>, <see cref="ConsumerRecord{TKey, TValue}"/> and <see cref="KafkaMetric"/>.
 /// </summary>
 public sealed class PublicValueTypeJavaEqualityTests
 {

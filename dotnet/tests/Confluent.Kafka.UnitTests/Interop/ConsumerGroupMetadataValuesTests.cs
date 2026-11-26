@@ -23,19 +23,19 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// <see cref="ConsumerGroupMetadataValues"/> registers a user's metadata with the core, which reads it back through
-/// its own C getters as the values were read: UTF-8 with an unpaired surrogate as <c>'?'</c>, a <see langword="null"/>
-/// string as Java's empty value and a <see langword="null"/> group instance id as none.
+/// its own C getters as the values were read: UTF-8 with an unpaired surrogate as <c>'?'</c>, and a
+/// <see langword="null"/> group instance id as none. A <see langword="null"/> group id or member id never reaches it: the
+/// producer refuses it, as Java's class does (<c>PublicConsumerGroupMetadataTests</c>).
 /// </summary>
 public sealed class ConsumerGroupMetadataValuesTests
 {
     [Theory]
     [InlineData("grüppe-✓", 7, "member-✓", "instance-✓", "grüppe-✓", "member-✓", "instance-✓")]
     [InlineData("group", 0, "", null, "group", "", null)]
-    [InlineData(null, 1, null, null, "", "", null)]
     public void TheCore_ReadsTheValuesBack(
-        string? groupId,
+        string groupId,
         int generationId,
-        string? memberId,
+        string memberId,
         string? groupInstanceId,
         string expectedGroupId,
         string expectedMemberId,
@@ -43,7 +43,7 @@ public sealed class ConsumerGroupMetadataValuesTests
     {
         Assert.Equal(
             (expectedGroupId, generationId, expectedMemberId, expectedGroupInstanceId),
-            ReadBack(new TestGroupMetadata(groupId!, generationId, memberId!, groupInstanceId)));
+            ReadBack(new TestGroupMetadata(groupId, generationId, memberId, groupInstanceId)));
     }
 
     // Built in code: an attribute argument is stored as UTF-8, which cannot hold an unpaired surrogate.

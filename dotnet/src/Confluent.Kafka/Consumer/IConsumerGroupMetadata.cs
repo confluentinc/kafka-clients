@@ -31,8 +31,10 @@ namespace Confluent.Kafka.Consumer;
 /// </para>
 /// <para>
 /// An implementation of your own can be passed to <c>SendOffsetsToTransaction</c> too. The producer reads each of its
-/// values once, on the calling thread, when the call is made; a string holding a NUL character is refused with
-/// <see cref="System.ArgumentException"/>, as the native client cannot receive it unchanged.
+/// values once, on the calling thread, when the call is made. A <see langword="null"/> <see cref="GroupId()"/> or
+/// <see cref="MemberId()"/> is refused with <see cref="System.ArgumentNullException"/>, as Java's
+/// <c>ConsumerGroupMetadata</c> refuses it ("group.id can't be null", "member.id can't be null"), and a string holding
+/// a NUL character with <see cref="System.ArgumentException"/>, as the native client cannot receive it unchanged.
 /// </para>
 /// </remarks>
 public interface IConsumerGroupMetadata

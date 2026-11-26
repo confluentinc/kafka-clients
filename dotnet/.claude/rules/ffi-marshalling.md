@@ -908,6 +908,9 @@ it returns the failed future (CLAUDE.md §3, as Java's `doSend`). The mocks reth
     operation has completed (its `# Safety`). So the binding reads the four values once, on the
     calling thread, into one native block that `self_` points at (`ConsumerGroupMetadataValues`),
     and the getters only return what it holds: no user code runs there, and nothing can throw.
+    The header takes `NULL` only from the group instance id getter (`Optional.empty()`): a null group
+    id or member id is refused with `ArgumentNullException` before the block is built, as Java's
+    class refuses it.
     The handle is freed after the submit, as the core keeps its own reference; the block, in the
     operation's completion, which the submit roots until it runs, or by the finalizer when no
     submit took it.

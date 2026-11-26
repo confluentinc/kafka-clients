@@ -28,7 +28,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// <see cref="IConsumerGroupMetadata"/> is Java's four getters as an interface, and a producer's
 /// <c>SendOffsetsToTransaction</c> takes an implementation of the user's own: it reads each value once, on the calling
-/// thread, refuses a NUL, and gives the core what it read.
+/// thread, refuses a null group id or member id, as Java's class does, and a NUL, and gives the core what it read.
 /// </summary>
 public sealed class PublicConsumerGroupMetadataTests
 {
@@ -145,6 +145,106 @@ public sealed class PublicConsumerGroupMetadataTests
         Assert.Equal("groupMetadata", e.ParamName);
         Assert.Equal(new ArgumentException(NulMessage, "groupMetadata").Message, e.Message);
         Assert.False(producer.SentOffsets());
+    }
+
+    // Java's ConsumerGroupMetadata refuses a null group id, then a null member id, with these messages.
+    [Theory]
+    [InlineData(null, "member", "group.id can't be null")]
+    [InlineData("group", null, "member.id can't be null")]
+    [InlineData(null, null, "group.id can't be null")]
+    public void SendOffsetsToTransaction_RefusesANullGroupIdOrMemberIdOfAUserImplementation(
+        string? groupId, string? memberId, string message)
+    {
+        MockProducer<byte[], byte[]> producer = TransactionalMockProducer();
+        using IDisposable disposal = TestTimeout.Disposal(producer);
+
+        ArgumentNullException e = Assert.Throws<ArgumentNullException>(
+            () => producer.SendOffsetsToTransaction(s_offsets, new TestGroupMetadata(groupId!, 1, memberId!, "instance")));
+
+        Assert.Equal("groupMetadata", e.ParamName);
+        Assert.Equal(new ArgumentNullException("groupMetadata", message).Message, e.Message);
+        Assert.False(producer.SentOffsets());
+    }
+
+    [Fact]
+    public async Task AsyncSendOffsetsToTransaction_RefusesANullMemberIdOfAUserImplementation_AtTheCall()
+    {
+        AsyncMockProducer<byte[], byte[]> producer = await TransactionalAsyncMockProducer();
+        try
+        {
+            ArgumentNullException e = Assert.Throws<ArgumentNullException>(
+                () => { _ = producer.SendOffsetsToTransaction(s_offsets, new TestGroupMetadata("group", 1, null!, null)); });
+
+            Assert.Equal("groupMetadata", e.ParamName);
+            Assert.Equal(new ArgumentNullException("groupMetadata", "member.id can't be null").Message, e.Message);
+            Assert.False(producer.SentOffsets());
+        }
+        finally
+        {
+            await TestTimeout.DisposeAsync(producer);
+        }
+    }
+
+    // A null group instance id is Java's Optional.empty(), which the producer passes on.
+    [Fact]
+    public void MockProducer_CommitsTheOffsetsOfAUserImplementation_WithNoGroupInstanceId()
+    {
+        MockProducer<byte[], byte[]> producer = TransactionalMockProducer();
+        using IDisposable disposal = TestTimeout.Disposal(producer);
+
+        producer.SendOffsetsToTransaction(s_offsets, new TestGroupMetadata("user-group", 3, "member-1", null));
+        producer.CommitTransaction();
+
+        AssertCommitted(producer.ConsumerGroupOffsetsHistory());
+    }
+
+    // The real producers read a user's values before the core checks the transaction state, as Java's KafkaProducer
+    // reads the group metadata first: here no transaction was initialized.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task KafkaProducers_RefuseANullGroupIdOfAUserImplementation_BeforeTheTransactionChecks(bool asynchronous)
+    {
+        Dictionary<string, object?> configs = new Dictionary<string, object?>
+        {
+            ["bootstrap.servers"] = "localhost:1",
+            ["transactional.id"] = "txn-user-group-metadata",
+            ["max.block.ms"] = 1000,
+        };
+        TestGroupMetadata metadata = new TestGroupMetadata(null!, 1, "member", null);
+        TimeSpan deadline = TimeSpan.FromSeconds(30);
+        if (!asynchronous)
+        {
+            KafkaProducer<byte[], byte[]> producer = KafkaProducer<byte[], byte[]>.Create(
+                configs, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
+            try
+            {
+                ArgumentNullException e = Assert.Throws<ArgumentNullException>(
+                    () => producer.SendOffsetsToTransaction(s_offsets, metadata));
+                Assert.Equal(new ArgumentNullException("groupMetadata", "group.id can't be null").Message, e.Message);
+            }
+            finally
+            {
+                TestTimeout.Run(() => producer.Close(TimeSpan.Zero), deadline);
+                TestTimeout.Run(producer.Dispose, deadline);
+            }
+
+            return;
+        }
+
+        AsyncKafkaProducer<byte[], byte[]> asyncProducer = await AsyncKafkaProducer<byte[], byte[]>.Create(
+            configs, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
+        try
+        {
+            ArgumentNullException e = Assert.Throws<ArgumentNullException>(
+                () => { _ = asyncProducer.SendOffsetsToTransaction(s_offsets, metadata); });
+            Assert.Equal(new ArgumentNullException("groupMetadata", "group.id can't be null").Message, e.Message);
+        }
+        finally
+        {
+            await TestTimeout.Run(() => asyncProducer.Close(TimeSpan.Zero), deadline);
+            await TestTimeout.Run(() => asyncProducer.DisposeAsync().AsTask(), deadline);
+        }
     }
 
     private static MockProducer<byte[], byte[]> TransactionalMockProducer()

@@ -35,16 +35,23 @@ internal sealed class ConsumerGroupMetadataValues : SafeHandleZeroIsInvalid
     private static readonly NativeMethods.ConsumerGroupMetadataStringGetter s_memberId = MemberId;
     private static readonly NativeMethods.ConsumerGroupMetadataStringGetter s_groupInstanceId = GroupInstanceId;
 
+    // Java's ConsumerGroupMetadata constructor refuses a null group id and member id with these messages; the C ABI
+    // takes NULL only for the group instance id, as Java's Optional.empty().
+    private const string NullGroupIdMessage = "group.id can't be null";
+    private const string NullMemberIdMessage = "member.id can't be null";
+
     private ConsumerGroupMetadataValues()
     {
     }
 
     /// <summary>
     /// Reads the four values of <paramref name="metadata"/> on the calling thread and copies them to native memory, a
-    /// <see langword="null"/> string as <c>NULL</c>, which the core reads as Java's empty value.
+    /// <see langword="null"/> group instance id as <c>NULL</c>, Java's <c>Optional.empty()</c>.
     /// </summary>
     /// <param name="metadata">The user's group metadata.</param>
     /// <returns>The owned copy.</returns>
+    /// <exception cref="ArgumentNullException">The group id or the member id is <see langword="null"/>, which Java's
+    /// <c>ConsumerGroupMetadata</c> refuses.</exception>
     /// <exception cref="ArgumentException">A value contains a NUL character.</exception>
     internal static ConsumerGroupMetadataValues Of(IConsumerGroupMetadata metadata)
     {
@@ -52,6 +59,16 @@ internal sealed class ConsumerGroupMetadataValues : SafeHandleZeroIsInvalid
         int generationId = metadata.GenerationId();
         string? memberId = metadata.MemberId();
         string? groupInstanceId = metadata.GroupInstanceId();
+        if (groupId is null)
+        {
+            throw new ArgumentNullException("groupMetadata", NullGroupIdMessage);
+        }
+
+        if (memberId is null)
+        {
+            throw new ArgumentNullException("groupMetadata", NullMemberIdMessage);
+        }
+
         NativeStrings.Validate(groupId, NativeStrings.InvalidGroupMetadataMessage, "groupMetadata");
         NativeStrings.Validate(memberId, NativeStrings.InvalidGroupMetadataMessage, "groupMetadata");
         NativeStrings.Validate(groupInstanceId, NativeStrings.InvalidGroupMetadataMessage, "groupMetadata");
