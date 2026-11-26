@@ -44,6 +44,8 @@
 //! fixed rate (`below rate`), or missed it after its consumer load did
 //! (`load short`). A client below its rate still passed: its Δ are colored
 //! like any other, and its Status tells the reader it missed its rate. A
+//! client whose first attempt failed shows its second's results, its Status
+//! ending in `(retried)`; its JUnit case gives the first failure. A
 //! latency percentile in the harnesses' top histogram bucket, which holds
 //! every longer latency too, is shown as at least that bucket (`≥ 10,001.00`).
 //!
@@ -689,11 +691,15 @@ fn results_table(out: &mut String, info: &RunInfo, columns: &[Column], result: &
         .collect();
     let _ = writeln!(out, "| Metric | {} |", headers.join(" | "));
     let _ = writeln!(out, "|---|{}", "---:|".repeat(columns.len()));
-    let statuses: Vec<&str> = columns
+    // A client that ran a second time after a failure says so.
+    let statuses: Vec<String> = columns
         .iter()
         .map(|c| match c {
-            Column::Client(arm) => status(*arm, result, live),
-            Column::Delta(_) => "",
+            Column::Client(arm) => match find(&result.arms, *arm).filter(|a| a.first_failure.is_some()) {
+                Some(_) => format!("{} (retried)", status(*arm, result, live)),
+                None => status(*arm, result, live).to_string(),
+            },
+            Column::Delta(_) => String::new(),
         })
         .collect();
     let _ = writeln!(out, "| Status | {} |", statuses.join(" | "));
@@ -832,7 +838,7 @@ pub(crate) fn junit(results: &[TestResult]) -> String {
                 a.elapsed.as_secs_f64()
             );
             let percentile = |v: f64| format!("{}{v:.2}", at_least(v, t.test.workload, "≥"));
-            let summary = a.metrics.as_ref().map(|m| {
+            let mut summary = a.metrics.as_ref().map(|m| {
                 let mut s = format!(
                     "client={} messages={:.0} msg/s={:.0} MiB/s={:.2} p50={}ms p99={}ms p99.9={}ms max={:.2}ms \
                      cpu={:.1}% rss={:.1}MiB",
@@ -860,6 +866,13 @@ pub(crate) fn junit(results: &[TestResult]) -> String {
                 }
                 s
             });
+            if let Some(first) = &a.first_failure {
+                let retried = format!("second attempt; the first failed: {first}");
+                summary = Some(match summary {
+                    Some(s) => format!("{retried}\n{s}"),
+                    None => retried,
+                });
+            }
             match (&a.outcome, summary) {
                 (Outcome::Passed, None) => out.push_str("/>\n"),
                 (outcome, summary) => {
@@ -963,7 +976,14 @@ mod tests {
     }
 
     fn arm(arm: Arm, outcome: Outcome, metrics: Option<Metrics>) -> ArmResult {
-        ArmResult { arm, outcome, metrics, load_msg_s: None, elapsed: Duration::from_secs(90) }
+        ArmResult {
+            arm,
+            outcome,
+            metrics,
+            load_msg_s: None,
+            elapsed: Duration::from_secs(90),
+            first_failure: None,
+        }
     }
 
     /// The report of a run of `results`' tests.
@@ -1931,6 +1951,45 @@ mod tests {
         assert_eq!(
             junit(&[]).lines().nth(1),
             Some("<testsuites name=\"perf-cloud\" tests=\"0\" failures=\"0\" errors=\"0\" time=\"0.0\">")
+        );
+    }
+
+    #[test]
+    fn a_retried_client_says_so() {
+        let retried = |a: ArmResult| ArmResult { first_failure: Some("harness exited with 1".to_string()), ..a };
+        let results = vec![TestResult {
+            test: test("t rust PARTITIONS=1 VALUE_SIZE=1024 LIMIT_RPS=0"),
+            arms: vec![
+                retried(arm(Arm::Rust, Outcome::Passed, Some(metrics("rust", 1_000.0, 9.0)))),
+                arm(Arm::Librdkafka, Outcome::Passed, Some(metrics("librdkafka", 1_000.0, 9.0))),
+                retried(arm(Arm::Java, Outcome::Failed("harness exited with 2".to_string()), None)),
+            ],
+        }];
+        let all = [Arm::Rust, Arm::Librdkafka, Arm::Java];
+        let md = render(Group::Rust, &all, None, &results);
+        // Its second attempt's numbers are compared like any other's.
+        assert_eq!(
+            line_starting(&md, "| Status |"),
+            "| Status | passed (retried) | passed | failed (retried) |  |  |"
+        );
+        assert_eq!(
+            line_starting(&md, "| Throughput (msg/s) |"),
+            "| Throughput (msg/s) | 1,000 | 1,000 | – | 0.0% | n/a |"
+        );
+        assert_rectangular(&md);
+        let xml = junit(&results);
+        assert!(
+            xml.contains(
+                "<system-out>second attempt; the first failed: harness exited with 1\nclient=rust messages=60000"
+            ),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(
+                "<failure message=\"harness exited with 2\">harness exited with 2</failure>\n      \
+                 <system-out>second attempt; the first failed: harness exited with 1</system-out>"
+            ),
+            "{xml}"
         );
     }
 }

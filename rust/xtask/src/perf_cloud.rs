@@ -48,9 +48,11 @@
 //!   its time estimate, failing above `--budget-min`. It needs no cluster, so
 //!   a caller can run it before provisioning one: a typo or an over-long list
 //!   then costs seconds, not a provisioning cycle.
-//! - `build` builds the group's harnesses once.
+//! - `build` builds the group's harnesses once, retrying the steps that
+//!   download (crates, NuGet and PyPI packages, Gradle's dependencies).
 //! - `run` creates each arm's topics, runs the arm, collects its
-//!   `results.json` and deletes the topics, then writes `report.md` (per
+//!   `results.json` and deletes the topics (an arm that fails runs once
+//!   more, on topics of its own, before the run goes on), then writes `report.md` (per
 //!   test, a column per client and a row per metric, with each client's
 //!   change against its librdkafka baseline) and `junit.xml`. With
 //!   `--push-artifacts` they also go to Semaphore: the job's artifacts, and
@@ -147,6 +149,14 @@ const BROKERS_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// cluster accepts it.
 const TOPIC_CREATE_ATTEMPTS: u32 = 8;
 const TOPIC_CREATE_RETRY_DELAY: Duration = Duration::from_secs(30);
+/// The times an arm runs at most: a failed one runs once more, as a failure
+/// is more often a passing fault (the network, the cluster, the instance)
+/// than the client's.
+const ARM_ATTEMPTS: u32 = 2;
+/// The times a `build` step that downloads runs at most, the wait before a
+/// retry growing by [`FETCH_RETRY_DELAY`] each time.
+const FETCH_ATTEMPTS: u32 = 3;
+const FETCH_RETRY_DELAY: Duration = Duration::from_secs(if cfg!(test) { 0 } else { 30 });
 
 /// The rate at which an `eos` test's harness is assumed to fill its source
 /// topic (Kafka's `kafka-producer-perf-test.sh`, one Java producer), in MB/s:
@@ -755,6 +765,24 @@ const DOTNET_LIBRDKAFKA_HARNESS: &str = "PerfV2";
 /// The one framework the .NET harnesses are published for: the newest
 /// supported runtime, and the runner installs a single SDK.
 const DOTNET_FRAMEWORK: &str = "net10.0";
+
+/// The cargo profile of the C library a Release build of the .NET binding
+/// links, `Confluent.Kafka.csproj` reading it from `rust/target/<profile>/`:
+/// the library as the package ships it (rust/Makefile's `build-cdylib`).
+const DOTNET_CARGO_PROFILE: &str = "release-cdylib";
+
+/// The cargo features of the library the packages ship: the one-word
+/// `CDYLIB_FEATURES` line of rust/Makefile, which `build-cdylib` builds.
+fn cdylib_features(makefile: &str) -> anyhow::Result<&str> {
+    makefile
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once('=')?;
+            (name.trim() == "CDYLIB_FEATURES").then_some(value.trim())
+        })
+        .filter(|value| !value.is_empty() && !value.contains(char::is_whitespace))
+        .context("rust/Makefile has no one-word CDYLIB_FEATURES line")
+}
 
 fn dotnet() -> String {
     std::env::var("DOTNET").unwrap_or_else(|_| "dotnet".to_string())
@@ -1814,9 +1842,10 @@ fn minutes(flags: &BTreeMap<String, String>, flag: &str, min: u64, max: u64) -> 
     Ok(Some(value))
 }
 
-/// Topic names are `<prefix>-<test>-<arm>`, and `<that>-source` for an
-/// `eos` test's source topic; Kafka allows `[A-Za-z0-9._-]`, at most 249
-/// characters, and all but the prefix add at most ~92.
+/// Topic names are `<prefix>-<test>-<arm>`, `-attempt-<n>` after it from an
+/// arm's second attempt, and `<that>-source` for an `eos` test's source
+/// topic; Kafka allows `[A-Za-z0-9._-]`, at most 249 characters, and all but
+/// the prefix add at most ~102.
 fn validate_topic_prefix(prefix: &str) -> anyhow::Result<()> {
     let valid = !prefix.is_empty()
         && prefix.len() <= 100
@@ -1829,8 +1858,14 @@ fn validate_topic_prefix(prefix: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn topic_name(prefix: &str, test: &PerfTest, arm: Arm) -> String {
-    format!("{prefix}-{}-{}", test.id, arm.id())
+/// The topic of `arm`'s `attempt` (from 1) at `test`: a retry gets topics,
+/// and so consumer groups and transactional ids, of its own, whatever the
+/// failed attempt left behind.
+fn topic_name(prefix: &str, test: &PerfTest, arm: Arm, attempt: u32) -> String {
+    match attempt {
+        1 => format!("{prefix}-{}-{}", test.id, arm.id()),
+        n => format!("{prefix}-{}-{}-attempt-{n}", test.id, arm.id()),
+    }
 }
 
 /// The topic an `eos` arm consumes from (see [`topic_name`]).
@@ -1952,6 +1987,9 @@ fn check(options: &RunOptions) -> anyhow::Result<()> {
 fn build(group: Group) -> anyhow::Result<()> {
     let repo = repo_root();
     let rust = repo.join("rust");
+    // The crates of every group's cargo builds, downloaded first and retried:
+    // the builds below then find them in cargo's cache.
+    fetch_step("Rust crates", Command::new(cargo()).arg("fetch").current_dir(&rust))?;
     match group {
         Group::Rust => {
             // The C harness links the Rust client's C library statically and
@@ -2037,7 +2075,8 @@ fn build(group: Group) -> anyhow::Result<()> {
                     .current_dir(&rust),
             )?;
             let gradle = std::env::var("GRADLE").unwrap_or_else(|_| "gradle".to_string());
-            step(
+            // Gradle downloads the dependencies as it builds.
+            fetch_step(
                 "Java (transactional) producer harnesses",
                 Command::new(gradle)
                     .args(["shadowJar", "--console=plain"])
@@ -2068,11 +2107,12 @@ fn build(group: Group) -> anyhow::Result<()> {
                 "Python venv (Rust-backed client)",
                 Command::new(&python).arg("-m").arg("venv").arg(repo.join("venv")),
             )?;
-            step(
+            // Every pip install downloads from PyPI.
+            fetch_step(
                 "pip upgrade",
                 Command::new(&venv).args(["-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]),
             )?;
-            step(
+            fetch_step(
                 "Rust-backed Python client",
                 Command::new(&venv)
                     .args(["-m", "pip", "install", "-e", "."])
@@ -2081,7 +2121,7 @@ fn build(group: Group) -> anyhow::Result<()> {
                     .current_dir(repo.join("python")),
             )?;
             // pytest: the performance package's conftest imports it.
-            step(
+            fetch_step(
                 "harness dependencies",
                 Command::new(&venv).args(["-m", "pip", "install", "psutil", "pytest"]),
             )?;
@@ -2090,11 +2130,11 @@ fn build(group: Group) -> anyhow::Result<()> {
                 "Python venv (librdkafka-backed client)",
                 Command::new(&python).arg("-m").arg("venv").arg(repo.join("venv-librdkafka")),
             )?;
-            step(
+            fetch_step(
                 "pip upgrade",
                 Command::new(&librdkafka).args(["-m", "pip", "install", "--upgrade", "pip"]),
             )?;
-            step(
+            fetch_step(
                 "librdkafka-backed Python client",
                 Command::new(&librdkafka)
                     .args(["-m", "pip", "install", "-r"])
@@ -2109,19 +2149,45 @@ fn build(group: Group) -> anyhow::Result<()> {
                     dotnet()
                 );
             }
-            // The binding loads it; its publish copies it next to PerfV3.dll.
+            // The library as the package ships it, in the folder a Release
+            // build of the binding reads it from; the publish copies it next
+            // to PerfV3.dll.
+            let makefile_path = rust.join("Makefile");
+            let makefile =
+                fs::read_to_string(&makefile_path).with_context(|| format!("reading {}", makefile_path.display()))?;
             step(
                 "Rust client C library (FFI)",
                 Command::new(cargo())
-                    .args(["build", "--features", "ffi", "--release"])
+                    .args([
+                        "build",
+                        "--profile",
+                        DOTNET_CARGO_PROFILE,
+                        "--no-default-features",
+                        "--features",
+                    ])
+                    .arg(cdylib_features(&makefile)?)
                     .current_dir(&rust),
             )?;
             for harness in [DOTNET_RUST_HARNESS, DOTNET_LIBRDKAFKA_HARNESS] {
                 let project = dotnet_perf_dir(repo).join(harness).join(format!("{harness}.csproj"));
+                // The NuGet packages, retried, apart from the build, so a
+                // build error is not.
+                fetch_step(
+                    &format!(".NET {harness} harness: restore"),
+                    Command::new(dotnet()).args(["restore", "--nologo"]).arg(&project),
+                )?;
                 step(
                     &format!(".NET {harness} harness"),
                     Command::new(dotnet())
-                        .args(["publish", "-c", "Release", "-f", DOTNET_FRAMEWORK, "--nologo"])
+                        .args([
+                            "publish",
+                            "-c",
+                            "Release",
+                            "-f",
+                            DOTNET_FRAMEWORK,
+                            "--nologo",
+                            "--no-restore",
+                        ])
                         .arg(&project)
                         .arg("-o")
                         .arg(dotnet_publish_dir(repo, harness)),
@@ -2258,6 +2324,28 @@ fn step(what: &str, command: &mut Command) -> anyhow::Result<()> {
         bail!("{what} failed ({status})");
     }
     Ok(())
+}
+
+/// [`step`] for a step that downloads: after a failure it runs again, up to
+/// [`FETCH_ATTEMPTS`] times in all, as a registry's or a mirror's fault
+/// rarely lasts.
+fn fetch_step(what: &str, command: &mut Command) -> anyhow::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match step(what, command) {
+            Err(e) if attempt < FETCH_ATTEMPTS => {
+                let wait = FETCH_RETRY_DELAY * attempt;
+                println!(
+                    "WARNING: {e:#}; retrying in {} s (attempt {}/{FETCH_ATTEMPTS})",
+                    wait.as_secs(),
+                    attempt + 1
+                );
+                std::thread::sleep(wait);
+                attempt += 1;
+            },
+            result => return result,
+        }
+    }
 }
 
 fn describe(command: &Command) -> String {
@@ -2422,6 +2510,9 @@ pub(crate) struct ArmResult {
     /// reached (msg/s), when its output gave one.
     pub(crate) load_msg_s: Option<f64>,
     pub(crate) elapsed: Duration,
+    /// Why the arm's first attempt failed, when this result is its second
+    /// (see [`run_attempts`]).
+    pub(crate) first_failure: Option<String>,
 }
 
 pub(crate) struct TestResult {
@@ -2532,25 +2623,37 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
                 interrupted = true;
                 break;
             }
-            let topic = topic_name(&options.topic_prefix, test, arm);
-            let ctx = ArmContext {
-                repo,
-                options,
-                test,
-                arm,
-                dir: results_dir.join(&test.id).join(arm.id()),
-                source_topic: test.is_eos().then(|| source_topic_name(&topic)),
-                topic,
-                topics_cli: &topics_cli,
-                kafka_bin: &kafka_bin,
-                client_properties: &client_properties,
-                credentials: &credentials,
-                redactions: Arc::clone(&redactions),
-                signals_baseline,
-            };
-            live.update(|p| p.begin_arm(RunningArm::new(test, arm, &ctx.dir)));
-            live.publish_now();
-            let result = match run_arm(&ctx) {
+            let dir = results_dir.join(&test.id).join(arm.id());
+            let what = format!("{} / {}", test.id, arm.label());
+            let interrupted_now = || crate::signals::count() > signals_baseline;
+            let result = run_attempts(&what, interrupted_now, |attempt| {
+                if attempt > 1 {
+                    // The failed attempt's files stay, beside the next one's.
+                    let kept = dir.with_file_name(format!("{}-attempt-{}", arm.id(), attempt - 1));
+                    fs::rename(&dir, &kept)
+                        .with_context(|| format!("renaming {} to {}", dir.display(), kept.display()))?;
+                }
+                let topic = topic_name(&options.topic_prefix, test, arm, attempt);
+                let ctx = ArmContext {
+                    repo,
+                    options,
+                    test,
+                    arm,
+                    dir: dir.clone(),
+                    source_topic: test.is_eos().then(|| source_topic_name(&topic)),
+                    topic,
+                    topics_cli: &topics_cli,
+                    kafka_bin: &kafka_bin,
+                    client_properties: &client_properties,
+                    credentials: &credentials,
+                    redactions: Arc::clone(&redactions),
+                    signals_baseline,
+                };
+                live.update(|p| p.begin_arm(RunningArm::new(test, arm, &ctx.dir)));
+                live.publish_now();
+                run_arm(&ctx)
+            });
+            let result = match result {
                 Ok(result) => result,
                 Err(e) => {
                     // Not to leave the report so far waiting for a test that
@@ -2592,6 +2695,34 @@ fn run_tests(options: &RunOptions) -> anyhow::Result<()> {
     println!("\nReport: {}", results_dir.join("report.md").display());
     // Also a signal after the last arm, e.g. while the report was pushed.
     verdict(&results, crate::signals::count() > signals_baseline)
+}
+
+/// Run an arm's attempts, `attempt(n)` running the `n`th (from 1): after a
+/// failed one the next runs, up to [`ARM_ATTEMPTS`], unless `interrupted`
+/// (a signal: the run stops instead). The last attempt's result is the
+/// arm's, with the first one's failure when there were two. An error (local
+/// I/O) ends the attempts.
+fn run_attempts(
+    what: &str,
+    interrupted: impl Fn() -> bool,
+    mut attempt: impl FnMut(u32) -> anyhow::Result<ArmResult>,
+) -> anyhow::Result<ArmResult> {
+    let mut n = 1;
+    let mut first_failure = None;
+    loop {
+        let mut result = attempt(n)?;
+        match &result.outcome {
+            Outcome::Failed(reason) if n < ARM_ATTEMPTS && !interrupted() => {
+                println!("==> {what}: failed; running it again (attempt {}/{ARM_ATTEMPTS})", n + 1);
+                first_failure.get_or_insert_with(|| reason.clone());
+                n += 1;
+            },
+            _ => {
+                result.first_failure = first_failure;
+                return Ok(result);
+            },
+        }
+    }
 }
 
 /// How the run ended: interrupted when a signal arrived during it, whatever
@@ -3095,7 +3226,14 @@ fn run_arm(ctx: &ArmContext<'_>) -> anyhow::Result<ArmResult> {
         Outcome::Passed => log.line(&format!("==> {} / {}: passed", ctx.test.id, ctx.arm.label())),
         Outcome::Failed(reason) => log.line(&format!("==> {} / {}: FAILED: {reason}", ctx.test.id, ctx.arm.label())),
     }
-    Ok(ArmResult { arm: ctx.arm, outcome, metrics, load_msg_s, elapsed: started.elapsed() })
+    Ok(ArmResult {
+        arm: ctx.arm,
+        outcome,
+        metrics,
+        load_msg_s,
+        elapsed: started.elapsed(),
+        first_failure: None,
+    })
 }
 
 /// The arm's harness command: its directory, consumer options and the
@@ -5417,8 +5555,13 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             .unwrap()
             .remove(0);
         assert_eq!(
-            topic_name("perf-abc", &test, Arm::PythonAsyncLibrdkafka),
+            topic_name("perf-abc", &test, Arm::PythonAsyncLibrdkafka, 1),
             "perf-abc-producer-fixed-python-async-librdkafka"
+        );
+        // A retry has topics of its own.
+        assert_eq!(
+            topic_name("perf-abc", &test, Arm::PythonAsyncLibrdkafka, 2),
+            "perf-abc-producer-fixed-python-async-librdkafka-attempt-2"
         );
         assert_eq!(source_topic_name("perf-abc-eos-x-rust"), "perf-abc-eos-x-rust-source");
         validate_topic_prefix("perf-0d0c9b9e-1f7a-4d0b-9c39-ff4b6a0f1d2e").unwrap();
@@ -5426,7 +5569,7 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         assert!(validate_topic_prefix("").is_err());
         // The longest name stays well inside Kafka's 249 characters.
         let longest = source_topic_name(&format!(
-            "{}-{}-{}",
+            "{}-{}-{}-attempt-{ARM_ATTEMPTS}",
             "p".repeat(100),
             "t".repeat(MAX_TEST_ID_LEN),
             Arm::PythonAsyncLibrdkafka.id()
@@ -5438,6 +5581,87 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
     }
 
     #[test]
+    fn a_failed_arm_runs_once_more() {
+        let result = |outcome: Outcome| ArmResult {
+            arm: Arm::Rust,
+            outcome,
+            metrics: None,
+            load_msg_s: None,
+            elapsed: Duration::ZERO,
+            first_failure: None,
+        };
+        let failed = |n: u32| Outcome::Failed(format!("failure {n}"));
+        // `outcomes[n - 1]` for attempt n, the attempts made.
+        let run = |outcomes: Vec<Outcome>, interrupted: bool| {
+            let mut made = Vec::new();
+            let r = run_attempts(
+                "t / Rust",
+                || interrupted,
+                |n| {
+                    made.push(n);
+                    Ok(result(outcomes[n as usize - 1].clone()))
+                },
+            )
+            .unwrap();
+            (r.outcome, r.first_failure, made)
+        };
+        // Passed: once.
+        assert_eq!(run(vec![Outcome::Passed], false), (Outcome::Passed, None, vec![1]));
+        // Failed, then passed: the second attempt's result, with the first's
+        // failure.
+        assert_eq!(
+            run(vec![failed(1), Outcome::Passed], false),
+            (Outcome::Passed, Some("failure 1".to_string()), vec![1, 2])
+        );
+        // Failed twice: no third attempt.
+        assert_eq!(
+            run(vec![failed(1), failed(2)], false),
+            (failed(2), Some("failure 1".to_string()), vec![1, 2])
+        );
+        // A signal stops the run, not to be retried.
+        assert_eq!(run(vec![failed(1)], true), (failed(1), None, vec![1]));
+        // An error ends the attempts.
+        let mut made = 0;
+        let err = run_attempts(
+            "t / Rust",
+            || false,
+            |_| {
+                made += 1;
+                anyhow::bail!("disk full")
+            },
+        );
+        assert_eq!(err.err().map(|e| e.to_string()), Some("disk full".to_string()));
+        assert_eq!(made, 1);
+    }
+
+    #[test]
+    fn a_step_that_downloads_is_retried() {
+        let dir = std::env::temp_dir().join(format!("perf-cloud-fetch-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let count = dir.join("count");
+        // Fails until its `n`th run, counting the runs in `count`.
+        let command = |n: u32| {
+            let _ = fs::remove_file(&count);
+            let mut c = Command::new("sh");
+            c.arg("-c")
+                .arg("c=$(cat \"$1\" 2>/dev/null || echo 0); c=$((c + 1)); echo $c > \"$1\"; [ $c -ge \"$2\" ]")
+                .arg("sh")
+                .arg(&count)
+                .arg(n.to_string());
+            c
+        };
+        let runs = || fs::read_to_string(&count).unwrap().trim().parse::<u32>().unwrap();
+        fetch_step("works at once", &mut command(1)).unwrap();
+        assert_eq!(runs(), 1);
+        fetch_step("works the third time", &mut command(FETCH_ATTEMPTS)).unwrap();
+        assert_eq!(runs(), FETCH_ATTEMPTS);
+        let err = fetch_step("never works", &mut command(FETCH_ATTEMPTS + 1)).unwrap_err();
+        assert!(err.to_string().starts_with("never works failed"), "{err}");
+        assert_eq!(runs(), FETCH_ATTEMPTS);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_signal_fails_the_run_whatever_its_arms_recorded() {
         let test = parse_tests("t rust PARTITIONS=1 VALUE_SIZE=1 LIMIT_RPS=0").unwrap().remove(0);
         let arm = |outcome: Outcome| ArmResult {
@@ -5446,6 +5670,7 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
             metrics: None,
             load_msg_s: None,
             elapsed: Duration::ZERO,
+            first_failure: None,
         };
         let passed = [TestResult { test: test.clone(), arms: vec![arm(Outcome::Passed)] }];
         verdict(&passed, false).unwrap();
@@ -5557,6 +5782,41 @@ producer-max    rust         PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=0 ENABLE_ID
         assert!(!is_dotnet_build_output(&dir.join("bin")));
         assert!(!is_dotnet_build_output(&project));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reads_the_cdylib_features() {
+        assert_eq!(
+            cdylib_features("A = b\nCDYLIB_FEATURES = ffi,lz4\nbuild-cdylib:\n").unwrap(),
+            "ffi,lz4"
+        );
+        for makefile in [
+            "",
+            "CDYLIB_FEATURES_X = ffi\n",
+            "CDYLIB_FEATURES =\n",
+            "CDYLIB_FEATURES = ffi lz4\n",
+        ] {
+            assert!(cdylib_features(makefile).is_err(), "{makefile:?}");
+        }
+        let makefile = fs::read_to_string(repo_root().join("rust/Makefile")).unwrap();
+        assert!(cdylib_features(&makefile).unwrap().split(',').any(|f| f == "ffi"));
+    }
+
+    /// `build` writes the C library where a Release build of the .NET
+    /// binding reads it.
+    #[test]
+    fn the_dotnet_build_puts_the_library_where_the_binding_reads_it() {
+        let csproj = fs::read_to_string(repo_root().join("dotnet/src/Confluent.Kafka/Confluent.Kafka.csproj")).unwrap();
+        let release = csproj
+            .lines()
+            .find(|line| line.contains("<CargoProfileDir") && line.contains("== 'Release'"))
+            .expect("Confluent.Kafka.csproj sets CargoProfileDir for Release");
+        assert!(
+            release.contains(&format!(">{DOTNET_CARGO_PROFILE}</CargoProfileDir>")),
+            "{release}"
+        );
+        let cargo_toml = fs::read_to_string(repo_root().join("rust/Cargo.toml")).unwrap();
+        assert!(cargo_toml.contains(&format!("[profile.{DOTNET_CARGO_PROFILE}]")));
     }
 
     #[test]
