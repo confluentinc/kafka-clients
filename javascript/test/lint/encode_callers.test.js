@@ -31,9 +31,10 @@ const base = {
   'src/internal/config.ts': USE('./encode'),
   'src/common/header/headers.ts': USE('../../internal/encode'),
   'src/common/serialization/string_serializer.ts': USE('../../internal/encode'),
+  'src/admin/user_scram_credential_upsertion.ts': USE('../internal/encode'),
 };
 
-test('the string serializer, the headers code and the config code pass', () => {
+test("the string serializer, the headers code, the config code and a SCRAM upsertion's string password pass", () => {
   const r = lint(project(base), [RULE]);
   assert.equal(r.status, 0, r.text);
 });
@@ -50,8 +51,8 @@ test('another module, under any name, is a finding: the record encodes no string
   );
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), [
-    'src/producer/kafka_producer.ts:2: uses encodeLikeJava: only the string serializer, the headers code and the config code turn strings into bytes',
-    'src/producer/kafka_producer.ts:3: uses encodeLikeJava: only the string serializer, the headers code and the config code turn strings into bytes',
-    'src/producer/producer_record.ts:2: uses encodeLikeJava: only the string serializer, the headers code and the config code turn strings into bytes',
+    'src/producer/kafka_producer.ts:2: uses encodeLikeJava: only the string serializer, the headers code, the config code and a SCRAM upsertion password turn strings into bytes',
+    'src/producer/kafka_producer.ts:3: uses encodeLikeJava: only the string serializer, the headers code, the config code and a SCRAM upsertion password turn strings into bytes',
+    'src/producer/producer_record.ts:2: uses encodeLikeJava: only the string serializer, the headers code, the config code and a SCRAM upsertion password turn strings into bytes',
   ]);
 });

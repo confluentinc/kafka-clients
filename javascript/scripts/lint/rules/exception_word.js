@@ -53,6 +53,33 @@ function isPropertyName(ts, node) {
 }
 
 /**
+ * Whether `node` names the method `exception()` declared by the class
+ * `FilterResult`, Java's DeleteAclsResult.FilterResult#exception().
+ */
+function isFilterResultGetter(ts, node) {
+  const parent = node.parent;
+  if (parent === undefined || !ts.isMethodDeclaration(parent) || parent.name !== node) return false;
+  const cls = parent.parent;
+  return cls !== undefined && ts.isClassDeclaration(cls) && cls.name !== undefined && cls.name.text === 'FilterResult';
+}
+
+/**
+ * Whether `node` names the parameter of a constructor signature of the class
+ * `TopicMetadataAndConfig`: the bare value of Java's
+ * CreateTopicsResult.TopicMetadataAndConfig(ApiException exception) form,
+ * named as Java names it (javascript/CLAUDE.md, JavaScript Binding
+ * Conventions, Signatures).
+ */
+function isTopicMetadataAndConfigParameter(ts, node) {
+  const parent = node.parent;
+  if (parent === undefined || !ts.isParameter(parent) || parent.name !== node) return false;
+  const ctor = parent.parent;
+  if (ctor === undefined || !ts.isConstructorDeclaration(ctor)) return false;
+  const cls = ctor.parent;
+  return cls !== undefined && ts.isClassDeclaration(cls) && cls.name !== undefined && cls.name.text === 'TopicMetadataAndConfig';
+}
+
+/**
  * The TypeScript names kept from Java: why, and in which positions (`where`,
  * absent for every position).
  */
@@ -127,10 +154,12 @@ const JAVA_NAMES = new Map([
     'exception',
     {
       reason:
-        "the parameter of Java's Callback#onCompletion, a named parameter of the send callback's one object " +
+        "the parameter of Java's Callback#onCompletion, a named parameter of the send callback's one object, and of " +
+        "Java's CreateTopicsResult.TopicMetadataAndConfig constructor, a key of its options object " +
         '(javascript/CLAUDE.md "Java shape, JS idiom": parameters are named as Java names them, as the Python client\'s are), ' +
-        'as a property name only',
-      where: isPropertyName,
+        "as a property name, and that constructor's bare value, as the name of its parameter; and Java's getter " +
+        'DeleteAclsResult.FilterResult#exception(), as the name of that method',
+      where: (ts, node) => isPropertyName(ts, node) || isTopicMetadataAndConfigParameter(ts, node) || isFilterResultGetter(ts, node),
     },
   ],
 ]);

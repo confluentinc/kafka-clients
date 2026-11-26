@@ -16,7 +16,7 @@ limitations under the License.
 
 # Verifiable clients, chaos and soak
 
-The JavaScript binding has a producer only, so the tools here are the
+The JavaScript binding has no consumer yet, so the tools here are the
 producer's: the verifiable producer for Kafka's system tests, the producer
 workload of the chaos harness, and a producer soak. Each runs over the public
 API (`@confluentinc/kafka-javascript/producer`), which the files import by the
@@ -113,7 +113,8 @@ shutdown that wedged past `--shutdown-timeout`), so `python/soak/run.sh`'s
 restart policy applies to it.
 
 Not ported from the Python soak: the consumer and its accounting, topic
-creation (the binding has no admin client), the OpenTelemetry pipeline (the
+creation (the soak was written before the binding had an admin client, and
+creating its topic through `Admin` is not ported yet), the OpenTelemetry pipeline (the
 package has no OpenTelemetry dependency; the JSONL file is written always),
 and the EC2, bootstrap, build and supervisor scripts.
 

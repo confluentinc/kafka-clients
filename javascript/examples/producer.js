@@ -25,6 +25,12 @@ const { ExecutionError } = require('@confluentinc/kafka-javascript');
 const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
+/**
+ * Produces the record the command line describes.
+ *
+ * @param {string[]} argv the command-line arguments
+ * @returns {Promise<number>} the exit code
+ */
 async function main(argv) {
   const [bootstrap, topic, key = null, value = 'hello from Node.js'] = argv;
   if (!bootstrap || !topic) {
@@ -43,9 +49,14 @@ async function main(argv) {
     // A header value is bytes, and a header may be a [key, value] pair. A
     // record with headers names its partition (null: the producer chooses),
     // as Java's constructors do.
-    const headers = [['source', Buffer.from('examples/producer.js')]];
     const future = await producer.send({
-      record: new ProducerRecord({ topic, partition: null, key, value, headers }),
+      record: new ProducerRecord({
+        topic,
+        partition: null,
+        key,
+        value,
+        headers: [['source', Buffer.from('examples/producer.js')]],
+      }),
       callback: ({ exception }) => {
         if (exception !== null) console.error(`delivery failed: ${exception.name}: ${exception.message}`);
       },
@@ -74,8 +85,8 @@ main(process.argv.slice(2)).then(
   (code) => {
     process.exitCode = code;
   },
-  (error) => {
-    console.error(`${error.name}: ${error.message}`);
+  (/** @type {unknown} */ error) => {
+    console.error(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
     process.exitCode = 1;
   },
 );

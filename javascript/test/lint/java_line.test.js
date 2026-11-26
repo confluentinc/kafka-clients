@@ -102,7 +102,7 @@ test('the rule: one finding per file, comments of TypeScript, JavaScript and C, 
     'test/t.test.js': j('const re = /\\/\\/ Foo.java', ":1/;\nconst x = 'a'; /* `:", '12` */\n'),
     'scripts/s.js': '// Java 4.4 is a version, not a line\n',
     'tools/x/y.js': j('/** Translated from `KafkaProducerTest.testFoo` (line\n * 73). */\n'),
-    'examples/e.js': j('// Foo.java', ':1 is out of scope\n'),
+    'examples/e.js': j('// Foo.java', ':1 is in scope too\n'),
   });
   const r = lint(root, [RULE]);
   assert.equal(r.status, 1);
@@ -112,9 +112,10 @@ test('the rule: one finding per file, comments of TypeScript, JavaScript and C, 
     j('src/a.ts: 2 Java file:line reference(s) in comments, the first `ProducerRecord.java', ':69` at line 2', rest),
     j('test/t.test.js: 1 Java file:line reference(s) in comments, the first `', '`:12`', '` at line 2', rest),
     j('tools/x/y.js: 1 Java file:line reference(s) in comments, the first `line 73` at line 1', rest),
+    j('examples/e.js: 1 Java file:line reference(s) in comments, the first `Foo.java', ':1` at line 1', rest),
     j('native/a.c: 2 Java file:line reference(s) in comments, the first `Sender.java', ':120` at line 2', rest),
   ]);
-  assert.ok(r.err.includes('❌ check-java-line: 4 finding(s).'), r.text);
+  assert.ok(r.err.includes('❌ check-java-line: 5 finding(s).'), r.text);
   assert.ok(
     r.err.includes(
       'Refer to the Java member by its fully qualified name (`org.apache.kafka.clients.producer.ProducerRecord#partition`), not by a line of its file: lines move with every Kafka release (.claude/rules/documentation.md §7).',
