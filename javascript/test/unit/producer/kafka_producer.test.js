@@ -2390,6 +2390,12 @@ test('a serde config key that is no synchronous function throws ConfigError, say
       return null;
     }
   }
+  /** A serializer class bound to a name, which JavaScript gives the class. */
+  const MySerializer = class {
+    serialize() {
+      return null;
+    }
+  };
   for (const [key, argument] of [
     ['key.serializer', 'keySerializer'],
     ['value.serializer', 'valueSerializer'],
@@ -2404,7 +2410,30 @@ test('a serde config key that is no synchronous function throws ConfigError, say
         `Invalid value an object for configuration ${key}: a serializer object is not a configuration value; ${pass(argument)}`,
       ],
       [5, `Invalid value a number for configuration ${key}: ${pass(argument)}`],
-      [StringSerializer, `Invalid value a function for configuration ${key}: a class is not called; ${pass(argument)}`],
+      [
+        StringSerializer,
+        `Invalid value a function for configuration ${key}: a class is not called (did you mean \`() => new StringSerializer()\`?); ${pass(argument)}`,
+      ],
+      // A class bound to a name is written under it; an anonymous one, whose
+      // inferred name is the config key, gets the message without a name.
+      [
+        MySerializer,
+        `Invalid value a function for configuration ${key}: a class is not called (did you mean \`() => new MySerializer()\`?); ${pass(argument)}`,
+      ],
+      [
+        /** An anonymous serializer class. */
+        class {
+          serialize() {
+            return null;
+          }
+        },
+        `Invalid value a function for configuration ${key}: a class is not called; ${pass(argument)}`,
+      ],
+      [
+        /** An anonymous subclass, whose source starts `class extends`. */
+        class extends StringSerializer {},
+        `Invalid value a function for configuration ${key}: a class is not called; ${pass(argument)}`,
+      ],
       [
         async () => ({ serialize: () => null }),
         `Invalid value a function for configuration ${key}: the function returned a Promise; it must return the serializer itself, synchronously`,
@@ -2423,6 +2452,22 @@ test('a serde config key that is no synchronous function throws ConfigError, say
         },
       );
     }
+    // A class written in the key itself infers the key as its name, which
+    // is no class name: the message names none.
+    assert.throws(
+      () =>
+        new KafkaProducer({
+          ...UNREACHABLE,
+          /** A serializer class written in the key. */
+          // @ts-expect-error a class in a serde config key: the check throws ConfigError
+          'key.serializer': class {
+            serialize() {
+              return null;
+            }
+          },
+        }),
+      { message: `Invalid value a function for configuration key.serializer: a class is not called; ${pass('keySerializer')}` },
+    );
     // null and undefined leave the key unset: no serializer.
     for (const value of [null, undefined]) {
       const producer = new KafkaProducer({ ...UNREACHABLE, [key]: value });

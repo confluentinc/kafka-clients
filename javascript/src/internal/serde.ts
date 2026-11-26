@@ -68,6 +68,31 @@ function isClass(value: (...args: never[]) => unknown): boolean {
 }
 
 /**
+ * The name a class is written under: the one its declaration gives
+ * (`class MySerializer {}`), else the one JavaScript inferred from a binding
+ * (`const MySerializer = class {}`) when it is an identifier, or null for an
+ * anonymous class (`{ 'key.serializer': class {} }` infers the key, which is
+ * no class name).
+ *
+ * @param value - the class
+ * @returns its name, or null
+ */
+function writtenClassName(value: (...args: never[]) => unknown): string | null {
+  const identifier = /^[\p{ID_Start}$_][\p{ID_Continue}$\u200c\u200d]*$/u;
+  let source = '';
+  try {
+    source = Function.prototype.toString.call(value);
+  } catch {
+    // A function whose source cannot be read names nothing from it.
+  }
+  const declared = /^class\s+([^\s{]+)/u.exec(source)?.[1];
+  // `class extends Base {}` declares no name.
+  if (declared !== undefined && declared !== 'extends' && identifier.test(declared)) return declared;
+  const inferred: unknown = Object.getOwnPropertyDescriptor(value, 'name')?.value;
+  return typeof inferred === 'string' && identifier.test(inferred) ? inferred : null;
+}
+
+/**
  * Whether `value` is an object or a function with a `serialize` method, and a `close` method or none.
  *
  * @param value - the value to test
@@ -124,7 +149,11 @@ export function configuredSerializer(
     throw invalid(isSerializer(value) ? `a serializer object is not a configuration value; ${pass}` : pass);
   }
   const make = value as (options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => unknown;
-  if (isClass(make)) throw invalid(`a class is not called; ${pass}`);
+  if (isClass(make)) {
+    const name = writtenClassName(make);
+    const hint = name === null ? '' : ` (did you mean \`() => new ${name}()\`?)`;
+    throw invalid(`a class is not called${hint}; ${pass}`);
+  }
   // Java's RecordingMap: a key the function reads is marked used.
   const recording = new Proxy(configs, {
     get(target, property, receiver): unknown {
