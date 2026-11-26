@@ -161,8 +161,6 @@ test("the consumer's commits, seeks, positions, offset and metadata queries use 
     'kafka_consumer_Consumer_beginning_offsets_with_timeout_cb',
     'kafka_consumer_Consumer_end_offsets_cb',
     'kafka_consumer_Consumer_end_offsets_with_timeout_cb',
-    'kafka_consumer_Consumer_enforce_rebalance_cb',
-    'kafka_consumer_Consumer_enforce_rebalance_with_reason_cb',
   ]) {
     assert.ok(called.has(name), `${name} is not called`);
   }
@@ -205,6 +203,10 @@ test('no blocking consumer call: every waiting call is a _cb twin (rule 4)', () 
     'kafka_consumer_Consumer_end_offsets_with_timeout',
     'kafka_consumer_Consumer_enforce_rebalance',
     'kafka_consumer_Consumer_enforce_rebalance_with_reason',
+    // Dropped as Python drops them (no generated method calls them): no form
+    // of enforceRebalance is called.
+    'kafka_consumer_Consumer_enforce_rebalance_cb',
+    'kafka_consumer_Consumer_enforce_rebalance_with_reason_cb',
   ]) {
     for (const source of sources) {
       const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));

@@ -526,13 +526,12 @@ napi_value js_consumer_position(napi_env env, napi_callback_info info);
 napi_value js_consumer_committed(napi_env env, napi_callback_info info);
 napi_value js_consumer_current_lag(napi_env env, napi_callback_info info);
 napi_value js_consumer_group_metadata(napi_env env, napi_callback_info info);
-// consumer.c: the offset and metadata queries and enforceRebalance.
+// consumer.c: the offset and metadata queries.
 napi_value js_consumer_partitions_for(napi_env env, napi_callback_info info);
 napi_value js_consumer_list_topics(napi_env env, napi_callback_info info);
 napi_value js_consumer_offsets_for_times(napi_env env, napi_callback_info info);
 napi_value js_consumer_beginning_offsets(napi_env env, napi_callback_info info);
 napi_value js_consumer_end_offsets(napi_env env, napi_callback_info info);
-napi_value js_consumer_enforce_rebalance(napi_env env, napi_callback_info info);
 
 // headers.c: the counts of the RecordHeaders the sends made.
 napi_value js_header_stats(napi_env env, napi_callback_info info);

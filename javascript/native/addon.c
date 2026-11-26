@@ -284,7 +284,6 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"consumerOffsetsForTimes", NULL, js_consumer_offsets_for_times, NULL, NULL, NULL, napi_default, NULL},
         {"consumerBeginningOffsets", NULL, js_consumer_beginning_offsets, NULL, NULL, NULL, napi_default, NULL},
         {"consumerEndOffsets", NULL, js_consumer_end_offsets, NULL, NULL, NULL, napi_default, NULL},
-        {"consumerEnforceRebalance", NULL, js_consumer_enforce_rebalance, NULL, NULL, NULL, napi_default, NULL},
         {"consumerClose", NULL, js_consumer_close, NULL, NULL, NULL, napi_default, NULL},
         {"consumerRecordHeaders", NULL, js_consumer_record_headers, NULL, NULL, NULL, napi_default, NULL},
         {"consumerStats", NULL, js_consumer_stats, NULL, NULL, NULL, napi_default, NULL},

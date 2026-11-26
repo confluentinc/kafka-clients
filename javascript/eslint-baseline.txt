@@ -74,6 +74,11 @@ missing clients.consumer.Consumer#unregisterMetricFromSubscription
 missing clients.consumer.KafkaConsumer#clientInstanceId
 missing clients.consumer.KafkaConsumer#registerMetricForSubscription
 missing clients.consumer.KafkaConsumer#unregisterMetricFromSubscription
+# Consumer and KafkaConsumer: enforceRebalance, both forms, dropped by the
+# user on 2026-11-26, as Python drops it: under KIP-848, the only protocol
+# here, Java's consumer only logs it as unsupported. Kept for good.
+missing clients.consumer.Consumer#enforceRebalance
+missing clients.consumer.KafkaConsumer#enforceRebalance
 
 
 # check-overload-shape: gaps the user kept (PLAN.md §8 decision 11).

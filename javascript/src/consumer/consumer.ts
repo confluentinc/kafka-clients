@@ -1393,57 +1393,6 @@ export interface Consumer<K = Buffer, V = Buffer> {
   groupMetadata(): ConsumerGroupMetadata;
 
   /**
-   * Alert the consumer to trigger a new rebalance by rejoining the group.
-   * This is a nonblocking call that forces the consumer to trigger a new
-   * rebalance on the next `poll` call. Note that this API does not itself
-   * initiate the rebalance, so you must still call `poll`.
-   *
-   * @returns settling once the core answered
-   *
-   * @remarks Under the consumer group protocol, the only one this client
-   * has, it only logs "Operation not supported in new consumer group
-   * protocol", as Java's consumer does. It is refused while another call is
-   * pending, as every guarded call is, where Java takes no lock for it.
-   *
-   * @see `enforceRebalance({ reason })`
-   */
-  enforceRebalance(): Promise<void>;
-  /**
-   * Alert the consumer to trigger a new rebalance by rejoining the group.
-   * This is a nonblocking call that forces the consumer to trigger a new
-   * rebalance on the next `poll` call. Note that this API does not itself
-   * initiate the rebalance, so you must still call `poll`. If a rebalance is
-   * already in progress this call will be a no-op. If you wish to force an
-   * additional rebalance you must complete the current one by calling poll
-   * before retrying this API.
-   *
-   * You do not need to call this during normal processing, as the consumer
-   * group will manage itself automatically and rebalance when necessary.
-   *
-   * @param options - The reason why the new rebalance is needed.
-   * @returns settling once the core answered
-   * @throws `IllegalStateError` rejects with it if the consumer does not use
-   *   group subscription
-   *
-   * @remarks Under the consumer group protocol, the only one this client
-   * has, it only logs "Operation not supported in new consumer group
-   * protocol", as Java's consumer does, and so resolves; it is refused while
-   * another call is pending, where Java takes no lock for it.
-   */
-  enforceRebalance(options: {
-    /** The reason why the new rebalance is needed. */
-    reason: string;
-  }): Promise<void>;
-  /**
-   * Alert the consumer to trigger a new rebalance: the reason on its own, the
-   * same as `enforceRebalance({ reason })`.
-   *
-   * @param reason - The reason why the new rebalance is needed.
-   * @returns settling once the core answered
-   */
-  enforceRebalance(reason: string): Promise<void>;
-
-  /**
    * Close the consumer with the default leave group behavior, waiting for up
    * to the default timeout of 30 seconds for any needed cleanup. If
    * auto-commit is enabled, this will commit the current offsets if possible

@@ -1161,9 +1161,6 @@ async function consumerUsage(): Promise<void> {
   expectTypeOf(await consumer.beginningOffsets([tp])).toEqualTypeOf<TopicPartitionMap<bigint>>();
   expectTypeOf(await consumer.endOffsets({ partitions: [tp], timeout: 100 })).toEqualTypeOf<TopicPartitionMap<bigint>>();
   expectTypeOf(await consumer.endOffsets(new Set([tp]))).toEqualTypeOf<TopicPartitionMap<bigint>>();
-  expectTypeOf(consumer.enforceRebalance()).toEqualTypeOf<Promise<void>>();
-  await consumer.enforceRebalance({ reason: 'r' });
-  await consumer.enforceRebalance('r');
   const records = await consumer.poll({ timeout: 100 });
   expectTypeOf(records).toEqualTypeOf<ConsumerRecords<Buffer, Buffer>>();
   expectTypeOf(await consumer.poll(100)).toEqualTypeOf<ConsumerRecords<Buffer, Buffer>>();

@@ -144,9 +144,6 @@ const BEGINNING_OFFSETS_FORMS = new JavaForms('beginningOffsets', [['partitions'
 const END_OFFSETS_FORMS = new JavaForms('endOffsets', [['partitions'], ['partitions', 'timeout']], {
   bareTypes: { partitions: (value) => value === null || isIterable(value) },
 });
-const ENFORCE_REBALANCE_FORMS = new JavaForms('enforceRebalance', [[], ['reason']], {
-  bareTypes: { reason: (value) => value === null || typeof value === 'string' },
-});
 
 // Until the client has deserializers, a consumer takes none: keys and values
 // are Buffers, and a deserializer is refused rather than ignored.
@@ -803,22 +800,6 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
     if (!this.#groupIdDefined) throw new InvalidGroupIdError(NO_GROUP_ID);
     const [groupId, generationId, memberId, groupInstanceId] = native.consumerGroupMetadata(this.#handle);
     return ConsumerGroupMetadata.internalCreate(groupId, generationId, memberId, groupInstanceId);
-  }
-
-  enforceRebalance(): Promise<void>;
-  enforceRebalance(options: {
-    /** The reason why the new rebalance is needed. */
-    reason: string;
-  }): Promise<void>;
-  enforceRebalance(reason: string): Promise<void>;
-  enforceRebalance(options?: unknown): Promise<void> {
-    const count = arguments.length;
-    return rejecting(() => {
-      const withReason = ENFORCE_REBALANCE_FORMS.match(options, count) === 1;
-      const reason = withReason ? ENFORCE_REBALANCE_FORMS.value(options, 'reason') : null;
-      if (reason !== null && typeof reason !== 'string') throw new TypeError('reason must be a string');
-      return completion((done) => native.consumerEnforceRebalance(this.#handle, withReason, reason, done));
-    });
   }
 
   close(): Promise<void>;

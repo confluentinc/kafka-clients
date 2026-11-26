@@ -1137,7 +1137,7 @@ napi_value js_consumer_current_lag(napi_env env, napi_callback_info info) {
     return NULL;
 }
 
-// ---- the offset and metadata queries and enforceRebalance -------------------
+// ---- the offset and metadata queries ----------------------------------------
 
 // The partitions_for_cb completion: the owned list of PartitionInfo as
 // partitions_take_to_js reads it, the list freed.
@@ -1424,37 +1424,6 @@ napi_value js_consumer_beginning_offsets(napi_env env, napi_callback_info info) 
 // endOffsets(Collection) and endOffsets(Collection, Duration).
 napi_value js_consumer_end_offsets(napi_env env, napi_callback_info info) {
     return offsets_call(env, info, 1, "endOffsets(handle, partitions, timeoutMs, done)");
-}
-
-// consumerEnforceRebalance(handle, withReason, reason, done): Java's
-// enforceRebalance() and enforceRebalance(String), `reason` a string or null,
-// which crosses as NULL. The core logs that the operation is not supported
-// and answers, as Java's AsyncKafkaConsumer does.
-napi_value js_consumer_enforce_rebalance(napi_env env, napi_callback_info info) {
-    size_t argc = 4;
-    napi_value argv[4];
-    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
-    bool with_reason = false;
-    if (argc != 4 || napi_get_value_bool(env, argv[1], &with_reason) != napi_ok || !is_function(env, argv[3])) {
-        napi_throw_type_error(env, NULL, "enforceRebalance(handle, withReason, reason, done)");
-        return NULL;
-    }
-    Consumer* c = unwrap_consumer(env, argv[0]);
-    if (c == NULL) return NULL;
-    napi_valuetype type;
-    NAPI_CHECK(env, napi_typeof(env, argv[2], &type), NULL);
-    char* reason = !with_reason || type == napi_null ? NULL : js_string_dup(env, argv[2], "reason must be a string");
-    if (with_reason && type != napi_null && reason == NULL) return NULL;
-    CallCtx* ctx = call_ctx_new(env, c, argv[3]);
-    if (ctx != NULL && !with_reason) {
-        cbq_call_begin(env, &c->queue);
-        kafka_consumer_Consumer_enforce_rebalance_cb(c->view, void_on_complete, ctx);
-    } else if (ctx != NULL) {
-        cbq_call_begin(env, &c->queue);
-        kafka_consumer_Consumer_enforce_rebalance_with_reason_cb(c->view, reason, void_on_complete, ctx);
-    }
-    free(reason);
-    return NULL;
 }
 
 // ---- a record's headers -----------------------------------------------------

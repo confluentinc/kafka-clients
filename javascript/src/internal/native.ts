@@ -419,8 +419,6 @@ interface Native {
     timeoutMs: number | bigint | null,
     done: (error: unknown, entries: Array<[string, number, bigint]> | null) => void,
   ): void;
-  // Java's enforceRebalance() and, withReason, enforceRebalance(String).
-  consumerEnforceRebalance(handle: ConsumerHandle, withReason: boolean, reason: string | null, done: (error: unknown) => void): void;
   // Java's assignment(), subscription() and paused(), through their fallible forms.
   consumerAssignment(handle: ConsumerHandle): Array<[string, number]>;
   consumerSubscription(handle: ConsumerHandle): string[];

@@ -206,8 +206,6 @@ test('the offset calls free every error they fail with, every answer, and the va
           await fail(c.beginningOffsets({ partitions: [tp], timeout: 20 }));
           await fail(c.endOffsets({ partitions: [tp], timeout: 20 }));
           await fail(c.endOffsets(null));
-          await c.enforceRebalance();
-          await c.enforceRebalance({ reason: 'r' });
           await c.close({ option: CloseOptions.timeout({ timeout: 0 }) });
           await fail(c.listTopics());
           await fail(c.commitSync());

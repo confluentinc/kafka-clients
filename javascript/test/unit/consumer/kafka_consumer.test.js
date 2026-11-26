@@ -1306,24 +1306,6 @@ test('beginningOffsets and endOffsets: their forms and errors', async () => {
   }
 });
 
-test('enforceRebalance() resolves: the core only logs that the consumer protocol does not support it', async () => {
-  const consumer = newConsumer();
-  await consumer.enforceRebalance();
-  await consumer.enforceRebalance({ reason: 'why' });
-  // The bare form, checked once.
-  await consumer.enforceRebalance('why');
-  // @ts-expect-error a null the types forbid: Java's null, which its consumer ignores too
-  await consumer.enforceRebalance({ reason: null });
-  // @ts-expect-error a number is no reason
-  await assert.rejects(consumer.enforceRebalance(1), {
-    constructor: IllegalArgumentError,
-    message: 'enforceRebalance() takes one of (), (reason); got a number',
-  });
-  // Java's AsyncKafkaConsumer.enforceRebalance makes no check: a closed consumer resolves too.
-  await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
-  await consumer.enforceRebalance();
-});
-
 test('unsubscribe, wakeup and the getters take no argument', async () => {
   const consumer = newConsumer();
   // @ts-expect-error an argument
@@ -1357,9 +1339,6 @@ test('one call at a time: the core busy error, wakeup() ending the waiting poll,
     consumer.offsetsForTimes({ timestampsToSearch: new TopicPartitionMap([[TP0, 0n]]) }),
     consumer.beginningOffsets({ partitions: [TP0] }),
     consumer.endOffsets({ partitions: [TP0] }),
-    // The core guards it as every call, where Java's takes no acquire().
-    consumer.enforceRebalance(),
-    consumer.enforceRebalance({ reason: 'r' }),
     consumer.close(),
   ]) {
     await assert.rejects(call, { constructor: ConcurrentModificationError, message: CONCURRENT });
@@ -1498,8 +1477,6 @@ test('a Promise method never throws: it rejects', () => {
     () => consumer.beginningOffsets(1),
     // @ts-expect-error a wrong argument
     () => consumer.endOffsets(1),
-    // @ts-expect-error a wrong argument
-    () => consumer.enforceRebalance(1),
   ]) {
     const result = call();
     assert.ok(result instanceof Promise);
