@@ -41,7 +41,7 @@ internal sealed class AsyncTestProducer : IAsyncProducer<byte[], byte[]>
     {
         _behaviour = behaviour;
         _probe = probe;
-        _inner = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: behaviour.FailEach is null);
+        _inner = new AsyncMockProducer<byte[], byte[]>(autoComplete: behaviour.FailEach is null, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
     }
 
     public ValueTask<AsyncKafkaFuture<RecordMetadata>> Send(ProducerRecord<byte[], byte[]> record, CancellationToken cancellationToken = default)

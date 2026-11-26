@@ -250,9 +250,9 @@ public sealed class PublicSyncConsumerTimedOverloadTests
         IConsumer<byte[], byte[]> sync = consumer;
         sync.Assign(new[] { s_tp0 });
         sync.Seek(s_tp0, 42L);
-        consumer.UpdateBeginningOffset(Topic, 0, 5);
-        consumer.UpdateEndOffset(Topic, 0, 77);
-        consumer.UpdatePartitions(Topic, partitionCount: 2, leaderId: 1, leaderHost: "broker-1", leaderPort: 9092);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 5 });
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 77 });
+        consumer.UpdatePartitions(Topic, TestPartitions.Led(Topic, partitionCount: 2, leaderId: 1, leaderHost: "broker-1", leaderPort: 9092));
 
         foreach (TimeSpan timeout in new[] { TimeSpan.Zero, TimeSpan.FromSeconds(5) })
         {

@@ -352,8 +352,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     // and serializes records into its history); UNLIKE the consumer, where mock-takes-deserializers is
     // a deviation. Send serializes K/V → bytes exactly like the real client (§4).
     public AsyncMockProducer(IAsyncSerializer<TKey> keySerializer, IAsyncSerializer<TValue> valueSerializer);  // autoComplete true
-    public AsyncMockProducer(IAsyncSerializer<TKey> keySerializer, IAsyncSerializer<TValue> valueSerializer,
-        bool autoComplete);
+    public AsyncMockProducer(bool autoComplete, IAsyncSerializer<TKey> keySerializer,
+        IAsyncSerializer<TValue> valueSerializer);   // Java's (boolean, Partitioner, Serializer, Serializer), no partitioner
     public bool CompleteNext();
     public bool ErrorNext(Exception e);   // Java errorNext(RuntimeException); the callback sees this instance, Get an ExecutionException around it
     public int HistoryCount();                  // .NET-only: history() needs typed records, the ABI's hold bytes
@@ -438,8 +438,9 @@ binding builds it (ledger 300; an internal `SerializedProducerRecord` carrier). 
     Contrast the consumer's deserialize wrap, which is Java's `RecordDeserializationException`.
   - **Mock-takes-serializers is Java-faithful.** Java's `MockProducer` takes
     `Serializer<K>/Serializer<V>` and serializes into its history, so the mock ctors
-    take serializers too (`(keySer, valueSer, autoComplete=true)`) — **unlike** the
-    consumer, where mock-takes-deserializers was a deviation.
+    take serializers too (`(autoComplete, keySer, valueSer)`, Java's order without the partitioner, and
+    `(keySer, valueSer)` with `autoComplete` true) — **unlike** the consumer, where mock-takes-deserializers
+    was a deviation.
 
 **Consumer** follows the identical pattern — the Java surface in C# idiom. Its C
 ABI has **landed**, so it's a **Mode A** build (§6.2); the receive-path key/value
@@ -964,7 +965,8 @@ each goes when the reason it gives goes:
   throws.
 - **A null partition Java keeps.** These throw case 4's `ArgumentNullException` where Java stores or
   skips the null. The consumer mocks throw it for `Commit` and `CommitAsync` with a null key and for
-  `UpdateDurationOffsets` (Java's mock stores it with `putAll`). The producer mocks throw it for
+  `UpdateBeginningOffsets`, `UpdateEndOffsets` and `UpdateDurationOffsets` (Java's mock stores it with
+  `putAll`). The producer mocks throw it for
   `SendOffsetsToTransaction`, after the checks Java's mock makes first. The admin mocks throw it for
   `ListPartitionReassignments` (Java's mock looks the null up and skips it), `ListConsumerGroupOffsets`
   with one group spec (Java's mock never matches it), and `UpdateBeginningOffsets`, `UpdateEndOffsets`
@@ -1114,8 +1116,9 @@ out of date). The rule:
    builds an object of its type) included: never a constructor, `Parse` or a property.
 5. Fields and constants keep Java's spelling (ledger 285).
 6. Parameters keep Java's names, the interface's declaration first. In an exception's constructor a
-   `Throwable` is `innerException`, and a `String` Java names `s` or `msg` is `message`. A Java `long` and
-   the `TimeUnit` that qualifies it are one `TimeSpan`.
+   `Throwable`, of any class (`InterruptException`'s `InterruptedException`), is `innerException`, and a
+   `String` Java names `s` or `msg` is `message`. A Java `long` and the `TimeUnit` that qualifies it are one
+   `TimeSpan`.
 7. .NET's own forms: `ToString`, `Equals` (with `==` and `!=`), `GetHashCode`; `CompareTo`;
    `GetEnumerator` for `Iterable`; `Dispose` / `DisposeAsync` for `Closeable`; `Message` /
    `InnerException`; `IEquatable<T>.Equals`; a C# enum covers `name`, `ordinal`, `values` and `valueOf`.

@@ -57,15 +57,14 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <see cref="ISerializerWithHeaders{T}"/>: the producer would never call that method.
     /// </exception>
     public MockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer)
-        : this(keySerializer, valueSerializer, true)
+        : this(true, keySerializer, valueSerializer)
     {
     }
 
     /// <summary>
-    /// Creates a broker-free mock producer with the key and value serializers, as Java's <c>MockProducer</c> takes them.
+    /// Creates a broker-free mock producer, Java's <c>MockProducer(boolean, Partitioner, Serializer, Serializer)</c>
+    /// without the partitioner, which the binding does not take: partitioning is the native mock's.
     /// </summary>
-    /// <param name="keySerializer">The serializer for record keys.</param>
-    /// <param name="valueSerializer">The serializer for record values.</param>
     /// <param name="autoComplete">
     /// When <see langword="true"/>, each send completes at once. When <see langword="false"/>,
     /// <c>Send</c> still returns at once, and the future's <see cref="KafkaFuture{T}.Get()"/> blocks until
@@ -73,6 +72,8 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// itself; <see cref="Dispose"/> first flushes, completing the pending sends, unless a close has begun, and
     /// <c>Close</c> leaves a pending send pending.
     /// </param>
+    /// <param name="keySerializer">The serializer for record keys.</param>
+    /// <param name="valueSerializer">The serializer for record values.</param>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
     /// </exception>
@@ -81,9 +82,9 @@ public sealed class MockProducer<TKey, TValue> : IProducer<TKey, TValue>
     /// <see cref="ISerializerWithHeaders{T}"/>: the producer would never call that method.
     /// </exception>
     public MockProducer(
+        bool autoComplete,
         ISerializer<TKey> keySerializer,
-        ISerializer<TValue> valueSerializer,
-        bool autoComplete)
+        ISerializer<TValue> valueSerializer)
     {
         _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
         _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));

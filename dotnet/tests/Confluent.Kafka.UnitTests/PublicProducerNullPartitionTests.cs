@@ -346,8 +346,8 @@ public sealed class PublicProducerNullPartitionTests
     }
 
     private static object Mock(string kind) => kind == "MockProducer"
-        ? new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), true)
-        : new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), true);
+        ? new MockProducer<byte[], byte[]>(true, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
+        : new AsyncMockProducer<byte[], byte[]>(true, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
     private static IConsumerGroupMetadata GroupMetadata()
     {

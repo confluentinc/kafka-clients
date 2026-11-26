@@ -988,6 +988,40 @@ public sealed class JavaNameAnalyzerTests
             Name(0, "parameter M:Confluent.Kafka.Common.Config.ConfigException.#ctor(System.String,System.Object): names its "
                 + "parameters (key, value) where Java's ConfigException constructor names them (name, value)"));
 
+    [Fact]
+    public Task AnExceptionNamesACauseOfAThrowableSubclassInnerException() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Common.Errors
+            {
+                public class InterruptException : Exception
+                {
+                    public InterruptException(Exception innerException)
+                        : base(null, innerException)
+                    {
+                    }
+
+                    public InterruptException(string message, Exception innerException)
+                        : base(message, innerException)
+                    {
+                    }
+
+                    public InterruptException(string message)
+                        : base(message)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(
+                "type\torg.apache.kafka.common.errors.InterruptException\tclass\tRuntimeException\n"
+                + "ctor\torg.apache.kafka.common.errors.InterruptException\tInterruptException(InterruptedException cause)\n"
+                + "ctor\torg.apache.kafka.common.errors.InterruptException\t"
+                + "InterruptException(String message, InterruptedException cause)\n"
+                + "ctor\torg.apache.kafka.common.errors.InterruptException\tInterruptException(String message)\n"));
+
     private const string ScramMechanism =
         "type\torg.apache.kafka.clients.admin.ScramMechanism\tenum\t-\n"
         + "constant\torg.apache.kafka.clients.admin.ScramMechanism\tUNKNOWN\n"

@@ -660,7 +660,7 @@ public sealed class VerifiableConsumerTests : IDisposable
     private static void AssignAndAdd(MockConsumer<string, string> mock, params long[] offsets)
     {
         mock.Rebalance(new[] { s_tp0 });
-        mock.UpdateBeginningOffset("t", 0, 0);
+        mock.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("t", 0)] = 0 });
         foreach (long offset in offsets)
         {
             mock.AddRecord(new ConsumerRecord<string, string>("t", 0, offset, null, offset.ToString(CultureInfo.InvariantCulture)));

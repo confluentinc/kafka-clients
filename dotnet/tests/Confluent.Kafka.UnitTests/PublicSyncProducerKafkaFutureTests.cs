@@ -57,7 +57,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     {
         // One thread sends, completes and waits: this deadlocks if Send waited for delivery.
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            autoComplete: false, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
         try
         {
@@ -240,7 +240,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     public void Dispose_WithAPendingFuture_CompletesIt()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            autoComplete: false, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
 
         KafkaFuture<RecordMetadata> future = producer.Send(Record(), callback);
@@ -256,7 +256,7 @@ public sealed class PublicSyncProducerKafkaFutureTests
     public void Close_WithAPendingFuture_LeavesItPending()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+            autoComplete: false, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         ThreadRecordingCallback callback = new ThreadRecordingCallback();
 
         KafkaFuture<RecordMetadata> future = producer.Send(Record(), callback);

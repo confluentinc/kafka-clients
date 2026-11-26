@@ -102,7 +102,7 @@ internal static class Program
         });
         Check("producer: a Kafka error crosses the core", "same instance: Not authorized to access topics: [t1]", () =>
         {
-            using var producer = new MockProducer<string, string>(s_serializer, s_serializer, autoComplete: false);
+            using var producer = new MockProducer<string, string>(autoComplete: false, s_serializer, s_serializer);
             KafkaFuture<RecordMetadata> future = producer.Send(new ProducerRecord<string, string>("t", "k", "v"));
             var injected = new TopicAuthorizationException(new HashSet<string> { "t1" });
             producer.ErrorNext(injected);
@@ -110,7 +110,7 @@ internal static class Program
         });
         Check("producer: a Java built-in error crosses the core", "same instance: boom", () =>
         {
-            using var producer = new MockProducer<string, string>(s_serializer, s_serializer, autoComplete: false);
+            using var producer = new MockProducer<string, string>(autoComplete: false, s_serializer, s_serializer);
             KafkaFuture<RecordMetadata> future = producer.Send(new ProducerRecord<string, string>("t", "k", "v"));
             var injected = new ExampleIllegalState("boom");
             producer.ErrorNext(injected);

@@ -79,7 +79,7 @@ public sealed class PublicSyncProducerSendTests
     [Fact]
     public async Task Send_ManualComplete_UnblocksAndReturnsMetadata()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(autoComplete: false, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         // Get blocks on a worker thread until CompleteNext resolves it from this thread.
@@ -99,7 +99,7 @@ public sealed class PublicSyncProducerSendTests
     [Fact]
     public async Task Send_ManualError_FaultsWithKafkaException()
     {
-        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(autoComplete: false, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable producerDisposal = TestTimeout.Disposal(producer);
 
         Task<RecordMetadata> sendTask = Task.Run(

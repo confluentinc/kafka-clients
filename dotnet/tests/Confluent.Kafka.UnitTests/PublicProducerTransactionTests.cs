@@ -784,7 +784,7 @@ public sealed class PublicProducerTransactionTests
         string? timedOutOperation)
     {
         AsyncMockProducer<byte[], byte[]> producer =
-            new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
+            new AsyncMockProducer<byte[], byte[]>(autoComplete: false, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         await using IAsyncDisposable teardown = TestTimeout.AsyncDisposal(producer);
         SetMaxBlockMs(producer, timedOutOperation is null ? AtOnceMaxBlockMs : MaxBlockMs);
         TaskCompletionSource<bool> gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -897,8 +897,8 @@ public sealed class PublicProducerTransactionTests
     }
 
     private static object Mock(string flavor, bool autoComplete) => flavor == SyncFlavor
-        ? new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete)
-        : new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete);
+        ? new MockProducer<byte[], byte[]>(autoComplete, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer())
+        : new AsyncMockProducer<byte[], byte[]>(autoComplete, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
 
     private static IConsumerGroupMetadata GroupMetadata()
     {

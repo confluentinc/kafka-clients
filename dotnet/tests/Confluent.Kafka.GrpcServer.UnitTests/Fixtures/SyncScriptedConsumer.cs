@@ -204,8 +204,8 @@ internal sealed class SyncScriptedConsumer : IConsumer<byte[], byte[]>, IMockCon
         _inner.Dispose();
     }
 
-    void IMockConsumerOperations.UpdateBeginningOffset(string topic, int partition, long offset) =>
-        _inner.UpdateBeginningOffset(topic, partition, offset);
+    void IMockConsumerOperations.UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        _inner.UpdateBeginningOffsets(newOffsets);
 
     Task IMockConsumerOperations.Rebalance(IReadOnlyCollection<TopicPartition> partitions)
     {

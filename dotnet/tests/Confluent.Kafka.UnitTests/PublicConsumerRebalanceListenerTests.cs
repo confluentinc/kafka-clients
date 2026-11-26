@@ -270,8 +270,8 @@ public sealed class PublicConsumerRebalanceListenerTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         consumer.Subscribe(new[] { Topic });
         consumer.Rebalance(new[] { tp0, tp1 });
-        consumer.UpdateBeginningOffset(Topic, 0, 0);
-        consumer.UpdateBeginningOffset(Topic, 1, 0);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 0 });
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 1)] = 0 });
         consumer.Seek(tp0, 0);
         consumer.Seek(tp1, 0);
         consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, 0, 0, null, null));

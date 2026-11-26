@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -112,7 +113,7 @@ public sealed class PublicConsumerPartitionOpsTests
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
-        consumer.UpdateBeginningOffset(Topic, 0, offset: 5);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 5 });
         for (int i = 0; i < 10; i++)
         {
             consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, 0, offset: i, key: null, value: new byte[] { (byte)i }));
@@ -134,7 +135,7 @@ public sealed class PublicConsumerPartitionOpsTests
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
-        consumer.UpdateEndOffset(Topic, 0, offset: 8);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 8 });
         for (int i = 0; i < 10; i++)
         {
             consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(Topic, 0, offset: i, key: null, value: new byte[] { (byte)i }));

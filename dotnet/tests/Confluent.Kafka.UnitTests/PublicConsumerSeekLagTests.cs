@@ -95,7 +95,7 @@ public sealed class PublicConsumerSeekLagTests
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
-        consumer.UpdateEndOffset(Topic, Partition, 100);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, Partition)] = 100 });
         await TestTimeout.Run(() => consumer.Seek(tp, 10L), s_deadline);
 
         Assert.Equal(90L, await TestTimeout.Run(() => consumer.CurrentLag(tp), s_deadline));
@@ -170,7 +170,7 @@ public sealed class PublicConsumerSeekLagTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
-        consumer.UpdateEndOffset(Topic, Partition, 100);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, Partition)] = 100 });
         consumer.Seek(tp, 10L);
 
         Assert.Equal(90L, consumer.CurrentLag(tp));
@@ -183,7 +183,7 @@ public sealed class PublicConsumerSeekLagTests
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
-        consumer.UpdateEndOffset(Topic, Partition, 2);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, Partition)] = 2 });
         consumer.Seek(tp, 5L);
 
         Assert.Equal(-3L, consumer.CurrentLag(tp));
@@ -195,7 +195,7 @@ public sealed class PublicConsumerSeekLagTests
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
         TopicPartition tp = new TopicPartition(Topic, Partition);
-        consumer.UpdateEndOffset(Topic, Partition, 2);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, Partition)] = 2 });
         await TestTimeout.Run(() => consumer.Seek(tp, 5L), s_deadline);
 
         Assert.Equal(-3L, await TestTimeout.Run(() => consumer.CurrentLag(tp), s_deadline));
@@ -206,7 +206,7 @@ public sealed class PublicConsumerSeekLagTests
     {
         MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>("latest");
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateEndOffset("unassigned-topic", 0, 2);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("unassigned-topic", 0)] = 2 });
 
         IllegalArgumentException ex = Assert.Throws<IllegalArgumentException>(
             () => consumer.CurrentLag(new TopicPartition("unassigned-topic", 0)));
@@ -219,7 +219,7 @@ public sealed class PublicConsumerSeekLagTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        consumer.UpdateEndOffset("unassigned-topic", 0, 2);
+        consumer.UpdateEndOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition("unassigned-topic", 0)] = 2 });
 
         IllegalArgumentException ex = await Assert.ThrowsAsync<IllegalArgumentException>(
             () => TestTimeout.Run(() => consumer.CurrentLag(new TopicPartition("unassigned-topic", 0)), s_deadline));

@@ -2154,48 +2154,87 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         KafkaException.ThrowIfFfiFailed(ref error);
     }
 
-    internal void UpdatePartitions(
-        string topic,
-        int partitionCount,
-        int leaderId,
-        string leaderHost,
-        int leaderPort)
-    {
-        if (topic is null)
-        {
-            throw new ArgumentNullException(nameof(topic));
-        }
-
-        if (leaderHost is null)
-        {
-            throw new ArgumentNullException(nameof(leaderHost));
-        }
-
-        if (partitionCount < 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(partitionCount), partitionCount, "Partition count must not be negative.");
-        }
-
+    internal void UpdatePartitions(string topic, IReadOnlyList<PartitionInfo> partitions) =>
         CallMock((mock, arguments) =>
         {
-            // Java's MockConsumer stores the strings after ensureNotClosed(); a NUL, which the C string would cut, is
-            // refused at that point.
-            NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
-            NativeStrings.Validate(leaderHost, NativeStrings.InvalidArgumentStringMessage, nameof(leaderHost));
-            IntPtr partitions = arguments.List();
-            for (int i = 0; i < partitionCount; i++)
+            // Java's MockConsumer stores the arguments after ensureNotClosed(), so they are checked here: a null the C
+            // ABI cannot hold, and a NUL the C string would cut.
+            if (topic is null)
             {
-                IntPtr leader = arguments.Node(leaderId, leaderHost, leaderPort, rack: null);
-                IntPtr replicas = arguments.List();
-                arguments.Add(replicas, leader);
-                arguments.Add(partitions, arguments.PartitionInfo(topic, i, leader, replicas, replicas));
+                throw new ArgumentNullException(nameof(topic));
+            }
+
+            if (partitions is null)
+            {
+                throw new ArgumentNullException(nameof(partitions));
+            }
+
+            NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
+            PartitionInfo[] snapshot = new PartitionInfo[partitions.Count];
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                snapshot[i] = ValidatedPartition(partitions[i]);
+            }
+
+            IntPtr list = arguments.List();
+            foreach (PartitionInfo info in snapshot)
+            {
+                arguments.Add(list, arguments.PartitionInfo(info));
             }
 
             IntPtr outErr = IntPtr.Zero;
-            NativeMethods.MockConsumerUpdatePartitions(mock, arguments.Utf8(topic), partitions, ref outErr);
+            NativeMethods.MockConsumerUpdatePartitions(mock, arguments.Utf8(topic), list, ref outErr);
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
+
+    private static PartitionInfo ValidatedPartition(PartitionInfo? info)
+    {
+        const string Partitions = "partitions";
+        if (info is null)
+        {
+            throw new ArgumentNullException(Partitions, "partitions must not contain null");
+        }
+
+        if (info.Topic() is null)
+        {
+            throw new ArgumentNullException(Partitions, "partitions must not contain a PartitionInfo with a null topic");
+        }
+
+        NativeStrings.Validate(info.Topic(), NativeStrings.InvalidTopicMessage, Partitions);
+        if (info.Leader() is { } leader)
+        {
+            ValidateNode(leader, Partitions);
+        }
+
+        ValidateNodes(info.Replicas(), "replicas");
+        ValidateNodes(info.InSyncReplicas(), "inSyncReplicas");
+        ValidateNodes(info.OfflineReplicas(), "offlineReplicas");
+        return info;
+    }
+
+    private static void ValidateNodes(Node[]? nodes, string field)
+    {
+        const string Partitions = "partitions";
+        if (nodes is null)
+        {
+            throw new ArgumentNullException(Partitions, "partitions must not contain a PartitionInfo with null " + field);
+        }
+
+        foreach (Node? node in nodes)
+        {
+            if (node is null)
+            {
+                throw new ArgumentNullException(Partitions, "partitions must not contain a PartitionInfo with a null node");
+            }
+
+            ValidateNode(node, Partitions);
+        }
+    }
+
+    private static void ValidateNode(Node node, string parameterName)
+    {
+        NativeStrings.Validate(node.Host(), NativeStrings.InvalidArgumentStringMessage, parameterName);
+        NativeStrings.Validate(node.Rack(), NativeStrings.InvalidArgumentStringMessage, parameterName);
     }
 
     internal void Assign(IReadOnlyList<(string Topic, int Partition)> topicPartitions)
@@ -2590,7 +2629,16 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
 
-    internal void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets)
+    internal void UpdateBeginningOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        UpdateOffsets(newOffsets, MockOffsets.Beginning);
+
+    internal void UpdateEndOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        UpdateOffsets(newOffsets, MockOffsets.End);
+
+    internal void UpdateDurationOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets) =>
+        UpdateOffsets(newOffsets, MockOffsets.Duration);
+
+    private void UpdateOffsets(IReadOnlyDictionary<TopicPartition, long> newOffsets, MockOffsets kind)
     {
         if (newOffsets is null)
         {
@@ -2623,8 +2671,21 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
 
         CallMock((mock, arguments) =>
         {
+            IntPtr map = arguments.LongMap(topics, partitions, offsets, count);
             IntPtr outErr = IntPtr.Zero;
-            NativeMethods.MockConsumerUpdateDurationOffsets(mock, arguments.LongMap(topics, partitions, offsets, count), ref outErr);
+            switch (kind)
+            {
+                case MockOffsets.Beginning:
+                    NativeMethods.MockConsumerUpdateBeginningOffsets(mock, map, ref outErr);
+                    break;
+                case MockOffsets.End:
+                    NativeMethods.MockConsumerUpdateEndOffsets(mock, map, ref outErr);
+                    break;
+                default:
+                    NativeMethods.MockConsumerUpdateDurationOffsets(mock, map, ref outErr);
+                    break;
+            }
+
             KafkaException.ThrowIfFfiFailed(ref outErr);
         });
     }
@@ -3381,42 +3442,6 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
-    internal void UpdateBeginningOffset(string topic, int partition, long offset) =>
-        UpdateOffset(topic, partition, offset, beginning: true);
-
-    internal void UpdateEndOffset(string topic, int partition, long offset) =>
-        UpdateOffset(topic, partition, offset, beginning: false);
-
-    private void UpdateOffset(string topic, int partition, long offset, bool beginning)
-    {
-        if (topic is null)
-        {
-            throw new ArgumentNullException(nameof(topic));
-        }
-
-        if (partition < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(partition), partition, "Partition must not be negative.");
-        }
-
-        NativeStrings.Validate(topic, NativeStrings.InvalidTopicMessage, nameof(topic));
-        CallMock((mock, arguments) =>
-        {
-            IntPtr offsets = arguments.LongMap(new[] { topic }, new[] { partition }, new[] { offset }, 1);
-            IntPtr outErr = IntPtr.Zero;
-            if (beginning)
-            {
-                NativeMethods.MockConsumerUpdateBeginningOffsets(mock, offsets, ref outErr);
-            }
-            else
-            {
-                NativeMethods.MockConsumerUpdateEndOffsets(mock, offsets, ref outErr);
-            }
-
-            KafkaException.ThrowIfFfiFailed(ref outErr);
-        });
-    }
-
     private void CallMock(Action<IntPtr, NativeCallArguments> call, UseKind kind = UseKind.Owned)
     {
         bool added = false;
@@ -3747,5 +3772,13 @@ internal sealed partial class NativeConsumer : IDisposable, IAsyncDisposable
         Unowned,
         UnownedOnMock,
         OwnedOnMock,
+    }
+
+    /// <summary>The offsets of a mock consumer that one of its updates sets.</summary>
+    private enum MockOffsets
+    {
+        Beginning,
+        End,
+        Duration,
     }
 }

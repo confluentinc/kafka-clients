@@ -287,6 +287,16 @@ foreach (var record in consumer.Poll(TimeSpan.FromSeconds(1)))
   it. Write `IConsumerGroupMetadata` where you named the type, including in a class of your own that
   implements a consumer or producer interface; code that uses `var` needs no change. An
   implementation of your own can now be passed to `SendOffsetsToTransaction`.
+- The mock consumers' offset and partition helpers take Java's arguments. Write
+  `UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [tp] = offset })` where you wrote
+  `UpdateBeginningOffset(topic, partition, offset)`, and the same for `UpdateEndOffsets`; one call can set
+  several partitions. Write `UpdatePartitions(topic, partitions)`, with the `PartitionInfo` list
+  `PartitionsFor` should answer, where you wrote `UpdatePartitions(topic, partitionCount, leaderId,
+  leaderHost, leaderPort)`.
+- The mock producers' three-argument constructor takes `autoComplete` first, in Java's order: write
+  `new MockProducer<K, V>(autoComplete, keySerializer, valueSerializer)` where you wrote
+  `new MockProducer<K, V>(keySerializer, valueSerializer, autoComplete)`, and the same for
+  `AsyncMockProducer`. The two-argument constructor is unchanged.
 
 ## Examples
 

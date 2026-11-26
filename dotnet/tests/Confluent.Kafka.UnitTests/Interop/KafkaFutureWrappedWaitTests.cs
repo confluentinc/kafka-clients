@@ -174,7 +174,7 @@ public sealed class KafkaFutureWrappedWaitTests
     [Fact]
     public void MockProducerErrorNext_WithACancellation_FailsGetWithAnExecutionException()
     {
-        var producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: false);
+        var producer = new MockProducer<byte[], byte[]>(autoComplete: false, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         using IDisposable disposal = TestTimeout.Disposal(producer);
         var cancellation = new OperationCanceledException("injected");
         var callback = new Recording();
@@ -191,7 +191,7 @@ public sealed class KafkaFutureWrappedWaitTests
     [Fact]
     public async Task AsyncMockProducerErrorNext_WithACancellation_FaultsGetWithAnExecutionException_TakenBeforeOrAfter()
     {
-        var producer = new AsyncMockProducer<byte[], byte[]>(new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: false);
+        var producer = new AsyncMockProducer<byte[], byte[]>(autoComplete: false, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         using IDisposable disposal = TestTimeout.Disposal(producer);
         var cancellation = new OperationCanceledException("injected");
 

@@ -42,10 +42,28 @@ missing T:Confluent.Kafka.Consumer.IConsumerGroupMetadata org.apache.kafka.clien
 missing T:Confluent.Kafka.Consumer.IConsumerGroupMetadata org.apache.kafka.clients.consumer.ConsumerGroupMetadata#toString()
 
 # C2: the two-argument mock producer constructors replace an optional argument (autoComplete true) with an
-# overload, so a parameter added later breaks no compiled caller. The mock producer's other forms stay in the
-# baseline: Java's take a partitioner and a cluster, which are not translated.
+# overload, so a parameter added later breaks no compiled caller. The three-argument ones are Java's
+# MockProducer(boolean, Partitioner, Serializer, Serializer) without the partitioner, in Java's order. Java's
+# forms take a partitioner and a cluster, which are not translated, so they stay in the baseline.
 overload M:Confluent.Kafka.Producer.AsyncMockProducer`2.#ctor(Confluent.Kafka.Common.Serialization.IAsyncSerializer{`0},Confluent.Kafka.Common.Serialization.IAsyncSerializer{`1})
+overload M:Confluent.Kafka.Producer.AsyncMockProducer`2.#ctor(System.Boolean,Confluent.Kafka.Common.Serialization.IAsyncSerializer{`0},Confluent.Kafka.Common.Serialization.IAsyncSerializer{`1})
 overload M:Confluent.Kafka.Producer.MockProducer`2.#ctor(Confluent.Kafka.Common.Serialization.ISerializer{`0},Confluent.Kafka.Common.Serialization.ISerializer{`1})
+overload M:Confluent.Kafka.Producer.MockProducer`2.#ctor(System.Boolean,Confluent.Kafka.Common.Serialization.ISerializer{`0},Confluent.Kafka.Common.Serialization.ISerializer{`1})
+
+# The futures' Get(CancellationToken) has no Java twin: it ends only the caller's wait, never the future
+# (dotnet/CLAUDE.md §4, Futures).
+overload M:Confluent.Kafka.Common.AsyncKafkaFuture.Get(System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.AsyncKafkaFuture`1.Get(System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.KafkaFuture.Get(System.Threading.CancellationToken)
+overload M:Confluent.Kafka.Common.KafkaFuture`1.Get(System.Threading.CancellationToken)
+
+# Java's MockProducer.history() returns the typed records it was sent. The native mock holds them serialized, and
+# keeping the typed records in .NET would repeat the mock's own bookkeeping in the binding, so the mocks answer
+# HistoryCount(), Java's history().size(), which the core gives.
+missing T:Confluent.Kafka.Producer.AsyncMockProducer`2 org.apache.kafka.clients.producer.MockProducer#history()
+missing T:Confluent.Kafka.Producer.MockProducer`2 org.apache.kafka.clients.producer.MockProducer#history()
+unmatched M:Confluent.Kafka.Producer.AsyncMockProducer`2.HistoryCount
+unmatched M:Confluent.Kafka.Producer.MockProducer`2.HistoryCount
 
 # M2: Java's commitSync is Commit, as Python's commit(): every binding uses that one name, and CommitSync would
 # put "Sync" on the async consumers.

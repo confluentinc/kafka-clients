@@ -31,7 +31,7 @@ internal sealed class RecordingProducer : IProducer<string, string>
 
     internal RecordingProducer(bool autoComplete = true)
     {
-        Mock = new MockProducer<string, string>(new StringSerializer(), new StringSerializer(), autoComplete);
+        Mock = new MockProducer<string, string>(autoComplete, new StringSerializer(), new StringSerializer());
     }
 
     internal MockProducer<string, string> Mock { get; }

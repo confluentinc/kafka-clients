@@ -941,6 +941,13 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
         // The names .NET gives Java's parameters: a long and the TimeUnit that qualifies it are one TimeSpan named after
         // the long; in an exception's constructor a Throwable is innerException and a String named s or msg is message.
+        // A Throwable is one by Java's naming: Throwable itself, or a class named ...Exception or ...Error, as
+        // InterruptException's InterruptedException cause.
+        private static bool IsThrowable(string type) =>
+            type == "Throwable"
+            || type.EndsWith("Exception", StringComparison.Ordinal)
+            || type.EndsWith("Error", StringComparison.Ordinal);
+
         private static (string[] Names, string[] Types) Parameters(JavaMember member, bool isExceptionConstructor)
         {
             List<string> names = new List<string>();
@@ -949,7 +956,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             {
                 string type = member.ParameterTypes[i];
                 string name = member.ParameterNames[i];
-                if (isExceptionConstructor && type == "Throwable")
+                if (isExceptionConstructor && IsThrowable(type))
                 {
                     name = "innerException";
                 }

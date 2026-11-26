@@ -594,7 +594,7 @@ public sealed class ErrorPayloadReaderTests
         using MockConsumer<byte[], byte[]> consumer =
             new MockConsumer<byte[], byte[]>("latest");
         consumer.Assign(new[] { tp });
-        consumer.UpdateBeginningOffset(NonAsciiTopic, 0, 5);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(NonAsciiTopic, 0)] = 5 });
         consumer.Seek(tp, 2);
         consumer.AddRecord(new ConsumerRecord<byte[], byte[]>(NonAsciiTopic, 0, 2, null, new byte[] { 1 }));
 

@@ -863,7 +863,7 @@ public sealed class PublicMockProducerTests : IDisposable
     }
 
     private void BuildMockProducer(bool autoComplete) =>
-        _producer = new MockProducer<string, string>(Serdes.String().Serializer(), Serdes.String().Serializer(), autoComplete);
+        _producer = new MockProducer<string, string>(autoComplete, Serdes.String().Serializer(), Serdes.String().Serializer());
 
     private sealed class IntegerKeySerializer : ISerializer<object>
     {

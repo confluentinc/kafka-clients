@@ -150,7 +150,7 @@ public sealed class PublicConsumerGroupMetadataTests
     private static MockProducer<byte[], byte[]> TransactionalMockProducer()
     {
         MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(
-            Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer(), autoComplete: true);
+            autoComplete: true, Serdes.ByteArray().Serializer(), Serdes.ByteArray().Serializer());
         producer.InitTransactions();
         producer.BeginTransaction();
         return producer;
@@ -159,7 +159,7 @@ public sealed class PublicConsumerGroupMetadataTests
     private static async Task<AsyncMockProducer<byte[], byte[]>> TransactionalAsyncMockProducer()
     {
         AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(
-            new AsyncByteArraySerializer(), new AsyncByteArraySerializer(), autoComplete: true);
+            autoComplete: true, new AsyncByteArraySerializer(), new AsyncByteArraySerializer());
         await producer.InitTransactions();
         await producer.BeginTransaction();
         return producer;

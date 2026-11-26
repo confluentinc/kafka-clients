@@ -871,7 +871,7 @@ public sealed class PublicAsyncConsumerCommitCallbackTests
         AsyncMockConsumer<byte[], byte[]> consumer =
             new AsyncMockConsumer<byte[], byte[]>("earliest");
         await TestTimeout.Run(() => consumer.Assign(new[] { s_tp0 }), s_deadline);
-        consumer.UpdateBeginningOffset(Topic, 0, 0);
+        consumer.UpdateBeginningOffsets(new Dictionary<TopicPartition, long> { [new TopicPartition(Topic, 0)] = 0 });
         return consumer;
     }
 

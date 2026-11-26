@@ -180,11 +180,15 @@ internal sealed class NativeCallArguments : IDisposable
         return map;
     }
 
-    internal IntPtr PartitionInfo(string topic, int partition, IntPtr leader, IntPtr replicas, IntPtr inSyncReplicas)
+    internal IntPtr PartitionInfo(Confluent.Kafka.Common.PartitionInfo info)
     {
+        IntPtr leader = info.Leader() is { } infoLeader ? Node(infoLeader) : IntPtr.Zero;
+        IntPtr replicas = NodeList(info.Replicas());
+        IntPtr inSyncReplicas = NodeList(info.InSyncReplicas());
+        IntPtr offlineReplicas = NodeList(info.OfflineReplicas());
         IntPtr outErr = IntPtr.Zero;
         IntPtr handle = NativeMethods.PartitionInfoWithOfflineReplicas(
-            Utf8(topic), partition, leader, replicas, inSyncReplicas, List(), ref outErr);
+            Utf8(info.Topic()), info.Partition(), leader, replicas, inSyncReplicas, offlineReplicas, ref outErr);
         return Track(handle, Kind.PartitionInfo, ref outErr);
     }
 
