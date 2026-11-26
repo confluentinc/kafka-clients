@@ -979,8 +979,12 @@ test('close() while a send waits for metadata rejects that send with a bare Kafk
     () => (settled = true),
     () => (settled = true),
   );
-  // Let the record reach the core, where it waits for the topic's metadata.
-  await new Promise((resolve) => setImmediate(resolve));
+  // Let the record reach the core and start waiting for the topic's metadata.
+  // The wait starts on the core's own task, so one turn of the event loop is
+  // not enough on a loaded machine: close() could win, and the send would be
+  // refused as closed (IllegalStateError) instead. max.block.ms (60 s) keeps
+  // the send pending meanwhile.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
   assert.equal(settled, false);
   const started = Date.now();
   await producer.close();
