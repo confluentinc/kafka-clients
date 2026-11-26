@@ -23,6 +23,10 @@
 //! instead, one returning a Promise of it included, which only
 //! `KafkaProducer.create()` waits for (Serialization and Lifetime), and so may
 //! an unknown key.
+//!
+//! It also writes `src/admin/admin_client_configs.ts`, the type of an admin
+//! client's configuration: every key Java's `AdminClientConfig` defines, the
+//! same way, with no serde key (the admin client has none).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -33,14 +37,56 @@ use crate::javascript_gen::{header, js_str, JS_SRC};
 type Res<T> = anyhow::Result<T>;
 
 const PRODUCER_CONFIG: &str = "org.apache.kafka.clients.producer.ProducerConfig";
+const ADMIN_CLIENT_CONFIG: &str = "org.apache.kafka.clients.admin.AdminClientConfig";
 
-/// `src/producer/producer_configs.ts` and `src/internal/producer_config_keys.ts`,
-/// with their content.
+/// `src/producer/producer_configs.ts`, `src/internal/producer_config_keys.ts`
+/// and `src/admin/admin_client_configs.ts`, with their content.
 pub(crate) fn outputs(repo_root: &Path) -> Res<Vec<(PathBuf, String)>> {
     let mut reader = Reader { root: repo_root.to_path_buf(), cache: BTreeMap::new() };
     let keys: Vec<String> = client_types(&mut reader, PRODUCER_CONFIG)?.into_keys().collect();
     let core_only = core_only_keys(repo_root, &keys)?;
-    Ok(vec![configs_type(repo_root, &keys), known_keys(repo_root, &keys, &core_only)])
+    let admin_keys: Vec<String> = client_types(&mut reader, ADMIN_CLIENT_CONFIG)?.into_keys().collect();
+    Ok(vec![
+        configs_type(repo_root, &keys),
+        known_keys(repo_root, &keys, &core_only),
+        admin_configs_type(repo_root, &admin_keys),
+    ])
+}
+
+/// `src/admin/admin_client_configs.ts` and its content: the admin client's
+/// keys, as `configs_type` writes the producer's, with no serde key.
+fn admin_configs_type(repo_root: &Path, keys: &[String]) -> (PathBuf, String) {
+    let mut text = header("Java's `AdminClientConfig` (with `SslConfigs` / `SaslConfigs`)");
+    text.push_str(
+        "\n/**\n \
+         * An admin client's configuration: Java's `AdminClientConfig` keys, as a\n \
+         * plain object (a `Map` is refused). Each value is written as the string the\n \
+         * core parses (`true` as `\"true\"`, numbers and bigints in decimal, arrays\n \
+         * joined with `,`, anything else by `String()`); `null` and `undefined` leave\n \
+         * the key out. The core checks every key and value, with Java's messages.\n \
+         *\n \
+         * @remarks *(js-only)* The type of the configuration `Admin.create` takes,\n \
+         * Java's `Map<String, Object>` and `Properties` as one. It lists the keys\n \
+         * Java's `AdminClientConfig` defines, for autocompletion, and takes any other\n \
+         * string too, through `(string & {})`, since an unknown key goes to the\n \
+         * core.\n \
+         */\n\
+         export type AdminClientConfigs = {\n  \
+         [key in\n",
+    );
+    for k in keys {
+        text.push_str(&format!("    | {}\n", js_str(k)));
+    }
+    text.push_str(
+        "    // Any other key, keeping the known keys' autocompletion: the core\n    \
+         // lists the keys it does not use.\n    \
+         | (string & {})]?: ConfigValue;\n\
+         };\n\
+         \n\
+         // A value the core parses.\n\
+         type ConfigValue = string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;\n",
+    );
+    (repo_root.join(JS_SRC).join("admin").join("admin_client_configs.ts"), text)
 }
 
 /// The core's producer configuration: `rust/src/producer/producer_config.rs`,
@@ -310,5 +356,22 @@ mod tests {
         assert!(keys.contains(&"linger.ms".to_string()));
         assert!(!keys.contains(&"bootstrap.servers".to_string()));
         assert!(keys.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn test_admin_keys() {
+        let outputs = outputs(&repo_root()).unwrap();
+        let (path, text) = &outputs[2];
+        assert!(path.ends_with("javascript/src/admin/admin_client_configs.ts"));
+        assert!(text.contains("export type AdminClientConfigs = {\n  [key in\n"));
+        for line in [
+            "    | 'bootstrap.servers'\n",
+            "    | 'bootstrap.controllers'\n",
+            "    | 'sasl.jaas.config'\n",
+        ] {
+            assert!(text.contains(line), "missing {line}");
+        }
+        assert!(!text.contains("serializer"));
+        assert!(!text.contains("linger.ms"));
     }
 }

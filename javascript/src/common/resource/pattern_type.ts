@@ -1,0 +1,251 @@
+// Copyright 2026 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Java's org.apache.kafka.common.resource.PatternType, an enum (javascript/CLAUDE.md,
+// JavaScript Binding Conventions, Class family): frozen constants carrying
+// Java's `code()`, with java.lang.Enum's `name()`, `ordinal()`, `values()`
+// and `valueOf()`; `toString()` and `toJSON()` return the name.
+
+import { JavaForms } from '../../internal/args';
+import { IllegalArgumentError } from '../../illegal_argument_error';
+
+const JAVA_CLASS = 'org.apache.kafka.common.resource.PatternType';
+
+const isString = (value: unknown): boolean => value === null || typeof value === 'string';
+const FROM_STRING_FORMS = new JavaForms('fromString', [['name']], { bareTypes: { name: isString } });
+const FROM_CODE_FORMS = new JavaForms('fromCode', [['code']], { bareTypes: { code: (value) => typeof value === 'number' } });
+const VALUE_OF_FORMS = new JavaForms('valueOf', [['name']], { bareTypes: { name: isString } });
+const VALUES_FORMS = new JavaForms('values', [[]], { reader: true });
+const CODE_FORMS = new JavaForms('code', [[]], { reader: true });
+const IS_UNKNOWN_FORMS = new JavaForms('isUnknown', [[]], { reader: true });
+const NAME_FORMS = new JavaForms('name', [[]], { reader: true });
+const ORDINAL_FORMS = new JavaForms('ordinal', [[]], { reader: true });
+const IS_SPECIFIC_FORMS = new JavaForms('isSpecific', [[]], { reader: true });
+
+/**
+ * Resource pattern type.
+ */
+export class PatternType {
+  readonly #code: number;
+  readonly #name: string;
+  readonly #ordinal: number;
+
+  /**
+   * Made by this class only (the enum's constants).
+   *
+   * @param ordinal - the constant's position in Java's declaration
+   * @param name - the constant's name
+   * @param code - Java's byte code
+   */
+  private constructor(ordinal: number, name: string, code: number) {
+    this.#code = code;
+    this.#name = name;
+    this.#ordinal = ordinal;
+    Object.freeze(this);
+  }
+
+  /** Represents any PatternType which this client cannot understand, perhaps because this client is too old. */
+  static readonly UNKNOWN: PatternType = new PatternType(0, 'UNKNOWN', 0);
+
+  /** In a filter, matches any resource pattern type. */
+  static readonly ANY: PatternType = new PatternType(1, 'ANY', 1);
+
+  /** In a filter, will perform pattern matching. Given a filter of `ResourcePatternFilter(TOPIC, "payments.received", MATCH)`, the filter matches any `ResourcePattern` that matches topic 'payments.received': a literal pattern with the same type and name, a wildcard pattern with the same type, or a prefixed pattern with the same type whose name is a matching prefix. */
+  static readonly MATCH: PatternType = new PatternType(2, 'MATCH', 2);
+
+  /** A literal resource name. A literal name defines the full name of a resource, e.g. topic with name 'foo', or group with name 'bob'. The special wildcard character `*` can be used to represent a resource with any name. */
+  static readonly LITERAL: PatternType = new PatternType(3, 'LITERAL', 3);
+
+  /** A prefixed resource name. A prefixed name defines a prefix for a resource, e.g. topics with names that start with 'foo'. */
+  static readonly PREFIXED: PatternType = new PatternType(4, 'PREFIXED', 4);
+
+  /**
+   * The constants in declaration order, Java's `values()`.
+   *
+   * @returns a new array of the constants
+   * @throws `TypeError` when it is given an argument: it only reads
+   */
+  static values(): PatternType[] {
+    VALUES_FORMS.match(undefined, arguments.length);
+    return [PatternType.UNKNOWN, PatternType.ANY, PatternType.MATCH, PatternType.LITERAL, PatternType.PREFIXED];
+  }
+
+  /**
+   * The constant named exactly `name`, Java's `valueOf(String)`.
+   *
+   * @param name - the name, on its own or as `{ name }`
+   * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
+   */
+  static valueOf(name: string): PatternType;
+  /**
+   * The same as `valueOf(name)`, the parameter given by name.
+   *
+   * @param options - the constant's name
+   * @returns the constant with the specified name
+   * @throws `IllegalArgumentError` when no constant has that name
+   * @throws `TypeError` when the name is null or not a string
+   */
+  static valueOf(options: {
+    /** The constant's name */
+    name: string;
+  }): PatternType;
+  static valueOf(name: unknown): PatternType {
+    VALUE_OF_FORMS.match(name, arguments.length);
+    const value = VALUE_OF_FORMS.value(name, 'name');
+    if (value === null) throw new TypeError('Name is null');
+    if (typeof value !== 'string') throw new TypeError(`name must be a string, not ${typeof value}`);
+    const found = PatternType.values().find((o) => o.#name === value);
+    if (found === undefined) throw new IllegalArgumentError(`No enum constant ${JAVA_CLASS}.${value}`);
+    return found;
+  }
+
+  /**
+   * Return the PatternType with the provided name or `UNKNOWN` if one cannot be found.
+   *
+   * @param name - The string to parse, on its own or as `{ name }`.
+   * @returns the PatternType, or UNKNOWN
+   * @throws `TypeError` when it is neither a string nor null
+   */
+  static fromString(name: string | null): PatternType;
+  /**
+   * The same as `fromString(name)`, the parameter given by name.
+   *
+   * @param options - The string to parse.
+   * @returns the PatternType, or UNKNOWN
+   * @throws `TypeError` when it is neither a string nor null
+   */
+  static fromString(options: {
+    /** The string to parse. */
+    name: string | null;
+  }): PatternType;
+  static fromString(name: unknown): PatternType {
+    FROM_STRING_FORMS.match(name, arguments.length);
+    const value = FROM_STRING_FORMS.value(name, 'name');
+    if (value === null) return PatternType.UNKNOWN;
+    if (typeof value !== 'string') throw new TypeError(`name must be a string or null, not ${typeof value}`);
+    return PatternType.values().find((o) => o.#name === value) ?? PatternType.UNKNOWN;
+  }
+
+  /**
+   * Return the PatternType with the provided code or `PatternType.UNKNOWN` if one
+   * cannot be found.
+   *
+   * @param code - the code, a Java `byte`, on its own or as `{ code }`
+   * @returns the constant
+   * @throws `TypeError` when the code is not an integer
+   * @throws `RangeError` when it is outside Java's `byte`
+   */
+  static fromCode(code: number): PatternType;
+  /**
+   * The same as `fromCode(code)`, the parameter given by name.
+   *
+   * @param options - the code, a Java `byte`
+   * @returns the constant
+   * @throws `TypeError` when the code is not an integer
+   * @throws `RangeError` when it is outside Java's `byte`
+   */
+  static fromCode(options: {
+    /** The code, a Java `byte` */
+    code: number;
+  }): PatternType;
+  static fromCode(code: unknown): PatternType {
+    FROM_CODE_FORMS.match(code, arguments.length);
+    const value = FROM_CODE_FORMS.value(code, 'code');
+    if (typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError('code must be an integer');
+    if (value < -128 || value > 127) throw new RangeError('code must be from -128 to 127');
+    return PatternType.values().find((o) => o.#code === value) ?? PatternType.UNKNOWN;
+  }
+
+  /**
+   * @returns the code of this resource.
+   * @throws `TypeError` when it is given an argument: it only reads
+   */
+  code(): number {
+    CODE_FORMS.match(undefined, arguments.length);
+    return this.#code;
+  }
+
+  /**
+   * @returns whether this resource pattern type is UNKNOWN.
+   * @throws `TypeError` when it is given an argument: it only reads
+   */
+  isUnknown(): boolean {
+    IS_UNKNOWN_FORMS.match(undefined, arguments.length);
+    return this === PatternType.UNKNOWN;
+  }
+
+  /**
+   * Whether this resource pattern type is a concrete type, rather than
+   * UNKNOWN or one of the filter types.
+   *
+   * @returns whether this resource pattern type is a concrete type
+   * @throws `TypeError` when it is given an argument: it only reads
+   */
+  isSpecific(): boolean {
+    IS_SPECIFIC_FORMS.match(undefined, arguments.length);
+    return this !== PatternType.UNKNOWN && this !== PatternType.ANY && this !== PatternType.MATCH;
+  }
+
+  /**
+   * The name of this constant, exactly as declared, Java's `Enum.name()`.
+   *
+   * @returns the name
+   * @throws `TypeError` when it is given an argument: it only reads
+   */
+  name(): string {
+    NAME_FORMS.match(undefined, arguments.length);
+    return this.#name;
+  }
+
+  /**
+   * The position of this constant in its enum declaration, Java's `Enum.ordinal()`.
+   *
+   * @returns the ordinal
+   * @throws `TypeError` when it is given an argument: it only reads
+   */
+  ordinal(): number {
+    ORDINAL_FORMS.match(undefined, arguments.length);
+    return this.#ordinal;
+  }
+
+  /**
+   * The constant's name, as Java's `Enum.toString()`.
+   *
+   * @returns the name
+   */
+  toString(): string {
+    return this.#name;
+  }
+
+  /**
+   * The constant's name, which `JSON.stringify` writes for it.
+   *
+   * @param key - the key `JSON.stringify` passes, which is ignored
+   * @returns the name
+   *
+   * @remarks *(js-only)* JavaScript's JSON protocol.
+   */
+  toJSON(key?: string): string {
+    void key;
+    return this.#name;
+  }
+
+  // Java's constants are static finals: the class is frozen once its static
+  // fields are set, so none can be reassigned.
+  static {
+    Object.freeze(this);
+  }
+}

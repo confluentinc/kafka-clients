@@ -147,7 +147,7 @@ atomic_int fault_armed = 0;
 
 // The failures armed for each step, and the names faultNext() takes, by FaultStep.
 static atomic_int fault_left[FAULT_STEPS];
-static const char* const FAULT_NAMES[FAULT_STEPS] = {NULL, "notify", "metadata", "error", "slot", "partitions", "close", "enqueue", "failure"};
+static const char* const FAULT_NAMES[FAULT_STEPS] = {NULL, "notify", "metadata", "error", "slot", "partitions", "close", "enqueue", "value", "failure"};
 
 int fault_take(FaultStep step) {
     int left = atomic_load(&fault_left[step]);
@@ -161,7 +161,7 @@ int fault_take(FaultStep step) {
 }
 
 // faultNext(step, times): arms `times` (1 when left out) more failures of
-// `step` (notify, metadata, error, slot, partitions, close, enqueue or
+// `step` (notify, metadata, error, slot, partitions, close, enqueue, value or
 // failure), each failing the next run of its site. faultNext(null) disarms
 // every step and returns the failures still armed, a name each, so a test
 // sees that the steps it armed ran. A process-wide switch. Test-only.
@@ -184,7 +184,7 @@ static napi_value js_fault_next(napi_env env, napi_callback_info info) {
     if (step < 0) {
         napi_throw_type_error(env, NULL,
                               "faultNext(step, times): step null, or notify, metadata, error, slot, partitions, close, "
-                              "enqueue or failure; times a positive count");
+                              "enqueue, value or failure; times a positive count");
         return NULL;
     }
     if (step != FAULT_NONE) {
@@ -264,6 +264,70 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"metricValue", NULL, js_metric_value, NULL, NULL, NULL, napi_default, NULL},
         {"metricIsMeasurable", NULL, js_metric_is_measurable, NULL, NULL, NULL, napi_default, NULL},
         {"metricsStats", NULL, js_metrics_stats, NULL, NULL, NULL, napi_default, NULL},
+        // admin.c, admin_values.c
+        {"adminCreate", NULL, js_admin_create, NULL, NULL, NULL, napi_default, NULL},
+        {"adminClose", NULL, js_admin_close, NULL, NULL, NULL, napi_default, NULL},
+        {"adminResultFuture", NULL, js_admin_result_future, NULL, NULL, NULL, napi_default, NULL},
+        {"adminResultFutures", NULL, js_admin_result_futures, NULL, NULL, NULL, napi_default, NULL},
+        {"adminFutureWait", NULL, js_admin_future_wait, NULL, NULL, NULL, napi_default, NULL},
+        {"adminFutureGet", NULL, js_admin_future_get, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeCluster", NULL, js_admin_describe_cluster, NULL, NULL, NULL, napi_default, NULL},
+        {"adminListTopics", NULL, js_admin_list_topics, NULL, NULL, NULL, napi_default, NULL},
+        {"adminCreateTopics", NULL, js_admin_create_topics, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDeleteTopics", NULL, js_admin_delete_topics, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeTopics", NULL, js_admin_describe_topics, NULL, NULL, NULL, napi_default, NULL},
+        {"adminCreatePartitions", NULL, js_admin_create_partitions, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDeleteRecords", NULL, js_admin_delete_records, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeConfigs", NULL, js_admin_describe_configs, NULL, NULL, NULL, napi_default, NULL},
+        {"adminIncrementalAlterConfigs", NULL, js_admin_incremental_alter_configs, NULL, NULL, NULL, napi_default, NULL},
+        {"adminListConfigResources", NULL, js_admin_list_config_resources, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeLogDirs", NULL, js_admin_describe_log_dirs, NULL, NULL, NULL, napi_default, NULL},
+        {"adminAlterReplicaLogDirs", NULL, js_admin_alter_replica_log_dirs, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeReplicaLogDirs", NULL, js_admin_describe_replica_log_dirs, NULL, NULL, NULL, napi_default, NULL},
+        {"adminElectLeaders", NULL, js_admin_elect_leaders, NULL, NULL, NULL, napi_default, NULL},
+        {"adminAlterPartitionReassignments", NULL, js_admin_alter_partition_reassignments, NULL, NULL, NULL, napi_default, NULL},
+        {"adminListPartitionReassignments", NULL, js_admin_list_partition_reassignments, NULL, NULL, NULL, napi_default, NULL},
+        {"adminListOffsets", NULL, js_admin_list_offsets, NULL, NULL, NULL, napi_default, NULL},
+        {"adminListGroups", NULL, js_admin_list_groups, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeConsumerGroups", NULL, js_admin_describe_consumer_groups, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeClassicGroups", NULL, js_admin_describe_classic_groups, NULL, NULL, NULL, napi_default, NULL},
+        {"adminListConsumerGroupOffsets", NULL, js_admin_list_consumer_group_offsets, NULL, NULL, NULL, napi_default, NULL},
+        {"adminAlterConsumerGroupOffsets", NULL, js_admin_alter_consumer_group_offsets, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDeleteConsumerGroupOffsets", NULL, js_admin_delete_consumer_group_offsets, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDeleteConsumerGroups", NULL, js_admin_delete_consumer_groups, NULL, NULL, NULL, napi_default, NULL},
+        {"adminRemoveMembersFromConsumerGroup", NULL, js_admin_remove_members_from_consumer_group, NULL, NULL, NULL, napi_default, NULL},
+        {"adminCreateAcls", NULL, js_admin_create_acls, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeAcls", NULL, js_admin_describe_acls, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDeleteAcls", NULL, js_admin_delete_acls, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeClientQuotas", NULL, js_admin_describe_client_quotas, NULL, NULL, NULL, napi_default, NULL},
+        {"adminAlterClientQuotas", NULL, js_admin_alter_client_quotas, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeUserScramCredentials", NULL, js_admin_describe_user_scram_credentials, NULL, NULL, NULL, napi_default, NULL},
+        {"adminAlterUserScramCredentials", NULL, js_admin_alter_user_scram_credentials, NULL, NULL, NULL, napi_default, NULL},
+        {"adminCreateDelegationToken", NULL, js_admin_create_delegation_token, NULL, NULL, NULL, napi_default, NULL},
+        {"adminRenewDelegationToken", NULL, js_admin_renew_delegation_token, NULL, NULL, NULL, napi_default, NULL},
+        {"adminExpireDelegationToken", NULL, js_admin_expire_delegation_token, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeDelegationToken", NULL, js_admin_describe_delegation_token, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeProducers", NULL, js_admin_describe_producers, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeTransactions", NULL, js_admin_describe_transactions, NULL, NULL, NULL, napi_default, NULL},
+        {"adminAbortTransaction", NULL, js_admin_abort_transaction, NULL, NULL, NULL, napi_default, NULL},
+        {"adminForceTerminateTransaction", NULL, js_admin_force_terminate_transaction, NULL, NULL, NULL, napi_default, NULL},
+        {"adminListTransactions", NULL, js_admin_list_transactions, NULL, NULL, NULL, napi_default, NULL},
+        {"adminFenceProducers", NULL, js_admin_fence_producers, NULL, NULL, NULL, napi_default, NULL},
+        {"adminDescribeFeatures", NULL, js_admin_describe_features, NULL, NULL, NULL, napi_default, NULL},
+        {"adminUpdateFeatures", NULL, js_admin_update_features, NULL, NULL, NULL, napi_default, NULL},
+        {"adminUnregisterController", NULL, js_admin_unregister_controller, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminUpdateConsumerGroupOffsets", NULL, js_mock_admin_update_consumer_group_offsets, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminUpdateOffsets", NULL, js_mock_admin_update_offsets, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminAddTopic", NULL, js_mock_admin_add_topic, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminMarkTopicForDeletion", NULL, js_mock_admin_mark_topic_for_deletion, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminSetFetchesRemainingUntilVisible", NULL, js_mock_admin_set_fetches_remaining_until_visible, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminCreate", NULL, js_mock_admin_create, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminController", NULL, js_mock_admin_controller, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminTimeoutNextRequest", NULL, js_mock_admin_timeout_next_request, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminBuilderNew", NULL, js_mock_admin_builder_new, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminBuilderSet", NULL, js_mock_admin_builder_set, NULL, NULL, NULL, napi_default, NULL},
+        {"mockAdminBuilderBuild", NULL, js_mock_admin_builder_build, NULL, NULL, NULL, napi_default, NULL},
+        {"adminStats", NULL, js_admin_stats, NULL, NULL, NULL, napi_default, NULL},
         // headers.c
         {"headerStats", NULL, js_header_stats, NULL, NULL, NULL, napi_default, NULL},
         // record_spy.c

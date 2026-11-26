@@ -70,7 +70,78 @@ missing common.serialization.Serializer#configure
 # KafkaProducer's constructor: a Map and Properties are one configs type, so
 # Java's (Properties, Serializer, Serializer) form is the (Map, Serializer,
 # Serializer) one.
-overload-missing KafkaProducer.constructor/KafkaProducer(Properties,Serializer,Serializer)
 # RecordHeader's constructor takes Java's (String, byte[]) form: JavaScript has
 # no ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
 overload-missing RecordHeader.constructor/RecordHeader(ByteBuffer,ByteBuffer)
+
+# Admin, KafkaAdminClient and MockAdminClient, with the reasons of the admin
+# package's documentation (src/admin/index.ts): the C FFI has no entry point
+# for the Raft voter calls, describeMetadataQuorum, unregisterBroker, the
+# metrics and telemetry calls, and the share-group and streams-group calls.
+missing clients.admin.Admin#addRaftVoter
+missing clients.admin.Admin#alterShareGroupOffsets
+missing clients.admin.Admin#alterStreamsGroupOffsets
+missing clients.admin.Admin#clientInstanceId
+missing clients.admin.Admin#deleteShareGroupOffsets
+missing clients.admin.Admin#deleteShareGroups
+missing clients.admin.Admin#deleteStreamsGroupOffsets
+missing clients.admin.Admin#deleteStreamsGroups
+missing clients.admin.Admin#describeMetadataQuorum
+missing clients.admin.Admin#describeShareGroups
+missing clients.admin.Admin#describeStreamsGroups
+missing clients.admin.Admin#listShareGroupOffsets
+missing clients.admin.Admin#listStreamsGroupOffsets
+missing clients.admin.Admin#metrics
+missing clients.admin.Admin#registerMetricForSubscription
+missing clients.admin.Admin#removeRaftVoter
+missing clients.admin.Admin#unregisterBroker
+missing clients.admin.Admin#unregisterMetricFromSubscription
+missing clients.admin.KafkaAdminClient#addRaftVoter
+missing clients.admin.KafkaAdminClient#alterShareGroupOffsets
+missing clients.admin.KafkaAdminClient#alterStreamsGroupOffsets
+missing clients.admin.KafkaAdminClient#clientInstanceId
+missing clients.admin.KafkaAdminClient#deleteShareGroupOffsets
+missing clients.admin.KafkaAdminClient#deleteShareGroups
+missing clients.admin.KafkaAdminClient#deleteStreamsGroupOffsets
+missing clients.admin.KafkaAdminClient#deleteStreamsGroups
+missing clients.admin.KafkaAdminClient#describeMetadataQuorum
+missing clients.admin.KafkaAdminClient#describeShareGroups
+missing clients.admin.KafkaAdminClient#describeStreamsGroups
+missing clients.admin.KafkaAdminClient#listShareGroupOffsets
+missing clients.admin.KafkaAdminClient#listStreamsGroupOffsets
+missing clients.admin.KafkaAdminClient#metrics
+missing clients.admin.KafkaAdminClient#registerMetricForSubscription
+missing clients.admin.KafkaAdminClient#removeRaftVoter
+missing clients.admin.KafkaAdminClient#unregisterBroker
+missing clients.admin.KafkaAdminClient#unregisterMetricFromSubscription
+missing clients.admin.MockAdminClient#addRaftVoter
+missing clients.admin.MockAdminClient#alterShareGroupOffsets
+missing clients.admin.MockAdminClient#alterStreamsGroupOffsets
+missing clients.admin.MockAdminClient#clientInstanceId
+missing clients.admin.MockAdminClient#deleteShareGroupOffsets
+missing clients.admin.MockAdminClient#deleteShareGroups
+missing clients.admin.MockAdminClient#deleteStreamsGroupOffsets
+missing clients.admin.MockAdminClient#deleteStreamsGroups
+missing clients.admin.MockAdminClient#describeMetadataQuorum
+missing clients.admin.MockAdminClient#describeShareGroups
+missing clients.admin.MockAdminClient#describeStreamsGroups
+missing clients.admin.MockAdminClient#listShareGroupOffsets
+missing clients.admin.MockAdminClient#listStreamsGroupOffsets
+missing clients.admin.MockAdminClient#metrics
+missing clients.admin.MockAdminClient#registerMetricForSubscription
+missing clients.admin.MockAdminClient#removeRaftVoter
+missing clients.admin.MockAdminClient#unregisterBroker
+missing clients.admin.MockAdminClient#unregisterMetricFromSubscription
+# MockAdminClient's own members with no FFI entry point (the admin package's
+# documentation).
+missing clients.admin.MockAdminClient#addStreamsGroupDescription
+missing clients.admin.MockAdminClient#addedMetrics
+missing clients.admin.MockAdminClient#advanceTimeOnClientInstanceId
+missing clients.admin.MockAdminClient#broker
+missing clients.admin.MockAdminClient#brokers
+missing clients.admin.MockAdminClient#disableTelemetry
+missing clients.admin.MockAdminClient#handleDescribeTopicsUsingIds
+missing clients.admin.MockAdminClient#injectTimeoutException
+missing clients.admin.MockAdminClient#setClientInstanceId
+missing clients.admin.MockAdminClient#setMockMetrics
+overload-missing MockAdminClient.addTopic/addTopic(boolean,String,List,Map,boolean)
