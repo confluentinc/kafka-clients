@@ -281,3 +281,244 @@ test('a delegation token crosses with the binding own hmacAsBase64String()', asy
     DelegationToken.prototype.hmacAsBase64String = original;
   }
 });
+
+// ---- the request and value translation, ported from Python's
+// test_grpc_admin_translate and .NET's AdminServiceTests ------------------------------
+
+/**
+ * Replaces `prototype[name]` for the length of `body`, as the hmac test above
+ * replaces a method, so a test can see what the service passes the client or
+ * hand it an answer the mock cannot give.
+ *
+ * @param {object} prototype
+ * @param {string} name
+ * @param {Function} replacement
+ * @param {() => Promise<void>} body
+ */
+async function replacing(prototype, name, replacement, body) {
+  const target = /** @type {Record<string, unknown>} */ (prototype);
+  const original = target[name];
+  target[name] = replacement;
+  try {
+    await body();
+  } finally {
+    target[name] = original;
+  }
+}
+
+test('a NewTopic whose counts are absent (-1) is Java empty Optional, kept apart from counts given', async () => {
+  const { MockAdminClient } = require('@confluentinc/kafka-javascript/admin');
+  /** @type {Array<[string, number, number, string]>} */
+  const seen = [];
+  const original = MockAdminClient.prototype.createTopics;
+  await replacing(
+    MockAdminClient.prototype,
+    'createTopics',
+    /** @this {import('@confluentinc/kafka-javascript/admin').MockAdminClient} @param {{ newTopics: Iterable<import('@confluentinc/kafka-javascript/admin').NewTopic> }} args */
+    function (args) {
+      for (const topic of args.newTopics) seen.push([topic.name(), topic.numPartitions(), topic.replicationFactor(), String(topic)]);
+      return original.call(this, /** @type {never} */ (args));
+    },
+    async () => {
+      const service = newService();
+      const id = await mock(service);
+      const created = /** @type {Keyed} */ (
+        await service.createTopics({
+          admin_id: id,
+          topics: [
+            { name: 'absent', num_partitions: -1, replication_factor: -1 },
+            { name: 'given', num_partitions: 3, replication_factor: 1 },
+          ],
+        })
+      );
+      assert.ok(created.entries);
+      assert.deepEqual(
+        created.entries.map((e) => [e.key, e.error]),
+        [
+          [{ name: 'absent' }, undefined],
+          [{ name: 'given' }, undefined],
+        ],
+      );
+      const given = /** @type {{ metadata: { num_partitions: number, replication_factor: number } }} */ (created.entries[1].value);
+      assert.equal(given.metadata.num_partitions, 3);
+      assert.equal(given.metadata.replication_factor, 1);
+    },
+  );
+  // Java's NewTopic#numPartitions and #replicationFactor read an empty
+  // Optional as -1 (CreateTopicsRequest.NO_NUM_PARTITIONS, NO_REPLICATION_FACTOR),
+  // as they read an explicit -1; only toString and equals tell the two apart,
+  // an empty Optional printing "default".
+  assert.deepEqual(seen, [
+    ['absent', -1, -1, '(name=absent, numPartitions=default, replicationFactor=default, replicasAssignments=null, configs=null)'],
+    ['given', 3, 1, '(name=given, numPartitions=3, replicationFactor=1, replicasAssignments=null, configs=null)'],
+  ]);
+});
+
+test("describeDelegationToken: owners unset is Java's null, every owner; owners present but empty is []", async () => {
+  const { MockAdminClient } = require('@confluentinc/kafka-javascript/admin');
+  /** @type {Array<unknown>} */
+  const seen = [];
+  const original = MockAdminClient.prototype.describeDelegationToken;
+  await replacing(
+    MockAdminClient.prototype,
+    'describeDelegationToken',
+    /** @this {import('@confluentinc/kafka-javascript/admin').MockAdminClient} @param {import('@confluentinc/kafka-javascript/admin').DescribeDelegationTokenOptions} options */
+    function (options) {
+      const owners = options.owners();
+      seen.push(owners === null ? null : owners.map(String));
+      return original.call(this, options);
+    },
+    async () => {
+      const service = newService();
+      const id = await mock(service);
+      const created = /** @type {{ token?: unknown, error?: ProtoError }} */ (
+        await service.createDelegationToken({ admin_id: id, renewers: [{ principal_type: 'User', name: 'r' }] })
+      );
+      assert.equal(created.error, undefined, JSON.stringify(created.error));
+      // Java's mock lists every token for empty owners, and throws
+      // NullPointerException for unset (null) ones (options.owners().isEmpty());
+      // the core's mock, which this one is, lists every token for null too.
+      // The server passes Java's null for unset owners.
+      const unset = /** @type {{ tokens: unknown[] }} */ (await service.describeDelegationToken({ admin_id: id }));
+      assert.equal(unset.tokens.length, 1);
+      const empty = /** @type {{ tokens: unknown[] }} */ (
+        await service.describeDelegationToken({ admin_id: id, owners: { principals: [] } })
+      );
+      assert.equal(empty.tokens.length, 1);
+      const byOwner = /** @type {{ tokens: unknown[] }} */ (
+        await service.describeDelegationToken({ admin_id: id, owners: { principals: [{ principal_type: 'User', name: 'nobody' }] } })
+      );
+      assert.equal(byOwner.tokens.length, 0);
+    },
+  );
+  assert.deepEqual(seen, [null, [], ['User:nobody']]);
+});
+
+test('Node.isFenced and LogDirDescription.isCordoned cross the wire, both arms', () => {
+  const { nodeToProto } = require('../../grpc-server/grpc_translate');
+  const { logDirDescriptionToProto } = require('../../grpc-server/grpc_admin_translate');
+  const { LogDirDescription } = require('@confluentinc/kafka-javascript/admin');
+  const { Node, TopicPartitionMap } = require('@confluentinc/kafka-javascript/common');
+  // A real cluster never reports a fenced broker or a cordoned dir to the
+  // pooled multilanguage scenarios, so the true arms are pinned here.
+  const fenced = /** @type {Record<string, unknown>} */ (
+    nodeToProto(new Node({ id: 1, host: 'h', port: 9092, rack: null, isFenced: true }))
+  );
+  assert.equal(fenced.is_fenced, true);
+  assert.equal(fenced.id, 1);
+  assert.equal('rack' in fenced, false);
+  assert.equal(
+    /** @type {Record<string, unknown>} */ (nodeToProto(new Node({ id: 2, host: 'h', port: 9092, rack: 'r' }))).is_fenced,
+    false,
+  );
+  const cordoned = logDirDescriptionToProto(
+    new LogDirDescription({ error: null, replicaInfos: new TopicPartitionMap(), totalBytes: 10, usableBytes: 5, isCordoned: true }),
+  );
+  assert.deepEqual(cordoned, { is_cordoned: true, total_bytes: '10', usable_bytes: '5', replica_infos: [] });
+  const plain = logDirDescriptionToProto(new LogDirDescription({ error: null, replicaInfos: new TopicPartitionMap() }));
+  assert.deepEqual(plain, { is_cordoned: false, replica_infos: [] });
+});
+
+test('alterConsumerGroupOffsets, deleteConsumerGroupOffsets and removeMembersFromConsumerGroup: one failing key is that key error, not the whole call', async () => {
+  const { MockAdminClient } = require('@confluentinc/kafka-javascript/admin');
+  const { KafkaFuture, TopicPartition } = require('@confluentinc/kafka-javascript/common');
+  const { GroupSubscribedToTopicError } = require('@confluentinc/kafka-javascript/common/errors');
+  const bad = new TopicPartition({ topic: 't', partition: 1 });
+  /** A failed future, as the client's own futures fail. */
+  const failed = () => {
+    const done = KafkaFuture.completedFuture(null);
+    return done.thenApply(() => {
+      throw new GroupSubscribedToTopicError('x');
+    });
+  };
+  const result = {
+    partitionResult: (/** @type {TopicPartition} */ partition) => (partition.equals(bad) ? failed() : KafkaFuture.completedFuture(null)),
+    memberResult: (/** @type {import('@confluentinc/kafka-javascript/admin').MemberToRemove} */ member) =>
+      member.groupInstanceId() === 'b' ? failed() : KafkaFuture.completedFuture(null),
+    all: () => KafkaFuture.completedFuture(null),
+  };
+  const code = errorFfiId(new GroupSubscribedToTopicError('x'));
+  const expected = {
+    entries: [
+      { key: { partition: { topic: 't', partition: 0 } } },
+      { key: { partition: { topic: 't', partition: 1 } }, error: { code, message: 'x' } },
+    ],
+  };
+  await replacing(
+    MockAdminClient.prototype,
+    'alterConsumerGroupOffsets',
+    () => result,
+    async () => {
+      await replacing(
+        MockAdminClient.prototype,
+        'deleteConsumerGroupOffsets',
+        () => result,
+        async () => {
+          const service = newService();
+          const id = await mock(service);
+          const partitions = [
+            { topic: 't', partition: 0 },
+            { topic: 't', partition: 1 },
+          ];
+          assert.deepEqual(
+            await service.alterConsumerGroupOffsets({
+              admin_id: id,
+              group_id: 'g',
+              offsets: partitions.map((partition) => ({ partition, offset: { offset: '1' } })),
+            }),
+            expected,
+          );
+          assert.deepEqual(await service.deleteConsumerGroupOffsets({ admin_id: id, group_id: 'g', partitions }), expected);
+          assert.deepEqual(await service.deleteConsumerGroupOffsets({ admin_id: id, group_id: 'g', partitions: [] }), { entries: [] });
+          await replacing(
+            MockAdminClient.prototype,
+            'removeMembersFromConsumerGroup',
+            () => result,
+            async () => {
+              assert.deepEqual(
+                await service.removeMembersFromConsumerGroup({
+                  admin_id: id,
+                  group_id: 'g',
+                  members: { members: [{ group_instance_id: 'a' }, { group_instance_id: 'b' }] },
+                }),
+                { entries: [{ key: { name: 'a' } }, { key: { name: 'b' }, error: { code, message: 'x' } }] },
+              );
+            },
+          );
+        },
+      );
+    },
+  );
+});
+
+test('listGroups with a non-Kafka listing error keeps the valid listings and sends the error as -4', async () => {
+  const { GroupListing, MockAdminClient } = require('@confluentinc/kafka-javascript/admin');
+  const { IllegalStateError } = require('@confluentinc/kafka-javascript');
+  const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
+  const listing = new GroupListing({ groupId: 'g1', type: null, protocol: 'consumer', groupState: null });
+  const result = {
+    valid: () => KafkaFuture.completedFuture([listing]),
+    errors: () => KafkaFuture.completedFuture([new IllegalStateError('broker listing failed'), new Error('listing invariant broken')]),
+  };
+  await replacing(
+    MockAdminClient.prototype,
+    'listGroups',
+    () => result,
+    async () => {
+      const service = newService();
+      const id = await mock(service);
+      const response = /** @type {{ valid: Array<{ group_id: string }>, listing_errors: ProtoError[], error?: ProtoError }} */ (
+        await service.listGroups({ admin_id: id })
+      );
+      assert.equal(response.error, undefined);
+      assert.deepEqual(
+        response.valid.map((l) => l.group_id),
+        ['g1'],
+      );
+      assert.deepEqual(response.listing_errors, [
+        { code: -4, message: 'broker listing failed' },
+        { code: -4, message: 'js server: Error: listing invariant broken' },
+      ]);
+    },
+  );
+});

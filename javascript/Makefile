@@ -456,6 +456,12 @@ test-integration-ssl: build security-certs
 	docker rm -f $(KAFKA_SSL_CONTAINER) >/dev/null 2>&1 || true; \
 	exit $$status
 
+# The files the SASL broker runs: the producer's SASL test, the admin client's
+# ACL, authorization and delegation-token tests, and the admin examples, whose
+# token examples run against this broker's token secret (the others skip
+# without KAFKA_BOOTSTRAP_SERVERS).
+SASL_TESTS = test/integration/sasl.test.js test/integration/admin_sasl.test.js test/integration/admin_examples.test.js
+
 # SASL_PLAINTEXT on KAFKA_SASL_PORT + 1 and SASL_SSL on KAFKA_SASL_PORT + 2,
 # both SASL/PLAIN, PLAINTEXT on KAFKA_SASL_PORT, under the StandardAuthorizer:
 # admin, and ANONYMOUS (the PLAINTEXT listener), are super users; alice has
@@ -473,12 +479,13 @@ test-integration-sasl: build security-certs
 	  -e KAFKA_OPTS=-Djava.security.auth.login.config=/etc/kafka/secrets/kafka_server_jaas.conf \
 	  -e KAFKA_AUTHORIZER_CLASS_NAME=org.apache.kafka.metadata.authorizer.StandardAuthorizer \
 	  -e 'KAFKA_SUPER_USERS=User:admin;User:ANONYMOUS' \
+	  -e KAFKA_DELEGATION_TOKEN_SECRET_KEY=js-tests-delegation-token-secret \
 	  $(KAFKA_IMAGE) >/dev/null || exit 1; \
 	status=0; \
 	KAFKA_SECURITY_DIR='$(SECURITY_DIR)' KAFKA_SASL_ADMIN_BOOTSTRAP_SERVERS=localhost:$$p \
 	  KAFKA_SASL_PLAINTEXT_BOOTSTRAP_SERVERS=localhost:$$plain KAFKA_SASL_SSL_BOOTSTRAP_SERVERS=localhost:$$tls \
 	  KAFKA_SASL_CONTAINER=$(KAFKA_SASL_CONTAINER) \
-	  $(NODE) $(JEST) --ci $(or $(JEST_ARGS),test/integration/sasl.test.js) --selectProjects integration --runInBand || status=$$?; \
+	  $(NODE) $(JEST) --ci $(or $(JEST_ARGS),$(SASL_TESTS)) --selectProjects integration --runInBand || status=$$?; \
 	docker rm -f $(KAFKA_SASL_CONTAINER) >/dev/null 2>&1 || true; \
 	exit $$status
 

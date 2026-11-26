@@ -22,7 +22,9 @@
 // whose node id is 1. What that broker refuses (ACLs and delegation tokens, a
 // reassignment needing more brokers, a preferred election with nothing to
 // elect, a replica move to another log dir) still runs, and the test checks the
-// broker's error and exit code 1. The usage tests need no broker.
+// broker's error and exit code 1. The usage tests need no broker. The token
+// examples also run against the broker of `make test-integration-sasl`, which
+// has a token secret, as Rust's delegation_token_examples runs them.
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
@@ -506,6 +508,71 @@ test('a usage error exits with code 2, --help with 0, and a secret is never repe
     );
     assert.equal(ok(run('force_terminate_transaction', [transactionalId])), `Transaction ${transactionalId} terminated\n`);
     ok(run('delete_topics', [topic]));
+  },
+  300000,
+);
+
+// ---- the token examples on the SASL broker --------------------------------------------
+//
+// Rust's delegation_token_examples (rust/tests/integration/admin_examples_test.rs),
+// on the broker of `make -C javascript test-integration-sasl`, which has a
+// token secret: its SASL_PLAINTEXT listener, PLAIN, as user admin.
+
+const SASL_PLAINTEXT = process.env.KAFKA_SASL_PLAINTEXT_BOOTSTRAP_SERVERS;
+const SKIP_SASL = SASL_PLAINTEXT ? false : 'KAFKA_SASL_PLAINTEXT_BOOTSTRAP_SERVERS is not set: no SASL broker with a token secret';
+if (SKIP_SASL) console.log(`skipping the delegation-token example test: ${SKIP_SASL}`);
+
+(SKIP_SASL ? test.skip : test)(
+  'the delegation-token examples on a broker with a token secret: create, describe, renew and expire',
+  async () => {
+    const sasl = /** @type {string} */ (SASL_PLAINTEXT);
+    const config = [
+      '-X',
+      'security.protocol=SASL_PLAINTEXT',
+      '-X',
+      'sasl.mechanism=PLAIN',
+      '-X',
+      'sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret";',
+    ];
+    /** @param {string} name @param {string[]} args */
+    const runSasl = (name, args) => run(name, [...config, ...args], sasl);
+    /** @param {string} name @param {string[]} args @param {string} expected */
+    const runSaslUntil = async (name, args, expected) => {
+      let output = runSasl(name, args);
+      for (let attempt = 0; attempt < 30 && !(output.code === 0 && output.stdout.includes(expected)); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        output = runSasl(name, args);
+      }
+      assert.ok(
+        output.code === 0 && output.stdout.includes(expected),
+        `${JSON.stringify(expected)} not in the output of ${name}: ${JSON.stringify(output)}`,
+      );
+      return output.stdout;
+    };
+
+    let stdout = ok(runSasl('create_delegation_token', ['--renewer=User:renewer']));
+    const tokenId = between(stdout, 'Created delegation token ', '\n');
+    const hmac = between(stdout, 'HMAC (hex): ', '\n');
+    assert.ok(stdout.includes('Owner: User:admin'), stdout);
+    assert.ok(stdout.includes('Renewers: User:renewer'), stdout);
+
+    // The HMAC is the token's password: describing shows it only when asked.
+    stdout = await runSaslUntil('describe_delegation_token', [], `Token ${tokenId}: `);
+    assert.ok(!stdout.includes(hmac), stdout);
+    stdout = ok(runSasl('describe_delegation_token', ['--show-hmac']));
+    assert.ok(stdout.includes(`  HMAC (hex): ${hmac}`), stdout);
+    // A malformed HMAC is not repeated back.
+    const stderr = failed(runSasl('renew_delegation_token', ['not-hex-secret']), 2);
+    assert.ok(!stderr.includes('not-hex-secret'), stderr);
+    stdout = ok(runSasl('describe_delegation_token', ['User:nobody']));
+    assert.ok(stdout.includes('No delegation tokens'), stdout);
+
+    // Only the owner and the renewers may renew; the owner is the caller here.
+    stdout = ok(runSasl('renew_delegation_token', ['--period-ms=600000', hmac]));
+    assert.ok(stdout.includes('Delegation token renewed, expiry timestamp: '), stdout);
+    stdout = ok(runSasl('expire_delegation_token', ['--period-ms=-1', hmac]));
+    assert.ok(stdout.includes('Delegation token expired, expiry timestamp: '), stdout);
+    await runSaslUntil('describe_delegation_token', [], 'No delegation tokens');
   },
   300000,
 );
