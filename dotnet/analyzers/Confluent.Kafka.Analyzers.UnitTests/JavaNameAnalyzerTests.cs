@@ -90,7 +90,7 @@ public sealed class JavaNameAnalyzerTests
                 + "method\torg.apache.kafka.common.Node\tinstance\thost()\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\tequals(Object obj)\n"
                 + "method\torg.apache.kafka.common.Node\tinstance\thashCode()\n"
-                + "field\torg.apache.kafka.common.Node\tstatic\tNO_ID\n"));
+                + "field\torg.apache.kafka.common.Node\tstatic final\tNO_ID\n"));
 
     [Fact]
     public Task AJavaInterface_TranslatedAsAnInterface_IsNotReported() =>
@@ -1568,7 +1568,7 @@ public sealed class JavaNameAnalyzerTests
         "type\torg.apache.kafka.common.config.SslClientAuth\tenum\t-\n"
         + "constant\torg.apache.kafka.common.config.SslClientAuth\tNONE\n"
         + "constant\torg.apache.kafka.common.config.SslClientAuth\tREQUIRED\n"
-        + "field\torg.apache.kafka.common.config.SslClientAuth\tstatic\tVALUES\n";
+        + "field\torg.apache.kafka.common.config.SslClientAuth\tstatic final\tVALUES\n";
 
     [Fact]
     public Task AJavaEnumsField_IsAStaticReadonlyFieldOfItsMethodsClass() =>
@@ -1623,8 +1623,8 @@ public sealed class JavaNameAnalyzerTests
     private const string SecurityProtocol =
         "type\torg.apache.kafka.common.security.auth.SecurityProtocol\tenum\t-\n"
         + "constant\torg.apache.kafka.common.security.auth.SecurityProtocol\tPLAINTEXT\n"
-        + "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tinstance\tid\n"
-        + "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tstatic\tVALUES\n";
+        + "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tinstance final\tid\n"
+        + "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tstatic final\tVALUES\n";
 
     [Fact]
     public Task AJavaEnumsInstanceField_AsAStaticReadonlyFieldOfItsMethodsClass_IsReported() =>
@@ -1676,6 +1676,168 @@ public sealed class JavaNameAnalyzerTests
             Files(SslClientAuth),
             Name(0, "missing T:Confluent.Kafka.Common.Config.SslClientAuth org.apache.kafka.common.config.SslClientAuth#REQUIRED: has no "
                 + "counterpart of Java's org.apache.kafka.common.config.SslClientAuth#REQUIRED"));
+
+    private const string MockProducerWithFields =
+        "type\torg.apache.kafka.clients.producer.MockProducer\tclass\t-\n"
+        + "ctor\torg.apache.kafka.clients.producer.MockProducer\tMockProducer()\n"
+        + "field\torg.apache.kafka.clients.producer.MockProducer\tinstance\tsendException\n"
+        + "field\torg.apache.kafka.clients.producer.MockProducer\tinstance final\tid\n";
+
+    private const string NoSendExceptionSetter =
+        "missing T:Confluent.Kafka.Producer.MockProducer org.apache.kafka.clients.producer.MockProducer#sendException: has no "
+        + "setter SendException(sendException) for Java's public field org.apache.kafka.clients.producer.MockProducer#sendException";
+
+    [Fact]
+    public Task AJavaFieldThatIsNotFinal_AsASetterNamedAfterIt_IsNotReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Producer
+            {
+                public sealed class MockProducer
+                {
+                    public readonly int id = 0;
+
+                    public void SendException(Exception sendException)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(MockProducerWithFields));
+
+    [Fact]
+    public Task AJavaFieldThatIsNotFinal_WithoutASetter_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Producer
+            {
+                public sealed class {|#0:MockProducer|}
+                {
+                    public readonly int id = 0;
+                }
+            }
+            """,
+            Files(MockProducerWithFields),
+            Name(0, NoSendExceptionSetter));
+
+    [Theory]
+    [InlineData("internal")]
+    [InlineData("private")]
+    public Task AJavaFieldThatIsNotFinal_WithASetterThatIsNotPublic_IsReported(string accessibility) =>
+        Verifier.VerifyWithFilesAsync(
+            $$"""
+            using System;
+
+            namespace Confluent.Kafka.Producer
+            {
+                public sealed class {|#0:MockProducer|}
+                {
+                    public readonly int id = 0;
+
+                    {{accessibility}} void SendException(Exception sendException)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(MockProducerWithFields),
+            Name(0, NoSendExceptionSetter));
+
+    [Fact]
+    public Task AJavaFieldThatIsNotFinal_AsASetPrefixedSetter_IsReported() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Producer
+            {
+                public sealed class {|#0:MockProducer|}
+                {
+                    public readonly int id = 0;
+
+                    public void {|#1:SetSendException|}(Exception sendException)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(MockProducerWithFields),
+            Name(0, NoSendExceptionSetter),
+            Name(1, "unmatched M:Confluent.Kafka.Producer.MockProducer.SetSendException(System.Exception): Java's "
+                + "MockProducer.sendException is a field: its setter is SendException(sendException), without Set"));
+
+    [Fact]
+    public Task AJavaFieldThatIsNotFinal_AndItsSetPrefixedSetter_ReportsOnlyTheSetPrefixedOne() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            using System;
+
+            namespace Confluent.Kafka.Producer
+            {
+                public sealed class MockProducer
+                {
+                    public readonly int id = 0;
+
+                    public void SendException(Exception sendException)
+                    {
+                    }
+
+                    public void {|#0:SetSendException|}(Exception sendException)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(MockProducerWithFields),
+            Name(0, "unmatched M:Confluent.Kafka.Producer.MockProducer.SetSendException(System.Exception): Java's "
+                + "MockProducer.sendException is a field: its setter is SendException(sendException), without Set"));
+
+    [Theory]
+    [InlineData("public void {|#1:SendException|}(Exception exception) { }")]
+    [InlineData("public void {|#1:SendException|}() { }")]
+    [InlineData("public void {|#1:SendException|}(Exception sendException, int extra) { }")]
+    [InlineData("public static void {|#1:SendException|}(Exception sendException) { }")]
+    public Task AJavaFieldThatIsNotFinal_AsASetterOfAnotherShape_IsReported(string setter) =>
+        Verifier.VerifyWithFilesAsync(
+            $$"""
+            using System;
+
+            namespace Confluent.Kafka.Producer
+            {
+                public sealed class {|#0:MockProducer|}
+                {
+                    public readonly int id = 0;
+
+                    {{setter}}
+                }
+            }
+            """,
+            Files(MockProducerWithFields),
+            Name(0, NoSendExceptionSetter),
+            Name(1, "unmatched M:Confluent.Kafka.Producer.MockProducer.SendException"
+                + (setter.Contains("()") ? "" : setter.Contains("extra") ? "(System.Exception,System.Int32)" : "(System.Exception)")
+                + ": Java's MockProducer.sendException is a field: its setter is SendException(sendException), "
+                + "with one parameter named after the field"));
+
+    [Fact]
+    public Task AJavaFieldThatIsFinal_IsReportedByItsSpelling_NotAsASetter() =>
+        Verifier.VerifyWithFilesAsync(
+            """
+            namespace Confluent.Kafka.Producer
+            {
+                public sealed class {|#0:MockProducer|}
+                {
+                    public void SendException(System.Exception sendException)
+                    {
+                    }
+                }
+            }
+            """,
+            Files(MockProducerWithFields),
+            Name(0, "missing T:Confluent.Kafka.Producer.MockProducer org.apache.kafka.clients.producer.MockProducer#id: has no "
+                + "counterpart of Java's org.apache.kafka.clients.producer.MockProducer#id"));
 
     private const string GroupState =
         "type\torg.apache.kafka.common.GroupState\tenum\t-\n"

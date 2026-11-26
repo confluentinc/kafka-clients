@@ -50,7 +50,7 @@ namespace Confluent.Kafka.Producer;
 /// asynchronous <c>Send</c>'s first stage completes, the callback may not have run yet and the future may not be
 /// done, and a running callback delays both, where Java runs it inside <c>send</c> and returns a future already
 /// done. A serializer's <see cref="Common.Errors.ApiException"/> there fires it where <b>Thread</b> (above) says. On
-/// the mocks, a send exception set with <c>SetSendException</c>, an <see cref="Common.Errors.ApiException"/>
+/// the mocks, a send exception set with <c>SendException</c>, an <see cref="Common.Errors.ApiException"/>
 /// included, fires nothing: <c>MockProducer</c>'s <c>Send</c> throws it and <c>AsyncMockProducer</c>'s
 /// <c>Send</c> ends its first stage with it, as Java's <c>MockProducer.send</c> throws it. Any other refusal before
 /// the append fires nothing: the synchronous <c>Send</c> throws, and the asynchronous <c>Send</c>'s first stage
