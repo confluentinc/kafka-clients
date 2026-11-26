@@ -41,8 +41,9 @@
  * object, once. Where the core's mock differs from Java's, the mock does as
  * the core's does:
  * - while another call on the mock is pending, `addRecord()`,
- *   `setMaxPollRecords()`, `updatePartitions()` and the waiting methods throw
- *   or reject with `ConcurrentModificationError`, and
+ *   `setMaxPollRecords()`, `updatePartitions()`, `assignment()`,
+ *   `subscription()`, `paused()`, `groupMetadata()` and the waiting methods
+ *   throw or reject with `ConcurrentModificationError`, and
  *   `updateBeginningOffsets()`, `updateEndOffsets()`,
  *   `updateDurationOffsets()`, `setPollException()`, `setOffsetsException()`
  *   and `scheduleNopPollTask()` are ignored, where Java's mock waits and
@@ -55,6 +56,13 @@
  *   `close({ option: null })`, which Java's mock ignores;
  * - `subscribe({ pattern: null })` rejects with "Topic pattern to subscribe to
  *   cannot be null", where Java's mock says "Topic pattern cannot be null";
+ * - `partitionsFor(null)` and `currentLag(null)` reject with a `TypeError`,
+ *   where Java's mock answers `[]` and `0`, and a `null` collection given to
+ *   `subscribe()`, `assign()`, `seekToBeginning()` or `seekToEnd()` rejects
+ *   with `KafkaConsumer`'s `IllegalArgumentError`, where Java's mock throws
+ *   a `NullPointerException`;
+ * - a negative timeout rejects with `IllegalArgumentError` "Timeout must not
+ *   be negative", where Java's mock ignores it;
  * - `metrics()` answers an empty map after `close()` too, where Java's mock
  *   throws "This consumer has already been closed.";
  * - `addRecord(null)` is a `TypeError` even on a closed mock, where Java's

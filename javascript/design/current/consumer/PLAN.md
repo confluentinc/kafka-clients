@@ -483,7 +483,7 @@ FFI has them:
 2. `registerMetricForSubscription` and `unregisterMetricFromSubscription`, and the mock's `addedMetrics()`.
 3. The mock's `schedulePollTask(Runnable)`, `setClientInstanceId`, `disableTelemetry` and `injectTimeoutException`.
 
-Eight FFI behaviours the binding lives with for now:
+Ten FFI behaviours the binding lives with for now:
 
 4. A negative `CloseOptions` timeout is read as zero (`duration_ms()` in `rust/src/ffi/consumer/close_options.rs`),
    where Java throws "The timeout cannot be negative." It's already a listed deviation (line 81). Ask: Java's check
@@ -522,11 +522,23 @@ Eight FFI behaviours the binding lives with for now:
     `Node` hold, gets `TypeError` from `PartitionInfo_with_offline_replicas` and `Node_with_rack_is_fenced`; and a
     NULL pattern in `subscribe_with_pattern_cb` on the mock's view is refused at the FFI's boundary with the
     consumer's "Topic pattern to subscribe to cannot be null", where Java's mock says "Topic pattern cannot be null".
-    Ask: accept them where Java's mock does, and let the mock report its own null pattern.
+    Also: on the mock's view, `partitions_for_cb` and `current_lag_cb` refuse a NULL topic or partition, where Java's
+    mock answers `[]` and `0`, and a NULL collection given to `subscribe_with_topics_cb`, `assign_cb`,
+    `seek_to_beginning_cb` or `seek_to_end_cb` gets `KafkaConsumer`'s `IllegalArgumentError`, where Java's mock throws
+    `NullPointerException` (a `TypeError` here). Ask: accept them where Java's mock does, and let the mock report its
+    own null pattern and null collections.
 11. Found while building P4: `kafka_consumer_Consumer_metrics` reads the metrics through the consumer's handle, never
     through the mock, so on a closed mock it answers an empty view, where Java's mock throws "This consumer has
     already been closed." (and the core's mock would panic with that message). Ask: have
     `kafka_consumer_Consumer_metrics` on a closed mock report Java's error, as `MockConsumer#metrics` throws it.
+12. Found in P4's review: on the mock's view, the FFI's `ms()` refuses a negative timeout ("Timeout must not be
+    negative") from `poll_cb` and every timed `_cb` twin, as on a `KafkaConsumer` (the conventions' rule, Signatures,
+    Q35), and such a `poll` does not record its timeout. Java's mock ignores every timeout and records each poll's as
+    `lastPollTimeout`. Ask: let the mock take a negative timeout as Java's does.
+13. Found in P4's review: the getters `assignment`, `subscription`, `paused` and `group_metadata` on the mock's view
+    take the single-owner flag, so they fail with the `ConcurrentModificationException` translation while another call
+    is pending, where Java's synchronized mock waits for them and its unsynchronized `groupMetadata()` answers at once.
+    Ask: read them as `closed` and `last_poll_timeout` are read, through the handle.
 
 ## 7. Execution: Actor and Critic
 

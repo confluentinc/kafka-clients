@@ -263,14 +263,17 @@ Java's own `IllegalStateError('This consumer has already been closed.')`. A seco
 
 The binding passes each through (lines 119 and 184), a test pins it (`test/unit/consumer/mock_consumer.test.js`),
 and the package docs list it. Why: the binding repeats no precondition and keeps no state. Goes when: the FFI's mock
-does as Java's does (PLAN §6, asks 8 to 11).
+does as Java's does (PLAN §6, asks 8 to 13).
 
 - One call at a time: the FFI's mock shares the consumer's single-owner flag, so a mock call made while another call
   on the mock is pending, a `poll` included, fails with `ConcurrentModificationError` ("KafkaConsumer is not safe for
-  multi-threaded access."), where Java's synchronized mock waits. `closed()` and `lastPollTimeout()` are read through
-  the handle and answer while a call is pending. The setters with no error slot (`updateBeginningOffsets`,
+  multi-threaded access."), where Java's synchronized mock waits. So do the getters `assignment()`,
+  `subscription()`, `paused()` and `groupMetadata()`, which Java's mock waits for or, for `groupMetadata()`, answers at
+  once (ask 13). `closed()` and `lastPollTimeout()` are read through the handle and answer while a call is pending, and
+  so do `metrics()` and `wakeup()`. The setters with no error slot (`updateBeginningOffsets`,
   `updateEndOffsets`, `updateDurationOffsets`, `setPollException`, `setOffsetsException`, `scheduleNopPollTask`) are
-  logged by the core and ignored instead (`with_mock_void`), where Java's mock applies them (ask 8). The FFI's mock
+  logged by the core and ignored instead (`with_mock_void`), where Java's mock applies them (ask 8); the error an
+  ignored error setter was given is let go at the next mock call, as the core dropped it. The FFI's mock
   answers a poll at once, so the window is short, and the test finds it by trying a call the FFI refuses.
 - A `null` offset in `newOffsets` is a `TypeError`, "newOffsets must not contain a null offset", the binding's
   run-time type check, as for a `null` timestamp in `offsetsForTimes`: the FFI reads a NULL value as 0 (`map_topic_partition_i64`), where
@@ -283,6 +286,16 @@ does as Java's does (PLAN §6, asks 8 to 11).
   nothing (ask 10).
 - `subscribe({ pattern: null })` rejects with the FFI's "Topic pattern to subscribe to cannot be null", the
   consumer's message, where Java's mock says "Topic pattern cannot be null" (ask 10).
+- The `Consumer` methods' null arguments get the FFI's errors, as on `KafkaConsumer` (the order of the null checks,
+  above): `partitionsFor(null)` rejects with `TypeError` "topic must not be null" and `currentLag(null)` with
+  `TypeError` "topic_partition must not be null", where Java's mock answers `[]` and `0`; `subscribe({ topics: null })`,
+  `assign({ partitions: null })`, `seekToBeginning(null)` and `seekToEnd(null)` reject with `IllegalArgumentError` and
+  Java's `KafkaConsumer` messages ("Topic collection to subscribe to cannot be null", "Topic partitions collection to
+  assign to cannot be null", "Partitions collection cannot be null"), where Java's mock throws `NullPointerException`
+  (ask 10).
+- A negative timeout is refused by the FFI's `ms()` with `IllegalArgumentError` "Timeout must not be negative", the
+  conventions' rule (Signatures, Q35), from `poll` and every timed form, and such a `poll` leaves `lastPollTimeout()`
+  as it was; Java's mock ignores the timeouts and records each poll's (ask 12).
 - `metrics()` on a closed mock answers an empty map: the FFI reads it through the consumer's handle, which outlives
   the close, never through the mock, whose `metrics()` would panic. Java's mock throws "This consumer has already been
   closed." (ask 11).
