@@ -78,7 +78,7 @@ semaphore:
     - name: bump-version
       branch: master
       pipeline_file: .semaphore/bump-version.yml
-      description: Set a new version with `make bump-version` on a branch off BASE_BRANCH and open a PR with it. The Cargo manifests and Cargo.lock get VERSION as given, the Python packages its PEP 440 form (0.3.0-rc.1 -> 0.3.0rc1) unless PYTHON_VERSION is set. Python versions only move up, so PYTHON_VERSION is required whenever that PEP 440 form is below the current Python version (python/pyproject.toml). DOTNET_VERSION, when set, gives the .NET package (dotnet/Directory.Build.props) its version; to change only that one, give VERSION and PYTHON_VERSION their current values. Nothing is merged, tagged or published; the PR's build runs the checks. Fails if the branch bump-version/<VERSION> already exists on origin.
+      description: Set a new version with `make bump-version` on a branch off BASE_BRANCH and open a PR with it. The Cargo manifests and Cargo.lock get VERSION as given, the Python packages its PEP 440 form (0.3.0-rc.1 -> 0.3.0rc1) unless PYTHON_VERSION is set. Python versions only move up, so PYTHON_VERSION is required whenever that PEP 440 form is below the current Python version (python/pyproject.toml). DOTNET_VERSION, when set, gives the .NET package (dotnet/Directory.Build.props) its version, and JAVASCRIPT_VERSION the Node.js package (javascript/package.json and package-lock.json) its version; to change only one of those, give VERSION and PYTHON_VERSION their current values. Nothing is merged, tagged or published; the PR's build runs the checks. Fails if the branch bump-version/<VERSION> already exists on origin.
       parameters:
         - name: VERSION
           required: true
@@ -89,7 +89,38 @@ semaphore:
         - name: DOTNET_VERSION
           required: false
           description: A version for the Confluent.Kafka NuGet package in semver form, X.Y.Z or X.Y.Z-alpha.N, -beta.N, -dev.N, -rc.N (e.g. "4.4.0-beta.1"), where an -alpha.N, -beta.N or -rc.N may be followed by .dev.M for a dev build (e.g. "4.4.0-alpha.0.dev.1"), written to dotnet/Directory.Build.props. It must not be below the current one. Without it the .NET version is left as it is.
+        - name: JAVASCRIPT_VERSION
+          required: false
+          description: A version for the @confluentinc/kafka-javascript npm package in semver form, X.Y.Z or X.Y.Z-alpha.N, -beta.N, -dev.N, -rc.N, 4.0.0 or higher (e.g. "4.4.0-beta.2"), written to javascript/package.json and package-lock.json. It must not be below the current one. Without it the JavaScript version is left as it is.
         - name: BASE_BRANCH
           required: true
           default_value: master
           description: The branch to bump and the PR's base.
+    - name: memory-javascript
+      branch: master
+      at: "0 3 * * *"
+      pipeline_file: .semaphore/memory-javascript.yml
+      description: Nightly (03:00 UTC), or by hand, run the Node.js client's native-memory checks on Linux amd64 -- the unit and memory Jest projects against the addon built with AddressSanitizer (make -C javascript test-asan), and the memory probes' mutants, each of which must make the probes that guard what it breaks fail (make -C javascript test-memory-mutation). Not part of the pull-request or release checks.
+    - name: chaos-javascript
+      branch: master
+      at: "0 2 * * 0"
+      pipeline_file: .semaphore/chaos-javascript.yml
+      description: Weekly (Sundays 02:00 UTC), or by hand, run the chaos harness (cargo xtask chaos, rust/tests/chaos) with the Node.js producer in its gRPC container and the Rust consumer on a three-broker cluster, twice (make chaos-javascript) -- leader changes and partition reassignments every cycle without broker restarts, then an unclean broker roll under the idempotent producer -- and fail when an acknowledged record is lost, duplicated or out of order. Not part of the pull-request or release checks.
+    - name: soak-javascript
+      branch: master
+      at: "0 2 * * 6"
+      pipeline_file: .semaphore/soak-javascript.yml
+      description: Weekly (Saturdays 02:00 UTC), or by hand, run the Node.js producer's soak client for SOAK_HOURS hours against a scratch broker (make -C javascript soak) and fail when its steady state does not hold -- the RSS, the JavaScript heap or the external memory still growing after the warm-up, open file descriptors or threads not flat, or a delivery callback that did not run exactly once. Not part of the pull-request or release checks.
+      parameters:
+        - name: SOAK_HOURS
+          required: false
+          default_value: '6'
+          description: How long the soak runs, in hours (the warm-up is its first 30 minutes).
+    - name: javascript-post-install
+      branch: master
+      pipeline_file: .semaphore/javascript-post-install.yml
+      description: Check a version of the Node.js client after the "Publish to npm" promotion of its tag build (.semaphore/publish-npm.yml) published it to npmjs.com. It checks that the registry has @confluentinc/kafka-javascript and its two platform packages at JAVASCRIPT_VERSION under its dist-tag (beta for a pre-release), with tarballs matching the registry's integrity and passing the package checks, then installs the package from npmjs.com into an empty project and runs the smoke program on Linux amd64 (almalinux 8 and 9, rockylinux 9, debian bookworm and trixie, ubuntu 20.04, 22.04 and 24.04) and macOS arm64, with Node.js 22, 24 and 26. It reads the registry anonymously and publishes nothing.
+      parameters:
+        - name: JAVASCRIPT_VERSION
+          required: true
+          description: The published version to check, X.Y.Z or X.Y.Z-alpha.N, X.Y.Z-beta.N, X.Y.Z-dev.N, X.Y.Z-rc.N (e.g. "4.4.0-beta.1").

@@ -738,47 +738,6 @@ fn has_word(text: &str, word: &str) -> bool {
     })
 }
 
-/// The references of a Javadoc that only points elsewhere: no text but `@see`
-/// tags (`@see KafkaConsumer#commitSync()`), or a body that is only "See" and
-/// `{@link}`s (`See {@link KafkaProducer#close()}`), with no tags but `@see`
-/// and `@since`. Empty for any other Javadoc.
-fn pointer_refs(doc: &str) -> Vec<String> {
-    let parsed = javadoc::parse(doc);
-    if !parsed.tags.iter().all(|t| t.name == "see" || t.name == "since") {
-        return Vec::new();
-    }
-    let mut refs: Vec<String> = Vec::new();
-    let mut rest = String::new();
-    let mut body = parsed.body.as_str();
-    while let Some(start) = body.find("{@link") {
-        rest.push_str(&body[..start]);
-        let Some(len) = body[start..].find('}') else {
-            return Vec::new();
-        };
-        let inner = &body[start + 1..start + len];
-        let target = inner.split_whitespace().nth(1).unwrap_or_default();
-        refs.push(target.to_string());
-        body = &body[start + len + 1..];
-    }
-    rest.push_str(body);
-    if rest
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|w| !w.is_empty() && !w.eq_ignore_ascii_case("see"))
-    {
-        return Vec::new();
-    }
-    refs.extend(parsed.tags.iter().filter(|t| t.name == "see").map(|t| {
-        // `@see Foo#bar() label`: the reference is the first word, the
-        // parameter list possibly spaced.
-        let text = t.text.as_str();
-        match text.find(')') {
-            Some(end) if text[..end].contains('(') => text[..=end].to_string(),
-            _ => text.split_whitespace().next().unwrap_or_default().to_string(),
-        }
-    }));
-    refs
-}
-
 /// The `Error` predicate of error type `name` (CLAUDE.md §12.4):
 /// `TimeoutError` -> `is_timeout_error`.
 pub(super) fn predicate_of(name: &str) -> String {
@@ -1447,7 +1406,7 @@ impl ApiDocs {
 
     /// The translator the rule and its helpers share.
     pub(super) fn translator(&self) -> Translator<'_> {
-        Translator { index: Some(&self.java), panics: false }
+        Translator { index: Some(&self.java), panics: false, markdown: false }
     }
 
     /// The translated Javadocs of `item`'s markers, the empty ones (only
@@ -1468,62 +1427,10 @@ impl ApiDocs {
     }
 
     /// The raw Javadocs of `marker`, a Javadoc that only points elsewhere
-    /// ([`pointer_refs`]) replaced by the Javadocs it points to
-    /// (documentation.md §4).
+    /// replaced by the Javadocs it points to (documentation.md §4,
+    /// [`javadoc::followed_javadocs`]).
     fn followed_javadocs(&self, marker: &str, seen: &mut BTreeSet<String>) -> Vec<String> {
-        if !seen.insert(marker.to_string()) {
-            return Vec::new();
-        }
-        let mut out = Vec::new();
-        for doc in self.java.marker_javadocs(marker).unwrap_or_default() {
-            let followed: Vec<String> = pointer_refs(&doc)
-                .iter()
-                .filter_map(|r| self.see_marker(marker, r))
-                .flat_map(|target| self.followed_javadocs(&target, seen))
-                .collect();
-            if followed.is_empty() {
-                out.push(doc);
-            } else {
-                out.extend(followed);
-            }
-        }
-        out
-    }
-
-    /// The marker a reference in the Javadoc of `from` names, when it names a
-    /// known class or one of its members: `KafkaConsumer`,
-    /// `KafkaConsumer#commitSync(Duration)`, `#commitSync()` (a member of
-    /// `from`'s own class). The class is found by simple name, `from`'s
-    /// package first; main-tree classes only.
-    fn see_marker(&self, from: &str, reference: &str) -> Option<String> {
-        let reference = reference.split_whitespace().collect::<String>();
-        let (class_name, member) = reference.split_once('#').unwrap_or((&reference, ""));
-        let from_class = self.java.resolve(from)?;
-        let class = if class_name.is_empty() {
-            from_class
-        } else {
-            let simple = class_name.rsplit('.').next().unwrap_or(class_name);
-            let mut candidates: Vec<&java::JavaClass> = self
-                .java
-                .classes
-                .iter()
-                .filter(|c| !c.is_test && c.path.last().is_some_and(|n| n == simple))
-                .collect();
-            candidates.sort_by_key(|c| c.package != from_class.package);
-            candidates.first().copied()?
-        };
-        if member.is_empty() {
-            return Some(class.marker());
-        }
-        let name = member.split('(').next().unwrap_or(member);
-        // A signature naming an overload is kept; one that names none (a
-        // fully-qualified parameter type) falls back to every overload.
-        let member = if member.contains('(') && class.overloads.iter().any(|o| o.signature() == member) {
-            member
-        } else {
-            name
-        };
-        Some(format!("{}#{member}", class.marker()))
+        javadoc::followed_javadocs(&self.java, marker, seen)
     }
 
     /// The Javadoc whose `@param` names best match `params` (the first on a
@@ -2377,16 +2284,19 @@ mod tests {
         assert_eq!(keys(&findings), ["size crate::abort", "size crate::close"]);
         assert_eq!(findings[1].detail, "18 words, more than 150% of the Javadoc's 10 (at most 15)");
         assert_eq!(
-            pointer_refs("@see KafkaConsumer#commitSync(Duration)\n@since 2.0"),
+            javadoc::pointer_refs("@see KafkaConsumer#commitSync(Duration)\n@since 2.0"),
             ["KafkaConsumer#commitSync(Duration)"]
         );
-        assert_eq!(pointer_refs("See {@link KafkaProducer#close()}."), ["KafkaProducer#close()"]);
         assert_eq!(
-            pointer_refs("@see KafkaConsumer\n@see MockConsumer"),
+            javadoc::pointer_refs("See {@link KafkaProducer#close()}."),
+            ["KafkaProducer#close()"]
+        );
+        assert_eq!(
+            javadoc::pointer_refs("@see KafkaConsumer\n@see MockConsumer"),
             ["KafkaConsumer", "MockConsumer"]
         );
-        assert!(pointer_refs("Closes it.\n@see KafkaProducer#close()").is_empty());
-        assert!(pointer_refs("@param x the x\n@see KafkaProducer#close()").is_empty());
+        assert!(javadoc::pointer_refs("Closes it.\n@see KafkaProducer#close()").is_empty());
+        assert!(javadoc::pointer_refs("@param x the x\n@see KafkaProducer#close()").is_empty());
     }
 
     #[test]

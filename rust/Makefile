@@ -42,6 +42,7 @@ export MULTILANG_IMAGE_TAG
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
 	test-integration-grpc-dotnet-native-aot \
+	test-integration-grpc-js test-integration-grpc-js-native chaos-javascript \
 	test-integration-perf test-integration-perf-macos producer-perf-test verify verify-macos \
 	format-check check-generated lint clippy-default-features doc-check package-check check-api-compat audit bump-version install-rust-analyzer clean
 
@@ -198,7 +199,8 @@ test-all-features-sasl-ssl:
 #
 # The `multilanguage_test!` / `multilanguage_consumer_test!` macros expand each
 # case into one test per backend, named `<case>__rust`, `<case>__grpc_python`,
-# `<case>__grpc_python_async` and `<case>__grpc_c`. So a backend is selectable
+# `<case>__grpc_python_async`, `<case>__grpc_c` and (producer only)
+# `<case>__grpc_js`. So a backend is selectable
 # with a plain libtest name filter -- no cargo feature or env var needed.
 #
 # The shared `__grpc_` infix is what lets `test-all-features` exclude every
@@ -259,6 +261,121 @@ test-integration-grpc-dotnet-native-aot:
 	MULTILANG_BACKEND_MODE=native \
 	MULTILANG_DOTNET_GRPC_SERVER=$(CURDIR)/target/grpc-native/dotnet-aot/Confluent.Kafka.GrpcServer \
 		$(CARGO_TEST_GRPC_DOTNET) --all-features --test integration -- __grpc_dotnet
+
+# ── The JavaScript-backend arms ───────────────────────────────────────────
+#
+# The same pair for the Node.js binding: the container arm, run by javascript/'s
+# `test-integration-grpc` after it builds the javascript gRPC image, and the
+# native arm, run by the root `test-integration-javascript-native` after the root
+# `build-grpc-native-javascript` builds the addon and checks the gRPC packages
+# `npm ci` installs in javascript/node_modules, where the server loads them.
+#
+# The binding is producer-only, so only `multilanguage_test!` has a `__grpc_js`
+# arm (the consumer and admin macros do not), and
+# javascript/grpc-server/grpc_server.js registers ProducerService alone.
+#
+# THE TRANSACTION TESTS ARE SKIPPED FOR JAVASCRIPT ONLY, because the
+# JavaScript client has no transactions yet. They are defined once, in
+# JS_GRPC_SKIPS, and used only by the two targets below, which only ever run
+# __grpc_js, so no other backend loses coverage.
+#
+# The JS producer has no transaction surface (initTransactions /
+# beginTransaction / sendOffsetsToTransaction / commitTransaction /
+# abortTransaction), so grpc-server/grpc_server.js leaves the five transaction
+# RPCs out and they answer gRPC UNIMPLEMENTED (and the bodies that read back
+# through a consumer also need a ConsumerService). Every `multilanguage_test!`
+# case that calls the transaction API is listed, one per line, by its module:
+# the producer transaction suite but its idempotent-producer case
+# (test_producer_id_expiration_with_no_transactions, which runs), the bounce
+# test and the transactional producer's authentication failure.
+# REMOVE them when the JS producer implements transactions (and, for those
+# reading back through a consumer, a JS consumer with a ConsumerService in
+# grpc-server/grpc_server.js).
+#
+# With all of them gone, remove JS_GRPC_SKIPS (the definition below and its uses in
+# test-integration-grpc-js and test-integration-grpc-js-native).
+#
+# Plain `cargo test`, with the other arms' features: the test selection has no
+# section for the JavaScript arm, so the arm runs whole whatever TEST_SELECTION
+# names.
+JS_GRPC_SKIPS = --skip client_authentication_failure_test::test_transactional_producer_with_invalid_credentials \
+	--skip producer_transactions_test::test_abort_transaction_timeout \
+	--skip producer_transactions_test::test_aborted_transaction_records_are_discarded \
+	--skip producer_transactions_test::test_bump_transactional_epoch_with_tv2_disabled \
+	--skip producer_transactions_test::test_bump_transactional_epoch_with_tv2_enabled \
+	--skip producer_transactions_test::test_commit_transaction_timeout \
+	--skip producer_transactions_test::test_consecutively_run_init_transactions \
+	--skip producer_transactions_test::test_consume_transform_produce_with_offsets \
+	--skip producer_transactions_test::test_consume_transform_produce_with_offsets_tv0 \
+	--skip producer_transactions_test::test_consume_transform_produce_with_offsets_tv1 \
+	--skip producer_transactions_test::test_delayed_fetch_includes_aborted_transaction \
+	--skip producer_transactions_test::test_empty_abort_after_commit \
+	--skip producer_transactions_test::test_failure_to_fence_epoch_tv1 \
+	--skip producer_transactions_test::test_failure_to_fence_epoch_tv2 \
+	--skip producer_transactions_test::test_fatal_error_after_invalid_producer_id_mapping_with_tv1 \
+	--skip producer_transactions_test::test_fatal_error_after_invalid_producer_id_mapping_with_tv2 \
+	--skip producer_transactions_test::test_fence_after_producer_commit \
+	--skip producer_transactions_test::test_fence_before_producer_commit \
+	--skip producer_transactions_test::test_fencing_on_commit \
+	--skip producer_transactions_test::test_fencing_on_send \
+	--skip producer_transactions_test::test_fencing_on_send_offsets \
+	--skip producer_transactions_test::test_fencing_on_transaction_expiration \
+	--skip producer_transactions_test::test_idempotent_produce_survives_a_forced_epoch_bump \
+	--skip producer_transactions_test::test_init_transactions_timeout \
+	--skip producer_transactions_test::test_multiple_markers_one_leader \
+	--skip producer_transactions_test::test_offset_metadata_in_send_offsets_to_transaction \
+	--skip producer_transactions_test::test_read_committed_consumer_should_not_see_undecided_data \
+	--skip producer_transactions_test::test_send_offsets_to_transaction_timeout \
+	--skip producer_transactions_test::test_send_offsets_with_group_metadata \
+	--skip producer_transactions_test::test_transaction_after_producer_id_expires_with_tv1 \
+	--skip producer_transactions_test::test_transaction_after_producer_id_expires_with_tv2 \
+	--skip producer_transactions_test::test_transaction_after_transaction_id_expires_but_producer_id_remains \
+	--skip producer_transactions_test::test_transaction_with_and_without_send \
+	--skip producer_transactions_test::test_transaction_with_and_without_send_tv0 \
+	--skip producer_transactions_test::test_transaction_with_and_without_send_tv1 \
+	--skip producer_transactions_test::test_transaction_with_invalid_send_and_end_txn_request_sent \
+	--skip producer_transactions_test::test_transaction_with_invalid_send_and_end_txn_request_sent_tv0 \
+	--skip producer_transactions_test::test_transaction_with_invalid_send_and_end_txn_request_sent_tv1 \
+	--skip producer_transactions_test::test_transactional_producer_single_broker_max_in_flight_one \
+	--skip producer_transactions_test::test_transactional_records_are_visible_only_after_commit \
+	--skip transactions_bounce_test::test_with_group_metadata
+
+test-integration-grpc-js:
+	cargo test --all-features --test integration -- __grpc_js \
+		$(JS_GRPC_SKIPS)
+
+test-integration-grpc-js-native:
+	MULTILANG_BACKEND_MODE=native \
+		cargo test --all-features --test integration -- __grpc_js \
+		$(JS_GRPC_SKIPS)
+
+# ── Chaos runs of the JavaScript producer ─────────────────────────────────
+#
+# `cargo xtask chaos` (tests/chaos/README.md) with the Node.js producer
+# (`producer:javascript`, served by javascript/grpc-server/grpc_server.js) and
+# the Rust consumer, on the harness's dedicated three-broker cluster, each run
+# ending in the conservation verdict. Two runs:
+#
+#   - leader movement without broker restarts: a preferred-leader change and a
+#     partition reassignment every cycle, at replication factor 2 so the
+#     reassignment moves data onto the third broker (Java's producer retries
+#     the NOT_LEADER_OR_FOLLOWER errors it meets with a metadata refresh);
+#   - an unclean broker roll (SIGKILL) under the workload's idempotent producer
+#     (acks=all, enable.idempotence=true): every acknowledged record is read
+#     back once, in order, per partition.
+#
+# The JavaScript backend runs in its container (the root
+# `chaos-javascript`, after `build-grpc-images-javascript`) or as a host
+# process (the root `chaos-javascript-native`, MULTILANG_BACKEND_MODE=native,
+# after `build-grpc-native-javascript`). A long run, so neither is part of
+# `verify` or of a pull request's CI; .semaphore/chaos-javascript.yml runs the
+# container form as a scheduled task (service.yml).
+CHAOS_JAVASCRIPT_WORKLOADS = --workload producer:javascript --workload consumer:rust --reports
+
+chaos-javascript:
+	cargo xtask chaos $(CHAOS_JAVASCRIPT_WORKLOADS) --no-broker-roll --change-leader \
+		--reassign-partitions --replication-factor 2 --cycles 3
+	cargo xtask chaos $(CHAOS_JAVASCRIPT_WORKLOADS) --unclean --cycles 3
 
 # Performance integration tests. Separated from the functional suites because
 # they assert latency and throughput budgets: run concurrently with ~138
@@ -357,15 +474,17 @@ audit:
 # PYTHON_VERSION is required whenever VERSION's PEP 440 form is below the
 # current Python version (python/pyproject.toml). DOTNET_VERSION (semver, e.g.
 # 4.4.0-beta.1) sets the .NET package's version (dotnet/Directory.Build.props),
-# which stays as it is without it and only moves up too; to change only that
-# one, give VERSION and PYTHON_VERSION their current values. The recipe reads them
+# which stays as it is without it and only moves up too; JAVASCRIPT_VERSION
+# (semver, 4.0.0 or higher, e.g. 4.4.0-beta.2) likewise sets the Node.js
+# package's version (javascript/package.json and package-lock.json). To change
+# only one of those, give VERSION and PYTHON_VERSION their current values. The recipe reads them
 # from its environment ("$$VERSION"), never through $(VERSION), so make pastes no
 # value into the shell. make still expands $(...) in a value given on its
 # command line, so a caller passing values it did not write (the Semaphore
 # Task) checks them and passes them in the environment instead.
 bump-version:
-	@test -n "$$VERSION" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440] [DOTNET_VERSION=SEMVER]" >&2; exit 2; }
-	cargo xtask bump-version "$$VERSION" $${PYTHON_VERSION:+--python-version "$$PYTHON_VERSION"} $${DOTNET_VERSION:+--dotnet-version "$$DOTNET_VERSION"}
+	@test -n "$$VERSION" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440] [DOTNET_VERSION=SEMVER] [JAVASCRIPT_VERSION=SEMVER]" >&2; exit 2; }
+	cargo xtask bump-version "$$VERSION" $${PYTHON_VERSION:+--python-version "$$PYTHON_VERSION"} $${DOTNET_VERSION:+--dotnet-version "$$DOTNET_VERSION"} $${JAVASCRIPT_VERSION:+--javascript-version "$$JAVASCRIPT_VERSION"}
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
 # component for the toolchain pinned in rust-toolchain.toml, and, if the
