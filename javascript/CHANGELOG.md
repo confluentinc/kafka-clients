@@ -347,6 +347,19 @@ newer.
   type-checked (`make typecheck-examples`) and linted.
 - The gRPC conformance server serves the `AdminService`, so the Rust
   multilanguage suite's admin cases run against this client.
+- Admin: a NUL in a group id, transactional id, SCRAM user, protocol type or
+  topic list is now refused with a TypeError naming the call's own parameter
+  (for example `groupIds must be an iterable of strings without null bytes`),
+  not 'a topic name'.
+- The admin client's static finals can't be reassigned, as the producer's
+  can't: its enums, nested ones included, and `AdminClientConfig`,
+  `TopicConfig` and `LogLevelConfig` are frozen, and `MockAdminClient`'s
+  `DEFAULT_CLUSTER_ID` and `DEFAULT_LOG_DIRS`, `Uuid`'s constants and the
+  other admin static finals are not writable or configurable.
+- A form error lists each form's names in Java's parameter order:
+  `describeTopics`' last form reads `(topics, options)`, and
+  `TokenInformation`'s constructor lists `tokenRequester` between `owner`
+  and `renewers`.
 
 ### Errors and security
 

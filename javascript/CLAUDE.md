@@ -706,7 +706,14 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `static { Object.freeze(this); }`, and any other class names its finals to
   `finalStatics` (`src/internal/static_finals.ts`), a static made on its
   first read keeping its getter, non-configurable.
-  `test/unit/internal/static_finals.test.js` walks every exported class.
+  `test/unit/internal/static_finals.test.js` walks every exported class. The
+  admin client's enums freeze themselves too, the nested ones in their own
+  class (`ConfigEntry.ConfigSource`, `AlterConfigOp.OpType`), and
+  `AdminClientConfig`, `TopicConfig` and `LogLevelConfig` are generated
+  frozen; `MockAdminClient.DEFAULT_CLUSTER_ID` and `DEFAULT_LOG_DIRS`,
+  `Uuid`'s constants, `KafkaPrincipal`'s, `ClientQuotaEntity`'s,
+  `ResourcePattern.WILDCARD_RESOURCE` and the `ANY` filters go through
+  `finalStatics`.
   The generators write the block too: `rust/xtask/src/config_consts/js.rs`
   for the config classes, `rust/xtask/src/error_hierarchy/js.rs` for an error
   class's nested enum (`RecordDeserializationError.DeserializationExceptionOrigin`).
@@ -1547,7 +1554,8 @@ adds:
   in `lint-mapping.json` as invented names; so are the value sets
   (`MemberToRemoveSet`, and `UuidSet` for Java's `Set<Uuid>`, which
   `Uuid.RESERVED` is, read-only as Java's `Set.of`, and made on its first
-  read, since `uuid_set.ts` reads `Uuid`). A map keyed by strings that a
+  read, since `uuid_set.ts` reads `Uuid`, by a non-configurable getter that
+  gives the same set every time). A map keyed by strings that a
   call takes is a `Map` or a plain object (entry 49); one a Result returns is
   a `Map`, keyed by `number` for broker ids (a `ReadonlyMap` for Java's
   unmodifiable view) **(not decided yet in the JS conventions**: the
