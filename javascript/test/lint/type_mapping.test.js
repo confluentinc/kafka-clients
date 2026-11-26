@@ -171,6 +171,38 @@ test('a Duration is a number of milliseconds or a Temporal.Duration, nothing els
   assert.deepEqual(findings(r), ['Typed.pause: parameter timeout: Java Duration is not TypeScript number | { other(): void; }']);
 });
 
+test("a bare Duration is named after its own Java form, not after the set's first one-parameter form", () => {
+  // MockConsumer declares commitSync(Map offsets) before commitSync(Duration timeout).
+  const commit = javaClass('clients.producer.Committer', {
+    overloads: [
+      method('commit', ['Map<String, Long>'], { return_type: 'void', param_names: ['offsets'] }),
+      method('commit', ['Duration'], { return_type: 'void', param_names: ['timeout'] }),
+    ],
+  });
+  const duration = "number | { readonly [Symbol.toStringTag]: 'Temporal.Duration'; total(options: { unit: 'millisecond' }): number }";
+  const r = lint(
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...classes, commit]),
+      ...FILES,
+      ...LIB,
+      'src/producer/typed.ts': TYPED_TS,
+      'src/common/kafka_future.ts': FUTURE_TS,
+      'src/producer/committer.ts': `export class Committer {
+  commit(options: { offsets: Map<string, bigint | number>; timeout?: never }): void;
+  commit(offsets: Map<string, bigint | number>): void;
+  commit(options: { timeout: ${duration}; offsets?: never }): void;
+  commit(timeout: ${duration}): void;
+  commit(options: unknown): void { void options; }
+}
+`,
+    }),
+    [RULE],
+  );
+  assert.deepEqual(findings(r), []);
+  assert.equal(r.status, 0);
+});
+
 test('a union holding the translated class and more is a mismatch', () => {
   const r = lint(
     fixture({ 'src/producer/typed.ts': TYPED_TS.replace('future(): KafkaFuture<Rec>', 'future(): KafkaFuture<Rec | string>') }),

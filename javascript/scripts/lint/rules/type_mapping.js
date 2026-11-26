@@ -504,7 +504,9 @@ module.exports = {
           // A Java interface whose bare value takes its class (BARE_CLASSES).
           const narrowed = types.length === 1 ? BARE_CLASSES.get(parseJava(types[0]).name) : undefined;
           if (narrowed === undefined || symbolName(strip(bare)) !== narrowed.ts) check(where, `parameter ${bareName}`, types, bare);
-          durationName(where, p0, types[0], forms.find((f) => f.params.length === 1).param_names[0]);
+          // The name of the form the bare value translates, not of the first one-parameter form.
+          const bareForm = forms.find((f, k) => f.params.length === 1 && names[k][0] === bareName);
+          durationName(where, p0, bareForm.types[0], bareForm.param_names[0]);
           return;
         }
         const options = p0 === null ? null : strip(checker.getTypeAtLocation(p0));
