@@ -623,6 +623,7 @@ warmup complete (100 msgs); measuring 600s now
             metrics: None,
             load_msg_s: None,
             elapsed: Duration::from_secs(1),
+            first_failure: None,
         });
         progress.end_test();
         assert_eq!(progress.live_markdown(Some((rust.clone(), rust.so_far()))), None);
@@ -650,6 +651,7 @@ warmup complete (100 msgs); measuring 600s now
             metrics: None,
             load_msg_s: None,
             elapsed: Duration::from_secs(1),
+            first_failure: None,
         }
     }
 
