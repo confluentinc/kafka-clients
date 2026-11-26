@@ -948,10 +948,12 @@ test('commitSync: its four forms, bare and by name, and their errors', async () 
   await consumer.commitSync({ offsets: new TopicPartitionMap(), timeout: Temporal.Duration.from({ milliseconds: 100 }) });
   // Offsets to an unassigned partition: the broker would take them; the
   // unreachable one never answers. The text is the core's: Java's commitSync
-  // attaches no message of its own.
+  // attaches no message of its own. Under load the event reaper may expire the
+  // commit first, with its "<event> was <n> ms past its expiration of <deadline>",
+  // the event named as the core names it, as Java's reaper races the commit too.
   await assert.rejects(consumer.commitSync({ offsets, timeout: 300 }), {
     constructor: KafkaTimeoutError,
-    message: 'Timeout of 300ms expired before successfully committing offsets',
+    message: /^(Timeout of 300ms expired before successfully committing offsets|.+ was \d+ ms past its expiration of \d+)$/,
   });
   // A bare null fits both one-parameter forms, so neither takes it.
   // @ts-expect-error a null the types forbid
