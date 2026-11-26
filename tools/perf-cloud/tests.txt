@@ -62,7 +62,12 @@ txn-fixed-10k-1kb-200p       rust,python,dotnet  WORKLOAD=transactional PARTITIO
 consumer-fixed-10k-1kb-200p  rust,python,dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=10000
 
 # 100k msg/s of 1 KiB values (~102 MB/s): latency at a high fixed load.
-producer-fixed-100k-1kb-200p  rust,python,dotnet  PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=100000 BATCH_SIZE=1024
+producer-fixed-100k-1kb-200p  rust,python  PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=100000 BATCH_SIZE=1024
+
+# 250k msg/s of 1 KiB values (~256 MB/s): the dotnet group's high fixed load,
+# a rate the Python clients cannot reach but the .NET clients sustain (their
+# unbounded peak is ~410-435k msg/s), so the rate stays fixed.
+producer-fixed-250k-1kb-200p  dotnet  PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=250000 BATCH_SIZE=1024
 
 # Unbounded lz4-compressed 1 KiB values into 36 partitions: compression's cost
 # at peak throughput.
@@ -144,12 +149,16 @@ txn-max-1kb-200p-1000rpt-abort50   rust,python,dotnet  WORKLOAD=transactional PA
 producer-max-100b-200p   rust,python,dotnet  PARTITIONS=200 VALUE_SIZE=100 LIMIT_RPS=0 BATCH_SIZE=1024
 producer-max-100kb-200p  rust,python,dotnet  PARTITIONS=200 VALUE_SIZE=102400 LIMIT_RPS=0 BATCH_SIZE=1024
 
+# The large-message producer test: unbounded 500 KiB values (512000 B), the
+# producer side of consumer-fixed-600-500kb-200p.
+producer-max-500kb-200p  dotnet  PARTITIONS=200 VALUE_SIZE=512000 LIMIT_RPS=0 BATCH_SIZE=1024
+
 # Rust GA consumer, read as produced with the client defaults: 300 MB/s and
 # 5 MB/s of 1 KiB values into 36 and 200 partitions, 100 KiB values at 250
 # msg/s (~25 MB/s), and 300 MB/s of 10 KiB values per codec. The 5 MB/s
 # tests are the Python Preview's too.
-consumer-fixed-300k-1kb-36p         rust  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=300000
-consumer-fixed-300k-1kb-200p        rust  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=300000
+consumer-fixed-300k-1kb-36p         rust,dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=300000
+consumer-fixed-300k-1kb-200p        rust,dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=300000
 consumer-fixed-5k-1kb-36p           rust,python,dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=5000
 consumer-fixed-5k-1kb-200p          rust,python,dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=5000
 consumer-fixed-250-100kb-36p        rust  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=102400 LIMIT_RPS=250
@@ -166,12 +175,12 @@ consumer-fixed-30k-10kb-36p-snappy  rust  WORKLOAD=consumer PARTITIONS=36 VALUE_
 # 10 KiB values per codec. The plan's 100 B rows run at 150k msg/s (~15 MB/s),
 # not its 150 MB/s: that is 1.5M msg/s, above the driver's 1M msg/s limit and
 # ~7 times the ~212k msg/s Python sync (Rust) consumed on m8i.4xlarge.
-consumer-fixed-150k-1kb-36p         python,dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=150000
-consumer-fixed-150k-1kb-200p        python,dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=150000
+consumer-fixed-150k-1kb-36p         python         WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=150000
+consumer-fixed-150k-1kb-200p        python         WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=150000
 consumer-fixed-500-10kb-36p         python,dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=500
 consumer-fixed-500-10kb-200p        python,dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=10240 LIMIT_RPS=500
-consumer-fixed-150k-100b-36p        python,dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=100 LIMIT_RPS=150000
-consumer-fixed-150k-100b-200p       python,dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=100 LIMIT_RPS=150000
+consumer-fixed-150k-100b-36p        python         WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=100 LIMIT_RPS=150000
+consumer-fixed-150k-100b-200p       python         WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=100 LIMIT_RPS=150000
 consumer-fixed-15k-10kb-36p-gzip    python,dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=gzip
 consumer-fixed-15k-10kb-36p-lz4     python,dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=lz4
 consumer-fixed-15k-10kb-36p-zstd    python,dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=10240 LIMIT_RPS=15000 COMPRESSION_TYPE=zstd
@@ -179,9 +188,37 @@ consumer-fixed-15k-10kb-36p-snappy  python,dotnet  WORKLOAD=consumer PARTITIONS=
 
 # The 150 MB/s, 36-partition anchor with the librdkafka clients polling one
 # record at a time (poll()), as applications that read record by record do.
-consumer-fixed-150k-1kb-36p-librdkafka-poll  python,dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=150000 LIBRDKAFKA_BATCH=0
+consumer-fixed-150k-1kb-36p-librdkafka-poll  python         WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=150000 LIBRDKAFKA_BATCH=0
 
 # Python Preview consumer, fetches tuned for throughput (as
 # consumer-fixed-250k-1kb-200p-fetch-tuned) at 150 MB/s of 1 KiB values.
-consumer-fixed-150k-1kb-36p-fetch-tuned   python,dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=150000 FETCH_MIN_BYTES=4194304 MAX_PARTITION_FETCH_BYTES=4194304 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000
-consumer-fixed-150k-1kb-200p-fetch-tuned  python,dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=150000 FETCH_MIN_BYTES=4194304 MAX_PARTITION_FETCH_BYTES=4194304 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000
+consumer-fixed-150k-1kb-36p-fetch-tuned   python         WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=150000 FETCH_MIN_BYTES=4194304 MAX_PARTITION_FETCH_BYTES=4194304 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000
+consumer-fixed-150k-1kb-200p-fetch-tuned  python         WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=150000 FETCH_MIN_BYTES=4194304 MAX_PARTITION_FETCH_BYTES=4194304 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000
+
+# The .NET consumer, read as produced at 300k msg/s, twice the Python Preview's
+# 150k (the Python clients cannot read much more; the .NET clients keep up at
+# 300k and 350k with a p99 under 35 ms, the stock load generator tops out near
+# 444k msg/s). Same shapes as the Python Preview tests above: 100 B values
+# (30 MB/s) into 36 and 200 partitions, the librdkafka clients polling one
+# record at a time into 36 partitions, and the fetch-tuned pair.
+consumer-fixed-300k-100b-36p   dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=100 LIMIT_RPS=300000
+consumer-fixed-300k-100b-200p  dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=100 LIMIT_RPS=300000
+consumer-fixed-300k-1kb-36p-librdkafka-poll  dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=300000 LIBRDKAFKA_BATCH=0
+consumer-fixed-300k-1kb-36p-fetch-tuned   dotnet  WORKLOAD=consumer PARTITIONS=36 VALUE_SIZE=1024 LIMIT_RPS=300000 FETCH_MIN_BYTES=4194304 MAX_PARTITION_FETCH_BYTES=4194304 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000
+consumer-fixed-300k-1kb-200p-fetch-tuned  dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=300000 FETCH_MIN_BYTES=4194304 MAX_PARTITION_FETCH_BYTES=4194304 MAX_POLL_RECORDS=4500 LIBRDKAFKA_BATCH=4000
+
+# The single 350k msg/s test (~342 MB/s of 1 KiB values, 200 partitions), the
+# highest rate the .NET clients are run at.
+consumer-fixed-350k-1kb-200p  dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=350000
+
+# The unbounded consumer test: the load generator produces as fast as it can
+# (~444k msg/s with the stock tool) and the consumers read as fast as they can,
+# so they may fall behind and the end-to-end latency grows. It measures the
+# consumers' peak read throughput, not latency. Only the Python and .NET
+# clients, whose warmup is timed.
+consumer-max-1kb-200p  dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=1024 LIMIT_RPS=0
+
+# The large-message anchor: 500 KiB values (512000 B) at 600 msg/s (~300 MB/s,
+# the byte rate of the 300k msg/s 1 KiB anchors) into 200 partitions, read as
+# they are produced with the client defaults.
+consumer-fixed-600-500kb-200p  dotnet  WORKLOAD=consumer PARTITIONS=200 VALUE_SIZE=512000 LIMIT_RPS=600
