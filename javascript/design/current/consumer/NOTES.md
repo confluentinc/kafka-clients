@@ -214,3 +214,91 @@ already been closed.')`, with `_subscription`, `_paused` or `_group_metadata` in
 tests assert the text, and PLAN §6's ask 5 goes to the FFI's owner. The waiting calls on a closed consumer reject with
 Java's own `IllegalStateError('This consumer has already been closed.')`. A second `close()` is harmless, and
 `metrics()` answers after `close()`, the view outliving the consumer.
+
+## The mock
+
+- `MockConsumer` (`src/consumer/mock_consumer.ts`) wraps the FFI's `MockConsumer` (JS conventions, Implementation over
+  the FFI, Q62): `native/consumer.c` builds it with `MockConsumer_new` and holds it in the same `Consumer` struct as a
+  `KafkaConsumer`, over its `MockConsumer__as_Consumer_err` view, through one construction helper for both
+  (`consumer_handle_new`, as the producer's `producer_handle_new`). So its `Consumer` methods go through the same `_cb`
+  twins and drain, with the same counts and lifetime (above): no closed flag, `close()` keeps the handle, the
+  finalizer destroys only a mock the core reported closed (`MockConsumer_destroy_err`), the close completion deciding
+  as for a `KafkaConsumer`, and a mock keeps Node running from its creation until `close()`. It emits no preview
+  warning. Its own waiting calls, `rebalance` and `losePartitions`, go through `rebalance_cb` and
+  `lose_partitions_cb` (`tp_call`, completed by `void_on_complete`); its other calls through their fallible or `_err`
+  forms, which answer inside the call.
+- One copy of the bodies: `src/internal/consumer_calls.ts` holds the `Consumer` methods' bodies, each taking the
+  native handle, which `KafkaConsumer` and `MockConsumer` both call. The temporary `group.id` check stays
+  `KafkaConsumer`'s: the mock passes the flag as set, since Java's mock answers `groupMetadata()` with its dummy
+  (`dummy.group.id`, generation 1, member `1`) and has no such check.
+- The records are the app's own. `addRecord(record)` builds a C record through `ConsumerRecordOptionsBuilder` and
+  `ConsumerRecord_with_options_err` carrying only what the FFI's mock reads: the topic, partition, offset and leader
+  epoch (the setter not called for none). Its key and value are the addresses of a `MockRecord`'s two tags
+  (`native/mock_values.c`, shared with the producer's mock), which the mock keeps without reading, and the
+  `MockRecord` holds the app's `ConsumerRecord`, and so its key, value and headers, by one reference. A record the
+  FFI refuses (a partition not assigned, a closed mock) is released at once; one the mock took is held until the
+  destroy, as `add_record`'s doc requires, since the core's copies of it (its records, those a rebalance cleared,
+  those a poll returned) share the tags. The C record is destroyed right after the call, which copied it.
+- A mock's poll: the completion finds each record's `MockRecord` from its key (`mock_record_to_js`) and returns the
+  app's own record, as Java's mock returns the records it was given; the batch makes no external buffer and no header
+  source, so it is destroyed once read. The next offsets are read as a `KafkaConsumer`'s are.
+- An error given to `setPollException` or `setOffsetsException` crosses as a `LocalCallbackError` whose opaque is an
+  `InjectedError` holding the value (`native/mock_values.c`), and `native/error.c` hands the very same object back
+  where the core reports it: `poll()` rejects with it once, and `beginningOffsets()` or `endOffsets()` with the
+  offsets error once, as Java's mock throws and clears them. Each mock call first lets go of the errors the core holds
+  no copy of any more (`mock_of`, `injected_errors_sweep`); the destroy lets go of the rest.
+- `updatePartitions` builds each `PartitionInfo` and its nodes through Java's six-parameter constructor
+  (`PartitionInfo_with_offline_replicas_err`, `Node_with_rack_is_fenced_err`, `partition_info_list_from_js` in
+  `native/values.c`, from `partitionInfoArgs` in `src/internal/metadata.ts`, the reverse of `partitionInfoOf`); the
+  FFI copies them, and they are destroyed after the call. `partitionsFor` and `listTopics` read them back as equal
+  `PartitionInfo`s. The `update*Offsets` calls build their maps with `tp_long_map_from_js`, as `offsetsForTimes`
+  does. `lastPollTimeout()` crosses as a bigint, `-1` for Java's null and `Long.MAX_VALUE` read as `Infinity`.
+- The checks are the FFI's and the core's, with Java's messages where the core has them: a record of a partition not
+  assigned, a partition lost that isn't assigned, `setMaxPollRecords(0)`, an invalid or null strategy, a partition
+  with no offset to reset to, and `offsetsForTimes()`, "Not implemented yet.". The binding's own are the form and
+  run-time type checks (`exception` a `KafkaError` or `null`, `record` a `ConsumerRecord`, `newOffsets` a
+  `TopicPartitionMap`, `partitions` an iterable of `PartitionInfo`) and the `null` offset below.
+
+### Where the FFI's mock differs from Java's *(deviation)*
+
+The binding passes each through (lines 119 and 184), a test pins it (`test/unit/consumer/mock_consumer.test.js`),
+and the package docs list it. Why: the binding repeats no precondition and keeps no state. Goes when: the FFI's mock
+does as Java's does (PLAN §6, asks 8 to 11).
+
+- One call at a time: the FFI's mock shares the consumer's single-owner flag, so a mock call made while another call
+  on the mock is pending, a `poll` included, fails with `ConcurrentModificationError` ("KafkaConsumer is not safe for
+  multi-threaded access."), where Java's synchronized mock waits. `closed()` and `lastPollTimeout()` are read through
+  the handle and answer while a call is pending. The setters with no error slot (`updateBeginningOffsets`,
+  `updateEndOffsets`, `updateDurationOffsets`, `setPollException`, `setOffsetsException`, `scheduleNopPollTask`) are
+  logged by the core and ignored instead (`with_mock_void`), where Java's mock applies them (ask 8). The FFI's mock
+  answers a poll at once, so the window is short, and the test finds it by trying a call the FFI refuses.
+- A `null` offset in `newOffsets` is a `TypeError`, "newOffsets must not contain a null offset", the binding's
+  run-time type check, as for a `null` timestamp in `offsetsForTimes`: the FFI reads a NULL value as 0 (`map_topic_partition_i64`), where
+  Java's mock keeps the null and later reports the partition as having no offset (ask 9).
+- Nulls Java's mock stores or ignores get the FFI's `TypeError`s, their messages naming the C parameters: a `null`
+  topic or partitions given to `updatePartitions`, a `null` element there, and a `PartitionInfo` with a null topic,
+  replica list, replica or node host, which `PartitionInfo_with_offline_replicas_err` and
+  `Node_with_rack_is_fenced_err` refuse ("topic must not be null", "partitions must not contain null", "replicas must
+  not be null", "host must not be null"); and `close({ option: null })` ("options must not be null"), which closes
+  nothing (ask 10).
+- `subscribe({ pattern: null })` rejects with the FFI's "Topic pattern to subscribe to cannot be null", the
+  consumer's message, where Java's mock says "Topic pattern cannot be null" (ask 10).
+- `metrics()` on a closed mock answers an empty map: the FFI reads it through the consumer's handle, which outlives
+  the close, never through the mock, whose `metrics()` would panic. Java's mock throws "This consumer has already been
+  closed." (ask 11).
+- The order of the null checks (above) holds for the mock too: `addRecord(null)` on a closed mock is the FFI's
+  `TypeError` ("record must not be null"), where Java's mock reports the closed mock first; `rebalance(null)` and
+  `losePartitions(null)` get the FFI's `TypeError`s ("new_assignment must not be null", "partitions_lost must not be
+  null"), Java's `NullPointerException`s.
+
+### Left out
+
+- For want of an FFI entry point (PLAN §6, items 1 to 3): `clientInstanceId`, `setClientInstanceId`,
+  `disableTelemetry`, `injectTimeoutException`, `schedulePollTask`, `registerMetricForSubscription`,
+  `unregisterMetricFromSubscription` and `addedMetrics`.
+- *(deviation, as in Python)* `enforceRebalance()`, `enforceRebalance(reason)`, `shouldRebalance()` and
+  `resetShouldRebalance()`, by the user's decision of 2026-11-26. Why: under KIP-848 Java's consumer only logs
+  `enforceRebalance` as unsupported, and the two helpers only track it. Goes when: the client supports the classic
+  protocol.
+- Java's `subscribe(Pattern…)` forms, as on `KafkaConsumer`; the deprecated `MockConsumer(OffsetResetStrategy)` and
+  `close(Duration)`; and, until the client has rebalance listeners and commit callbacks, the forms taking one.

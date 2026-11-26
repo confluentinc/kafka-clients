@@ -14,8 +14,8 @@
 
 /**
  * The public classes of Java's `org.apache.kafka.clients.consumer` this
- * client has: the `Consumer` interface and `KafkaConsumer`, the consumer's
- * value types (`ConsumerRecord`, `ConsumerRecords`, `OffsetAndMetadata`,
+ * client has: the `Consumer` interface, `KafkaConsumer` and `MockConsumer`,
+ * the consumer's value types (`ConsumerRecord`, `ConsumerRecords`, `OffsetAndMetadata`,
  * `OffsetAndTimestamp`, `SubscriptionPattern`, `ConsumerGroupMetadata`,
  * `CloseOptions` and the `GroupProtocol` enum), the interfaces its user
  * implements (`ConsumerRebalanceListener` and `OffsetCommitCallback`),
@@ -30,16 +30,49 @@
  * `group.protocol: 'consumer'`: the classic
  * protocol is not supported.
  *
+ * `MockConsumer` is the core's mock, reached as `KafkaConsumer` is: its
+ * waiting methods return Promises, it takes one call at a time, it keeps Node
+ * running until `close()`, so a test closes every mock, and it emits no
+ * preview warning. Its type arguments are written, as Java's are, since it
+ * takes no deserializers: `new MockConsumer<string, string>('earliest')`.
+ * `poll()` returns the very records `addRecord()` was given, each held until
+ * the mock is garbage collected after its `close()`, and an error given to
+ * `setPollException()` or `setOffsetsException()` comes back as the very same
+ * object, once. Where the core's mock differs from Java's, the mock does as
+ * the core's does:
+ * - while another call on the mock is pending, `addRecord()`,
+ *   `setMaxPollRecords()`, `updatePartitions()` and the waiting methods throw
+ *   or reject with `ConcurrentModificationError`, and
+ *   `updateBeginningOffsets()`, `updateEndOffsets()`,
+ *   `updateDurationOffsets()`, `setPollException()`, `setOffsetsException()`
+ *   and `scheduleNopPollTask()` are ignored, where Java's mock waits and
+ *   applies them;
+ * - a `null` offset given to an `update*Offsets()` method is a `TypeError`,
+ *   where Java's mock keeps the null;
+ * - a `null` topic or partitions given to `updatePartitions()`, or a
+ *   `PartitionInfo` there with a null topic, replica list, replica or host, is
+ *   a `TypeError`, where Java's mock stores it, and so is
+ *   `close({ option: null })`, which Java's mock ignores;
+ * - `subscribe({ pattern: null })` rejects with "Topic pattern to subscribe to
+ *   cannot be null", where Java's mock says "Topic pattern cannot be null";
+ * - `metrics()` answers an empty map after `close()` too, where Java's mock
+ *   throws "This consumer has already been closed.";
+ * - `addRecord(null)` is a `TypeError` even on a closed mock, where Java's
+ *   mock reports the closed mock first.
+ *
  * Not in this release yet: `commitAsync`'s forms with an
  * `OffsetCommitCallback`, `subscribe`'s forms with a
  * `ConsumerRebalanceListener`, and `KafkaConsumer`'s constructor forms with
  * deserializers, which throw `UnsupportedOperationError`.
  *
  * Left out for want of an FFI entry point: `clientInstanceId`,
- * `registerMetricForSubscription` and `unregisterMetricFromSubscription`.
+ * `registerMetricForSubscription` and `unregisterMetricFromSubscription`, and
+ * `MockConsumer`'s `setClientInstanceId`, `disableTelemetry`,
+ * `injectTimeoutException`, `schedulePollTask` and `addedMetrics`.
  * Left out, as in Python: `enforceRebalance()` and `enforceRebalance(reason)`,
  * which Java's consumer only logs as unsupported under the consumer group
- * protocol, the only one this client has.
+ * protocol, the only one this client has, and `MockConsumer`'s
+ * `shouldRebalance()` and `resetShouldRebalance()`, which only track it.
  * Left out because the JS conventions take only a `SubscriptionPattern` as a
  * pattern: the `subscribe(Pattern)` and `subscribe(Pattern,
  * ConsumerRebalanceListener)` forms; a `RegExp` throws a `TypeError` that
@@ -54,6 +87,7 @@
  *
  * Left out because Java deprecates them: `close(Duration)` (use
  * `close({ option: CloseOptions.timeout({ timeout }) })`),
+ * `MockConsumer(OffsetResetStrategy)` (pass the strategy's name),
  * `ConsumerRecords(Map)` and `ConsumerGroupMetadata`'s public constructors;
  * a `ConsumerGroupMetadata` comes from the consumer.
  *

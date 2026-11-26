@@ -483,15 +483,15 @@ FFI has them:
 2. `registerMetricForSubscription` and `unregisterMetricFromSubscription`, and the mock's `addedMetrics()`.
 3. The mock's `schedulePollTask(Runnable)`, `setClientInstanceId`, `disableTelemetry` and `injectTimeoutException`.
 
-Seven FFI behaviours the binding lives with for now:
+Eight FFI behaviours the binding lives with for now:
 
 4. A negative `CloseOptions` timeout is read as zero (`duration_ms()` in `rust/src/ffi/consumer/close_options.rs`),
    where Java throws "The timeout cannot be negative." It's already a listed deviation (line 81). Ask: Java's check
    in the FFI.
 5. The closed synchronous getters (`assignment`, `subscription`, `paused`, `groupMetadata`) panic in the core, so
-   the error's message gains the FFI's panic prefix (decision 11), and so does the mock's `metrics()` once closed,
-   where Java's mock throws "This consumer has already been closed." (P4.md). Ask: report them with `precondition::fail`
-   (`rust/src/ffi/precondition.rs`), which passes Java's error through unchanged.
+   the error's message gains the FFI's panic prefix (decision 11). Ask: report them with `precondition::fail`
+   (`rust/src/ffi/precondition.rs`), which passes Java's error through unchanged. (P4.md expected the mock's
+   `metrics()` once closed to panic too; it does not: see ask 11.)
 6. `groupMetadata()` without `group.id` panics in the core too; the binding's temporary check (line 119) catches it
    first. Ask: report `InvalidGroupIdError` through the error slot, so that the temporary check can go.
 7. The FFI refuses a NULL collection, pattern or `CloseOptions` at its boundary, before the core's group, closed and
@@ -517,7 +517,16 @@ Seven FFI behaviours the binding lives with for now:
    refuse a NULL value, or read it as absent.
 10. The mock refuses nulls Java's mock accepts: a NULL topic or list in `update_partitions`, which Java's mock stores,
     and NULL options in `close_with_options_cb` on the mock's view, which Java's mock ignores, give `TypeError`
-    (P4.md), as the producer mock's `partitionsFor(null)` does. Ask: accept them where Java's mock does.
+    (P4.md), as the producer mock's `partitionsFor(null)` does. Found while building P4: a `PartitionInfo` given to
+    `update_partitions` with a null topic, replica list, replica or node host, which Java's `PartitionInfo` and
+    `Node` hold, gets `TypeError` from `PartitionInfo_with_offline_replicas` and `Node_with_rack_is_fenced`; and a
+    NULL pattern in `subscribe_with_pattern_cb` on the mock's view is refused at the FFI's boundary with the
+    consumer's "Topic pattern to subscribe to cannot be null", where Java's mock says "Topic pattern cannot be null".
+    Ask: accept them where Java's mock does, and let the mock report its own null pattern.
+11. Found while building P4: `kafka_consumer_Consumer_metrics` reads the metrics through the consumer's handle, never
+    through the mock, so on a closed mock it answers an empty view, where Java's mock throws "This consumer has
+    already been closed." (and the core's mock would panic with that message). Ask: have
+    `kafka_consumer_Consumer_metrics` on a closed mock report Java's error, as `MockConsumer#metrics` throws it.
 
 ## 7. Execution: Actor and Critic
 
