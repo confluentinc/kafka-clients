@@ -1,0 +1,21 @@
+{
+  "base": "origin/master",
+  "changed_files": [
+    "M dotnet/tests/Performance/Confluent.Kafka.PerformanceTests/PerfV3SmokeTests.cs",
+    "M dotnet/tests/Performance/PerfV3/V3Config.cs"
+  ],
+  "created": 1795687739,
+  "dotnet": {
+    "performance": [
+      "Confluent.Kafka.Performance.Tests.PerfV3SmokeTests",
+      "Confluent.Kafka.Performance.Tests.PerfEnvParseIntTests"
+    ]
+  },
+  "head": "c6b189e159f98165445f67db9772708077a65ede",
+  "merge_base": "e07405cf085e10ad1a5abf62d5de872ceb4e47ec",
+  "reasons": {
+    "dotnet.performance": "The change edits PerfV3SmokeTests and the PerfV3 producer config's default allocation strategy, which the smoke tests and PerfEnvParseIntTests' producer-mode child runs go through."
+  },
+  "tree": "eeba8731eab655a9af45f7fe7bbc88f0fe5734e2",
+  "version": 2
+}
