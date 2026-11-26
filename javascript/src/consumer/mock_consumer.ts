@@ -470,10 +470,10 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
    *
    * @param options - the new assignment
    * @returns settling once the rebalance ran
-   * @throws `IllegalArgumentError` when the given parameters are not
-   *   `{newAssignment}`
-   * @throws `TypeError` when `newAssignment` is not an iterable of
-   *   `TopicPartition`, or `undefined`
+   * @throws `IllegalArgumentError` rejects with it if the given parameters
+   *   are not `{newAssignment}`
+   * @throws `TypeError` rejects with it if `newAssignment` is not an iterable
+   *   of `TopicPartition`, or `undefined`
    */
   rebalance(options: {
     /** The new assignment. */
@@ -507,13 +507,12 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
    *
    * @param options - the partitions to lose; all must be currently assigned
    * @returns settling once the partitions are lost
-   * @throws `IllegalArgumentError` when the given parameters are not
-   *   `{partitionsLost}`
-   * @throws `TypeError` when `partitionsLost` is not an iterable of
-   *   `TopicPartition`, or `undefined`
-   *
-   * @remarks The Promise rejects with `IllegalStateError` if any partition is
-   * not currently assigned.
+   * @throws `IllegalStateError` rejects with it if any partition is not
+   *   currently assigned
+   * @throws `IllegalArgumentError` rejects with it if the given parameters
+   *   are not `{partitionsLost}`
+   * @throws `TypeError` rejects with it if `partitionsLost` is not an
+   *   iterable of `TopicPartition`, or `undefined`
    */
   losePartitions(options: {
     /** The partitions to lose; all must be currently assigned. */

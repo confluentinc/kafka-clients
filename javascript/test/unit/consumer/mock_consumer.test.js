@@ -817,6 +817,132 @@ test('a mock takes one call at a time; the setters with no error to report are i
   assert.ok(refused, 'no round found the poll pending');
 });
 
+/**
+ * Starts a poll of `consumer`, runs `during(round)` and tries `assignment()`,
+ * round after round, until the poll was still pending when `assignment()` was
+ * called: the FFI's mock answers a poll at once, and the single-owner flag,
+ * taken inside poll() and released once, was then held for `during` too.
+ *
+ * @param {MockConsumer<string, string>} consumer
+ * @param {(round: number) => void} during
+ * @returns {Promise<number>} the round
+ */
+async function pendingRound(consumer, during) {
+  for (let round = 1; round <= 10000; round++) {
+    const poll = consumer.poll(0).catch(() => {});
+    during(round);
+    let pending = false;
+    try {
+      consumer.assignment();
+    } catch (e) {
+      if (!(e instanceof ConcurrentModificationError)) throw e;
+      pending = true;
+    }
+    await poll;
+    if (pending) return round;
+  }
+  return assert.fail('no round found the poll pending');
+}
+
+test('each ignored setter whose effect can be seen leaves it unseen when it was called while a poll was pending', async () => {
+  const consumer = newMock();
+  consumer.updateBeginningOffsets(offsets([[TP0, 0n]]));
+  let round = await pendingRound(consumer, (r) => consumer.updateBeginningOffsets(offsets([[TP0, BigInt(r)]])));
+  assert.ok(/** @type {bigint} */ ((await consumer.beginningOffsets([TP0])).get(TP0)) < BigInt(round));
+
+  const duration = newMock('by_duration:PT1H');
+  duration.updateDurationOffsets(offsets([[TP0, 0n]]));
+  round = await pendingRound(duration, (r) => duration.updateDurationOffsets(offsets([[TP0, BigInt(r)]])));
+  // The reset reads the duration offset.
+  await duration.assign([TP0]);
+  assert.ok((await duration.position(TP0)) < BigInt(round));
+
+  // The error set while the poll was pending is never thrown.
+  /** @type {KafkaError[]} */
+  const pollErrors = [];
+  round = await pendingRound(consumer, (r) => consumer.setPollException((pollErrors[r] = new KafkaError(`poll ${r}`))));
+  const next = await consumer.poll(0).then(
+    () => null,
+    (/** @type {unknown} */ e) => e,
+  );
+  assert.notEqual(next, pollErrors[round]);
+
+  consumer.updateEndOffsets(offsets([[TP0, 4n]]));
+  /** @type {KafkaError[]} */
+  const offsetsErrors = [];
+  round = await pendingRound(consumer, (r) => consumer.setOffsetsException((offsetsErrors[r] = new KafkaError(`offsets ${r}`))));
+  for (let i = 0; i < 2; i++) {
+    const answer = await consumer.endOffsets([TP0]).then(
+      (map) => map.get(TP0),
+      (/** @type {unknown} */ e) => e,
+    );
+    assert.notEqual(answer, offsetsErrors[round]);
+  }
+});
+
+test('assignment(), subscription(), paused() and groupMetadata() throw ConcurrentModificationError while a call is pending', async () => {
+  const consumer = newMock();
+  for (const getter of /** @type {const} */ (['assignment', 'subscription', 'paused', 'groupMetadata'])) {
+    let refused = false;
+    for (let round = 1; !refused && round <= 10000; round++) {
+      const poll = consumer.poll(0);
+      try {
+        consumer[getter]();
+      } catch (e) {
+        if (!(e instanceof ConcurrentModificationError)) throw e;
+        assert.equal(e.message, CONCURRENT);
+        refused = true;
+      }
+      await poll;
+    }
+    assert.ok(refused, `${getter}() was never refused`);
+  }
+});
+
+test("the Consumer methods' null arguments get the FFI's errors, where Java's mock answers or throws NullPointerException", async () => {
+  const consumer = newMock();
+  // Java's mock answers [] and OptionalLong.of(0).
+  await assert.rejects(consumer.partitionsFor(/** @type {never} */ (null)), { constructor: TypeError, message: 'topic must not be null' });
+  await assert.rejects(consumer.partitionsFor({ topic: /** @type {never} */ (null), timeout: 1 }), {
+    constructor: TypeError,
+    message: 'topic must not be null',
+  });
+  await assert.rejects(consumer.currentLag(/** @type {never} */ (null)), {
+    constructor: TypeError,
+    message: 'topic_partition must not be null',
+  });
+  // Java's mock throws NullPointerException; these are Java's KafkaConsumer messages.
+  await assert.rejects(consumer.subscribe({ topics: /** @type {never} */ (null) }), {
+    constructor: IllegalArgumentError,
+    message: 'Topic collection to subscribe to cannot be null',
+  });
+  await assert.rejects(consumer.assign({ partitions: /** @type {never} */ (null) }), {
+    constructor: IllegalArgumentError,
+    message: 'Topic partitions collection to assign to cannot be null',
+  });
+  for (const method of /** @type {const} */ (['seekToBeginning', 'seekToEnd'])) {
+    await assert.rejects(consumer[method](/** @type {never} */ (null)), {
+      constructor: IllegalArgumentError,
+      message: 'Partitions collection cannot be null',
+    });
+  }
+});
+
+test("a negative timeout is the FFI's IllegalArgumentError, where Java's mock ignores it", async () => {
+  const consumer = newMock();
+  await consumer.assign([TP0]);
+  consumer.updateBeginningOffsets(offsets([[TP0, 0n]]));
+  const negative = { constructor: IllegalArgumentError, message: 'Timeout must not be negative' };
+  await assert.rejects(consumer.poll(-1), negative);
+  // Java's mock records the timeout of every poll.
+  assert.equal(consumer.lastPollTimeout(), null);
+  await assert.rejects(consumer.position({ partition: TP0, timeout: -1 }), negative);
+  await assert.rejects(consumer.commitSync({ timeout: -1 }), negative);
+  await assert.rejects(consumer.committed({ partitions: [TP0], timeout: -1 }), negative);
+  await assert.rejects(consumer.beginningOffsets({ partitions: [TP0], timeout: -1 }), negative);
+  await assert.rejects(consumer.listTopics(-1), negative);
+});
+
 // ---- liveness ---------------------------------------------------------------
 
 /**

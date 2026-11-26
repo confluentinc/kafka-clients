@@ -67,23 +67,14 @@ export function partitionInfoOf(fields: PartitionFields): PartitionInfo {
   });
 }
 
-/** A node's fields, as the addon takes them: a null host crosses as NULL. */
-export interface NodeArgs {
-  id: number;
-  host: string | null;
-  port: number;
-  rack: string | null;
-  isFenced: boolean;
-}
-
 /** A partition's fields, as the addon takes them: a null topic, list or element crosses as NULL. */
 export interface PartitionInfoArgs {
   topic: string | null;
   partition: number;
-  leader: NodeArgs | null;
-  replicas: Array<NodeArgs | null> | null;
-  inSyncReplicas: Array<NodeArgs | null> | null;
-  offlineReplicas: Array<NodeArgs | null> | null;
+  leader: NodeFields | null;
+  replicas: Array<NodeFields | null> | null;
+  inSyncReplicas: Array<NodeFields | null> | null;
+  offlineReplicas: Array<NodeFields | null> | null;
 }
 
 /**
@@ -92,7 +83,7 @@ export interface PartitionInfoArgs {
  * @param node - the node, or null
  * @returns its fields, or null
  */
-function nodeArgs(node: Node | null): NodeArgs | null {
+function nodeArgs(node: Node | null): NodeFields | null {
   return node === null ? null : { id: node.id, host: node.host, port: node.port, rack: node.rack, isFenced: node.isFenced };
 }
 
@@ -104,7 +95,7 @@ function nodeArgs(node: Node | null): NodeArgs | null {
  * @returns its fields
  */
 export function partitionInfoArgs(info: PartitionInfo): PartitionInfoArgs {
-  const nodes = (list: Array<Node | null> | null): Array<NodeArgs | null> | null => (list === null ? null : list.map(nodeArgs));
+  const nodes = (list: Array<Node | null> | null): Array<NodeFields | null> | null => (list === null ? null : list.map(nodeArgs));
   return {
     topic: info.topic(),
     partition: info.partition(),

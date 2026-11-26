@@ -49,8 +49,9 @@ test('identifiers without the word pass; comments and strings may name Java clas
   const r = lint(root, [RULE]);
   assert.equal(r.status, 0, r.text);
   // src: msg, t, msg, F, isCompletedExceptionally, DeserializationExceptionOrigin, C, options, exception, M and its 4 setters, their
-  // parameters and their 4 uses (Java's MockProducer error fields); native (every word token): const,
-  // char, s, int, f, void, return, and the two Node-API calls.
+  // parameters and their 4 uses (Java's MockProducer error fields), N and its 5 signatures of setPollException and
+  // setOffsetsException, their 5 parameters, its option key exception and the 2 uses (Java's MockConsumer setters);
+  // native (every word token): const, char, s, int, f, void, return, and the two Node-API calls.
   assert.ok(r.out.includes('✅ check-exception-word: 45 item(s) checked'), r.text);
 });
 

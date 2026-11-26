@@ -120,6 +120,47 @@ test('an injected error is let go once the core holds no copy of it, or at the d
   assert.equal(out.stats.injectedMade, 3);
 });
 
+test('the error of a setPollException the core ignored, while a poll was pending, is let go at the next mock call', () => {
+  const out = probe(`
+    const { MockConsumer } = require(D + '/consumer');
+    const { KafkaError } = require(D + '/common');
+    const { ConcurrentModificationError } = require(D);
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      const counts = {};
+      let ignored;
+      await (async () => {
+        const m = new MockConsumer('earliest');
+        for (let round = 1; ignored === undefined && round <= 10000; round++) {
+          const poll = m.poll(0).catch(() => {});
+          const error = new KafkaError('round ' + round);
+          m.setPollException(error);
+          try {
+            m.assignment();
+          } catch (e) {
+            if (!(e instanceof ConcurrentModificationError)) throw e;
+            ignored = new WeakRef(error);
+          }
+          await poll;
+        }
+        // Clears an error a later round set, and sweeps the ones the core dropped.
+        m.setPollException(null);
+        m.scheduleNopPollTask();
+        const s = native.consumerStats();
+        counts.heldWhileOpen = s.injectedMade - s.injectedFreed;
+        await m.close();
+      })();
+      await settle();
+      console.log(JSON.stringify({ counts, found: ignored !== undefined, collected: ignored !== undefined && ignored.deref() === undefined, leaks: leaks() }));
+      clearInterval(hold);
+    })();
+  `);
+  assert.ok(out.found, 'no round found the poll pending');
+  assert.deepEqual(out.counts, { heldWhileOpen: 0 });
+  assert.ok(out.collected, 'the ignored error outlived the mock');
+  assert.deepEqual(out.leaks, NO_LEAKS);
+});
+
 test('mocks made, used and closed are destroyed once collected; an open mock never is', () => {
   const out = probe(`
     const { MockConsumer, ConsumerRecord } = require(D + '/consumer');
