@@ -100,9 +100,14 @@ void viaConfig;
 // @ts-expect-error a class name cannot be loaded in JavaScript
 const byClassName: ProducerConfigs = { 'key.serializer': 'org.apache.kafka.common.serialization.StringSerializer' };
 void byClassName;
-// @ts-expect-error the function returns the serializer synchronously, not a Promise
+// A function returning a Promise of the serializer is typed for the
+// constructor and create() alike (one config type); only create() waits for
+// it, and the constructor refuses it at run time.
 const asyncFactory: ProducerConfigs = { 'value.serializer': async () => ({ serialize: () => null }) };
-void asyncFactory;
+expectTypeOf(KafkaProducer.create(asyncFactory)).toEqualTypeOf<Promise<KafkaProducer<Uint8Array, Uint8Array>>>();
+expectTypeOf(KafkaProducer.create({ configs: asyncFactory })).toEqualTypeOf<Promise<KafkaProducer<Uint8Array, Uint8Array>>>();
+const refusedAtRunTime = (): KafkaProducer => new KafkaProducer(asyncFactory);
+void refusedAtRunTime;
 // @ts-expect-error a known key that is no serde key takes no function
 const lingerFunction: ProducerConfigs = { 'linger.ms': () => ({ serialize: () => null }) };
 void lingerFunction;
@@ -907,6 +912,30 @@ expectTypeOf(new KafkaProducer({ ...configs, 'key.serializer': null })).toEqualT
 expectTypeOf(
   new KafkaProducer({ configs: { ...configs, 'key.serializer': stringSerializer }, keySerializer: null, valueSerializer: null }),
 ).toEqualTypeOf<KafkaProducer<string, Uint8Array>>();
+// create() takes the constructor's types, its serde config functions may
+// return a Promise, and it returns a Promise of the producer: a forgotten
+// await is a missing method.
+async function createWaitsForTheSerdeFunctions(): Promise<void> {
+  const awaited = KafkaProducer.create({
+    ...configs,
+    'key.serializer': async () => stringSerializer(),
+    'value.serializer': stringSerializer,
+  });
+  expectTypeOf(awaited).toEqualTypeOf<Promise<KafkaProducer<string, string>>>();
+  expectTypeOf(KafkaProducer.create({ configs })).toEqualTypeOf<Promise<KafkaProducer<Uint8Array, Uint8Array>>>();
+  expectTypeOf(
+    KafkaProducer.create({ configs: { ...configs, 'key.serializer': stringSerializer }, keySerializer: null, valueSerializer: null }),
+  ).toEqualTypeOf<Promise<KafkaProducer<string, Uint8Array>>>();
+  expectTypeOf(KafkaProducer.create({ configs, keySerializer: stringSerializer(), valueSerializer: null })).toEqualTypeOf<
+    Promise<KafkaProducer<string, Uint8Array>>
+  >();
+  // @ts-expect-error a Promise of the producer has no send(): await it
+  void awaited.send(new ProducerRecord({ topic: 't', key: 'k', value: 'v' }));
+  const producer = await awaited;
+  await producer.send(new ProducerRecord({ topic: 't', key: 'k', value: 'v' }));
+  await producer.close();
+}
+void createWaitsForTheSerdeFunctions;
 async function serializersFromTheConfiguration(): Promise<void> {
   const same = new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
   await same.send(new ProducerRecord({ topic: 't', key: 'k', value: 'v' }));

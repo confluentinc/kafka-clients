@@ -50,6 +50,17 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     close(options: CloseArgs): Promise<void>;
     // (undocumented)
     close(timeout: Duration): Promise<void>;
+    static create<K = Uint8Array, V = Uint8Array>(options: {
+        configs: ProducerConfigs & SerdeConfigs<K, V>;
+        keySerializer?: never;
+        valueSerializer?: never;
+    }): Promise<KafkaProducer<K, V>>;
+    static create<K = Uint8Array, V = Uint8Array>(options: {
+        configs: ProducerConfigs & SerdeConfigs<K, V>;
+        keySerializer: Serializer<K> | null;
+        valueSerializer: Serializer<V> | null;
+    }): Promise<KafkaProducer<K, V>>;
+    static create<K = Uint8Array, V = Uint8Array>(configs: ProducerConfigs & SerdeConfigs<K, V>): Promise<KafkaProducer<K, V>>;
     // (undocumented)
     flush(): Promise<void>;
     // (undocumented)

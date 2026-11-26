@@ -104,51 +104,61 @@ function isSerializer(value: unknown): value is Serializer<unknown> {
   return typeof serialize === 'function' && (close === undefined || typeof close === 'function');
 }
 
+/** The function a serde config key holds, `({ configs, isKey }) => serializer`. */
+type SerializerFunction = (options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => unknown;
+
+/** A serde config key's function, checked, and how to call it and check what it made. */
+type ConfiguredMaker = {
+  /** Calls the function once with the recording configuration. */
+  call: () => unknown;
+  /** What it made, if a serializer; else the `ConfigError` saying so. */
+  check: (out: unknown) => Serializer<unknown>;
+};
+
 /**
- * The serializer the serde config key `key` (`key.serializer`,
- * `value.serializer`) of `configs` makes, or null when the key is not set
- * (`null` or `undefined`): its value is a synchronous function
- * `({ configs, isKey }) => serializer`, called once with the whole
- * configuration, in place of Java's class and its `configure(configs, isKey)`
- * (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization). The
- * configuration it gets records each of its keys the function reads, into
- * `read`, so that the producer leaves those the core doesn't know out of the
- * configuration it sends to the core, as Java's `originals()` marks them
- * used. The configuration is the user's, without Java's computed
- * `client.id`, and the function runs before the core checks it
- * *(deviation: the core doesn't exist yet; javascript/CLAUDE.md)*.
+ * The function the serde config key `key` (`key.serializer`,
+ * `value.serializer`) of `configs` holds, checked, or null when the key is
+ * not set (`null` or `undefined`): a function `({ configs, isKey }) =>
+ * serializer`, called once with the whole configuration, in place of Java's
+ * class and its `configure(configs, isKey)` (javascript/CLAUDE.md,
+ * JavaScript Binding Conventions, Serialization). The configuration it gets
+ * records each of its keys the function reads, into `read`, so that the
+ * producer leaves those the core doesn't know out of the configuration it
+ * sends to the core, as Java's `originals()` marks them used. The
+ * configuration is the user's, without Java's computed `client.id`, and the
+ * function runs before the core checks it.
  *
  * @param configs - the producer's configuration
  * @param key - the serde config key
  * @param read - collects the keys the function reads
- * @returns the serializer, or null
+ * @param awaits - whether the function may return a Promise (`create()`)
+ * @returns the checked function, or null
  *
  * @throws `ConfigError` when the value is a class name (a string), a
- *   serializer object, a class or any other value that is no function, or
- *   the function returns a Promise or no serializer
- * @throws `KafkaError` "Failed to construct kafka producer", with the error
- *   as its `cause`, when the function throws, as Java wraps a serializer that
- *   fails to build
+ *   serializer object, a class or any other value that is no function
  */
-export function configuredSerializer(
+function configuredMaker(
   configs: Readonly<Record<string, unknown>>,
   key: 'key.serializer' | 'value.serializer',
   read: Set<string>,
-): Serializer<unknown> | null {
+  awaits: boolean,
+): ConfiguredMaker | null {
   const value: unknown = configs[key];
   if (value === null || value === undefined) return null;
   const isKey = key === 'key.serializer';
   const argument = isKey ? 'keySerializer' : 'valueSerializer';
-  const pass =
-    'pass a synchronous function ({ configs, isKey }) => serializer, such as stringSerializer, ' +
-    `or the serializer itself as the ${argument} argument of the constructor`;
+  const pass = awaits
+    ? 'pass a function ({ configs, isKey }) => serializer, or one returning a Promise of it, such as stringSerializer, ' +
+      `or the serializer itself as the ${argument} argument`
+    : 'pass a synchronous function ({ configs, isKey }) => serializer, such as stringSerializer, ' +
+      `or the serializer itself as the ${argument} argument of the constructor`;
   const invalid = (why: string): ConfigError =>
     new ConfigError(`Invalid value ${typeof value === 'string' ? value : kind(value)} for configuration ${key}: ${why}`);
   if (typeof value === 'string') throw invalid(`a class name cannot be loaded in JavaScript; ${pass}`);
   if (typeof value !== 'function') {
     throw invalid(isSerializer(value) ? `a serializer object is not a configuration value; ${pass}` : pass);
   }
-  const make = value as (options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => unknown;
+  const make = value as SerializerFunction;
   if (isClass(make)) {
     const name = writtenClassName(make);
     const hint = name === null ? '' : ` (did you mean \`() => new ${name}()\`?)`;
@@ -161,21 +171,127 @@ export function configuredSerializer(
       return Reflect.get(target, property, receiver) as unknown;
     },
   });
+  return {
+    call: () => make({ configs: recording, isKey }),
+    check: (out) => {
+      if (!isSerializer(out)) {
+        throw invalid(`the function returned ${kind(out)}, not a serializer: an object with a serialize({ topic, headers, data }) method`);
+      }
+      return out;
+    },
+  };
+}
+
+/**
+ * Java's relabelled construction failure, `KafkaException("Failed to
+ * construct kafka producer", t)`, for a serde config function that threw or
+ * whose Promise rejected.
+ *
+ * @param cause - what it threw or rejected with
+ * @returns the error
+ */
+function constructionFailure(cause: unknown): KafkaError {
+  return new KafkaError({ message: 'Failed to construct kafka producer', cause });
+}
+
+/**
+ * The serializer the serde config key `key` of `configs` makes, or null when
+ * the key is not set, as the constructor takes it: its function must return
+ * the serializer itself, synchronously (`configuredMaker`).
+ *
+ * @param configs - the producer's configuration
+ * @param key - the serde config key
+ * @param read - collects the keys the function reads
+ * @returns the serializer, or null
+ *
+ * @throws `ConfigError` when the value is a class name (a string), a
+ *   serializer object, a class or any other value that is no function, or
+ *   the function returns a Promise, which only `create()` waits for, or no
+ *   serializer
+ * @throws `KafkaError` "Failed to construct kafka producer", with the error
+ *   as its `cause`, when the function throws, as Java wraps a serializer that
+ *   fails to build
+ */
+export function configuredSerializer(
+  configs: Readonly<Record<string, unknown>>,
+  key: 'key.serializer' | 'value.serializer',
+  read: Set<string>,
+): Serializer<unknown> | null {
+  const maker = configuredMaker(configs, key, read, false);
+  if (maker === null) return null;
   let out: unknown;
   try {
-    out = make({ configs: recording, isKey });
+    out = maker.call();
   } catch (cause) {
-    throw new KafkaError({ message: 'Failed to construct kafka producer', cause });
+    throw constructionFailure(cause);
   }
   if (isThenable(out)) {
-    // Refused, so nobody awaits it: its rejection is not an unhandled one.
-    void Promise.resolve(out).then(undefined, () => undefined);
-    throw invalid('the function returned a Promise; it must return the serializer itself, synchronously');
+    // Refused, so nobody else awaits it: the serializer it resolves to is
+    // closed, being nobody's, and its rejection is not an unhandled one.
+    const name = key === 'key.serializer' ? 'keySerializer' : 'valueSerializer';
+    void Promise.resolve(out).then(
+      (made: unknown) => {
+        if (isSerializer(made)) closeSerializer(made, name);
+      },
+      () => undefined,
+    );
+    throw new ConfigError(
+      `Invalid value a function for configuration ${key}: the function returned a Promise, which the constructor cannot wait for; ` +
+        'build the producer with await KafkaProducer.create(...), which waits for it',
+    );
   }
-  if (!isSerializer(out)) {
-    throw invalid(`the function returned ${kind(out)}, not a serializer: an object with a serialize({ topic, headers, data }) method`);
+  return maker.check(out);
+}
+
+/**
+ * The serializers the serde config keys make, key first, each function
+ * awaited before the next is called, as `create()` takes them: a function may
+ * return the serializer or a Promise of it. A key whose serializer is given
+ * is not read, as the constructor ignores it. On a failure the serializers
+ * already taken are closed, as the constructor closes them: the key's, made
+ * or given, when the value's function fails, and only one made when the
+ * value's config key is refused.
+ *
+ * @param configs - the producer's configuration
+ * @param given - the key and the value serializers given, or null
+ * @param read - collects the keys the functions read
+ * @returns the key's and the value's serializers made, null where none is
+ *
+ * @throws `ConfigError` (a rejection) as `configuredSerializer`, except for a
+ *   Promise, which is awaited
+ * @throws `KafkaError` "Failed to construct kafka producer" (a rejection),
+ *   with the error as its `cause`, when a function throws or its Promise
+ *   rejects
+ */
+export async function awaitedSerializers(
+  configs: Readonly<Record<string, unknown>>,
+  given: readonly [Serializer<unknown> | null, Serializer<unknown> | null],
+  read: Set<string>,
+): Promise<[Serializer<unknown> | null, Serializer<unknown> | null]> {
+  const made: [Serializer<unknown> | null, Serializer<unknown> | null] = [null, null];
+  const keys = ['key.serializer', 'value.serializer'] as const;
+  for (const index of [0, 1] as const) {
+    if (given[index] !== null) continue;
+    let maker: ConfiguredMaker | null = null;
+    let out: unknown;
+    try {
+      maker = configuredMaker(configs, keys[index], read, true);
+      if (maker === null) continue;
+      try {
+        out = await maker.call();
+      } catch (cause) {
+        throw constructionFailure(cause);
+      }
+      made[index] = maker.check(out);
+    } catch (error) {
+      // The key's serializer is taken once the value's turn comes: a
+      // construction failure closes it, given or made (Java's constructor
+      // catch); a ConfigError only the one made, nobody else's.
+      if (index === 1) closeSerializer(error instanceof ConfigError ? made[0] : (given[0] ?? made[0]), 'keySerializer');
+      throw error;
+    }
   }
-  return out;
+  return made;
 }
 
 // The name of a built-in serializer's factory, on the object it made

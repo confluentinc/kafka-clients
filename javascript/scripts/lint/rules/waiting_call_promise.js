@@ -30,7 +30,11 @@
 // A use that leads nowhere (no registration, no C definition) is a finding of
 // its own: an unresolved path never passes. A method with no native use is
 // not checked. A member that reaches a future's waits only to complete the
-// dependant it returns (`DEPENDANTS`) need not return a Promise.
+// dependant it returns (`DEPENDANTS`) need not return a Promise, and the
+// clients' static `create()` (`CREATES`), which waits in JavaScript for the
+// serde config functions and then calls the constructor's entry point, may
+// return one (javascript/CLAUDE.md, JavaScript Binding Conventions, Futures
+// and waiting).
 
 const { applyAllowlist } = require('../c_model');
 const { atNode } = require('../location');
@@ -46,6 +50,19 @@ const { nativeUses, reachedBodies } = require('../native_uses');
  * matches nothing is a finding.
  */
 const DEPENDANTS = [{ key: 'KafkaFuture.allOf', reason: "allOf's future, completed once every source's wait completed" }];
+
+/**
+ * The static `create()`s that return a Promise with no `_cb` twin on their
+ * path: the JS conventions allow `KafkaProducer.create()` and
+ * `KafkaConsumer.create()`, and only those; the consumer's joins this list
+ * with the consumer. An entry that matches nothing is a finding.
+ */
+const CREATES = [
+  {
+    key: 'KafkaProducer.create',
+    reason: "the producer's create(), which waits for the serde config functions before the constructor runs",
+  },
+];
 
 /** The C call graph of native/*.c: function name -> the names it calls. */
 function callGraph(ctx) {
@@ -150,6 +167,7 @@ module.exports = {
   name: 'check-waiting-call-promise',
   kinds: ['not-promise', 'promise-not-waiting', 'unresolved-native', 'waiting-unused-allowance'],
   DEPENDANTS,
+  CREATES,
   needs: ['program', 'native', 'header'],
   hint:
     'A method whose native call waits on a _cb twin returns a Promise settled by that completion; one ' +
@@ -181,10 +199,12 @@ module.exports = {
           kind: 'promise-not-waiting',
           subject,
           message: `returns ${checker.typeToString(returned)} but its native path (${[...new Set(uses.map((u) => `native.${u.name}`))].join(', ')}) reaches no _cb twin`,
+          // Only a client's static create().
+          allow: w.m.isStatic && w.m.name === 'create' ? subject : undefined,
         });
       }
     }
-    const { kept, unused } = applyAllowlist(raw, this.DEPENDANTS, 'waiting-unused-allowance');
+    const { kept, unused } = applyAllowlist(raw, [...this.DEPENDANTS, ...this.CREATES], 'waiting-unused-allowance');
     return { findings: [...kept, ...unused], checked };
   },
 };
