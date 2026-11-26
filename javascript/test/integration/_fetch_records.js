@@ -798,5 +798,6 @@ module.exports = {
   createPartitions,
   alterTopicConfigs,
   brokerContainer,
+  docker,
   waitForBroker,
 };

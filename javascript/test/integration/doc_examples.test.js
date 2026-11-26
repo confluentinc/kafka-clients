@@ -17,7 +17,8 @@
 // The README's examples against a broker (JS conventions, Documentation:
 // the docs carry the contract): the Example, the Headers and Errors
 // blocks, and examples/producer.js, which "`send` in two steps" describes,
-// each run as a user runs it, and what they wrote read back.
+// each run as a user runs it, and what they wrote read back; then the admin
+// client's blocks, as its producer blocks are run.
 // test/unit/producer/index.test.js runs the blocks without a broker.
 
 const assert = require('node:assert/strict');
@@ -175,6 +176,97 @@ function runExample(args) {
     assert.equal(code, 2);
     assert.equal(stdout, '');
     assert.equal(stderr, 'usage: node examples/producer.js <bootstrap-servers> <topic> [key] [value]\n');
+  },
+  60_000,
+);
+
+// ---- the README's admin blocks --------------------------------------------------------
+
+(SKIP ? test.skip : test)(
+  "README's admin client block creates its topic, lists it, and a second run reports that it already exists",
+  async () => {
+    const topic = freshTopic('admin');
+    const block = jsBlock('README.md', 'The admin client', 'Admin.create');
+    const replace = /** @type {[string, string][]} */ ([
+      ["'bootstrap.servers': 'localhost:9092'", `'bootstrap.servers': ${JSON.stringify(BOOTSTRAP)}`],
+      ["name: 'orders'", `name: ${JSON.stringify(topic)}`],
+    ]);
+    const first = await runBlock(block, { replace });
+    assert.equal(first.error, undefined);
+    assert.equal(first.run.printed.length, 2);
+    assert.equal(first.run.printed[0], `created ${topic}`);
+    // The block prints every topic on the broker, which util.format cuts after
+    // 100 names, so the print is only checked to be an array's, and the
+    // topic's presence is read with a call of the test's own.
+    assert.match(first.run.printed[1], /^\[[^]*\]$/);
+    const { Admin } = require('@confluentinc/kafka-javascript/admin');
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    try {
+      assert.ok((await admin.listTopics().names().get()).has(topic));
+    } finally {
+      await admin.close();
+    }
+    const second = await runBlock(block, { replace });
+    assert.equal(second.error, undefined);
+    assert.equal(second.run.printed[0], `${topic} already exists`);
+  },
+  60_000,
+);
+
+(SKIP ? test.skip : test)(
+  "README's ConfigResourceMap block builds the map incrementalAlterConfigs takes, and the broker applies it",
+  async () => {
+    const topic = freshTopic('admin-configs');
+    await createTopic(BOOTSTRAP, topic);
+    const { error, value } = await runBlock(jsBlock('README.md', 'Maps and sets keyed by value classes', 'ConfigResourceMap'), {
+      replace: [["name: 'orders'", `name: ${JSON.stringify(topic)}`]],
+      result: 'configs',
+    });
+    assert.equal(error, undefined);
+    const { Admin } = require('@confluentinc/kafka-javascript/admin');
+    const { ConfigResource } = require('@confluentinc/kafka-javascript/common/config');
+    const admin = Admin.create({ 'bootstrap.servers': BOOTSTRAP });
+    try {
+      const configs =
+        /** @type {import('@confluentinc/kafka-javascript/common/config').ConfigResourceMap<import('@confluentinc/kafka-javascript/admin').AlterConfigOp[]>} */ (
+          value
+        );
+      assert.equal(await admin.incrementalAlterConfigs(configs).all().get(), null);
+      const resource = new ConfigResource({ type: ConfigResource.Type.TOPIC, name: topic });
+      let retention = null;
+      for (let i = 0; i < 40 && retention !== '86400000'; i++) {
+        const config = await admin.describeConfigs([resource]).all().get();
+        retention = config.get(resource)?.get('retention.ms')?.value() ?? null;
+        if (retention !== '86400000') await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      assert.equal(retention, '86400000');
+    } finally {
+      await admin.close();
+    }
+  },
+  60_000,
+);
+
+(SKIP ? test.skip : test)(
+  "README's MockAdminClient block prints the topic it added",
+  async () => {
+    const { error, run } = await runBlock(jsBlock('README.md', 'MockAdminClient', 'new MockAdminClient'));
+    assert.equal(error, undefined);
+    assert.deepEqual(run.printed, ["[ 'orders' ]"]);
+  },
+  60_000,
+);
+
+// `await using` needs Node.js 24; on Node.js 22 the block cannot be parsed.
+const USING = Number(process.versions.node.split('.')[0]) >= 24;
+(SKIP || !USING ? test.skip : test)(
+  "README's `await using` block closes the admin client when the block ends",
+  async () => {
+    const { error } = await runBlock(jsBlock('README.md', 'Creating and closing the admin client', 'await using'), {
+      replace: [["'bootstrap.servers': 'localhost:9092'", `'bootstrap.servers': ${JSON.stringify(BOOTSTRAP)}`]],
+      scope: { Admin: require('@confluentinc/kafka-javascript/admin').Admin },
+    });
+    assert.equal(error, undefined);
   },
   60_000,
 );
