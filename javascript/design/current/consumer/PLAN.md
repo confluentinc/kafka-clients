@@ -6,8 +6,9 @@ and linter work, `poll(long)`, `doc-check`, the CHANGELOG, and the per-commit ch
 its "Result" section has the commits, the review and the gate. Choice 5(a) moved the `Consumer` interface from P1
 to P2. P2 is **done** (2026-11-26): its phase plan, `P2.md`, was approved with its choices 2(a) to 8(a), and its
 "Result" section has the commits, the review and the gate. P3 is **done** (2026-11-26): its phase plan, `P3.md`, was
-approved with its choices 2(a) and 3(a), and its "Result" section has the commits, the review and the gate. P4's
-phase plan, `P4.md`, was approved on 2026-11-26 with its choice 2(a), and P4 is in progress.
+approved with its choices 2(a) and 3(a), and its "Result" section has the commits, the review and the gate. P4 is
+**done** (2026-11-27): its phase plan, `P4.md`, was approved with its choice 2(a), and its "Result" section has the
+commits, the review and the gate. P5's phase plan is next.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch. The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
