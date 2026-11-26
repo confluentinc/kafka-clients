@@ -79,6 +79,14 @@ newer.
 
 - `KafkaProducer`, `ProducerRecord`, `RecordMetadata`, Java's `Callback` and,
   from `common`, `KafkaFuture` and `KafkaError`, over the Rust client's C FFI.
+- `KafkaProducer.create()` *(js-only)*: the constructor's arguments, with
+  serde config functions that may return a Promise, such as a Schema
+  Registry serializer's, each awaited in turn, the key's first, before the
+  producer is built; a function that throws or rejects fails it with
+  `KafkaError` "Failed to construct kafka producer", its `cause` the failure.
+  The constructor refuses such a function with a `ConfigError` pointing to
+  `create()`, and a class in a serde config key with the hint "did you mean
+  `() => new X()`?" naming it.
 - `send()` answers a serializer's error as Java's `KafkaProducer#doSend`
   does: an `ApiError` runs the callback once, with Java's failure metadata
   (the record's topic, its partition or -1, the rest -1), and `send()`
@@ -275,7 +283,8 @@ newer.
   (`common/metrics`): Java's unmodifiable live view, its keys and size read
   at each call and a kept metric's value at each `metricValue()`, after
   `close()` too. `MetricName` (`common`) has Java's methods, its `tags()` a
-  `Map`, and Java's `equals` and `hashCode`; `KafkaMetric` has Java's public
+  `Map` whose values may be `null`, as Java's, and Java's `equals`,
+  `hashCode` and `toString` (`tags={a=null}`); `KafkaMetric` has Java's public
   constructor, its value provider, configuration and time Java types this
   client does not translate (`MetricValueProvider`, `MetricConfig` and
   `Measurable` are placeholder types) and Java's `config()` getter; the
@@ -345,6 +354,11 @@ newer.
 - `ProducerConfig`, `SslConfigs`, `SaslConfigs` and `SecurityConfig` constants,
   generated from the Java sources (a constant `Set` a read-only set, a
   constant `List` a frozen array); `SslClientAuth` and `SecurityProtocol`.
+  None of Java's static finals can be reassigned: the enum and config
+  classes are frozen, and every other static final is not writable or
+  configurable, so an assignment throws `TypeError` in strict-mode code.
+- A form error lists each form's names in Java's parameter order, a tie
+  going to the earliest-declared form, as the Python client's does.
 - The client has no `ConfigDef` table and checks no config value: every
   value is written as a string (`true` as `"true"`, numbers and bigints in
   decimal, arrays joined with `,`, anything else by `String()`), `null` and

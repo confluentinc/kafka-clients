@@ -289,9 +289,14 @@ These decide every question, in this order:
      producer's serde keys, which never reach the core: `key.serializer` and
      `value.serializer` take a synchronous `({ configs, isKey }) => serde`
      (JS conventions, Serialization, Q53), and a class name, a serde
-     object, a class or a function that returns a Promise or no serializer
-     is a `ConfigError` saying what to pass (`src/internal/serde.ts`
-     `configuredSerializer`). Why: the binding runs the serdes, so only it
+     object, a class (with the hint "did you mean `() => new X()`?" naming
+     it, or no name for an anonymous one) or a function that returns no
+     serializer is a `ConfigError` saying what to pass
+     (`src/internal/serde.ts` `configuredSerializer`). A function that
+     returns a Promise is a `ConfigError` pointing to
+     `KafkaProducer.create()`, which awaits it (`awaitedSerializers`); the
+     refused Promise is still handled, the serde it resolves to closed and
+     its rejection caught. Why: the binding runs the serdes, so only it
      reads these keys. Goes when: never.
    - **A NUL byte in a string or bytes that cross as a C string** (the topic,
      the header keys, the config keys and values: `js_string_dup` and
@@ -693,7 +698,16 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   Java's `key()` and `value()`, the methods of Java's `Header` interface (JS
   conventions, Serialization). Java's `public final` instance fields are
   `readonly` fields of a frozen object (`SecurityProtocol.id`); `public static
-  final` constants are static properties (`RecordMetadata.UNKNOWN_PARTITION`).
+  final` constants are static properties that are not writable or
+  configurable, so none can be reassigned (`RecordMetadata.UNKNOWN_PARTITION`):
+  an enum class, nested ones included, and a generated config class end with
+  `static { Object.freeze(this); }`, and any other class names its finals to
+  `finalStatics` (`src/internal/static_finals.ts`), a static made on its
+  first read keeping its getter, non-configurable.
+  `test/unit/internal/static_finals.test.js` walks every exported class.
+  The generators write the block too: `rust/xtask/src/config_consts/js.rs`
+  for the config classes, `rust/xtask/src/error_hierarchy/js.rs` for an error
+  class's nested enum (`RecordDeserializationError.DeserializationExceptionOrigin`).
   Value classes have `toJSON()` *(js-only)*, whose output is frozen once
   released (`RecordHeader`'s writes `{ key, value }`, `Headers`' its array, an
   enum's its name, `ProducerRecord`'s and `RecordMetadata`'s their fields
@@ -840,7 +854,11 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   plain object (the JS conventions' Types row "Other collections taken", Q25):
   `MetricName`'s constructor takes its `tags` so: a `Map` is kept as given
   and `tags()` returns it, as Java stores the map; a plain object is read
-  into a new `Map`. Java's `Map<MetricName, ? extends Metric>` is a `MetricNameMap`
+  into a new `Map`. A tag value may be `null`, as Java's map holds one:
+  `hashCode()` counts it 0, `equals()` matches it only with a present null,
+  `toString()` prints `tags={a=null}`, and a `MetricNameMap` key, JSON, tells
+  it from the string `"null"`; no metric of the core has one (its tags are
+  strings), so a live `metrics()` map finds none for it. Java's `Map<MetricName, ? extends Metric>` is a `MetricNameMap`
   *(js-only, on the invented-names list)*, a read-only map keyed by the
   JSON text of the group, the name and the tags sorted by key (the fields
   `MetricName.equals` compares), keeping the original `MetricName`s, with a
@@ -942,6 +960,19 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   is not decided yet in the JS conventions. `close()` closes both serializers once
   the core reports the producer closed; a construction the core fails with
   Java's relabelled "Failed to construct kafka producer" closes them too.
+  `KafkaProducer.create()` *(js-only, on the invented-names list)* takes the
+  constructor's arguments and types (`ProducerConfigs`, generated, and
+  `SerdeConfigs` type a serde config function's result as a serializer or a
+  Promise of one, for both), awaits each
+  serde config function in turn, the key's first, and then runs the
+  constructor with the serializers it made; it makes no network call of its
+  own, and `check-waiting-call-promise` allows it (`CREATES`). A function
+  that throws, or whose Promise rejects, rejects it with `KafkaError` "Failed
+  to construct kafka producer", its `cause` the failure, closing the
+  serializers already taken as the constructor does; the serde keys' own
+  `ConfigError`s are not wrapped. `MockProducer` takes no serde config keys,
+  so it has no `create()`, and `Admin.create()` is Java's synchronous
+  factory: the admin client takes no serializers.
   An omitted or `null` key or value binds `never` (JS conventions, Class
   family, Q26), through extra `ProducerRecord` signatures for the null
   combinations beside each Java constructor's, so `send` takes the
@@ -1333,7 +1364,8 @@ waiting, Signatures, Types, Errors, Configuration). What this binding adds:
   `Header` objects and `[key, value]` pairs; from the core, both are copies,
   as the error outlives the core's handle. Java's `public static final` instances are: `INSTANCE` on
   `DisconnectError` and `CoordinatorNotAvailableError`, a static property of
-  the class that is not writable, built by Java's no-argument chain (an empty
+  the class that is not writable, as every Java static final is ("Java shape,
+  JS idiom", the data objects), built by Java's no-argument chain (an empty
   message, no cause) whatever that constructor's visibility
   (`CoordinatorNotAvailableException`'s is private), as Python's
   `_throwable.singleton` (each module's header comment says so); a class whose every
