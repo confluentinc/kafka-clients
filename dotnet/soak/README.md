@@ -26,7 +26,7 @@ dotnet/soak/
 ├─ create-ec2.env.example     the account-specific values create-ec2.sh needs
 ├─ otel-config.yaml           OpenTelemetry Collector config for the box
 ├─ bootstrap.sh               one-time host setup, then build.sh
-├─ build.sh                   cargo build --features ffi, then dotnet build + tests
+├─ build.sh                   make -C rust build-cdylib, then dotnet build + tests
 ├─ run.sh                     the supervisor: keeps the client alive, rotates its log
 ├─ SoakClient/                the client itself (net10.0, Exe)
 └─ SoakClient.Tests/          its unit tests (xunit, no broker, no Docker)

@@ -25,8 +25,8 @@
 # public yet, so on a host that cannot clone it, the sources arrive by scp.
 #
 # Ordering is mandatory (dotnet/CLAUDE.md §7.1, firm). `dotnet build`
-# consumes rust/target/<profile>/libconfluent_kafka.* -- Confluent.Kafka.csproj copies
-# it into the output, and its EnsureNativeLibraryExists target fails the build
+# consumes rust/target/<cargo profile>/libconfluent_kafka.* -- Confluent.Kafka.csproj
+# copies it into the output, and its EnsureNativeLibraryExists target fails the build
 # loudly if cargo has not run. So cargo runs first, always.
 #
 # Ported from python/soak/build.sh: the source resolution, the cargo
@@ -49,10 +49,10 @@ Options:
   --repo <url|path> Repository to clone for --ref. Defaults to the origin of
                     the tree this script lives in.
   --workdir <dir>   Where --ref clones to. Default: ./soak-build.
-  --profile <p>     cargo profile: release (default) or debug. The .NET build
-                    configuration follows it (Release / Debug) -- they must
-                    match, because Confluent.Kafka.csproj derives the cargo
-                    profile directory from $(Configuration).
+  --profile <p>     release (default: the library the .NET package ships, built
+                    by `make -C rust build-cdylib`) or debug. The .NET build
+                    configuration follows it (Release / Debug), and the build
+                    is pointed at the cargo output directory explicitly.
   --tfm <tfm>       Target framework to run the unit tests on, and the one
                     run.sh will execute. Default: net10.0.
   --sha <sha>       Commit the sources correspond to. REQUIRED in practice for
@@ -105,8 +105,9 @@ if [[ "$PROFILE" != "release" && "$PROFILE" != "debug" ]]; then
     exit 2
 fi
 
-# The .NET build configuration MUST match the cargo profile: the csproj maps
-# Configuration -> rust/target/<debug|release>/ to find the native.
+# The .NET build configuration follows the profile. Which cargo output directory
+# it reads is passed explicitly (CargoProfileDir, step 3), not left to the
+# csproj's per-configuration default.
 if [[ "$PROFILE" == "release" ]]; then
     DOTNET_CONFIG="Release"
 else
@@ -161,18 +162,26 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Build the Rust client with the FFI feature
 #
-# Produces rust/target/<profile>/libconfluent_kafka.{so,dylib,a} and
+# Produces rust/target/<cargo profile>/libconfluent_kafka.{so,dylib,a} and
 # rust/target/include/confluent_kafka.h. cargo runs from rust/, so
 # rust-toolchain.toml and .cargo/config.toml resolve (as python/soak/build.sh
-# and rust/Makefile do).
+# and rust/Makefile do). A release build is the library the .NET package ships,
+# `make -C rust build-cdylib` in target/release-cdylib/, when the source tree has
+# that target; an older ref builds `cargo build --features ffi --release` as it did.
 # ---------------------------------------------------------------------------
-CARGO_ARGS=(build --features ffi)
-[[ "$PROFILE" == "release" ]] && CARGO_ARGS+=(--release)
+CARGO_PROFILE="$PROFILE"
+if [[ "$PROFILE" == "release" ]] && grep -q '^build-cdylib:' "$ROOT/rust/Makefile"; then
+    CARGO_PROFILE="release-cdylib"
+    echo ">>> make -C rust build-cdylib"
+    make -C "$ROOT/rust" build-cdylib
+else
+    CARGO_ARGS=(build --features ffi)
+    [[ "$PROFILE" == "release" ]] && CARGO_ARGS+=(--release)
+    echo ">>> cargo ${CARGO_ARGS[*]}"
+    ( cd "$ROOT/rust" && cargo "${CARGO_ARGS[@]}" )
+fi
 
-echo ">>> cargo ${CARGO_ARGS[*]}"
-( cd "$ROOT/rust" && cargo "${CARGO_ARGS[@]}" )
-
-LIB_DIR="$ROOT/rust/target/$PROFILE"
+LIB_DIR="$ROOT/rust/target/$CARGO_PROFILE"
 if ! ls "$LIB_DIR"/libconfluent_kafka.* >/dev/null 2>&1; then
     echo "ERROR: no libconfluent_kafka.* in $LIB_DIR after the cargo build" >&2
     exit 1
@@ -187,11 +196,15 @@ fi
 #
 # By PATH, never through Confluent.Kafka.sln: the soak is deliberately outside
 # the solution (it carries the OpenTelemetry dependency tree). No venv and no
-# CONFLUENT_KAFKA_LIB_DIR -- Confluent.Kafka.csproj computes the native path
-# from rust/target/<profile>/ itself and copies it into the output.
+# CONFLUENT_KAFKA_LIB_DIR -- Confluent.Kafka.csproj copies the native from
+# rust/target/<CargoProfileDir>/ into the output. CargoProfileDir is passed, as
+# dotnet/Makefile passes it, so the build reads the directory cargo just wrote
+# whatever the csproj's default for the configuration is.
 # ---------------------------------------------------------------------------
-echo ">>> $DOTNET build -c $DOTNET_CONFIG (soak client)"
-"$DOTNET" build -c "$DOTNET_CONFIG" "$SOAK_DIR/SoakClient/SoakClient.csproj"
+DOTNET_PROPS=(-c "$DOTNET_CONFIG" "-p:CargoProfileDir=$CARGO_PROFILE")
+
+echo ">>> $DOTNET build ${DOTNET_PROPS[*]} (soak client)"
+"$DOTNET" build "${DOTNET_PROPS[@]}" "$SOAK_DIR/SoakClient/SoakClient.csproj"
 
 SOAKCLIENT_DLL="$SOAK_DIR/SoakClient/bin/$DOTNET_CONFIG/$TFM/SoakClient.dll"
 if [[ ! -f "$SOAKCLIENT_DLL" ]]; then
@@ -205,8 +218,8 @@ fi
 # second, so there is no reason for a build to hand over an artifact whose
 # payload parsing or duplicate/gap accounting is broken.
 # ---------------------------------------------------------------------------
-echo ">>> $DOTNET test -f $TFM (soak unit tests)"
-"$DOTNET" test -c "$DOTNET_CONFIG" -f "$TFM" "$SOAK_DIR/SoakClient.Tests/SoakClient.Tests.csproj"
+echo ">>> $DOTNET test ${DOTNET_PROPS[*]} -f $TFM (soak unit tests)"
+"$DOTNET" test "${DOTNET_PROPS[@]}" -f "$TFM" "$SOAK_DIR/SoakClient.Tests/SoakClient.Tests.csproj"
 
 # Fail loudly here rather than three days into a soak: prove the built client
 # starts, loads the native and accepts its own preflight.
@@ -290,7 +303,7 @@ cat > "$MANIFEST" <<EOF
   "git_branch": "$(json_escape "$GIT_BRANCH")",
   "git_ref_requested": "$(json_escape "${GIT_REF:-<local source>}")",
   "source_root": "$(json_escape "$ROOT")",
-  "cargo_profile": "$(json_escape "$PROFILE")",
+  "cargo_profile": "$(json_escape "$CARGO_PROFILE")",
   "dotnet_configuration": "$(json_escape "$DOTNET_CONFIG")",
   "target_framework": "$(json_escape "$TFM")",
   "rustc_version": "$(json_escape "$RUSTC_VERSION")",
