@@ -103,10 +103,9 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   contain a null timestamp", as Java's unboxing throws `NullPointerException`: the binding's run-time type check,
   since a `null` has no `int64` to cross as, and the FFI reads a NULL value as 0 (`map_topic_partition_i64`).
 - `commitSync(null)` is the form error: a bare `null` fits both its one-parameter forms (line 73).
-- `enforceRebalance()` and `enforceRebalance(reason)` resolve once the core logged "Operation not supported in new
-  consumer group protocol", as Java's `AsyncKafkaConsumer` does (decision 9), on a closed consumer too, where Java
-  makes no check either. Unlike Java's, which takes no `acquire()`, they are refused while another call is pending,
-  with the core's busy error: the core guards every call (line 152, consumer-threading.md §1).
+- *(deviation, as in Python)* `enforceRebalance()` and `enforceRebalance(reason)` aren't translated. Why: under
+  KIP-848, the only protocol here, Java's `AsyncKafkaConsumer` only logs them as unsupported. Goes when: the client
+  supports the classic protocol.
 
 ## The `group.id` check (line 119, choice 3(a))
 

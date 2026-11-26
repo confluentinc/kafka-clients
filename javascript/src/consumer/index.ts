@@ -37,6 +37,9 @@
  *
  * Left out for want of an FFI entry point: `clientInstanceId`,
  * `registerMetricForSubscription` and `unregisterMetricFromSubscription`.
+ * Left out, as in Python: `enforceRebalance()` and `enforceRebalance(reason)`,
+ * which Java's consumer only logs as unsupported under the consumer group
+ * protocol, the only one this client has.
  * Left out because the JS conventions take only a `SubscriptionPattern` as a
  * pattern: the `subscribe(Pattern)` and `subscribe(Pattern,
  * ConsumerRebalanceListener)` forms; a `RegExp` throws a `TypeError` that

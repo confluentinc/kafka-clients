@@ -123,11 +123,6 @@ export interface Consumer<K = Buffer, V = Buffer> {
         partitions: Iterable<TopicPartition>;
         timeout: Duration;
     }): Promise<TopicPartitionMap<bigint>>;
-    enforceRebalance(): Promise<void>;
-    enforceRebalance(options: {
-        reason: string;
-    }): Promise<void>;
-    enforceRebalance(reason: string): Promise<void>;
     groupMetadata(): ConsumerGroupMetadata;
     listTopics(): Promise<Map<string, PartitionInfo[]>>;
     listTopics(options: {
@@ -668,14 +663,6 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
         partitions: Iterable<TopicPartition>;
         timeout: Duration;
     }): Promise<TopicPartitionMap<bigint>>;
-    // (undocumented)
-    enforceRebalance(): Promise<void>;
-    // (undocumented)
-    enforceRebalance(options: {
-        reason: string;
-    }): Promise<void>;
-    // (undocumented)
-    enforceRebalance(reason: string): Promise<void>;
     // (undocumented)
     groupMetadata(): ConsumerGroupMetadata;
     // (undocumented)
