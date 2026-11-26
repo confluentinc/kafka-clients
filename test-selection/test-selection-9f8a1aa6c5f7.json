@@ -1,0 +1,20 @@
+{
+  "base": "origin/master",
+  "changed_files": [
+    "M tools/perf-cloud/batches.txt",
+    "M tools/perf-cloud/tests.txt"
+  ],
+  "created": 1795668314,
+  "head": "9f8a1aa6c5f782fa839122d99522308e7f2ec019",
+  "merge_base": "692400a1c10b739067a99ac0f2336778dd0bac69",
+  "reasons": {
+    "rust.xtask": "The perf_cloud unit tests load and validate the checked-in tools/perf-cloud/tests.txt and batches.txt, which this change edits; no other test reads these files."
+  },
+  "rust": {
+    "xtask": [
+      "perf_cloud::"
+    ]
+  },
+  "tree": "44e0a8bb7560a210d89e132f255ea482cf93943d",
+  "version": 2
+}
