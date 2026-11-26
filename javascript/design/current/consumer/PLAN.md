@@ -5,8 +5,9 @@ and linter work, `poll(long)`, `doc-check`, the CHANGELOG, and the per-commit ch
 **done** (2026-11-25): its phase plan, `P1.md` beside this file, was approved with its choices 2(a) to 9(a), and
 its "Result" section has the commits, the review and the gate. Choice 5(a) moved the `Consumer` interface from P1
 to P2. P2 is **done** (2026-11-26): its phase plan, `P2.md`, was approved with its choices 2(a) to 8(a), and its
-"Result" section has the commits, the review and the gate. P3's phase plan, `P3.md`, was approved on 2026-11-26 with
-its choices 2(a) and 3(a), and P3 is being built.
+"Result" section has the commits, the review and the gate. P3 is **done** (2026-11-26): its phase plan, `P3.md`, was
+approved with its choices 2(a) and 3(a), and its "Result" section has the commits, the review and the gate. P4's
+phase plan is next.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch. The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
@@ -495,7 +496,11 @@ Four FFI behaviours the binding lives with for now:
    Java throws `IllegalStateException` or `ConcurrentModificationException`. `kafka_common_TopicPartition_new`
    refuses a NULL topic, which Java's `TopicPartition` holds, so `pause` and `resume` of a null-topic partition give
    `TypeError` where Java says "No current assignment for partition null-0". Recorded as a deviation, as in Python
-   (P2.md, issue 151-3). Ask: refuse a NULL only after the core's earlier checks, and accept a null topic.
+   (P2.md, issue 151-3). P3's calls do the same with a null partition, collection or map (`position(null)` gives
+   `TypeError`, its message naming the C parameter, where Java says "You can only check the position for partitions
+   assigned to this consumer."). The FFI also checks a negative timeout before the core's closed and group checks
+   (P3.md, issue 152-2), and its busy check before `seek`'s negative offset, which Java checks first. Ask: refuse a
+   NULL and a negative timeout only after the core's earlier checks, and accept a null topic.
 
 ## 7. Execution: Actor and Critic
 
