@@ -177,7 +177,7 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *   `unsubscribe()`)
    *
    * @remarks Java's blocking call returns a Promise here.
-   * *(deviation: a null collection is refused before the closed, busy
+   * *(deviation: a null collection is refused before the closed and busy
    * checks, with its null error where Java reports those first. Why: the FFI
    * refuses the NULL at its boundary. Goes when: the FFI refuses it after the
    * core's checks.)*

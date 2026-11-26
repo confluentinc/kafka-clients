@@ -27,7 +27,7 @@
  * holds that whole fetch in memory. To keep a value for long, copy it with
  * `Buffer.from(value)`. Electron doesn't allow external buffers, so on
  * Electron the client copies each consumed key and value. Every consumer needs
- `group.protocol: 'consumer'`: the classic
+ * `group.protocol: 'consumer'`: the classic
  * protocol is not supported.
  *
  * Not in this release yet: `Consumer` and `KafkaConsumer`'s offset, commit and
