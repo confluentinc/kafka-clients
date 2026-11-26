@@ -394,8 +394,10 @@ static kafka_List_t* int_list(napi_env env, napi_value array) {
 }
 
 // An array of strings as an owned list of malloc'ed C strings (a null element
-// NULL), or NULL with a JS exception pending.
-static kafka_List_t* string_list(napi_env env, napi_value array) {
+// NULL), or NULL with a JS exception pending. `what` is the TypeError's text
+// for an element that isn't a string, naming the list as the JS call names it;
+// for a NUL in an element, "without null bytes" follows it.
+static kafka_List_t* string_list(napi_env env, napi_value array, const char* what) {
     int ok = 0;
     uint32_t n = length_of(env, array, &ok);
     if (!ok) return NULL;
@@ -403,7 +405,7 @@ static kafka_List_t* string_list(napi_env env, napi_value array) {
     if (list == NULL) return NULL;
     for (uint32_t i = 0; i < n; i++) {
         napi_value v = element(env, array, i);
-        char* s = v == NULL ? NULL : string_or_null(env, v, "a topic name must be a string", &ok);
+        char* s = v == NULL ? NULL : string_or_null(env, v, what, &ok);
         if (v == NULL || !ok || list_add(env, list, s, free_item) < 0) {
             admin_list_free(env, list, free_item);
             return NULL;
@@ -451,7 +453,7 @@ static kafka_List_t* uuid_list(napi_env env, napi_value array) {
 // `form` 1 (names) or 2 (ids) and their items as an owned TopicCollection, or
 // NULL with a JS exception pending.
 static kafka_common_TopicCollection_t* topic_collection(napi_env env, int32_t form, napi_value items) {
-    kafka_List_t* list = form == 2 ? uuid_list(env, items) : string_list(env, items);
+    kafka_List_t* list = form == 2 ? uuid_list(env, items) : string_list(env, items, "topics must be an iterable of strings");
     if (list == NULL) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
     kafka_common_TopicCollection_t* topics = NULL;
@@ -980,7 +982,7 @@ napi_value js_admin_delete_topics(napi_env env, napi_callback_info info) {
     NAPI_CHECK(env, napi_get_value_int32(env, argv[1], &form), NULL);
     kafka_List_t* names = NULL;
     kafka_common_TopicCollection_t* topics = NULL;
-    if (form == 0) names = string_list(env, argv[2]);
+    if (form == 0) names = string_list(env, argv[2], "topics must be an iterable of strings");
     else topics = topic_collection(env, form, argv[2]);
     if (names == NULL && topics == NULL) return NULL;
     void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[3]);
@@ -1034,7 +1036,7 @@ napi_value js_admin_describe_topics(napi_env env, napi_callback_info info) {
     NAPI_CHECK(env, napi_get_value_int32(env, argv[1], &form), NULL);
     kafka_List_t* names = NULL;
     kafka_common_TopicCollection_t* topics = NULL;
-    if (form == 0) names = string_list(env, argv[2]);
+    if (form == 0) names = string_list(env, argv[2], "topicNames must be an iterable of strings");
     else topics = topic_collection(env, form, argv[2]);
     if (names == NULL && topics == NULL) return NULL;
     void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[3]);
@@ -2846,7 +2848,7 @@ static int ADMIN_SETTER_FN(withTypes)(napi_env env, void* o, napi_value v, kafka
 }
 // `withProtocolTypes`: the stored set of strings.
 static int ADMIN_SETTER_FN(withProtocolTypes)(napi_env env, void* o, napi_value v, kafka_common_Error_t** out_err) {
-    kafka_List_t* list = string_list(env, v);
+    kafka_List_t* list = string_list(env, v, "protocolTypes must contain only strings");
     if (list == NULL) return -1;
     kafka_admin_ListGroupsOptions_with_protocol_types_err((ADMIN_OPTIONS_T*)o, list, out_err);
     admin_list_free(env, list, free_item);
@@ -2910,7 +2912,7 @@ napi_value js_admin_describe_consumer_groups(napi_env env, napi_callback_info in
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
     Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
     if (a == NULL) return NULL;
-    kafka_List_t* ids = string_list(env, argv[1]);
+    kafka_List_t* ids = string_list(env, argv[1], "groupIds must be an iterable of strings");
     if (ids == NULL) return NULL;
     void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
     if (o == NULL) {
@@ -2955,7 +2957,7 @@ napi_value js_admin_describe_classic_groups(napi_env env, napi_callback_info inf
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
     Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
     if (a == NULL) return NULL;
-    kafka_List_t* ids = string_list(env, argv[1]);
+    kafka_List_t* ids = string_list(env, argv[1], "groupIds must be an iterable of strings");
     if (ids == NULL) return NULL;
     void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
     if (o == NULL) {
@@ -3268,7 +3270,7 @@ napi_value js_admin_delete_consumer_groups(napi_env env, napi_callback_info info
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
     Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
     if (a == NULL) return NULL;
-    kafka_List_t* ids = string_list(env, argv[1]);
+    kafka_List_t* ids = string_list(env, argv[1], "groupIds must be an iterable of strings");
     if (ids == NULL) return NULL;
     void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
     if (o == NULL) {
@@ -4261,7 +4263,7 @@ napi_value js_admin_describe_user_scram_credentials(napi_env env, napi_callback_
     NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
     kafka_List_t* users = NULL;
     if (type != napi_null) {
-        users = string_list(env, argv[1]);
+        users = string_list(env, argv[1], "users must be an iterable of strings");
         if (users == NULL) return NULL;
     }
     void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
@@ -4845,7 +4847,7 @@ napi_value js_admin_describe_transactions(napi_env env, napi_callback_info info)
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
     Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
     if (a == NULL) return NULL;
-    kafka_List_t* ids = string_list(env, argv[1]);
+    kafka_List_t* ids = string_list(env, argv[1], "transactionalIds must be an iterable of strings");
     if (ids == NULL) return NULL;
     void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
     if (o == NULL) {
@@ -5177,7 +5179,7 @@ napi_value js_admin_fence_producers(napi_env env, napi_callback_info info) {
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
     Admin* a = argc == 3 ? admin_unwrap(env, argv[0]) : NULL;
     if (a == NULL) return NULL;
-    kafka_List_t* ids = string_list(env, argv[1]);
+    kafka_List_t* ids = string_list(env, argv[1], "transactionalIds must be an iterable of strings");
     if (ids == NULL) return NULL;
     void* o = admin_options_build(env, &ADMIN_OPTIONS_DESC, argv[2]);
     if (o == NULL) {

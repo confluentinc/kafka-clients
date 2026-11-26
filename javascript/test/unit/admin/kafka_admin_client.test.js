@@ -1503,6 +1503,37 @@ const {
 const upgradeTo = (/** @type {number} */ level) =>
   new FeatureUpdate({ maxVersionLevel: level, upgradeType: FeatureUpdate.UpgradeType.UPGRADE });
 
+test("a NUL in an admin string list: TypeError naming the call's own parameter", async () => {
+  // The C API reads each string up to its first NUL, so the binding refuses
+  // one (the binding's own checks, rule 1), naming the list the call took.
+  const { TopicCollection } = require('@confluentinc/kafka-javascript/common');
+  const client = admin();
+  const nul = 'a\0b';
+  /**
+   * @param {string} list
+   * @returns {{ name: string, message: string }}
+   */
+  const refused = (list) => ({ name: 'TypeError', message: `${list} must be an iterable of strings without null bytes` });
+  try {
+    assert.throws(() => client.deleteTopics([nul]), refused('topics'));
+    assert.throws(() => client.describeTopics([nul]), refused('topicNames'));
+    assert.throws(() => client.deleteTopics(TopicCollection.ofTopicNames([nul])), refused('topics'));
+    assert.throws(() => client.describeTopics(TopicCollection.ofTopicNames([nul])), refused('topics'));
+    assert.throws(() => client.describeConsumerGroups([nul]), refused('groupIds'));
+    assert.throws(() => client.describeClassicGroups([nul]), refused('groupIds'));
+    assert.throws(() => client.deleteConsumerGroups([nul]), refused('groupIds'));
+    assert.throws(() => client.listGroups(new ListGroupsOptions().withProtocolTypes([nul])), {
+      name: 'TypeError',
+      message: 'protocolTypes must contain only strings without null bytes',
+    });
+    assert.throws(() => client.describeUserScramCredentials([nul]), refused('users'));
+    assert.throws(() => client.describeTransactions([nul]), refused('transactionalIds'));
+    assert.throws(() => client.fenceProducers([nul]), refused('transactionalIds'));
+  } finally {
+    await client.close({ timeout: 0 });
+  }
+});
+
 test('testUnregisterControllerTimeoutMaxWait', async () => {
   const client = admin({});
   try {
