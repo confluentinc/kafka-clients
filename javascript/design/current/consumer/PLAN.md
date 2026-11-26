@@ -7,7 +7,7 @@ its "Result" section has the commits, the review and the gate. Choice 5(a) moved
 to P2. P2 is **done** (2026-11-26): its phase plan, `P2.md`, was approved with its choices 2(a) to 8(a), and its
 "Result" section has the commits, the review and the gate. P3 is **done** (2026-11-26): its phase plan, `P3.md`, was
 approved with its choices 2(a) and 3(a), and its "Result" section has the commits, the review and the gate. P4's
-phase plan is next.
+phase plan, `P4.md`, was approved on 2026-11-26 with its choice 2(a), and P4 is in progress.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch. The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
@@ -261,10 +261,11 @@ The producer's layout (JS conventions, Layout and modules), one Java class per f
 ### 4.6 The mock (P4)
 
 - `MockConsumer` wraps the FFI's mock (line 160) and shares the consumer's code through `__as_Consumer`.
-- `addRecord(record)` builds a C record with `ConsumerRecordOptionsBuilder` and `ConsumerRecord_with_options_err`.
-  The record's key and value are the user's JavaScript values: the addon passes a reference to each as the
-  record's `void *` and keeps the references until the mock is destroyed, as `add_record`'s doc requires.
-  `poll()` turns them back into the same values.
+- `addRecord(record)` builds a C record with `ConsumerRecordOptionsBuilder` and `ConsumerRecord_with_options_err`,
+  carrying what the FFI's mock reads: topic, partition, offset and leader epoch. The addon keeps the app's record
+  through one reference until the mock is destroyed, as `add_record`'s doc requires, and its key and value cross
+  as the `void *` addresses of that holder's two tags, as the producer mock's do. `poll()` hands back the very
+  record objects, as Java's mock returns the records it was given (P4.md).
 - Injected errors (`setPollException`, `setOffsetsException`) come back as the very same objects, through the
   producer mock's injected-error carrier.
 - `rebalance()` and `losePartitions()` return Promises, since they have `_cb` twins. From P5 they run the
@@ -405,17 +406,18 @@ the full gate before its hand-off (§7).
 
 **P4 — MockConsumer (N=153).**
 - 4.6, with every method of the FFI's mock. The members the FFI lacks are left out and listed (§6).
-- Tests: the seven `MockConsumerTest` cases without a listener: `testSimpleMock`,
+- Tests: the ten `MockConsumerTest` cases without a listener (P4.md, choice 2(a)): `testSimpleMock`,
   `testConsumerRecordsIsEmptyWhenReturningNoRecords`, `shouldNotClearRecordsForPausedPartitions`,
-  `endOffsetsShouldBeIdempotent`, `testDurationBasedOffsetReset`, `testRe2JPatternSubscription`,
-  `shouldReturnMaxPollRecords`.
+  `endOffsetsShouldBeIdempotent`, `testDurationBasedOffsetReset`, `testRe2JPatternSubscription` (without its
+  `subscribe(pattern, null)` assertion), `shouldReturnMaxPollRecords`, `testLosePartitionsRemovesFromAssignment`,
+  `testLosePartitionsThrowsIfNotAssigned` and `testLosePartitionsClearsOnlyLostRecords`.
 
 **P5 — listeners, commit callbacks and the window (N=154).**
 - 4.4.
-- Tests: the six `MockConsumerTest` cases with a listener (`testRebalanceListener`,
-  `testLosePartitionsCallsOnPartitionsLost`, `testLosePartitionsRemovesFromAssignment`,
-  `testLosePartitionsThrowsIfNotAssigned`, `testLosePartitionsClearsOnlyLostRecords`,
-  `testLosePartitionsThenRebalance`); the listener and commit-callback cases of `KafkaConsumerTest`, and its
+- Tests: the three `MockConsumerTest` cases with a listener (`testRebalanceListener`,
+  `testLosePartitionsCallsOnPartitionsLost`, `testLosePartitionsThenRebalance`; P4.md, choice 2(a)), and
+  `testRe2JPatternSubscription`'s `subscribe(pattern, null)` assertion; the listener and commit-callback cases of
+  `KafkaConsumerTest`, and its
   broker-backed `testSubscriptionOnInvalidTopic`, which subscribes with a listener (P3.md, choice 2(a)); the two tests
   `consumer-threading.md` §31 requires (a `commitSync` inside `onPartitionsRevoked` succeeds, and `poll()` stays
   pending until the listener's Promise settles); one test for each method refused in the window.
@@ -469,7 +471,7 @@ the full gate before its hand-off (§7).
 | `OffsetAndMetadataTest` | — | already ported |
 | `ConsumerConfigTest` | 17 | P2, 9 through `new KafkaConsumer`; the other 8 skipped, with their reasons (P2.md §2) |
 | `KafkaConsumerTest` | 135 | P2 to P6: P2 30, P3 19, P5 1, P6 1, and 84 left out with reasons (P2.md §2; P3.md, choice 2(a)); P7 reruns the broker cases over SSL and SASL_SSL. Python's port is the starting point (36 broker-less, 14 broker-backed, 85 left out with reasons), and each case is re-checked against Java and the FFI |
-| `MockConsumerTest` | 13 | P4 (7) and P5 (6) |
+| `MockConsumerTest` | 13 | P4 (10) and P5 (3) (P4.md, choice 2(a)) |
 | `SerializationTest` | 36 | P6, the 12 in scope |
 | `ListSerializerTest`, `ListDeserializerTest` | — | left out: the List serdes are |
 
@@ -481,13 +483,14 @@ FFI has them:
 2. `registerMetricForSubscription` and `unregisterMetricFromSubscription`, and the mock's `addedMetrics()`.
 3. The mock's `schedulePollTask(Runnable)`, `setClientInstanceId`, `disableTelemetry` and `injectTimeoutException`.
 
-Four FFI behaviours the binding lives with for now:
+Seven FFI behaviours the binding lives with for now:
 
 4. A negative `CloseOptions` timeout is read as zero (`duration_ms()` in `rust/src/ffi/consumer/close_options.rs`),
    where Java throws "The timeout cannot be negative." It's already a listed deviation (line 81). Ask: Java's check
    in the FFI.
 5. The closed synchronous getters (`assignment`, `subscription`, `paused`, `groupMetadata`) panic in the core, so
-   the error's message gains the FFI's panic prefix (decision 11). Ask: report them with `precondition::fail`
+   the error's message gains the FFI's panic prefix (decision 11), and so does the mock's `metrics()` once closed,
+   where Java's mock throws "This consumer has already been closed." (P4.md). Ask: report them with `precondition::fail`
    (`rust/src/ffi/precondition.rs`), which passes Java's error through unchanged.
 6. `groupMetadata()` without `group.id` panics in the core too; the binding's temporary check (line 119) catches it
    first. Ask: report `InvalidGroupIdError` through the error slot, so that the temporary check can go.
@@ -503,6 +506,18 @@ Four FFI behaviours the binding lives with for now:
    (P3.md, issue 152-2, accepted by the user on 2026-11-26 as a known difference), and its busy check before
    `seek`'s negative offset, which Java checks first. Ask: refuse a
    NULL and a negative timeout only after the core's earlier checks, and accept a null topic.
+8. The mock's setters that have no error slot (`update_beginning_offsets`, `update_end_offsets`,
+   `update_duration_offsets`, `set_poll_error`, `set_offsets_error`, `schedule_nop_poll_task`) log and ignore a call
+   made while another call on the mock is pending (`with_mock_void` in `rust/src/ffi/consumer/mock_consumer.rs`),
+   where Java's synchronized mock waits and applies it (P4.md). Ask: report the refusal through the `_err` twin's
+   error slot.
+9. A NULL value in a map of `TopicPartition` to `int64_t *` is read as 0 (`map_topic_partition_i64` in
+   `rust/src/ffi/common/topic_partition.rs`), where Java's mock keeps the null and later reports the partition as
+   having no offset. The binding refuses a `null` offset with `TypeError`, as P3's `null` timestamp (P4.md). Ask:
+   refuse a NULL value, or read it as absent.
+10. The mock refuses nulls Java's mock accepts: a NULL topic or list in `update_partitions`, which Java's mock stores,
+    and NULL options in `close_with_options_cb` on the mock's view, which Java's mock ignores, give `TypeError`
+    (P4.md), as the producer mock's `partitionsFor(null)` does. Ask: accept them where Java's mock does.
 
 ## 7. Execution: Actor and Critic
 
