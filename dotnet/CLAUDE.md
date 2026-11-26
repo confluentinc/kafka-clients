@@ -1043,10 +1043,14 @@ each goes when the reason it gives goes:
   `Metrics`, and `MockProducer`'s and `AsyncMockProducer`'s `PartitionsFor`, `Metrics`,
   `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, `SetSendException`, `SetFlushException`,
   `SetPartitionsForException`, the five `Set*TransactionException` setters
-  and the transaction state readers (`TransactionInitialized` to `UncommittedOffsets`) throw the
-  closed client's `IllegalStateException`, because the native handle is gone; Java answers (Java's
-  mock checks for close only in `send`, `flush`, `fenceProducer` and the transaction methods). Goes
-  when the native object outlives `Close`.
+  and the transaction state readers (`TransactionInitialized` to `UncommittedOffsets`), and
+  `MockConsumer`'s and `AsyncMockConsumer`'s `Rebalance`, `LosePartitions`, `SetMaxPollRecords`,
+  `SetPollException`, `SetOffsetsException`, `UpdateBeginningOffsets`, `UpdateEndOffsets`,
+  `UpdateDurationOffsets`, `ScheduleNopPollTask` and `LastPollTimeout` throw the closed client's
+  `IllegalStateException`, because the native handle is gone; Java answers (Java's producer mock
+  checks for close only in `send`, `flush`, `fenceProducer` and the transaction methods, and of its
+  consumer mock's own methods only `addRecord` and `updatePartitions` check, which throw here too).
+  Goes when the native object outlives `Close`.
 - **The core admin mock.** `MockAdminClient.Builder` checks that live only in the core mock
   (`controller(int)` out of range, `numBrokers` below the log-dir count, `Build()` with no
   brokers, `AddTopic` with a leader without log dirs) and `SetFetchesRemainingUntilVisible` on an
