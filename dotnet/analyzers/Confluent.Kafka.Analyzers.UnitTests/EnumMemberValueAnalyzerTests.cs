@@ -105,6 +105,18 @@ public sealed class EnumMemberValueAnalyzerTests
                 0,
                 "Outer.E.A has no written number; write it out (A = 0), so a member added before it cannot renumber it"));
 
+    [Fact]
+    public Task AMemberWhoseNumberOverflowsItsType_IsLeftToTheCompiler() =>
+        Verifier.VerifyAsync(
+            "public enum E : byte { A = 255, {|#0:B|} }",
+            DiagnosticResult.CompilerError("CS0543").WithLocation(0));
+
+    [Fact]
+    public Task AMemberAfterOneWhoseNumberDoesNotCompile_IsLeftToTheCompiler() =>
+        Verifier.VerifyAsync(
+            "public enum E { A = {|#0:Missing|}, B }",
+            DiagnosticResult.CompilerError("CS0103").WithLocation(0));
+
     [Theory]
     [InlineData("internal enum E { A, B }")]
     [InlineData("enum E { A, B }")]
