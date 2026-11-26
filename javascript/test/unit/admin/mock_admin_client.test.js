@@ -446,6 +446,18 @@ test('create_then_list_and_describe', async () => {
   assert.equal((await desc.get()).get('t')?.partitions.length, 2);
 });
 
+// A form error lists each form's names in Java's parameter order, as the
+// Python client's does: Java's describeTopics(TopicCollection,
+// DescribeTopicsOptions) is (topics, options).
+test("describeTopics' form error lists each form in Java's parameter order", () => {
+  const client = admin();
+  // @ts-expect-error options alone is no Java form: the form check throws IllegalArgumentError
+  assert.throws(() => client.describeTopics({ options: new DescribeTopicsOptions() }), {
+    name: 'IllegalArgumentError',
+    message: 'describeTopics() takes one of (topicNames), (topicNames, options), (topics), (topics, options); got (options)',
+  });
+});
+
 test('create_existing_topic_fails_with_topic_exists', async () => {
   const client = admin();
   await client

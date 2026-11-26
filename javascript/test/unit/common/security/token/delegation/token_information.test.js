@@ -67,3 +67,17 @@ test('a null is stored, as Java stores it, and fails where Java reads it', () =>
   assert.throws(() => i.ownerAsString(), { name: 'TypeError', message: 'owner must not be null' });
   assert.throws(() => i.renewersAsString(), { name: 'TypeError', message: 'renewers must not be null' });
 });
+
+// A form error lists each form's names in Java's parameter order, a tie going
+// to the earliest-declared form, as the Python client's does: tokenRequester
+// sits between owner and renewers, as Java's seven-parameter constructor
+// declares it.
+test("the form error lists the names in Java's constructor order", () => {
+  // @ts-expect-error a set of names no constructor takes: the form check throws IllegalArgumentError
+  assert.throws(() => new TokenInformation({ renewers: [], tokenRequester: null, tokenId: 't' }), {
+    name: 'IllegalArgumentError',
+    message:
+      'TokenInformation() takes one of (tokenId, owner, renewers, issueTimestamp, maxTimestamp, expiryTimestamp), ' +
+      '(tokenId, owner, tokenRequester, renewers, issueTimestamp, maxTimestamp, expiryTimestamp); got (tokenId, tokenRequester, renewers)',
+  });
+});
