@@ -21,10 +21,17 @@
 //   - C: a delivery-completion function (one native/ hands to an interface's
 //     constructor, a header `..._new` / `..._new_err`, as an `..._fn_t`
 //     method, such as
-//     `kafka_producer_Callback_new_err`'s `on_completion`) calls the JS side
-//     (`call_ref`) at one site, and `__set_callback_result_err` at one site,
-//     after it, as the statement an `if (!…destroying)` guards or inside its
-//     braced block (no report once destroy has begun);
+//     `kafka_producer_Callback_new_err`'s `on_completion`, or as either branch
+//     of `cond ? fn : NULL`, a required method passed as NULL when it is
+//     missing) calls the JS side (`call_ref`) at one site, and
+//     `__set_callback_result_err` at one site, after it, as the statement an
+//     `if (!…destroying)` or `if (!…destroyed)` guards or inside its braced
+//     block (no report once the destroy has begun, for the producer, or has
+//     returned, for the consumer, whose destroy runs the callbacks still
+//     pending and waits for their reports). A completion listed with `via`
+//     hands its whole run to that one function, which it calls once, and that
+//     function's body is the one checked (the three listener methods share
+//     one run);
 //   - TypeScript: the function src/ hands the native send as its delivery
 //     completion (an argument for a native parameter whose function type
 //     takes a `RecordMetadata`, and any function argument of a `native.<fn>`
@@ -52,7 +59,7 @@ const { scan, matching } = require('../c_source');
  * the single statement after it (to that statement's `;`).
  */
 function guarded(code, from, to, at) {
-  const re = /\bif\s*\(\s*!\s*(\w+\s*(->|\.)\s*)*destroying\s*\)/g;
+  const re = /\bif\s*\(\s*!\s*(\w+\s*(->|\.)\s*)*(destroying|destroyed)\s*\)/g;
   re.lastIndex = from;
   let m;
   while ((m = re.exec(code)) !== null && m.index < to) {
@@ -75,7 +82,11 @@ function guarded(code, from, to, at) {
   return false;
 }
 
-/** The C delivery-completion functions, with why they are one. */
+/**
+ * The C delivery-completion functions, with why they are one; `via` names the
+ * one function a completion hands its whole run to, which is then the body
+ * checked.
+ */
 const COMPLETIONS = [{ key: 'send_on_completion', reason: "the record's Callback_t on_completion (kafka_producer_Callback_new_err)" }];
 
 /** The native functions whose function argument completes a wait on a record's future, not a delivery. */
@@ -108,8 +119,15 @@ module.exports = {
       // An interface's constructor (`..._new` / `..._new_err`) takes its methods as `_fn_t`s.
       if (!proto || !/_new(_err)?$/.test(c.name)) continue;
       proto.params.forEach((p, i) => {
-        const body = /_fn_t$/.test(p.type) ? resolve(c.args[i], c.file) : undefined;
-        if (body) completions.set(bodyKey(body), body);
+        if (!/_fn_t$/.test(p.type)) return;
+        // A method given as `cond ? fn : NULL` (a required method that is
+        // missing goes as NULL, which the FFI refuses) is `fn`.
+        const arg = c.args[i] || '';
+        const chosen = /\?\s*(\w+)\s*:\s*(\w+)\s*$/.exec(arg);
+        for (const n of chosen ? [chosen[1], chosen[2]].filter((x) => x !== 'NULL') : [arg]) {
+          const body = resolve(n, c.file);
+          if (body) completions.set(bodyKey(body), body);
+        }
       });
     }
     const raw = [];
@@ -118,10 +136,23 @@ module.exports = {
     }
     const listed = applyAllowlist(raw, this.COMPLETIONS, 'order-unused-allowance');
     findings.push(...listed.kept, ...listed.unused);
-    for (const body of completions.values()) {
-      const { name } = body;
+    for (const completion of completions.values()) {
+      const { name } = completion;
       checked += 1;
-      const own = calls.filter((c) => c.file === body.file && c.function === name);
+      // A completion handing its whole run to one function (`via`) calls it
+      // once, and that function's body is the one checked.
+      const entry = this.COMPLETIONS.find((e) => e.key === name);
+      let body = completion;
+      if (entry && entry.via) {
+        const via = calls.filter((c) => c.file === completion.file && c.function === name && c.name === entry.via);
+        const target = resolve(entry.via, completion.file);
+        if (via.length !== 1 || !target) {
+          findings.push({ kind: 'completion-count', subject: name, message: `calls ${entry.via} ${via.length} time(s), not once` });
+          continue;
+        }
+        body = target;
+      }
+      const own = calls.filter((c) => c.file === body.file && c.function === body.name);
       const js = own.filter((c) => c.name === 'call_ref');
       const report = own.filter((c) => c.name.endsWith('__set_callback_result_err'));
       if (js.length !== 1 || report.length !== 1) {
@@ -137,15 +168,16 @@ module.exports = {
           message: `reports __set_callback_result_err (line ${report[0].line}) before running the callback (line ${js[0].line})`,
         });
       }
-      // Rule 6: no report once destroy has begun, so the report is the
-      // statement an `if (!...destroying)` guards, or inside its braced block.
+      // Rule 6: no report once the destroy has begun (or returned), so the
+      // report is the statement an `if (!...destroying)` or
+      // `if (!...destroyed)` guards, or inside its braced block.
       if (report.length === 1) {
         const code = scan(ctx.read(body.file)).code;
         if (!guarded(code, body.bodyStart, body.bodyEnd, report[0].start)) {
           findings.push({
             kind: 'report-unguarded',
             subject: name,
-            message: `reports __set_callback_result_err (line ${report[0].line}) outside an if (!…destroying) guard`,
+            message: `reports __set_callback_result_err (line ${report[0].line}) outside an if (!…destroying) or if (!…destroyed) guard`,
           });
         }
       }
