@@ -11,7 +11,7 @@
 #   type      <class>  <class|abstract class|interface|enum|record>  <supertypes, comma-separated, or ->
 #   ctor      <class>  <Name(Type name, ...)>
 #   method    <class>  <static|instance|default>  <name(Type name, ...)>   (default: an interface's default method)
-#   field     <class>  <static|instance>  <NAME>
+#   field     <class>  <static|instance|static final|instance final>  <NAME>
 #   constant  <class>  <NAME>   (an enum constant)
 type	java.lang.IllegalArgumentException	class	java.lang.RuntimeException
 ctor	java.lang.IllegalArgumentException	IllegalArgumentException()
@@ -211,42 +211,42 @@ method	org.apache.kafka.clients.admin.AdminClient	static	create(Map conf)
 method	org.apache.kafka.clients.admin.AdminClient	static	create(Properties props)
 type	org.apache.kafka.clients.admin.AdminClientConfig	class	org.apache.kafka.common.config.AbstractConfig
 ctor	org.apache.kafka.clients.admin.AdminClientConfig	AdminClientConfig(Map props)
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	BOOTSTRAP_CONTROLLERS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	BOOTSTRAP_CONTROLLERS_DOC
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	BOOTSTRAP_SERVERS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	CLIENT_DNS_LOOKUP_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	CLIENT_ID_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	CONNECTIONS_MAX_IDLE_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	DEFAULT_API_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	DEFAULT_METADATA_RECOVERY_STRATEGY
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	DEFAULT_SECURITY_PROTOCOL
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	ENABLE_METRICS_PUSH_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	ENABLE_METRICS_PUSH_DOC
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METADATA_CLUSTER_CHECK_ENABLE_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METADATA_CLUSTER_CHECK_ENABLE_DOC
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METADATA_MAX_AGE_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METADATA_RECOVERY_STRATEGY_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METADATA_RECOVERY_STRATEGY_DOC
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METRICS_NUM_SAMPLES_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METRICS_RECORDING_LEVEL_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METRICS_SAMPLE_WINDOW_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	METRIC_REPORTER_CLASSES_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	RECEIVE_BUFFER_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	RECONNECT_BACKOFF_MAX_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	RECONNECT_BACKOFF_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	REQUEST_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	RETRIES_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	RETRY_BACKOFF_MAX_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	RETRY_BACKOFF_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	SECURITY_PROTOCOL_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	SECURITY_PROVIDERS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	SEND_BUFFER_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG
-field	org.apache.kafka.clients.admin.AdminClientConfig	static	SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	BOOTSTRAP_CONTROLLERS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	BOOTSTRAP_CONTROLLERS_DOC
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	BOOTSTRAP_SERVERS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	CLIENT_DNS_LOOKUP_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	CLIENT_ID_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	CONNECTIONS_MAX_IDLE_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	DEFAULT_API_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	DEFAULT_METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	DEFAULT_METADATA_RECOVERY_STRATEGY
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	DEFAULT_SECURITY_PROTOCOL
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	ENABLE_METRICS_PUSH_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	ENABLE_METRICS_PUSH_DOC
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METADATA_CLUSTER_CHECK_ENABLE_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METADATA_CLUSTER_CHECK_ENABLE_DOC
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METADATA_MAX_AGE_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METADATA_RECOVERY_STRATEGY_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METADATA_RECOVERY_STRATEGY_DOC
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METRICS_NUM_SAMPLES_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METRICS_RECORDING_LEVEL_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METRICS_SAMPLE_WINDOW_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	METRIC_REPORTER_CLASSES_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	RECEIVE_BUFFER_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	RECONNECT_BACKOFF_MAX_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	RECONNECT_BACKOFF_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	REQUEST_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	RETRIES_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	RETRY_BACKOFF_MAX_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	RETRY_BACKOFF_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	SECURITY_PROTOCOL_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	SECURITY_PROVIDERS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	SEND_BUFFER_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG
+field	org.apache.kafka.clients.admin.AdminClientConfig	static final	SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG
 method	org.apache.kafka.clients.admin.AdminClientConfig	static	configDef()
 method	org.apache.kafka.clients.admin.AdminClientConfig	static	configNames()
 method	org.apache.kafka.clients.admin.AdminClientConfig	static	main(String[] args)
@@ -991,8 +991,8 @@ method	org.apache.kafka.clients.admin.MemberToRemove	instance	hashCode()
 type	org.apache.kafka.clients.admin.MockAdminClient	class	org.apache.kafka.clients.admin.AdminClient
 ctor	org.apache.kafka.clients.admin.MockAdminClient	MockAdminClient()
 ctor	org.apache.kafka.clients.admin.MockAdminClient	MockAdminClient(List brokers, Node controller)
-field	org.apache.kafka.clients.admin.MockAdminClient	static	DEFAULT_CLUSTER_ID
-field	org.apache.kafka.clients.admin.MockAdminClient	static	DEFAULT_LOG_DIRS
+field	org.apache.kafka.clients.admin.MockAdminClient	static final	DEFAULT_CLUSTER_ID
+field	org.apache.kafka.clients.admin.MockAdminClient	static final	DEFAULT_LOG_DIRS
 method	org.apache.kafka.clients.admin.MockAdminClient	instance	abortTransaction(AbortTransactionSpec spec, AbortTransactionOptions options)
 method	org.apache.kafka.clients.admin.MockAdminClient	instance	addRaftVoter(int voterId, Uuid voterDirectoryId, Set endpoints, AddRaftVoterOptions options)
 method	org.apache.kafka.clients.admin.MockAdminClient	instance	addStreamsGroupDescription(StreamsGroupDescription description)
@@ -1531,7 +1531,7 @@ constant	org.apache.kafka.clients.consumer.AcknowledgeType	ACCEPT
 constant	org.apache.kafka.clients.consumer.AcknowledgeType	REJECT
 constant	org.apache.kafka.clients.consumer.AcknowledgeType	RELEASE
 constant	org.apache.kafka.clients.consumer.AcknowledgeType	RENEW
-field	org.apache.kafka.clients.consumer.AcknowledgeType	instance	id
+field	org.apache.kafka.clients.consumer.AcknowledgeType	instance final	id
 method	org.apache.kafka.clients.consumer.AcknowledgeType	instance	name()
 method	org.apache.kafka.clients.consumer.AcknowledgeType	instance	ordinal()
 method	org.apache.kafka.clients.consumer.AcknowledgeType	instance	toString()
@@ -1612,75 +1612,75 @@ method	org.apache.kafka.clients.consumer.Consumer	instance	wakeup()
 type	org.apache.kafka.clients.consumer.ConsumerConfig	class	org.apache.kafka.common.config.AbstractConfig
 ctor	org.apache.kafka.clients.consumer.ConsumerConfig	ConsumerConfig(Map props)
 ctor	org.apache.kafka.clients.consumer.ConsumerConfig	ConsumerConfig(Properties props)
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	ALLOW_AUTO_CREATE_TOPICS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	ASSIGN_FROM_SUBSCRIBED_ASSIGNORS
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	AUTO_COMMIT_INTERVAL_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	AUTO_OFFSET_RESET_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	AUTO_OFFSET_RESET_DOC
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	BOOTSTRAP_SERVERS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	CHECK_CRCS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	CLIENT_DNS_LOOKUP_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	CLIENT_ID_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	CLIENT_RACK_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	CONNECTIONS_MAX_IDLE_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_ALLOW_AUTO_CREATE_TOPICS
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_API_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_CLIENT_RACK
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_EXCLUDE_INTERNAL_TOPICS
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_FETCH_MAX_BYTES
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_FETCH_MAX_WAIT_MS
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_FETCH_MIN_BYTES
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_GROUP_PROTOCOL
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_GROUP_REMOTE_ASSIGNOR
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_ISOLATION_LEVEL
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_MAX_PARTITION_FETCH_BYTES
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_MAX_POLL_RECORDS
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	DEFAULT_SHARE_ACQUIRE_MODE
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	ENABLE_AUTO_COMMIT_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	ENABLE_METRICS_PUSH_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	ENABLE_METRICS_PUSH_DOC
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	EXCLUDE_INTERNAL_TOPICS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	FETCH_MAX_BYTES_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	FETCH_MAX_WAIT_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	FETCH_MIN_BYTES_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	GROUP_ID_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	GROUP_INSTANCE_ID_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	GROUP_PROTOCOL_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	GROUP_PROTOCOL_DOC
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	GROUP_REMOTE_ASSIGNOR_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	GROUP_REMOTE_ASSIGNOR_DOC
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	HEARTBEAT_INTERVAL_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	INTERCEPTOR_CLASSES_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	INTERCEPTOR_CLASSES_DOC
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	ISOLATION_LEVEL_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	ISOLATION_LEVEL_DOC
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	KEY_DESERIALIZER_CLASS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	KEY_DESERIALIZER_CLASS_DOC
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	MAX_PARTITION_FETCH_BYTES_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	MAX_POLL_INTERVAL_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	MAX_POLL_RECORDS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	METADATA_MAX_AGE_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	METRICS_NUM_SAMPLES_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	METRICS_RECORDING_LEVEL_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	METRICS_SAMPLE_WINDOW_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	METRIC_REPORTER_CLASSES_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	PARTITION_ASSIGNMENT_STRATEGY_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	RECEIVE_BUFFER_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	RECONNECT_BACKOFF_MAX_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	RECONNECT_BACKOFF_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	REQUEST_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	RETRY_BACKOFF_MAX_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	RETRY_BACKOFF_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	SECURITY_PROVIDERS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	SEND_BUFFER_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	SESSION_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	SHARE_ACKNOWLEDGEMENT_MODE_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	SHARE_ACQUIRE_MODE_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	VALUE_DESERIALIZER_CLASS_CONFIG
-field	org.apache.kafka.clients.consumer.ConsumerConfig	static	VALUE_DESERIALIZER_CLASS_DOC
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	ALLOW_AUTO_CREATE_TOPICS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	ASSIGN_FROM_SUBSCRIBED_ASSIGNORS
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	AUTO_COMMIT_INTERVAL_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	AUTO_OFFSET_RESET_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	AUTO_OFFSET_RESET_DOC
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	BOOTSTRAP_SERVERS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	CHECK_CRCS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	CLIENT_DNS_LOOKUP_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	CLIENT_ID_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	CLIENT_RACK_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	CONNECTIONS_MAX_IDLE_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_ALLOW_AUTO_CREATE_TOPICS
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_API_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_CLIENT_RACK
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_EXCLUDE_INTERNAL_TOPICS
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_FETCH_MAX_BYTES
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_FETCH_MAX_WAIT_MS
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_FETCH_MIN_BYTES
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_GROUP_PROTOCOL
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_GROUP_REMOTE_ASSIGNOR
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_ISOLATION_LEVEL
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_MAX_PARTITION_FETCH_BYTES
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_MAX_POLL_RECORDS
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	DEFAULT_SHARE_ACQUIRE_MODE
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	ENABLE_AUTO_COMMIT_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	ENABLE_METRICS_PUSH_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	ENABLE_METRICS_PUSH_DOC
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	EXCLUDE_INTERNAL_TOPICS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	FETCH_MAX_BYTES_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	FETCH_MAX_WAIT_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	FETCH_MIN_BYTES_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	GROUP_ID_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	GROUP_INSTANCE_ID_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	GROUP_PROTOCOL_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	GROUP_PROTOCOL_DOC
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	GROUP_REMOTE_ASSIGNOR_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	GROUP_REMOTE_ASSIGNOR_DOC
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	HEARTBEAT_INTERVAL_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	INTERCEPTOR_CLASSES_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	INTERCEPTOR_CLASSES_DOC
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	ISOLATION_LEVEL_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	ISOLATION_LEVEL_DOC
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	KEY_DESERIALIZER_CLASS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	KEY_DESERIALIZER_CLASS_DOC
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	MAX_PARTITION_FETCH_BYTES_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	MAX_POLL_INTERVAL_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	MAX_POLL_RECORDS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	METADATA_MAX_AGE_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	METRICS_NUM_SAMPLES_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	METRICS_RECORDING_LEVEL_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	METRICS_SAMPLE_WINDOW_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	METRIC_REPORTER_CLASSES_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	PARTITION_ASSIGNMENT_STRATEGY_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	RECEIVE_BUFFER_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	RECONNECT_BACKOFF_MAX_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	RECONNECT_BACKOFF_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	REQUEST_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	RETRY_BACKOFF_MAX_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	RETRY_BACKOFF_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	SECURITY_PROVIDERS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	SEND_BUFFER_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	SESSION_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	SHARE_ACKNOWLEDGEMENT_MODE_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	SHARE_ACQUIRE_MODE_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	VALUE_DESERIALIZER_CLASS_CONFIG
+field	org.apache.kafka.clients.consumer.ConsumerConfig	static final	VALUE_DESERIALIZER_CLASS_DOC
 method	org.apache.kafka.clients.consumer.ConsumerConfig	static	appendDeserializerToConfig(Map configs, Deserializer keyDeserializer, Deserializer valueDeserializer)
 method	org.apache.kafka.clients.consumer.ConsumerConfig	static	configDef()
 method	org.apache.kafka.clients.consumer.ConsumerConfig	static	configNames()
@@ -1749,8 +1749,8 @@ type	org.apache.kafka.clients.consumer.ConsumerRecord	class	-
 ctor	org.apache.kafka.clients.consumer.ConsumerRecord	ConsumerRecord(String topic, int partition, long offset, K key, V value)
 ctor	org.apache.kafka.clients.consumer.ConsumerRecord	ConsumerRecord(String topic, int partition, long offset, long timestamp, TimestampType timestampType, int serializedKeySize, int serializedValueSize, K key, V value, Headers headers, Optional leaderEpoch)
 ctor	org.apache.kafka.clients.consumer.ConsumerRecord	ConsumerRecord(String topic, int partition, long offset, long timestamp, TimestampType timestampType, int serializedKeySize, int serializedValueSize, K key, V value, Headers headers, Optional leaderEpoch, Optional deliveryCount)
-field	org.apache.kafka.clients.consumer.ConsumerRecord	static	NO_TIMESTAMP
-field	org.apache.kafka.clients.consumer.ConsumerRecord	static	NULL_SIZE
+field	org.apache.kafka.clients.consumer.ConsumerRecord	static final	NO_TIMESTAMP
+field	org.apache.kafka.clients.consumer.ConsumerRecord	static final	NULL_SIZE
 method	org.apache.kafka.clients.consumer.ConsumerRecord	instance	deliveryCount()
 method	org.apache.kafka.clients.consumer.ConsumerRecord	instance	headers()
 method	org.apache.kafka.clients.consumer.ConsumerRecord	instance	key()
@@ -1766,7 +1766,7 @@ method	org.apache.kafka.clients.consumer.ConsumerRecord	instance	topic()
 method	org.apache.kafka.clients.consumer.ConsumerRecord	instance	value()
 type	org.apache.kafka.clients.consumer.ConsumerRecords	class	Iterable
 ctor	org.apache.kafka.clients.consumer.ConsumerRecords	ConsumerRecords(Map records, Map nextOffsets)
-field	org.apache.kafka.clients.consumer.ConsumerRecords	static	EMPTY
+field	org.apache.kafka.clients.consumer.ConsumerRecords	static final	EMPTY
 method	org.apache.kafka.clients.consumer.ConsumerRecords	instance	count()
 method	org.apache.kafka.clients.consumer.ConsumerRecords	instance	isEmpty()
 method	org.apache.kafka.clients.consumer.ConsumerRecords	instance	iterator()
@@ -1777,7 +1777,7 @@ method	org.apache.kafka.clients.consumer.ConsumerRecords	instance	records(TopicP
 method	org.apache.kafka.clients.consumer.ConsumerRecords	static	empty()
 type	org.apache.kafka.clients.consumer.CooperativeStickyAssignor	class	org.apache.kafka.clients.consumer.internals.AbstractStickyAssignor
 ctor	org.apache.kafka.clients.consumer.CooperativeStickyAssignor	CooperativeStickyAssignor()
-field	org.apache.kafka.clients.consumer.CooperativeStickyAssignor	static	COOPERATIVE_STICKY_ASSIGNOR_NAME
+field	org.apache.kafka.clients.consumer.CooperativeStickyAssignor	static final	COOPERATIVE_STICKY_ASSIGNOR_NAME
 method	org.apache.kafka.clients.consumer.CooperativeStickyAssignor	instance	assignPartitions(Map partitionsPerTopic, Map subscriptions)
 method	org.apache.kafka.clients.consumer.CooperativeStickyAssignor	instance	name()
 method	org.apache.kafka.clients.consumer.CooperativeStickyAssignor	instance	onAssignment(Assignment assignment, ConsumerGroupMetadata metadata)
@@ -1786,7 +1786,7 @@ method	org.apache.kafka.clients.consumer.CooperativeStickyAssignor	instance	supp
 type	org.apache.kafka.clients.consumer.GroupProtocol	enum	-
 constant	org.apache.kafka.clients.consumer.GroupProtocol	CLASSIC
 constant	org.apache.kafka.clients.consumer.GroupProtocol	CONSUMER
-field	org.apache.kafka.clients.consumer.GroupProtocol	instance	name
+field	org.apache.kafka.clients.consumer.GroupProtocol	instance final	name
 method	org.apache.kafka.clients.consumer.GroupProtocol	instance	name()
 method	org.apache.kafka.clients.consumer.GroupProtocol	instance	ordinal()
 method	org.apache.kafka.clients.consumer.GroupProtocol	static	of(String name)
@@ -2005,7 +2005,7 @@ method	org.apache.kafka.clients.consumer.OffsetOutOfRangeException	instance	offs
 method	org.apache.kafka.clients.consumer.OffsetOutOfRangeException	instance	partitions()
 type	org.apache.kafka.clients.consumer.RangeAssignor	class	org.apache.kafka.clients.consumer.internals.AbstractPartitionAssignor
 ctor	org.apache.kafka.clients.consumer.RangeAssignor	RangeAssignor()
-field	org.apache.kafka.clients.consumer.RangeAssignor	static	RANGE_ASSIGNOR_NAME
+field	org.apache.kafka.clients.consumer.RangeAssignor	static final	RANGE_ASSIGNOR_NAME
 method	org.apache.kafka.clients.consumer.RangeAssignor	instance	assign(Map partitionsPerTopic, Map subscriptions)
 method	org.apache.kafka.clients.consumer.RangeAssignor	instance	assignPartitions(Map partitionsPerTopic, Map subscriptions)
 method	org.apache.kafka.clients.consumer.RangeAssignor	instance	name()
@@ -2015,7 +2015,7 @@ ctor	org.apache.kafka.clients.consumer.RetriableCommitFailedException	RetriableC
 ctor	org.apache.kafka.clients.consumer.RetriableCommitFailedException	RetriableCommitFailedException(Throwable t)
 type	org.apache.kafka.clients.consumer.RoundRobinAssignor	class	org.apache.kafka.clients.consumer.internals.AbstractPartitionAssignor
 ctor	org.apache.kafka.clients.consumer.RoundRobinAssignor	RoundRobinAssignor()
-field	org.apache.kafka.clients.consumer.RoundRobinAssignor	static	ROUNDROBIN_ASSIGNOR_NAME
+field	org.apache.kafka.clients.consumer.RoundRobinAssignor	static final	ROUNDROBIN_ASSIGNOR_NAME
 method	org.apache.kafka.clients.consumer.RoundRobinAssignor	instance	assign(Map partitionsPerTopic, Map subscriptions)
 method	org.apache.kafka.clients.consumer.RoundRobinAssignor	instance	name()
 type	org.apache.kafka.clients.consumer.ShareConsumer	interface	Closeable
@@ -2040,7 +2040,7 @@ method	org.apache.kafka.clients.consumer.ShareConsumer	instance	unsubscribe()
 method	org.apache.kafka.clients.consumer.ShareConsumer	instance	wakeup()
 type	org.apache.kafka.clients.consumer.StickyAssignor	class	org.apache.kafka.clients.consumer.internals.AbstractStickyAssignor
 ctor	org.apache.kafka.clients.consumer.StickyAssignor	StickyAssignor()
-field	org.apache.kafka.clients.consumer.StickyAssignor	static	STICKY_ASSIGNOR_NAME
+field	org.apache.kafka.clients.consumer.StickyAssignor	static final	STICKY_ASSIGNOR_NAME
 method	org.apache.kafka.clients.consumer.StickyAssignor	instance	name()
 method	org.apache.kafka.clients.consumer.StickyAssignor	instance	onAssignment(Assignment assignment, ConsumerGroupMetadata metadata)
 method	org.apache.kafka.clients.consumer.StickyAssignor	instance	subscriptionUserData(Set topics)
@@ -2059,8 +2059,8 @@ ctor	org.apache.kafka.clients.producer.KafkaProducer	KafkaProducer(Map configs)
 ctor	org.apache.kafka.clients.producer.KafkaProducer	KafkaProducer(Map configs, Serializer keySerializer, Serializer valueSerializer)
 ctor	org.apache.kafka.clients.producer.KafkaProducer	KafkaProducer(Properties properties)
 ctor	org.apache.kafka.clients.producer.KafkaProducer	KafkaProducer(Properties properties, Serializer keySerializer, Serializer valueSerializer)
-field	org.apache.kafka.clients.producer.KafkaProducer	static	NETWORK_THREAD_PREFIX
-field	org.apache.kafka.clients.producer.KafkaProducer	static	PRODUCER_METRIC_GROUP_NAME
+field	org.apache.kafka.clients.producer.KafkaProducer	static final	NETWORK_THREAD_PREFIX
+field	org.apache.kafka.clients.producer.KafkaProducer	static final	PRODUCER_METRIC_GROUP_NAME
 method	org.apache.kafka.clients.producer.KafkaProducer	instance	abortTransaction()
 method	org.apache.kafka.clients.producer.KafkaProducer	instance	beginTransaction()
 method	org.apache.kafka.clients.producer.KafkaProducer	instance	clientInstanceId(Duration timeout)
@@ -2156,65 +2156,65 @@ method	org.apache.kafka.clients.producer.Producer	instance	unregisterMetricFromS
 type	org.apache.kafka.clients.producer.ProducerConfig	class	org.apache.kafka.common.config.AbstractConfig
 ctor	org.apache.kafka.clients.producer.ProducerConfig	ProducerConfig(Map props)
 ctor	org.apache.kafka.clients.producer.ProducerConfig	ProducerConfig(Properties props)
-field	org.apache.kafka.clients.producer.ProducerConfig	static	ACKS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	BATCH_SIZE_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	BOOTSTRAP_SERVERS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL
-field	org.apache.kafka.clients.producer.ProducerConfig	static	BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL
-field	org.apache.kafka.clients.producer.ProducerConfig	static	BUFFER_MEMORY_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	CLIENT_DNS_LOOKUP_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	CLIENT_ID_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	CLIENT_RACK_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	COMPRESSION_GZIP_LEVEL_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	COMPRESSION_LZ4_LEVEL_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	COMPRESSION_TYPE_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	COMPRESSION_ZSTD_LEVEL_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	CONNECTIONS_MAX_IDLE_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	DEFAULT_CLIENT_RACK
-field	org.apache.kafka.clients.producer.ProducerConfig	static	DELIVERY_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	ENABLE_IDEMPOTENCE_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	ENABLE_IDEMPOTENCE_DOC
-field	org.apache.kafka.clients.producer.ProducerConfig	static	ENABLE_METRICS_PUSH_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	ENABLE_METRICS_PUSH_DOC
-field	org.apache.kafka.clients.producer.ProducerConfig	static	INTERCEPTOR_CLASSES_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	INTERCEPTOR_CLASSES_DOC
-field	org.apache.kafka.clients.producer.ProducerConfig	static	KEY_SERIALIZER_CLASS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	KEY_SERIALIZER_CLASS_DOC
-field	org.apache.kafka.clients.producer.ProducerConfig	static	LINGER_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	MAX_BLOCK_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION
-field	org.apache.kafka.clients.producer.ProducerConfig	static	MAX_REQUEST_SIZE_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	METADATA_MAX_AGE_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	METADATA_MAX_IDLE_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	METRICS_NUM_SAMPLES_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	METRICS_RECORDING_LEVEL_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	METRICS_SAMPLE_WINDOW_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	METRIC_REPORTER_CLASSES_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	PARTITIONER_CLASS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	PARTITIONER_IGNORE_KEYS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	PARTITIONER_RACK_AWARE_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	RECEIVE_BUFFER_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	RECONNECT_BACKOFF_MAX_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	RECONNECT_BACKOFF_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	REQUEST_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	RETRIES_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	RETRY_BACKOFF_MAX_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	RETRY_BACKOFF_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	SECURITY_PROVIDERS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	SEND_BUFFER_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	TRANSACTIONAL_ID_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	TRANSACTIONAL_ID_DOC
-field	org.apache.kafka.clients.producer.ProducerConfig	static	TRANSACTION_TIMEOUT_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	TRANSACTION_TIMEOUT_DOC
-field	org.apache.kafka.clients.producer.ProducerConfig	static	TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	VALUE_SERIALIZER_CLASS_CONFIG
-field	org.apache.kafka.clients.producer.ProducerConfig	static	VALUE_SERIALIZER_CLASS_DOC
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	ACKS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	BATCH_SIZE_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	BOOTSTRAP_RESOLVE_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	BOOTSTRAP_SERVERS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	BUFFER_MEMORY_ALLOCATION_STRATEGY_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	BUFFER_MEMORY_ALLOCATION_STRATEGY_FULL
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	BUFFER_MEMORY_ALLOCATION_STRATEGY_INCREMENTAL
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	BUFFER_MEMORY_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	CLIENT_DNS_LOOKUP_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	CLIENT_ID_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	CLIENT_RACK_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	COMPRESSION_GZIP_LEVEL_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	COMPRESSION_LZ4_LEVEL_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	COMPRESSION_TYPE_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	COMPRESSION_ZSTD_LEVEL_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	CONNECTIONS_MAX_IDLE_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	DEFAULT_CLIENT_RACK
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	DELIVERY_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	ENABLE_IDEMPOTENCE_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	ENABLE_IDEMPOTENCE_DOC
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	ENABLE_METRICS_PUSH_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	ENABLE_METRICS_PUSH_DOC
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	INTERCEPTOR_CLASSES_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	INTERCEPTOR_CLASSES_DOC
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	KEY_SERIALIZER_CLASS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	KEY_SERIALIZER_CLASS_DOC
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	LINGER_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	MAX_BLOCK_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	MAX_REQUEST_SIZE_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	METADATA_MAX_AGE_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	METADATA_MAX_IDLE_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	METRICS_NUM_SAMPLES_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	METRICS_RECORDING_LEVEL_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	METRICS_SAMPLE_WINDOW_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	METRIC_REPORTER_CLASSES_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	PARTITIONER_CLASS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	PARTITIONER_IGNORE_KEYS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	PARTITIONER_RACK_AWARE_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	RECEIVE_BUFFER_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	RECONNECT_BACKOFF_MAX_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	RECONNECT_BACKOFF_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	REQUEST_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	RETRIES_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	RETRY_BACKOFF_MAX_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	RETRY_BACKOFF_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	SECURITY_PROVIDERS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	SEND_BUFFER_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	TRANSACTIONAL_ID_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	TRANSACTIONAL_ID_DOC
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	TRANSACTION_TIMEOUT_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	TRANSACTION_TIMEOUT_DOC
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	VALUE_SERIALIZER_CLASS_CONFIG
+field	org.apache.kafka.clients.producer.ProducerConfig	static final	VALUE_SERIALIZER_CLASS_DOC
 method	org.apache.kafka.clients.producer.ProducerConfig	static	configDef()
 method	org.apache.kafka.clients.producer.ProducerConfig	static	configNames()
 method	org.apache.kafka.clients.producer.ProducerConfig	static	main(String[] args)
@@ -2241,7 +2241,7 @@ method	org.apache.kafka.clients.producer.ProducerRecord	instance	topic()
 method	org.apache.kafka.clients.producer.ProducerRecord	instance	value()
 type	org.apache.kafka.clients.producer.RecordMetadata	class	-
 ctor	org.apache.kafka.clients.producer.RecordMetadata	RecordMetadata(TopicPartition topicPartition, long baseOffset, int batchIndex, long timestamp, int serializedKeySize, int serializedValueSize)
-field	org.apache.kafka.clients.producer.RecordMetadata	static	UNKNOWN_PARTITION
+field	org.apache.kafka.clients.producer.RecordMetadata	static final	UNKNOWN_PARTITION
 method	org.apache.kafka.clients.producer.RecordMetadata	instance	hasOffset()
 method	org.apache.kafka.clients.producer.RecordMetadata	instance	hasTimestamp()
 method	org.apache.kafka.clients.producer.RecordMetadata	instance	offset()
@@ -2312,7 +2312,7 @@ method	org.apache.kafka.common.Configurable	instance	configure(Map configs)
 type	org.apache.kafka.common.ElectionType	enum	-
 constant	org.apache.kafka.common.ElectionType	PREFERRED
 constant	org.apache.kafka.common.ElectionType	UNCLEAN
-field	org.apache.kafka.common.ElectionType	instance	value
+field	org.apache.kafka.common.ElectionType	instance final	value
 method	org.apache.kafka.common.ElectionType	instance	name()
 method	org.apache.kafka.common.ElectionType	instance	ordinal()
 method	org.apache.kafka.common.ElectionType	static	valueOf(String ?)
@@ -2496,10 +2496,10 @@ method	org.apache.kafka.common.TopicPartitionReplica	instance	toString()
 method	org.apache.kafka.common.TopicPartitionReplica	instance	topic()
 type	org.apache.kafka.common.Uuid	class	Comparable
 ctor	org.apache.kafka.common.Uuid	Uuid(long mostSigBits, long leastSigBits)
-field	org.apache.kafka.common.Uuid	static	METADATA_TOPIC_ID
-field	org.apache.kafka.common.Uuid	static	ONE_UUID
-field	org.apache.kafka.common.Uuid	static	RESERVED
-field	org.apache.kafka.common.Uuid	static	ZERO_UUID
+field	org.apache.kafka.common.Uuid	static final	METADATA_TOPIC_ID
+field	org.apache.kafka.common.Uuid	static final	ONE_UUID
+field	org.apache.kafka.common.Uuid	static final	RESERVED
+field	org.apache.kafka.common.Uuid	static final	ZERO_UUID
 method	org.apache.kafka.common.Uuid	instance	compareTo(Uuid other)
 method	org.apache.kafka.common.Uuid	instance	equals(Object obj)
 method	org.apache.kafka.common.Uuid	instance	getLeastSignificantBits()
@@ -2523,7 +2523,7 @@ method	org.apache.kafka.common.acl.AccessControlEntry	instance	toFilter()
 method	org.apache.kafka.common.acl.AccessControlEntry	instance	toString()
 type	org.apache.kafka.common.acl.AccessControlEntryFilter	class	-
 ctor	org.apache.kafka.common.acl.AccessControlEntryFilter	AccessControlEntryFilter(String principal, String host, AclOperation operation, AclPermissionType permissionType)
-field	org.apache.kafka.common.acl.AccessControlEntryFilter	static	ANY
+field	org.apache.kafka.common.acl.AccessControlEntryFilter	static final	ANY
 method	org.apache.kafka.common.acl.AccessControlEntryFilter	instance	equals(Object o)
 method	org.apache.kafka.common.acl.AccessControlEntryFilter	instance	findIndefiniteField()
 method	org.apache.kafka.common.acl.AccessControlEntryFilter	instance	hashCode()
@@ -2546,7 +2546,7 @@ method	org.apache.kafka.common.acl.AclBinding	instance	toFilter()
 method	org.apache.kafka.common.acl.AclBinding	instance	toString()
 type	org.apache.kafka.common.acl.AclBindingFilter	class	-
 ctor	org.apache.kafka.common.acl.AclBindingFilter	AclBindingFilter(ResourcePatternFilter patternFilter, AccessControlEntryFilter entryFilter)
-field	org.apache.kafka.common.acl.AclBindingFilter	static	ANY
+field	org.apache.kafka.common.acl.AclBindingFilter	static final	ANY
 method	org.apache.kafka.common.acl.AclBindingFilter	instance	entryFilter()
 method	org.apache.kafka.common.acl.AclBindingFilter	instance	equals(Object o)
 method	org.apache.kafka.common.acl.AclBindingFilter	instance	findIndefiniteField()
@@ -2609,9 +2609,9 @@ type	org.apache.kafka.common.config.AbstractConfig	class	-
 ctor	org.apache.kafka.common.config.AbstractConfig	AbstractConfig(ConfigDef definition, Map originals)
 ctor	org.apache.kafka.common.config.AbstractConfig	AbstractConfig(ConfigDef definition, Map originals, Map configProviderProps, boolean doLog)
 ctor	org.apache.kafka.common.config.AbstractConfig	AbstractConfig(ConfigDef definition, Map originals, boolean doLog)
-field	org.apache.kafka.common.config.AbstractConfig	static	AUTOMATIC_CONFIG_PROVIDERS_PROPERTY
-field	org.apache.kafka.common.config.AbstractConfig	static	CONFIG_PROVIDERS_CONFIG
-field	org.apache.kafka.common.config.AbstractConfig	static	CONFIG_PROVIDERS_DOC
+field	org.apache.kafka.common.config.AbstractConfig	static final	AUTOMATIC_CONFIG_PROVIDERS_PROPERTY
+field	org.apache.kafka.common.config.AbstractConfig	static final	CONFIG_PROVIDERS_CONFIG
+field	org.apache.kafka.common.config.AbstractConfig	static final	CONFIG_PROVIDERS_DOC
 method	org.apache.kafka.common.config.AbstractConfig	instance	documentationOf(String key)
 method	org.apache.kafka.common.config.AbstractConfig	instance	equals(Object o)
 method	org.apache.kafka.common.config.AbstractConfig	instance	getBoolean(String key)
@@ -2655,7 +2655,7 @@ method	org.apache.kafka.common.config.ConfigData	instance	ttl()
 type	org.apache.kafka.common.config.ConfigDef	class	-
 ctor	org.apache.kafka.common.config.ConfigDef	ConfigDef()
 ctor	org.apache.kafka.common.config.ConfigDef	ConfigDef(ConfigDef base)
-field	org.apache.kafka.common.config.ConfigDef	static	NO_DEFAULT_VALUE
+field	org.apache.kafka.common.config.ConfigDef	static final	NO_DEFAULT_VALUE
 method	org.apache.kafka.common.config.ConfigDef	instance	configKeys()
 method	org.apache.kafka.common.config.ConfigDef	instance	defaultValues()
 method	org.apache.kafka.common.config.ConfigDef	instance	define(ConfigKey key)
@@ -2707,20 +2707,20 @@ method	org.apache.kafka.common.config.ConfigDef$CompositeValidator	instance	toSt
 method	org.apache.kafka.common.config.ConfigDef$CompositeValidator	static	of(Validator[] validators)
 type	org.apache.kafka.common.config.ConfigDef$ConfigKey	class	-
 ctor	org.apache.kafka.common.config.ConfigDef$ConfigKey	ConfigKey(String name, Type type, Object defaultValue, Validator validator, Importance importance, String documentation, String group, int orderInGroup, Width width, String displayName, List dependents, Recommender recommender, boolean internalConfig)
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	alternativeString
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	defaultValue
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	dependents
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	displayName
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	documentation
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	group
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	importance
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	internalConfig
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	name
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	orderInGroup
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	recommender
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	type
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	validator
-field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	width
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	alternativeString
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	defaultValue
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	dependents
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	displayName
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	documentation
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	group
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	importance
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	internalConfig
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	name
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	orderInGroup
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	recommender
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	type
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	validator
+field	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance final	width
 method	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	hasDefault()
 method	org.apache.kafka.common.config.ConfigDef$ConfigKey	instance	type()
 type	org.apache.kafka.common.config.ConfigDef$Importance	enum	-
@@ -2823,7 +2823,7 @@ method	org.apache.kafka.common.config.ConfigResource$Type	static	valueOf(String 
 method	org.apache.kafka.common.config.ConfigResource$Type	static	values()
 type	org.apache.kafka.common.config.ConfigTransformer	class	-
 ctor	org.apache.kafka.common.config.ConfigTransformer	ConfigTransformer(Map configProviders)
-field	org.apache.kafka.common.config.ConfigTransformer	static	DEFAULT_PATTERN
+field	org.apache.kafka.common.config.ConfigTransformer	static final	DEFAULT_PATTERN
 method	org.apache.kafka.common.config.ConfigTransformer	instance	transform(Map configs)
 type	org.apache.kafka.common.config.ConfigTransformerResult	class	-
 ctor	org.apache.kafka.common.config.ConfigTransformerResult	ConfigTransformerResult(Map data, Map ttls)
@@ -2846,144 +2846,144 @@ method	org.apache.kafka.common.config.ConfigValue	instance	visible()
 method	org.apache.kafka.common.config.ConfigValue	instance	visible(boolean visible)
 type	org.apache.kafka.common.config.LogLevelConfig	class	-
 ctor	org.apache.kafka.common.config.LogLevelConfig	LogLevelConfig()
-field	org.apache.kafka.common.config.LogLevelConfig	static	DEBUG_LOG_LEVEL
-field	org.apache.kafka.common.config.LogLevelConfig	static	ERROR_LOG_LEVEL
-field	org.apache.kafka.common.config.LogLevelConfig	static	FATAL_LOG_LEVEL
-field	org.apache.kafka.common.config.LogLevelConfig	static	INFO_LOG_LEVEL
-field	org.apache.kafka.common.config.LogLevelConfig	static	TRACE_LOG_LEVEL
-field	org.apache.kafka.common.config.LogLevelConfig	static	VALID_LOG_LEVELS
-field	org.apache.kafka.common.config.LogLevelConfig	static	WARN_LOG_LEVEL
+field	org.apache.kafka.common.config.LogLevelConfig	static final	DEBUG_LOG_LEVEL
+field	org.apache.kafka.common.config.LogLevelConfig	static final	ERROR_LOG_LEVEL
+field	org.apache.kafka.common.config.LogLevelConfig	static final	FATAL_LOG_LEVEL
+field	org.apache.kafka.common.config.LogLevelConfig	static final	INFO_LOG_LEVEL
+field	org.apache.kafka.common.config.LogLevelConfig	static final	TRACE_LOG_LEVEL
+field	org.apache.kafka.common.config.LogLevelConfig	static final	VALID_LOG_LEVELS
+field	org.apache.kafka.common.config.LogLevelConfig	static final	WARN_LOG_LEVEL
 type	org.apache.kafka.common.config.SaslConfigs	class	-
 ctor	org.apache.kafka.common.config.SaslConfigs	SaslConfigs()
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_KERBEROS_KINIT_CMD
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_KERBEROS_TICKET_RENEW_JITTER
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_KERBEROS_TICKET_RENEW_WINDOW_FACTOR
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_LOGIN_REFRESH_BUFFER_SECONDS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_LOGIN_REFRESH_MIN_PERIOD_SECONDS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_LOGIN_REFRESH_WINDOW_JITTER
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MAX_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_MECHANISM
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_ASSERTION_ALGORITHM
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_EXP_SECONDS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_JTI_INCLUDE
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_NBF_SECONDS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_HEADER_URLENCODE
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_SCOPE_CLAIM_NAME
-field	org.apache.kafka.common.config.SaslConfigs	static	DEFAULT_SASL_OAUTHBEARER_SUB_CLAIM_NAME
-field	org.apache.kafka.common.config.SaslConfigs	static	GSSAPI_MECHANISM
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_CLIENT_CALLBACK_HANDLER_CLASS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_CLIENT_CALLBACK_HANDLER_CLASS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_JAAS_CONFIG
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_JAAS_CONFIG_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_KERBEROS_KINIT_CMD
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_KERBEROS_KINIT_CMD_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_KERBEROS_MIN_TIME_BEFORE_RELOGIN
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_KERBEROS_MIN_TIME_BEFORE_RELOGIN_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_KERBEROS_SERVICE_NAME
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_KERBEROS_SERVICE_NAME_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_KERBEROS_TICKET_RENEW_JITTER
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_KERBEROS_TICKET_RENEW_JITTER_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_KERBEROS_TICKET_RENEW_WINDOW_FACTOR
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_KERBEROS_TICKET_RENEW_WINDOW_FACTOR_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_CALLBACK_HANDLER_CLASS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_CALLBACK_HANDLER_CLASS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_CLASS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_CLASS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_CONNECT_TIMEOUT_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_CONNECT_TIMEOUT_MS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_READ_TIMEOUT_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_READ_TIMEOUT_MS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_REFRESH_BUFFER_SECONDS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_REFRESH_BUFFER_SECONDS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_REFRESH_WINDOW_FACTOR
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_REFRESH_WINDOW_FACTOR_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_REFRESH_WINDOW_JITTER
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_REFRESH_WINDOW_JITTER_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_RETRY_BACKOFF_MAX_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_RETRY_BACKOFF_MAX_MS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_RETRY_BACKOFF_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_LOGIN_RETRY_BACKOFF_MS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_MECHANISM
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_MECHANISM_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ALLOW_UNVERIFIED_AUDIENCE
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ALLOW_UNVERIFIED_AUDIENCE_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ALLOW_UNVERIFIED_ISSUER
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ALLOW_UNVERIFIED_ISSUER_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_ALGORITHM
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_ALGORITHM_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_AUD
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_AUD_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_EXP_SECONDS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_EXP_SECONDS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_ISS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_ISS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_JTI_INCLUDE
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_JTI_INCLUDE_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_NBF_SECONDS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_NBF_SECONDS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_SUB
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_CLAIM_SUB_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_FILE
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_FILE_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_FILE
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_FILE_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_PASSPHRASE
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_PASSPHRASE_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_TEMPLATE_FILE
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_ASSERTION_TEMPLATE_FILE_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_ID
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_ID_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_SECRET
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_SECRET_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_EXPECTED_AUDIENCE
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_EXPECTED_AUDIENCE_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_EXPECTED_ISSUER
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_EXPECTED_ISSUER_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_HEADER_URLENCODE
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_HEADER_URLENCODE_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWKS_ENDPOINT_URL
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWKS_ENDPOINT_URL_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_SCOPE
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_SCOPE_CLAIM_NAME
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_SCOPE_CLAIM_NAME_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_SCOPE_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_SUB_CLAIM_NAME
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_SUB_CLAIM_NAME_DOC
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL
-field	org.apache.kafka.common.config.SaslConfigs	static	SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_KERBEROS_KINIT_CMD
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_KERBEROS_TICKET_RENEW_JITTER
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_KERBEROS_TICKET_RENEW_WINDOW_FACTOR
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_LOGIN_REFRESH_BUFFER_SECONDS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_LOGIN_REFRESH_MIN_PERIOD_SECONDS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_LOGIN_REFRESH_WINDOW_FACTOR
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_LOGIN_REFRESH_WINDOW_JITTER
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MAX_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_LOGIN_RETRY_BACKOFF_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_MECHANISM
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_ASSERTION_ALGORITHM
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_EXP_SECONDS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_JTI_INCLUDE
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_ASSERTION_CLAIM_NBF_SECONDS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_HEADER_URLENCODE
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_SCOPE_CLAIM_NAME
+field	org.apache.kafka.common.config.SaslConfigs	static final	DEFAULT_SASL_OAUTHBEARER_SUB_CLAIM_NAME
+field	org.apache.kafka.common.config.SaslConfigs	static final	GSSAPI_MECHANISM
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_CLIENT_CALLBACK_HANDLER_CLASS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_CLIENT_CALLBACK_HANDLER_CLASS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_JAAS_CONFIG
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_JAAS_CONFIG_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_KERBEROS_KINIT_CMD
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_KERBEROS_KINIT_CMD_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_KERBEROS_MIN_TIME_BEFORE_RELOGIN
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_KERBEROS_MIN_TIME_BEFORE_RELOGIN_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_KERBEROS_SERVICE_NAME
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_KERBEROS_SERVICE_NAME_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_KERBEROS_TICKET_RENEW_JITTER
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_KERBEROS_TICKET_RENEW_JITTER_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_KERBEROS_TICKET_RENEW_WINDOW_FACTOR
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_KERBEROS_TICKET_RENEW_WINDOW_FACTOR_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_CALLBACK_HANDLER_CLASS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_CALLBACK_HANDLER_CLASS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_CLASS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_CLASS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_CONNECT_TIMEOUT_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_CONNECT_TIMEOUT_MS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_READ_TIMEOUT_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_READ_TIMEOUT_MS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_REFRESH_BUFFER_SECONDS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_REFRESH_BUFFER_SECONDS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_REFRESH_WINDOW_FACTOR
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_REFRESH_WINDOW_FACTOR_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_REFRESH_WINDOW_JITTER
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_REFRESH_WINDOW_JITTER_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_RETRY_BACKOFF_MAX_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_RETRY_BACKOFF_MAX_MS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_RETRY_BACKOFF_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_LOGIN_RETRY_BACKOFF_MS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_MECHANISM
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_MECHANISM_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ALLOW_UNVERIFIED_AUDIENCE
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ALLOW_UNVERIFIED_AUDIENCE_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ALLOW_UNVERIFIED_ISSUER
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ALLOW_UNVERIFIED_ISSUER_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_ALGORITHM
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_ALGORITHM_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_AUD
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_AUD_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_EXP_SECONDS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_EXP_SECONDS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_ISS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_ISS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_JTI_INCLUDE
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_JTI_INCLUDE_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_NBF_SECONDS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_NBF_SECONDS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_SUB
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_CLAIM_SUB_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_FILE
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_FILE_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_FILE
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_FILE_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_PASSPHRASE
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_PASSPHRASE_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_TEMPLATE_FILE
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_ASSERTION_TEMPLATE_FILE_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_ID
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_ID_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_SECRET
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_SECRET_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_EXPECTED_AUDIENCE
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_EXPECTED_AUDIENCE_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_EXPECTED_ISSUER
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_EXPECTED_ISSUER_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_HEADER_URLENCODE
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_HEADER_URLENCODE_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWKS_ENDPOINT_REFRESH_MS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MAX_MS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWKS_ENDPOINT_RETRY_BACKOFF_MS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWKS_ENDPOINT_URL
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWKS_ENDPOINT_URL_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_SCOPE
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_SCOPE_CLAIM_NAME
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_SCOPE_CLAIM_NAME_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_SCOPE_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_SUB_CLAIM_NAME
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_SUB_CLAIM_NAME_DOC
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL
+field	org.apache.kafka.common.config.SaslConfigs	static final	SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL_DOC
 method	org.apache.kafka.common.config.SaslConfigs	static	addClientSaslSupport(ConfigDef config)
 type	org.apache.kafka.common.config.SecurityConfig	class	-
 ctor	org.apache.kafka.common.config.SecurityConfig	SecurityConfig()
-field	org.apache.kafka.common.config.SecurityConfig	static	SECURITY_PROVIDERS_CONFIG
-field	org.apache.kafka.common.config.SecurityConfig	static	SECURITY_PROVIDERS_DOC
+field	org.apache.kafka.common.config.SecurityConfig	static final	SECURITY_PROVIDERS_CONFIG
+field	org.apache.kafka.common.config.SecurityConfig	static final	SECURITY_PROVIDERS_DOC
 type	org.apache.kafka.common.config.SslClientAuth	enum	-
 constant	org.apache.kafka.common.config.SslClientAuth	NONE
 constant	org.apache.kafka.common.config.SslClientAuth	REQUESTED
 constant	org.apache.kafka.common.config.SslClientAuth	REQUIRED
-field	org.apache.kafka.common.config.SslClientAuth	static	VALUES
+field	org.apache.kafka.common.config.SslClientAuth	static final	VALUES
 method	org.apache.kafka.common.config.SslClientAuth	instance	name()
 method	org.apache.kafka.common.config.SslClientAuth	instance	ordinal()
 method	org.apache.kafka.common.config.SslClientAuth	instance	toString()
@@ -2992,128 +2992,128 @@ method	org.apache.kafka.common.config.SslClientAuth	static	valueOf(String ?)
 method	org.apache.kafka.common.config.SslClientAuth	static	values()
 type	org.apache.kafka.common.config.SslConfigs	class	-
 ctor	org.apache.kafka.common.config.SslConfigs	SslConfigs()
-field	org.apache.kafka.common.config.SslConfigs	static	DEFAULT_SSL_ENABLED_PROTOCOLS
-field	org.apache.kafka.common.config.SslConfigs	static	DEFAULT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM
-field	org.apache.kafka.common.config.SslConfigs	static	DEFAULT_SSL_KEYMANGER_ALGORITHM
-field	org.apache.kafka.common.config.SslConfigs	static	DEFAULT_SSL_KEYSTORE_TYPE
-field	org.apache.kafka.common.config.SslConfigs	static	DEFAULT_SSL_PROTOCOL
-field	org.apache.kafka.common.config.SslConfigs	static	DEFAULT_SSL_TRUSTMANAGER_ALGORITHM
-field	org.apache.kafka.common.config.SslConfigs	static	DEFAULT_SSL_TRUSTSTORE_TYPE
-field	org.apache.kafka.common.config.SslConfigs	static	NON_RECONFIGURABLE_CONFIGS
-field	org.apache.kafka.common.config.SslConfigs	static	RECONFIGURABLE_CONFIGS
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_CIPHER_SUITES_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_CIPHER_SUITES_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_ENABLED_PROTOCOLS_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_ENABLED_PROTOCOLS_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_ENGINE_FACTORY_CLASS_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_ENGINE_FACTORY_CLASS_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYMANAGER_ALGORITHM_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYMANAGER_ALGORITHM_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYSTORE_CERTIFICATE_CHAIN_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYSTORE_KEY_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYSTORE_KEY_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYSTORE_LOCATION_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYSTORE_LOCATION_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYSTORE_PASSWORD_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYSTORE_PASSWORD_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYSTORE_TYPE_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEYSTORE_TYPE_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEY_PASSWORD_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_KEY_PASSWORD_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_PROTOCOL_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_PROTOCOL_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_PROVIDER_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_PROVIDER_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_SECURE_RANDOM_IMPLEMENTATION_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_TRUSTMANAGER_ALGORITHM_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_TRUSTMANAGER_ALGORITHM_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_TRUSTSTORE_CERTIFICATES_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_TRUSTSTORE_CERTIFICATES_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_TRUSTSTORE_LOCATION_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_TRUSTSTORE_LOCATION_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_TRUSTSTORE_PASSWORD_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_TRUSTSTORE_PASSWORD_DOC
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_TRUSTSTORE_TYPE_CONFIG
-field	org.apache.kafka.common.config.SslConfigs	static	SSL_TRUSTSTORE_TYPE_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	DEFAULT_SSL_ENABLED_PROTOCOLS
+field	org.apache.kafka.common.config.SslConfigs	static final	DEFAULT_SSL_ENDPOINT_IDENTIFICATION_ALGORITHM
+field	org.apache.kafka.common.config.SslConfigs	static final	DEFAULT_SSL_KEYMANGER_ALGORITHM
+field	org.apache.kafka.common.config.SslConfigs	static final	DEFAULT_SSL_KEYSTORE_TYPE
+field	org.apache.kafka.common.config.SslConfigs	static final	DEFAULT_SSL_PROTOCOL
+field	org.apache.kafka.common.config.SslConfigs	static final	DEFAULT_SSL_TRUSTMANAGER_ALGORITHM
+field	org.apache.kafka.common.config.SslConfigs	static final	DEFAULT_SSL_TRUSTSTORE_TYPE
+field	org.apache.kafka.common.config.SslConfigs	static final	NON_RECONFIGURABLE_CONFIGS
+field	org.apache.kafka.common.config.SslConfigs	static final	RECONFIGURABLE_CONFIGS
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_CIPHER_SUITES_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_CIPHER_SUITES_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_ENABLED_PROTOCOLS_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_ENABLED_PROTOCOLS_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_ENGINE_FACTORY_CLASS_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_ENGINE_FACTORY_CLASS_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYMANAGER_ALGORITHM_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYMANAGER_ALGORITHM_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYSTORE_CERTIFICATE_CHAIN_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYSTORE_KEY_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYSTORE_KEY_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYSTORE_LOCATION_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYSTORE_LOCATION_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYSTORE_PASSWORD_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYSTORE_PASSWORD_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYSTORE_TYPE_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEYSTORE_TYPE_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEY_PASSWORD_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_KEY_PASSWORD_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_PROTOCOL_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_PROTOCOL_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_PROVIDER_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_PROVIDER_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_SECURE_RANDOM_IMPLEMENTATION_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_TRUSTMANAGER_ALGORITHM_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_TRUSTMANAGER_ALGORITHM_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_TRUSTSTORE_CERTIFICATES_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_TRUSTSTORE_CERTIFICATES_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_TRUSTSTORE_LOCATION_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_TRUSTSTORE_LOCATION_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_TRUSTSTORE_PASSWORD_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_TRUSTSTORE_PASSWORD_DOC
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_TRUSTSTORE_TYPE_CONFIG
+field	org.apache.kafka.common.config.SslConfigs	static final	SSL_TRUSTSTORE_TYPE_DOC
 method	org.apache.kafka.common.config.SslConfigs	static	addClientSslSupport(ConfigDef config)
 type	org.apache.kafka.common.config.TopicConfig	class	-
 ctor	org.apache.kafka.common.config.TopicConfig	TopicConfig()
-field	org.apache.kafka.common.config.TopicConfig	static	CLEANUP_POLICY_COMPACT
-field	org.apache.kafka.common.config.TopicConfig	static	CLEANUP_POLICY_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	CLEANUP_POLICY_DELETE
-field	org.apache.kafka.common.config.TopicConfig	static	CLEANUP_POLICY_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	COMPRESSION_GZIP_LEVEL_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	COMPRESSION_GZIP_LEVEL_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	COMPRESSION_LZ4_LEVEL_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	COMPRESSION_LZ4_LEVEL_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	COMPRESSION_TYPE_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	COMPRESSION_TYPE_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	COMPRESSION_ZSTD_LEVEL_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	COMPRESSION_ZSTD_LEVEL_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	DELETE_RETENTION_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	DELETE_RETENTION_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	FILE_DELETE_DELAY_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	FILE_DELETE_DELAY_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	FLUSH_MESSAGES_INTERVAL_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	FLUSH_MESSAGES_INTERVAL_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	FLUSH_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	FLUSH_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	INDEX_INTERVAL_BYTES_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	INDEX_INTERVAL_BYTES_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	LOCAL_LOG_RETENTION_BYTES_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	LOCAL_LOG_RETENTION_BYTES_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	LOCAL_LOG_RETENTION_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	LOCAL_LOG_RETENTION_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	MAX_COMPACTION_LAG_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	MAX_COMPACTION_LAG_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	MAX_DECOMPRESSED_MESSAGE_BYTES_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	MAX_DECOMPRESSED_MESSAGE_BYTES_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	MAX_MESSAGE_BYTES_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	MAX_MESSAGE_BYTES_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	MESSAGE_TIMESTAMP_AFTER_MAX_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	MESSAGE_TIMESTAMP_BEFORE_MAX_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	MESSAGE_TIMESTAMP_TYPE_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	MESSAGE_TIMESTAMP_TYPE_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	MIN_CLEANABLE_DIRTY_RATIO_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	MIN_CLEANABLE_DIRTY_RATIO_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	MIN_COMPACTION_LAG_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	MIN_COMPACTION_LAG_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	MIN_IN_SYNC_REPLICAS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	MIN_IN_SYNC_REPLICAS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	PREALLOCATE_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	PREALLOCATE_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	REMOTE_COPY_LAG_BYTES_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	REMOTE_COPY_LAG_BYTES_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	REMOTE_COPY_LAG_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	REMOTE_COPY_LAG_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	REMOTE_LOG_COPY_DISABLE_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	REMOTE_LOG_COPY_DISABLE_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	REMOTE_LOG_DELETE_ON_DISABLE_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	REMOTE_LOG_DELETE_ON_DISABLE_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	REMOTE_LOG_STORAGE_ENABLE_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	REMOTE_LOG_STORAGE_ENABLE_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	RETENTION_BYTES_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	RETENTION_BYTES_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	RETENTION_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	RETENTION_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	SEGMENT_BYTES_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	SEGMENT_BYTES_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	SEGMENT_INDEX_BYTES_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	SEGMENT_INDEX_BYTES_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	SEGMENT_JITTER_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	SEGMENT_JITTER_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	SEGMENT_MS_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	SEGMENT_MS_DOC
-field	org.apache.kafka.common.config.TopicConfig	static	UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG
-field	org.apache.kafka.common.config.TopicConfig	static	UNCLEAN_LEADER_ELECTION_ENABLE_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	CLEANUP_POLICY_COMPACT
+field	org.apache.kafka.common.config.TopicConfig	static final	CLEANUP_POLICY_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	CLEANUP_POLICY_DELETE
+field	org.apache.kafka.common.config.TopicConfig	static final	CLEANUP_POLICY_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	COMPRESSION_GZIP_LEVEL_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	COMPRESSION_GZIP_LEVEL_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	COMPRESSION_LZ4_LEVEL_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	COMPRESSION_LZ4_LEVEL_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	COMPRESSION_TYPE_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	COMPRESSION_TYPE_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	COMPRESSION_ZSTD_LEVEL_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	COMPRESSION_ZSTD_LEVEL_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	DELETE_RETENTION_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	DELETE_RETENTION_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	ERRORS_DEADLETTERQUEUE_GROUP_ENABLE_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	FILE_DELETE_DELAY_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	FILE_DELETE_DELAY_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	FLUSH_MESSAGES_INTERVAL_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	FLUSH_MESSAGES_INTERVAL_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	FLUSH_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	FLUSH_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	INDEX_INTERVAL_BYTES_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	INDEX_INTERVAL_BYTES_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	LOCAL_LOG_RETENTION_BYTES_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	LOCAL_LOG_RETENTION_BYTES_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	LOCAL_LOG_RETENTION_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	LOCAL_LOG_RETENTION_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	MAX_COMPACTION_LAG_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	MAX_COMPACTION_LAG_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	MAX_DECOMPRESSED_MESSAGE_BYTES_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	MAX_DECOMPRESSED_MESSAGE_BYTES_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	MAX_MESSAGE_BYTES_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	MAX_MESSAGE_BYTES_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	MESSAGE_TIMESTAMP_AFTER_MAX_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	MESSAGE_TIMESTAMP_AFTER_MAX_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	MESSAGE_TIMESTAMP_BEFORE_MAX_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	MESSAGE_TIMESTAMP_BEFORE_MAX_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	MESSAGE_TIMESTAMP_TYPE_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	MESSAGE_TIMESTAMP_TYPE_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	MIN_CLEANABLE_DIRTY_RATIO_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	MIN_CLEANABLE_DIRTY_RATIO_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	MIN_COMPACTION_LAG_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	MIN_COMPACTION_LAG_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	MIN_IN_SYNC_REPLICAS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	MIN_IN_SYNC_REPLICAS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	PREALLOCATE_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	PREALLOCATE_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	REMOTE_COPY_LAG_BYTES_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	REMOTE_COPY_LAG_BYTES_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	REMOTE_COPY_LAG_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	REMOTE_COPY_LAG_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	REMOTE_LOG_COPY_DISABLE_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	REMOTE_LOG_COPY_DISABLE_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	REMOTE_LOG_DELETE_ON_DISABLE_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	REMOTE_LOG_DELETE_ON_DISABLE_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	REMOTE_LOG_STORAGE_ENABLE_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	REMOTE_LOG_STORAGE_ENABLE_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	RETENTION_BYTES_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	RETENTION_BYTES_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	RETENTION_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	RETENTION_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	SEGMENT_BYTES_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	SEGMENT_BYTES_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	SEGMENT_INDEX_BYTES_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	SEGMENT_INDEX_BYTES_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	SEGMENT_JITTER_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	SEGMENT_JITTER_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	SEGMENT_MS_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	SEGMENT_MS_DOC
+field	org.apache.kafka.common.config.TopicConfig	static final	UNCLEAN_LEADER_ELECTION_ENABLE_CONFIG
+field	org.apache.kafka.common.config.TopicConfig	static final	UNCLEAN_LEADER_ELECTION_ENABLE_DOC
 type	org.apache.kafka.common.config.provider.ConfigProvider	interface	org.apache.kafka.common.Configurable,Closeable
 method	org.apache.kafka.common.config.provider.ConfigProvider	default	subscribe(String path, Set keys, ConfigChangeCallback callback)
 method	org.apache.kafka.common.config.provider.ConfigProvider	default	unsubscribe(String path, Set keys, ConfigChangeCallback callback)
@@ -3122,8 +3122,8 @@ method	org.apache.kafka.common.config.provider.ConfigProvider	instance	get(Strin
 method	org.apache.kafka.common.config.provider.ConfigProvider	instance	get(String path, Set keys)
 type	org.apache.kafka.common.config.provider.DirectoryConfigProvider	class	org.apache.kafka.common.config.provider.ConfigProvider
 ctor	org.apache.kafka.common.config.provider.DirectoryConfigProvider	DirectoryConfigProvider()
-field	org.apache.kafka.common.config.provider.DirectoryConfigProvider	static	ALLOWED_PATHS_CONFIG
-field	org.apache.kafka.common.config.provider.DirectoryConfigProvider	static	ALLOWED_PATHS_DOC
+field	org.apache.kafka.common.config.provider.DirectoryConfigProvider	static final	ALLOWED_PATHS_CONFIG
+field	org.apache.kafka.common.config.provider.DirectoryConfigProvider	static final	ALLOWED_PATHS_DOC
 method	org.apache.kafka.common.config.provider.DirectoryConfigProvider	instance	close()
 method	org.apache.kafka.common.config.provider.DirectoryConfigProvider	instance	configure(Map configs)
 method	org.apache.kafka.common.config.provider.DirectoryConfigProvider	instance	get(String path)
@@ -3131,23 +3131,23 @@ method	org.apache.kafka.common.config.provider.DirectoryConfigProvider	instance	
 type	org.apache.kafka.common.config.provider.EnvVarConfigProvider	class	org.apache.kafka.common.config.provider.ConfigProvider
 ctor	org.apache.kafka.common.config.provider.EnvVarConfigProvider	EnvVarConfigProvider()
 ctor	org.apache.kafka.common.config.provider.EnvVarConfigProvider	EnvVarConfigProvider(Map envVarsAsArgument)
-field	org.apache.kafka.common.config.provider.EnvVarConfigProvider	static	ALLOWLIST_PATTERN_CONFIG
-field	org.apache.kafka.common.config.provider.EnvVarConfigProvider	static	ALLOWLIST_PATTERN_CONFIG_DOC
+field	org.apache.kafka.common.config.provider.EnvVarConfigProvider	static final	ALLOWLIST_PATTERN_CONFIG
+field	org.apache.kafka.common.config.provider.EnvVarConfigProvider	static final	ALLOWLIST_PATTERN_CONFIG_DOC
 method	org.apache.kafka.common.config.provider.EnvVarConfigProvider	instance	close()
 method	org.apache.kafka.common.config.provider.EnvVarConfigProvider	instance	configure(Map configs)
 method	org.apache.kafka.common.config.provider.EnvVarConfigProvider	instance	get(String path)
 method	org.apache.kafka.common.config.provider.EnvVarConfigProvider	instance	get(String path, Set keys)
 type	org.apache.kafka.common.config.provider.FileConfigProvider	class	org.apache.kafka.common.config.provider.ConfigProvider
 ctor	org.apache.kafka.common.config.provider.FileConfigProvider	FileConfigProvider()
-field	org.apache.kafka.common.config.provider.FileConfigProvider	static	ALLOWED_PATHS_CONFIG
-field	org.apache.kafka.common.config.provider.FileConfigProvider	static	ALLOWED_PATHS_DOC
+field	org.apache.kafka.common.config.provider.FileConfigProvider	static final	ALLOWED_PATHS_CONFIG
+field	org.apache.kafka.common.config.provider.FileConfigProvider	static final	ALLOWED_PATHS_DOC
 method	org.apache.kafka.common.config.provider.FileConfigProvider	instance	close()
 method	org.apache.kafka.common.config.provider.FileConfigProvider	instance	configure(Map configs)
 method	org.apache.kafka.common.config.provider.FileConfigProvider	instance	get(String path)
 method	org.apache.kafka.common.config.provider.FileConfigProvider	instance	get(String path, Set keys)
 type	org.apache.kafka.common.config.types.Password	class	-
 ctor	org.apache.kafka.common.config.types.Password	Password(String value)
-field	org.apache.kafka.common.config.types.Password	static	HIDDEN
+field	org.apache.kafka.common.config.types.Password	static final	HIDDEN
 method	org.apache.kafka.common.config.types.Password	instance	equals(Object obj)
 method	org.apache.kafka.common.config.types.Password	instance	hashCode()
 method	org.apache.kafka.common.config.types.Password	instance	toString()
@@ -3198,7 +3198,7 @@ ctor	org.apache.kafka.common.errors.CoordinatorLoadInProgressException	Coordinat
 type	org.apache.kafka.common.errors.CoordinatorNotAvailableException	class	org.apache.kafka.common.errors.RefreshRetriableException
 ctor	org.apache.kafka.common.errors.CoordinatorNotAvailableException	CoordinatorNotAvailableException(String message)
 ctor	org.apache.kafka.common.errors.CoordinatorNotAvailableException	CoordinatorNotAvailableException(String message, Throwable cause)
-field	org.apache.kafka.common.errors.CoordinatorNotAvailableException	static	INSTANCE
+field	org.apache.kafka.common.errors.CoordinatorNotAvailableException	static final	INSTANCE
 type	org.apache.kafka.common.errors.CorruptRecordException	class	org.apache.kafka.common.errors.RetriableException
 ctor	org.apache.kafka.common.errors.CorruptRecordException	CorruptRecordException()
 ctor	org.apache.kafka.common.errors.CorruptRecordException	CorruptRecordException(String message)
@@ -3224,7 +3224,7 @@ ctor	org.apache.kafka.common.errors.DisconnectException	DisconnectException()
 ctor	org.apache.kafka.common.errors.DisconnectException	DisconnectException(String message)
 ctor	org.apache.kafka.common.errors.DisconnectException	DisconnectException(String message, Throwable cause)
 ctor	org.apache.kafka.common.errors.DisconnectException	DisconnectException(Throwable cause)
-field	org.apache.kafka.common.errors.DisconnectException	static	INSTANCE
+field	org.apache.kafka.common.errors.DisconnectException	static final	INSTANCE
 type	org.apache.kafka.common.errors.DuplicateBrokerRegistrationException	class	org.apache.kafka.common.errors.ApiException
 ctor	org.apache.kafka.common.errors.DuplicateBrokerRegistrationException	DuplicateBrokerRegistrationException(String message)
 ctor	org.apache.kafka.common.errors.DuplicateBrokerRegistrationException	DuplicateBrokerRegistrationException(String message, Throwable throwable)
@@ -3663,12 +3663,12 @@ method	org.apache.kafka.common.metrics.CompoundStat$NamedMeasurable	instance	sta
 type	org.apache.kafka.common.metrics.Gauge	interface	org.apache.kafka.common.metrics.MetricValueProvider
 type	org.apache.kafka.common.metrics.JmxReporter	class	org.apache.kafka.common.metrics.MetricsReporter
 ctor	org.apache.kafka.common.metrics.JmxReporter	JmxReporter()
-field	org.apache.kafka.common.metrics.JmxReporter	static	DEFAULT_EXCLUDE
-field	org.apache.kafka.common.metrics.JmxReporter	static	DEFAULT_INCLUDE
-field	org.apache.kafka.common.metrics.JmxReporter	static	EXCLUDE_CONFIG
-field	org.apache.kafka.common.metrics.JmxReporter	static	INCLUDE_CONFIG
-field	org.apache.kafka.common.metrics.JmxReporter	static	METRICS_CONFIG_PREFIX
-field	org.apache.kafka.common.metrics.JmxReporter	static	RECONFIGURABLE_CONFIGS
+field	org.apache.kafka.common.metrics.JmxReporter	static final	DEFAULT_EXCLUDE
+field	org.apache.kafka.common.metrics.JmxReporter	static final	DEFAULT_INCLUDE
+field	org.apache.kafka.common.metrics.JmxReporter	static final	EXCLUDE_CONFIG
+field	org.apache.kafka.common.metrics.JmxReporter	static final	INCLUDE_CONFIG
+field	org.apache.kafka.common.metrics.JmxReporter	static final	METRICS_CONFIG_PREFIX
+field	org.apache.kafka.common.metrics.JmxReporter	static final	RECONFIGURABLE_CONFIGS
 method	org.apache.kafka.common.metrics.JmxReporter	instance	close()
 method	org.apache.kafka.common.metrics.JmxReporter	instance	configure(Map configs)
 method	org.apache.kafka.common.metrics.JmxReporter	instance	containsMbean(String mbeanName)
@@ -3699,7 +3699,7 @@ method	org.apache.kafka.common.metrics.Measurable	instance	measure(MetricConfig 
 type	org.apache.kafka.common.metrics.MeasurableStat	interface	org.apache.kafka.common.metrics.Stat,org.apache.kafka.common.metrics.Measurable
 type	org.apache.kafka.common.metrics.MetricConfig	class	-
 ctor	org.apache.kafka.common.metrics.MetricConfig	MetricConfig()
-field	org.apache.kafka.common.metrics.MetricConfig	static	DEFAULT_NUM_SAMPLES
+field	org.apache.kafka.common.metrics.MetricConfig	static final	DEFAULT_NUM_SAMPLES
 method	org.apache.kafka.common.metrics.MetricConfig	instance	eventWindow()
 method	org.apache.kafka.common.metrics.MetricConfig	instance	eventWindow(long window)
 method	org.apache.kafka.common.metrics.MetricConfig	instance	quota()
@@ -3755,7 +3755,7 @@ method	org.apache.kafka.common.metrics.Metrics	instance	sensor(String name, Reco
 method	org.apache.kafka.common.metrics.Metrics	instance	sensor(String name, Sensor[] parents)
 method	org.apache.kafka.common.metrics.Metrics	static	toHtmlTable(String domain, Iterable allMetrics)
 type	org.apache.kafka.common.metrics.MetricsContext	interface	-
-field	org.apache.kafka.common.metrics.MetricsContext	static	NAMESPACE
+field	org.apache.kafka.common.metrics.MetricsContext	static final	NAMESPACE
 method	org.apache.kafka.common.metrics.MetricsContext	instance	contextLabels()
 type	org.apache.kafka.common.metrics.MetricsReporter	interface	org.apache.kafka.common.Reconfigurable,AutoCloseable
 method	org.apache.kafka.common.metrics.MetricsReporter	default	contextChange(MetricsContext metricsContext)
@@ -3810,9 +3810,9 @@ type	org.apache.kafka.common.metrics.Sensor$RecordingLevel	enum	-
 constant	org.apache.kafka.common.metrics.Sensor$RecordingLevel	DEBUG
 constant	org.apache.kafka.common.metrics.Sensor$RecordingLevel	INFO
 constant	org.apache.kafka.common.metrics.Sensor$RecordingLevel	TRACE
-field	org.apache.kafka.common.metrics.Sensor$RecordingLevel	instance	id
-field	org.apache.kafka.common.metrics.Sensor$RecordingLevel	instance	name
-field	org.apache.kafka.common.metrics.Sensor$RecordingLevel	static	MAX_RECORDING_LEVEL_KEY
+field	org.apache.kafka.common.metrics.Sensor$RecordingLevel	instance final	id
+field	org.apache.kafka.common.metrics.Sensor$RecordingLevel	instance final	name
+field	org.apache.kafka.common.metrics.Sensor$RecordingLevel	static final	MAX_RECORDING_LEVEL_KEY
 method	org.apache.kafka.common.metrics.Sensor$RecordingLevel	instance	name()
 method	org.apache.kafka.common.metrics.Sensor$RecordingLevel	instance	ordinal()
 method	org.apache.kafka.common.metrics.Sensor$RecordingLevel	instance	shouldRecord(int configId)
@@ -3953,9 +3953,9 @@ method	org.apache.kafka.common.quota.ClientQuotaAlteration$Op	instance	toString(
 method	org.apache.kafka.common.quota.ClientQuotaAlteration$Op	instance	value()
 type	org.apache.kafka.common.quota.ClientQuotaEntity	class	-
 ctor	org.apache.kafka.common.quota.ClientQuotaEntity	ClientQuotaEntity(Map entries)
-field	org.apache.kafka.common.quota.ClientQuotaEntity	static	CLIENT_ID
-field	org.apache.kafka.common.quota.ClientQuotaEntity	static	IP
-field	org.apache.kafka.common.quota.ClientQuotaEntity	static	USER
+field	org.apache.kafka.common.quota.ClientQuotaEntity	static final	CLIENT_ID
+field	org.apache.kafka.common.quota.ClientQuotaEntity	static final	IP
+field	org.apache.kafka.common.quota.ClientQuotaEntity	static final	USER
 method	org.apache.kafka.common.quota.ClientQuotaEntity	instance	entries()
 method	org.apache.kafka.common.quota.ClientQuotaEntity	instance	equals(Object o)
 method	org.apache.kafka.common.quota.ClientQuotaEntity	instance	hashCode()
@@ -3983,8 +3983,8 @@ type	org.apache.kafka.common.record.TimestampType	enum	-
 constant	org.apache.kafka.common.record.TimestampType	CREATE_TIME
 constant	org.apache.kafka.common.record.TimestampType	LOG_APPEND_TIME
 constant	org.apache.kafka.common.record.TimestampType	NO_TIMESTAMP_TYPE
-field	org.apache.kafka.common.record.TimestampType	instance	id
-field	org.apache.kafka.common.record.TimestampType	instance	name
+field	org.apache.kafka.common.record.TimestampType	instance final	id
+field	org.apache.kafka.common.record.TimestampType	instance final	name
 method	org.apache.kafka.common.record.TimestampType	instance	name()
 method	org.apache.kafka.common.record.TimestampType	instance	ordinal()
 method	org.apache.kafka.common.record.TimestampType	instance	toString()
@@ -4012,8 +4012,8 @@ method	org.apache.kafka.common.resource.PatternType	static	valueOf(String ?)
 method	org.apache.kafka.common.resource.PatternType	static	values()
 type	org.apache.kafka.common.resource.Resource	class	-
 ctor	org.apache.kafka.common.resource.Resource	Resource(ResourceType resourceType, String name)
-field	org.apache.kafka.common.resource.Resource	static	CLUSTER
-field	org.apache.kafka.common.resource.Resource	static	CLUSTER_NAME
+field	org.apache.kafka.common.resource.Resource	static final	CLUSTER
+field	org.apache.kafka.common.resource.Resource	static final	CLUSTER_NAME
 method	org.apache.kafka.common.resource.Resource	instance	equals(Object o)
 method	org.apache.kafka.common.resource.Resource	instance	hashCode()
 method	org.apache.kafka.common.resource.Resource	instance	isUnknown()
@@ -4022,7 +4022,7 @@ method	org.apache.kafka.common.resource.Resource	instance	resourceType()
 method	org.apache.kafka.common.resource.Resource	instance	toString()
 type	org.apache.kafka.common.resource.ResourcePattern	class	-
 ctor	org.apache.kafka.common.resource.ResourcePattern	ResourcePattern(ResourceType resourceType, String name, PatternType patternType)
-field	org.apache.kafka.common.resource.ResourcePattern	static	WILDCARD_RESOURCE
+field	org.apache.kafka.common.resource.ResourcePattern	static final	WILDCARD_RESOURCE
 method	org.apache.kafka.common.resource.ResourcePattern	instance	equals(Object o)
 method	org.apache.kafka.common.resource.ResourcePattern	instance	hashCode()
 method	org.apache.kafka.common.resource.ResourcePattern	instance	isUnknown()
@@ -4033,7 +4033,7 @@ method	org.apache.kafka.common.resource.ResourcePattern	instance	toFilter()
 method	org.apache.kafka.common.resource.ResourcePattern	instance	toString()
 type	org.apache.kafka.common.resource.ResourcePatternFilter	class	-
 ctor	org.apache.kafka.common.resource.ResourcePatternFilter	ResourcePatternFilter(ResourceType resourceType, String name, PatternType patternType)
-field	org.apache.kafka.common.resource.ResourcePatternFilter	static	ANY
+field	org.apache.kafka.common.resource.ResourcePatternFilter	static final	ANY
 method	org.apache.kafka.common.resource.ResourcePatternFilter	instance	equals(Object o)
 method	org.apache.kafka.common.resource.ResourcePatternFilter	instance	findIndefiniteField()
 method	org.apache.kafka.common.resource.ResourcePatternFilter	instance	hashCode()
@@ -4071,8 +4071,8 @@ method	org.apache.kafka.common.security.auth.AuthenticationContext	instance	secu
 type	org.apache.kafka.common.security.auth.KafkaPrincipal	class	Principal
 ctor	org.apache.kafka.common.security.auth.KafkaPrincipal	KafkaPrincipal(String principalType, String name)
 ctor	org.apache.kafka.common.security.auth.KafkaPrincipal	KafkaPrincipal(String principalType, String name, boolean tokenAuthenticated)
-field	org.apache.kafka.common.security.auth.KafkaPrincipal	static	ANONYMOUS
-field	org.apache.kafka.common.security.auth.KafkaPrincipal	static	USER_TYPE
+field	org.apache.kafka.common.security.auth.KafkaPrincipal	static final	ANONYMOUS
+field	org.apache.kafka.common.security.auth.KafkaPrincipal	static final	USER_TYPE
 method	org.apache.kafka.common.security.auth.KafkaPrincipal	instance	equals(Object o)
 method	org.apache.kafka.common.security.auth.KafkaPrincipal	instance	getName()
 method	org.apache.kafka.common.security.auth.KafkaPrincipal	instance	getPrincipalType()
@@ -4120,8 +4120,8 @@ constant	org.apache.kafka.common.security.auth.SecurityProtocol	PLAINTEXT
 constant	org.apache.kafka.common.security.auth.SecurityProtocol	SASL_PLAINTEXT
 constant	org.apache.kafka.common.security.auth.SecurityProtocol	SASL_SSL
 constant	org.apache.kafka.common.security.auth.SecurityProtocol	SSL
-field	org.apache.kafka.common.security.auth.SecurityProtocol	instance	id
-field	org.apache.kafka.common.security.auth.SecurityProtocol	instance	name
+field	org.apache.kafka.common.security.auth.SecurityProtocol	instance final	id
+field	org.apache.kafka.common.security.auth.SecurityProtocol	instance final	name
 method	org.apache.kafka.common.security.auth.SecurityProtocol	instance	name()
 method	org.apache.kafka.common.security.auth.SecurityProtocol	instance	ordinal()
 method	org.apache.kafka.common.security.auth.SecurityProtocol	static	forId(short id)
@@ -4159,8 +4159,8 @@ method	org.apache.kafka.common.security.oauthbearer.ClientCredentialsJwtRetrieve
 method	org.apache.kafka.common.security.oauthbearer.ClientCredentialsJwtRetriever	instance	retrieve()
 type	org.apache.kafka.common.security.oauthbearer.ClientJwtValidator	class	org.apache.kafka.common.security.oauthbearer.JwtValidator
 ctor	org.apache.kafka.common.security.oauthbearer.ClientJwtValidator	ClientJwtValidator()
-field	org.apache.kafka.common.security.oauthbearer.ClientJwtValidator	static	EXPIRATION_CLAIM_NAME
-field	org.apache.kafka.common.security.oauthbearer.ClientJwtValidator	static	ISSUED_AT_CLAIM_NAME
+field	org.apache.kafka.common.security.oauthbearer.ClientJwtValidator	static final	EXPIRATION_CLAIM_NAME
+field	org.apache.kafka.common.security.oauthbearer.ClientJwtValidator	static final	ISSUED_AT_CLAIM_NAME
 method	org.apache.kafka.common.security.oauthbearer.ClientJwtValidator	instance	configure(Map configs, String saslMechanism, List jaasConfigEntries)
 method	org.apache.kafka.common.security.oauthbearer.ClientJwtValidator	instance	validate(String accessToken)
 type	org.apache.kafka.common.security.oauthbearer.DefaultJwtRetriever	class	org.apache.kafka.common.security.oauthbearer.JwtRetriever
@@ -4207,18 +4207,18 @@ method	org.apache.kafka.common.security.oauthbearer.OAuthBearerExtensionsValidat
 method	org.apache.kafka.common.security.oauthbearer.OAuthBearerExtensionsValidatorCallback	instance	validatedExtensions()
 type	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	class	org.apache.kafka.common.security.auth.AuthenticateCallbackHandler
 ctor	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	OAuthBearerLoginCallbackHandler()
-field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static	CLIENT_ID_CONFIG
-field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static	CLIENT_ID_DOC
-field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static	CLIENT_SECRET_CONFIG
-field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static	CLIENT_SECRET_DOC
-field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static	SCOPE_CONFIG
-field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static	SCOPE_DOC
+field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static final	CLIENT_ID_CONFIG
+field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static final	CLIENT_ID_DOC
+field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static final	CLIENT_SECRET_CONFIG
+field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static final	CLIENT_SECRET_DOC
+field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static final	SCOPE_CONFIG
+field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	static final	SCOPE_DOC
 method	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	instance	close()
 method	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	instance	configure(Map configs, String saslMechanism, List jaasConfigEntries)
 method	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler	instance	handle(Callback[] callbacks)
 type	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule	class	LoginModule
 ctor	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule	OAuthBearerLoginModule()
-field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule	static	OAUTHBEARER_MECHANISM
+field	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule	static final	OAUTHBEARER_MECHANISM
 method	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule	instance	abort()
 method	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule	instance	commit()
 method	org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule	instance	initialize(Subject subject, CallbackHandler callbackHandler, Map sharedState, Map options)
@@ -4280,7 +4280,7 @@ method	org.apache.kafka.common.security.scram.ScramExtensionsCallback	instance	e
 method	org.apache.kafka.common.security.scram.ScramExtensionsCallback	instance	extensions(Map extensions)
 type	org.apache.kafka.common.security.scram.ScramLoginModule	class	LoginModule
 ctor	org.apache.kafka.common.security.scram.ScramLoginModule	ScramLoginModule()
-field	org.apache.kafka.common.security.scram.ScramLoginModule	static	TOKEN_AUTH_CONFIG
+field	org.apache.kafka.common.security.scram.ScramLoginModule	static final	TOKEN_AUTH_CONFIG
 method	org.apache.kafka.common.security.scram.ScramLoginModule	instance	abort()
 method	org.apache.kafka.common.security.scram.ScramLoginModule	instance	commit()
 method	org.apache.kafka.common.security.scram.ScramLoginModule	instance	initialize(Subject subject, CallbackHandler callbackHandler, Map sharedState, Map options)
@@ -4483,7 +4483,7 @@ ctor	org.apache.kafka.common.serialization.VoidSerializer	VoidSerializer()
 method	org.apache.kafka.common.serialization.VoidSerializer	instance	serialize(String topic, Void data)
 type	org.apache.kafka.common.utils.Bytes	class	Comparable
 ctor	org.apache.kafka.common.utils.Bytes	Bytes(byte[] bytes)
-field	org.apache.kafka.common.utils.Bytes	static	EMPTY
+field	org.apache.kafka.common.utils.Bytes	static final	EMPTY
 method	org.apache.kafka.common.utils.Bytes	instance	compareTo(Bytes that)
 method	org.apache.kafka.common.utils.Bytes	instance	equals(Object other)
 method	org.apache.kafka.common.utils.Bytes	instance	get()
@@ -4492,7 +4492,7 @@ method	org.apache.kafka.common.utils.Bytes	instance	toString()
 method	org.apache.kafka.common.utils.Bytes	static	wrap(byte[] bytes)
 type	org.apache.kafka.server.authorizer.AclCreateResult	class	-
 ctor	org.apache.kafka.server.authorizer.AclCreateResult	AclCreateResult(ApiException exception)
-field	org.apache.kafka.server.authorizer.AclCreateResult	static	SUCCESS
+field	org.apache.kafka.server.authorizer.AclCreateResult	static final	SUCCESS
 method	org.apache.kafka.server.authorizer.AclCreateResult	instance	exception()
 type	org.apache.kafka.server.authorizer.AclDeleteResult	class	-
 ctor	org.apache.kafka.server.authorizer.AclDeleteResult	AclDeleteResult(ApiException exception)
