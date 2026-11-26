@@ -186,3 +186,38 @@ Two small items from the Critic's report, not numbered issues, for the same roun
   `89c86b6c6` does for `commitSync`, and the usual text stays exact where it comes. The note says why, and no longer
   reads as if the core never gives the topic-metadata manager's text.
 - **Done**: 152-6 as decided, in `8c8def551`.
+
+## Issue 152-7 (the P3 follow-up's review): The fix-up chain does not autosquash: `2677b6802` and the `amend!` conflict with their targets
+- **Commit**: `60f5b7937` amend! javascript: the consumer's offset and metadata queries and enforceRebalance, with
+  `2677b6802` fixup! javascript: the consumer's commits, seeks, positions, committed offsets, lag and group metadata
+  (round 2's fix of 152-3)
+- **File**: `javascript/native/consumer.c` (and, for `2677b6802`, `javascript/src/consumer/consumer.ts` and
+  `javascript/src/consumer/kafka_consumer.ts`)
+- **Severity**: Design Flaw
+- **Reference**: `P3-followup.md` item 1: "as fix-ups of the commits that added them, so an autosquash leaves P3
+  without the method"
+- **Description**: In an autosquash each fix-up is picked right after its target. Simulated with `git merge-tree
+  --write-tree --merge-base=<fix-up>~1 <target state> <fix-up>`, the 3-way merge a rebase makes, and with
+  `git apply --cached --check` on a scratch index:
+  - `2677b6802`, a fix-up of `05a99ab3f`, also renames `ValueCtx` / `value_ctx_new` / `VoidCtx` / `void_ctx_new`
+    in the 18 places `1513ab98c` adds (its offset queries' completions and calls, and `js_consumer_enforce_rebalance`),
+    and edits `1513ab98c`'s `partitionsFor` / `offsetsForTimes` / `endOffsets` remarks and its `longMap`. Onto
+    `05a99ab3f` those hunks have nothing to apply to: conflicts in `consumer.c`, `consumer.ts` and
+    `kafka_consumer.ts`. Resolved by keeping the hunks that do apply, the group has no `ValueCtx` or
+    `value_ctx_new` any more (`2677b6802` removes them), so the picked `1513ab98c`, whose code still names them,
+    does not build unless the rename is redone there by hand.
+  - `60f5b7937` removes `js_consumer_enforce_rebalance` as it reads at the tip, with
+    `CallCtx* ctx = call_ctx_new(env, c, argv[3]);`. At `1513ab98c` with its fix-ups `2ea549c8e`, `8c8def551` and
+    `be17e1f19`, the line reads `VoidCtx* ctx = void_ctx_new(env, c, argv[3]);`, so its pick conflicts in
+    `consumer.c` too.
+  - `9dc8f9a0a` and `31ece7396` apply cleanly onto `8f316efaf` and `3ba87a4b8` with their fix-ups.
+
+  So an autosquash stops twice and needs hand edits to leave a `1513ab98c` that builds, and the fix-up shape the
+  plan chose for it does not deliver as cut. The linear history at the tip is fine: each commit passes in the order
+  the Actor gave them.
+- **Expected**: one of: the rename's hunks on `1513ab98c`'s code moved into a fix-up of `1513ab98c` placed before the
+  `amend!` (a rewrite of pushed commits, so the user's call); a recorded way to resolve the two stops when the branch
+  is autosquashed; or, if the branch is squash-merged instead, the plan's reason for the shape corrected.
+- **Actual**: the planned autosquash stops at `2677b6802` and at `60f5b7937`, and the squashed `1513ab98c` would not
+  build without a hand edit.
+- **Resolved**: by the record, with no change to the commits, which are pushed: the two autosquash stops and how to resolve them are in `P3-followup.md`'s Result, and how the branch merges (a squash-merge, an autosquash with those stops, or a rewrite of the fix-up chain) is the user's call. Decided by the Manager, 2026-11-26.

@@ -1,7 +1,7 @@
 # P3 follow-up: enforceRebalance dropped, 152-2 recorded (N=152)
 
-Status: **approved** by the user on 2026-11-26 ("do it", through the coordinator), with the fix-up shape of item 1.
-Base `0f1d45fb9`, pushed. Done before P4, not folded into it.
+Status: **done** on 2026-11-26 ("Result", at the end). Approved that day by the user ("do it", through the
+coordinator), with the fix-up shape of item 1. Base `0f1d45fb9`, pushed. Done before P4, not folded into it.
 The user's decisions of 2026-11-26: 152-2 accepted as a known difference ("Okay just record it"), 151-3 unchanged;
 PLAN decision 9 reversed ("remove it entirely as python").
 
@@ -47,3 +47,45 @@ draft for its Scope group, after the "Left out, as in Python" bullet: "- Dropped
 `enforceRebalance()` and `enforceRebalance(reason)`, which Java's `AsyncKafkaConsumer` only logs as unsupported, and
 the mock's `shouldRebalance()` and `resetShouldRebalance()`, which serve only them *(deviation. Why: under KIP-848,
 the only protocol here, the method does nothing)*." P8 is unaffected: `consumer_service.proto` has no such RPC.
+
+## Result (2026-11-26)
+
+Actor 152 built the follow-up and Critic 152 reviewed it. The method is gone from the code, the tests, the docs and
+the API report; the record is in PLAN.md, P3.md and `NOTES.md`.
+
+The commits, after the plan's `7ceebbc3d`:
+- `9dc8f9a0a` fix-up of `8f316efaf`: the broker test's two calls. It comes first, so that the next commit passes
+  `typecheck-tests` on its own;
+- `60f5b7937` `amend!` of `1513ab98c`: the code, the addon glue and the tests, the header test's never-called list
+  and the two baseline lines; its new subject is "javascript: the consumer's offset and metadata queries";
+- `31ece7396` fix-up of `3ba87a4b8`: `NOTES.md`'s dropped note, the package docs' left-out line, and the API report,
+  13 lines shorter;
+- `d409f640c` the record: PLAN.md's decision 9 reversed with its echoes, ask 7, P3.md's "After the hand-off", and
+  152-2's acceptance in `NOTES.md`.
+
+The review found one issue, 152-7: the fix-ups don't autosquash as item 1 meant. It is recorded, below, with no
+change to the commits, since a fix rewrites pushed commits, which is the user's call. The Critic found the rest
+sound, and the header test's "…, the blocking form" failure message for the two `_cb` names cosmetic.
+
+An autosquash (`git rebase -i --autosquash f62d5fec9`) stops twice:
+1. at `2677b6802`, P3's fix-up of `05a99ab3f` for 152-3, which also renames `ValueCtx` / `value_ctx_new` and
+   `VoidCtx` / `void_ctx_new` in code `1513ab98c` adds, and edits that commit's remarks and `longMap`. Keep its
+   hunks on `05a99ab3f`'s own code there;
+2. at the `amend!` of `1513ab98c`, whose removal of `js_consumer_enforce_rebalance` reads the renamed names. Remove
+   the function as it reads there, and apply the rest of `2677b6802` (the rename, the remarks, and
+   `topicPartitionLongMap.core` for `longMap`), so the squashed `1513ab98c` builds.
+
+The squashed branch's tree must then equal today's tip's (`git diff` between the two is empty). A squash-merge of
+the branch meets neither stop.
+
+The gate, P3's JavaScript steps, on `d409f640c`: nothing outside `javascript/` changed since `7ceebbc3d`.
+`make lint-javascript` passed (442 tests, 304 files formatted). `make verify-javascript` passed: static 80, unit 650
+and 1 skipped (the Node 24 `await using` test), memory 27, typing 10, verifiable-clients 127, grpc-server 13,
+integration 100 and 12 skipped (the SSL and SASL suites), stress 2, lint 442. `check-api` matches `api/`, and
+`typecheck-tests` found nothing in the test files. `make -C javascript test-memory-mutation` passed (16).
+`core.hooksPath` stayed `/opt/vault-radar/hooks`, and no container was left running.
+
+For the user:
+- 152-7: how the branch merges is yours: a squash-merge, an autosquash with the two stops above, or a rewrite of the
+  fix-up chain now, by a rebase and a force-push.
+- The rule line for `javascript/CLAUDE.md` (§ "For the user", above) is still yours to add.
