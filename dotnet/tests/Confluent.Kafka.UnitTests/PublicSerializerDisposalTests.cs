@@ -300,7 +300,8 @@ public sealed class PublicSerializerDisposalTests
 
             Assert.Equal(0, key.Disposals);
             Assert.Equal(0, value.Disposals);
-            Assert.NotEmpty(producer.Metrics());
+            // Still open: a Flush with nothing to send returns, where a closed producer's throws.
+            await TestTimeout.Run(() => producer.Flush(), Deadline);
         }
         finally
         {

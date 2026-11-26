@@ -803,6 +803,11 @@ internal sealed partial class NativeConsumer
                     handle, CompletionThread.NotifyHook, consumer._pump.NotifyOpaque, ref outErr);
                 KafkaException.ThrowIfFfiFailed(ref outErr);
             }
+
+            IntPtr metricsErr = IntPtr.Zero;
+            IntPtr metricsView = NativeMethods.ConsumerMetrics(handle, ref metricsErr);
+            KafkaException.ThrowIfFfiFailed(ref metricsErr);
+            consumer._metricsView = new SafeMetricsViewHandle(metricsView);
         }
         catch
         {

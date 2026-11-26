@@ -17,40 +17,20 @@ using System.Collections.Generic;
 namespace Confluent.Kafka.Common;
 
 /// <summary>
-/// A metric and its value, Java's <c>Metric</c>: the value type of the
-/// <see cref="IReadOnlyDictionary{TKey, TValue}"/> a client's <c>Metrics()</c> returns. The value was measured
-/// once, when <c>Metrics()</c> was called, where Java measures on each read.
+/// A metric tracked for monitoring purposes, Java's <c>Metric</c>: the value type of the
+/// <see cref="IReadOnlyDictionary{TKey, TValue}"/> a client's <c>Metrics()</c> returns, whose values are
+/// <see cref="Metrics.KafkaMetric"/>s.
 /// </summary>
 public interface IMetric
 {
-    /// <summary>The metric's name.</summary>
+    /// <summary>A name for this metric.</summary>
     /// <returns>The metric's name.</returns>
     MetricName MetricName();
 
     /// <summary>
-    /// The measured value: a boxed <see cref="double"/>, <see cref="string"/>, <see cref="long"/> or
-    /// <see cref="int"/>, whose type is the metric's kind.
+    /// The value of the metric, which may be measurable or a non-measurable gauge: a boxed <see cref="double"/>,
+    /// <see cref="string"/>, <see cref="long"/> or <see cref="int"/>, whose type is the metric's kind.
     /// </summary>
-    /// <returns>The measured value: a boxed <see cref="double"/>, <see cref="string"/>, <see cref="long"/> or
-    /// <see cref="int"/>, whose type is the metric's kind.</returns>
+    /// <returns>The value of the metric, which may be measurable or a non-measurable gauge.</returns>
     object MetricValue();
-}
-
-/// <summary>The <see cref="IMetric"/> a client's metric map holds: an immutable name and value.</summary>
-internal sealed class Metric : IMetric
-{
-    private readonly MetricName _metricName;
-    private readonly object _metricValue;
-
-    internal Metric(MetricName name, object value)
-    {
-        _metricName = name;
-        _metricValue = value;
-    }
-
-    /// <inheritdoc/>
-    public MetricName MetricName() => _metricName;
-
-    /// <inheritdoc/>
-    public object MetricValue() => _metricValue;
 }

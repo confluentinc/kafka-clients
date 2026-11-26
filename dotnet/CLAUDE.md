@@ -103,7 +103,7 @@ where practical), and `Internal/Interop/` is the only place `unsafe` appears.
 Wanting a type under `Internal/` to be `public` is the signal it belongs in the public tree.
 `Common/Header/Internals/` is Java's package `common.header.internals`: its two classes, `RecordHeader` and
 `RecordHeaders`, are `internal`, as Java's package is not public API, and sit beside the public interfaces they
-implement, as `Metric` sits beside `IMetric` (ledger 608, §3 Java names).
+implement (ledger 608, §3 Java names).
 **Every public type lives in the namespace of its Java package, and its file in the folder that
 mirrors that namespace** (M20/P1, ledger 253): drop `org.apache.kafka.`, then `clients.`, PascalCase
 each remaining segment, and prefix `Confluent.Kafka.`, as the Rust core names its modules (root
@@ -185,8 +185,10 @@ package, read from `kafka/`. There is no inner `src/` inside the project: the ou
   class and a package can. Inside any `Confluent.Kafka.Common.*` namespace the simple name of a
   segment under `Common` (`Config`, `Record`, `Header`) means that namespace (CS0118), whatever the
   `using` lines say, so a type of that name is written qualified there: the admin client's `Config`
-  as `Admin.Config`. No type under `Common` has such a name (Java's `Header` is `IHeader`, ledger
-  596); a later one follows the same rule. CA1724 stays at its default, off.
+  as `Admin.Config`. One type under `Common` has such a name, `Confluent.Kafka.Common.Metrics.Quota`
+  (Java's `org.apache.kafka.common.metrics.Quota`, beside the namespace `Confluent.Kafka.Common.Quota`): its own
+  namespace finds it by its simple name, and the rest of `Common` writes it `Metrics.Quota` (ledger 642). Java's
+  `Header` is `IHeader` (ledger 596). A later one follows the same rule. CA1724 stays at its default, off.
 - **`using` lines.** A file imports each namespace it uses with one `using` line outside its
   namespace (IDE0065), in `dotnet format`'s order; there is no `global using`. Code in a
   `Confluent.Kafka.*` namespace (the tests, the gRPC server, soak, perf) imports them like user code
@@ -385,8 +387,8 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 
 **Clipped to today's ABI.** The sketch is the *producer* surface the current ABI
 can back — it omits Java members the ABI doesn't expose yet (`metrics()` is **no
-longer** among them: it shipped in M11/P8 as a Mode-A port over the already-present
-`kafka_producer_Producer_metrics` + `kafka_producer_MetricMap_*` family; and
+longer** among them: it shipped in M11/P8, and is now a live map over the
+`kafka_common_metrics_MetricsView_t` that `kafka_producer_Producer_metrics` returns, ledger 631; and
 `send(record, Callback)` now goes through the ABI's per-record `Callback_t`, ffi §A6, decision 10;
 `ProducerRecord.headers()` shipped in M21/P2): `MockProducer.history()` and `MockProducer.uncommittedRecords()`.
 Java returns the records as they were sent, typed `ProducerRecord<K, V>`. The ABI returns the records too
@@ -489,7 +491,7 @@ public interface IConsumerCommon {               // shared sync surface (IAsyncC
     // CommitAsync, Seek and CurrentLag live on each flavor's interface (decisions 13 and 22,
     // ledger 103): the async flavor returns a Task.
 
-    // Metrics (M9/P2) — Python parity, a SHIPPED sync state read (§4). No ClientId(): Java's
+    // Metrics (M9/P2) — a SHIPPED sync read, Java's live view (§4, ledger 631). No ClientId(): Java's
     // clientId() is package-private and Python has no client_id() (ledger 102).
     IReadOnlyDictionary<MetricName, IMetric> Metrics();                        // Java Map<MetricName, ? extends Metric> metrics()
 
@@ -896,7 +898,22 @@ each goes when the reason it gives goes:
   constructor, which only makes the random salt there (`AlterUserScramCredentials` refuses it). The mock
   producers' `PartitionsFor` takes a NUL topic and answers as Java's `MockProducer`: an empty list,
   or the injected exception, since no mock constructor takes a cluster and the topic cut at the NUL
-  finds no partitions. Goes when the C ABI takes length-delimited strings.
+  finds no partitions. Goes when the C ABI takes length-delimited strings. Two metrics strings
+  differ from the `?` rule, and stay, since the core holds them as UTF-8 text, which has no form for
+  an unpaired surrogate. A tag key or value of a `MetricConfig` that crosses to the core
+  (`KafkaMetric.Config(MetricConfig)`, `Measure` on the measurable `KafkaMetric.Measurable()`
+  returns) holding an unpaired surrogate throws `ArgumentException`, as a NUL does, because
+  `Config()` would give it back as `?` where Java's metric keeps the string (ledger 652). A
+  `Metrics()` lookup (`ContainsKey`, `TryGetValue`, the indexer) whose `MetricName` holds an
+  unpaired surrogate in its name, group or a tag is not found, without a call into the core, rather
+  than matching a metric whose name holds the `?` the encoding would produce (ledger 653); the
+  description, which equality ignores, crosses as `?`. The trade-off: a client whose configuration
+  holds an unpaired surrogate (`client.id`, a topic) registers its metrics under the `?` that
+  configuration crossed as, so a lookup by the configured string does not find the client's own
+  metrics, which Java's finds, and only a lookup by the `?` form does. A valid surrogate pair
+  crosses unchanged in both. A filter justified by "the core holds no such string" also turns away
+  keys a caller builds from its own configuration, since configuration crosses as `?`: a new one
+  states its effect on those keys.
 - **A null header key.** A user `IHeader` whose `Key()` returns `null` makes `Send` throw Java's
   `IllegalArgumentException` "Invalid null header key found in headers" on all four producers, at
   every read of the key, so a key that turns `null` at a later read throws too (ledger 603). On an
@@ -1037,14 +1054,19 @@ each goes when the reason it gives goes:
   `GroupMembershipOperation`), the call throws `ArgumentOutOfRangeException`. An instance member reads the
   value as it is and never throws (`((AclOperation)99).Code()` is `99`). It stays: a C# cast can always make
   such a value.
-- **After close.** The producer's `Flush`, `PartitionsFor` and `Metrics`, the consumer's
-  `Metrics`, and `MockProducer`'s and `AsyncMockProducer`'s `PartitionsFor`, `Metrics`,
+- **After close.** The producer's `Flush` and `PartitionsFor`, and `MockProducer`'s and
+  `AsyncMockProducer`'s `PartitionsFor`,
   `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, `SetSendException`, `SetFlushException`,
   `SetPartitionsForException`, the five `Set*TransactionException` setters
   and the transaction state readers (`TransactionInitialized` to `UncommittedOffsets`) throw the
   closed client's `IllegalStateException`, because the native handle is gone; Java answers (Java's
   mock checks for close only in `send`, `flush`, `fenceProducer` and the transaction methods). Goes
-  when the native object outlives `Close`.
+  when the native object outlives `Close`. `Metrics()` is not on this list: it answers after close,
+  as Java's, on the real clients and the mock producers, since its map reads the view the client
+  took at construction, and it throws on the mock consumers, as Java's `MockConsumer` (ledger 633).
+  One value differs: `kafka-metrics-count`'s `count` reads 0 once the client is closed, where Java's
+  reads the number of metrics left *(recorded gap of the core: its gauge holds the registry weakly,
+  and the view holds only the registry's metric map. Goes when the core's gauge reads the map)*.
 - **The core admin mock.** `MockAdminClient.Builder` checks that live only in the core mock
   (`controller(int)` out of range, `numBrokers` below the log-dir count, `Build()` with no
   brokers, `AddTopic` with a leader without log dirs) and `SetFetchesRemainingUntilVisible` on an
@@ -1308,10 +1330,12 @@ snapshot per call), `GroupMetadata()` (without `group.id` it throws
 before the C call, as Java's `throwIfGroupIdNotDefined` and Python's `InvalidGroupIdError`
 do; ledger 105), `Wakeup()`, `Metrics()`
 (**shipped M9/P2** — `IReadOnlyDictionary<MetricName, IMetric> Metrics()`, Java
-`metrics()`; on `KafkaConsumer` and `AsyncKafkaConsumer` it makes no owner check, as Java's
-takes no `acquire()`, and holds only the use that keeps the handle alive; the core answers it
-while an op holds its flag, BH:30592-30606 at `3f8a5bc6`; the mocks wait, as Java's
-`synchronized` mock; after close it throws, the call-site list below §3's idiom map), and
+`metrics()`; it returns Java's live view, a read-only map over the
+`kafka_common_metrics_MetricsView_t` the consumer took at construction, which reads the registry
+and not the consumer (ledger 631); on `KafkaConsumer` and `AsyncKafkaConsumer` it makes no owner
+check and takes no use, as Java's takes no `acquire()`, so it answers while an op runs and after
+close (ledger 633); the mocks wait, as Java's `synchronized` mock, and after close throw Java's
+"This consumer has already been closed."), and
 `EnforceRebalance(string? reason
 = null)` (a no-op that only logs under KIP-848; one method collapses Java's two overloads). It
 makes no owner check and, once the consumer is closed, returns without calling the core, as Java's
@@ -1321,11 +1345,11 @@ this list since M19/P1: both block in Java, so each is a `Task` on `IAsyncConsum
 blocking member on `IConsumer` (decision 22, ledger 103). There is no `ClientId()` since
 M19/P1: Java's `clientId()` is package-private and Python has no `client_id()` (ledger 102). **On the
 producer:** `Metrics` (**shipped M11/P8** — `IReadOnlyDictionary<MetricName, IMetric> Metrics()`,
-Java `metrics()`, on **both** `IProducer` and `IAsyncProducer`; it maps **no**
-concurrent-access null — the producer ABI documents none, it takes the core `Mutex` and blocks —
-so its defensive null guard carries a producer-accurate message, decision D-5; it holds the core's
-producer metrics only, none of Java's network and app-info metrics: not the connection,
-authentication, request and I/O metrics Java's `Selector` adds to `producer-metrics`
+Java `metrics()`, on **both** `IProducer` and `IAsyncProducer`; the same live view, over the
+view the producer took at construction, answering after close on the real producers and the mocks,
+ledgers 631 and 633; it holds the core's producer metrics only, none of Java's network and
+app-info metrics: not the connection, authentication, request and I/O metrics Java's `Selector`
+adds to `producer-metrics`
 (`connection-count`, `request-total`, ...), not the per-node `producer-node-metrics` group and not
 the `app-info` group *(recorded gap; Python's binding returns the same set. Why: the core registers
 none of them. Goes when: the core does)*).
@@ -1838,7 +1862,7 @@ managed array, then `ConsumerRecords_destroy`. It matches Java's owned
 thread-safe, no memory amplification), and costs one gen-0 array per raw record —
 Java's own allocation behavior. **This is the default.**
 
-**Keep-alive (zero-copy), through `BytesMemoryManager` only (M23/P7, ledger 535–537).** A deserializer that
+**Keep-alive (zero-copy) of record bytes, through `BytesMemoryManager` only (M23/P7, ledger 535–537).** A deserializer that
 takes the memory form (`IDeserializerWithReadOnlyMemory<T>`, `IAsyncDeserializerWithRetention<T>`) receives a
 `ReadOnlyMemory<byte>` over the batch that it may keep or return. The memory's `BytesMemoryManager` references
 a `SafeConsumerRecordsHandle`, so the batch lives as long as any such memory is reachable, and a `Pin` defers
@@ -1847,6 +1871,30 @@ does not keep the batch alive: hold `using MemoryHandle pin = memory.Pin();` whi
 keeps its whole batch. Copy-out stays the default: a span deserializer and `ByteArrayDeserializer` are
 unchanged, and a client with only span deserializers creates no handle and no manager. No other code may store
 a `ReadOnlyMemory<byte>` over native batch memory.
+
+**Keep-alive of a metric and of the metrics view (ledgers 626, 633).** The second sanctioned keep-alive form, on the
+producers and the consumers. Each client takes one `kafka_common_metrics_MetricsView_t` at construction and keeps it in
+a `SafeMetricsViewHandle`; every map `Metrics()` returns is a new read-only wrapper over that view, which reads the
+registry at each call, so a map taken before the first record sees the metrics registered later. Each value of a map is
+a `KafkaMetric` over its own owned `kafka_common_metrics_KafkaMetric_t`, taken with
+`kafka_common_metrics_MetricsView_get_err`, by a lookup or while the view's iterator entry is current. The view and each
+metric are independent of the client and stay valid after it is destroyed, so a map answers and `MetricValue()` measures
+the metric on each call, as Java's do, also after the client is closed, except `kafka-metrics-count`'s `count`, which
+reads 0 then (§3 **After close**). Neither handle takes a reference on the client's handle; the client's teardown frees
+neither, and the GC releases each once nothing holds it (the view: the client, every map over it and every `Keys` or
+`Values` of one). The view keeps the registry's metric map, and so what each metric's value provider holds, and a metric
+keeps its provider: on a producer the `waiting-threads`, `buffer-total-bytes` and `buffer-available-bytes` gauges hold
+its `BufferPool`, whose close keeps its pooled buffers, so a closed producer whose map, a `Keys` or `Values` of one, or
+one of those metrics is kept keeps up to `buffer.memory` of native memory, which the GC does not see, until they are
+released *(recorded gap of the core. Goes when the pool's close returns its pooled buffers)*. `KafkaMetric` is not
+`IDisposable`. Its `Config()` copies the metric's configuration out of the owned `kafka_common_metrics_MetricConfig_t`
+that `KafkaMetric_config_err` returns, and `Config(MetricConfig)` builds a transient one that
+`KafkaMetric_set_config_err` copies, so neither keeps a native config (ledger 640). `Measurable()` returns a new
+`NativeMeasurable` over the `kafka_common_metrics_Measurable_t` borrowed from the metric's handle: it holds its
+`KafkaMetric`, so the handle outlives it, and each `Measure` takes a call-scoped reference on that handle (ledger 641).
+A metric a `QuotaViolationException` names holds a name and a value, as the error's payload carries no metric handle: it
+is not measurable, and keeps a copy of a configuration set on it (ledger 639). ffi §A2 and §B2 Category 6 give the
+mechanics.
 
 ---
 

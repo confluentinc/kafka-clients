@@ -92,8 +92,11 @@ unmatched M:Confluent.Kafka.Consumer.MockConsumer`2.Commit(System.TimeSpan)
 
 # N2: a Java enum's fields: the integer one is the enum's value, the others are reached through Java's methods or
 # ToString() (Python's enum rule, ledger 373): TimestampType#name's text is TimestampType.ToString(t), and
-# SecurityProtocol#name and GroupProtocol#name are the constant's name, which ToString() prints.
+# SecurityProtocol#name, GroupProtocol#name and Sensor.RecordingLevel#name are the constant's name, which ToString()
+# prints.
 missing T:Confluent.Kafka.Common.ElectionType org.apache.kafka.common.ElectionType#value
+missing T:Confluent.Kafka.Common.Metrics.Sensor.RecordingLevel org.apache.kafka.common.metrics.Sensor$RecordingLevel#id
+missing T:Confluent.Kafka.Common.Metrics.Sensor.RecordingLevel org.apache.kafka.common.metrics.Sensor$RecordingLevel#name
 missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#id
 missing T:Confluent.Kafka.Common.Record.TimestampType org.apache.kafka.common.record.TimestampType#name
 missing T:Confluent.Kafka.Common.Security.Auth.SecurityProtocol org.apache.kafka.common.security.auth.SecurityProtocol#id
@@ -400,3 +403,9 @@ unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Create(System.Collecti
 unmatched M:Confluent.Kafka.Consumer.AsyncKafkaConsumer`2.Create(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},Confluent.Kafka.Common.Serialization.IAsyncDeserializer{`0},Confluent.Kafka.Common.Serialization.IAsyncDeserializer{`1},System.Threading.CancellationToken)
 unmatched M:Confluent.Kafka.Producer.AsyncKafkaProducer`2.Create(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},System.Threading.CancellationToken)
 unmatched M:Confluent.Kafka.Producer.AsyncKafkaProducer`2.Create(System.Collections.Generic.IReadOnlyDictionary{System.String,System.Object},Confluent.Kafka.Common.Serialization.IAsyncSerializer{`0},Confluent.Kafka.Common.Serialization.IAsyncSerializer{`1},System.Threading.CancellationToken)
+
+# Java's Measurable.value(MetricConfig, long) is a default over MetricValueProvider<Double>'s abstract value, and
+# IMeasurable keeps Java's chain, IMeasurable : IMetricValueProvider<double>: Value is declared on the base interface,
+# so every implementer writes it, and Java's default is MeasurableExtensions.Value (ledger 637). An
+# IMeasurableWithValue would declare a method every IMeasurable already declares.
+with T:Confluent.Kafka.Common.Metrics.IMeasurable org.apache.kafka.common.metrics.Measurable#value(MetricConfig,long)
