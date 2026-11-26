@@ -23,10 +23,10 @@
 //! `name__grpc_dotnet_async`, `name__grpc_js`. The double underscore is
 //! intentional so the backend label is easy to grep for in `cargo test` output.
 //!
-//! `__grpc_js` drives the Node.js producer, which has no consumer or admin
-//! client yet: only this macro has a `__grpc_js` arm, and its `JsGrpcFactory`
-//! serves the producer alone. [`crate::multilanguage_js_test`] expands to that
-//! arm alone, for a scenario that runs on the JavaScript backend only.
+//! `__grpc_js` drives the Node.js producer. The binding has no consumer yet,
+//! so this macro and `multilanguage_admin_test!` have a `__grpc_js` arm and
+//! the consumer macro has none. [`crate::multilanguage_js_test`] expands to
+//! that arm alone, for a scenario that runs on the JavaScript backend only.
 //!
 //! Every backend that runs in a container behind gRPC shares the `__grpc_`
 //! infix, so a single `--skip __grpc` excludes all of them — `make -C

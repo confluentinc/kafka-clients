@@ -20,21 +20,39 @@
  *
  * Invented *(js-only)*: `TopicPartitionMap` and `TopicPartitionSet`, Java's
  * `Map<TopicPartition, V>` and the `Set<TopicPartition>` the client returns,
- * and `MetricNameMap`, the `Map<MetricName, ? extends Metric>` that
- * `metrics()` returns: JavaScript has no value equality for map keys.
+ * `MetricNameMap`, the `Map<MetricName, ? extends Metric>` that `metrics()`
+ * returns, `UuidMap` and `TopicPartitionReplicaMap`, Java's `Map<Uuid, V>`
+ * and `Map<TopicPartitionReplica, V>`, and `UuidSet`, Java's `Set<Uuid>`
+ * (`Uuid.RESERVED`): JavaScript has no value equality for map keys or set
+ * members.
+ *
+ * Not translated: Java's deprecated `ConsumerGroupState`, which `GroupState`
+ * replaces.
  *
  * @packageDocumentation
  */
 
+export { ClassicGroupState } from './classic_group_state';
+export { ElectionType } from './election_type';
+export { GroupState } from './group_state';
+export { GroupType } from './group_type';
+export { IsolationLevel } from './isolation_level';
 export { KafkaFuture } from './kafka_future';
 export type { Metric } from './metric';
 export { MetricName } from './metric_name';
 export { MetricNameMap } from './metric_name_map';
 export { Node } from './node';
 export { PartitionInfo } from './partition_info';
+export { TopicCollection } from './topic_collection';
 export { TopicPartition } from './topic_partition';
+export { TopicPartitionInfo } from './topic_partition_info';
 export { TopicPartitionMap } from './topic_partition_map';
+export { TopicPartitionReplica } from './topic_partition_replica';
+export { TopicPartitionReplicaMap } from './topic_partition_replica_map';
 export { TopicPartitionSet } from './topic_partition_set';
+export { Uuid } from './uuid';
+export { UuidMap } from './uuid_map';
+export { UuidSet } from './uuid_set';
 // BEGIN GENERATED EXPORTS (cargo xtask generate-error-codes; do not edit)
 export { InvalidRecordError } from './invalid_record_error';
 export { KafkaError } from './kafka_error';

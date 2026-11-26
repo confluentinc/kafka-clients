@@ -103,6 +103,15 @@ const ALLOWED = [
     reason: "the entries of Java's Map<TopicPartition, V> the caller builds or a call returns, not a store of records",
   },
   { key: 'TopicPartitionSet.#members', reason: "the members of Java's Set<TopicPartition> a call returns, not a store of records" },
+  { key: 'MockAdminClient.DEFAULT_LOG_DIRS', reason: "Java's constant List MockAdminClient#DEFAULT_LOG_DIRS, not a store of records" },
+  {
+    key: 'AbstractOptions.#setters',
+    reason: 'the setters an admin options object ran, which the client runs again on the native options, not a store of records',
+  },
+  {
+    key: 'src/admin/mock_admin_client.ts:MAX_SUPPORTED_FEATURE_LEVELS',
+    reason: "the forms of Java's MockAdminClient.Builder#maxSupportedFeatureLevels setter, a feature level, not a cap on records",
+  },
   {
     key: 'MockProducer.#pending',
     reason:
@@ -124,6 +133,183 @@ const ALLOWED = [
   { key: 'PartitionInfo.#replicas', reason: "one partition's replicas (Java's Node[]), not a store of records" },
   { key: 'PartitionInfo.#inSyncReplicas', reason: "one partition's in-sync replicas (Java's Node[]), not a store of records" },
   { key: 'PartitionInfo.#offlineReplicas', reason: "one partition's offline replicas (Java's Node[]), not a store of records" },
+  { key: 'Config.#entries', reason: "one resource's configuration entries (Java's Map<String, ConfigEntry>), not a store of records" },
+  { key: 'ConfigEntry.#synonyms', reason: "one configuration entry's synonyms (Java's List<ConfigSynonym>), not a store of records" },
+  {
+    key: 'CreatePartitionsResult.#values',
+    reason: "one call's futures by topic (Java's Map<String, KafkaFuture<Void>>), not a store of records",
+  },
+  {
+    key: 'UpdateFeaturesResult.#futures',
+    reason: "one call's futures by feature name (Java's Map<String, KafkaFuture<Void>>), not a store of records",
+  },
+  {
+    key: 'CreateTopicsResult.#futures',
+    reason: "one call's futures by topic (Java's Map<String, KafkaFuture<...>>), not a store of records",
+  },
+  {
+    key: 'DeleteTopicsResult.#nameFutures',
+    reason: "one call's futures by topic name (Java's Map<String, KafkaFuture<Void>>), not a store of records",
+  },
+  {
+    key: 'DescribeTopicsResult.#nameFutures',
+    reason: "one call's futures by topic name (Java's Map<String, KafkaFuture<TopicDescription>>), not a store of records",
+  },
+  {
+    key: 'src/admin/describe_topics_options.ts:PARTITION_SIZE_LIMIT_PER_RESPONSE',
+    reason: "the forms of Java's DescribeTopicsOptions#partitionSizeLimitPerResponse setter, a broker-side page size, not a cap on records",
+  },
+  {
+    key: 'NewPartitions.#newAssignments',
+    reason: "one request's replica assignments (Java's List<List<Integer>>), not a store of records",
+  },
+  { key: 'NewTopic.#configs', reason: "one new topic's configuration (Java's Map<String, String>), not a store of records" },
+  { key: 'TopicDescription.partitions', reason: "one topic's partitions (Java's List<TopicPartitionInfo>), not a store of records" },
+  { key: 'TopicPartitionInfo.#replicas', reason: "one partition's replicas (Java's List<Node>), not a store of records" },
+  { key: 'TopicPartitionInfo.#isr', reason: "one partition's in-sync replicas (Java's List<Node>), not a store of records" },
+  { key: 'TopicPartitionInfo.#elr', reason: "one partition's eligible leader replicas (Java's List<Node>), not a store of records" },
+  {
+    key: 'TopicPartitionInfo.#lastKnownElr',
+    reason: "one partition's last known eligible leader replicas (Java's List<Node>), not a store of records",
+  },
+  { key: 'UuidMap.#entries', reason: "the entries of Java's Map<Uuid, V> the caller builds or a call returns, not a store of records" },
+  { key: 'UuidSet.#members', reason: "the members of Java's Set<Uuid>, Uuid.RESERVED's or the caller's, not a store of records" },
+  {
+    key: 'ConfigResourceMap.#entries',
+    reason: "the entries of Java's Map<ConfigResource, V> the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'TopicPartitionReplicaMap.#entries',
+    reason: "the entries of Java's Map<TopicPartitionReplica, V> the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'AclBindingMap.#entries',
+    reason: "the entries of Java's Map<AclBinding, V> the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'AclBindingFilterMap.#entries',
+    reason: "the entries of Java's Map<AclBindingFilter, V> the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'src/admin/create_delegation_token_options.ts:MAX_LIFETIME_MS',
+    reason: "the forms of Java's CreateDelegationTokenOptions#maxLifetimeMs getter and setter, a token's lifetime, not a cap on records",
+  },
+  {
+    key: 'src/common/security/token/delegation/token_information.ts:MAX_TIMESTAMP_FORMS',
+    reason: "the forms of Java's TokenInformation#maxTimestamp getter, a token's timestamp, not a cap on records",
+  },
+  {
+    key: 'CreateDelegationTokenOptions.#renewers',
+    reason: "the renewers Java's CreateDelegationTokenOptions holds, an option of one call, not a store of records",
+  },
+  {
+    key: 'DescribeDelegationTokenOptions.#owners',
+    reason: "the owners Java's DescribeDelegationTokenOptions holds, an option of one call, not a store of records",
+  },
+  {
+    key: 'UserScramCredentialsDescription.credentialInfos',
+    reason: "the credential infos of Java's UserScramCredentialsDescription, a value a call returns, not a store of records",
+  },
+  {
+    key: 'ClientQuotaAlteration.#ops',
+    reason: "the ops of Java's ClientQuotaAlteration, a value the caller builds, not a store of records",
+  },
+  {
+    key: 'ClientQuotaEntity.#entries',
+    reason: "the entries of Java's ClientQuotaEntity, a value the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'ClientQuotaFilter.#components',
+    reason: "the components of Java's ClientQuotaFilter, a value the caller builds, not a store of records",
+  },
+  {
+    key: 'TokenInformation.#renewers',
+    reason: "the renewers of Java's TokenInformation, a value a call returns, not a store of records",
+  },
+  {
+    key: 'ClientQuotaEntityMap.#entries',
+    reason: "the entries of Java's Map<ClientQuotaEntity, V> the caller builds or a call returns, not a store of records",
+  },
+  {
+    key: 'MemberToRemoveSet.#members',
+    reason: "the members of Java's Set<MemberToRemove> an options object holds, not a store of records",
+  },
+  {
+    key: 'DescribeLogDirsResult.#futures',
+    reason: "one call's futures by broker id (Java's Map<Integer, KafkaFuture<...>>), not a store of records",
+  },
+  {
+    key: 'DeleteConsumerGroupsResult.#futures',
+    reason: "one call's futures by group id (Java's Map<String, KafkaFuture<Void>>), not a store of records",
+  },
+  {
+    key: 'DescribeClassicGroupsResult.#futures',
+    reason: "one call's futures by group id (Java's Map<String, KafkaFuture<ClassicGroupDescription>>), not a store of records",
+  },
+  {
+    key: 'DescribeConsumerGroupsResult.#futures',
+    reason: "one call's futures by group id (Java's Map<String, KafkaFuture<ConsumerGroupDescription>>), not a store of records",
+  },
+  {
+    key: 'ListConsumerGroupOffsetsResult.#futures',
+    reason: "one call's futures by group id (Java's Map<CoordinatorKey, KafkaFuture<...>>), not a store of records",
+  },
+  {
+    key: 'ClassicGroupDescription.members',
+    reason: "one group's members (Java's Collection<MemberDescription>), not a store of records",
+  },
+  {
+    key: 'ConsumerGroupDescription.members',
+    reason: "one group's members (Java's Collection<MemberDescription>), not a store of records",
+  },
+  {
+    key: 'ListConsumerGroupOffsetsSpec.#topicPartitions',
+    reason: "one group's partitions to list (Java's Collection<TopicPartition>), not a store of records",
+  },
+  {
+    key: 'ListTransactionsOptions.#filteredStates',
+    reason: "the transaction states to filter by (Java's Set<TransactionState>), not a store of records",
+  },
+  {
+    key: 'ListTransactionsOptions.#filteredProducerIds',
+    reason: "the producer ids to filter by (Java's Set<Long>), not a store of records",
+  },
+  {
+    key: 'ListGroupsOptions.#groupStates',
+    reason: "the group states to list (Java's Set<GroupState>), not a store of records",
+  },
+  {
+    key: 'ListGroupsOptions.#types',
+    reason: "the group types to list (Java's Set<GroupType>), not a store of records",
+  },
+  {
+    key: 'ListGroupsOptions.#protocolTypes',
+    reason: "the protocol types to list (Java's Set<String>), not a store of records",
+  },
+  {
+    key: 'RemoveMembersFromConsumerGroupOptions.#members',
+    reason: "the members to remove (Java's Set<MemberToRemove>), not a store of records",
+  },
+  {
+    key: 'NewPartitionReassignment.#targetReplicas',
+    reason: "one partition's target replicas (Java's List<Integer>), not a store of records",
+  },
+  {
+    key: 'PartitionReassignment.#replicas',
+    reason: "one partition's replicas (Java's List<Integer>), not a store of records",
+  },
+  {
+    key: 'PartitionReassignment.#addingReplicas',
+    reason: "one partition's replicas being added (Java's List<Integer>), not a store of records",
+  },
+  {
+    key: 'PartitionReassignment.#removingReplicas',
+    reason: "one partition's replicas being removed (Java's List<Integer>), not a store of records",
+  },
+  {
+    key: 'src/admin/offset_spec.ts:MAX_TIMESTAMP_FORMS',
+    reason: "the forms of Java's OffsetSpec#maxTimestamp factory, an offset spec, not a cap on records",
+  },
   { key: 'SslClientAuth.VALUES', reason: "Java's SslClientAuth.VALUES, the enum's constants in order" },
   {
     key: 'src/common/kafka_future.ts:MAX_TIMER_MS',

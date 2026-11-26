@@ -8,6 +8,37 @@
 export const __esModule: true;
 
 // @public
+export class KafkaPrincipal {
+    constructor(options: {
+        principalType: string;
+        name: string;
+        tokenAuthenticated?: never;
+    });
+    constructor(options: {
+        principalType: string;
+        name: string;
+        tokenAuthenticated: boolean;
+    });
+    static readonly ANONYMOUS: KafkaPrincipal;
+    equals(o: unknown): boolean;
+    getName(): string;
+    getPrincipalType(): string;
+    hashCode(): number;
+    toJSON(): {
+        principalType: string;
+        name: string;
+        tokenAuthenticated: boolean;
+    };
+    tokenAuthenticated(): boolean;
+    tokenAuthenticated(tokenAuthenticated: boolean): void;
+    tokenAuthenticated(options: {
+        tokenAuthenticated: boolean;
+    }): void;
+    toString(): string;
+    static readonly USER_TYPE: string;
+}
+
+// @public
 export class SecurityProtocol {
     static forId(id: number): SecurityProtocol | null;
     static forId(options: {
